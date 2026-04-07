@@ -1,5 +1,6 @@
 """GRC Agent package."""
 
+# Re-export the main public types so callers can import from one place.
 from .flowgraph_session import FlowgraphSession
 from .models import Block, Connection, Flowgraph
 
