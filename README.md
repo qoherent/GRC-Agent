@@ -1,103 +1,52 @@
 # GRC Agent
 
-Local GNU Radio `.grc` assistant.
+Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 
-## Project Structure
+## Status
 
-```text
-.
-├── main.py
-├── pyproject.toml
-├── README.md
-├── docs/
-│   └── QUICKSTART.md
-├── scripts/
-│   └── check_env.py
-├── AGENTS.md
-├── src/
-│   └── grc_agent/
-│       ├── __init__.py
-│       ├── cli.py
-│       ├── flowgraph_session.py
-│       └── models.py
-├── tests/
-│   ├── data/
-│   │   └── random_bit_generator.grc
-│   └── test_flowgraph_session.py
-└── workarea/
-    └── random_bit_generator.grc
-```
+- one `.grc` file per session
+- all meaningful graph mutations go through `FlowgraphSession`
+- the structural-edit surface is considered stable
+- a thin runtime scaffold exists, but no real local model backend is wired yet
 
-## Goal
-Build a fully local, CPU-first CLI agent that can read, explain, modify, validate, save, and later create GNU Radio Companion `.grc` flowgraphs.
+## Repo Map
 
-## Current Scope
-v1 focuses on:
-- one `.grc` per session
-- headless CLI
-- safe editing through an internal layer
-- explicit validation before save
+- [src/grc_agent](src/grc_agent): package code, including the session layer and thin runtime wrapper
+- [tests](tests): focused `unittest` coverage for `FlowgraphSession`
+- [docs/QUICKSTART.md](docs/QUICKSTART.md): verification commands and smoke checks
+- [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture layers and future phases
+- [docs/PROGRESS_RECORDER.md](docs/PROGRESS_RECORDER.md): verified milestones and current backlog
+- [docs/decisions/README.md](docs/decisions/README.md): settled decision notes and appendices
 
-This pass now covers load, summarize, save, validate, `set_param(...)`, and `disconnect(...)`.
+## Current Safe Surface
 
-## Testing This Stage
+- `FlowgraphSession` supports load, summarize, save, validate, `set_param(...)`, `disconnect(...)`, `connect(...)`, conservative `remove_block(...)`, narrow `add_block(...)` for detached `variable` blocks, `add_and_connect_qtgui_time_sink(...)`, `add_and_connect_char_to_float_to_qtgui_time_sink(...)`, and `add_and_connect_analog_random_source_to_qtgui_time_sink(...)`
+- `GrcAgent` is a thin runtime wrapper that exposes the session surface as tools without letting the model touch raw YAML directly
+- `grc_agent.cli` remains intentionally small and includes a deterministic `--fake` runtime smoke path
 
-Run the focused unit test with:
+## Verification
+
+Run the current checks with:
 
 ```bash
 uv run python -m unittest tests.test_flowgraph_session
+uv run ruff check
+uv run python scripts/check_env.py
 ```
 
-Look for these exact signs of success:
-
-- `Ran 13 tests in ...`
-- `OK`
-- no traceback or failure lines
-
-This module now checks loading, connection parsing, save round-tripping, validation, the new `set_param(...)` and `disconnect(...)` mutations, persistence after save and reload, and the failure cases for unloaded sessions.
-
-If you want the short version of what the command means, see [docs/QUICKSTART.md](docs/QUICKSTART.md).
-
-Next step: implement `connect()` after `disconnect()`.
-
-If you only want the summary smoke check, run:
+Optional runtime scaffold smoke test:
 
 ```bash
-uv run python - <<'PY'
-from grc_agent.flowgraph_session import FlowgraphSession
-
-session = FlowgraphSession()
-session.load("tests/data/random_bit_generator.grc")
-print(session.summarize())
-PY
+uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc
 ```
 
-That smoke output should include the file name, `Blocks: 5`, `Connections: 3`, and the five block lines.
+## Safety Rules
 
-## Environment
-- Ubuntu/Linux
-- GNU Radio 3.10.9.2
-- Python 3.12.3
-- `grcc` available on PATH
+- the model must never edit raw `.grc` YAML directly
+- all graph mutations go through `FlowgraphSession`
+- structural APIs only widen when new experiments justify them
+- final graph validity is established explicitly through `validate()`
 
-## Architecture Direction
-- `.grc` file on disk is the source of truth
-- the model must not edit raw `.grc` YAML directly
-- a thin internal layer will sit between the model and `.grc`
-- validation gates save
-- safe mutations must update both the parsed model and raw YAML
-- wiring changes happen one edit at a time: disconnect first, then connect
-- CPU-first local inference
-- planned model runtime: llama.cpp server
-- planned client side: Python + OpenAI SDK + thin custom AgentRuntime
+## Next Step
 
-## Development Order
-1. Formalize environment contract
-2. Build `FlowgraphSession`
-3. Add thin internal models
-4. Implement first safe edit path
-5. Prove load → summarize → validate → save
-6. Add first safe mutation: `set_param`
-7. Add wiring mutation: `disconnect`
-8. Add agent runtime
-9. Expand capabilities
+Wire a real local model adapter into the existing runtime/tool surface without bypassing `FlowgraphSession`.
