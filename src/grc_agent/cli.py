@@ -1,6 +1,7 @@
 """Command-line entry point for GRC Agent."""
 
 import argparse
+import json
 import sys
 
 from grc_agent.agent import GrcAgent
@@ -11,14 +12,13 @@ FAKE_USER_MESSAGE = "Please change the samp_rate to 48000 and validate the graph
 FAKE_ACTIONS = [
     {"text": "I'll do that right away."},
     {
-        "tool": "set_param",
+        "tool": "set_variable",
         "kwargs": {
             "instance_name": "samp_rate",
-            "parameter_key": "value",
             "value": "48000",
         },
     },
-    {"tool": "validate", "kwargs": {}},
+    {"tool": "validate_graph", "kwargs": {}},
 ]
 
 
@@ -47,6 +47,11 @@ def _run_fake_runtime(file_path: str) -> int:
 
     print("\n--- History ---")
     for turn in agent.history:
+        if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
+            printable_turn = dict(turn)
+            printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
+            print(printable_turn)
+            continue
         print(turn)
 
     return 0

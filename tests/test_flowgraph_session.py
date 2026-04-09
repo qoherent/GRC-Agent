@@ -120,6 +120,62 @@ class FlowgraphSessionTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             session.load("does_not_exist.grc")
 
+    # Malformed block sections should fail fast instead of loading a partial graph.
+    def test_load_invalid_blocks_section_raises(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"] = {"not": "a list"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(tmpdir, raw_data, "invalid_blocks_section.grc")
+            session = FlowgraphSession()
+
+            with self.assertRaises(ValueError):
+                session.load(fixture_path)
+
+    # Malformed block entries should fail fast instead of being skipped silently.
+    def test_load_malformed_block_entry_raises(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"][0] = ["not", "a", "mapping"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(tmpdir, raw_data, "malformed_block_entry.grc")
+            session = FlowgraphSession()
+
+            with self.assertRaises(ValueError):
+                session.load(fixture_path)
+
+    # Malformed connection sections should fail fast instead of loading a partial graph.
+    def test_load_invalid_connections_section_raises(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["connections"] = {"not": "a list"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(
+                tmpdir,
+                raw_data,
+                "invalid_connections_section.grc",
+            )
+            session = FlowgraphSession()
+
+            with self.assertRaises(ValueError):
+                session.load(fixture_path)
+
+    # Malformed connection entries should fail fast instead of being skipped silently.
+    def test_load_malformed_connection_entry_raises(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["connections"][0] = ["only", "three", "items"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(
+                tmpdir,
+                raw_data,
+                "malformed_connection_entry.grc",
+            )
+            session = FlowgraphSession()
+
+            with self.assertRaises(ValueError):
+                session.load(fixture_path)
+
     # Connections should preserve the exact block/port wiring from the `.grc` file.
     def test_connections_parse_correctly(self) -> None:
         # Reuse the same fixture so this test checks the same parsed graph.

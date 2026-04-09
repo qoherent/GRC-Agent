@@ -4,7 +4,6 @@ import re
 import subprocess
 import tempfile
 from typing import Any
-import warnings
 
 import yaml
 
@@ -844,20 +843,17 @@ class FlowgraphSession:
         if blocks_data is None:
             return blocks
 
-        # If the section shape is wrong, skip it and warn instead of failing the load.
+        # Reject malformed top-level structure instead of silently dropping data.
         if not isinstance(blocks_data, list):
-            warnings.warn("Skipping blocks section because it is not a list.", stacklevel=3)
-            return blocks
+            raise ValueError("Flowgraph blocks section must be a list.")
 
         # Inspect each block entry in order.
         for index, entry in enumerate(blocks_data):
-            # Skip anything that is not a mapping.
+            # Reject malformed entries so callers never load partial graphs silently.
             if not isinstance(entry, dict):
-                warnings.warn(
-                    f"Skipping malformed block entry at index {index}: expected a mapping.",
-                    stacklevel=3,
+                raise ValueError(
+                    f"Malformed block entry at index {index}: expected a mapping."
                 )
-                continue
 
             # The block name becomes the user-facing instance name.
             instance_name = entry.get("name")
@@ -866,11 +862,9 @@ class FlowgraphSession:
 
             # Both fields must exist and both must be strings.
             if not isinstance(instance_name, str) or not isinstance(block_type, str):
-                warnings.warn(
-                    f"Skipping malformed block entry at index {index}: missing name or id.",
-                    stacklevel=3,
+                raise ValueError(
+                    f"Malformed block entry at index {index}: missing name or id."
                 )
-                continue
 
             # Preserve the rest of the block payload for future use.
             params = {key: value for key, value in entry.items() if key not in {"name", "id"}}
@@ -888,42 +882,35 @@ class FlowgraphSession:
         if connections_data is None:
             return connections
 
-        # If the section shape is wrong, skip it and warn instead of failing the load.
+        # Reject malformed top-level structure instead of silently dropping data.
         if not isinstance(connections_data, list):
-            warnings.warn("Skipping connections section because it is not a list.", stacklevel=3)
-            return connections
+            raise ValueError("Flowgraph connections section must be a list.")
 
         # Inspect each connection entry in order.
         for index, entry in enumerate(connections_data):
             # Each connection must be a 4-item list.
             if not isinstance(entry, list) or len(entry) != 4:
-                warnings.warn(
-                    f"Skipping malformed connection entry at index {index}: expected four items.",
-                    stacklevel=3,
+                raise ValueError(
+                    f"Malformed connection entry at index {index}: expected four items."
                 )
-                continue
 
             # The first and third items are block instance names.
             src_block, src_port, dst_block, dst_port = entry
 
             # Connection endpoints must refer to block names.
             if not isinstance(src_block, str) or not isinstance(dst_block, str):
-                warnings.warn(
-                    f"Skipping malformed connection entry at index {index}: block names must be strings.",
-                    stacklevel=3,
+                raise ValueError(
+                    f"Malformed connection entry at index {index}: block names must be strings."
                 )
-                continue
 
             # Ports are stored as strings in the file, so convert them to integers.
             try:
                 src_port_number = int(src_port)
                 dst_port_number = int(dst_port)
             except (TypeError, ValueError):
-                warnings.warn(
-                    f"Skipping malformed connection entry at index {index}: ports must be integers.",
-                    stacklevel=3,
+                raise ValueError(
+                    f"Malformed connection entry at index {index}: ports must be integers."
                 )
-                continue
 
             # Build the typed Connection object and keep it in file order.
             connections.append(

@@ -5,48 +5,53 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 ## Status
 
 - one `.grc` file per session
-- all meaningful graph mutations go through `FlowgraphSession`
-- the structural-edit surface is considered stable
-- a thin runtime scaffold exists, but no real local model backend is wired yet
+- `FlowgraphSession` owns parsed state, persistence, validation, and all graph-mutation primitives
+- `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
+- the structural-edit surface is frozen pending new experiments
+- no real local model adapter is wired yet
 
 ## Repo Map
 
-- [src/grc_agent](src/grc_agent): package code, including the session layer and thin runtime wrapper
-- [tests](tests): focused `unittest` coverage for `FlowgraphSession`
-- [docs/QUICKSTART.md](docs/QUICKSTART.md): verification commands and smoke checks
-- [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture layers and future phases
-- [docs/PROGRESS_RECORDER.md](docs/PROGRESS_RECORDER.md): verified milestones and current backlog
-- [docs/decisions/README.md](docs/decisions/README.md): settled decision notes and appendices
+- [src/grc_agent](src/grc_agent): session layer, model-facing runtime wrapper, and CLI entrypoint
+- [tests](tests): focused `unittest` regression coverage
+- [tests/data/random_bit_generator.grc](tests/data/random_bit_generator.grc): canonical fixture flowgraph
+- [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture, settled decisions, evidence, milestones, and backlog
 
-## Current Safe Surface
+## Model-Facing Runtime
 
-- `FlowgraphSession` supports load, summarize, save, validate, `set_param(...)`, `disconnect(...)`, `connect(...)`, conservative `remove_block(...)`, narrow `add_block(...)` for detached `variable` blocks, `add_and_connect_qtgui_time_sink(...)`, `add_and_connect_char_to_float_to_qtgui_time_sink(...)`, and `add_and_connect_analog_random_source_to_qtgui_time_sink(...)`
-- `GrcAgent` is a thin runtime wrapper that exposes the session surface as tools without letting the model touch raw YAML directly
-- `grc_agent.cli` remains intentionally small and includes a deterministic `--fake` runtime smoke path
+The model-facing runtime is intentionally narrower than the session layer.
+
+- `summarize_graph`: report the current graph shape
+- `set_variable(instance_name, value)`: update only a `variable` block's `value` parameter through `FlowgraphSession`
+- `validate_graph`: run `grcc` validation on the current in-memory graph
+- `save_graph(path=None)`: persist the current graph, but only after the latest dirty state has passed validation
+
+The broader `FlowgraphSession` mutation methods remain available for direct code paths and regression tests, but they are not part of the model tool contract.
 
 ## Verification
 
-Run the current checks with:
+Use the package entrypoint directly:
 
 ```bash
-uv run python -m unittest tests.test_flowgraph_session
-uv run ruff check
 uv run python scripts/check_env.py
-```
-
-Optional runtime scaffold smoke test:
-
-```bash
+uv run ruff check
+uv run python -m unittest
 uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc
 ```
 
+What to expect:
+
+- `check_env.py` passes Python, `grcc`, and GNU Radio version checks
+- `ruff check` is clean
+- `python -m unittest` passes the current regression suite
+- the `--fake` CLI path routes a deterministic tool sequence through `GrcAgent` and `FlowgraphSession`
+
 ## Safety Rules
 
-- the model must never edit raw `.grc` YAML directly
-- all graph mutations go through `FlowgraphSession`
-- structural APIs only widen when new experiments justify them
+- the model never edits raw `.grc` YAML directly
+- all meaningful mutations flow through `FlowgraphSession`
+- the runtime save path is blocked until the current dirty state has passed validation
+- structural APIs only widen when a new experiment pass justifies them
 - final graph validity is established explicitly through `validate()`
 
-## Next Step
-
-Wire a real local model adapter into the existing runtime/tool surface without bypassing `FlowgraphSession`.
+See [docs/BLUEPRINT.md](docs/BLUEPRINT.md) for the settled structural boundary, runtime decision, condensed experiment evidence, milestones, and backlog.
