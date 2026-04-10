@@ -1,3 +1,10 @@
+"""Session management for loading, validating, and editing `.grc` flowgraphs.
+
+The session keeps a typed view of the flowgraph and the original YAML payload in
+sync so structural edits can be validated with `grcc` and saved without dropping
+unsupported fields.
+"""
+
 import copy
 from pathlib import Path
 import re
@@ -11,7 +18,7 @@ from .models import Block, Connection, Flowgraph
 
 
 class FlowgraphSession:
-    """Owns one `.grc` flowgraph session."""
+    """Own one `.grc` flowgraph and keep parsed and raw state synchronized."""
 
     def __init__(self, path: str | Path | None = None) -> None:
         # Store the loaded path separately from the parsed flowgraph data.
@@ -25,7 +32,10 @@ class FlowgraphSession:
         self.last_validation_stderr: str | None = None
         self.last_validation_returncode: int | None = None
 
+    # Session lifecycle
+
     def load(self, path: str | Path) -> None:
+        """Load a `.grc` file into the session."""
         # Convert the incoming path so file operations are easy and consistent.
         source_path = Path(path)
         # Read the file as text because .grc files are YAML documents.
@@ -60,6 +70,7 @@ class FlowgraphSession:
         self.is_dirty = False
 
     def save(self, path: str | Path | None = None) -> None:
+        """Write the current in-memory graph to disk."""
         # Refuse to save if no flowgraph has been loaded yet.
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
@@ -83,6 +94,7 @@ class FlowgraphSession:
         self.is_dirty = False
 
     def validate(self) -> bool:
+        """Run `grcc` against the current in-memory graph."""
         # Refuse to validate if no flowgraph has been loaded yet.
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
@@ -98,6 +110,8 @@ class FlowgraphSession:
         self.last_validation_stderr = stderr
         self.last_validation_returncode = returncode
         return is_valid
+
+    # Connection edits
 
     def disconnect(self, src_block: str, src_port: int, dst_block: str, dst_port: int) -> None:
         """Remove exactly one connection from both the model and raw YAML."""
@@ -206,6 +220,8 @@ class FlowgraphSession:
 
         # Any successful mutation means the in-memory session now differs from disk.
         self.is_dirty = True
+
+    # Structural block edits
 
     def add_block(
         self,
@@ -711,6 +727,8 @@ class FlowgraphSession:
         # Any successful mutation means the in-memory session now differs from disk.
         self.is_dirty = True
 
+    # Block removal and parameter edits
+
     def remove_block(self, instance_name: str) -> None:
         """Remove one detached, unreferenced block from both the model and raw YAML."""
         # Refuse to mutate anything if no graph has been loaded yet.
@@ -811,6 +829,7 @@ class FlowgraphSession:
         self.is_dirty = True
 
     def summarize(self) -> str:
+        """Return a compact human-readable summary of the loaded graph."""
         # If nothing has been loaded yet, say so plainly.
         if self.flowgraph is None:
             return "No flowgraph loaded."
@@ -834,8 +853,11 @@ class FlowgraphSession:
 
         return "\n".join(lines)
 
+    # Parsing and serialization helpers
+
     @staticmethod
     def _parse_blocks(blocks_data: Any) -> list[Block]:
+        """Parse the raw `blocks` section into typed block objects."""
         # Start with an empty result and add valid blocks one by one.
         blocks: list[Block] = []
 
@@ -875,6 +897,7 @@ class FlowgraphSession:
 
     @staticmethod
     def _parse_connections(connections_data: Any) -> list[Connection]:
+        """Parse the raw `connections` section into typed connection objects."""
         # Start with an empty result and add valid connections one by one.
         connections: list[Connection] = []
 
@@ -926,6 +949,7 @@ class FlowgraphSession:
 
     @staticmethod
     def _serialize_raw_data(raw_data: Any) -> str:
+        """Serialize raw flowgraph data using the project's YAML settings."""
         # Save and validate both use the same YAML serialization rules.
         if not isinstance(raw_data, dict):
             raise ValueError("Flowgraph raw_data is missing or invalid.")
@@ -933,8 +957,11 @@ class FlowgraphSession:
         # Keep the original key order and make the output readable.
         return yaml.safe_dump(raw_data, sort_keys=False, allow_unicode=True)
 
+    # Validation helpers
+
     @staticmethod
     def _run_grcc_validation(raw_data: Any) -> tuple[bool, str, str, int]:
+        """Run `grcc` against raw flowgraph data inside a temporary workspace."""
         # Serialize the candidate YAML once so validation stays consistent everywhere.
         serialized = FlowgraphSession._serialize_raw_data(raw_data)
 
@@ -963,6 +990,7 @@ class FlowgraphSession:
             )
 
     def _validate_candidate_raw_data_or_raise(self, raw_data: Any, error_prefix: str) -> None:
+        """Raise a `ValueError` when a candidate graph fails `grcc` validation."""
         # Candidate validation must be consistent across structural-edit workflows.
         is_valid, stdout, stderr, _returncode = self._run_grcc_validation(raw_data)
         if not is_valid:
@@ -975,11 +1003,13 @@ class FlowgraphSession:
         dst_block: str,
         dst_port: int,
     ) -> list[str]:
+        """Build the on-disk four-item connection entry used by `.grc` files."""
         # Preserve the same on-disk connection shape as the original .grc files.
         return [src_block, str(src_port), dst_block, str(dst_port)]
 
     @staticmethod
     def _default_block_states(existing_block_count: int) -> dict[str, Any]:
+        """Return the minimal default `states` payload for generated blocks."""
         # Keep the first generated state payload minimal because GNU Radio accepts it.
         return {
             "coordinate": [8, 8 + (existing_block_count * 24)],
@@ -987,7 +1017,10 @@ class FlowgraphSession:
             "state": "enabled",
         }
 
+    # Structural edit helpers
+
     def _assert_new_block_name_available(self, instance_name: str, raw_blocks: list[Any]) -> None:
+        """Reject new block names that already exist in parsed or raw state."""
         # New structural blocks must stay unique in both parsed and raw representations.
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
@@ -1006,6 +1039,7 @@ class FlowgraphSession:
         role: str,
         expected_block_type: str | None = None,
     ) -> Block:
+        """Return one parsed block by name and optionally enforce its type."""
         # Structural edits should never act on an ambiguous parsed block lookup.
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
@@ -1029,6 +1063,7 @@ class FlowgraphSession:
         instance_name: str,
         role: str,
     ) -> dict[str, Any]:
+        """Return one raw block entry by name or raise on ambiguity."""
         # Structural edits should never act on an ambiguous raw block lookup.
         matches = [
             entry
@@ -1050,6 +1085,7 @@ class FlowgraphSession:
         existing_block_count: int,
         add_default_comment: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Build a raw block payload plus the copied parameter and state mappings."""
         # Keep block payload generation consistent across structural add workflows.
         raw_parameters = copy.deepcopy(parameters)
         if add_default_comment:
@@ -1074,6 +1110,7 @@ class FlowgraphSession:
         connections: list[list[str]],
         error_context: str,
     ) -> None:
+        """Append connection entries into a raw graph mapping in one place."""
         # Keep raw connection insertion consistent across candidate and committed graphs.
         if not isinstance(raw_data, dict):
             raise ValueError(f"{error_context} is missing or invalid.")
@@ -1089,6 +1126,7 @@ class FlowgraphSession:
 
     @staticmethod
     def _grcc_result_is_valid(returncode: int, stdout: str, stderr: str) -> bool:
+        """Interpret `grcc` output using GNU Radio's actual failure markers."""
         # grcc sometimes prints flowgraph errors but still exits with status 0.
         if returncode != 0:
             return False
@@ -1107,6 +1145,7 @@ class FlowgraphSession:
 
     @staticmethod
     def _grcc_failure_message(stdout: str, stderr: str) -> str:
+        """Extract the clearest available validation failure message."""
         # Prefer GNU Radio's explicit error lines when turning validation failures into exceptions.
         for stream in (stdout, stderr):
             for line in stream.splitlines():
@@ -1123,12 +1162,15 @@ class FlowgraphSession:
 
         return "GNU Radio rejected the candidate flowgraph."
 
+    # Raw-data inspection helpers
+
     @staticmethod
     def _block_name_is_referenced_elsewhere(
         raw_data: Any,
         instance_name: str,
         ignored_raw_block_index: int,
     ) -> bool:
+        """Check whether a block name still appears in other raw expressions."""
         # Only inspect the sections that commonly hold block-name expressions.
         if not isinstance(raw_data, dict):
             return False
@@ -1149,6 +1191,7 @@ class FlowgraphSession:
 
     @staticmethod
     def _value_references_identifier(value: Any, identifier: str) -> bool:
+        """Recursively search raw values for a block-name-sized identifier match."""
         # GNU Radio expressions are plain strings, so use an identifier-boundary match.
         pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])")
 
@@ -1168,6 +1211,7 @@ class FlowgraphSession:
 
     @staticmethod
     def _connection_entry_to_tuple(entry: Any) -> tuple[str, int, str, int] | None:
+        """Normalize one raw connection entry to the typed tuple form."""
         # Normalize a raw connection entry into the same tuple shape as the model.
         if not isinstance(entry, list) or len(entry) != 4:
             return None

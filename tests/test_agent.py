@@ -1,3 +1,5 @@
+"""Runtime-contract tests for the model-facing `GrcAgent` surface."""
+
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -31,6 +33,50 @@ class GrcAgentTests(unittest.TestCase):
         self.assertNotIn("set_param", agent._tools)
         self.assertNotIn("connect", agent._tools)
         self.assertNotIn("remove_block", agent._tools)
+
+    def test_tool_schemas_match_narrow_runtime_surface(self) -> None:
+        agent, _session = self._load_agent()
+
+        schemas = agent.get_tool_schemas()
+
+        self.assertEqual(
+            [schema["function"]["name"] for schema in schemas],
+            ["summarize_graph", "set_variable", "validate_graph", "save_graph"],
+        )
+        self.assertEqual(
+            schemas[1]["function"]["parameters"]["required"],
+            ["instance_name", "value"],
+        )
+
+    def test_system_prompt_constrains_summarize_output_shape(self) -> None:
+        agent, _session = self._load_agent()
+
+        prompt = agent.get_system_prompt()
+
+        self.assertIn("Most tool results are JSON objects.", prompt)
+        self.assertIn("latest tool message content is the final summary text", prompt)
+        self.assertIn("Never leave the final answer empty after `summarize_graph`", prompt)
+        self.assertIn("Do not add markdown, commentary, introductions, conclusions, or follow-up questions", prompt)
+        self.assertIn("do not leave the final answer empty", prompt)
+
+    def test_summarize_tool_message_to_model_is_plain_summary_text(self) -> None:
+        agent, _session = self._load_agent()
+
+        summary_result = agent.execute_tool("summarize_graph", {})
+        agent.history.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "name": "summarize_graph",
+                "content": summary_result,
+            }
+        )
+
+        tool_message = agent.get_model_messages()[-1]
+
+        self.assertEqual(tool_message["role"], "tool")
+        self.assertEqual(tool_message["name"], "summarize_graph")
+        self.assertEqual(tool_message["content"], summary_result["summary"])
 
     def test_execute_tool_unknown_name_returns_structured_error(self) -> None:
         agent, _session = self._load_agent()

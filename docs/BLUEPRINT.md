@@ -15,7 +15,9 @@ safe graph changes without letting the model edit raw YAML directly.
 - structural-edit session surface frozen unless a new experiment pass justifies change
 - model-facing runtime deliberately narrower than the session layer
 - deterministic `--fake` runtime path for smoke testing
-- no real local model adapter wired yet
+- thin llama.cpp server adapter spike available through the CLI
+- supported llama.cpp behavior is live-verified for the current narrow tool contract
+- raw model free-form prose is still not trusted outside deterministic runtime finalization for supported flows
 
 ## Canonical Working Rules
 
@@ -25,6 +27,24 @@ safe graph changes without letting the model edit raw YAML directly.
 - explicit `validate()` remains the final graph-correctness gate
 - model-facing `save_graph` is rejected until the latest dirty state has passed validation
 - structural APIs widen only when new experiments justify a narrower or clearly necessary contract
+- llama.cpp built-in `/tools` is not part of the supported contract; the server is used only as a model backend through documented chat endpoints
+
+## Evidence-First Planning Policy
+
+- start from the smallest user goal and the narrowest candidate API
+- read the relevant GNU Radio documentation before proposing behavior
+- reproduce the behavior on a real `.grc` case with `grcc` before trusting it
+- record the pass or fail evidence in this blueprint before widening the supported contract
+- add or update automated regression coverage after the real GNU result is known
+- never infer GNU semantics from YAML shape alone, especially for ports, types, generated states, or block-specific parameters
+
+## Baby-Step Delivery Rule
+
+- change one narrow behavior at a time
+- validate each step with the smallest real flowgraph that proves the behavior
+- keep failed experiments out of the runtime contract until they have a passing, documented, repeatable path
+- keep the runtime narrower than the session layer until repeated real usage proves a wider tool is needed
+- keep CI split between a fast health gate and a GNU-backed validation gate so policy drift is visible early
 
 ## Architecture Layers
 
@@ -48,13 +68,22 @@ safe graph changes without letting the model edit raw YAML directly.
 
 ### 4. CLI boundary
 
+- [src/grc_agent/config.py](../src/grc_agent/config.py) loads repo-backed llama runtime defaults from [grc_agent.toml](../grc_agent.toml).
 - [src/grc_agent/cli.py](../src/grc_agent/cli.py) remains a thin entrypoint.
 - The `--fake` path exists only to prove the runtime boundary and tool routing without introducing a model backend.
+- The llama.cpp CLI defaults are repo-configured rather than duplicated inline.
 
-### 5. Future local adapter
+### 5. Local llama.cpp adapter
 
-- A real local model adapter should call the runtime layer, not `FlowgraphSession` directly.
-- Tool schemas, prompt construction, and stop conditions should stay thin and explicit.
+- [src/grc_agent/llama_server.py](../src/grc_agent/llama_server.py) owns the thin HTTP adapter to `/health`, `/v1/models`, and `/v1/chat/completions`.
+- The adapter calls `GrcAgent`, not `FlowgraphSession` directly.
+- The adapter keeps `parallel_tool_calls` off and uses a bounded assistant-turn loop instead of a framework.
+- `max_steps` is a tool-round budget; one final non-tool assistant answer is allowed after the last tool round.
+- The current supported slice is verified live on one local Gemma GGUF, but the raw model final prose still is not trusted for summarize or supported mutation outcomes.
+
+### 6. Future backend flexibility
+
+- The runtime should stay backend-agnostic enough that a future local backend can still call the same narrow tool layer.
 - Avoid orchestration frameworks unless the direct tool-calling shape fails under real use.
 
 ## Session Surface vs Runtime Surface
@@ -126,6 +155,24 @@ Use a thin local runtime wrapper over `FlowgraphSession` instead of wiring the C
 - `uv run ruff check` is the lint gate.
 - `uv run python -m unittest` is the regression test command.
 - `uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc` is the runtime smoke test.
+- `GRC_AGENT_LIVE_LLAMA_URL=... GRC_AGENT_LIVE_LLAMA_MODEL=... uv run python -m unittest tests.test_llama_server_live` is the env-gated live llama.cpp check.
+- `GRC_AGENT_LIVE_LLAMA_URL=... GRC_AGENT_LIVE_LLAMA_MODEL=... uv run python scripts/llama_reliability_matrix.py` is the non-gating live reliability matrix.
+- `.github/workflows/ci.yml` runs a fast lint job and a GNU-backed validation job on Ubuntu.
+- The llama.cpp adapter follows the documented `/health`, `/v1/models`, and `/v1/chat/completions` endpoints.
+- Default local llama settings live in [grc_agent.toml](../grc_agent.toml), currently targeting the alias `unsloth/gemma-4-E2B-it-GGUF` at `http://127.0.0.1:8080`.
+- The adapter requires `/v1/models` to return exactly one entry and requires that `data[0].id` matches the configured alias before the first chat request.
+- The bounded llama.cpp loop treats `max_steps` as a tool-round budget; one final non-tool assistant answer is allowed after the last tool round.
+- The adapter regression tests use a scripted local HTTP server while still exercising real `.grc` validation on the canonical fixture.
+- Local live evidence on this machine used `llama-server` `8680 (15f786e65)` with cached `unsloth/gemma-4-E2B-it-GGUF:Q4_K_M`.
+- The repo default `max_tokens = 12000` is an operational ceiling only. It is not the summarize correctness fix.
+- On this machine/build/model, an unshaped summarize request timed out, while bounded requests with `temperature=0.0` and `chat_template_kwargs.enable_thinking=false` produced successful real tool calls and real `grcc` validation.
+- Summarize correctness now comes from deterministic finalization of the `summarize_graph.summary` payload because the raw model second response stayed lossy.
+- Supported mutation correctness now comes from deterministic finalization of tool results:
+  - `set_variable(ok) + validate_graph(ok)` surfaces `Set <instance_name> to <value> and validated the graph successfully.`
+  - `set_variable(fail) + validate_graph(ok)` surfaces `Could not set the requested variable: <message>. The graph validated successfully.`
+- Raw tool-call-like text such as `summarize_graph{}` is not surfaced as a final answer when no tools actually ran; the runtime returns `I could not complete that request with the available tools.`
+- The env-gated live unittest module and the non-gating reliability matrix both passed for the supported cases on this machine.
+- Transport timeout handling is covered against a delayed local HTTP server. A llama-server-specific stall reproduction is still not part of the verified contract.
 - `validate()` records diagnostics from the most recent top-level validation call.
 - Structural candidate validation is proven to roll back cleanly before commit.
 - The canonical fixture is [tests/data/random_bit_generator.grc](../tests/data/random_bit_generator.grc).
@@ -323,11 +370,11 @@ Derived rule: structural adds can safely rely on the copy-validate-commit patter
 
 ## Backlog
 
-1. Wire a real local model adapter into the narrowed `GrcAgent` tool surface.
-2. Formalize tool schemas and prompt/context construction for the runtime.
-3. Add a one-session interactive CLI conversation loop over the current runtime.
-4. Improve user-facing summaries, validation reporting, and error surfacing.
-5. Revisit structural API growth only if new use cases are backed by new experiments.
+1. Validate one concrete tool-aware llama.cpp model/template combination against real `.grc` cases and record the evidence.
+2. Add a one-session interactive CLI conversation loop over the current narrowed runtime.
+3. Improve user-facing summaries, validation reporting, and error surfacing.
+4. Revisit structural API growth only if new use cases are backed by new experiments.
+5. Keep backend flexibility only if a second backend is justified by real use, not speculation.
 
 ## Intentionally Deferred
 
@@ -350,3 +397,4 @@ Derived rule: structural adds can safely rely on the copy-validate-commit patter
 ## Related File
 
 - [README.md](../README.md)
+- [PACKAGE_GUIDE.md](PACKAGE_GUIDE.md)

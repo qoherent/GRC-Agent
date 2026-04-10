@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# This script checks the local machine against the project assumptions.
+"""Verify that the local machine matches the project's pinned assumptions."""
+
 import shutil
 import sys
 

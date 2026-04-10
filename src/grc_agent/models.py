@@ -1,3 +1,5 @@
+"""Typed in-memory models for parsed GNU Radio flowgraphs."""
+
 from dataclasses import dataclass, field
 from typing import Any
 

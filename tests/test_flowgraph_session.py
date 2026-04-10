@@ -1,14 +1,12 @@
-# Path helps us build a test fixture location relative to this file.
+"""Regression tests for loading, validating, and editing `.grc` sessions."""
+
 from pathlib import Path
-# tempfile gives us isolated directories for save tests.
 import tempfile
-# unittest is the standard library test framework.
 import unittest
 
 import copy
 import yaml
 
-# Import the class we want to exercise.
 from grc_agent.flowgraph_session import FlowgraphSession
 
 

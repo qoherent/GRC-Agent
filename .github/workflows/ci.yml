@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  fast-checks:
+    name: Fast Checks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --dev --frozen
+
+      - name: Run Ruff
+        run: uv run ruff check
+
+  gnu-validated-tests:
+    name: GNU-Validated Tests
+    runs-on: ubuntu-24.04
+    needs: fast-checks
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install GNU Radio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnuradio
+
+      - name: Sync dependencies
+        run: uv sync --dev --frozen
+
+      - name: Print GNU runtime details
+        run: |
+          uv run python -c "import shutil; from gnuradio import gr; print(f'grcc={shutil.which(\"grcc\")}'); print(f'gnuradio={gr.version()}')"
+
+      - name: Run unittest suite
+        run: uv run python -m unittest
+
+      - name: Run runtime smoke test
+        run: uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc

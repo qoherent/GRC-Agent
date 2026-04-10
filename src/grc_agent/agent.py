@@ -1,5 +1,6 @@
 """Thin runtime wrapper for tool-driven `.grc` sessions."""
 
+import json
 from typing import Any, Callable
 
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -28,8 +29,131 @@ class GrcAgent:
             "1. Start by calling `summarize_graph` when you need graph context.\n"
             "2. Use `set_variable` only for GNU Radio `variable` blocks.\n"
             "3. Call `validate_graph` before asking to save a dirty graph.\n"
-            "4. Only use `save_graph` after the latest dirty state has validated successfully."
+            "4. Only use `save_graph` after the latest dirty state has validated successfully.\n"
+            "5. Most tool results are JSON objects.\n"
+            "6. After `summarize_graph`, the latest tool message content is the final summary text. "
+            "Copy that tool message content verbatim as your final answer.\n"
+            "7. Never leave the final answer empty after `summarize_graph`.\n"
+            "8. Do not add markdown, commentary, introductions, conclusions, or follow-up questions "
+            "after `summarize_graph`.\n"
+            "9. After any other successful tool flow, return one short factual sentence and do not "
+            "leave the final answer empty.\n"
+            "10. Keep final answers short and factual."
         )
+
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        """Return the fixed tool schemas exposed to a chat-completions client."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "summarize_graph",
+                    "description": "Return a short summary of the loaded GNU Radio graph.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "set_variable",
+                    "description": (
+                        "Update the value parameter on a GNU Radio variable block. "
+                        "Use this only for blocks whose type is variable."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "instance_name": {
+                                "type": "string",
+                                "description": "Variable block instance name.",
+                            },
+                            "value": {
+                                "type": ["string", "number", "boolean"],
+                                "description": "New variable value or expression.",
+                            },
+                        },
+                        "required": ["instance_name", "value"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "validate_graph",
+                    "description": "Run grcc validation on the current in-memory graph.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_graph",
+                    "description": (
+                        "Save the current graph to disk. This is allowed only after the latest "
+                        "dirty state has validated successfully."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional destination path for the saved .grc file.",
+                            }
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+
+    def get_model_messages(self) -> list[HistoryEntry]:
+        """Render the current runtime history into chat-completions messages."""
+        messages: list[HistoryEntry] = [
+            {
+                "role": "system",
+                "content": self.get_system_prompt(),
+            }
+        ]
+
+        for index, turn in enumerate(self.history):
+            role = turn.get("role")
+
+            if role == "tool":
+                tool_name = turn.get("name")
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(turn.get("tool_call_id") or f"tool_call_{index}"),
+                        "name": tool_name,
+                        "content": self._history_content_as_text(
+                            turn.get("content"),
+                            tool_name=tool_name,
+                        ),
+                    }
+                )
+                continue
+
+            if role not in {"user", "assistant"}:
+                continue
+
+            message: HistoryEntry = {
+                "role": role,
+                "content": turn.get("content"),
+            }
+            if role == "assistant" and "tool_calls" in turn:
+                message["tool_calls"] = turn["tool_calls"]
+            messages.append(message)
+
+        return messages
 
     def _build_tool_registry(self) -> dict[str, ToolCallable]:
         return {
@@ -61,6 +185,7 @@ class GrcAgent:
             )
 
     def _tool_result(self, tool_name: str, ok: bool, message: str, **extra: Any) -> ToolResult:
+        """Build the common structured result payload returned by every tool."""
         result: ToolResult = {
             "tool": tool_name,
             "ok": ok,
@@ -70,14 +195,32 @@ class GrcAgent:
         return result
 
     def _require_loaded_flowgraph(self) -> Any:
+        """Return the loaded flowgraph or raise when the session is empty."""
         if self.session.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
         return self.session.flowgraph
 
     def _mark_mutation(self) -> None:
+        """Advance the dirty revision and invalidate any prior validation result."""
         self._mutation_revision += 1
         self._last_validated_revision = None
         self._last_validation_ok = None
+
+    def _history_content_as_text(self, content: Any, *, tool_name: str | None = None) -> str:
+        """Normalize stored history content into the string form chat APIs expect."""
+        if (
+            tool_name == "summarize_graph"
+            and isinstance(content, dict)
+            and isinstance(content.get("summary"), str)
+        ):
+            return content["summary"]
+        if isinstance(content, str):
+            return content
+        if content is None:
+            return ""
+        if isinstance(content, (dict, list)):
+            return json.dumps(content, sort_keys=True)
+        return str(content)
 
     def _summarize_graph(self) -> ToolResult:
         return self._tool_result(

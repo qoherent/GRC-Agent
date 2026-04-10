@@ -1,0 +1,8 @@
+[llama]
+server_url = "http://127.0.0.1:8080"
+model = "unsloth/gemma-4-E2B-it-GGUF"
+max_steps = 2
+max_tokens = 12000
+temperature = 0.0
+enable_thinking = false
+request_timeout_seconds = 60.0
