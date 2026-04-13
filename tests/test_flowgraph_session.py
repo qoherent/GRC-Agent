@@ -276,6 +276,21 @@ class FlowgraphSessionTests(unittest.TestCase):
         self.assertIsNotNone(session.last_validation_stdout)
         self.assertIsNotNone(session.last_validation_stderr)
 
+    # Loading a new graph should clear diagnostics from any previous validation run.
+    def test_load_clears_previous_validation_diagnostics(self) -> None:
+        fixture_path = self._fixture_path()
+        session = FlowgraphSession()
+        session.load(fixture_path)
+
+        self.assertTrue(session.validate())
+        self.assertIsNotNone(session.last_validation_returncode)
+
+        session.load(fixture_path)
+
+        self.assertIsNone(session.last_validation_stdout)
+        self.assertIsNone(session.last_validation_stderr)
+        self.assertIsNone(session.last_validation_returncode)
+
     # Diagnostics must stay None when validate() raises before subprocess runs.
     def test_validate_without_load_leaves_diagnostics_unset(self) -> None:
         session = FlowgraphSession()
@@ -332,6 +347,30 @@ class FlowgraphSessionTests(unittest.TestCase):
 
         # The raw YAML should also be updated so save() and validate() see the change.
         self.assertEqual(flowgraph.raw_data["blocks"][0]["parameters"]["value"], "48000")
+
+    # Failed parameter edits must not leave parsed and raw state out of sync.
+    def test_set_param_raw_lookup_failure_does_not_partially_mutate(self) -> None:
+        fixture_path = self._fixture_path()
+        session = FlowgraphSession()
+        session.load(fixture_path)
+
+        flowgraph = session.flowgraph
+        self.assertIsNotNone(flowgraph)
+        assert flowgraph is not None
+
+        block = next(block for block in flowgraph.blocks if block.instance_name == "samp_rate")
+        original_value = block.params["parameters"]["value"]
+        flowgraph.raw_data["blocks"] = [
+            entry
+            for entry in flowgraph.raw_data["blocks"]
+            if entry["name"] != "samp_rate"
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Raw block not found: samp_rate"):
+            session.set_param("samp_rate", "value", "48000")
+
+        self.assertEqual(block.params["parameters"]["value"], original_value)
+        self.assertFalse(session.is_dirty)
 
     # Asking for a block that does not exist should raise a clear error.
     def test_set_param_missing_block_raises(self) -> None:

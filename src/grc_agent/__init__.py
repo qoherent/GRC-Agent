@@ -4,5 +4,14 @@
 from .agent import GrcAgent
 from .flowgraph_session import FlowgraphSession
 from .models import Block, Connection, Flowgraph
+from .retrieval import initialize_retrieval, search_grc
 
-__all__ = ["Block", "Connection", "Flowgraph", "FlowgraphSession", "GrcAgent"]
+__all__ = [
+    "Block",
+    "Connection",
+    "Flowgraph",
+    "FlowgraphSession",
+    "GrcAgent",
+    "initialize_retrieval",
+    "search_grc",
+]

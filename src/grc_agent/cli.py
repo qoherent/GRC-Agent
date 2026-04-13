@@ -8,6 +8,8 @@ from grc_agent.agent import GrcAgent
 from grc_agent.config import AppConfig, load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_server import LlamaServerClient, LlamaServerError, run_bounded_llama_turn
+from grc_agent.retrieval import initialize_retrieval
+from grc_agent.retrieval.search import _bind_retrieval_context, _clear_retrieval_context
 
 
 FAKE_USER_MESSAGE = "Please change the samp_rate to 48000 and validate the graph."
@@ -74,11 +76,30 @@ def _print_history(agent: GrcAgent) -> None:
         print(turn)
 
 
+def _prepare_retrieval(session: FlowgraphSession) -> int:
+    """Run the bounded retrieval startup check and bind the active session context."""
+    _clear_retrieval_context()
+    readiness = initialize_retrieval()
+    if not readiness["ok"]:
+        print("\n--- Retrieval ---")
+        print(readiness["message"])
+        return 1
+
+    _bind_retrieval_context(
+        session=session,
+        catalog_root=readiness.get("catalog_root"),
+    )
+    return 0
+
+
 def _run_fake_runtime(file_path: str) -> int:
     """Exercise the narrow runtime contract with deterministic fake actions."""
     print(f"Loading {file_path}...")
     session = FlowgraphSession()
     session.load(file_path)
+    retrieval_status = _prepare_retrieval(session)
+    if retrieval_status != 0:
+        return retrieval_status
     agent = GrcAgent(session)
 
     print("--- System Prompt ---")
@@ -105,6 +126,9 @@ def _run_llama_runtime(
     print(f"Loading {file_path}...")
     session = FlowgraphSession()
     session.load(file_path)
+    retrieval_status = _prepare_retrieval(session)
+    if retrieval_status != 0:
+        return retrieval_status
     agent = GrcAgent(session)
     llama_config = config.llama
     client = LlamaServerClient(

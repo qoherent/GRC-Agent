@@ -5,6 +5,7 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 ## Status
 
 - one `.grc` file per session
+- a bounded retrieval package now exposes `search_grc(...)` for GNU catalog and active-session search
 - `FlowgraphSession` owns parsed state, persistence, validation, and all graph-mutation primitives
 - `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
 - the structural-edit surface is frozen pending new experiments
@@ -14,9 +15,10 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 
 ## Repo Map
 
-- [src/grc_agent](src/grc_agent): session layer, model-facing runtime wrapper, and CLI entrypoint
+- [src/grc_agent](src/grc_agent): retrieval, session, runtime, and CLI package code
 - [grc_agent.toml](grc_agent.toml): repo-backed llama.cpp defaults for server URL, model id, and bounded turn settings
 - [docs/PACKAGE_GUIDE.md](docs/PACKAGE_GUIDE.md): concise script-by-script map of the Python package
+- [docs/phases](docs/phases): isolated phase plans for the GRC-native pivot
 - [tests](tests): focused `unittest` regression coverage
 - [tests/data/random_bit_generator.grc](tests/data/random_bit_generator.grc): canonical fixture flowgraph
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture, settled decisions, evidence, milestones, and backlog
@@ -26,6 +28,31 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - do not assume GNU Radio behavior from YAML shape or memory alone
 - read the relevant GNU docs first, then verify with real `.grc` and `grcc` runs
 - widen the supported contract only after the evidence is written down in [docs/BLUEPRINT.md](docs/BLUEPRINT.md)
+
+## Retrieval
+
+Phase 1 keeps retrieval package-level and bounded. It is not part of the model-facing runtime yet.
+
+- `initialize_retrieval(warm_catalog=False)`: verify graphify availability, discover the system GNU catalog root, and optionally warm the cached catalog index
+- `search_grc(query, scope="catalog|session", k=5)`: package-level structured search contract for GNU catalog or active-session search
+- catalog search uses the real system GNU metadata under `/usr/share/gnuradio/grc/blocks` (or `/usr/local/share/gnuradio/grc/blocks` when present)
+- search is block-centric by default: parameter and port text boosts parent block matches instead of dominating top-level results
+- session search uses the active parsed `.grc` graph that the app startup path binds before runtime flow, and may enrich block results from the catalog when that metadata is available
+- graphify is used only as the graph-construction substrate; GNU metadata and the active `.grc` file remain the truth layers
+- the CLI startup path now runs the bounded retrieval readiness check and fails clearly if the catalog root is missing or incomplete
+- default results stay compact: score and source scope remain, while rich block details are collapsed into one short `summary` field
+
+Example package usage:
+
+```python
+from grc_agent import initialize_retrieval, search_grc
+
+initialize_retrieval()
+
+catalog_hits = search_grc("analog_agc_xx", scope="catalog", k=5)
+```
+
+`session` scope is available after the app runtime has loaded and bound an active `FlowgraphSession`.
 
 ## Model-Facing Runtime
 
@@ -93,6 +120,7 @@ What to expect:
 - `check_env.py` passes Python, `grcc`, and GNU Radio version checks
 - `ruff check` is clean
 - `python -m unittest` passes the current regression suite
+- the retrieval tests cover the real GNU catalog metadata and the canonical `.grc` fixture
 - the `--fake` CLI path routes a deterministic tool sequence through `GrcAgent` and `FlowgraphSession`
 - the adapter tests exercise a scripted llama.cpp-compatible server while still validating the fixture graph with real `grcc`
 - live llama.cpp checks are env-gated:

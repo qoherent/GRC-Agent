@@ -9,6 +9,8 @@ description = "Local GNU Radio Companion .grc assistant."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "graphifyy==0.4.11",
+    "networkx>=3.6.1",
     "pyyaml>=6.0.3",
 ]
 
@@ -22,3 +24,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+extend-exclude = ["Temp", "random_bit_generator.py"]

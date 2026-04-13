@@ -10,6 +10,8 @@ safe graph changes without letting the model edit raw YAML directly.
 
 - one `.grc` file per session
 - headless CLI
+- bounded retrieval is available as a package-level `search_grc(...)` API over GNU catalog and active-session graphs
+- CLI startup now runs the bounded retrieval readiness check and binds the active session context
 - local validation through `grcc`
 - safe mutations owned by `FlowgraphSession`
 - structural-edit session surface frozen unless a new experiment pass justifies change
@@ -59,21 +61,29 @@ safe graph changes without letting the model edit raw YAML directly.
 - [src/grc_agent/flowgraph_session.py](../src/grc_agent/flowgraph_session.py) owns load, summarize, save, validate, and all mutation primitives.
 - The session layer is broader than the model-facing runtime because it is also the regression-tested experimentation surface.
 
-### 3. Model-facing runtime layer
+### 3. Retrieval / search layer
+
+- [src/grc_agent/retrieval/](../src/grc_agent/retrieval/) owns bounded search over installed GNU catalog metadata and the active session graph.
+- The system GNU catalog metadata remains the truth source for catalog search, and the active `.grc` session remains the truth source for session search.
+- graphify is used only as the graph-construction substrate through a thin adapter; ranking and result shaping stay local and deterministic.
+- The current Phase 1 catalog corpus is the system block metadata roots (`/usr/share/gnuradio/grc/blocks` first, `/usr/local/share/gnuradio/grc/blocks` second) and includes `.block.yml`, `.tree.yml`, and `.domain.yml`.
+- Retrieval stays package-level for now through `initialize_retrieval(...)` and `search_grc(...)`; it is not part of the model-facing runtime yet, but the CLI startup path already runs the bounded readiness check and binds the active session context.
+
+### 4. Model-facing runtime layer
 
 - [src/grc_agent/agent.py](../src/grc_agent/agent.py) owns the runtime tool registry and turn history.
 - The runtime exposes only four tools: `summarize_graph`, `set_variable`, `validate_graph`, and `save_graph`.
 - `set_variable` is intentionally narrower than generic `set_param(...)`; it updates only the `value` parameter on `variable` blocks.
 - `save_graph` is explicit and gated by successful validation of the latest dirty state.
 
-### 4. CLI boundary
+### 5. CLI boundary
 
 - [src/grc_agent/config.py](../src/grc_agent/config.py) loads repo-backed llama runtime defaults from [grc_agent.toml](../grc_agent.toml).
 - [src/grc_agent/cli.py](../src/grc_agent/cli.py) remains a thin entrypoint.
 - The `--fake` path exists only to prove the runtime boundary and tool routing without introducing a model backend.
 - The llama.cpp CLI defaults are repo-configured rather than duplicated inline.
 
-### 5. Local llama.cpp adapter
+### 6. Local llama.cpp adapter
 
 - [src/grc_agent/llama_server.py](../src/grc_agent/llama_server.py) owns the thin HTTP adapter to `/health`, `/v1/models`, and `/v1/chat/completions`.
 - The adapter calls `GrcAgent`, not `FlowgraphSession` directly.
@@ -81,7 +91,7 @@ safe graph changes without letting the model edit raw YAML directly.
 - `max_steps` is a tool-round budget; one final non-tool assistant answer is allowed after the last tool round.
 - The current supported slice is verified live on one local Gemma GGUF, but the raw model final prose still is not trusted for summarize or supported mutation outcomes.
 
-### 6. Future backend flexibility
+### 7. Future backend flexibility
 
 - The runtime should stay backend-agnostic enough that a future local backend can still call the same narrow tool layer.
 - Avoid orchestration frameworks unless the direct tool-calling shape fails under real use.
@@ -149,12 +159,32 @@ Use a thin local runtime wrapper over `FlowgraphSession` instead of wiring the C
 - `set_param(...)`, `connect(...)`, `disconnect(...)`, `remove_block(...)`, and the structural add workflows update both the parsed model and the raw YAML.
 - Structural add workflows use a copy-validate-commit pattern so failed candidate validation leaves the live session unchanged.
 
+## Retrieval Semantics
+
+- `initialize_retrieval(...)` is the bounded startup seam for Phase 1. It checks graphify availability, resolves the system GNU catalog root, requires the selected root to contain `.block.yml`, `.tree.yml`, and `.domain.yml` metadata, and can optionally warm the cached catalog index.
+- `search_grc(...)` supports only `catalog` and `session` scopes in Phase 1, with the public contract kept to `search_grc(query, scope="catalog|session", k=5)`.
+- `catalog` scope indexes the system GNU block metadata roots only. Phase 1 intentionally excludes user-local custom blocks and examples.
+- `session` scope indexes the active parsed `FlowgraphSession`, not raw YAML text, and may enrich block results from the catalog metadata when the system catalog is available.
+- The current CLI startup path runs `initialize_retrieval(...)` and binds the active session context before the fake or llama runtime path continues.
+- Results stay structured, bounded, deterministic, provenance-aware, and block-centric by default.
+- Parameter and port metadata now boosts parent block ranking instead of appearing as equal top-level results.
+- Normalized field text and an inverted token index are precomputed during index build so retrieval no longer rescans every indexed record per query.
+- graphify remains a retrieval substrate only. It does not become a truth layer for either GNU metadata or the active `.grc` session.
+
 ## Current Verified State
 
 - `uv run python scripts/check_env.py` is the environment preflight check.
 - `uv run ruff check` is the lint gate.
 - `uv run python -m unittest` is the regression test command.
 - `uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc` is the runtime smoke test.
+- GNU Radio's YAML GRC documentation confirms that `.block.yml` files carry block IDs, labels, parameters, ports, optional category, optional documentation, and that `.tree.yml` files map block IDs into the block tree categories. Source: <https://wiki.gnuradio.org/index.php/YAML_GRC>
+- On this machine, the Phase 1 catalog root resolved to `/usr/share/gnuradio/grc/blocks`.
+- The resolved Phase 1 catalog corpus on this machine contained 564 `.block.yml` files, 16 `.tree.yml` files, and 9 `.domain.yml` files.
+- `graphifyy==0.4.11` is installed in the project environment and `graphify.build_from_json()` successfully constructs the retrieval graphs used by Phase 1.
+- `search_grc(...)` now returns bounded, deterministic, provenance-aware, block-centric results for both catalog and session scope, and the retrieval tests exercise the real GNU catalog plus the canonical `.grc` fixture.
+- The tuned retrieval index currently builds a smaller block-centric catalog graph (643 nodes on this machine) and the first catalog query dropped from multi-second behavior to sub-second behavior in local measurement.
+- Retrieval readiness now fails clearly when a selected catalog root is empty or incomplete instead of reporting a false-positive ready state.
+- Duplicate retrieval node IDs are no longer silently dropped; compatible duplicates are merged intentionally, while conflicting duplicates raise a retrieval index error.
 - `GRC_AGENT_LIVE_LLAMA_URL=... GRC_AGENT_LIVE_LLAMA_MODEL=... uv run python -m unittest tests.test_llama_server_live` is the env-gated live llama.cpp check.
 - `GRC_AGENT_LIVE_LLAMA_URL=... GRC_AGENT_LIVE_LLAMA_MODEL=... uv run python scripts/llama_reliability_matrix.py` is the non-gating live reliability matrix.
 - `.github/workflows/ci.yml` runs a fast lint job and a GNU-backed validation job on Ubuntu.
@@ -368,13 +398,23 @@ Derived rule: structural adds can safely rely on the copy-validate-commit patter
 - split the earlier decision material by role before this consolidation pass
 - normalized the repo around a blueprint doc for architecture and future phases
 
+### Phase 17 retrieval index and `search_grc`
+
+- added `src/grc_agent/retrieval/` for GNU catalog discovery, graph build/load, provenance, readiness, and bounded search
+- indexed the system GNU catalog from `.block.yml`, `.tree.yml`, and `.domain.yml` metadata only
+- added package-level `initialize_retrieval(...)` and `search_grc(...)` entry points without widening the model-facing runtime
+- wired the bounded retrieval readiness check into CLI startup and bound the active session context there
+- kept graphify behind a thin adapter and kept ranking deterministic and explainable
+- added retrieval regression coverage over the real GNU catalog metadata and the canonical `random_bit_generator.grc` fixture
+
 ## Backlog
 
 1. Validate one concrete tool-aware llama.cpp model/template combination against real `.grc` cases and record the evidence.
 2. Add a one-session interactive CLI conversation loop over the current narrowed runtime.
-3. Improve user-facing summaries, validation reporting, and error surfacing.
-4. Revisit structural API growth only if new use cases are backed by new experiments.
-5. Keep backend flexibility only if a second backend is justified by real use, not speculation.
+3. Decide when and how the existing package-level retrieval surface should be exposed as a model-facing runtime tool beyond the current CLI startup readiness/binding seam.
+4. Improve user-facing summaries, validation reporting, and error surfacing.
+5. Revisit structural API growth only if new use cases are backed by new experiments.
+6. Keep backend flexibility only if a second backend is justified by real use, not speculation.
 
 ## Intentionally Deferred
 

@@ -68,6 +68,10 @@ class FlowgraphSession:
         )
         # A fresh load is clean because nothing has been edited yet.
         self.is_dirty = False
+        # A newly loaded graph should not inherit stale validation diagnostics.
+        self.last_validation_stdout = None
+        self.last_validation_stderr = None
+        self.last_validation_returncode = None
 
     def save(self, path: str | Path | None = None) -> None:
         """Write the current in-memory graph to disk."""
@@ -796,12 +800,6 @@ class FlowgraphSession:
         if block is None:
             raise ValueError(f"Block not found: {instance_name}")
 
-        # The nested parameters section is where block settings live.
-        parameters = block.params.setdefault("parameters", {})
-        if not isinstance(parameters, dict):
-            raise ValueError(f"Block parameters section is invalid for: {instance_name}")
-        parameters[parameter_key] = value
-
         # The raw YAML must change too so save() and validate() see the mutation.
         raw_blocks = self.flowgraph.raw_data.get("blocks")
         if not isinstance(raw_blocks, list):
@@ -819,10 +817,16 @@ class FlowgraphSession:
         if raw_block is None:
             raise ValueError(f"Raw block not found: {instance_name}")
 
+        # Confirm both parameter mappings are valid before mutating either representation.
+        parameters = block.params.setdefault("parameters", {})
+        if not isinstance(parameters, dict):
+            raise ValueError(f"Block parameters section is invalid for: {instance_name}")
+
         # Update the raw parameters mapping in the same way as the parsed model.
         raw_parameters = raw_block.setdefault("parameters", {})
         if not isinstance(raw_parameters, dict):
             raise ValueError(f"Raw block parameters section is invalid for: {instance_name}")
+        parameters[parameter_key] = value
         raw_parameters[parameter_key] = value
 
         # Any successful mutation means the in-memory session now differs from disk.

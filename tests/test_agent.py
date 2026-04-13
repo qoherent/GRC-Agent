@@ -5,9 +5,10 @@ from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from grc_agent.agent import GrcAgent
-from grc_agent.cli import _run_fake_runtime
+from grc_agent.cli import _prepare_retrieval, _run_fake_runtime
 from grc_agent.flowgraph_session import FlowgraphSession
 
 
@@ -190,6 +191,20 @@ class GrcAgentTests(unittest.TestCase):
         self.assertIn("Assistant called set_variable", rendered)
         self.assertIn("Assistant called validate_graph", rendered)
         self.assertNotIn("Assistant called set_param", rendered)
+
+    def test_prepare_retrieval_fails_clearly_when_not_ready(self) -> None:
+        _agent, session = self._load_agent()
+        output = StringIO()
+
+        with mock.patch(
+            "grc_agent.cli.initialize_retrieval",
+            return_value={"ok": False, "message": "Retrieval is unavailable."},
+        ):
+            with redirect_stdout(output):
+                exit_code = _prepare_retrieval(session)
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Retrieval is unavailable.", output.getvalue())
 
 
 if __name__ == "__main__":
