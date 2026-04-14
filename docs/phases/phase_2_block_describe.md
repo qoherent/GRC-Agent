@@ -16,18 +16,32 @@ The public output should stay tight and structured: no prose summary, no raw cod
 - graphify-backed retrieval
 - `unittest`
 
-## Phase 1 baseline to reuse
+## Implementation status
+
+Phase 2 is implemented in the current repo state.
+
+What landed:
+- `src/grc_agent/catalog/{__init__,describe,normalize,schema,loaders,errors}.py`
+- `tests/catalog/{test_describe_block,test_catalog_errors}.py`
+- public contract: `describe_block(block_id)`
+- shared GNU catalog loader seam: catalog root discovery, file collection, and raw `.block.yml` loading now live under `src/grc_agent/catalog/loaders.py` and are reused by `src/grc_agent/retrieval/index.py`
+- normalized category paths: block-local `category` first, tree-derived fallback second, warning on multi-category ambiguity
+- warning-based hierarchy marking for generated and built-in hierarchical wrappers
+- stable bad-metadata behavior: malformed YAML, unreadable files, and invalid section shapes return structured `ok: false` payloads instead of uncaught parser errors
+
+## Implemented baseline to reuse
 
 - `src/grc_agent/retrieval/` already exists and is the current Phase 1 baseline.
+- `src/grc_agent/catalog/` already exists and is the current Phase 2 baseline.
 - Reuse the existing GNU catalog root discovery and retrieval package behavior instead of adding a second catalog-discovery path.
-- If this phase needs raw catalog loaders or normalized shared records that Phase 1 does not expose yet, extract a shared seam instead of duplicating YAML traversal in parallel packages.
+- If a later phase needs raw catalog loaders or normalized shared records, reuse the shared catalog seam instead of duplicating YAML traversal in parallel packages.
 - `search_grc(query, scope="catalog|session", k=5)` and `initialize_retrieval(...)` are already live and should be treated as the stable retrieval/search boundary below this phase.
 
 ---
 
 ## Package boundary
 
-Create an isolated catalog package:
+Current package boundary:
 
 ```text
 src/grc_agent/catalog/
@@ -44,7 +58,6 @@ Suggested tests:
 ```text
 tests/catalog/
   test_describe_block.py
-  test_catalog_normalize.py
   test_catalog_errors.py
 ```
 
@@ -72,6 +85,7 @@ Create tests that prove:
 - asserts are included
 - hier blocks are clearly marked, not excluded
 - unknown block ids return a stable error shape
+- malformed metadata and unreadable files fail with a stable public error payload
 - output is concise, structured, and machine-readable
 
 ## Strict success criteria
@@ -81,6 +95,7 @@ This phase is done only when all are true:
 - it uses local catalog data, not free-form prose
 - it returns enough detail to choose or instantiate a block safely
 - it has tests on real GRC block metadata
+- malformed catalog metadata fails inside the structured error envelope
 - it does not mutate the graph
 
 ## Coding rules for implementers
@@ -153,7 +168,7 @@ Error shape:
 - output is concise and machine-readable
 - docs pointers and caveats are preserved
 - no graph mutation occurs
-- tests cover known, unknown, and hier-block cases
+- tests cover known, unknown, hier-block, and malformed-metadata cases
 
 ## Refactor / remove checklist
 

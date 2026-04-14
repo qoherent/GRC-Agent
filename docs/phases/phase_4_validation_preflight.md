@@ -17,11 +17,13 @@ Validation stays pure and in-memory. It should not save files, mutate live state
 - GNU Radio metadata rules
 - `unittest`
 
-## Prior phase baseline to reuse
+## Implemented baseline to reuse
 
-- Phase 1 retrieval and Phase 3 session inspection should already provide the bounded catalog/session lookup surfaces below this phase.
+- Phase 1 retrieval and Phase 2 catalog description should already provide the bounded catalog lookup surfaces below this phase.
+- Phase 3 session inspection should already provide the bounded live-session lookup surface below this phase.
+- Reuse `describe_block(...)` or the catalog package’s shared loaders/normalizers rather than scanning `.block.yml` files directly inside validation code.
 - Reuse existing GNU catalog discovery and active-session context rather than adding another startup or metadata-scan path here.
-- This phase should stay pure in-memory and consume those lower layers; it should not re-implement retrieval readiness or graph search as part of validation.
+- This phase should stay pure in-memory and consume those lower layers; it should not re-implement retrieval readiness, block description, or graph search as part of validation.
 
 ---
 

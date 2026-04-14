@@ -18,11 +18,12 @@ Eager startup should stay bounded: load config and check the selected backend/se
 - graph retrieval and transaction packages
 - `unittest`
 
-## Prior phase baseline to reuse
+## Implemented baseline to reuse
 
 - Phase 1 already provides package-level retrieval through `initialize_retrieval(...)` and `search_grc(...)`.
+- Phase 2 already provides package-level block description through `describe_block(block_id)`.
 - The CLI startup path already runs the bounded retrieval readiness check and binds the active session context before runtime flow continues.
-- This phase should integrate that existing retrieval surface into the agent/tool loop if needed, not redesign startup readiness or rebuild search from scratch.
+- This phase should integrate those existing read-only surfaces into the agent/tool loop if needed, not redesign startup readiness or rebuild search/block description from scratch.
 
 ---
 

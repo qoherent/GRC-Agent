@@ -10,6 +10,7 @@ safe graph changes without letting the model edit raw YAML directly.
 
 - one `.grc` file per session
 - headless CLI
+- package-level block description is available as `describe_block(block_id)` over installed GNU metadata
 - bounded retrieval is available as a package-level `search_grc(...)` API over GNU catalog and active-session graphs
 - CLI startup now runs the bounded retrieval readiness check and binds the active session context
 - local validation through `grcc`
@@ -61,7 +62,13 @@ safe graph changes without letting the model edit raw YAML directly.
 - [src/grc_agent/flowgraph_session.py](../src/grc_agent/flowgraph_session.py) owns load, summarize, save, validate, and all mutation primitives.
 - The session layer is broader than the model-facing runtime because it is also the regression-tested experimentation surface.
 
-### 3. Retrieval / search layer
+### 3. Catalog / block description layer
+
+- [src/grc_agent/catalog/](../src/grc_agent/catalog/) owns canonical structured block truth over installed GNU metadata.
+- `describe_block(block_id)` is the read-only Phase 2 entry point for normalized block identity, category path, parameters, ports, asserts, docs, warnings, and a compact signature.
+- The catalog layer uses the same GNU metadata roots as retrieval and keeps hierarchy handling lightweight through warnings rather than over-modeling it.
+
+### 4. Retrieval / search layer
 
 - [src/grc_agent/retrieval/](../src/grc_agent/retrieval/) owns bounded search over installed GNU catalog metadata and the active session graph.
 - The system GNU catalog metadata remains the truth source for catalog search, and the active `.grc` session remains the truth source for session search.
@@ -69,21 +76,21 @@ safe graph changes without letting the model edit raw YAML directly.
 - The current Phase 1 catalog corpus is the system block metadata roots (`/usr/share/gnuradio/grc/blocks` first, `/usr/local/share/gnuradio/grc/blocks` second) and includes `.block.yml`, `.tree.yml`, and `.domain.yml`.
 - Retrieval stays package-level for now through `initialize_retrieval(...)` and `search_grc(...)`; it is not part of the model-facing runtime yet, but the CLI startup path already runs the bounded readiness check and binds the active session context.
 
-### 4. Model-facing runtime layer
+### 5. Model-facing runtime layer
 
 - [src/grc_agent/agent.py](../src/grc_agent/agent.py) owns the runtime tool registry and turn history.
 - The runtime exposes only four tools: `summarize_graph`, `set_variable`, `validate_graph`, and `save_graph`.
 - `set_variable` is intentionally narrower than generic `set_param(...)`; it updates only the `value` parameter on `variable` blocks.
 - `save_graph` is explicit and gated by successful validation of the latest dirty state.
 
-### 5. CLI boundary
+### 6. CLI boundary
 
 - [src/grc_agent/config.py](../src/grc_agent/config.py) loads repo-backed llama runtime defaults from [grc_agent.toml](../grc_agent.toml).
 - [src/grc_agent/cli.py](../src/grc_agent/cli.py) remains a thin entrypoint.
 - The `--fake` path exists only to prove the runtime boundary and tool routing without introducing a model backend.
 - The llama.cpp CLI defaults are repo-configured rather than duplicated inline.
 
-### 6. Local llama.cpp adapter
+### 7. Local llama.cpp adapter
 
 - [src/grc_agent/llama_server.py](../src/grc_agent/llama_server.py) owns the thin HTTP adapter to `/health`, `/v1/models`, and `/v1/chat/completions`.
 - The adapter calls `GrcAgent`, not `FlowgraphSession` directly.
@@ -91,7 +98,7 @@ safe graph changes without letting the model edit raw YAML directly.
 - `max_steps` is a tool-round budget; one final non-tool assistant answer is allowed after the last tool round.
 - The current supported slice is verified live on one local Gemma GGUF, but the raw model final prose still is not trusted for summarize or supported mutation outcomes.
 
-### 7. Future backend flexibility
+### 8. Future backend flexibility
 
 - The runtime should stay backend-agnostic enough that a future local backend can still call the same narrow tool layer.
 - Avoid orchestration frameworks unless the direct tool-calling shape fails under real use.
@@ -171,17 +178,34 @@ Use a thin local runtime wrapper over `FlowgraphSession` instead of wiring the C
 - Normalized field text and an inverted token index are precomputed during index build so retrieval no longer rescans every indexed record per query.
 - graphify remains a retrieval substrate only. It does not become a truth layer for either GNU metadata or the active `.grc` session.
 
+## Catalog Semantics
+
+- `describe_block(block_id)` is the Phase 2 package-level entry point, with the public contract intentionally kept to one required `block_id` string.
+- The response stays structured and read-only: identity fields, one normalized category path, flags, source path, normalized parameters, normalized inputs/outputs, asserts, documentation/doc_url, warnings, and a compact signature string.
+- Category paths come from the block-local `category` field when present, otherwise from GNU `.tree.yml` placement.
+- If GNU tree metadata places one block in multiple categories, the public payload selects the first sorted path and records the ambiguity in `warnings`.
+- Hierarchical wrappers are marked through `warnings`. Generated hier blocks are identified from GNU metadata such as `grc_source`; built-in hierarchical wrappers are marked only when the installed GNU Python target resolves to a `hier_block2` subclass.
+- Literal GNU expressions such as `${ type }`, `${ num_inputs }`, and parameter-hide expressions are preserved as strings rather than evaluated.
+- The catalog layer shares the same GNU root discovery and raw `.block.yml` loading seam used by retrieval so Phase 2 does not introduce a second catalog traversal path.
+- Malformed GNU metadata and unreadable metadata files must fail inside the public `ok: false` envelope rather than surfacing raw YAML parser or file-read exceptions.
+
 ## Current Verified State
 
 - `uv run python scripts/check_env.py` is the environment preflight check.
 - `uv run ruff check` is the lint gate.
 - `uv run python -m unittest` is the regression test command.
 - `uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc` is the runtime smoke test.
-- GNU Radio's YAML GRC documentation confirms that `.block.yml` files carry block IDs, labels, parameters, ports, optional category, optional documentation, and that `.tree.yml` files map block IDs into the block tree categories. Source: <https://wiki.gnuradio.org/index.php/YAML_GRC>
+- GNU Radio's YAML GRC documentation confirms that `.block.yml` files carry block IDs, labels, parameters, ports, optional category, optional asserts, optional documentation, and that `.tree.yml` files map block IDs into the block tree categories. Source: <https://wiki.gnuradio.org/index.php/YAML_GRC>
+- The installed GNU Radio block schema on this machine includes optional `doc_url`, `grc_source`, and `block_wrapper_path` fields for `.block.yml` files. Source: `gnuradio.grc.core.schema_checker.BLOCK_SCHEME`
 - On this machine, the Phase 1 catalog root resolved to `/usr/share/gnuradio/grc/blocks`.
 - The resolved Phase 1 catalog corpus on this machine contained 564 `.block.yml` files, 16 `.tree.yml` files, and 9 `.domain.yml` files.
+- A real `grcc` hier-block generation pass against `/usr/share/gnuradio/examples/digital/packet/packet_rx.grc` produced a generated `packet_rx.block.yml` with `grc_source` and a hier-specific import template comment (`from packet_rx import packet_rx  # grc-generated hier_block`).
+- `gnuradio.filter.pfb.channelizer_hier_ccf` resolves to a `gr.hier_block2` subclass on this machine, which supports Phase 2's lightweight hierarchical-wrapper warning path.
+- `describe_block(...)` now returns structured block truth from the real GNU catalog, including normalized tree-derived category paths, literal parameter/port expressions, stable docs/doc_url fields, and hierarchical-wrapper warnings.
 - `graphifyy==0.4.11` is installed in the project environment and `graphify.build_from_json()` successfully constructs the retrieval graphs used by Phase 1.
 - `search_grc(...)` now returns bounded, deterministic, provenance-aware, block-centric results for both catalog and session scope, and the retrieval tests exercise the real GNU catalog plus the canonical `.grc` fixture.
+- The catalog regression tests cover a known block, docs/asserts preservation, doc_url preservation, an unknown block id, and a hierarchical wrapper case against the real installed GNU catalog.
+- Malformed `.block.yml` files, missing required block fields, invalid section shapes, and unreadable metadata files now return structured `CatalogLoadError` payloads in catalog tests instead of leaking parser or file-read exceptions.
 - The tuned retrieval index currently builds a smaller block-centric catalog graph (643 nodes on this machine) and the first catalog query dropped from multi-second behavior to sub-second behavior in local measurement.
 - Retrieval readiness now fails clearly when a selected catalog root is empty or incomplete instead of reporting a false-positive ready state.
 - Duplicate retrieval node IDs are no longer silently dropped; compatible duplicates are merged intentionally, while conflicting duplicates raise a retrieval index error.
@@ -406,6 +430,14 @@ Derived rule: structural adds can safely rely on the copy-validate-commit patter
 - wired the bounded retrieval readiness check into CLI startup and bound the active session context there
 - kept graphify behind a thin adapter and kept ranking deterministic and explainable
 - added retrieval regression coverage over the real GNU catalog metadata and the canonical `random_bit_generator.grc` fixture
+
+### Phase 18 block description and structured block truth
+
+- added `src/grc_agent/catalog/` for shared GNU catalog discovery/loading, normalization, errors, and package-level block description
+- added public `describe_block(block_id)` without widening the model-facing runtime
+- kept the payload read-only and structured around identity, categories, parameters, ports, asserts, docs/doc_url, warnings, and a compact signature
+- reused the same GNU root discovery and raw catalog loading seam from Phase 1 instead of introducing a second catalog traversal path
+- added catalog regression coverage over real GNU metadata, including docs, doc_url, unknown-block, and hierarchical-wrapper cases
 
 ## Backlog
 

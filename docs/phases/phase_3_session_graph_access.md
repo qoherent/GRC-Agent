@@ -16,12 +16,13 @@ The public output should be a compact structured payload with a bounded mini-gra
 - graph retrieval index
 - `unittest`
 
-## Phase 1 baseline to reuse
+## Implemented baseline to reuse
 
 - `src/grc_agent/retrieval/` already includes session-scope search and a bounded session index.
+- `src/grc_agent/catalog/` already provides `describe_block(block_id)` and normalized GNU block truth for live block types.
 - The CLI startup path already runs retrieval readiness checks and binds the active session context for `search_grc(..., scope="session")`.
-- This phase should add richer bounded session inspection and mini-graph context, not a second ad-hoc session search implementation.
-- If neighborhood expansion needs to share traversal or node-shaping logic with the retrieval package, extract shared helpers rather than duplicating session graph walks.
+- This phase should add richer bounded session inspection and mini-graph context, not a second ad-hoc session search or block-description implementation.
+- If neighborhood expansion needs block-type facts, call into the catalog package or extract shared helpers rather than re-parsing GNU metadata or duplicating session graph walks.
 
 ---
 

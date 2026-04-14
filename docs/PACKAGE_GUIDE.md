@@ -19,9 +19,10 @@ flowchart LR
   CLI["cli.py"]
   Llama["llama_server.py<br/>LlamaServerClient"]
   Agent["agent.py<br/>GrcAgent"]
+  CatalogPkg["catalog/<br/>describe_block"]
   Retrieval["retrieval/<br/>search_grc + initialize_retrieval"]
   Session["flowgraph_session.py<br/>FlowgraphSession"]
-  Catalog["GNU metadata<br/>.block/.tree/.domain yml"]
+  GnuCatalog["GNU metadata<br/>.block/.tree/.domain yml"]
   Models["models.py<br/>Block / Connection / Flowgraph"]
   Raw[".grc YAML"]
   Grcc["grcc"]
@@ -31,7 +32,8 @@ flowchart LR
   CLI --> Llama
   Llama --> Agent
   Agent --> Session
-  Catalog --> Retrieval
+  GnuCatalog --> CatalogPkg
+  CatalogPkg --> Retrieval
   Session --> Retrieval
   Session --> Models
   Session --> Raw
@@ -45,6 +47,7 @@ flowchart LR
 | [config.py](../src/grc_agent/config.py) | Repo-backed runtime defaults loaded from `grc_agent.toml` |
 | [models.py](../src/grc_agent/models.py) | Thin in-memory dataclasses for parsed flowgraphs |
 | [flowgraph_session.py](../src/grc_agent/flowgraph_session.py) | Load, summarize, save, validate, and all graph mutations |
+| [catalog/](../src/grc_agent/catalog/) | Shared GNU catalog loading, metadata normalization, and `describe_block(...)` |
 | [retrieval/](../src/grc_agent/retrieval/) | GNU catalog discovery, graph build/load, bounded search, provenance, and readiness checks |
 | [agent.py](../src/grc_agent/agent.py) | Narrow model-facing tool contract and runtime history |
 | [llama_server.py](../src/grc_agent/llama_server.py) | Thin llama.cpp HTTP adapter and bounded tool loop |
@@ -90,9 +93,38 @@ Import from `grc_agent` when possible:
 - `Connection`
 - `Flowgraph`
 - `initialize_retrieval`
+- `describe_block`
 - `search_grc`
 
 That public surface comes from [__init__.py](../src/grc_agent/__init__.py). Most code should not need lower-level imports unless it is working directly on the adapter or config layer.
+
+## Catalog Surface
+
+Phase 2 catalog description also stays package-level and read-only.
+
+### Catalog package layout
+
+| File | Owns |
+| --- | --- |
+| [catalog/loaders.py](../src/grc_agent/catalog/loaders.py) | Shared GNU catalog root discovery, file collection, tree walking, and cached raw block loading |
+| [catalog/normalize.py](../src/grc_agent/catalog/normalize.py) | Block-field normalization, category selection, signature building, and lightweight hierarchical-wrapper detection |
+| [catalog/schema.py](../src/grc_agent/catalog/schema.py) | Structured catalog dataclasses for raw and normalized records |
+| [catalog/errors.py](../src/grc_agent/catalog/errors.py) | Catalog-specific exceptions and stable error payload helpers |
+| [catalog/describe.py](../src/grc_agent/catalog/describe.py) | `describe_block(...)` public entry point |
+
+### Catalog entry point
+
+| Callable | Input | Output | Purpose |
+| --- | --- | --- | --- |
+| `describe_block(block_id)` | block id string | `{"ok","block_id","label","category_path","flags","loaded_from","parameters","inputs","outputs","asserts","documentation","doc_url","warnings","signature"}` or `{"ok": false, ...}` | Return normalized GNU block truth for one installed catalog block |
+
+Notes:
+
+- `describe_block(...)` uses the same system GNU catalog roots as retrieval
+- tree-derived category paths are normalized into plain parts such as `["Core", "Audio"]`
+- malformed GNU metadata is wrapped into the catalog error payload instead of surfacing raw parser exceptions
+- hierarchical wrappers are marked through `warnings` rather than a separate public boolean field
+- the payload preserves literal GNU expressions such as `${ type }` and `${ num_inputs }`
 
 ## Retrieval Surface
 
@@ -102,7 +134,7 @@ Phase 1 retrieval stays package-level. It is intentionally separate from the cur
 
 | File | Owns |
 | --- | --- |
-| [retrieval/index.py](../src/grc_agent/retrieval/index.py) | Catalog root discovery, catalog/session index construction, cache management, readiness checks |
+| [retrieval/index.py](../src/grc_agent/retrieval/index.py) | Catalog/session index construction, cache management, and retrieval readiness checks |
 | [retrieval/search.py](../src/grc_agent/retrieval/search.py) | `search_grc(...)`, query normalization, deterministic ranking, bounded result assembly |
 | [retrieval/graphify_adapter.py](../src/grc_agent/retrieval/graphify_adapter.py) | Thin wrapper around `graphify.build_from_json()` and graphify availability checks |
 | [retrieval/schema.py](../src/grc_agent/retrieval/schema.py) | Shared retrieval dataclasses, result limits, success/error payload helpers |

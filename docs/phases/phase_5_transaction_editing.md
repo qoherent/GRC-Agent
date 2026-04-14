@@ -19,10 +19,10 @@ The first public transaction contract should stay intentionally narrow. Prefer t
 - `grcc`
 - `unittest`
 
-## Prior phase baseline to reuse
+## Implemented baseline to reuse
 
-- Phase 1 retrieval readiness/search is already live, and Phase 4 should already provide pure preflight validation.
-- This phase should consume those lower layers rather than bypassing them with bespoke catalog/session lookups inside transaction code.
+- Phase 1 retrieval readiness/search and Phase 2 catalog description are already live, and Phase 4 should already provide pure preflight validation.
+- This phase should consume those lower layers rather than bypassing them with bespoke catalog/session lookups or ad-hoc block schema parsing inside transaction code.
 - Keep the current bounded startup behavior intact: cheap retrieval/session checks early, heavier catalog or transaction work only when the edit path actually needs it.
 
 ---

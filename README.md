@@ -5,6 +5,7 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 ## Status
 
 - one `.grc` file per session
+- package-level catalog description now exposes `describe_block(block_id)` for structured GNU block truth
 - a bounded retrieval package now exposes `search_grc(...)` for GNU catalog and active-session search
 - `FlowgraphSession` owns parsed state, persistence, validation, and all graph-mutation primitives
 - `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
@@ -53,6 +54,24 @@ catalog_hits = search_grc("analog_agc_xx", scope="catalog", k=5)
 ```
 
 `session` scope is available after the app runtime has loaded and bound an active `FlowgraphSession`.
+
+## Catalog
+
+Phase 2 keeps block description package-level and read-only.
+
+- `describe_block(block_id)`: return normalized GNU block truth for one installed catalog block
+- catalog description uses the same system GNU metadata roots as retrieval
+- payloads stay structured: identity, category path, flags, loaded-from path, parameters, ports, asserts, documentation/doc_url, warnings, and a compact signature
+- malformed catalog metadata fails as a structured `ok: false` payload rather than an uncaught parser exception
+- hierarchical wrappers are marked through `warnings` instead of widening the public payload with extra derived fields
+
+Example package usage:
+
+```python
+from grc_agent import describe_block
+
+block = describe_block("analog_agc_xx")
+```
 
 ## Model-Facing Runtime
 
@@ -120,7 +139,8 @@ What to expect:
 - `check_env.py` passes Python, `grcc`, and GNU Radio version checks
 - `ruff check` is clean
 - `python -m unittest` passes the current regression suite
-- the retrieval tests cover the real GNU catalog metadata and the canonical `.grc` fixture
+- the retrieval and catalog tests cover the real GNU catalog metadata and the canonical `.grc` fixture
+- `describe_block(...)` is exercised against real GNU blocks with asserts, documentation/doc_url, and hierarchical-wrapper coverage
 - the `--fake` CLI path routes a deterministic tool sequence through `GrcAgent` and `FlowgraphSession`
 - the adapter tests exercise a scripted llama.cpp-compatible server while still validating the fixture graph with real `grcc`
 - live llama.cpp checks are env-gated:

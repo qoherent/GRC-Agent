@@ -28,10 +28,12 @@ Current important files:
 - `src/grc_agent/config.py`
 - `src/grc_agent/llama_server.py`
 - `src/grc_agent/retrieval/`
+- `src/grc_agent/catalog/`
 - `docs/BLUEPRINT.md`
 - `docs/PACKAGE_GUIDE.md`
 - `README.md`
 - `tests/retrieval/`
+- `tests/catalog/`
 - `tests/data/random_bit_generator.grc`
 
 ## Canonical system model
@@ -83,7 +85,8 @@ src/grc_agent/
 
 Status today:
 - `src/grc_agent/retrieval/` is implemented and should be treated as the current Phase 1 baseline.
-- later phases should build on that package rather than re-creating GNU metadata discovery, graphify wiring, or bounded search from scratch.
+- `src/grc_agent/catalog/` is implemented and should be treated as the current Phase 2 baseline.
+- later phases should build on those packages rather than re-creating GNU metadata discovery, graphify wiring, bounded search, or block description from scratch.
 
 Testing should follow the same boundaries:
 
@@ -115,7 +118,7 @@ Implement in this order:
 - Keep `agent.py` thin; avoid putting search or transaction logic directly in it.
 - Keep `cli.py` thin; avoid duplicating business logic there.
 - Phase 1 has landed; do not reintroduce ad-hoc search code in the agent or CLI layers.
-- Remove any future prompt-only block schema assumptions once Phase 2 lands.
+- Phase 2 has landed; do not reintroduce prompt-only block schema assumptions or duplicate GNU block parsing outside `src/grc_agent/catalog/`.
 - Remove any implicit validation behavior from mutation paths once Phase 4 and Phase 5 land.
 - Remove narrow, bespoke runtime-only mutation contracts from the final public agent surface once the new tool loop is in place.
 

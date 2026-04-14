@@ -7,8 +7,22 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from grc_agent.catalog.errors import CatalogLoadError
+from grc_agent.catalog.loaders import (
+    DEFAULT_GRC_CATALOG_ROOTS as DEFAULT_GRC_CATALOG_ROOTS_SHARED,
+    collect_catalog_files,
+    discover_catalog_root as discover_catalog_root_shared,
+    load_yaml_mapping,
+    require_string,
+    validate_catalog_files,
+    walk_tree_entries,
+)
+from grc_agent.catalog.normalize import (
+    compact_text,
+    coerce_mapping_list,
+    split_category_path,
+    string_values,
+)
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.models import Connection
 
@@ -24,19 +38,10 @@ from .schema import (
 )
 from .text import expand_terms, normalize_text, tokenize_text
 
-DEFAULT_GRC_CATALOG_ROOTS = (
-    Path("/usr/share/gnuradio/grc/blocks"),
-    Path("/usr/local/share/gnuradio/grc/blocks"),
-)
-
 MAX_RELATED_LABELS = 8
 MAX_SUMMARY_CHARS = 240
 MAX_RESULT_SUMMARY_CHARS = 160
-
-try:
-    _YAML_SAFE_LOADER = yaml.CSafeLoader
-except AttributeError:  # pragma: no cover - depends on libyaml availability.
-    _YAML_SAFE_LOADER = yaml.SafeLoader
+DEFAULT_GRC_CATALOG_ROOTS = DEFAULT_GRC_CATALOG_ROOTS_SHARED
 
 
 class RetrievalIndexError(RuntimeError):
@@ -45,18 +50,10 @@ class RetrievalIndexError(RuntimeError):
 
 def discover_catalog_root(catalog_root: str | Path | None = None) -> Path:
     """Return the system GNU Radio catalog root used for Phase 1 retrieval."""
-    if catalog_root is not None:
-        resolved_root = Path(catalog_root).expanduser()
-        if not resolved_root.is_dir():
-            raise RetrievalIndexError(f"GNU Radio catalog root not found: {resolved_root}")
-        return resolved_root
-
-    for root in DEFAULT_GRC_CATALOG_ROOTS:
-        if root.is_dir():
-            return root
-
-    checked_roots = ", ".join(str(root) for root in DEFAULT_GRC_CATALOG_ROOTS)
-    raise RetrievalIndexError(f"GNU Radio catalog root not found. Checked: {checked_roots}")
+    try:
+        return discover_catalog_root_shared(catalog_root)
+    except CatalogLoadError as exc:
+        raise RetrievalIndexError(str(exc)) from exc
 
 
 def initialize_retrieval(
@@ -75,9 +72,9 @@ def initialize_retrieval(
 
     try:
         root = discover_catalog_root(catalog_root)
-        files = _collect_catalog_files(root)
-        _validate_catalog_files(root, files)
-    except RetrievalIndexError as exc:
+        files = collect_catalog_files(root)
+        validate_catalog_files(root, files)
+    except (CatalogLoadError, RetrievalIndexError) as exc:
         return build_error_payload(error_type="RetrievalNotReady", message=str(exc))
 
     payload: dict[str, Any] = {
@@ -86,9 +83,9 @@ def initialize_retrieval(
         "graphify_version": status["version"],
         "catalog_root": str(root),
         "catalog_files": {
-            "block": len(files["block"]),
-            "tree": len(files["tree"]),
-            "domain": len(files["domain"]),
+            "block": len(files.block),
+            "tree": len(files.tree),
+            "domain": len(files.domain),
         },
         "catalog_index_warmed": False,
     }
@@ -114,14 +111,20 @@ def clear_catalog_index_cache() -> None:
 
 def get_catalog_index(catalog_root: str | Path | None = None) -> RetrievalIndex:
     """Return the cached catalog retrieval index for the resolved root."""
-    root = discover_catalog_root(catalog_root).resolve()
-    return _get_cached_catalog_index(str(root))
+    try:
+        root = discover_catalog_root(catalog_root).resolve()
+        return _get_cached_catalog_index(str(root))
+    except CatalogLoadError as exc:
+        raise RetrievalIndexError(str(exc)) from exc
 
 
 def build_catalog_index(catalog_root: str | Path | None = None) -> RetrievalIndex:
     """Build a fresh catalog retrieval index for the resolved GNU Radio metadata root."""
-    root = discover_catalog_root(catalog_root).resolve()
-    return _build_catalog_index_for_root(root)
+    try:
+        root = discover_catalog_root(catalog_root).resolve()
+        return _build_catalog_index_for_root(root)
+    except CatalogLoadError as exc:
+        raise RetrievalIndexError(str(exc)) from exc
 
 
 def build_session_index(
@@ -145,7 +148,7 @@ def build_session_index(
     for block in flowgraph.blocks:
         catalog_record = catalog_blocks.get(block.block_type)
         parameter_map = _coerce_parameter_map(block.params.get("parameters"))
-        parameter_pairs = [f"{key}={_compact_text(value)}" for key, value in parameter_map.items()]
+        parameter_pairs = [f"{key}={compact_text(value)}" for key, value in parameter_map.items()]
         incoming = upstream_names.get(block.instance_name, [])
         outgoing = downstream_names.get(block.instance_name, [])
         catalog_categories = catalog_record.related_node_labels if catalog_record is not None else []
@@ -193,7 +196,7 @@ def build_session_index(
                     " ".join(incoming),
                     " ".join(outgoing),
                     " ".join(parameter_map.keys()),
-                    " ".join(_compact_text(value) for value in parameter_map.values()),
+                    " ".join(compact_text(value) for value in parameter_map.values()),
                     " ".join(parameter_pairs),
                     " ".join(catalog_categories),
                 ),
@@ -237,18 +240,18 @@ def _get_cached_catalog_index(root_text: str) -> RetrievalIndex:
 
 
 def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
-    files = _collect_catalog_files(root)
-    _validate_catalog_files(root, files)
+    files = collect_catalog_files(root)
+    validate_catalog_files(root, files)
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     records: dict[str, IndexedNode] = {}
     block_categories: dict[str, set[str]] = defaultdict(set)
     block_category_nodes: dict[str, set[str]] = defaultdict(set)
 
-    for domain_path in files["domain"]:
-        domain_payload = _load_yaml_mapping(domain_path)
-        domain_id = _require_string(domain_payload, "id", path=domain_path)
-        domain_label = _require_string(domain_payload, "label", path=domain_path)
+    for domain_path in files.domain:
+        domain_payload = load_yaml_mapping(domain_path)
+        domain_id = require_string(domain_payload, "id", path=domain_path)
+        domain_label = require_string(domain_payload, "label", path=domain_path)
         domain_record = IndexedNode(
             node_id=f"catalog:domain:{domain_id}",
             node_type="domain",
@@ -263,22 +266,22 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
                 "label": domain_label,
                 "identifier": domain_id,
                 "summary": _join_non_empty(
-                    f"input fan-in {_compact_text(domain_payload.get('multiple_connections_per_input'))}",
-                    f"output fan-out {_compact_text(domain_payload.get('multiple_connections_per_output'))}",
-                    _compact_text(domain_payload.get("templates")),
+                    f"input fan-in {compact_text(domain_payload.get('multiple_connections_per_input'))}",
+                    f"output fan-out {compact_text(domain_payload.get('multiple_connections_per_output'))}",
+                    compact_text(domain_payload.get("templates")),
                 ),
                 "related": "",
             },
             summary=_build_result_summary(
                 _join_non_empty(
-                    f"multiple input connections: {_compact_text(domain_payload.get('multiple_connections_per_input'))}",
-                    f"multiple output connections: {_compact_text(domain_payload.get('multiple_connections_per_output'))}",
+                    f"multiple input connections: {compact_text(domain_payload.get('multiple_connections_per_input'))}",
+                    f"multiple output connections: {compact_text(domain_payload.get('multiple_connections_per_output'))}",
                 )
             ),
             field_summary=_truncate(
                 _join_non_empty(
-                    f"multiple input connections: {_compact_text(domain_payload.get('multiple_connections_per_input'))}",
-                    f"multiple output connections: {_compact_text(domain_payload.get('multiple_connections_per_output'))}",
+                    f"multiple input connections: {compact_text(domain_payload.get('multiple_connections_per_input'))}",
+                    f"multiple output connections: {compact_text(domain_payload.get('multiple_connections_per_output'))}",
                 ),
                 MAX_SUMMARY_CHARS,
             )
@@ -286,44 +289,65 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
         )
         _append_indexed_node(nodes, records, domain_record)
 
-    for tree_path in files["tree"]:
-        tree_payload = yaml.load(tree_path.read_text(encoding="utf-8"), Loader=_YAML_SAFE_LOADER)
-        if not isinstance(tree_payload, dict):
-            raise RetrievalIndexError(f"Tree metadata must be a mapping: {tree_path}")
-        _walk_tree_categories(
+    for tree_path in files.tree:
+        tree_payload = load_yaml_mapping(tree_path)
+
+        def _on_category(category_parts: tuple[str, ...], *, source_path: Path = tree_path) -> None:
+            _ensure_category_path(
+                list(category_parts),
+                source_path,
+                nodes=nodes,
+                edges=edges,
+                records=records,
+            )
+
+        def _on_block(
+            category_parts: tuple[str, ...],
+            block_id: str,
+            *,
+            source_path: Path = tree_path,
+        ) -> None:
+            category_node_id = _ensure_category_path(
+                list(category_parts),
+                source_path,
+                nodes=nodes,
+                edges=edges,
+                records=records,
+            )
+            block_categories[block_id].add(" > ".join(category_parts))
+            block_category_nodes[block_id].add(category_node_id)
+
+        walk_tree_entries(
             tree_payload,
             tree_path,
-            nodes=nodes,
-            edges=edges,
-            records=records,
-            block_categories=block_categories,
-            block_category_nodes=block_category_nodes,
+            on_category=_on_category,
+            on_block=_on_block,
         )
 
-    for block_path in files["block"]:
-        block_payload = _load_yaml_mapping(block_path)
-        block_id = _require_string(block_payload, "id", path=block_path)
-        block_label = _require_string(block_payload, "label", path=block_path)
-        documentation = _truncate(_compact_text(block_payload.get("documentation")), MAX_SUMMARY_CHARS)
-        parameters = _coerce_mapping_list(block_payload.get("parameters"))
-        inputs = _coerce_mapping_list(block_payload.get("inputs"))
-        outputs = _coerce_mapping_list(block_payload.get("outputs"))
-        flags = _string_values(block_payload.get("flags"))
-        parameter_ids = [_require_string(item, "id", path=block_path) for item in parameters]
+    for block_path in files.block:
+        block_payload = load_yaml_mapping(block_path)
+        block_id = require_string(block_payload, "id", path=block_path)
+        block_label = require_string(block_payload, "label", path=block_path)
+        documentation = _truncate(compact_text(block_payload.get("documentation")), MAX_SUMMARY_CHARS)
+        parameters = coerce_mapping_list(block_payload.get("parameters"))
+        inputs = coerce_mapping_list(block_payload.get("inputs"))
+        outputs = coerce_mapping_list(block_payload.get("outputs"))
+        flags = string_values(block_payload.get("flags"))
+        parameter_ids = [require_string(item, "id", path=block_path) for item in parameters]
         parameter_labels = [
-            _compact_text(parameter.get("label")) or parameter_id
+            compact_text(parameter.get("label")) or parameter_id
             for parameter, parameter_id in zip(parameters, parameter_ids, strict=False)
         ]
         input_signatures = [_port_signature("input", item, index) for index, item in enumerate(inputs)]
         output_signatures = [_port_signature("output", item, index) for index, item in enumerate(outputs)]
         port_domains = sorted(
             {
-                _compact_text(port_payload.get("domain"))
+                compact_text(port_payload.get("domain"))
                 for port_payload in [*inputs, *outputs]
-                if _compact_text(port_payload.get("domain"))
+                if compact_text(port_payload.get("domain"))
             }
         )
-        category_parts = _split_category_path(block_payload.get("category"))
+        category_parts = split_category_path(block_payload.get("category"))
         if category_parts:
             category_node_id = _ensure_category_path(
                 category_parts,
@@ -374,7 +398,7 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
                 "summary": _join_non_empty(
                     block_description,
                     field_summary,
-                    _compact_text(block_payload.get("doc_url")),
+                    compact_text(block_payload.get("doc_url")),
                 ),
                 "related": _join_non_empty(
                     " ".join(category_labels),
@@ -422,38 +446,15 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
         metadata={
             "catalog_root": str(root),
             "file_counts": {
-                "block": len(files["block"]),
-                "tree": len(files["tree"]),
-                "domain": len(files["domain"]),
+                "block": len(files.block),
+                "tree": len(files.tree),
+                "domain": len(files.domain),
             },
         },
     )
     _populate_related_labels(index)
     index.prepared_records, index.token_index = _prepare_search_records(index.node_records)
     return index
-
-
-def _collect_catalog_files(root: Path) -> dict[str, list[Path]]:
-    return {
-        "block": sorted(root.rglob("*.block.yml")),
-        "tree": sorted(root.rglob("*.tree.yml")),
-        "domain": sorted(root.rglob("*.domain.yml")),
-    }
-
-
-def _validate_catalog_files(root: Path, files: dict[str, list[Path]]) -> None:
-    counts = {name: len(paths) for name, paths in files.items()}
-    missing_kinds = [name for name, count in counts.items() if count == 0]
-    if not missing_kinds:
-        return
-
-    missing_labels = ", ".join(f".{name}.yml" for name in missing_kinds)
-    raise RetrievalIndexError(
-        f"GNU Radio catalog metadata is incomplete at {root}: missing {missing_labels} "
-        f"(found {counts['block']} .block.yml, {counts['tree']} .tree.yml, "
-        f"{counts['domain']} .domain.yml)."
-    )
-
 
 def _records_are_compatible(existing: IndexedNode, new: IndexedNode) -> bool:
     return (
@@ -518,65 +519,6 @@ def _append_edge(
             "source_file": str(source_file) if source_file is not None else "<in-memory-flowgraph>",
         }
     )
-
-
-def _walk_tree_categories(
-    payload: dict[str, Any],
-    source_path: Path,
-    *,
-    nodes: list[dict[str, Any]],
-    edges: list[dict[str, Any]],
-    records: dict[str, IndexedNode],
-    block_categories: dict[str, set[str]],
-    block_category_nodes: dict[str, set[str]],
-    parent_path: list[str] | None = None,
-) -> None:
-    path_prefix = [] if parent_path is None else list(parent_path)
-    for category_name, children in payload.items():
-        child_path = path_prefix + [str(category_name)]
-        category_node_id = _ensure_category_path(
-            child_path,
-            source_path,
-            nodes=nodes,
-            edges=edges,
-            records=records,
-        )
-        if isinstance(children, list):
-            for item in children:
-                if isinstance(item, str):
-                    category_path = " > ".join(child_path)
-                    block_categories[item].add(category_path)
-                    block_category_nodes[item].add(category_node_id)
-                    continue
-                if isinstance(item, dict):
-                    _walk_tree_categories(
-                        item,
-                        source_path,
-                        nodes=nodes,
-                        edges=edges,
-                        records=records,
-                        block_categories=block_categories,
-                        block_category_nodes=block_category_nodes,
-                        parent_path=child_path,
-                    )
-                    continue
-                raise RetrievalIndexError(
-                    f"Unexpected category item in {source_path}: {type(item).__name__}"
-                )
-            continue
-        if isinstance(children, dict):
-            _walk_tree_categories(
-                children,
-                source_path,
-                nodes=nodes,
-                edges=edges,
-                records=records,
-                block_categories=block_categories,
-                block_category_nodes=block_category_nodes,
-                parent_path=child_path,
-            )
-            continue
-        raise RetrievalIndexError(f"Unexpected category payload in {source_path}: {type(children).__name__}")
 
 
 def _ensure_category_path(
@@ -715,57 +657,6 @@ def _coerce_parameter_map(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _coerce_mapping_list(value: Any) -> list[dict[str, Any]]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _load_yaml_mapping(path: Path) -> dict[str, Any]:
-    payload = yaml.load(path.read_text(encoding="utf-8"), Loader=_YAML_SAFE_LOADER)
-    if not isinstance(payload, dict):
-        raise RetrievalIndexError(f"YAML metadata must be a mapping: {path}")
-    return payload
-
-
-def _require_string(payload: dict[str, Any], key: str, *, path: Path) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise RetrievalIndexError(f"{path} is missing a non-empty '{key}' field.")
-    return value
-
-
-def _compact_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return " ".join(value.split())
-    if isinstance(value, dict):
-        parts = [_join_non_empty(str(key), _compact_text(item)) for key, item in value.items()]
-        return "; ".join(part for part in parts if part)
-    if isinstance(value, (list, tuple, set)):
-        parts = [_compact_text(item) for item in value]
-        return ", ".join(part for part in parts if part)
-    return str(value)
-
-
-def _split_category_path(value: Any) -> list[str]:
-    if not isinstance(value, str) or not value.strip():
-        return []
-    return [part.strip() for part in value.split("/") if part.strip()]
-
-
-def _string_values(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        return [_compact_text(item) for item in value if _compact_text(item)]
-    compact = _compact_text(value)
-    return [compact] if compact else []
-
-
 def _join_non_empty(*parts: str) -> str:
     return " ".join(part for part in parts if part).strip()
 
@@ -799,8 +690,8 @@ def _port_signature(direction: str, payload: dict[str, Any], index: int) -> str:
     return _join_non_empty(
         direction,
         str(index),
-        _compact_text(payload.get("label")),
-        _compact_text(payload.get("id")),
-        _compact_text(payload.get("domain")),
-        _compact_text(payload.get("dtype")),
+        compact_text(payload.get("label")),
+        compact_text(payload.get("id")),
+        compact_text(payload.get("domain")),
+        compact_text(payload.get("dtype")),
     )
