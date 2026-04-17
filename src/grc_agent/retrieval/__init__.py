@@ -11,7 +11,7 @@ from .index import (
     initialize_retrieval,
 )
 from .schema import DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT, RetrievalIndex
-from .search import search_grc
+from .search import bind_retrieval_context, search_grc
 
 __all__ = [
     "DEFAULT_GRC_CATALOG_ROOTS",
@@ -19,6 +19,7 @@ __all__ = [
     "MAX_RESULT_LIMIT",
     "RetrievalIndex",
     "RetrievalIndexError",
+    "bind_retrieval_context",
     "build_catalog_index",
     "build_session_index",
     "clear_catalog_index_cache",

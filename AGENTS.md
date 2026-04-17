@@ -1,26 +1,32 @@
 # Project Rules
 
+## Tooling
+
 - Use `uv run` for commands and `uv add` / `uv add --dev` for dependencies.
 - Keep the real package under `src/grc_agent/` and use package imports.
 - Keep `pyproject.toml` authoritative for project metadata and dependencies.
 - Keep tests focused and use stdlib `unittest` for now.
-- Comment scripts and study files concisely when they help explain the flow.
-- Update README and docs when the workflow or verification command changes.
+- `uv run ruff check` is the lint gate. `uv run python -m unittest` is the regression gate.
+
+## Decision principles
+
 - Do not add save, validate, or mutation behavior unless the pass explicitly asks for it.
-- You must must always ask for more details when needed and you must not make assumptions.
+- Ask for more details when needed. Do not make assumptions.
+- Reject any ad-hoc logic or flow that leads to redundancy, extra cost, latency, or worse performance.
+- Lean towards simplifying, not complicating.
+- Keep replies concise, free of fluff.
+- Prefer the smallest passing change, the smallest passing experiment, and the smallest passing CI gate.
 
-- You Must always reject any ad-hoc logic or flow that leads to redundancy, extra cost, latency, or worse performance.
+## GNU Radio contract
 
-- You must always be bold, objective and grounded.
+- Test and verify any assumptions on real GRC test cases (not mock) with `grcc`.
+- Before changing any GNU-facing behavior, read the relevant GNU Radio docs and reproduce on a real `.grc` case.
+- Any new GNU behavior, edge case, or widened API must be recorded in `docs/BLUEPRINT.md` with real validation evidence.
 
-- You must always lean in decisions towards simplifying not complicating.
+## Eval harness
 
-- You must always keep your replies concise, free of fluff.
-
-- You must always test and verify any assumptions or bespkoke recommendations you propose on real GRC test cases (Not mock) and valiate this is the correct pattern expected by the GNU system.
-
-- Before changing any GNU-facing behavior, you must first read the relevant GNU Radio documentation and then reproduce the behavior on a real `.grc` case with `grcc`; never infer GNU semantics from YAML shape alone.
-
-- Any new GNU behavior, edge case, or widened API must be recorded in `docs/BLUEPRINT.md` with the smallest real validation evidence before it becomes part of the supported contract.
-
-- Prefer the smallest passing change, the smallest passing experiment, and the smallest passing CI gate. Do not widen APIs or automation until the narrower shape is proven insufficient.
+- The llama.cpp eval runners auto-start the server via `LlamaServerLauncher`.
+- Run `uv run python -m tests.llama_eval.run_phase1` (same for phase2, phase3) — no manual server start needed.
+- Tool order in `get_tool_schemas()` matters: models prefer earlier tools. `apply_edit` must appear before `propose_edit`.
+- After changing system prompt, tool schemas, or loop reminders, re-run the eval suite and record results in `docs/LLAMA_EVAL.md`.
+- Update `docs/BLUEPRINT.md` when the runtime contract or harness changes.

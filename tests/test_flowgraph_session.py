@@ -101,13 +101,13 @@ class FlowgraphSessionTests(unittest.TestCase):
         # The summary should mention the file name.
         self.assertIn("random_bit_generator.grc", summary)
         # The summary should mention the block count.
-        self.assertIn("Blocks: 5", summary)
+        self.assertIn("5 blocks", summary)
         # The summary should mention the connection count.
-        self.assertIn("Connections: 3", summary)
-        # The summary should include the first block line.
-        self.assertIn("- samp_rate (variable)", summary)
-        # The summary should include the last block line.
-        self.assertIn("- qtgui_time_sink_x_0 (qtgui_time_sink_x)", summary)
+        self.assertIn("3 connections", summary)
+        # The summary should include the first block preview entry.
+        self.assertIn("samp_rate (variable)", summary)
+        # The summary should include the last block preview entry.
+        self.assertIn("qtgui_time_sink_x_0 (qtgui_time_sink_x)", summary)
 
     # Missing files should fail immediately so callers can surface the error directly.
     def test_load_missing_file_raises(self) -> None:

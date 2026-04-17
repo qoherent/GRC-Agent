@@ -1,6 +1,6 @@
 """Catalog-specific errors and public error payload helpers."""
 
-from typing import Any
+from grc_agent._payload import build_error_payload as build_error_payload
 
 
 class CatalogError(RuntimeError):
@@ -18,20 +18,3 @@ class BlockNotFoundError(CatalogError):
         self.block_id = block_id
         self.catalog_root = catalog_root
         super().__init__(f"Block '{block_id}' not found in catalog.")
-
-
-def build_error_payload(
-    *,
-    error_type: str,
-    message: str,
-    details: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build the public error payload returned by catalog entry points."""
-    payload: dict[str, Any] = {
-        "ok": False,
-        "error_type": error_type,
-        "message": message,
-    }
-    if details:
-        payload["details"] = details
-    return payload

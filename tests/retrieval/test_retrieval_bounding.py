@@ -2,10 +2,18 @@
 
 from pathlib import Path
 import unittest
+from unittest import mock
 
+import grc_agent.retrieval.search as retrieval_search
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.retrieval import MAX_RESULT_LIMIT, clear_catalog_index_cache, discover_catalog_root, search_grc
-from grc_agent.retrieval.search import _bind_retrieval_context, _clear_retrieval_context
+from grc_agent.retrieval import (
+    MAX_RESULT_LIMIT,
+    bind_retrieval_context,
+    clear_catalog_index_cache,
+    discover_catalog_root,
+    search_grc,
+)
+from grc_agent.retrieval.search import _clear_retrieval_context
 
 
 class RetrievalBoundingTests(unittest.TestCase):
@@ -31,7 +39,7 @@ class RetrievalBoundingTests(unittest.TestCase):
 
     def test_results_respect_requested_k(self) -> None:
         catalog_root = self._catalog_root_or_skip()
-        _bind_retrieval_context(catalog_root=str(catalog_root))
+        bind_retrieval_context(catalog_root=str(catalog_root))
 
         result = search_grc("analog", scope="catalog", k=3)
 
@@ -40,7 +48,7 @@ class RetrievalBoundingTests(unittest.TestCase):
 
     def test_large_k_is_capped_and_warned(self) -> None:
         catalog_root = self._catalog_root_or_skip()
-        _bind_retrieval_context(catalog_root=str(catalog_root))
+        bind_retrieval_context(catalog_root=str(catalog_root))
 
         result = search_grc("analog", scope="catalog", k=999)
 
@@ -50,7 +58,7 @@ class RetrievalBoundingTests(unittest.TestCase):
 
     def test_non_matching_query_returns_stable_empty_shape(self) -> None:
         catalog_root = self._catalog_root_or_skip()
-        _bind_retrieval_context(catalog_root=str(catalog_root))
+        bind_retrieval_context(catalog_root=str(catalog_root))
 
         result = search_grc(
             "zzzxqv987654321nomatch",
@@ -67,16 +75,34 @@ class RetrievalBoundingTests(unittest.TestCase):
 
     def test_repeated_session_queries_are_deterministic(self) -> None:
         session = self._load_session()
-        _bind_retrieval_context(session=session)
+        bind_retrieval_context(session=session)
 
         first = search_grc("qtgui", scope="session", k=5)
         second = search_grc("qtgui", scope="session", k=5)
 
         self.assertEqual(first, second)
 
+    def test_session_index_is_reused_until_session_revision_changes(self) -> None:
+        session = self._load_session()
+        bind_retrieval_context(session=session)
+
+        with mock.patch(
+            "grc_agent.retrieval.search.build_session_index",
+            wraps=retrieval_search.build_session_index,
+        ) as build_session_index:
+            first = search_grc("qtgui", scope="session", k=5)
+            second = search_grc("qtgui", scope="session", k=5)
+            session.set_param("samp_rate", "value", "48000")
+            third = search_grc("qtgui", scope="session", k=5)
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertTrue(third["ok"])
+        self.assertEqual(build_session_index.call_count, 2)
+
     def test_results_include_provenance_and_stay_compact(self) -> None:
         catalog_root = self._catalog_root_or_skip()
-        _bind_retrieval_context(catalog_root=str(catalog_root))
+        bind_retrieval_context(catalog_root=str(catalog_root))
 
         result = search_grc("analog", scope="catalog", k=5)
 

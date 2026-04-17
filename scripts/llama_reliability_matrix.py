@@ -10,14 +10,27 @@ import time
 from grc_agent.agent import GrcAgent
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.llama_server import LlamaServerClient, LlamaServerError, run_bounded_llama_turn
+from grc_agent.llama_server import (
+    LlamaServerClient,
+    LlamaServerError,
+    run_bounded_llama_turn,
+)
 
 
 CASES = [
     ("summarize", "Summarize the graph."),
-    ("set_and_validate", "Change the samp_rate variable to 48000 and validate the graph."),
-    ("missing_variable_recovery", "Set the variable does_not_exist to 123 and validate the graph."),
-    ("unsupported_structural_request", "Add a throttle block and connect it correctly."),
+    (
+        "set_and_validate",
+        "Change the samp_rate variable to 48000 and validate the graph.",
+    ),
+    (
+        "missing_variable_recovery",
+        "Set the variable does_not_exist to 123 and validate the graph.",
+    ),
+    (
+        "unsupported_structural_request",
+        "Add a throttle block and connect it correctly.",
+    ),
     ("repeat_summarize_1", "Summarize the graph."),
     ("repeat_summarize_2", "Summarize the graph."),
     ("repeat_summarize_3", "Summarize the graph."),
@@ -27,11 +40,18 @@ CASES = [
 
 
 def _default_fixture_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "tests" / "data" / "random_bit_generator.grc"
+    return (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "data"
+        / "random_bit_generator.grc"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a live llama.cpp reliability matrix.")
+    parser = argparse.ArgumentParser(
+        description="Run a live llama.cpp reliability matrix."
+    )
     parser.add_argument(
         "--file",
         default=str(_default_fixture_path()),
@@ -61,7 +81,9 @@ def _build_client(server_url: str) -> LlamaServerClient:
     )
 
 
-def _run_case(file_path: str, server_url: str, model: str, name: str, prompt: str) -> dict[str, object]:
+def _run_case(
+    file_path: str, server_url: str, model: str, name: str, prompt: str
+) -> dict[str, object]:
     session = FlowgraphSession()
     session.load(file_path)
     agent = GrcAgent(session)
@@ -75,7 +97,6 @@ def _run_case(file_path: str, server_url: str, model: str, name: str, prompt: st
             client,
             prompt,
             model=model,
-            max_steps=load_app_config().llama.max_steps,
         )
         error_message = None
     except LlamaServerError as exc:
@@ -104,7 +125,9 @@ def _run_case(file_path: str, server_url: str, model: str, name: str, prompt: st
         "elapsed_seconds": round(elapsed_seconds, 3),
         "assistant_text": result["assistant_text"] if result and result["ok"] else "",
         "steps": result["steps"] if result else None,
-        "tool_calls_executed": result["tool_calls_executed"] if result else len(tool_entries),
+        "tool_calls_executed": result["tool_calls_executed"]
+        if result
+        else len(tool_entries),
         "tool_names": [entry["name"] for entry in tool_entries],
         "tool_results": [entry["content"] for entry in tool_entries],
         "dirty": session.is_dirty,

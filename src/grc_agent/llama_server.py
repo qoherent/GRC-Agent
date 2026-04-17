@@ -52,10 +52,20 @@ class LlamaServerClient:
             raise ValueError("base_url must be a non-empty string.")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero.")
-        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+        if (
+            not isinstance(max_tokens, int)
+            or isinstance(max_tokens, bool)
+            or max_tokens < 1
+        ):
             raise ValueError("max_tokens must be an integer greater than zero.")
-        if isinstance(temperature, bool) or not isinstance(temperature, int | float) or temperature < 0:
-            raise ValueError("temperature must be a number greater than or equal to zero.")
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, int | float)
+            or temperature < 0
+        ):
+            raise ValueError(
+                "temperature must be a number greater than or equal to zero."
+            )
         if not isinstance(enable_thinking, bool):
             raise ValueError("enable_thinking must be true or false.")
 
@@ -117,15 +127,21 @@ class LlamaServerClient:
         """Extract assistant text and normalized tool calls from one completion."""
         choices = response.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise LlamaServerError("llama.cpp chat completion did not return any choices.")
+            raise LlamaServerError(
+                "llama.cpp chat completion did not return any choices."
+            )
 
         first_choice = choices[0]
         if not isinstance(first_choice, dict):
-            raise LlamaServerError("llama.cpp chat completion returned an invalid choice entry.")
+            raise LlamaServerError(
+                "llama.cpp chat completion returned an invalid choice entry."
+            )
 
         message = first_choice.get("message")
         if not isinstance(message, dict):
-            raise LlamaServerError("llama.cpp chat completion choice is missing a message object.")
+            raise LlamaServerError(
+                "llama.cpp chat completion choice is missing a message object."
+            )
 
         content = self._strip_leading_control_tokens(
             self._normalize_content(message.get("content"))
@@ -160,14 +176,20 @@ class LlamaServerClient:
             raise LlamaServerError(self._format_http_error(exc.code, raw_body)) from exc
         except error.URLError as exc:
             if self._is_timeout_reason(exc.reason):
-                raise LlamaServerError(f"Timed out connecting to llama.cpp server at {url}.") from exc
+                raise LlamaServerError(
+                    f"Timed out connecting to llama.cpp server at {url}."
+                ) from exc
             raise LlamaServerError(
                 f"Failed to reach llama.cpp server at {url}: {exc.reason}"
             ) from exc
         except TimeoutError as exc:
-            raise LlamaServerError(f"Timed out connecting to llama.cpp server at {url}.") from exc
+            raise LlamaServerError(
+                f"Timed out connecting to llama.cpp server at {url}."
+            ) from exc
         except socket.timeout as exc:
-            raise LlamaServerError(f"Timed out connecting to llama.cpp server at {url}.") from exc
+            raise LlamaServerError(
+                f"Timed out connecting to llama.cpp server at {url}."
+            ) from exc
 
         try:
             with response:
@@ -189,7 +211,9 @@ class LlamaServerClient:
             ) from exc
 
         if not isinstance(parsed, dict):
-            raise LlamaServerError(f"llama.cpp server returned non-object JSON from {path}.")
+            raise LlamaServerError(
+                f"llama.cpp server returned non-object JSON from {path}."
+            )
         return parsed
 
     def _get_single_model_entry(self) -> dict[str, Any]:
@@ -197,15 +221,21 @@ class LlamaServerClient:
         response = self._request_json("GET", "/v1/models")
         data = response.get("data")
         if not isinstance(data, list):
-            raise LlamaServerError("llama.cpp /v1/models response is missing the data list.")
+            raise LlamaServerError(
+                "llama.cpp /v1/models response is missing the data list."
+            )
         if len(data) != 1:
             raise LlamaServerError(
                 "llama.cpp /v1/models response must contain exactly one model entry."
             )
 
         first_model = data[0]
-        if not isinstance(first_model, dict) or not isinstance(first_model.get("id"), str):
-            raise LlamaServerError("llama.cpp /v1/models response is missing the single model id.")
+        if not isinstance(first_model, dict) or not isinstance(
+            first_model.get("id"), str
+        ):
+            raise LlamaServerError(
+                "llama.cpp /v1/models response is missing the single model id."
+            )
         return first_model
 
     @staticmethod
@@ -264,7 +294,9 @@ class LlamaServerClient:
         if tool_calls is None:
             return []
         if not isinstance(tool_calls, list):
-            raise LlamaServerError("llama.cpp tool_calls field must be a list when present.")
+            raise LlamaServerError(
+                "llama.cpp tool_calls field must be a list when present."
+            )
 
         normalized_calls: list[LlamaToolCall] = []
         for index, call in enumerate(tool_calls, start=1):
@@ -280,7 +312,9 @@ class LlamaServerClient:
                 arguments = call.get("arguments")
 
             if not isinstance(name, str) or not name:
-                raise LlamaServerError(f"llama.cpp tool call {index} is missing a valid name.")
+                raise LlamaServerError(
+                    f"llama.cpp tool call {index} is missing a valid name."
+                )
 
             call_id = call.get("id")
             normalized_calls.append(
@@ -325,17 +359,50 @@ class LlamaServerClient:
         return isinstance(reason, TimeoutError | socket.timeout)
 
 
+_SAFETY_MAX_TOOL_ROUNDS = 50
+_VALIDATION_INTENT_TERMS = (
+    "validate",
+    "validation",
+    "valid",
+    "compile",
+    "run",
+    "work",
+    "works",
+)
+_DESCRIBE_INTENT_TERMS = (
+    "describe",
+    "what does",
+    "tell me about",
+    "explain",
+    "parameters",
+    "ports",
+    "inputs",
+    "outputs",
+)
+_SAVE_INTENT_TERMS = (
+    "save",
+    "write",
+    "persist",
+    "write out",
+    "dump",
+)
+_INSPECT_BEFORE_EDIT_TERMS = (
+    "look",
+    "inspect",
+    "check",
+    "show",
+    "see",
+)
+
+
 def run_bounded_llama_turn(
     agent: GrcAgent,
     client: LlamaServerClient,
     user_message: str,
     *,
     model: str | None = None,
-    max_steps: int = 2,
 ) -> dict[str, Any]:
-    """Run a bounded llama.cpp -> runtime loop against one loaded flowgraph."""
-    if max_steps < 1:
-        raise ValueError("max_steps must be at least 1.")
+    """Run an unbounded llama.cpp -> runtime loop against one loaded flowgraph."""
     if not isinstance(user_message, str) or not user_message.strip():
         raise ValueError("user_message must be a non-empty string.")
 
@@ -370,18 +437,31 @@ def run_bounded_llama_turn(
         agent.history.append(assistant_entry)
 
         if tool_calls:
-            if tool_rounds_used >= max_steps:
+            if tool_rounds_used >= _SAFETY_MAX_TOOL_ROUNDS:
                 return {
                     "ok": False,
                     "model": resolved_model,
                     "steps": assistant_turns,
                     "tool_rounds_used": tool_rounds_used,
                     "tool_calls_executed": tool_calls_executed,
-                    "message": "Tool-round limit reached before the model produced a final answer.",
+                    "message": "Safety tool-round ceiling reached before the model produced a final answer.",
                 }
 
             tool_rounds_used += 1
             for tool_call in tool_calls:
+                validation_result = agent.validate_tool_call(
+                    tool_call.name, tool_call.arguments
+                )
+                if validation_result is not None:
+                    agent.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": validation_result,
+                        }
+                    )
+                    continue
                 result = agent.execute_tool(tool_call.name, tool_call.arguments)
                 tool_calls_executed += 1
                 agent.history.append(
@@ -394,7 +474,20 @@ def run_bounded_llama_turn(
                 )
             continue
 
-        assistant_text = _resolve_final_assistant_text(agent.history, assistant_content or "")
+        follow_up_reminder = _build_follow_up_reminder(user_message, agent.history)
+        if follow_up_reminder is not None:
+            agent.history.append(
+                {
+                    "role": "reminder",
+                    "code": follow_up_reminder["code"],
+                    "content": follow_up_reminder["message"],
+                }
+            )
+            continue
+
+        assistant_text = _resolve_final_assistant_text(
+            agent.history, assistant_content or ""
+        )
         agent.history[-1]["content"] = assistant_text
         return {
             "ok": True,
@@ -406,7 +499,9 @@ def run_bounded_llama_turn(
         }
 
 
-def _resolve_final_assistant_text(history: list[dict[str, Any]], assistant_text: str) -> str:
+def _resolve_final_assistant_text(
+    history: list[dict[str, Any]], assistant_text: str
+) -> str:
     """Deterministically finalize supported runtime outcomes from tool results."""
     tool_turns = [turn for turn in history[:-1] if turn.get("role") == "tool"]
     latest_tool_turn = tool_turns[-1] if tool_turns else None
@@ -418,31 +513,25 @@ def _resolve_final_assistant_text(history: list[dict[str, Any]], assistant_text:
     ):
         return latest_tool_turn["content"]["summary"]
 
-    if len(tool_turns) >= 2:
-        previous_tool = tool_turns[-2]
-        if (
-            previous_tool.get("name") == "set_variable"
-            and latest_tool_turn.get("name") == "validate_graph"
-            and isinstance(previous_tool.get("content"), dict)
-            and isinstance(latest_tool_turn.get("content"), dict)
-        ):
-            set_result = previous_tool["content"]
-            validate_result = latest_tool_turn["content"]
-            if validate_result.get("ok") and validate_result.get("valid"):
-                if set_result.get("ok"):
-                    instance_name = set_result.get("instance_name")
-                    value = set_result.get("value")
-                    return (
-                        f"Set {instance_name} to {value} and validated the graph successfully."
-                    )
-                return (
-                    f"Could not set the requested variable: {set_result.get('message')}. "
-                    "The graph validated successfully."
-                )
-
     if _looks_like_tool_call_text(assistant_text):
+        if (
+            isinstance(latest_tool_turn, dict)
+            and isinstance(latest_tool_turn.get("content"), dict)
+            and isinstance(latest_tool_turn["content"].get("message"), str)
+        ):
+            return latest_tool_turn["content"]["message"]
         return "I could not complete that request with the available tools."
-    return assistant_text
+
+    if assistant_text.strip():
+        return assistant_text
+
+    if (
+        isinstance(latest_tool_turn, dict)
+        and isinstance(latest_tool_turn.get("content"), dict)
+        and isinstance(latest_tool_turn["content"].get("message"), str)
+    ):
+        return latest_tool_turn["content"]["message"]
+    return "I could not complete that request with the available tools."
 
 
 def _looks_like_tool_call_text(text: str) -> bool:
@@ -455,3 +544,151 @@ def _looks_like_tool_call_text(text: str) -> bool:
     if ":" in stripped:
         return False
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\s*\{.*\}", stripped))
+
+
+def _build_follow_up_reminder(
+    user_message: str, history: list[dict[str, Any]]
+) -> dict[str, str] | None:
+    """Return one unmet follow-up requirement inferred from the user request."""
+    lowered = user_message.lower()
+    successful_tool_names = _successful_tool_names(history)
+    last_success = _last_successful_tool_indices(history)
+    existing_reminders = {
+        turn.get("code")
+        for turn in history
+        if turn.get("role") == "reminder" and isinstance(turn.get("code"), str)
+    }
+
+    if _requests_validation(lowered):
+        last_validate = last_success.get("validate_graph", -1)
+        last_change_or_load = max(
+            last_success.get("apply_edit", -1),
+            last_success.get("load_grc", -1),
+        )
+        if (
+            ("validate_graph" not in successful_tool_names)
+            or last_validate < last_change_or_load
+        ) and "validate_graph_required" not in existing_reminders:
+            return {
+                "code": "validate_graph_required",
+                "message": (
+                    "Reminder: the user asked you to validate the graph. "
+                    "Call `validate_graph` before you finish."
+                ),
+            }
+
+    if _requests_description(lowered):
+        last_search = last_success.get("search_grc", -1)
+        last_describe = last_success.get("describe_block", -1)
+        if (
+            last_search > last_describe
+            and "describe_block_required" not in existing_reminders
+        ):
+            return {
+                "code": "describe_block_required",
+                "message": (
+                    "Reminder: the user asked for a block description. "
+                    "After `search_grc`, call `describe_block` with the chosen result's `block_id`, not its `node_id`."
+                ),
+            }
+
+    if _requests_save(lowered):
+        last_save = last_success.get("save_graph", -1)
+        last_edit = last_success.get("apply_edit", -1)
+        last_validate = last_success.get("validate_graph", -1)
+        if (
+            last_edit > last_save
+            and last_validate >= last_edit
+            and "save_graph_required" not in existing_reminders
+        ):
+            return {
+                "code": "save_graph_required",
+                "message": (
+                    "Reminder: the user asked to save the graph. "
+                    "The edit was applied and validated. Call `save_graph` before you finish."
+                ),
+            }
+
+    if _needs_inspect_before_edit(lowered):
+        edit_tools_used = {
+            "apply_edit",
+            "propose_edit",
+        } & successful_tool_names
+        inspect_tools_used = {
+            "summarize_graph",
+            "get_grc_context",
+            "search_grc",
+            "describe_block",
+        } & successful_tool_names
+        if (
+            edit_tools_used
+            and not inspect_tools_used
+            and "inspect_before_edit" not in existing_reminders
+        ):
+            return {
+                "code": "inspect_before_edit",
+                "message": (
+                    "Reminder: the user asked to inspect or look at something before making a change. "
+                    "Call an inspection tool (summarize_graph, get_grc_context, search_grc, or describe_block) first."
+                ),
+            }
+
+    return None
+
+
+def _successful_tool_names(history: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(turn.get("name"))
+        for turn in history
+        if turn.get("role") == "tool"
+        and isinstance(turn.get("name"), str)
+        and isinstance(turn.get("content"), dict)
+        and turn["content"].get("ok") is True
+    }
+
+
+def _last_successful_tool_indices(history: list[dict[str, Any]]) -> dict[str, int]:
+    indices: dict[str, int] = {}
+    for index, turn in enumerate(history):
+        if (
+            turn.get("role") == "tool"
+            and isinstance(turn.get("name"), str)
+            and isinstance(turn.get("content"), dict)
+            and turn["content"].get("ok") is True
+        ):
+            indices[str(turn["name"])] = index
+    return indices
+
+
+def _requests_validation(lowered_user_message: str) -> bool:
+    return any(term in lowered_user_message for term in _VALIDATION_INTENT_TERMS)
+
+
+def _requests_description(lowered_user_message: str) -> bool:
+    return any(term in lowered_user_message for term in _DESCRIBE_INTENT_TERMS)
+
+
+def _requests_save(lowered_user_message: str) -> bool:
+    return any(term in lowered_user_message for term in _SAVE_INTENT_TERMS)
+
+
+def _needs_inspect_before_edit(lowered_user_message: str) -> bool:
+    has_inspect_intent = any(
+        term in lowered_user_message for term in _INSPECT_BEFORE_EDIT_TERMS
+    )
+    has_edit_intent = any(
+        term in lowered_user_message
+        for term in (
+            "change",
+            "edit",
+            "update",
+            "set",
+            "modify",
+            "apply",
+            "remove",
+            "add",
+            "disconnect",
+            "connect",
+        )
+    )
+    return has_inspect_intent and has_edit_intent

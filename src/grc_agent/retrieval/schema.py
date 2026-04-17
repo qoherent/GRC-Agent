@@ -52,6 +52,8 @@ class IndexedNode:
             "score": round(score, 3),
             "source_scope": self.source_scope,
         }
+        if self.block_id:
+            result["block_id"] = self.block_id
         if self.summary:
             result["summary"] = self.summary
         return result
@@ -85,21 +87,4 @@ def build_success_payload(
     }
     if warnings:
         payload["warnings"] = warnings
-    return payload
-
-
-def build_error_payload(
-    *,
-    error_type: str,
-    message: str,
-    details: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build the public error payload returned by retrieval entry points."""
-    payload: dict[str, Any] = {
-        "ok": False,
-        "error_type": error_type,
-        "message": message,
-    }
-    if details:
-        payload["details"] = details
     return payload

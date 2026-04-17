@@ -7,21 +7,24 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - one `.grc` file per session
 - package-level catalog description now exposes `describe_block(block_id)` for structured GNU block truth
 - a bounded retrieval package now exposes `search_grc(...)` for GNU catalog and active-session search
+- package-level session inspection now exposes `load_grc(...)`, `summarize_graph(session)`, and `get_grc_context(session, ...)`
+- package-level preflight validation now exposes `preflight_transaction(session, operations)` for pure staged checks before mutation
+- package-level transaction editing now exposes `propose_edit(session, transaction)` and `apply_edit(session, transaction)` for atomic validated edits
 - `FlowgraphSession` owns parsed state, persistence, validation, and all graph-mutation primitives
 - `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
 - the structural-edit surface is frozen pending new experiments
 - a thin llama.cpp adapter is wired for one bounded CLI turn
-- the supported llama.cpp slice is live-verified for summarize, `set_variable + validate_graph`, and missing-variable recovery
+- the env-gated live llama.cpp checks now target summarize and phase-6 routed edit flows
 - raw model prose is still not trusted outside the runtime's deterministic finalization rules for supported flows
 
 ## Repo Map
 
-- [src/grc_agent](src/grc_agent): retrieval, session, runtime, and CLI package code
-- [grc_agent.toml](grc_agent.toml): repo-backed llama.cpp defaults for server URL, model id, and bounded turn settings
+- [src/grc_agent](src/grc_agent): retrieval, session, validation, transaction, runtime, and CLI package code
+- [grc_agent.toml](grc_agent.toml): workspace override config for llama.cpp defaults when running from the repo
 - [docs/PACKAGE_GUIDE.md](docs/PACKAGE_GUIDE.md): concise script-by-script map of the Python package
-- [docs/phases](docs/phases): isolated phase plans for the GRC-native pivot
 - [tests](tests): focused `unittest` regression coverage
 - [tests/data/random_bit_generator.grc](tests/data/random_bit_generator.grc): canonical fixture flowgraph
+- [tests/llama_eval](tests/llama_eval): live model eval suite (see [docs/LLAMA_EVAL.md](docs/LLAMA_EVAL.md))
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture, settled decisions, evidence, milestones, and backlog
 
 ## Planning Rule
@@ -30,15 +33,34 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - read the relevant GNU docs first, then verify with real `.grc` and `grcc` runs
 - widen the supported contract only after the evidence is written down in [docs/BLUEPRINT.md](docs/BLUEPRINT.md)
 
+## Production-V1 App Shape
+
+The narrow production target is an installable local CLI app.
+
+- installable console entrypoint: `grc-agent`
+- built-in runtime defaults when no config file exists
+- optional config override via `--config`, `GRC_AGENT_CONFIG`, repo `grc_agent.toml`, or user config at `~/.config/grc_agent/config.toml`
+- built-in `doctor` command for environment, config, and retrieval readiness
+- deterministic direct-tool workflows stay valid even when no model backend is configured
+
+Install and check the app:
+
+```bash
+uv sync
+uv run grc-agent doctor
+```
+
 ## Retrieval
 
-Phase 1 keeps retrieval package-level and bounded. It is not part of the model-facing runtime yet.
+Phase 1 keeps retrieval package-level and bounded. Phase 6 now routes it through the model-facing runtime without moving the search logic into `agent.py`.
 
 - `initialize_retrieval(warm_catalog=False)`: verify graphify availability, discover the system GNU catalog root, and optionally warm the cached catalog index
 - `search_grc(query, scope="catalog|session", k=5)`: package-level structured search contract for GNU catalog or active-session search
 - catalog search uses the real system GNU metadata under `/usr/share/gnuradio/grc/blocks` (or `/usr/local/share/gnuradio/grc/blocks` when present)
 - search is block-centric by default: parameter and port text boosts parent block matches instead of dominating top-level results
 - session search uses the active parsed `.grc` graph that the app startup path binds before runtime flow, and may enrich block results from the catalog when that metadata is available
+- unchanged sessions now reuse their previously built session retrieval index instead of rebuilding it on every query
+- catalog index construction now reuses the shared phase 2 catalog snapshot for block metadata instead of re-reading every `.block.yml`
 - graphify is used only as the graph-construction substrate; GNU metadata and the active `.grc` file remain the truth layers
 - the CLI startup path now runs the bounded retrieval readiness check and fails clearly if the catalog root is missing or incomplete
 - default results stay compact: score and source scope remain, while rich block details are collapsed into one short `summary` field
@@ -73,33 +95,114 @@ from grc_agent import describe_block
 block = describe_block("analog_agc_xx")
 ```
 
+## Session Inspection
+
+Phase 3 now stays package-level and read-oriented. It does not widen the model-facing runtime yet.
+
+- `load_grc(file_path)`: create and load one `FlowgraphSession`
+- `summarize_graph(session, max_blocks=8)`: return a bounded structured summary with `graph_id`, counts, dirty state, and validation state
+- `get_grc_context(session, node_id, hops=1, max_nodes=20)`: return a bounded neighborhood mini-graph around one session block instance
+- provenance is explicit and includes `path`, `graph_id`, `file_format`, and `grc_version`
+- unknown node ids fail with a stable `node_not_found` payload instead of falling back to a fuzzy dump
+
+Example package usage:
+
+```python
+from grc_agent import get_grc_context, load_grc, summarize_graph
+
+session = load_grc("tests/data/random_bit_generator.grc")
+summary = summarize_graph(session)
+context = get_grc_context(session, "blocks_throttle2_0", hops=1, max_nodes=20)
+```
+
+## Validation
+
+Phase 4 stays package-level and preflight-only. It does not mutate the live graph or call `grcc` as its public contract.
+
+- `preflight_transaction(session, operations)`: validate one ordered transaction or single operation against the active session and installed GNU catalog
+- supported operations are `update_params`, `add_connection`, `remove_connection`, `remove_block`, and detached-`variable` `add_block`
+- results stay structured: `ok`, `errors`, `warnings`, counts, and `normalized_operations`
+- ordered staged validation is allowed: earlier ops can repair a later precondition without mutating the live session
+
+Example package usage:
+
+```python
+from grc_agent import load_grc, preflight_transaction
+
+session = load_grc("tests/data/random_bit_generator.grc")
+payload = preflight_transaction(
+    session,
+    {"op_type": "update_params", "instance_name": "samp_rate", "params": {"value": "48000"}},
+)
+```
+
+## Transactions
+
+Phase 5 stays package-level and is the first path that mutates the live session. It consumes Phase 4 preflight validation, applies the ordered ops on a copied session, runs final `grcc` validation, and swaps the live session only after the candidate validates successfully.
+
+- `propose_edit(session, transaction)`: run preflight and return the normalized/planned operation list with `commit_eligible=False`
+- `apply_edit(session, transaction)`: apply the same narrow transaction surface atomically and return affected blocks/connections, revision markers, and final validation state
+- supported operations remain narrow: `update_params`, `add_connection`, `remove_connection`, `remove_block`, and detached-`variable` `add_block`
+- failed preflight or failed final GNU validation leaves the live session unchanged
+
+Example package usage:
+
+```python
+from grc_agent import apply_edit, load_grc
+
+session = load_grc("tests/data/random_bit_generator.grc")
+result = apply_edit(
+    session,
+    {"op_type": "update_params", "instance_name": "samp_rate", "params": {"value": "48000"}},
+)
+```
+
 ## Model-Facing Runtime
 
 The model-facing runtime is intentionally narrower than the session layer.
 
-- `summarize_graph`: report the current graph shape
-- `set_variable(instance_name, value)`: update only a `variable` block's `value` parameter through `FlowgraphSession`
+- `load_grc(file_path)`: load or switch the active `.grc` session
+- `summarize_graph(max_blocks=None)`: report the current graph shape
+- `search_grc(query, scope="catalog|session", k=5)`: route bounded retrieval without duplicating search logic
+- `get_grc_context(node_id, hops=1, max_nodes=20)`: return a bounded neighborhood around one loaded block
+- `describe_block(block_id)`: return structured GNU catalog truth for one block id
+- `propose_edit(transaction)`: run preflight validation for a supported ordered transaction
+- `apply_edit(transaction)`: apply the same narrow transaction surface atomically and commit only after final GNU validation
 - `validate_graph`: run `grcc` validation on the current in-memory graph
 - `save_graph(path=None)`: persist the current graph, but only after the latest dirty state has passed validation
 
-The broader `FlowgraphSession` mutation methods remain available for direct code paths and regression tests, but they are not part of the model tool contract.
+The broader `FlowgraphSession` mutation methods remain available for direct code paths and regression tests, but they are not part of the model tool contract. `set_variable` is no longer part of the public runtime surface; variable edits now flow through `propose_edit` / `apply_edit` like other supported transactions.
+Every model tool call is validated against the declared runtime schema before execution: unknown tools, missing required fields, non-object payloads, type mismatches, enum mismatches, and unsupported extra fields fail with structured errors instead of reaching the session layer. Routed tool results now also carry an `active_session` snapshot so the current file, graph id, revision, dirty flag, and validation state stay explicit at the runtime boundary.
 
 ## Optional llama.cpp Spike
 
 The repo now includes a thin llama.cpp adapter that calls only documented server endpoints.
 
-- default llama runtime values are loaded from [grc_agent.toml](grc_agent.toml)
+- default llama runtime values come from built-in app defaults and may be overridden by [grc_agent.toml](grc_agent.toml), `GRC_AGENT_CONFIG`, or `--config`
 - endpoints used: `/health`, `/v1/models`, `/v1/chat/completions`
 - llama.cpp built-in `/tools` is intentionally not used
-- the runtime tool surface stays fixed to the same four tools
-- the runtime is bounded by tool rounds, with `--max-steps` defaulting to `2`
+- the runtime tool surface stays fixed to the explicit routed phase 6 tool list
+- returned tool calls are validated against the declared runtime schemas before execution
+- active session context is explicit in CLI output, runtime history, and model-visible session messages
+- `chat` now owns local llama.cpp startup for the normal CLI path when the configured `server_url` is a plain local `http://127.0.0.1` or `http://localhost` base URL
+- the runtime is unbounded with a safety ceiling of 50 tool rounds
 - the default model id is the server alias, currently `unsloth/gemma-4-E2B-it-GGUF`
+- the default Hugging Face model source is `unsloth/gemma-4-E2B-it-GGUF:Q4_K_M`
 - the default `max_tokens = 12000` is an operational ceiling, not the correctness guard
 - summarize final answers are resolved from the `summarize_graph` tool payload
-- supported mutation final answers are resolved from tool results after `set_variable` and `validate_graph`
+- other supported final answers fall back to the latest structured tool `message` only when the model leaves the final text empty or tool-call-shaped
 - raw tool-call-like text is not surfaced as the final answer when no tools actually ran
 
-Start the local server with the configured model:
+Run the bounded CLI path:
+
+```bash
+uv run grc-agent chat tests/data/random_bit_generator.grc \
+	--message "Change samp_rate to 48000 and validate the graph."
+```
+
+If the configured local llama.cpp server is down, the CLI starts it automatically, waits for `/health`, requires `/v1/models` to return exactly one model, and requires that model `id` to match the configured alias before the first chat request. Repeated `chat` runs reuse the healthy local backend instead of relaunching it.
+
+For manual backend debugging only, the equivalent repo-configured launch command is:
 
 ```bash
 llama-server -hf unsloth/gemma-4-E2B-it-GGUF:Q4_K_M \
@@ -111,51 +214,68 @@ llama-server -hf unsloth/gemma-4-E2B-it-GGUF:Q4_K_M \
 
 `--jinja` is explicit for reproducibility, but current `llama-server` enables it by default.
 
-Then run the bounded CLI path:
+Or execute one routed tool directly without a model backend:
 
 ```bash
-uv run python -m grc_agent.cli tests/data/random_bit_generator.grc \
-	--message "Change samp_rate to 48000 and validate the graph."
+uv run grc-agent tool summarize_graph \
+	--file tests/data/random_bit_generator.grc
 ```
 
-Use `--model`, `--llama-server-url`, or `--max-steps` only when you want a one-off override of the repo config.
-The CLI now verifies that `/v1/models` returns exactly one entry and that the returned `id` matches the configured alias before the first chat request.
-The final non-tool assistant answer is allowed after the configured tool-round budget is exhausted.
+Check the packaged app state:
+
+```bash
+uv run grc-agent doctor --json
+```
+
+Use `--model` or `--llama-server-url` only when you want a one-off override of the configured defaults.
+The `chat` command prints the active session first, then whether it started or reused the backend, so the real runtime path and the current bound `.grc` file are visible in normal CLI output.
+When a model tool call is rejected before execution, validation errors feed back to the model for retry.
+The final non-tool assistant answer concludes the turn.
 For the current supported slice, correctness comes from the bounded runtime contract, not from trusting the model's free-form final prose.
 
 ## Verification
 
-Use the package entrypoint directly:
+Use the packaged CLI entrypoint directly:
 
 ```bash
 uv run python scripts/check_env.py
+uv run grc-agent doctor
 uv run ruff check
 uv run python -m unittest
-uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc
+uv run grc-agent fake tests/data/random_bit_generator.grc
 ```
 
 What to expect:
 
 - `check_env.py` passes Python, `grcc`, and GNU Radio version checks
+- `grc-agent doctor` passes Python, `grcc`, GNU Radio, config, and retrieval readiness checks
 - `ruff check` is clean
 - `python -m unittest` passes the current regression suite
 - the retrieval and catalog tests cover the real GNU catalog metadata and the canonical `.grc` fixture
+- the session inspection tests cover `load_grc(...)`, bounded summary payloads, and bounded context slices on the canonical `.grc` fixture
+- the validation tests cover real catalog-backed enum/port rules plus staged transaction checks on the canonical `.grc` fixture
+- the transaction tests cover proposal behavior, atomic apply, rollback/unchanged-live-session guarantees, and final GNU validation gating on the canonical `.grc` fixture
+- the runtime validation tests reject unknown tools, missing required args, wrong types, and unsupported extra fields before execution
+- the runtime loop tests cover invalid tool-call rejection plus `load_grc` session-context rebinding during a chat turn
 - `describe_block(...)` is exercised against real GNU blocks with asserts, documentation/doc_url, and hierarchical-wrapper coverage
-- the `--fake` CLI path routes a deterministic tool sequence through `GrcAgent` and `FlowgraphSession`
+- the phase-6 `fake` CLI path is a deterministic harness only; it is not evidence that the real model-backed path is ready
+- the direct `tool` CLI path exercises read-only and edit flows without a model backend
 - the adapter tests exercise a scripted llama.cpp-compatible server while still validating the fixture graph with real `grcc`
+- the launcher tests exercise the real subprocess startup path, including cold-port startup, malformed/stale/mismatched state cleanup, alias mismatch failure, and end-to-end `chat` auto-start/reuse on the canonical fixture
 - live llama.cpp checks are env-gated:
   ```bash
   GRC_AGENT_LIVE_LLAMA_URL=http://127.0.0.1:8080 \
   GRC_AGENT_LIVE_LLAMA_MODEL=unsloth/gemma-4-E2B-it-GGUF \
   uv run python -m unittest tests.test_llama_server_live
   ```
+- the env-gated live llama module now covers CLI cold-start, CLI reuse, a real live edit flow, summarize, and structured edit failure
 - the non-gating reliability matrix is:
   ```bash
   GRC_AGENT_LIVE_LLAMA_URL=http://127.0.0.1:8080 \
   GRC_AGENT_LIVE_LLAMA_MODEL=unsloth/gemma-4-E2B-it-GGUF \
   uv run python scripts/llama_reliability_matrix.py
   ```
-- the supported live cases are summarize, `set_variable + validate_graph`, and missing-variable recovery
+- the supported live cases are summarize, routed `apply_edit` success, and routed edit failure staying structured
 - GitHub Actions repeats the fast lint gate and a GNU-backed validation job on Ubuntu
 
 ## Safety Rules

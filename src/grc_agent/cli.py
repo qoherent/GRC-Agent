@@ -3,71 +3,141 @@
 import argparse
 import json
 import sys
+from typing import Any
 
-from grc_agent.agent import GrcAgent
+from grc_agent.agent import GrcAgent, PUBLIC_TOOL_NAMES
 from grc_agent.config import AppConfig, load_app_config
+from grc_agent.doctor import print_doctor_report, run_doctor
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.llama_server import LlamaServerClient, LlamaServerError, run_bounded_llama_turn
+from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
+from grc_agent.llama_server import (
+    LlamaServerClient,
+    LlamaServerError,
+    run_bounded_llama_turn,
+)
 from grc_agent.retrieval import initialize_retrieval
-from grc_agent.retrieval.search import _bind_retrieval_context, _clear_retrieval_context
 
 
 FAKE_USER_MESSAGE = "Please change the samp_rate to 48000 and validate the graph."
 FAKE_ACTIONS = [
     {"text": "I'll do that right away."},
     {
-        "tool": "set_variable",
+        "tool": "apply_edit",
         "kwargs": {
-            "instance_name": "samp_rate",
-            "value": "48000",
+            "transaction": {
+                "op_type": "update_params",
+                "instance_name": "samp_rate",
+                "params": {"value": "48000"},
+            }
         },
     },
-    {"tool": "validate_graph", "kwargs": {}},
 ]
+
+_RETRIEVAL_READY_TOOLS = {"search_grc", "describe_block", "propose_edit", "apply_edit"}
 
 
 def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
-    app_config = load_app_config() if config is None else config
-    llama_config = app_config.llama
+    llama_config = config.llama if config is not None else None
 
     parser = argparse.ArgumentParser(description="GRC Agent CLI")
-    parser.add_argument("file", nargs="?", help="Path to a .grc file to load")
     parser.add_argument(
-        "--fake",
+        "--config",
+        help="Optional path to a TOML config file. Defaults to workspace config when present, then user config, then built-in defaults.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check environment, config, and retrieval readiness for the packaged app.",
+    )
+    doctor_parser.add_argument(
+        "--json",
         action="store_true",
-        help="Run a deterministic fake-model step through the runtime",
+        help="Print the doctor report as JSON.",
     )
-    parser.add_argument(
+    doctor_parser.add_argument(
+        "--skip-retrieval",
+        action="store_true",
+        help="Skip retrieval readiness checks.",
+    )
+
+    fake_parser = subparsers.add_parser(
+        "fake",
+        help="Run a deterministic fake-model step through the runtime.",
+    )
+    fake_parser.add_argument("file", help="Path to a .grc file to load.")
+
+    chat_parser = subparsers.add_parser(
+        "chat",
+        help="Run one bounded llama.cpp-backed turn against a loaded graph.",
+    )
+    chat_parser.add_argument("file", help="Path to a .grc file to load.")
+    chat_parser.add_argument(
         "--message",
-        help="Run one bounded llama.cpp turn with this user message",
+        required=True,
+        help="Run one bounded llama.cpp turn with this user message.",
     )
-    parser.add_argument(
+    chat_parser.add_argument(
         "--llama-server-url",
-        default=llama_config.server_url,
+        default=llama_config.server_url if llama_config is not None else None,
         help="Base URL for a llama.cpp HTTP server. Defaults to grc_agent.toml.",
     )
-    parser.add_argument(
+    chat_parser.add_argument(
         "--model",
-        default=llama_config.model,
+        default=llama_config.model if llama_config is not None else None,
         help="llama.cpp model id. Defaults to the configured value in grc_agent.toml.",
     )
-    parser.add_argument(
+    chat_parser.add_argument(
         "--api-key",
         help="Optional API key for llama.cpp server authentication",
     )
-    parser.add_argument(
-        "--max-steps",
-        type=int,
-        default=llama_config.max_steps,
-        help="Maximum tool rounds before the bounded llama.cpp loop stops.",
+
+    tool_parser = subparsers.add_parser(
+        "tool",
+        help="Execute one routed runtime tool directly without a model backend.",
     )
+    tool_parser.add_argument(
+        "tool_name",
+        choices=list(PUBLIC_TOOL_NAMES),
+        help="Runtime tool name to execute.",
+    )
+    tool_parser.add_argument(
+        "--file",
+        help="Optional .grc file to load before executing the tool.",
+    )
+    tool_parser.add_argument(
+        "--args",
+        default="{}",
+        help="JSON object of tool arguments.",
+    )
+
     return parser
+
+
+def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
+    if not argv or argv[0] in {"fake", "chat", "tool"}:
+        return argv
+
+    if "--fake" in argv:
+        translated = [arg for arg in argv if arg != "--fake"]
+        return ["fake", *translated]
+
+    if "--message" in argv:
+        return ["chat", *argv]
+
+    return argv
 
 
 def _print_history(agent: GrcAgent) -> None:
     """Render runtime history in a compact CLI-friendly form."""
     print("\n--- History ---")
     for turn in agent.history:
+        if turn.get("role") == "session" and isinstance(turn.get("content"), dict):
+            printable_turn = dict(turn)
+            printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
+            print(printable_turn)
+            continue
         if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
             printable_turn = dict(turn)
             printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
@@ -76,31 +146,58 @@ def _print_history(agent: GrcAgent) -> None:
         print(turn)
 
 
-def _prepare_retrieval(session: FlowgraphSession) -> int:
-    """Run the bounded retrieval startup check and bind the active session context."""
-    _clear_retrieval_context()
+def _print_active_session(agent: GrcAgent) -> None:
+    """Render the currently bound session before running the chat loop."""
+    active_session = agent.active_session_snapshot()
+    print("\n--- Active Session ---")
+    if active_session is None:
+        print("No active flowgraph session.")
+        return
+    validation = active_session["validation"]["status"]
+    print(
+        f"{active_session['path']} "
+        f"(graph_id={active_session['graph_id']}, "
+        f"state_revision={active_session['state_revision']}, "
+        f"dirty={active_session['dirty']}, validation={validation})"
+    )
+
+
+def _prepare_retrieval() -> tuple[int, str | None]:
+    """Run the bounded retrieval startup check and return the resolved catalog root."""
     readiness = initialize_retrieval()
     if not readiness["ok"]:
         print("\n--- Retrieval ---")
         print(readiness["message"])
-        return 1
+        return 1, None
+    return 0, readiness.get("catalog_root")
 
-    _bind_retrieval_context(
-        session=session,
-        catalog_root=readiness.get("catalog_root"),
-    )
-    return 0
+
+def _load_initial_session(file_path: str | None) -> FlowgraphSession:
+    session = FlowgraphSession()
+    if file_path is not None:
+        session.load(file_path)
+    return session
+
+
+def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw_arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--args must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--args must decode to a JSON object.")
+    return parsed
 
 
 def _run_fake_runtime(file_path: str) -> int:
-    """Exercise the narrow runtime contract with deterministic fake actions."""
+    """Exercise the routed runtime contract with deterministic fake actions."""
     print(f"Loading {file_path}...")
-    session = FlowgraphSession()
-    session.load(file_path)
-    retrieval_status = _prepare_retrieval(session)
+    session = _load_initial_session(file_path)
+    retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
-    agent = GrcAgent(session)
+    agent = GrcAgent(session, catalog_root=catalog_root)
+    _print_active_session(agent)
 
     print("--- System Prompt ---")
     print(agent.get_system_prompt())
@@ -120,17 +217,29 @@ def _run_llama_runtime(
     server_url: str,
     model: str | None,
     api_key: str | None,
-    max_steps: int,
 ) -> int:
-    """Run one bounded llama.cpp-backed turn against the narrowed runtime."""
+    """Run one bounded llama.cpp-backed turn against the routed runtime surface."""
     print(f"Loading {file_path}...")
-    session = FlowgraphSession()
-    session.load(file_path)
-    retrieval_status = _prepare_retrieval(session)
+    session = _load_initial_session(file_path)
+    retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
-    agent = GrcAgent(session)
+    agent = GrcAgent(session, catalog_root=catalog_root)
+    _print_active_session(agent)
     llama_config = config.llama
+    launcher = LlamaServerLauncher(
+        llama_config,
+        server_url=server_url,
+        model_alias=model,
+        api_key=api_key,
+    )
+    try:
+        launch_result = launcher.ensure_server_ready()
+    except LlamaLauncherError as exc:
+        print("\n--- Launcher ---")
+        print(str(exc))
+        return 1
+
     client = LlamaServerClient(
         base_url=server_url,
         api_key=api_key,
@@ -140,19 +249,27 @@ def _run_llama_runtime(
         enable_thinking=llama_config.enable_thinking,
     )
     try:
-        client.require_ready()
         result = run_bounded_llama_turn(
             agent,
             client,
             user_message,
             model=model,
-            max_steps=max_steps,
         )
     except LlamaServerError as exc:
         print("\n--- Runtime ---")
         print(str(exc))
         return 1
 
+    if launch_result.status == "started":
+        print(
+            f"Started llama.cpp server for {launch_result.model_alias} "
+            f"at {launch_result.server_url} (pid {launch_result.pid})"
+        )
+    else:
+        print(
+            f"Reusing llama.cpp server for {launch_result.model_alias} "
+            f"at {launch_result.server_url}"
+        )
     print(f"Using model {result['model']} via {server_url}")
     if result["ok"]:
         print("\n--- Assistant ---")
@@ -165,34 +282,73 @@ def _run_llama_runtime(
     return 0 if result["ok"] else 1
 
 
-def main() -> int:
-    app_config = load_app_config()
-    parser = _build_parser(app_config)
-    args = parser.parse_args()
+def _run_tool_command(
+    tool_name: str, tool_kwargs: dict[str, Any], file_path: str | None
+) -> int:
+    """Execute one routed runtime tool directly and print the structured result."""
+    session = _load_initial_session(file_path)
+    catalog_root: str | None = None
+    if tool_name in _RETRIEVAL_READY_TOOLS:
+        retrieval_status, catalog_root = _prepare_retrieval()
+        if retrieval_status != 0:
+            return retrieval_status
 
-    if args.fake and args.message is not None:
-        parser.error("--fake cannot be combined with --message")
+    agent = GrcAgent(session, catalog_root=catalog_root)
+    result = agent.execute_tool(tool_name, tool_kwargs)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("ok") else 1
 
-    if args.fake:
-        if args.file is None:
-            parser.error("--fake requires a .grc file path")
+
+def _run_doctor_command(
+    *,
+    config_path: str | None,
+    json_output: bool,
+    skip_retrieval: bool,
+) -> int:
+    """Execute the packaged-app doctor checks."""
+    report = run_doctor(config_path=config_path, check_retrieval=not skip_retrieval)
+    print_doctor_report(report, json_output=json_output)
+    return 0 if report["ok"] else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    translated_argv = _maybe_translate_legacy_args(raw_argv)
+    parser = _build_parser()
+    args = parser.parse_args(translated_argv)
+
+    if args.command == "doctor":
+        return _run_doctor_command(
+            config_path=args.config,
+            json_output=args.json,
+            skip_retrieval=args.skip_retrieval,
+        )
+
+    if args.command == "fake":
         return _run_fake_runtime(args.file)
 
-    if args.message is not None:
-        if args.file is None:
-            parser.error("--message requires a .grc file path")
+    if args.command == "chat":
+        app_config = load_app_config(args.config)
         return _run_llama_runtime(
             args.file,
             args.message,
             app_config,
-            args.llama_server_url,
-            args.model,
+            app_config.llama.server_url
+            if args.llama_server_url is None
+            else args.llama_server_url,
+            app_config.llama.model if args.model is None else args.model,
             args.api_key,
-            args.max_steps,
         )
 
-    print("GRC Agent CLI placeholder")
-    return 0
+    if args.command == "tool":
+        try:
+            tool_kwargs = _parse_tool_kwargs(args.args)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return _run_tool_command(args.tool_name, tool_kwargs, args.file)
+
+    parser.error("Unknown command.")
+    return 2
 
 
 if __name__ == "__main__":

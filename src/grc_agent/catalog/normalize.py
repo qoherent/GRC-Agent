@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import ast
+from functools import lru_cache
 import importlib
 import inspect
 import re
 from pathlib import Path
 from typing import Any
+
+from grc_agent._payload import join_non_empty
 
 from .errors import CatalogLoadError
 from .schema import NormalizedParameter, NormalizedPort, RawCatalogBlock
@@ -22,7 +25,9 @@ def compact_text(value: Any) -> str:
     if isinstance(value, str):
         return " ".join(value.split())
     if isinstance(value, dict):
-        parts = [_join_non_empty(str(key), compact_text(item)) for key, item in value.items()]
+        parts = [
+            join_non_empty(str(key), compact_text(item)) for key, item in value.items()
+        ]
         return "; ".join(part for part in parts if part)
     if isinstance(value, (list, tuple, set)):
         parts = [compact_text(item) for item in value]
@@ -93,11 +98,15 @@ def preserved_string_values(value: Any) -> list[str]:
     return [text] if text else []
 
 
-def normalize_parameter(payload: dict[str, Any], *, source_path: Path) -> NormalizedParameter:
+def normalize_parameter(
+    payload: dict[str, Any], *, source_path: Path
+) -> NormalizedParameter:
     """Normalize one GNU parameter payload into the public structured shape."""
     parameter_id = optional_string(payload.get("id"))
     if parameter_id is None:
-        raise CatalogLoadError(f"{source_path} has a parameter missing a non-empty 'id' field.")
+        raise CatalogLoadError(
+            f"{source_path} has a parameter missing a non-empty 'id' field."
+        )
 
     option_attributes: dict[str, list[Any]] = {}
     raw_option_attributes = payload.get("option_attributes")
@@ -121,7 +130,9 @@ def normalize_parameter(payload: dict[str, Any], *, source_path: Path) -> Normal
         category=optional_string(payload.get("category")),
         hide=optional_string(payload.get("hide")),
         options=list(raw_options) if isinstance(raw_options, list) else [],
-        option_labels=list(raw_option_labels) if isinstance(raw_option_labels, list) else [],
+        option_labels=list(raw_option_labels)
+        if isinstance(raw_option_labels, list)
+        else [],
         option_attributes=option_attributes,
         base_key=optional_string(payload.get("base_key")),
     )
@@ -215,12 +226,19 @@ def build_signature(
     return f"{block_id}({', '.join(rendered)})"
 
 
-def _looks_hierarchical(block_id: str, label: str | None, make_text: str | None) -> bool:
-    haystack = " ".join(part for part in (block_id, label or "", make_text or "") if part).lower()
+def _looks_hierarchical(
+    block_id: str, label: str | None, make_text: str | None
+) -> bool:
+    haystack = " ".join(
+        part for part in (block_id, label or "", make_text or "") if part
+    ).lower()
     return "_hier" in haystack or "hierarchical" in haystack or "hier_block" in haystack
 
 
-def _resolves_to_hierarchical_class(imports_text: str | None, make_text: str | None) -> bool:
+@lru_cache(maxsize=128)
+def _resolves_to_hierarchical_class(
+    imports_text: str | None, make_text: str | None
+) -> bool:
     if not imports_text or not make_text:
         return False
 
@@ -231,7 +249,14 @@ def _resolves_to_hierarchical_class(imports_text: str | None, make_text: str | N
     try:
         aliases = _parse_import_aliases(imports_text)
         resolved = _resolve_target(aliases, target_expression)
-    except (AttributeError, ImportError, ModuleNotFoundError, SyntaxError, TypeError, ValueError):
+    except (
+        AttributeError,
+        ImportError,
+        ModuleNotFoundError,
+        SyntaxError,
+        TypeError,
+        ValueError,
+    ):
         return False
     return _is_hierarchical_class(resolved)
 
@@ -295,7 +320,3 @@ def _is_hierarchical_class(candidate: object) -> bool:
         base.__name__ == "hier_block2" and base.__module__.startswith("gnuradio")
         for base in candidate.__mro__
     )
-
-
-def _join_non_empty(*parts: str) -> str:
-    return " ".join(part for part in parts if part).strip()

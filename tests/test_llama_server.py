@@ -5,17 +5,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 import json
 from pathlib import Path
+import tempfile
 import time
 from threading import Thread
 import unittest
 from unittest import mock
 from urllib import error
 
-from grc_agent.agent import GrcAgent
+from grc_agent.agent import GrcAgent, PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_llama_runtime
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.llama_server import LlamaServerClient, LlamaServerError, run_bounded_llama_turn
+from grc_agent.llama_server import (
+    LlamaServerClient,
+    LlamaServerError,
+    run_bounded_llama_turn,
+)
 
 
 class _ScriptedLlamaServer(ThreadingHTTPServer):
@@ -38,7 +43,9 @@ class _ScriptedLlamaHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         server = self.server
         assert isinstance(server, _ScriptedLlamaServer)
-        server.requests_seen.append({"method": "GET", "path": self.path, "payload": None})
+        server.requests_seen.append(
+            {"method": "GET", "path": self.path, "payload": None}
+        )
 
         if self.path in {"/health", "/v1/health"}:
             self._write_json(200, {"status": "ok"})
@@ -72,7 +79,9 @@ class _ScriptedLlamaHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_payload = self.rfile.read(content_length).decode("utf-8")
         payload = json.loads(raw_payload) if raw_payload else None
-        server.requests_seen.append({"method": "POST", "path": self.path, "payload": payload})
+        server.requests_seen.append(
+            {"method": "POST", "path": self.path, "payload": payload}
+        )
 
         if self.path == "/v1/chat/completions":
             if not server.responses:
@@ -187,6 +196,16 @@ class LlamaServerAdapterTests(unittest.TestCase):
         session.load(self._fixture_path())
         return GrcAgent(session), session
 
+    def _write_alt_fixture(self, directory: Path) -> Path:
+        alt_path = directory / "random_bit_generator_alt.grc"
+        alt_path.write_text(
+            self._fixture_path()
+            .read_text(encoding="utf-8")
+            .replace("samp_rate", "fresh_clock_value"),
+            encoding="utf-8",
+        )
+        return alt_path
+
     def _start_server(
         self,
         responses: list[dict[str, object]],
@@ -241,24 +260,23 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": "I will update the variable and validate the graph.",
+                                "content": "I will apply the edit transaction.",
                                 "tool_calls": [
                                     {
-                                        "id": "call_set_variable",
+                                        "id": "call_apply_edit",
                                         "type": "function",
                                         "function": {
-                                            "name": "set_variable",
+                                            "name": "apply_edit",
                                             "arguments": json.dumps(
                                                 {
-                                                    "instance_name": "samp_rate",
-                                                    "value": "48000",
+                                                    "transaction": {
+                                                        "op_type": "update_params",
+                                                        "instance_name": "samp_rate",
+                                                        "params": {"value": "48000"},
+                                                    }
                                                 }
                                             ),
                                         },
-                                    },
-                                    {
-                                        "name": "validate_graph",
-                                        "arguments": {},
                                     },
                                 ],
                             }
@@ -270,7 +288,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": "The graph is valid with samp_rate set to 48000.",
+                                "content": "Updated samp_rate to 48000.",
                             }
                         }
                     ]
@@ -285,19 +303,15 @@ class LlamaServerAdapterTests(unittest.TestCase):
         result = run_bounded_llama_turn(
             agent,
             client,
-            "Please change the samp_rate to 48000 and validate the graph.",
+            "Please change the samp_rate to 48000.",
             model=llama_config.model,
-            max_steps=2,
         )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["model"], llama_config.model)
-        self.assertEqual(result["tool_calls_executed"], 2)
+        self.assertEqual(result["tool_calls_executed"], 1)
         self.assertEqual(result["tool_rounds_used"], 1)
-        self.assertEqual(
-            result["assistant_text"],
-            "Set samp_rate to 48000 and validated the graph successfully.",
-        )
+        self.assertEqual(result["assistant_text"], "Updated samp_rate to 48000.")
 
         flowgraph = session.flowgraph
         self.assertIsNotNone(flowgraph)
@@ -308,8 +322,8 @@ class LlamaServerAdapterTests(unittest.TestCase):
         self.assertEqual(variable_block.params["parameters"]["value"], "48000")
 
         tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
-        self.assertEqual([entry["name"] for entry in tool_entries], ["set_variable", "validate_graph"])
-        self.assertTrue(tool_entries[1]["content"]["valid"])
+        self.assertEqual([entry["name"] for entry in tool_entries], ["apply_edit"])
+        self.assertEqual(tool_entries[0]["content"]["validation"]["status"], "valid")
 
         model_requests = [
             request
@@ -335,15 +349,12 @@ class LlamaServerAdapterTests(unittest.TestCase):
             {"enable_thinking": llama_config.enable_thinking},
         )
         self.assertEqual(
-            {
-                schema["function"]["name"]
-                for schema in first_payload["tools"]
-            },
-            {"summarize_graph", "set_variable", "validate_graph", "save_graph"},
+            {schema["function"]["name"] for schema in first_payload["tools"]},
+            set(PUBLIC_TOOL_NAMES),
         )
         self.assertTrue(
             any(
-                message.get("role") == "tool" and message.get("name") == "validate_graph"
+                message.get("role") == "tool" and message.get("name") == "apply_edit"
                 for message in chat_requests[1]["payload"]["messages"]
             )
         )
@@ -360,7 +371,6 @@ class LlamaServerAdapterTests(unittest.TestCase):
                 client,
                 "Summarize the graph.",
                 model="configured-model",
-                max_steps=2,
             )
 
         chat_requests = [
@@ -369,6 +379,159 @@ class LlamaServerAdapterTests(unittest.TestCase):
             if request["path"] == "/v1/chat/completions"
         ]
         self.assertEqual(chat_requests, [])
+
+    def test_bounded_llama_turn_rejects_invalid_tool_call_before_execution(
+        self,
+    ) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "search_grc",
+                                        "arguments": json.dumps(
+                                            {
+                                                "query": "samp_rate",
+                                                "scope": "session",
+                                                "unexpected": True,
+                                            }
+                                        ),
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "I could not complete that request due to a validation error.",
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Search the session graph for samp_rate.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tool_rounds_used"], 1)
+        tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
+        validation_entry = next(e for e in tool_entries if not e["content"]["ok"])
+        self.assertEqual(
+            validation_entry["content"]["validation_errors"][0]["code"],
+            "unexpected_argument",
+        )
+
+    def test_bounded_llama_turn_rebinds_session_context_after_load_grc(self) -> None:
+        llama_config = self._llama_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            alt_path = self._write_alt_fixture(Path(tmpdir))
+            server = self._start_server(
+                [
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "name": "load_grc",
+                                            "arguments": json.dumps(
+                                                {"file_path": str(alt_path)}
+                                            ),
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "name": "search_grc",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "query": "fresh_clock_value",
+                                                    "scope": "session",
+                                                    "k": 5,
+                                                }
+                                            ),
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Loaded the alternate graph and searched it.",
+                                }
+                            }
+                        ]
+                    },
+                ],
+                model_id=llama_config.model,
+            )
+            agent, _session = self._load_agent()
+            client = self._client(self._server_url(server))
+            client.require_ready()
+
+            result = run_bounded_llama_turn(
+                agent,
+                client,
+                "Load the alternate graph and search the session for alt_rate.",
+                model=llama_config.model,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tool_rounds_used"], 2)
+        tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
+        self.assertEqual(
+            [entry["name"] for entry in tool_entries], ["load_grc", "search_grc"]
+        )
+        self.assertEqual(
+            tool_entries[0]["content"]["active_session"]["path"], str(alt_path)
+        )
+        self.assertEqual(
+            tool_entries[1]["content"]["active_session"]["path"], str(alt_path)
+        )
+        self.assertTrue(tool_entries[1]["content"]["results"])
+        self.assertEqual(
+            tool_entries[1]["content"]["results"][0]["node_id"],
+            "session:block:fresh_clock_value",
+        )
+        session_entries = [
+            turn for turn in agent.history if turn.get("role") == "session"
+        ]
+        self.assertGreaterEqual(len(session_entries), 2)
+        self.assertEqual(session_entries[-1]["reason"], "load_grc")
+        self.assertEqual(session_entries[-1]["content"]["path"], str(alt_path))
 
     def test_get_model_id_requires_single_entry(self) -> None:
         server = self._start_server(
@@ -460,11 +623,14 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "role": "assistant",
                                 "tool_calls": [
                                     {
-                                        "name": "set_variable",
+                                        "name": "propose_edit",
                                         "arguments": json.dumps(
                                             {
-                                                "instance_name": "samp_rate",
-                                                "value": "48000",
+                                                "transaction": {
+                                                    "op_type": "update_params",
+                                                    "instance_name": "samp_rate",
+                                                    "params": {"value": "48000"},
+                                                }
                                             }
                                         ),
                                     }
@@ -478,7 +644,20 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "validate_graph", "arguments": "{}"}],
+                                "tool_calls": [
+                                    {
+                                        "name": "apply_edit",
+                                        "arguments": json.dumps(
+                                            {
+                                                "transaction": {
+                                                    "op_type": "update_params",
+                                                    "instance_name": "samp_rate",
+                                                    "params": {"value": "48000"},
+                                                }
+                                            }
+                                        ),
+                                    }
+                                ],
                             }
                         }
                     ]
@@ -488,11 +667,94 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": "The graph is valid with samp_rate set to 48000.",
+                                "content": "Applied the transaction successfully.",
                             }
                         }
                     ]
-                }
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Change the samp_rate variable to 48000.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tool_rounds_used"], 2)
+        self.assertEqual(result["tool_calls_executed"], 2)
+        self.assertEqual(
+            result["assistant_text"], "Applied the transaction successfully."
+        )
+
+    def test_bounded_llama_turn_reminds_model_to_validate_after_apply(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "apply_edit",
+                                        "arguments": json.dumps(
+                                            {
+                                                "transaction": {
+                                                    "op_type": "update_params",
+                                                    "instance_name": "samp_rate",
+                                                    "params": {"value": "48000"},
+                                                }
+                                            }
+                                        ),
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Done.",
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "validate_graph",
+                                        "arguments": "{}",
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Validated after the edit.",
+                            }
+                        }
+                    ]
+                },
             ],
             model_id=llama_config.model,
         )
@@ -505,18 +767,19 @@ class LlamaServerAdapterTests(unittest.TestCase):
             client,
             "Change the samp_rate variable to 48000 and validate the graph.",
             model=llama_config.model,
-            max_steps=2,
         )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["tool_rounds_used"], 2)
         self.assertEqual(result["tool_calls_executed"], 2)
-        self.assertEqual(
-            result["assistant_text"],
-            "Set samp_rate to 48000 and validated the graph successfully.",
-        )
+        self.assertEqual(result["assistant_text"], "Validated after the edit.")
+        reminder_entries = [
+            turn for turn in agent.history if turn.get("role") == "reminder"
+        ]
+        self.assertEqual(len(reminder_entries), 1)
+        self.assertEqual(reminder_entries[0]["code"], "validate_graph_required")
 
-    def test_bounded_llama_turn_reports_tool_round_limit(self) -> None:
+    def test_bounded_llama_turn_reminds_model_to_describe_after_search(self) -> None:
         llama_config = self._llama_config()
         server = self._start_server(
             [
@@ -525,7 +788,14 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "summarize_graph", "arguments": "{}"}],
+                                "tool_calls": [
+                                    {
+                                        "name": "search_grc",
+                                        "arguments": json.dumps(
+                                            {"query": "AGC", "scope": "catalog"}
+                                        ),
+                                    }
+                                ],
                             }
                         }
                     ]
@@ -535,7 +805,34 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "summarize_graph", "arguments": "{}"}],
+                                "content": "I found some AGC blocks.",
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "describe_block",
+                                        "arguments": json.dumps(
+                                            {"block_id": "analog_agc_xx"}
+                                        ),
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Described the AGC block.",
                             }
                         }
                     ]
@@ -550,18 +847,75 @@ class LlamaServerAdapterTests(unittest.TestCase):
         result = run_bounded_llama_turn(
             agent,
             client,
-            "Summarize the graph.",
+            "Find an AGC block and describe its parameters.",
             model=llama_config.model,
-            max_steps=1,
         )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["tool_rounds_used"], 1)
-        self.assertEqual(
-            result["message"],
-            "Tool-round limit reached before the model produced a final answer.",
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tool_rounds_used"], 2)
+        self.assertEqual(result["tool_calls_executed"], 2)
+        self.assertEqual(result["assistant_text"], "Described the AGC block.")
+        reminder_entries = [
+            turn for turn in agent.history if turn.get("role") == "reminder"
+        ]
+        self.assertEqual(len(reminder_entries), 1)
+        self.assertEqual(reminder_entries[0]["code"], "describe_block_required")
+
+    def test_bounded_llama_turn_executes_multiple_tool_rounds(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {"name": "summarize_graph", "arguments": "{}"}
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {"name": "validate_graph", "arguments": "{}"}
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Done.",
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
         )
-        self.assertEqual(result["tool_calls_executed"], 1)
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Summarize the graph then validate it.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tool_rounds_used"], 2)
+        self.assertEqual(result["tool_calls_executed"], 2)
 
     def test_bounded_llama_turn_uses_summary_tool_payload_as_final_text(self) -> None:
         llama_config = self._llama_config()
@@ -572,7 +926,9 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "summarize_graph", "arguments": "{}"}],
+                                "tool_calls": [
+                                    {"name": "summarize_graph", "arguments": "{}"}
+                                ],
                             }
                         }
                     ]
@@ -599,14 +955,15 @@ class LlamaServerAdapterTests(unittest.TestCase):
             client,
             "Summarize the graph.",
             model=llama_config.model,
-            max_steps=2,
         )
 
         tool_entry = next(turn for turn in agent.history if turn.get("role") == "tool")
         self.assertEqual(result["assistant_text"], tool_entry["content"]["summary"])
         self.assertEqual(agent.history[-1]["content"], tool_entry["content"]["summary"])
 
-    def test_bounded_llama_turn_finalizes_set_and_validate_from_tool_results(self) -> None:
+    def test_bounded_llama_turn_falls_back_to_latest_tool_message_when_final_text_is_empty(
+        self,
+    ) -> None:
         llama_config = self._llama_config()
         server = self._start_server(
             [
@@ -617,9 +974,15 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "role": "assistant",
                                 "tool_calls": [
                                     {
-                                        "name": "set_variable",
+                                        "name": "apply_edit",
                                         "arguments": json.dumps(
-                                            {"instance_name": "samp_rate", "value": 48000}
+                                            {
+                                                "transaction": {
+                                                    "op_type": "update_params",
+                                                    "instance_name": "samp_rate",
+                                                    "params": {"value": 48000},
+                                                }
+                                            }
                                         ),
                                     }
                                 ],
@@ -632,17 +995,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "validate_graph", "arguments": "{}"}],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "The graph has been validated successfully.",
+                                "content": "",
                             }
                         }
                     ]
@@ -657,17 +1010,18 @@ class LlamaServerAdapterTests(unittest.TestCase):
         result = run_bounded_llama_turn(
             agent,
             client,
-            "Change the samp_rate variable to 48000 and validate the graph.",
+            "Change the samp_rate variable to 48000.",
             model=llama_config.model,
-            max_steps=2,
         )
 
         self.assertEqual(
             result["assistant_text"],
-            "Set samp_rate to 48000 and validated the graph successfully.",
+            "Applied transaction and validated the graph successfully.",
         )
 
-    def test_bounded_llama_turn_finalizes_missing_variable_recovery_from_tool_results(self) -> None:
+    def test_bounded_llama_turn_falls_back_to_failure_tool_message_when_final_text_is_empty(
+        self,
+    ) -> None:
         llama_config = self._llama_config()
         server = self._start_server(
             [
@@ -678,9 +1032,15 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "role": "assistant",
                                 "tool_calls": [
                                     {
-                                        "name": "set_variable",
+                                        "name": "apply_edit",
                                         "arguments": json.dumps(
-                                            {"instance_name": "does_not_exist", "value": 123}
+                                            {
+                                                "transaction": {
+                                                    "op_type": "update_params",
+                                                    "instance_name": "does_not_exist",
+                                                    "params": {"value": 123},
+                                                }
+                                            }
                                         ),
                                     }
                                 ],
@@ -693,17 +1053,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "validate_graph", "arguments": "{}"}],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "The graph is valid.",
+                                "content": "",
                             }
                         }
                     ]
@@ -718,18 +1068,17 @@ class LlamaServerAdapterTests(unittest.TestCase):
         result = run_bounded_llama_turn(
             agent,
             client,
-            "Set the variable does_not_exist to 123 and validate the graph.",
+            "Set the variable does_not_exist to 123.",
             model=llama_config.model,
-            max_steps=2,
         )
 
         self.assertEqual(
-            result["assistant_text"],
-            "Could not set the requested variable: Variable block not found: does_not_exist. "
-            "The graph validated successfully.",
+            result["assistant_text"], "Transaction failed preflight validation."
         )
 
-    def test_bounded_llama_turn_blocks_raw_tool_call_text_without_executed_tools(self) -> None:
+    def test_bounded_llama_turn_blocks_raw_tool_call_text_without_executed_tools(
+        self,
+    ) -> None:
         llama_config = self._llama_config()
         server = self._start_server(
             [
@@ -755,7 +1104,6 @@ class LlamaServerAdapterTests(unittest.TestCase):
             client,
             "Add a throttle block and connect it correctly.",
             model=llama_config.model,
-            max_steps=2,
         )
 
         self.assertEqual(
@@ -773,7 +1121,9 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "summarize_graph", "arguments": "{}"}],
+                                "tool_calls": [
+                                    {"name": "summarize_graph", "arguments": "{}"}
+                                ],
                             }
                         }
                     ]
@@ -801,14 +1151,12 @@ class LlamaServerAdapterTests(unittest.TestCase):
                 self._server_url(server),
                 llama_config.model,
                 None,
-                llama_config.max_steps,
             )
 
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)
         self.assertIn(f"Using model {llama_config.model}", rendered)
-        self.assertIn("File: random_bit_generator.grc", rendered)
-        self.assertIn("Connections: 3", rendered)
+        self.assertIn("random_bit_generator.grc: 5 blocks, 3 connections", rendered)
         self.assertIn("summarize_graph", rendered)
 
     def test_cli_llama_runtime_strips_leading_control_tokens(self) -> None:
@@ -821,7 +1169,9 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "tool_calls": [{"name": "summarize_graph", "arguments": "{}"}],
+                                "tool_calls": [
+                                    {"name": "summarize_graph", "arguments": "{}"}
+                                ],
                             }
                         }
                     ]
@@ -849,13 +1199,11 @@ class LlamaServerAdapterTests(unittest.TestCase):
                 self._server_url(server),
                 llama_config.model,
                 None,
-                llama_config.max_steps,
             )
 
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)
-        self.assertIn("File: random_bit_generator.grc", rendered)
-        self.assertIn("Connections: 3", rendered)
+        self.assertIn("random_bit_generator.grc: 5 blocks, 3 connections", rendered)
         self.assertNotIn("<eos>", rendered)
 
         chat_requests = [
@@ -878,13 +1226,68 @@ class LlamaServerAdapterTests(unittest.TestCase):
                 self._server_url(server),
                 config.llama.model,
                 None,
-                config.llama.max_steps,
             )
 
         rendered = output.getvalue()
         self.assertEqual(exit_code, 1)
-        self.assertIn("--- Runtime ---", rendered)
+        self.assertIn("--- Launcher ---", rendered)
         self.assertIn("alias mismatch", rendered)
+        self.assertNotIn("Traceback", rendered)
+
+    def test_cli_llama_runtime_feeds_validation_errors_back(self) -> None:
+        config = load_app_config()
+        output = StringIO()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "search_grc",
+                                        "arguments": json.dumps(
+                                            {
+                                                "query": "samp_rate",
+                                                "scope": "session",
+                                                "unexpected": True,
+                                            }
+                                        ),
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Validation error received.",
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=config.llama.model,
+        )
+
+        with redirect_stdout(output):
+            exit_code = _run_llama_runtime(
+                str(self._fixture_path()),
+                "Search the current graph for samp_rate.",
+                config,
+                self._server_url(server),
+                config.llama.model,
+                None,
+            )
+
+        rendered = output.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validation error received.", rendered)
+        self.assertIn("unexpected_argument", rendered)
         self.assertNotIn("Traceback", rendered)
 
 

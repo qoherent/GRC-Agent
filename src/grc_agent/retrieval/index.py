@@ -7,15 +7,17 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from grc_agent._payload import join_non_empty
+from grc_agent._payload import build_error_payload
 from grc_agent.catalog.errors import CatalogLoadError
 from grc_agent.catalog.loaders import (
     DEFAULT_GRC_CATALOG_ROOTS as DEFAULT_GRC_CATALOG_ROOTS_SHARED,
+    build_catalog_snapshot,
     collect_catalog_files,
     discover_catalog_root as discover_catalog_root_shared,
     load_yaml_mapping,
     require_string,
     validate_catalog_files,
-    walk_tree_entries,
 )
 from grc_agent.catalog.normalize import (
     compact_text,
@@ -34,7 +36,6 @@ from .schema import (
     IndexedNode,
     PreparedSearchNode,
     RetrievalIndex,
-    build_error_payload,
 )
 from .text import expand_terms, normalize_text, tokenize_text
 
@@ -143,22 +144,28 @@ def build_session_index(
     session_path = Path(session.path) if session.path is not None else None
     block_by_name = {block.instance_name: block for block in flowgraph.blocks}
     upstream_names, downstream_names = _build_session_adjacency(flowgraph.connections)
-    catalog_blocks = _catalog_block_lookup(catalog_index) if catalog_index is not None else {}
+    catalog_blocks = (
+        _catalog_block_lookup(catalog_index) if catalog_index is not None else {}
+    )
 
     for block in flowgraph.blocks:
         catalog_record = catalog_blocks.get(block.block_type)
         parameter_map = _coerce_parameter_map(block.params.get("parameters"))
-        parameter_pairs = [f"{key}={compact_text(value)}" for key, value in parameter_map.items()]
+        parameter_pairs = [
+            f"{key}={compact_text(value)}" for key, value in parameter_map.items()
+        ]
         incoming = upstream_names.get(block.instance_name, [])
         outgoing = downstream_names.get(block.instance_name, [])
-        catalog_categories = catalog_record.related_node_labels if catalog_record is not None else []
+        catalog_categories = (
+            catalog_record.related_node_labels if catalog_record is not None else []
+        )
         block_description = (
             catalog_record.block_description
             if catalog_record is not None
             else f"Session block of type {block.block_type}."
         )
         field_summary = _truncate(
-            _join_non_empty(
+            join_non_empty(
                 _format_key_value_group("parameters", parameter_pairs[:6]),
                 _format_label_group("incoming", incoming[:4]),
                 _format_label_group("outgoing", outgoing[:4]),
@@ -167,7 +174,7 @@ def build_session_index(
             MAX_SUMMARY_CHARS,
         )
         adjacency_summary = _truncate(
-            _join_non_empty(
+            join_non_empty(
                 _format_label_group("incoming", incoming[:4]),
                 _format_label_group("outgoing", outgoing[:4]),
                 _format_label_group("catalog context", catalog_categories[:4]),
@@ -187,12 +194,12 @@ def build_session_index(
             search_fields={
                 "label": block.instance_name,
                 "identifier": f"{block.instance_name} {block.block_type}",
-                "summary": _join_non_empty(
+                "summary": join_non_empty(
                     block_description,
                     field_summary,
                     " ".join(catalog_categories),
                 ),
-                "related": _join_non_empty(
+                "related": join_non_empty(
                     " ".join(incoming),
                     " ".join(outgoing),
                     " ".join(parameter_map.keys()),
@@ -202,7 +209,9 @@ def build_session_index(
                 ),
             },
             block_id=block.block_type,
-            summary=_build_result_summary(block_description, field_summary, adjacency_summary),
+            summary=_build_result_summary(
+                block_description, field_summary, adjacency_summary
+            ),
             block_description=_truncate(block_description, MAX_SUMMARY_CHARS),
             field_summary=field_summary or None,
             adjacency_summary=adjacency_summary or None,
@@ -227,10 +236,14 @@ def build_session_index(
         scope="session",
         graph=graph,
         node_records=records,
-        metadata={"flowgraph_path": str(session_path) if session_path is not None else None},
+        metadata={
+            "flowgraph_path": str(session_path) if session_path is not None else None
+        },
     )
     _populate_related_labels(index)
-    index.prepared_records, index.token_index = _prepare_search_records(index.node_records)
+    index.prepared_records, index.token_index = _prepare_search_records(
+        index.node_records
+    )
     return index
 
 
@@ -240,8 +253,8 @@ def _get_cached_catalog_index(root_text: str) -> RetrievalIndex:
 
 
 def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
-    files = collect_catalog_files(root)
-    validate_catalog_files(root, files)
+    snapshot = build_catalog_snapshot(root)
+    files = snapshot.files
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     records: dict[str, IndexedNode] = {}
@@ -265,7 +278,7 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
             search_fields={
                 "label": domain_label,
                 "identifier": domain_id,
-                "summary": _join_non_empty(
+                "summary": join_non_empty(
                     f"input fan-in {compact_text(domain_payload.get('multiple_connections_per_input'))}",
                     f"output fan-out {compact_text(domain_payload.get('multiple_connections_per_output'))}",
                     compact_text(domain_payload.get("templates")),
@@ -273,13 +286,13 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
                 "related": "",
             },
             summary=_build_result_summary(
-                _join_non_empty(
+                join_non_empty(
                     f"multiple input connections: {compact_text(domain_payload.get('multiple_connections_per_input'))}",
                     f"multiple output connections: {compact_text(domain_payload.get('multiple_connections_per_output'))}",
                 )
             ),
             field_summary=_truncate(
-                _join_non_empty(
+                join_non_empty(
                     f"multiple input connections: {compact_text(domain_payload.get('multiple_connections_per_input'))}",
                     f"multiple output connections: {compact_text(domain_payload.get('multiple_connections_per_output'))}",
                 ),
@@ -289,57 +302,31 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
         )
         _append_indexed_node(nodes, records, domain_record)
 
-    for tree_path in files.tree:
-        tree_payload = load_yaml_mapping(tree_path)
-
-        def _on_category(category_parts: tuple[str, ...], *, source_path: Path = tree_path) -> None:
-            _ensure_category_path(
-                list(category_parts),
-                source_path,
-                nodes=nodes,
-                edges=edges,
-                records=records,
-            )
-
-        def _on_block(
-            category_parts: tuple[str, ...],
-            block_id: str,
-            *,
-            source_path: Path = tree_path,
-        ) -> None:
-            category_node_id = _ensure_category_path(
-                list(category_parts),
-                source_path,
-                nodes=nodes,
-                edges=edges,
-                records=records,
-            )
-            block_categories[block_id].add(" > ".join(category_parts))
-            block_category_nodes[block_id].add(category_node_id)
-
-        walk_tree_entries(
-            tree_payload,
-            tree_path,
-            on_category=_on_category,
-            on_block=_on_block,
-        )
-
-    for block_path in files.block:
-        block_payload = load_yaml_mapping(block_path)
-        block_id = require_string(block_payload, "id", path=block_path)
+    for raw_block in sorted(snapshot.blocks.values(), key=lambda item: item.path):
+        block_path = raw_block.path
+        block_payload = raw_block.payload
+        block_id = raw_block.block_id
         block_label = require_string(block_payload, "label", path=block_path)
-        documentation = _truncate(compact_text(block_payload.get("documentation")), MAX_SUMMARY_CHARS)
+        documentation = _truncate(
+            compact_text(block_payload.get("documentation")), MAX_SUMMARY_CHARS
+        )
         parameters = coerce_mapping_list(block_payload.get("parameters"))
         inputs = coerce_mapping_list(block_payload.get("inputs"))
         outputs = coerce_mapping_list(block_payload.get("outputs"))
         flags = string_values(block_payload.get("flags"))
-        parameter_ids = [require_string(item, "id", path=block_path) for item in parameters]
+        parameter_ids = [
+            require_string(item, "id", path=block_path) for item in parameters
+        ]
         parameter_labels = [
             compact_text(parameter.get("label")) or parameter_id
             for parameter, parameter_id in zip(parameters, parameter_ids, strict=False)
         ]
-        input_signatures = [_port_signature("input", item, index) for index, item in enumerate(inputs)]
-        output_signatures = [_port_signature("output", item, index) for index, item in enumerate(outputs)]
+        input_signatures = [
+            _port_signature("input", item, index) for index, item in enumerate(inputs)
+        ]
+        output_signatures = [
+            _port_signature("output", item, index) for index, item in enumerate(outputs)
+        ]
         port_domains = sorted(
             {
                 compact_text(port_payload.get("domain"))
@@ -347,16 +334,20 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
                 if compact_text(port_payload.get("domain"))
             }
         )
-        category_parts = split_category_path(block_payload.get("category"))
-        if category_parts:
+        category_paths = set(raw_block.category_paths)
+        direct_category_parts = split_category_path(block_payload.get("category"))
+        if direct_category_parts:
+            category_paths.add(tuple(direct_category_parts))
+
+        for category_path in sorted(category_paths):
             category_node_id = _ensure_category_path(
-                category_parts,
+                list(category_path),
                 block_path,
                 nodes=nodes,
                 edges=edges,
                 records=records,
             )
-            block_categories[block_id].add(" > ".join(category_parts))
+            block_categories[block_id].add(" > ".join(category_path))
             block_category_nodes[block_id].add(category_node_id)
         category_labels = sorted(block_categories.get(block_id, set()))
         block_description = documentation or _truncate(
@@ -365,7 +356,7 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
             MAX_SUMMARY_CHARS,
         )
         field_summary = _truncate(
-            _join_non_empty(
+            join_non_empty(
                 _format_label_group("parameters", parameter_ids[:8]),
                 _format_label_group("inputs", input_signatures[:4]),
                 _format_label_group("outputs", output_signatures[:4]),
@@ -375,10 +366,12 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
             MAX_SUMMARY_CHARS,
         )
         adjacency_summary = _truncate(
-            _join_non_empty(
+            join_non_empty(
                 _format_label_group("categories", category_labels[:4]),
                 _format_label_group("parameters", parameter_ids[:6]),
-                _format_label_group("ports", input_signatures[:2] + output_signatures[:2]),
+                _format_label_group(
+                    "ports", input_signatures[:2] + output_signatures[:2]
+                ),
             ),
             MAX_SUMMARY_CHARS,
         )
@@ -395,12 +388,12 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
             search_fields={
                 "label": block_label,
                 "identifier": block_id,
-                "summary": _join_non_empty(
+                "summary": join_non_empty(
                     block_description,
                     field_summary,
                     compact_text(block_payload.get("doc_url")),
                 ),
-                "related": _join_non_empty(
+                "related": join_non_empty(
                     " ".join(category_labels),
                     " ".join(flags),
                     " ".join(parameter_ids),
@@ -411,7 +404,9 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
                 ),
             },
             block_id=block_id,
-            summary=_build_result_summary(block_description, field_summary, adjacency_summary),
+            summary=_build_result_summary(
+                block_description, field_summary, adjacency_summary
+            ),
             block_description=block_description,
             field_summary=field_summary or None,
             adjacency_summary=adjacency_summary or None,
@@ -453,8 +448,11 @@ def _build_catalog_index_for_root(root: Path) -> RetrievalIndex:
         },
     )
     _populate_related_labels(index)
-    index.prepared_records, index.token_index = _prepare_search_records(index.node_records)
+    index.prepared_records, index.token_index = _prepare_search_records(
+        index.node_records
+    )
     return index
+
 
 def _records_are_compatible(existing: IndexedNode, new: IndexedNode) -> bool:
     return (
@@ -479,7 +477,9 @@ def _append_indexed_node(
     if existing_record is not None:
         if _records_are_compatible(existing_record, record):
             return
-        raise RetrievalIndexError(f"Conflicting duplicate retrieval node id: {record.node_id}")
+        raise RetrievalIndexError(
+            f"Conflicting duplicate retrieval node id: {record.node_id}"
+        )
 
     records[record.node_id] = record
     nodes.append(
@@ -516,7 +516,9 @@ def _append_edge(
             "target": target,
             "relation": relation,
             "confidence": GRAPHIFY_EDGE_CONFIDENCE,
-            "source_file": str(source_file) if source_file is not None else "<in-memory-flowgraph>",
+            "source_file": str(source_file)
+            if source_file is not None
+            else "<in-memory-flowgraph>",
         }
     )
 
@@ -553,7 +555,9 @@ def _ensure_category_path(
                     "related": "",
                 },
                 summary=_build_result_summary(f"Block-tree category {current_path}"),
-                field_summary=_truncate(f"Block-tree category {current_path}", MAX_SUMMARY_CHARS),
+                field_summary=_truncate(
+                    f"Block-tree category {current_path}", MAX_SUMMARY_CHARS
+                ),
             )
             _append_indexed_node(nodes, records, category_record)
         if parent_node_id is not None:
@@ -578,12 +582,13 @@ def _populate_related_labels(index: RetrievalIndex) -> None:
             {
                 index.node_records[node_id].label
                 for node_id in neighbor_ids
-                if node_id in index.node_records and index.node_records[node_id].label != record.label
+                if node_id in index.node_records
+                and index.node_records[node_id].label != record.label
             }
         )
         record.related_node_labels = related_labels[:MAX_RELATED_LABELS]
         if record.related_node_labels:
-            record.search_fields["related"] = _join_non_empty(
+            record.search_fields["related"] = join_non_empty(
                 record.search_fields.get("related", ""),
                 " ".join(record.related_node_labels),
             )
@@ -624,7 +629,9 @@ def _prepare_search_records(
             field_terms=field_terms,
         )
 
-    return prepared_records, {term: frozenset(node_ids) for term, node_ids in token_index.items()}
+    return prepared_records, {
+        term: frozenset(node_ids) for term, node_ids in token_index.items()
+    }
 
 
 def _catalog_block_lookup(index: RetrievalIndex | None) -> dict[str, IndexedNode]:
@@ -657,10 +664,6 @@ def _coerce_parameter_map(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _join_non_empty(*parts: str) -> str:
-    return " ".join(part for part in parts if part).strip()
-
-
 def _format_label_group(label: str, values: list[str]) -> str:
     cleaned_values = [value for value in values if value]
     if not cleaned_values:
@@ -668,11 +671,7 @@ def _format_label_group(label: str, values: list[str]) -> str:
     return f"{label}: {', '.join(cleaned_values)}"
 
 
-def _format_key_value_group(label: str, values: list[str]) -> str:
-    cleaned_values = [value for value in values if value]
-    if not cleaned_values:
-        return ""
-    return f"{label}: {', '.join(cleaned_values)}"
+_format_key_value_group = _format_label_group
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -682,12 +681,12 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _build_result_summary(*parts: str) -> str | None:
-    summary = _truncate(_join_non_empty(*parts), MAX_RESULT_SUMMARY_CHARS)
+    summary = _truncate(join_non_empty(*parts), MAX_RESULT_SUMMARY_CHARS)
     return summary or None
 
 
 def _port_signature(direction: str, payload: dict[str, Any], index: int) -> str:
-    return _join_non_empty(
+    return join_non_empty(
         direction,
         str(index),
         compact_text(payload.get("label")),

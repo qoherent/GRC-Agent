@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from grc_agent._payload import build_error_payload
 from grc_agent.flowgraph_session import FlowgraphSession
 
 from .graphify_adapter import GraphifyAdapterError
@@ -16,7 +17,6 @@ from .schema import (
     VALID_SCOPES,
     IndexedNode,
     RetrievalIndex,
-    build_error_payload,
     build_success_payload,
 )
 from .text import expand_terms, normalize_text, tokenize_text
@@ -44,6 +44,8 @@ NODE_TYPE_BONUS = {
 
 _ACTIVE_SESSION: FlowgraphSession | None = None
 _ACTIVE_CATALOG_ROOT: str | None = None
+_ACTIVE_SESSION_INDEX: RetrievalIndex | None = None
+_ACTIVE_SESSION_INDEX_KEY: tuple[str, int, str | None, str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -53,23 +55,34 @@ class _SearchMatch:
     reason: str
 
 
-def _bind_retrieval_context(
+def bind_retrieval_context(
     *,
     session: FlowgraphSession | None = None,
     catalog_root: str | None = None,
 ) -> None:
     """Bind runtime retrieval context for the narrow public search surface."""
-    global _ACTIVE_SESSION, _ACTIVE_CATALOG_ROOT
+    global \
+        _ACTIVE_SESSION, \
+        _ACTIVE_CATALOG_ROOT, \
+        _ACTIVE_SESSION_INDEX, \
+        _ACTIVE_SESSION_INDEX_KEY
     _ACTIVE_SESSION = session
     _ACTIVE_CATALOG_ROOT = catalog_root
+    _ACTIVE_SESSION_INDEX = None
+    _ACTIVE_SESSION_INDEX_KEY = None
+
+
+_bind_retrieval_context = bind_retrieval_context
 
 
 def _clear_retrieval_context() -> None:
     """Clear any previously bound runtime retrieval context."""
-    _bind_retrieval_context(session=None, catalog_root=None)
+    bind_retrieval_context(session=None, catalog_root=None)
 
 
-def search_grc(query: str, scope: str = "catalog", k: int = DEFAULT_RESULT_LIMIT) -> dict[str, Any]:
+def search_grc(
+    query: str, scope: str = "catalog", k: int = DEFAULT_RESULT_LIMIT
+) -> dict[str, Any]:
     """Search the GNU Radio catalog or active session with bounded structured results."""
     return _search_grc_with_context(
         query,
@@ -126,8 +139,7 @@ def _search_grc_with_context(
                     error_type="MissingSession",
                     message="Session scope requires a loaded FlowgraphSession.",
                 )
-            catalog_index = _maybe_get_catalog_index(catalog_root)
-            retrieval_index = build_session_index(session, catalog_index=catalog_index)
+            retrieval_index = _get_session_index(session, catalog_root=catalog_root)
     except (GraphifyAdapterError, RetrievalIndexError) as exc:
         return build_error_payload(
             error_type=type(exc).__name__,
@@ -148,7 +160,10 @@ def _search_grc_with_context(
     return build_success_payload(
         scope=scope,
         query=normalized_query,
-        results=[match.node.to_result(score=match.score, reason=match.reason) for match in results],
+        results=[
+            match.node.to_result(score=match.score, reason=match.reason)
+            for match in results
+        ],
         warnings=warnings or None,
     )
 
@@ -157,6 +172,7 @@ def _normalize_query_text(query: Any) -> str:
     if not isinstance(query, str):
         return ""
     return " ".join(query.split())
+
 
 def _normalize_limit(k: Any) -> tuple[int, list[str]]:
     if isinstance(k, bool) or not isinstance(k, int):
@@ -173,6 +189,28 @@ def _maybe_get_catalog_index(catalog_root: str | None) -> RetrievalIndex | None:
         return get_catalog_index(catalog_root)
     except (GraphifyAdapterError, RetrievalIndexError):
         return None
+
+
+def _get_session_index(
+    session: FlowgraphSession,
+    *,
+    catalog_root: str | None,
+) -> RetrievalIndex:
+    global _ACTIVE_SESSION_INDEX, _ACTIVE_SESSION_INDEX_KEY
+    cache_key = (
+        session.graph_id(),
+        session.state_revision,
+        str(session.path) if session.path is not None else None,
+        catalog_root,
+    )
+    if _ACTIVE_SESSION_INDEX is not None and _ACTIVE_SESSION_INDEX_KEY == cache_key:
+        return _ACTIVE_SESSION_INDEX
+
+    catalog_index = _maybe_get_catalog_index(catalog_root)
+    retrieval_index = build_session_index(session, catalog_index=catalog_index)
+    _ACTIVE_SESSION_INDEX = retrieval_index
+    _ACTIVE_SESSION_INDEX_KEY = cache_key
+    return retrieval_index
 
 
 def _search_index(
@@ -215,7 +253,9 @@ def _search_index(
     )[:applied_limit]
 
 
-def _candidate_node_ids(retrieval_index: RetrievalIndex, query_terms: list[str]) -> set[str]:
+def _candidate_node_ids(
+    retrieval_index: RetrievalIndex, query_terms: list[str]
+) -> set[str]:
     candidate_ids: set[str] = set()
     for term in query_terms:
         candidate_ids.update(retrieval_index.token_index.get(term, ()))
@@ -245,7 +285,9 @@ def _score_record(
             exact_fields.append(field_name)
 
         token_hits = [
-            token for token in query_terms if token in prepared_record.field_terms.get(field_name, frozenset())
+            token
+            for token in query_terms
+            if token in prepared_record.field_terms.get(field_name, frozenset())
         ]
         if token_hits:
             deduped_hits = list(dict.fromkeys(token_hits))

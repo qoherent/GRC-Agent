@@ -68,4 +68,4 @@ jobs:
         run: uv run python -m unittest
 
       - name: Run runtime smoke test
-        run: uv run python -m grc_agent.cli --fake tests/data/random_bit_generator.grc
+        run: uv run grc-agent fake tests/data/random_bit_generator.grc

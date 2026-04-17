@@ -3,7 +3,9 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
+import grc_agent.retrieval.index as retrieval_index
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.retrieval import (
     build_catalog_index,
@@ -69,6 +71,20 @@ class RetrievalIndexBuildTests(unittest.TestCase):
         self.assertTrue(record.related_node_labels)
         self.assertIn("agc", index.token_index)
 
+    def test_catalog_index_reuses_shared_snapshot_for_block_metadata(self) -> None:
+        catalog_root = self._catalog_root_or_skip()
+
+        with mock.patch(
+            "grc_agent.retrieval.index.load_yaml_mapping",
+            wraps=retrieval_index.load_yaml_mapping,
+        ) as load_yaml_mapping:
+            build_catalog_index(catalog_root)
+
+        self.assertTrue(load_yaml_mapping.call_args_list)
+        self.assertTrue(
+            all(Path(call.args[0]).name.endswith(".domain.yml") for call in load_yaml_mapping.call_args_list)
+        )
+
     def test_session_index_builds_from_loaded_flowgraph(self) -> None:
         session = FlowgraphSession()
         session.load(self._fixture_path())
@@ -87,3 +103,9 @@ class RetrievalIndexBuildTests(unittest.TestCase):
         self.assertEqual(block_record.provenance.pointer, "blocks[samp_rate]")
         self.assertTrue(block_record.summary)
         self.assertIn("value", " ".join(block_record.search_fields["related"].split()))
+
+    def test_key_value_group_alias_matches_label_group_output(self) -> None:
+        self.assertEqual(
+            retrieval_index._format_label_group("parameters", ["a", "b"]),
+            retrieval_index._format_key_value_group("parameters", ["a", "b"]),
+        )
