@@ -70,13 +70,15 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser(
         "chat",
-        help="Run one bounded llama.cpp-backed turn against a loaded graph.",
+        help="Run one or more llama.cpp-backed turns against a loaded graph. "
+        "With --message, runs a single turn; without it, starts an interactive REPL.",
     )
     chat_parser.add_argument("file", help="Path to a .grc file to load.")
     chat_parser.add_argument(
         "--message",
-        required=True,
-        help="Run one bounded llama.cpp turn with this user message.",
+        required=False,
+        help="Run one bounded llama.cpp turn with this user message. "
+        "When omitted, starts an interactive REPL loop.",
     )
     chat_parser.add_argument(
         "--llama-server-url",
@@ -212,13 +214,13 @@ def _run_fake_runtime(file_path: str) -> int:
 
 def _run_llama_runtime(
     file_path: str,
-    user_message: str,
+    user_message: str | None,
     config: AppConfig,
     server_url: str,
     model: str | None,
     api_key: str | None,
 ) -> int:
-    """Run one bounded llama.cpp-backed turn against the routed runtime surface."""
+    """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
     print(f"Loading {file_path}...")
     session = _load_initial_session(file_path)
     retrieval_status, catalog_root = _prepare_retrieval()
@@ -248,6 +250,31 @@ def _run_llama_runtime(
         temperature=llama_config.temperature,
         enable_thinking=llama_config.enable_thinking,
     )
+
+    if launch_result.status == "started":
+        print(
+            f"Started llama.cpp server for {launch_result.model_alias} "
+            f"at {launch_result.server_url} (pid {launch_result.pid})"
+        )
+    else:
+        print(
+            f"Reusing llama.cpp server for {launch_result.model_alias} "
+            f"at {launch_result.server_url}"
+        )
+
+    if user_message is not None:
+        return _run_single_turn(agent, client, user_message, model)
+
+    return _run_repl_loop(agent, client, model)
+
+
+def _run_single_turn(
+    agent: GrcAgent,
+    client: LlamaServerClient,
+    user_message: str,
+    model: str | None,
+) -> int:
+    """Run one bounded llama turn and print the result."""
     try:
         result = run_bounded_llama_turn(
             agent,
@@ -260,17 +287,7 @@ def _run_llama_runtime(
         print(str(exc))
         return 1
 
-    if launch_result.status == "started":
-        print(
-            f"Started llama.cpp server for {launch_result.model_alias} "
-            f"at {launch_result.server_url} (pid {launch_result.pid})"
-        )
-    else:
-        print(
-            f"Reusing llama.cpp server for {launch_result.model_alias} "
-            f"at {launch_result.server_url}"
-        )
-    print(f"Using model {result['model']} via {server_url}")
+    print(f"Using model {result['model']}")
     if result["ok"]:
         print("\n--- Assistant ---")
         print(result["assistant_text"])
@@ -280,6 +297,53 @@ def _run_llama_runtime(
 
     _print_history(agent)
     return 0 if result["ok"] else 1
+
+
+def _run_repl_loop(
+    agent: GrcAgent,
+    client: LlamaServerClient,
+    model: str | None,
+) -> int:
+    """Run an interactive REPL loop over the current agent and session."""
+    print("\nInteractive REPL. Type /quit or /exit to stop.\n")
+    last_exit_code = 0
+
+    while True:
+        try:
+            user_input = input(">>> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("/quit", "/exit"):
+            break
+
+        _print_active_session(agent)
+
+        try:
+            result = run_bounded_llama_turn(
+                agent,
+                client,
+                user_input,
+                model=model,
+            )
+        except LlamaServerError as exc:
+            print(f"\n--- Runtime Error ---\n{exc}")
+            last_exit_code = 1
+            continue
+
+        if result["ok"]:
+            print(f"\n--- Assistant ---\n{result['assistant_text']}")
+        else:
+            print(f"\n--- Runtime ---\n{result['message']}")
+            last_exit_code = 1
+
+        _print_history(agent)
+        print()
+
+    return last_exit_code
 
 
 def _run_tool_command(

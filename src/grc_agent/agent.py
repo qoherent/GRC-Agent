@@ -58,50 +58,99 @@ class GrcAgent:
             "Decision rules:\n"
             "1. The active session context tells you which `.grc` file is loaded. "
             "Use `load_grc` only when the user explicitly asks to switch files.\n"
-            "2. Scope selection: if the user says my graph / this graph / current graph / in here, "
-            'use `scope="session"`. If the user says find me / available / in GNU Radio / library / '
-            "OFDM / PSK / QAM / equalizer / channelizer / spread spectrum / carrier / scrambler, "
-            'use `scope="catalog"`.\n'
-            "3. `get_grc_context` needs an exact session instance name like `blocks_throttle2_0`. "
-            "`describe_block` needs a GNU block id like `blocks_throttle2` or `qtgui_time_sink_x`.\n"
+            '2. Scope selection: use `scope="session"` only for my graph / this graph / current graph / '
+            "in here / loaded graph, or when the user explicitly wants blocks from the active session. "
+            "If the user says find / search / look up / discover a block type, or names a block family like "
+            "Head / throttle2 / AGC / time sink / OFDM / PSK / QAM / equalizer / channelizer / scrambler, "
+            'use `scope="catalog"` unless they explicitly say the current graph. '
+            'Example: `Find the Head block` starts with `search_grc(query="Head", scope="catalog")`.\n'
+            "3. `get_grc_context` needs an exact session instance name like `blocks_throttle2_0` or a variable "
+            "name like `samp_rate`. `describe_block` needs a GNU block id like `blocks_throttle2` or "
+            "`qtgui_time_sink_x`. If the user names one loaded block or variable and asks what uses it, "
+            "what is around it, how it is wired, or says to take a quick look at it, call `get_grc_context` directly.\n"
             "4. After `search_grc`, block results include `block_id`. "
             "If the user asked to explain a block, call `describe_block` with that `block_id`. "
             "Never pass `catalog:block:...` or `session:block:...` into `describe_block`.\n"
-            "5. If the user already names a GNU block id or a clear block family like `blocks_char_to_float`, "
-            "prefer `describe_block` instead of `search_grc`.\n"
+            "5. MANDATORY: If the user says 'find', 'search', or 'look up' first, you MUST call "
+            "`search_grc` before `describe_block` — even if the query looks like a known GNU block id "
+            "or family such as `throttle2`. Never call `describe_block` as the first tool when the user "
+            "said 'look up', 'find', or 'search' — always start with `search_grc`. "
+            "Otherwise, if the user directly asks what / tell me about / explain one specific block, prefer `describe_block` "
+            'even when the block might not exist yet. Examples: `Tell me about foobar_baz` => `describe_block(block_id="foobar_baz")`; '
+            '`What is a QT GUI time sink?` => `describe_block(block_id="qtgui_time_sink_x")`.\n'
             "6. When the user asks to change, set, update, remove, add, connect, disconnect, "
             "or modify anything, ALWAYS call `apply_edit`. "
             "ONLY use `propose_edit` when the user explicitly says "
-            "preview / dry-run / what-if / would it work.\n"
+            "preview / dry-run / what-if / would it work / what would happen if. "
+            "Do NOT use `propose_edit` just because you inspected first or want to be cautious. "
+            "Removing a named block or variable like `samp_rate` is still an edit: use `apply_edit`, "
+            "do not ask for clarification.\n"
             "7. For parameter edits, use transactions shaped like "
             '`{"op_type": "update_params", "instance_name": "samp_rate", "params": {"value": "48000"}}`. '
             "When the user says sample rate, speed, or rate, they usually mean the `samp_rate` variable. "
-            "Expand abbreviations: 48k=48000, 8k=8000, 96k=96000.\n"
+            "Expand abbreviations: 8k=8000, 32k=32000, 44.1k=44100, 48k=48000, 96k=96000.\n"
             "8. Supported `op_type` values: `update_params`, `add_connection`, `remove_connection`, "
             "`remove_block`, and detached-variable `add_block`. Do not invent wrappers or new op types. "
+            "Example remove_block: "
+            '`{"op_type": "remove_block", "instance_name": "samp_rate"}`. '
             "Example add_block: "
             '`{"op_type": "add_block", "block_type": "variable", "instance_name": "debug_flag", '
-            '"params": {"value": "0"}}`\n'
+            '"parameters": {"value": "0"}}`. '
+            "Use plain JSON keys like `nconnections`, `srate`, and `value`, not quoted key names.\n"
             "9. For rewires, pass all operations in one ordered transaction list. "
             "To add a second trace to the time sink: "
             '`[{"op_type": "update_params", "instance_name": "qtgui_time_sink_x_0", '
             '"params": {"nconnections": "2"}}, {"op_type": "add_connection", '
             '"src_block": "blocks_char_to_float_0", "src_port": 0, '
             '"dst_block": "qtgui_time_sink_x_0", "dst_port": 1}]`. '
+            "A request like `Put another trace on the time sink` or `add a second trace` is an `apply_edit` request, not `propose_edit`. "
+            "To remove `samp_rate` while keeping the standard graph valid: "
+            '`[{"op_type": "update_params", "instance_name": "blocks_throttle2_0", '
+            '"params": {"samples_per_second": "32000"}}, {"op_type": "update_params", '
+            '"instance_name": "qtgui_time_sink_x_0", "params": {"srate": "32000"}}, '
+            '{"op_type": "remove_block", "instance_name": "samp_rate"}]`. '
             "Always expand `nconnections` before adding the connection in the same transaction. "
             "`remove_connection` needs `src_block`, `src_port`, `dst_block`, `dst_port`.\n"
             "10. Complete every requested step in order before answering. "
             "If the user said look / inspect / check / show first, you MUST call an inspection tool "
             "(summarize_graph, get_grc_context, search_grc, or describe_block) before any edit. "
             "Do not skip to apply_edit when the user asked to inspect first. "
+            "If the user names a specific loaded block or variable, prefer `get_grc_context` over `summarize_graph`. "
+            "If the user asks a vague whole-graph question like what am I looking at or what is generating the signal here, prefer `summarize_graph`. "
+            "If the edit is already clear and the user did NOT ask to inspect first, do not add an inspection step. "
             "If the user asked to apply and validate, call `validate_graph` after a successful edit. "
+            "Phrases like save / persist / write it out mean `save_graph` on the current graph. "
             "Only call `save_graph` after successful validation of the current dirty state.\n"
             "11. If the user asks for unsupported operations (undo, redo, export as Python, "
             "edit raw YAML, generate code), do not call a tool; answer briefly that it is unsupported.\n"
             "12. After `summarize_graph`, copy the tool summary verbatim as your final answer. "
             "After other successful flows, return one short factual sentence.\n"
-            "13. When a tool returns `ok: false`, report the error message to the user. "
-            "Do not silently retry with different arguments unless the error hints at a fix."
+            "13. When a tool returns `ok: false`, report the error message to the user and stop unless the "
+            "user explicitly asked you to recover or retry after that failure. Do not continue to contingent "
+            "steps like `validate_graph` or `save_graph` after a failed edit or preview. You may do one corrected "
+            "retry only when the user explicitly asked for recovery and the tool error or hint gives a clear fix. "
+            "After a preview-only request, stop after `propose_edit` and explain the preview result; do not call "
+            "`validate_graph` or `save_graph` unless the preview succeeded and the user separately asked for them.\n"
+            "14. Questions about the current graph state — like is the graph dirty, what variables are "
+            "in the graph, what blocks are loaded, give me a summary, what changed, show me the current "
+            "state — should use `summarize_graph`. But if the user says search / find / look through the "
+            "current graph for a class of blocks such as sinks or sources, use `search_grc` with "
+            '`scope="session"`, not `summarize_graph`. Do NOT call `apply_edit` to answer state queries.\n'
+            "15. When the user gives a follow-up message in a multi-turn conversation, do NOT repeat "
+            "edits or actions that were already completed in a prior turn. Only execute the new request. "
+            "If the user asks to validate after a prior edit, just call `validate_graph` — do not "
+            "re-apply the edit. If the user asks to save after validation, just call `save_graph`.\n"
+            "16. When the user asks to disconnect and then remove a connected block in the same request, "
+            "remove every attached wire first, then `remove_block`, all in one ordered transaction list. "
+            'Example for removing `blocks_throttle2_0`: `[{"op_type": "remove_connection", '
+            '"src_block": "analog_random_source_x_0", "src_port": 0, "dst_block": "blocks_throttle2_0", '
+            '"dst_port": 0}, {"op_type": "remove_connection", "src_block": "blocks_throttle2_0", '
+            '"src_port": 0, "dst_block": "blocks_char_to_float_0", "dst_port": 0}, '
+            '{"op_type": "remove_block", "instance_name": "blocks_throttle2_0"}]`.\n'
+            "17. In a follow-up message, when the user says the edit is already applied and asks you to "
+            "only validate or save, do NOT call `apply_edit` again. Call only the tools the user requested. "
+            "If the save was previously refused because the graph needs validation, call `validate_graph` "
+            "then `save_graph` — without re-editing."
         )
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
@@ -120,7 +169,12 @@ class GrcAgent:
             ),
             self._schema(
                 "summarize_graph",
-                "Return a bounded summary of the loaded GNU Radio graph.",
+                "Return a bounded summary of the loaded GNU Radio graph. "
+                "Use this for vague whole-graph questions like what am I looking at, what is generating the signal here, "
+                "give me a quick overview, what variables are in the graph, what blocks are loaded, "
+                "is the graph dirty, show me the current state, or what changed. "
+                "Do NOT use this when the user explicitly says to search or look through the current graph "
+                "for a class of blocks like sinks or sources; use `search_grc` with `scope=\"session\"` instead.",
                 {
                     "max_blocks": {
                         "type": "integer",
@@ -131,12 +185,16 @@ class GrcAgent:
             self._schema(
                 "search_grc",
                 "Search for GNU Radio blocks by name, function, or domain concept. "
-                "Use this when the user wants to discover or find a block "
+                "Use this when the user wants to find, search for, look up, or discover a block "
                 "(e.g. filtering, modulation, carrier recovery, scrambling, OFDM, PSK, QAM, "
-                "equalizer, channelizer, spread spectrum, frequency hopping, AGC, sink, source). "
-                'Use `scope="session"` for the loaded graph and `scope="catalog"` for GNU Radio discovery. '
+                "equalizer, channelizer, spread spectrum, frequency hopping, AGC, Head, throttle2, sink, source). "
+                'Use `scope="session"` only for the loaded graph and `scope="catalog"` for GNU Radio discovery or block-family lookups. '
+                'Example: `Find the Head block` => `search_grc(query="Head", scope="catalog")`. '
+                'Example: `Look through my current graph for sink blocks` => `search_grc(query="sink", scope="session")`. '
+                "Keep the user's distinguishing words together in the query: search `frequency sink`, not generic `sink`. "
                 "Block results include `block_id` for `describe_block` and `node_id` for `get_grc_context`. "
-                "Do NOT use this when the user already names a specific GNU block id — use `describe_block` instead.",
+                "If the user said find / search / look up first, prefer this before `describe_block` even when the query already resembles a block id. "
+                "Do NOT use this when the user only wants details for a specific GNU block id — use `describe_block` instead.",
                 {
                     "query": {
                         "type": "string",
@@ -157,8 +215,8 @@ class GrcAgent:
             self._schema(
                 "get_grc_context",
                 "Show the connections and neighborhood around a specific block in the session. "
-                "Use this when the user asks how blocks are wired, connected, routed, or linked. "
-                "Pass the exact loaded session instance name (e.g. `blocks_throttle2_0`), not a catalog id. "
+                "Use this when the user asks how blocks are wired, connected, routed, linked, used, or what is around a named block or variable. "
+                "Pass the exact loaded session instance name (e.g. `blocks_throttle2_0` or `samp_rate`), not a catalog id. "
                 "If the name is not found, close matches will be suggested.",
                 {
                     "node_id": {
@@ -180,7 +238,9 @@ class GrcAgent:
                 "describe_block",
                 "Return the full parameter list, port types, and documentation for one GNU Radio block. "
                 "Pass a GNU block id such as `blocks_throttle2` or `qtgui_time_sink_x`. "
-                "If you searched first, use the result's `block_id` field.",
+                "If you searched first, use the result's `block_id` field. "
+                "NEVER call this first if the user said 'find', 'look up', or 'search' — call `search_grc` first in those cases. "
+                "If the user directly asks about one named block, you can call this even when the block may not exist; the tool will report not found.",
                 {
                     "block_id": {
                         "type": "string",
@@ -197,11 +257,16 @@ class GrcAgent:
                 '`{"transaction": {"op_type": "update_params", "instance_name": "samp_rate", '
                 '"params": {"value": "48000"}}}`. Supported `op_type`: `update_params`, '
                 "`add_connection`, `remove_connection`, `remove_block`, detached-variable `add_block`. "
+                "For remove_block, pass "
+                '`{"transaction": {"op_type": "remove_block", "instance_name": "samp_rate"}}`. '
                 "For disconnects, include all four endpoint fields. "
+                "To remove a connected block, remove every attached wire first in the same ordered transaction, then `remove_block`. "
                 "For second-trace rewires, pass an ordered list: first update `nconnections`, then `add_connection`. "
                 "For adding a detached variable, pass "
                 '`{"transaction": {"op_type": "add_block", "block_type": "variable", '
-                '"instance_name": "my_var", "params": {"value": "0"}}}`',
+                '"instance_name": "my_var", "parameters": {"value": "0"}}}`. '
+                "Use plain JSON parameter names like `nconnections`, `srate`, and `value`. "
+                "If the user wants to remove `samp_rate` but keep the graph working, use one ordered repair transaction that updates dependent params to literals before `remove_block`.",
                 {
                     "transaction": {
                         "type": ["object", "array"],
@@ -213,16 +278,20 @@ class GrcAgent:
             self._schema(
                 "propose_edit",
                 "Preview whether a transaction would succeed. This does NOT modify the graph. "
-                "ONLY use this when the user explicitly says preview / dry-run / what-if / would it work. "
+                "ONLY use this when the user explicitly says preview / dry-run / what-if / would it work / what would happen if. "
                 "For all other edit requests, use `apply_edit` instead. "
+                "Do NOT use this after an inspect-first edit request unless the user explicitly asked for a preview. "
                 "For parameter edits, pass "
                 '`{"transaction": {"op_type": "update_params", "instance_name": "samp_rate", '
                 '"params": {"value": "48000"}}}`. Supported `op_type`: `update_params`, '
                 "`add_connection`, `remove_connection`, `remove_block`, detached-variable `add_block`. "
+                "For remove_block, pass "
+                '`{"transaction": {"op_type": "remove_block", "instance_name": "samp_rate"}}`. '
                 "For rewires, use ordered transaction lists when one step enables another. "
                 "For adding a detached variable, pass "
                 '`{"transaction": {"op_type": "add_block", "block_type": "variable", '
-                '"instance_name": "my_var", "params": {"value": "0"}}}`',
+                '"instance_name": "my_var", "parameters": {"value": "0"}}}`. '
+                "If the preview fails and the user only asked for a preview, explain the failure and stop.",
                 {
                     "transaction": {
                         "type": ["object", "array"],
@@ -240,6 +309,7 @@ class GrcAgent:
             self._schema(
                 "save_graph",
                 "Write the current graph to disk. Use this to save, persist, or write out the flowgraph. "
+                "Phrases like `write it out` or `write this out` mean the current loaded graph. "
                 "Allowed only after the latest dirty state has validated successfully. "
                 "Pass an optional `path` to save to a specific destination.",
                 {
@@ -488,6 +558,64 @@ class GrcAgent:
             }
         )
 
+    def compact_history(self) -> None:
+        """Reduce history token cost before a new multi-turn conversation turn.
+
+        1. Keep only the last ``role="session"`` entry.
+        2. For ``role="tool"`` entries older than the previous turn boundary
+           (a turn boundary is a ``role="user"`` entry), truncate content to
+           the small set of fields needed for the model to understand past
+           outcomes without repeating large payloads.
+        """
+        last_session_index: int | None = None
+        for index, turn in enumerate(self.history):
+            if turn.get("role") == "session":
+                last_session_index = index
+
+        if last_session_index is not None and last_session_index > 0:
+            self.history = [
+                turn
+                for idx, turn in enumerate(self.history)
+                if turn.get("role") != "session" or idx == last_session_index
+            ]
+
+        user_indices = [
+            idx for idx, turn in enumerate(self.history) if turn.get("role") == "user"
+        ]
+        previous_turn_start = user_indices[-2] if len(user_indices) >= 2 else None
+
+        if previous_turn_start is not None:
+            compacted = []
+            for idx, turn in enumerate(self.history):
+                if (
+                    turn.get("role") == "tool"
+                    and idx < previous_turn_start
+                    and isinstance(turn.get("content"), dict)
+                ):
+                    compacted.append(self._compact_tool_entry(turn))
+                else:
+                    compacted.append(turn)
+            self.history = compacted
+
+    @staticmethod
+    def _compact_tool_entry(turn: HistoryEntry) -> HistoryEntry:
+        content = turn.get("content")
+        if not isinstance(content, dict):
+            return turn
+        compact: dict[str, Any] = {}
+        for key in ("ok", "message", "error_type", "active_session", "tool", "valid"):
+            if key in content:
+                compact[key] = content[key]
+        if not compact:
+            compact["ok"] = content.get("ok", False)
+            compact["message"] = "result truncated"
+        return {
+            "role": turn.get("role"),
+            "tool_call_id": turn.get("tool_call_id"),
+            "name": turn.get("name"),
+            "content": compact,
+        }
+
     def _missing_session_result(self, tool_name: str) -> ToolResult | None:
         if self.session.flowgraph is not None:
             return None
@@ -554,7 +682,8 @@ class GrcAgent:
             f"dirty={content.get('dirty')}, "
             f"validation={validation_status};"
             f"{variables_hint}{blocks_hint} "
-            "Use exact session instance names for session tools. "
+            "Use exact session instance names for session tools. Variable names like `samp_rate` are exact session instance names. "
+            "Use named loaded blocks or variables with `get_grc_context`, and use `remove_block` with their `instance_name`. "
             "For describe_block use GNU block ids, not session:block or catalog:block prefixes."
         )
 
@@ -601,13 +730,14 @@ class GrcAgent:
             payload = search_grc(query, scope=scope, k=k)
         if payload.get("ok") and payload.get("results"):
             payload["hint"] = (
-                "Use `block_id` from block results with describe_block. "
-                "Use `node_id` with get_grc_context."
+                "Use `block_id` from block results with `describe_block`. "
+                "Use `node_id` with `get_grc_context`."
             )
         elif payload.get("ok") and scope == "session" and not payload.get("results"):
             payload["hint"] = (
                 "No matches in the session. "
-                'Retry with `scope="catalog"` to search the GNU Radio block library.'
+                'Do NOT call `describe_block` with the raw query text. Retry the same query with `scope="catalog"`, '
+                "then use the returned `block_id`."
             )
         return self._payload_result("search_grc", payload)
 
@@ -618,7 +748,35 @@ class GrcAgent:
         max_nodes: int = 20,
     ) -> ToolResult:
         payload = get_grc_context(self.session, node_id, hops=hops, max_nodes=max_nodes)
+        if payload.get("ok"):
+            payload["hint"] = (
+                "This is inspection data only. "
+                "If the user also asked for a real change after inspecting, call `apply_edit` next."
+            )
+            target = payload.get("target")
+            edges = payload.get("edges")
+            if (
+                isinstance(target, dict)
+                and target.get("block_type") == "qtgui_time_sink_x"
+                and isinstance(target.get("node_id"), str)
+                and isinstance(edges, list)
+            ):
+                for edge in edges:
+                    if (
+                        isinstance(edge, dict)
+                        and edge.get("target") == target["node_id"]
+                        and isinstance(edge.get("source"), str)
+                    ):
+                        payload["hint"] = (
+                            "This is inspection data only. If the user asked to add a second trace to this time sink, "
+                            "call `apply_edit` with one ordered transaction: first update `nconnections` to `2` on "
+                            f"`{target['node_id']}`, then add_connection from `{edge['source']}` port "
+                            f"{edge.get('source_port', 0)} to `{target['node_id']}` port `1`. Do not use `propose_edit` "
+                            "unless the user explicitly asked for a preview."
+                        )
+                        break
         if payload.get("ok") is False and payload.get("error_type") == "node_not_found":
+            candidate_nodes: list[str] = []
             candidate_result = search_grc(node_id, scope="session", k=3)
             if candidate_result.get("ok") and candidate_result.get("results"):
                 candidate_nodes = [
@@ -628,11 +786,23 @@ class GrcAgent:
                     and isinstance(result.get("node_id"), str)
                     and str(result.get("node_id")).startswith("session:block:")
                 ]
-                if candidate_nodes:
-                    payload["candidate_nodes"] = candidate_nodes
+            if candidate_nodes:
+                payload["candidate_nodes"] = candidate_nodes
+                payload["hint"] = (
+                    "Use an exact session instance name for get_grc_context. "
+                    f"Closest session matches: {', '.join(candidate_nodes)}."
+                )
+            elif self.session.flowgraph is not None:
+                all_blocks = self.session.flowgraph.blocks
+                all_entries = [
+                    f"{b.instance_name} ({b.block_type})"
+                    for b in all_blocks[:max_nodes]
+                ]
+                if all_entries:
+                    payload["candidate_nodes"] = [b.instance_name for b in all_blocks[:max_nodes]]
                     payload["hint"] = (
                         "Use an exact session instance name for get_grc_context. "
-                        f"Closest session matches: {', '.join(candidate_nodes)}."
+                        f"All loaded session blocks: {', '.join(all_entries)}."
                     )
         return self._payload_result("get_grc_context", payload)
 
@@ -660,10 +830,15 @@ class GrcAgent:
         result = self._payload_result("propose_edit", payload)
         if result.get("ok") and result.get("error_count", 0) == 0:
             result["hint"] = (
-                "To commit this change, call apply_edit with the same transaction."
+                "This was only a preview and did NOT modify the graph. "
+                "If the user asked for the actual change, call `apply_edit` next with the same or fuller transaction."
             )
         elif result.get("ok") is False:
-            result["hint"] = self._transaction_hint()
+            result["hint"] = (
+                "Preview failed. Explain the preflight errors to the user. "
+                "If the user asked only for a preview, stop after explaining; do not call validate_graph. "
+                + self._transaction_hint()
+            )
         return result
 
     def _apply_edit(self, transaction: Any) -> ToolResult:
@@ -677,10 +852,32 @@ class GrcAgent:
         result = self._payload_result("apply_edit", payload)
         if result.get("ok"):
             result["hint"] = (
-                "If the user also asked to confirm the graph still works, call validate_graph next."
+                "Edit applied and validated. Do NOT call apply_edit again for this same change. "
+                "If the user also asked to save, call validate_graph then save_graph. "
+                "If the user only asked to confirm it works, call validate_graph next."
             )
         else:
-            result["hint"] = self._transaction_hint()
+            errors = result.get("errors")
+            if isinstance(errors, list) and any(
+                isinstance(error, dict)
+                and error.get("code") == "block_still_referenced"
+                for error in errors
+            ):
+                result["hint"] = (
+                    "This block is still referenced elsewhere. "
+                    "If the user asked to keep the graph working, call apply_edit again with one repair transaction that first replaces references with literal values, then removes the block. "
+                    "Do not switch to propose_edit unless the user explicitly asked for a preview. "
+                    + self._transaction_hint()
+                )
+            elif isinstance(errors, list) and any(
+                isinstance(error, dict)
+                and error.get("code") == "connected_block"
+                for error in errors
+            ):
+                conn_hint = self._build_connection_hints_for_remove_block(result)
+                result["hint"] = (conn_hint + " " if conn_hint else "") + self._transaction_hint()
+            else:
+                result["hint"] = self._transaction_hint()
         return result
 
     def _validate_graph(self) -> ToolResult:
@@ -714,7 +911,11 @@ class GrcAgent:
             return self._tool_result(
                 tool_name="save_graph",
                 ok=False,
-                message="Refusing to save a dirty graph before successful validation.",
+                message=(
+                    "Refusing to save a dirty graph before successful validation. "
+                    "Next step: call validate_graph, then save_graph. "
+                    "Do NOT call apply_edit again."
+                ),
                 requires_validation=True,
                 dirty=True,
             )
@@ -770,6 +971,44 @@ class GrcAgent:
         return (
             "Use supported transactions only. "
             "For parameter edits use update_params with instance_name and params. "
+            "For remove_block use instance_name, not block_id. "
+            "For detached variable add_block use block_type, instance_name, and parameters (not params). "
+            "Use bare parameter keys like nconnections, srate, and value. "
             "For disconnects include src_block, src_port, dst_block, and dst_port. "
-            "For a second time-sink trace, first update nconnections, then add_connection."
+            "For a second time-sink trace, first update nconnections, then add_connection. "
+            "For removing samp_rate while keeping the graph valid, replace dependent params with literals before remove_block."
         )
+
+    def _build_connection_hints_for_remove_block(self, result: dict[str, Any]) -> str:
+        """Return a concrete remove_connection + remove_block transaction hint for connected blocks."""
+        if self.session.flowgraph is None:
+            return ""
+        normalized_ops = result.get("normalized_operations")
+        if not isinstance(normalized_ops, list):
+            return ""
+        parts = []
+        for op in normalized_ops:
+            if not isinstance(op, dict) or op.get("op_type") != "remove_block":
+                continue
+            instance_name = op.get("instance_name")
+            if not isinstance(instance_name, str):
+                continue
+            conns = [
+                c
+                for c in self.session.flowgraph.connections
+                if c.src_block == instance_name or c.dst_block == instance_name
+            ]
+            if not conns:
+                continue
+            remove_conn_ops = ", ".join(
+                f'{{"op_type": "remove_connection", "src_block": "{c.src_block}", '
+                f'"src_port": {c.src_port}, "dst_block": "{c.dst_block}", "dst_port": {c.dst_port}}}'
+                for c in conns
+            )
+            parts.append(
+                f"`{instance_name}` is still connected. "
+                f"To disconnect and remove it, use this ordered transaction: "
+                f"[{remove_conn_ops}, "
+                f'{{"op_type": "remove_block", "instance_name": "{instance_name}"}}]'
+            )
+        return " ".join(parts)

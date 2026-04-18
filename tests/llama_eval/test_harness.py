@@ -94,6 +94,20 @@ class SequenceMatchingTests(unittest.TestCase):
         self.assertTrue(tools_appear_in_expected_order([], []))
         self.assertFalse(tools_appear_in_expected_order(["save_graph"], []))
 
+    def test_duplicate_expected_tools_require_duplicate_calls(self) -> None:
+        self.assertTrue(
+            tools_appear_in_expected_order(
+                ["apply_edit", "apply_edit", "validate_graph"],
+                ["apply_edit", "apply_edit"],
+            )
+        )
+        self.assertFalse(
+            tools_appear_in_expected_order(
+                ["apply_edit", "validate_graph"],
+                ["apply_edit", "apply_edit"],
+            )
+        )
+
 
 class TransactionMatchingTests(unittest.TestCase):
     def test_argument_checks_match_partial_raw_arguments(self) -> None:

@@ -393,6 +393,29 @@ _INSPECT_BEFORE_EDIT_TERMS = (
     "show",
     "see",
 )
+_PREVIEW_INTENT_TERMS = (
+    "preview",
+    "dry-run",
+    "dry run",
+    "what-if",
+    "what if",
+    "would it work",
+    "what would happen if",
+)
+_PREVIEW_FOLLOW_UP_TERMS = (
+    "apply",
+    "validate",
+    "validation",
+    "save",
+    "persist",
+    "commit",
+)
+_SUMMARY_INTENT_TERMS = (
+    "summary",
+    "summarize",
+    "give me a summary",
+    "overview",
+)
 
 
 def run_bounded_llama_turn(
@@ -411,6 +434,9 @@ def run_bounded_llama_turn(
     else:
         client.require_model_alias(model)
         resolved_model = model
+    agent.compact_history()
+    if any(turn.get("role") == "user" for turn in agent.history):
+        agent._record_active_session_history(reason="turn_refresh")
     agent.history.append({"role": "user", "content": user_message})
 
     tool_calls_executed = 0
@@ -505,6 +531,7 @@ def _resolve_final_assistant_text(
     """Deterministically finalize supported runtime outcomes from tool results."""
     tool_turns = [turn for turn in history[:-1] if turn.get("role") == "tool"]
     latest_tool_turn = tool_turns[-1] if tool_turns else None
+    unsupported_message = _unsupported_request_message(history)
     if (
         isinstance(latest_tool_turn, dict)
         and latest_tool_turn.get("name") == "summarize_graph"
@@ -520,6 +547,8 @@ def _resolve_final_assistant_text(
             and isinstance(latest_tool_turn["content"].get("message"), str)
         ):
             return latest_tool_turn["content"]["message"]
+        if unsupported_message is not None:
+            return unsupported_message
         return "I could not complete that request with the available tools."
 
     if assistant_text.strip():
@@ -531,6 +560,8 @@ def _resolve_final_assistant_text(
         and isinstance(latest_tool_turn["content"].get("message"), str)
     ):
         return latest_tool_turn["content"]["message"]
+    if unsupported_message is not None and latest_tool_turn is None:
+        return unsupported_message
     return "I could not complete that request with the available tools."
 
 
@@ -539,11 +570,34 @@ def _looks_like_tool_call_text(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    if "(" in stripped or ")" in stripped:
-        return False
-    if ":" in stripped:
-        return False
-    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\s*\{.*\}", stripped))
+    return bool(
+        re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*\s*(\{.*\}|\(.*\))",
+            stripped,
+            re.DOTALL,
+        )
+    )
+
+
+def _unsupported_request_message(history: list[dict[str, Any]]) -> str | None:
+    user_turns = [turn for turn in history if turn.get("role") == "user"]
+    if not user_turns:
+        return None
+    content = user_turns[-1].get("content")
+    if not isinstance(content, str):
+        return None
+    lowered = content.lower()
+    if "undo" in lowered:
+        return "Undo is unsupported."
+    if "redo" in lowered:
+        return "Redo is unsupported."
+    if ("export" in lowered and "python" in lowered) or "standalone python script" in lowered:
+        return "Exporting as standalone Python is unsupported."
+    if "yaml" in lowered and ("edit" in lowered or "raw" in lowered):
+        return "Editing raw YAML directly is unsupported."
+    if "generate code" in lowered or "generate python" in lowered:
+        return "Code generation is unsupported."
+    return None
 
 
 def _build_follow_up_reminder(
@@ -559,7 +613,7 @@ def _build_follow_up_reminder(
         if turn.get("role") == "reminder" and isinstance(turn.get("code"), str)
     }
 
-    if _requests_validation(lowered):
+    if _requests_validation(lowered) and not _is_preview_only_request(lowered):
         last_validate = last_success.get("validate_graph", -1)
         last_change_or_load = max(
             last_success.get("apply_edit", -1),
@@ -574,6 +628,19 @@ def _build_follow_up_reminder(
                 "message": (
                     "Reminder: the user asked you to validate the graph. "
                     "Call `validate_graph` before you finish."
+                ),
+            }
+
+    if _requests_summary(lowered):
+        if (
+            "summarize_graph" not in successful_tool_names
+            and "summarize_graph_required" not in existing_reminders
+        ):
+            return {
+                "code": "summarize_graph_required",
+                "message": (
+                    "Reminder: the user asked for a graph summary. "
+                    "Call `summarize_graph` before you finish."
                 ),
             }
 
@@ -629,7 +696,8 @@ def _build_follow_up_reminder(
                 "code": "inspect_before_edit",
                 "message": (
                     "Reminder: the user asked to inspect or look at something before making a change. "
-                    "Call an inspection tool (summarize_graph, get_grc_context, search_grc, or describe_block) first."
+                    "Call an inspection tool first. If the user named a specific loaded block or variable, "
+                    "prefer `get_grc_context` over `summarize_graph`."
                 ),
             }
 
@@ -668,6 +736,10 @@ def _requests_description(lowered_user_message: str) -> bool:
     return any(term in lowered_user_message for term in _DESCRIBE_INTENT_TERMS)
 
 
+def _requests_summary(lowered_user_message: str) -> bool:
+    return any(term in lowered_user_message for term in _SUMMARY_INTENT_TERMS)
+
+
 def _requests_save(lowered_user_message: str) -> bool:
     return any(term in lowered_user_message for term in _SAVE_INTENT_TERMS)
 
@@ -692,3 +764,12 @@ def _needs_inspect_before_edit(lowered_user_message: str) -> bool:
         )
     )
     return has_inspect_intent and has_edit_intent
+
+
+def _is_preview_only_request(lowered_user_message: str) -> bool:
+    has_preview_intent = any(
+        term in lowered_user_message for term in _PREVIEW_INTENT_TERMS
+    )
+    if not has_preview_intent:
+        return False
+    return not any(term in lowered_user_message for term in _PREVIEW_FOLLOW_UP_TERMS)

@@ -1111,6 +1111,41 @@ class LlamaServerAdapterTests(unittest.TestCase):
             "I could not complete that request with the available tools.",
         )
 
+    def test_bounded_llama_turn_blocks_function_style_tool_call_text_without_executed_tools(
+        self,
+    ) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": 'save_graph(path="random_bit_generator.py")',
+                            }
+                        }
+                    ]
+                }
+            ],
+            model_id=llama_config.model,
+        )
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Export this as a standalone Python script.",
+            model=llama_config.model,
+        )
+
+        self.assertEqual(
+            result["assistant_text"],
+            "Exporting as standalone Python is unsupported.",
+        )
+
     def test_cli_llama_runtime_uses_adapter_path(self) -> None:
         config = load_app_config()
         llama_config = config.llama

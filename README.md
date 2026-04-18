@@ -13,8 +13,9 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - `FlowgraphSession` owns parsed state, persistence, validation, and all graph-mutation primitives
 - `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
 - the structural-edit surface is frozen pending new experiments
-- a thin llama.cpp adapter is wired for one bounded CLI turn
-- the env-gated live llama.cpp checks now target summarize and phase-6 routed edit flows
+- a thin llama.cpp adapter is wired for single-turn and multi-turn CLI conversations
+- the live llama.cpp eval suite now covers phases 1-5, including multi-turn continuity and failure-recovery flows
+- multi-turn conversations use history compaction and session auto-refresh to stay within the token budget
 - raw model prose is still not trusted outside the runtime's deterministic finalization rules for supported flows
 
 ## Repo Map
@@ -24,7 +25,7 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - [docs/PACKAGE_GUIDE.md](docs/PACKAGE_GUIDE.md): concise script-by-script map of the Python package
 - [tests](tests): focused `unittest` regression coverage
 - [tests/data/random_bit_generator.grc](tests/data/random_bit_generator.grc): canonical fixture flowgraph
-- [tests/llama_eval](tests/llama_eval): live model eval suite (see [docs/LLAMA_EVAL.md](docs/LLAMA_EVAL.md))
+- [tests/llama_eval](tests/llama_eval): five-phase live model eval suite (see [docs/LLAMA_EVAL.md](docs/LLAMA_EVAL.md))
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture, settled decisions, evidence, milestones, and backlog
 
 ## Planning Rule
@@ -193,12 +194,20 @@ The repo now includes a thin llama.cpp adapter that calls only documented server
 - other supported final answers fall back to the latest structured tool `message` only when the model leaves the final text empty or tool-call-shaped
 - raw tool-call-like text is not surfaced as the final answer when no tools actually ran
 
-Run the bounded CLI path:
+Run a single-turn CLI path:
 
 ```bash
 uv run grc-agent chat tests/data/random_bit_generator.grc \
 	--message "Change samp_rate to 48000 and validate the graph."
 ```
+
+Run an interactive multi-turn REPL (no `--message` flag):
+
+```bash
+uv run grc-agent chat tests/data/random_bit_generator.grc
+```
+
+Type `/quit` or `/exit` to leave the REPL. History compaction runs between turns to stay within the model context window.
 
 If the configured local llama.cpp server is down, the CLI starts it automatically, waits for `/health`, requires `/v1/models` to return exactly one model, and requires that model `id` to match the configured alias before the first chat request. Repeated `chat` runs reuse the healthy local backend instead of relaunching it.
 

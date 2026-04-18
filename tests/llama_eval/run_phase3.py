@@ -409,6 +409,7 @@ PHASE3_CASES: list[RealisticCase] = [
         "change_rate_validate_save",
         "Set the rate to 32000, validate, and save.",
         ["apply_edit", "validate_graph", "save_graph"],
+        checked_tool_name="apply_edit",
         transaction_checks=[
             {"op_type": "update_params", "instance_name": "samp_rate"},
         ],

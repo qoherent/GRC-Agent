@@ -38,6 +38,7 @@ class ChainCase:
     expected_tool_sequence: list[str]
     fixture_name: str = DEFAULT_FIXTURE_NAME
     target_fixture_name: str | None = None
+    require_successful_tool_results: bool = True
     description: str = ""
 
 
@@ -240,6 +241,7 @@ PHASE2_CASES: list[ChainCase] = [
         "preview_bad_removal",
         "Preview removing the throttle block. If it won't work, explain why.",
         ["propose_edit"],
+        require_successful_tool_results=False,
     ),
 ]
 
@@ -254,7 +256,10 @@ def _render_prompt(
 
 
 def _successful_tools_appear_in_expected_order(
-    executed_tool_calls: list[dict[str, Any]], expected_tool_sequence: list[str]
+    executed_tool_calls: list[dict[str, Any]],
+    expected_tool_sequence: list[str],
+    *,
+    require_successful_tool_results: bool = True,
 ) -> bool:
     """Return whether the expected chain completed with successful tool results."""
     call_index = 0
@@ -265,6 +270,8 @@ def _successful_tools_appear_in_expected_order(
             if executed_call["name"] != expected_tool:
                 continue
             payload = executed_call.get("arguments")
+            if not require_successful_tool_results:
+                break
             if isinstance(payload, dict) and payload.get("ok") is True:
                 break
         else:
@@ -305,7 +312,9 @@ def _run_case(client: Any, model: str, case: ChainCase) -> dict[str, Any]:
         requested_tool_names, case.expected_tool_sequence
     )
     matched = _successful_tools_appear_in_expected_order(
-        executed_tool_calls, case.expected_tool_sequence
+        executed_tool_calls,
+        case.expected_tool_sequence,
+        require_successful_tool_results=case.require_successful_tool_results,
     )
 
     return {

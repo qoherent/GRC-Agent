@@ -137,16 +137,20 @@ def extract_executed_tool_calls(history: list[dict[str, Any]]) -> list[dict[str,
 def tools_appear_in_expected_order(
     actual_tool_names: list[str], expected_tool_names: list[str]
 ) -> bool:
-    """Return whether the first appearance of each expected tool respects the order."""
+    """Return whether expected tools appear in order without later expected tools arriving early."""
     if not expected_tool_names:
         return not actual_tool_names
-    positions = []
-    for tool_name in expected_tool_names:
-        try:
-            positions.append(actual_tool_names.index(tool_name))
-        except ValueError:
+    expected_index = 0
+    for actual_tool_name in actual_tool_names:
+        if expected_index >= len(expected_tool_names):
+            break
+        current_expected_tool = expected_tool_names[expected_index]
+        if actual_tool_name == current_expected_tool:
+            expected_index += 1
+            continue
+        if actual_tool_name in expected_tool_names[expected_index + 1 :]:
             return False
-    return positions == sorted(positions)
+    return expected_index == len(expected_tool_names)
 
 
 def tool_call_matches_transaction_checks(
