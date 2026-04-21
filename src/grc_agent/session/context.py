@@ -4,7 +4,7 @@ from typing import Any
 
 from grc_agent.flowgraph_session import DEFAULT_CONTEXT_MAX_NODES, FlowgraphSession
 
-from grc_agent._payload import build_error_payload
+from grc_agent._payload import build_error_payload, ErrorCode
 
 from .inspect import require_loaded_session
 
@@ -22,11 +22,11 @@ def get_grc_context(
         return session.context_payload(node_id, hops=hops, max_nodes=max_nodes)
     except KeyError:
         return build_error_payload(
-            error_type="node_not_found",
+            error_type=ErrorCode.BLOCK_NOT_FOUND,
             message=f"Unknown session node: {node_id}",
             details={"node_id": node_id},
         )
     except ValueError as exc:
         return build_error_payload(
-            error_type="invalid_context_request", message=str(exc)
+            error_type=ErrorCode.INVALID_REQUEST, message=str(exc)
         )

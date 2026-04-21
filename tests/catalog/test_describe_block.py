@@ -94,5 +94,5 @@ class DescribeBlockTests(unittest.TestCase):
         result = describe_block("definitely_not_a_real_block")
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "BlockNotFound")
+        self.assertEqual(result["error_type"], "block_not_found")
         self.assertEqual(result["details"]["block_id"], "definitely_not_a_real_block")

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from grc_agent._payload import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.models import Block, Connection
 from grc_agent.session_ops import (
@@ -617,7 +618,7 @@ def _require_block_rules(
     if lookup.ok:
         return lookup.rules, None
 
-    code = block_not_found_code if lookup.error_type == "BlockNotFound" else "catalog_block_unavailable"
+    code = block_not_found_code if lookup.error_type == ErrorCode.BLOCK_NOT_FOUND else "catalog_block_unavailable"
     return None, make_issue(
         op_index=op_index,
         op_type=op_type,

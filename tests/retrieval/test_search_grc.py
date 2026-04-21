@@ -2,6 +2,8 @@
 
 import inspect
 from pathlib import Path
+from threading import Event, Thread
+import tempfile
 import unittest
 
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -30,6 +32,16 @@ class SearchGrcTests(unittest.TestCase):
         session = FlowgraphSession()
         session.load(self._fixture_path())
         return session
+
+    def _write_alt_fixture(self, directory: Path) -> Path:
+        alt_path = directory / "random_bit_generator_alt.grc"
+        alt_path.write_text(
+            self._fixture_path()
+            .read_text(encoding="utf-8")
+            .replace("samp_rate", "fresh_clock_value"),
+            encoding="utf-8",
+        )
+        return alt_path
 
     def setUp(self) -> None:
         clear_catalog_index_cache()
@@ -93,16 +105,54 @@ class SearchGrcTests(unittest.TestCase):
             [entry["node_id"] for entry in session_result["results"]],
         )
 
+    def test_bound_session_context_is_isolated_per_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            alt_path = self._write_alt_fixture(Path(tmpdir))
+            session_a = self._load_session()
+            session_b = FlowgraphSession()
+            session_b.load(alt_path)
+
+            first_bound = Event()
+            second_bound = Event()
+            results: dict[str, dict] = {}
+
+            def worker_a() -> None:
+                bind_retrieval_context(session=session_a)
+                first_bound.set()
+                second_bound.wait()
+                results["a"] = search_grc("samp_rate", scope="session", k=5)
+
+            def worker_b() -> None:
+                first_bound.wait()
+                bind_retrieval_context(session=session_b)
+                second_bound.set()
+                results["b"] = search_grc("fresh_clock_value", scope="session", k=5)
+
+            thread_a = Thread(target=worker_a)
+            thread_b = Thread(target=worker_b)
+            thread_a.start()
+            thread_b.start()
+            thread_a.join()
+            thread_b.join()
+
+        self.assertTrue(results["a"]["ok"])
+        self.assertTrue(results["b"]["ok"])
+        self.assertEqual(results["a"]["results"][0]["node_id"], "session:block:samp_rate")
+        self.assertEqual(
+            results["b"]["results"][0]["node_id"],
+            "session:block:fresh_clock_value",
+        )
+
     def test_empty_query_fails_clearly(self) -> None:
         result = search_grc("   ", scope="catalog")
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "InvalidQuery")
+        self.assertEqual(result["error_type"], "invalid_request")
         self.assertIn("non-empty string", result["message"])
 
     def test_unsupported_scope_fails_clearly(self) -> None:
         result = search_grc("analog", scope="hybrid")
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "UnsupportedScope")
+        self.assertEqual(result["error_type"], "invalid_request")
         self.assertEqual(result["details"]["supported_scopes"], ["catalog", "session"])

@@ -8,6 +8,7 @@ unsupported fields.
 from collections import defaultdict, deque
 import copy
 import hashlib
+import logging
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,6 +25,8 @@ from .session_ops import (
     parse_connections as shared_parse_connections,
     raw_connection_entry as shared_raw_connection_entry,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SUMMARY_BLOCK_LIMIT = 8
 DEFAULT_CONTEXT_MAX_NODES = 20
@@ -99,6 +102,7 @@ class FlowgraphSession:
         self.last_validation_returncode = None
         self.last_validation_ok = None
         self._bump_state_revision()
+        logger.info("load path=%s blocks=%d connections=%d", source_path, len(blocks), len(connections))
 
     def save(self, path: str | Path | None = None) -> None:
         """Write the current in-memory graph to disk."""
@@ -127,6 +131,9 @@ class FlowgraphSession:
         self.is_dirty = False
         if path_changed:
             self._bump_state_revision()
+        logger.info("save path=%s", target_path)
+
+    DEFAULT_GRCC_TIMEOUT_SECONDS = 30.0
 
     def validate(self) -> bool:
         """Run `grcc` against the current in-memory graph."""
@@ -147,6 +154,7 @@ class FlowgraphSession:
         self.last_validation_stderr = stderr
         self.last_validation_returncode = returncode
         self.last_validation_ok = is_valid
+        logger.info("validate ok=%s returncode=%s", is_valid, returncode)
         return is_valid
 
     @property
@@ -1252,10 +1260,12 @@ class FlowgraphSession:
     # Validation helpers
 
     @staticmethod
-    def _run_grcc_validation(raw_data: Any) -> tuple[bool, str, str, int]:
+    def _run_grcc_validation(raw_data: Any, *, timeout: float | None = None) -> tuple[bool, str, str, int]:
         """Run `grcc` against raw flowgraph data inside a temporary workspace."""
         # Serialize the candidate YAML once so validation stays consistent everywhere.
         serialized = FlowgraphSession._serialize_raw_data(raw_data)
+
+        wall_timeout = timeout if timeout is not None else FlowgraphSession.DEFAULT_GRCC_TIMEOUT_SECONDS
 
         # Use a temporary directory so validation does not touch project files.
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1264,12 +1274,21 @@ class FlowgraphSession:
             temp_path.write_text(serialized, encoding="utf-8")
 
             # Run grcc and return the normalized validity plus the raw diagnostics.
-            result = subprocess.run(
-                ["grcc", str(temp_path)],
-                capture_output=True,
-                text=True,
-                cwd=tmpdir,
-            )
+            try:
+                result = subprocess.run(
+                    ["grcc", str(temp_path)],
+                    capture_output=True,
+                    text=True,
+                    cwd=tmpdir,
+                    timeout=wall_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return (
+                    False,
+                    "",
+                    f"grcc validation timed out after {wall_timeout}s",
+                    -2,
+                )
             return (
                 FlowgraphSession._grcc_result_is_valid(
                     returncode=result.returncode,

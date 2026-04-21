@@ -41,28 +41,30 @@ def isolated_fixture_workspace(
 def ensure_llama_server(
     server_url: str | None = None,
     model: str | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, LlamaServerClient]:
     """Ensure the llama.cpp server is reachable, starting it if necessary.
 
-    Returns (server_url, model_alias).
+    Returns (server_url, model_alias, client).
     """
     config = load_app_config()
     resolved_url = (server_url or config.llama.server_url).rstrip("/")
     resolved_model = model or config.llama.model
 
-    client = LlamaServerClient(
-        resolved_url,
-        timeout_seconds=config.llama.request_timeout_seconds,
-        max_tokens=config.llama.max_tokens,
-        temperature=config.llama.temperature,
-        enable_thinking=config.llama.enable_thinking,
-    )
+    def _make_client(url: str) -> LlamaServerClient:
+        return LlamaServerClient(
+            url,
+            timeout_seconds=config.llama.request_timeout_seconds,
+            max_tokens=config.llama.max_tokens,
+            temperature=config.llama.temperature,
+            enable_thinking=config.llama.enable_thinking,
+        )
 
+    client = _make_client(resolved_url)
     try:
         client.require_ready()
         client.require_model_alias(resolved_model)
         print(f"Reusing llama.cpp server at {resolved_url}")
-        return resolved_url, resolved_model
+        return resolved_url, resolved_model, client
     except Exception:
         pass
 
@@ -76,22 +78,11 @@ def ensure_llama_server(
         print(
             f"{result.status.capitalize()} llama.cpp server at {result.server_url} (pid={result.pid})"
         )
-        return result.server_url, result.model_alias
+        return result.server_url, result.model_alias, _make_client(result.server_url)
     except LlamaLauncherError as exc:
         print(f"Failed to start llama.cpp server: {exc}")
         raise
 
-
-def build_client(server_url: str) -> LlamaServerClient:
-    """Build one live llama client from the repo config."""
-    llama_config = load_app_config().llama
-    return LlamaServerClient(
-        server_url,
-        timeout_seconds=llama_config.request_timeout_seconds,
-        max_tokens=llama_config.max_tokens,
-        temperature=llama_config.temperature,
-        enable_thinking=llama_config.enable_thinking,
-    )
 
 
 def extract_requested_tool_calls(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -208,6 +199,40 @@ def text_contains_any(text: str, needles: list[str]) -> bool:
     """Return whether any expected lowercase fragment appears in the text."""
     lowered = text.lower()
     return any(needle.lower() in lowered for needle in needles)
+
+
+def render_prompt(prompt: str, target_path: str, save_path: str) -> str:
+    return prompt.format(target_path=target_path, save_path=save_path)
+
+
+def render_value_templates(value: Any, *, target_path: str, save_path: str) -> Any:
+    if isinstance(value, str):
+        return value.format(target_path=target_path, save_path=save_path)
+    if isinstance(value, dict):
+        return {
+            key: render_value_templates(
+                nested_value, target_path=target_path, save_path=save_path
+            )
+            for key, nested_value in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            render_value_templates(item, target_path=target_path, save_path=save_path)
+            for item in value
+        ]
+    return value
+
+
+def requested_tool_calls_since(
+    history: list[dict[str, Any]], start_index: int
+) -> list[dict[str, Any]]:
+    return extract_requested_tool_calls(history[start_index:])
+
+
+def executed_tool_calls_since(
+    history: list[dict[str, Any]], start_index: int
+) -> list[dict[str, Any]]:
+    return extract_executed_tool_calls(history[start_index:])
 
 
 def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:

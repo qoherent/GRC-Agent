@@ -30,7 +30,7 @@ class CatalogErrorEnvelopeTests(unittest.TestCase):
             result = _describe_block_with_root("test_block", catalog_root=root)
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "CatalogLoadError")
+        self.assertEqual(result["error_type"], "catalog_load_error")
         self.assertIn("Could not parse GNU metadata file", result["message"])
 
     def test_missing_label_returns_structured_error(self) -> None:
@@ -42,7 +42,7 @@ class CatalogErrorEnvelopeTests(unittest.TestCase):
             result = _describe_block_with_root("test_block", catalog_root=root)
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "CatalogLoadError")
+        self.assertEqual(result["error_type"], "catalog_load_error")
         self.assertIn("label", result["message"])
 
     def test_invalid_section_shapes_return_structured_errors(self) -> None:
@@ -56,7 +56,7 @@ class CatalogErrorEnvelopeTests(unittest.TestCase):
                     result = _describe_block_with_root("test_block", catalog_root=root)
 
                 self.assertFalse(result["ok"])
-                self.assertEqual(result["error_type"], "CatalogLoadError")
+                self.assertEqual(result["error_type"], "catalog_load_error")
                 self.assertIn(field, result["message"])
 
     def test_unreadable_block_file_returns_structured_error(self) -> None:
@@ -71,7 +71,7 @@ class CatalogErrorEnvelopeTests(unittest.TestCase):
                 block_path.chmod(original_mode | stat.S_IRUSR | stat.S_IWUSR)
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "CatalogLoadError")
+        self.assertEqual(result["error_type"], "catalog_load_error")
         self.assertIn("Could not read GNU metadata file", result["message"])
 
     def _write_catalog_root(

@@ -18,11 +18,11 @@ from grc_agent.llama_server import LlamaServerError, run_bounded_llama_turn
 
 from tests.llama_eval.harness import (
     DEFAULT_FIXTURE_NAME,
-    build_client,
     ensure_llama_server,
     extract_executed_tool_calls,
     extract_requested_tool_calls,
     isolated_fixture_workspace,
+    render_value_templates as _render_value_templates,
     text_contains_any,
     tool_call_matches_argument_checks,
     tool_call_matches_transaction_checks,
@@ -488,30 +488,6 @@ def _render_prompt(
     return case.prompt.format(target_path=target_path, save_path=save_path)
 
 
-def _render_value_templates(value: Any, *, target_path: str, save_path: str) -> Any:
-    if isinstance(value, str):
-        return value.format(target_path=target_path, save_path=save_path)
-    if isinstance(value, dict):
-        return {
-            key: _render_value_templates(
-                nested_value,
-                target_path=target_path,
-                save_path=save_path,
-            )
-            for key, nested_value in value.items()
-        }
-    if isinstance(value, list):
-        return [
-            _render_value_templates(
-                item,
-                target_path=target_path,
-                save_path=save_path,
-            )
-            for item in value
-        ]
-    return value
-
-
 def _tool_name_for_checks(case: RealisticCase) -> str | None:
     if case.checked_tool_name is not None:
         return case.checked_tool_name
@@ -639,8 +615,7 @@ def _run_eval(
     cases: list[RealisticCase],
     n_runs: int,
 ) -> dict[str, Any]:
-    resolved_url, resolved_model = ensure_llama_server(server_url, model)
-    client = build_client(resolved_url)
+    resolved_url, resolved_model, client = ensure_llama_server(server_url, model)
 
     results = []
     total = len(cases) * n_runs
@@ -771,7 +746,13 @@ def main() -> int:
         default=None,
         help="Run only the case with this name.",
     )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Quick check: force n_runs=1.",
+    )
     args = parser.parse_args()
+    n_runs = 1 if args.quick else args.n_runs
 
     cases = list(PHASE3_CASES)
     if args.category:
@@ -782,7 +763,7 @@ def main() -> int:
         print("No matching cases.", file=sys.stderr)
         return 1
 
-    report = _run_eval(args.server_url, args.model, cases, args.n_runs)
+    report = _run_eval(args.server_url, args.model, cases, n_runs)
     print("\n" + json.dumps(report, indent=2, sort_keys=False))
     return 0
 

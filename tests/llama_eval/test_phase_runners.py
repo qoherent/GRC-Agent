@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
+from tests.llama_eval.harness import requested_tool_calls_since
 from tests.llama_eval.run_phase2 import _successful_tools_appear_in_expected_order
 from tests.llama_eval.run_phase3 import PHASE3_CASES
-from tests.llama_eval.run_phase4 import _requested_tool_calls_since
 from tests.llama_eval.run_phase5 import ExecutedToolSpec, _executed_tools_match
 
 
@@ -59,7 +59,7 @@ class Phase4RunnerTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            _requested_tool_calls_since(history, 1),
+            requested_tool_calls_since(history, 1),
             [{"name": "validate_graph", "arguments": {}}],
         )
 

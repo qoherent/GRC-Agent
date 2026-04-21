@@ -1,18 +1,21 @@
 """Thin runtime wrapper for routed package-level `.grc` tools."""
 
 import json
+import logging
 from typing import Any, Callable
 
 from grc_agent.catalog import describe_block
+from grc_agent._payload import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.retrieval import search_grc
-from grc_agent.retrieval.search import bind_retrieval_context
+from grc_agent.retrieval.search import _search_grc_with_context
 from grc_agent.runtime_tool_validation import (
     build_tool_schema_map,
     validate_runtime_tool_call,
 )
 from grc_agent.session import get_grc_context, load_grc, summarize_graph
 from grc_agent.transaction import apply_edit, propose_edit
+
+logger = logging.getLogger(__name__)
 
 ToolResult = dict[str, Any]
 ToolCallable = Callable[..., ToolResult]
@@ -48,7 +51,6 @@ class GrcAgent:
         self._reset_validation_tracking()
         self._tools = self._build_tool_registry()
         self._tool_schema_map = build_tool_schema_map(self.get_tool_schemas())
-        self._sync_retrieval_context()
         self._record_active_session_history(reason="initial_session")
 
     def get_system_prompt(self) -> str:
@@ -385,22 +387,33 @@ class GrcAgent:
         return messages
 
     def execute_tool(self, tool_name: str, kwargs: dict[str, Any]) -> ToolResult:
-        """Execute one runtime tool and return a structured result."""
+        """Execute one runtime tool and return a structured result.
+
+        Validation is intentionally performed here even though the llama loop
+        (``run_bounded_llama_turn``) also validates before calling this method.
+        The check here is the authoritative gate for direct callers (CLI ``run``
+        command, tests, and any future callers that bypass the loop).  The
+        loop-level pre-check exists to keep ``tool_calls_executed`` accurate:
+        schema-rejected calls are never counted as executed.
+        """
         validation_result = self.validate_tool_call(tool_name, kwargs)
         if validation_result is not None:
+            logger.info("tool_call_rejected tool=%s error_type=%s", tool_name, validation_result.get("error_type"))
             return validation_result
 
         func = self._tools[tool_name]
         try:
-            return func(**kwargs)
+            result = func(**kwargs)
+            logger.info("tool_executed tool=%s ok=%s", tool_name, result.get("ok"))
+            return result
         except Exception as error:
+            logger.exception("tool_exception tool=%s error=%s", tool_name, error)
             return self._tool_result(
                 tool_name=tool_name,
                 ok=False,
                 message=str(error),
-                error_type=type(error).__name__,
+                error_type=ErrorCode.INTERNAL_ERROR,
             )
-
     def validate_tool_call(self, tool_name: str, kwargs: Any) -> ToolResult | None:
         """Validate one runtime tool call against the declared public schema."""
         validation_error = validate_runtime_tool_call(
@@ -410,6 +423,26 @@ class GrcAgent:
             return None
         return self._tool_result(tool_name=tool_name, ok=False, **validation_error)
 
+    def health_check(self) -> dict[str, Any]:
+        """Return a structured health payload describing agent readiness.
+
+        ``status`` is ``"ok"`` when the agent has tools registered and retrieval
+        is available.  Whether a session is loaded is reported separately and
+        does *not* affect the status — loading a file is a user action, not a
+        runtime health concern.
+        """
+        has_session = self.session.flowgraph is not None
+        has_retrieval = self.catalog_root is not None
+        tool_count = len(self._tools)
+        status = "ok" if tool_count > 0 and has_retrieval else "not_ready"
+        return {
+            "status": status,
+            "session_loaded": has_session,
+            "retrieval_ready": has_retrieval,
+            "history_length": len(self.history),
+            "tool_count": tool_count,
+        }
+
     def active_session_snapshot(self) -> dict[str, Any] | None:
         """Return the compact active-session payload exposed in runtime history and CLI output."""
         if self.session.flowgraph is None:
@@ -418,6 +451,20 @@ class GrcAgent:
         snapshot["state_revision"] = self.session.state_revision
         snapshot["dirty"] = self.session.is_dirty
         snapshot["validation"] = self.session.validation_state()
+        variable_preview: list[str] = []
+        block_preview: list[str] = []
+        for block in self.session.flowgraph.blocks:
+            if block.block_type == "variable":
+                value = block.params.get("parameters", {}).get("value", "")
+                variable_preview.append(f"{block.instance_name}={value}")
+                continue
+            block_preview.append(
+                f"{block.instance_name} ({block.block_type}{self._block_role_hint(block.block_type)})"
+            )
+        if variable_preview:
+            snapshot["variable_preview"] = variable_preview
+        if block_preview:
+            snapshot["block_preview"] = block_preview[:6]
         return snapshot
 
     def run_step_fake(
@@ -433,12 +480,10 @@ class GrcAgent:
         for action in fake_assistant_actions:
             if "text" in action:
                 self.history.append({"role": "assistant", "content": action["text"]})
-                print(f"Assistant: {action['text']}")
 
             if "tool" in action:
                 tool_name = action["tool"]
                 kwargs = action.get("kwargs", {})
-                print(f"Assistant called {tool_name} with {kwargs}")
 
                 self.history.append(
                     {
@@ -448,7 +493,6 @@ class GrcAgent:
                 )
 
                 result = self.execute_tool(tool_name, kwargs)
-                print(f"Tool {tool_name} responded: {result}")
 
                 self.history.append(
                     {
@@ -493,13 +537,6 @@ class GrcAgent:
             "save_graph": self._save_graph,
         }
 
-    def _sync_retrieval_context(self) -> None:
-        """Keep the session-search package bound to the current live session."""
-        bind_retrieval_context(
-            session=self.session if self.session.flowgraph is not None else None,
-            catalog_root=self.catalog_root,
-        )
-
     def _reset_validation_tracking(self) -> None:
         """Align save gating with the current live session state."""
         self._last_validation_ok = self.session.last_validation_ok
@@ -516,7 +553,6 @@ class GrcAgent:
     def _replace_session(self, session: FlowgraphSession) -> None:
         self.session = session
         self._reset_validation_tracking()
-        self._sync_retrieval_context()
         self._record_active_session_history(reason="load_grc")
 
     def _tool_result(
@@ -529,6 +565,8 @@ class GrcAgent:
             "message": message,
         }
         result.update(extra)
+        if not ok and "error_type" not in result:
+            result["error_type"] = ErrorCode.INTERNAL_ERROR
         result["active_session"] = self.active_session_snapshot()
         return result
 
@@ -558,6 +596,8 @@ class GrcAgent:
             }
         )
 
+    _PROACTIVE_COMPACT_CHAR_BUDGET = 60000
+
     def compact_history(self) -> None:
         """Reduce history token cost before a new multi-turn conversation turn.
 
@@ -566,6 +606,9 @@ class GrcAgent:
            (a turn boundary is a ``role="user"`` entry), truncate content to
            the small set of fields needed for the model to understand past
            outcomes without repeating large payloads.
+        3. Proactively compact when the total history char budget is exceeded,
+           keeping only the latest session, latest user message, and compacted
+           older tool results.
         """
         last_session_index: int | None = None
         for index, turn in enumerate(self.history):
@@ -597,13 +640,50 @@ class GrcAgent:
                     compacted.append(turn)
             self.history = compacted
 
+        self._proactive_compact_if_needed()
+        logger.debug("compact_history history_len=%d", len(self.history))
+
+    def _proactive_compact_if_needed(self) -> None:
+        """Drop older assistant/tool detail when history exceeds the char budget."""
+        total_chars = sum(
+            len(str(turn)) for turn in self.history
+        )
+        if total_chars <= self._PROACTIVE_COMPACT_CHAR_BUDGET:
+            return
+
+        user_indices = [
+            idx for idx, turn in enumerate(self.history) if turn.get("role") == "user"
+        ]
+        if len(user_indices) < 2:
+            return
+
+        cutoff = user_indices[-1]
+        compacted = []
+        for idx, turn in enumerate(self.history):
+            if idx >= cutoff:
+                compacted.append(turn)
+                continue
+            role = turn.get("role")
+            if role == "session":
+                continue
+            if role == "assistant":
+                continue
+            if role == "tool" and isinstance(turn.get("content"), dict):
+                compacted.append(self._compact_tool_entry(turn))
+            elif role not in ("user", "reminder"):
+                compacted.append(turn)
+            else:
+                compacted.append(turn)
+
+        self.history = compacted
+
     @staticmethod
     def _compact_tool_entry(turn: HistoryEntry) -> HistoryEntry:
         content = turn.get("content")
         if not isinstance(content, dict):
             return turn
         compact: dict[str, Any] = {}
-        for key in ("ok", "message", "error_type", "active_session", "tool", "valid"):
+        for key in ("ok", "message", "error_type", "active_session", "tool", "valid", "hint"):
             if key in content:
                 compact[key] = content[key]
         if not compact:
@@ -623,7 +703,7 @@ class GrcAgent:
             tool_name=tool_name,
             ok=False,
             message="No flowgraph loaded.",
-            error_type="MissingSession",
+            error_type=ErrorCode.MISSING_SESSION,
         )
 
     def _history_content_as_text(
@@ -660,21 +740,12 @@ class GrcAgent:
         )
         variables_hint = ""
         blocks_hint = ""
-        if self.session.flowgraph is not None:
-            var_parts = []
-            block_parts = []
-            for block in self.session.flowgraph.blocks:
-                if block.block_type == "variable":
-                    val = block.params.get("parameters", {}).get("value", "")
-                    var_parts.append(f"{block.instance_name}={val}")
-                    continue
-                block_parts.append(
-                    f"{block.instance_name} ({block.block_type}{self._block_role_hint(block.block_type)})"
-                )
-            if var_parts:
-                variables_hint = f" variables=[{', '.join(var_parts)}];"
-            if block_parts:
-                blocks_hint = f" blocks=[{', '.join(block_parts[:6])}];"
+        variable_preview = content.get("variable_preview")
+        if isinstance(variable_preview, list) and variable_preview:
+            variables_hint = f" variables=[{', '.join(str(item) for item in variable_preview)}];"
+        block_preview = content.get("block_preview")
+        if isinstance(block_preview, list) and block_preview:
+            blocks_hint = f" blocks=[{', '.join(str(item) for item in block_preview[:6])}];"
         return (
             f"{action}: path={content.get('path')}, "
             f"graph_id={content.get('graph_id')}, "
@@ -694,7 +765,7 @@ class GrcAgent:
                 "load_grc",
                 ok=False,
                 message=loaded.get("message", "Failed to load .grc file."),
-                error_type=loaded.get("error_type", "FileLoadError"),
+                error_type=loaded.get("error_type", ErrorCode.FILE_LOAD_ERROR),
             )
         self._replace_session(loaded)
         payload = summarize_graph(self.session)
@@ -723,11 +794,22 @@ class GrcAgent:
         scope: str = "catalog",
         k: int | None = None,
     ) -> ToolResult:
-        self._sync_retrieval_context()
+        session = self.session if self.session.flowgraph is not None else None
         if k is None:
-            payload = search_grc(query, scope=scope)
+            payload = _search_grc_with_context(
+                query,
+                scope=scope,
+                session=session,
+                catalog_root=self.catalog_root,
+            )
         else:
-            payload = search_grc(query, scope=scope, k=k)
+            payload = _search_grc_with_context(
+                query,
+                scope=scope,
+                k=k,
+                session=session,
+                catalog_root=self.catalog_root,
+            )
         if payload.get("ok") and payload.get("results"):
             payload["hint"] = (
                 "Use `block_id` from block results with `describe_block`. "
@@ -736,8 +818,8 @@ class GrcAgent:
         elif payload.get("ok") and scope == "session" and not payload.get("results"):
             payload["hint"] = (
                 "No matches in the session. "
-                'Do NOT call `describe_block` with the raw query text. Retry the same query with `scope="catalog"`, '
-                "then use the returned `block_id`."
+                'Do NOT call `describe_block` with the raw query text. Retry the same query with `scope="catalog"` '
+                "before you answer or validate anything else, then use the returned `block_id`."
             )
         return self._payload_result("search_grc", payload)
 
@@ -775,9 +857,15 @@ class GrcAgent:
                             "unless the user explicitly asked for a preview."
                         )
                         break
-        if payload.get("ok") is False and payload.get("error_type") == "node_not_found":
+        if payload.get("ok") is False and payload.get("error_type") == ErrorCode.BLOCK_NOT_FOUND:
             candidate_nodes: list[str] = []
-            candidate_result = search_grc(node_id, scope="session", k=3)
+            candidate_result = _search_grc_with_context(
+                node_id,
+                scope="session",
+                k=3,
+                session=self.session if self.session.flowgraph is not None else None,
+                catalog_root=self.catalog_root,
+            )
             if candidate_result.get("ok") and candidate_result.get("results"):
                 candidate_nodes = [
                     str(result.get("node_id")).removeprefix("session:block:")
@@ -848,13 +936,12 @@ class GrcAgent:
         payload = apply_edit(self.session, transaction, self.catalog_root)
         if payload.get("ok"):
             self._record_successful_validation()
-        self._sync_retrieval_context()
         result = self._payload_result("apply_edit", payload)
         if result.get("ok"):
             result["hint"] = (
                 "Edit applied and validated. Do NOT call apply_edit again for this same change. "
-                "If the user also asked to save, call validate_graph then save_graph. "
-                "If the user only asked to confirm it works, call validate_graph next."
+                "If the user explicitly asked you to validate or confirm it works, call validate_graph next. "
+                "Otherwise, if the user asked to save, call save_graph."
             )
         else:
             errors = result.get("errors")
@@ -885,10 +972,21 @@ class GrcAgent:
         if missing_session is not None:
             return missing_session
         is_valid = self.session.validate()
-        self._last_validation_ok = is_valid
-        self._last_validated_state_revision = (
-            self.session.state_revision if is_valid else None
-        )
+        if self.session.last_validation_returncode == -2:
+            self._last_validation_ok = False
+            self._last_validated_state_revision = None
+            return self._tool_result(
+                tool_name="validate_graph",
+                ok=False,
+                message="Graph validation timed out. Try again or simplify the graph.",
+                error_type=ErrorCode.VALIDATION_TIMEOUT,
+                stderr=self.session.last_validation_stderr,
+            )
+        if is_valid:
+            self._record_successful_validation()
+        else:
+            self._last_validation_ok = False
+            self._last_validated_state_revision = None
         return self._tool_result(
             tool_name="validate_graph",
             ok=True,
@@ -916,11 +1014,20 @@ class GrcAgent:
                     "Next step: call validate_graph, then save_graph. "
                     "Do NOT call apply_edit again."
                 ),
+                error_type=ErrorCode.SAVE_REFUSED,
                 requires_validation=True,
                 dirty=True,
             )
 
-        self.session.save(path)
+        try:
+            self.session.save(path)
+        except Exception as exc:
+            return self._tool_result(
+                tool_name="save_graph",
+                ok=False,
+                message=f"Failed to save graph: {exc}",
+                error_type=ErrorCode.INTERNAL_ERROR,
+            )
         self._reset_validation_tracking()
         saved_path = str(self.session.path) if self.session.path is not None else None
         return self._tool_result(

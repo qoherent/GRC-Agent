@@ -50,7 +50,7 @@ class RetrievalIndexBuildTests(unittest.TestCase):
             payload = initialize_retrieval(catalog_root=tmpdir)
 
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error_type"], "RetrievalNotReady")
+        self.assertEqual(payload["error_type"], "retrieval_not_ready")
         self.assertIn("incomplete", payload["message"])
 
     def test_catalog_index_contains_real_gnu_block_metadata(self) -> None:

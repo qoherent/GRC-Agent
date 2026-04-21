@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import sys
 from typing import Any
 
@@ -16,6 +17,8 @@ from grc_agent.llama_server import (
     run_bounded_llama_turn,
 )
 from grc_agent.retrieval import initialize_retrieval
+
+logger = logging.getLogger(__name__)
 
 
 FAKE_USER_MESSAGE = "Please change the samp_rate to 48000 and validate the graph."
@@ -41,6 +44,11 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(description="GRC Agent CLI")
     parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose (DEBUG) logging output.",
+    )
+    parser.add_argument(
         "--config",
         help="Optional path to a TOML config file. Defaults to workspace config when present, then user config, then built-in defaults.",
     )
@@ -60,6 +68,11 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         "--skip-retrieval",
         action="store_true",
         help="Skip retrieval readiness checks.",
+    )
+
+    subparsers.add_parser(
+        "health",
+        help="Print a structured agent health check and exit.",
     )
 
     fake_parser = subparsers.add_parser(
@@ -139,6 +152,14 @@ def _print_history(agent: GrcAgent) -> None:
             printable_turn = dict(turn)
             printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
             print(printable_turn)
+            continue
+        if turn.get("role") == "assistant" and turn.get("tool_calls"):
+            for tc in turn["tool_calls"]:
+                # Flat structure (fake mode): {"name": ..., "arguments": ...}
+                # Nested structure (llama mode): {"function": {"name": ..., "arguments": ...}}
+                fn = tc.get("function") or {}
+                name = tc.get("name") or fn.get("name") or "?"
+                print(f"Assistant called {name}: {json.dumps(tc.get('arguments', fn.get('arguments', {})))}")
             continue
         if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
             printable_turn = dict(turn)
@@ -222,6 +243,7 @@ def _run_llama_runtime(
 ) -> int:
     """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
     print(f"Loading {file_path}...")
+    logger.info("chat_start file=%s message=%s", file_path, user_message[:80] if user_message else None)
     session = _load_initial_session(file_path)
     retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
@@ -238,6 +260,7 @@ def _run_llama_runtime(
     try:
         launch_result = launcher.ensure_server_ready()
     except LlamaLauncherError as exc:
+        logger.error("launcher_failed error=%s", exc)
         print("\n--- Launcher ---")
         print(str(exc))
         return 1
@@ -252,11 +275,13 @@ def _run_llama_runtime(
     )
 
     if launch_result.status == "started":
+        logger.info("server_started url=%s pid=%s", launch_result.server_url, launch_result.pid)
         print(
             f"Started llama.cpp server for {launch_result.model_alias} "
             f"at {launch_result.server_url} (pid {launch_result.pid})"
         )
     else:
+        logger.info("server_reused url=%s", launch_result.server_url)
         print(
             f"Reusing llama.cpp server for {launch_result.model_alias} "
             f"at {launch_result.server_url}"
@@ -363,6 +388,19 @@ def _run_tool_command(
     return 0 if result.get("ok") else 1
 
 
+def _run_health_command() -> int:
+    """Print a structured agent health check and return 0 when healthy."""
+    readiness = initialize_retrieval()
+    catalog_root = readiness.get("catalog_root") if readiness.get("ok") else None
+    session = FlowgraphSession()
+    agent = GrcAgent(session, catalog_root=catalog_root)
+    report = agent.health_check()
+    if not readiness.get("ok"):
+        report["retrieval_message"] = readiness.get("message", "Retrieval not ready.")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["status"] == "ok" else 1
+
+
 def _run_doctor_command(
     *,
     config_path: str | None,
@@ -376,10 +414,18 @@ def _run_doctor_command(
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     translated_argv = _maybe_translate_legacy_args(raw_argv)
     parser = _build_parser()
     args = parser.parse_args(translated_argv)
+
+    if args.verbose:
+        logging.getLogger("grc_agent").setLevel(logging.DEBUG)
 
     if args.command == "doctor":
         return _run_doctor_command(
@@ -387,6 +433,9 @@ def main(argv: list[str] | None = None) -> int:
             json_output=args.json,
             skip_retrieval=args.skip_retrieval,
         )
+
+    if args.command == "health":
+        return _run_health_command()
 
     if args.command == "fake":
         return _run_fake_runtime(args.file)

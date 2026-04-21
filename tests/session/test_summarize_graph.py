@@ -47,4 +47,4 @@ class SummarizeGraphTests(unittest.TestCase):
         payload = summarize_graph(session)
 
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error_type"], "invalid_summary_request")
+        self.assertEqual(payload["error_type"], "invalid_request")

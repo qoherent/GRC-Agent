@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from grc_agent import FlowgraphSession, apply_edit, propose_edit
 
@@ -171,7 +172,30 @@ class MultiOperationTransactionTests(unittest.TestCase):
 
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["applied"])
-        self.assertEqual(payload["error_type"], "GNUValidationFailed")
+        self.assertEqual(payload["error_type"], "gnu_validation_failed")
+
+    def test_apply_edit_grcc_timeout_returns_validation_timeout_error(self) -> None:
+        """When grcc times out during apply, error_type must be 'validation_timeout'."""
+        session = self._load_session()
+
+        def _fake_grcc_timeout(raw_data: object) -> tuple[bool, str, str, int]:
+            return (False, "", "grcc validation timed out after 30s", -2)
+
+        with mock.patch.object(
+            session.__class__, "_run_grcc_validation", side_effect=_fake_grcc_timeout
+        ):
+            payload = apply_edit(
+                session,
+                {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "48000"},
+                },
+            )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["applied"])
+        self.assertEqual(payload["error_type"], "validation_timeout")
 
 
 if __name__ == "__main__":

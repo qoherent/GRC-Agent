@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from grc_agent._payload import build_error_payload
+from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.flowgraph_session import FlowgraphSession
 
 from .graphify_adapter import GraphifyAdapterError
@@ -42,10 +43,18 @@ NODE_TYPE_BONUS = {
     "domain": 1.5,
 }
 
-_ACTIVE_SESSION: FlowgraphSession | None = None
-_ACTIVE_CATALOG_ROOT: str | None = None
-_ACTIVE_SESSION_INDEX: RetrievalIndex | None = None
-_ACTIVE_SESSION_INDEX_KEY: tuple[str, int, str | None, str | None] | None = None
+_BOUND_SESSION: ContextVar[FlowgraphSession | None] = ContextVar(
+    "grc_agent_retrieval_bound_session", default=None
+)
+_BOUND_CATALOG_ROOT: ContextVar[str | None] = ContextVar(
+    "grc_agent_retrieval_bound_catalog_root", default=None
+)
+_BOUND_SESSION_INDEX: ContextVar[RetrievalIndex | None] = ContextVar(
+    "grc_agent_retrieval_bound_session_index", default=None
+)
+_BOUND_SESSION_INDEX_KEY: ContextVar[tuple[str, int, str | None, str | None] | None] = (
+    ContextVar("grc_agent_retrieval_bound_session_index_key", default=None)
+)
 
 
 @dataclass(frozen=True)
@@ -60,16 +69,15 @@ def bind_retrieval_context(
     session: FlowgraphSession | None = None,
     catalog_root: str | None = None,
 ) -> None:
-    """Bind runtime retrieval context for the narrow public search surface."""
-    global \
-        _ACTIVE_SESSION, \
-        _ACTIVE_CATALOG_ROOT, \
-        _ACTIVE_SESSION_INDEX, \
-        _ACTIVE_SESSION_INDEX_KEY
-    _ACTIVE_SESSION = session
-    _ACTIVE_CATALOG_ROOT = catalog_root
-    _ACTIVE_SESSION_INDEX = None
-    _ACTIVE_SESSION_INDEX_KEY = None
+    """Bind retrieval context for the narrow public search surface.
+
+    The binding is context-local so concurrent callers do not overwrite each
+    other's active session or session-index cache.
+    """
+    _BOUND_SESSION.set(session)
+    _BOUND_CATALOG_ROOT.set(catalog_root)
+    _BOUND_SESSION_INDEX.set(None)
+    _BOUND_SESSION_INDEX_KEY.set(None)
 
 
 _bind_retrieval_context = bind_retrieval_context
@@ -88,8 +96,8 @@ def search_grc(
         query,
         scope=scope,
         k=k,
-        session=_ACTIVE_SESSION,
-        catalog_root=_ACTIVE_CATALOG_ROOT,
+        session=_BOUND_SESSION.get(),
+        catalog_root=_BOUND_CATALOG_ROOT.get(),
     )
 
 
@@ -105,7 +113,7 @@ def _search_grc_with_context(
     normalized_query = _normalize_query_text(query)
     if not normalized_query:
         return build_error_payload(
-            error_type="InvalidQuery",
+            error_type=ErrorCode.INVALID_REQUEST,
             message="Query must be a non-empty string.",
         )
 
@@ -113,14 +121,14 @@ def _search_grc_with_context(
     query_tokens = list(tokenize_text(normalized_query))
     if not query_tokens:
         return build_error_payload(
-            error_type="InvalidQuery",
+            error_type=ErrorCode.INVALID_REQUEST,
             message="Query must contain at least one searchable letter or digit.",
         )
     query_terms = list(expand_terms(query_tokens))
 
     if scope not in VALID_SCOPES:
         return build_error_payload(
-            error_type="UnsupportedScope",
+            error_type=ErrorCode.INVALID_REQUEST,
             message=f"Unsupported search scope: {scope}",
             details={"supported_scopes": sorted(VALID_SCOPES)},
         )
@@ -128,7 +136,7 @@ def _search_grc_with_context(
     try:
         applied_limit, warnings = _normalize_limit(k)
     except ValueError as exc:
-        return build_error_payload(error_type="InvalidLimit", message=str(exc))
+        return build_error_payload(error_type=ErrorCode.INVALID_REQUEST, message=str(exc))
 
     try:
         if scope == "catalog":
@@ -136,13 +144,13 @@ def _search_grc_with_context(
         else:
             if session is None:
                 return build_error_payload(
-                    error_type="MissingSession",
+                    error_type=ErrorCode.MISSING_SESSION,
                     message="Session scope requires a loaded FlowgraphSession.",
                 )
             retrieval_index = _get_session_index(session, catalog_root=catalog_root)
     except (GraphifyAdapterError, RetrievalIndexError) as exc:
         return build_error_payload(
-            error_type=type(exc).__name__,
+            error_type=ErrorCode.INTERNAL_ERROR,
             message=str(exc),
         )
 
@@ -196,20 +204,24 @@ def _get_session_index(
     *,
     catalog_root: str | None,
 ) -> RetrievalIndex:
-    global _ACTIVE_SESSION_INDEX, _ACTIVE_SESSION_INDEX_KEY
     cache_key = (
         session.graph_id(),
         session.state_revision,
         str(session.path) if session.path is not None else None,
         catalog_root,
     )
-    if _ACTIVE_SESSION_INDEX is not None and _ACTIVE_SESSION_INDEX_KEY == cache_key:
-        return _ACTIVE_SESSION_INDEX
+    active_session_index = _BOUND_SESSION_INDEX.get()
+    active_session_index_key = _BOUND_SESSION_INDEX_KEY.get()
+    if (
+        active_session_index is not None
+        and active_session_index_key == cache_key
+    ):
+        return active_session_index
 
     catalog_index = _maybe_get_catalog_index(catalog_root)
     retrieval_index = build_session_index(session, catalog_index=catalog_index)
-    _ACTIVE_SESSION_INDEX = retrieval_index
-    _ACTIVE_SESSION_INDEX_KEY = cache_key
+    _BOUND_SESSION_INDEX.set(retrieval_index)
+    _BOUND_SESSION_INDEX_KEY.set(cache_key)
     return retrieval_index
 
 

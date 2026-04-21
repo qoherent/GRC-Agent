@@ -52,7 +52,7 @@ class TransactionRollbackTests(unittest.TestCase):
 
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["applied"])
-        self.assertEqual(payload["error_type"], "PreflightRejected")
+        self.assertEqual(payload["error_type"], "preflight_rejected")
         self.assertEqual(payload["errors"][0]["code"], "duplicate_connection")
         assert session.flowgraph is not None
         self.assertEqual(session.flowgraph.raw_data, original_raw)

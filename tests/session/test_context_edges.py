@@ -66,7 +66,7 @@ class GetGrcContextEdgeTests(unittest.TestCase):
         result = get_grc_context(session, "blocks_throttle2_0")
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "invalid_context_request")
+        self.assertEqual(result["error_type"], "invalid_request")
 
 
 if __name__ == "__main__":

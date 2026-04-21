@@ -14,8 +14,9 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
 - the structural-edit surface is frozen pending new experiments
 - a thin llama.cpp adapter is wired for single-turn and multi-turn CLI conversations
-- the live llama.cpp eval suite now covers phases 1-5, including multi-turn continuity and failure-recovery flows
-- multi-turn conversations use history compaction and session auto-refresh to stay within the token budget
+- the live llama.cpp eval suite now covers phases 1-6, including multi-turn continuity, failure-recovery flows, and compound workflows for the supported single-session harness contract; see `docs/LLAMA_EVAL.md` for the exact latest evidence level
+- multi-turn conversations use proactive history compaction and session auto-refresh to control prompt growth; this is a budget guardrail, not a hard context-window guarantee
+- structured logging is available throughout the runtime; `--verbose` enables debug output
 - raw model prose is still not trusted outside the runtime's deterministic finalization rules for supported flows
 
 ## Repo Map
@@ -25,7 +26,7 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - [docs/PACKAGE_GUIDE.md](docs/PACKAGE_GUIDE.md): concise script-by-script map of the Python package
 - [tests](tests): focused `unittest` regression coverage
 - [tests/data/random_bit_generator.grc](tests/data/random_bit_generator.grc): canonical fixture flowgraph
-- [tests/llama_eval](tests/llama_eval): five-phase live model eval suite (see [docs/LLAMA_EVAL.md](docs/LLAMA_EVAL.md))
+- [tests/llama_eval](tests/llama_eval): six-phase live model eval suite plus `run_all.py` convenience runner (see [docs/LLAMA_EVAL.md](docs/LLAMA_EVAL.md))
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture, settled decisions, evidence, milestones, and backlog
 
 ## Planning Rule
@@ -41,7 +42,7 @@ The narrow production target is an installable local CLI app.
 - installable console entrypoint: `grc-agent`
 - built-in runtime defaults when no config file exists
 - optional config override via `--config`, `GRC_AGENT_CONFIG`, repo `grc_agent.toml`, or user config at `~/.config/grc_agent/config.toml`
-- built-in `doctor` command for environment, config, and retrieval readiness
+- built-in `doctor` and `health` commands for environment and runtime readiness
 - deterministic direct-tool workflows stay valid even when no model backend is configured
 
 Install and check the app:
@@ -76,7 +77,7 @@ initialize_retrieval()
 catalog_hits = search_grc("analog_agc_xx", scope="catalog", k=5)
 ```
 
-`session` scope is available after the app runtime has loaded and bound an active `FlowgraphSession`.
+`session` scope is available after the app runtime has loaded an active `FlowgraphSession`, or after direct package callers bind one with `bind_retrieval_context(...)`.
 
 ## Catalog
 
@@ -164,15 +165,15 @@ The model-facing runtime is intentionally narrower than the session layer.
 
 - `load_grc(file_path)`: load or switch the active `.grc` session
 - `summarize_graph(max_blocks=None)`: report the current graph shape
-- `search_grc(query, scope="catalog|session", k=5)`: route bounded retrieval without duplicating search logic
+- `search_grc(query, scope="catalog|session", k=5)`: route bounded retrieval with explicit session/catalog context and without runtime-global session binding
 - `get_grc_context(node_id, hops=1, max_nodes=20)`: return a bounded neighborhood around one loaded block
 - `describe_block(block_id)`: return structured GNU catalog truth for one block id
 - `propose_edit(transaction)`: run preflight validation for a supported ordered transaction
 - `apply_edit(transaction)`: apply the same narrow transaction surface atomically and commit only after final GNU validation
 - `validate_graph`: run `grcc` validation on the current in-memory graph
-- `save_graph(path=None)`: persist the current graph, but only after the latest dirty state has passed validation
+- `save_graph(path=None)`: persist the current graph, but only after the latest dirty state has passed validation; a successful `apply_edit(...)` already satisfies that gate
 
-The broader `FlowgraphSession` mutation methods remain available for direct code paths and regression tests, but they are not part of the model tool contract. `set_variable` is no longer part of the public runtime surface; variable edits now flow through `propose_edit` / `apply_edit` like other supported transactions.
+The broader `FlowgraphSession` mutation methods remain available for direct code paths and regression tests, but they are not part of the model tool contract. `set_variable` is no longer part of the public runtime surface; variable edits now flow through `propose_edit` / `apply_edit` like other supported transactions. The runtime search path passes explicit session/catalog context into retrieval and does not rely on a module-global active-session binding.
 Every model tool call is validated against the declared runtime schema before execution: unknown tools, missing required fields, non-object payloads, type mismatches, enum mismatches, and unsupported extra fields fail with structured errors instead of reaching the session layer. Routed tool results now also carry an `active_session` snapshot so the current file, graph id, revision, dirty flag, and validation state stay explicit at the runtime boundary.
 
 ## Optional llama.cpp Spike
@@ -189,7 +190,7 @@ The repo now includes a thin llama.cpp adapter that calls only documented server
 - the runtime is unbounded with a safety ceiling of 50 tool rounds
 - the default model id is the server alias, currently `unsloth/gemma-4-E2B-it-GGUF`
 - the default Hugging Face model source is `unsloth/gemma-4-E2B-it-GGUF:Q4_K_M`
-- the default `max_tokens = 12000` is an operational ceiling, not the correctness guard
+- the default `max_tokens = 100000` is an operational ceiling, not the correctness guard
 - summarize final answers are resolved from the `summarize_graph` tool payload
 - other supported final answers fall back to the latest structured tool `message` only when the model leaves the final text empty or tool-call-shaped
 - raw tool-call-like text is not surfaced as the final answer when no tools actually ran
@@ -207,7 +208,9 @@ Run an interactive multi-turn REPL (no `--message` flag):
 uv run grc-agent chat tests/data/random_bit_generator.grc
 ```
 
-Type `/quit` or `/exit` to leave the REPL. History compaction runs between turns to stay within the model context window.
+Type `/quit` or `/exit` to leave the REPL. History compaction runs between turns to control prompt growth across multi-turn sessions.
+
+The eval suite is strong regression evidence for the supported harness contract, but it is not exhaustive proof for concurrent sessions, large-graph scaling, or model/backend diversity.
 
 If the configured local llama.cpp server is down, the CLI starts it automatically, waits for `/health`, requires `/v1/models` to return exactly one model, and requires that model `id` to match the configured alias before the first chat request. Repeated `chat` runs reuse the healthy local backend instead of relaunching it.
 

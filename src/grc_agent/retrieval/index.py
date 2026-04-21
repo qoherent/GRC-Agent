@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from grc_agent._payload import join_non_empty
-from grc_agent._payload import build_error_payload
+from grc_agent._payload import build_error_payload, ErrorCode
 from grc_agent.catalog.errors import CatalogLoadError
 from grc_agent.catalog.loaders import (
     DEFAULT_GRC_CATALOG_ROOTS as DEFAULT_GRC_CATALOG_ROOTS_SHARED,
@@ -66,7 +66,7 @@ def initialize_retrieval(
     status = graphify_status()
     if not status["ok"]:
         return build_error_payload(
-            error_type="RetrievalNotReady",
+            error_type=ErrorCode.RETRIEVAL_NOT_READY,
             message=str(status["message"]),
             details={"graphify_version": status["version"]},
         )
@@ -76,7 +76,7 @@ def initialize_retrieval(
         files = collect_catalog_files(root)
         validate_catalog_files(root, files)
     except (CatalogLoadError, RetrievalIndexError) as exc:
-        return build_error_payload(error_type="RetrievalNotReady", message=str(exc))
+        return build_error_payload(error_type=ErrorCode.RETRIEVAL_NOT_READY, message=str(exc))
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -95,7 +95,7 @@ def initialize_retrieval(
         try:
             index = get_catalog_index(root)
         except (GraphifyAdapterError, RetrievalIndexError) as exc:
-            return build_error_payload(error_type="RetrievalNotReady", message=str(exc))
+            return build_error_payload(error_type=ErrorCode.RETRIEVAL_NOT_READY, message=str(exc))
         payload["catalog_index_warmed"] = True
         payload["catalog_index"] = {
             "nodes": index.graph.number_of_nodes(),

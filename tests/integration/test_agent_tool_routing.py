@@ -32,9 +32,9 @@ class AgentToolRoutingIntegrationTests(unittest.TestCase):
         )
         validate = agent.execute_tool("validate_graph", {})
 
-        self.assertEqual(propose["error_type"], "MissingSession")
-        self.assertEqual(apply["error_type"], "MissingSession")
-        self.assertEqual(validate["error_type"], "MissingSession")
+        self.assertEqual(propose["error_type"], "missing_session")
+        self.assertEqual(apply["error_type"], "missing_session")
+        self.assertEqual(validate["error_type"], "missing_session")
 
     def test_read_only_routes_surface_structured_payloads(self) -> None:
         agent, _session = self._load_agent()

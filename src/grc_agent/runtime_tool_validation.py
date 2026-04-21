@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from grc_agent._payload import ErrorCode
+
 
 ToolSchemaMap = dict[str, dict[str, Any]]
 
@@ -33,7 +35,7 @@ def validate_runtime_tool_call(
     """Return one structured validation error payload or `None` when valid."""
     if tool_name not in schema_map:
         return {
-            "error_type": "UnknownTool",
+            "error_type": ErrorCode.UNKNOWN_TOOL,
             "message": f"Unknown tool: {tool_name}",
             "validation_errors": [
                 {
@@ -47,7 +49,7 @@ def validate_runtime_tool_call(
 
     if not isinstance(arguments, dict):
         return {
-            "error_type": "InvalidToolCall",
+            "error_type": ErrorCode.TOOL_CALL_INVALID,
             "message": f"Rejected invalid tool call for {tool_name}: arguments must be a JSON object.",
             "validation_errors": [
                 {
@@ -64,7 +66,7 @@ def validate_runtime_tool_call(
         return None
 
     return {
-        "error_type": "InvalidToolCall",
+        "error_type": ErrorCode.TOOL_CALL_INVALID,
         "message": f"Rejected invalid tool call for {tool_name}: {issues[0]['message']}",
         "validation_errors": issues,
     }

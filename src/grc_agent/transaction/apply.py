@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from grc_agent._payload import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 
 from .commit import build_apply_failure_payload, build_apply_success_payload
@@ -32,7 +33,7 @@ def apply_edit(
             warnings=warnings,
             errors=proposal["errors"],
             state_revision_before=state_revision_before,
-            error_type="PreflightRejected",
+            error_type=ErrorCode.PREFLIGHT_REJECTED,
         )
 
     candidate = clone_session(session)
@@ -43,6 +44,11 @@ def apply_edit(
                 candidate.is_dirty = session.is_dirty
 
         if not candidate.validate():
+            error_type = (
+                ErrorCode.VALIDATION_TIMEOUT
+                if candidate.last_validation_returncode == -2
+                else ErrorCode.GNU_VALIDATION_FAILED
+            )
             return build_apply_failure_payload(
                 session=session,
                 message="Candidate graph failed GNU validation.",
@@ -50,7 +56,7 @@ def apply_edit(
                 warnings=warnings,
                 validation=candidate.validation_state(),
                 state_revision_before=state_revision_before,
-                error_type="GNUValidationFailed",
+                error_type=error_type,
             )
     except Exception as exc:
         return build_apply_failure_payload(
@@ -59,7 +65,7 @@ def apply_edit(
             normalized_operations=normalized_operations,
             warnings=warnings,
             state_revision_before=state_revision_before,
-            error_type=type(exc).__name__,
+            error_type=ErrorCode.INTERNAL_ERROR,
         )
 
     commit_candidate_session(session, candidate)

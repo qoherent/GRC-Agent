@@ -63,5 +63,5 @@ class GetGrcContextTests(unittest.TestCase):
         payload = get_grc_context(session, "does_not_exist")
 
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error_type"], "node_not_found")
+        self.assertEqual(payload["error_type"], "block_not_found")
         self.assertEqual(payload["details"]["node_id"], "does_not_exist")

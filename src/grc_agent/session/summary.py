@@ -4,7 +4,7 @@ from typing import Any
 
 from grc_agent.flowgraph_session import DEFAULT_SUMMARY_BLOCK_LIMIT, FlowgraphSession
 
-from grc_agent._payload import build_error_payload
+from grc_agent._payload import build_error_payload, ErrorCode
 
 from .inspect import require_loaded_session
 
@@ -20,5 +20,5 @@ def summarize_graph(
         return session.summary_payload(max_blocks=max_blocks)
     except ValueError as exc:
         return build_error_payload(
-            error_type="invalid_summary_request", message=str(exc)
+            error_type=ErrorCode.INVALID_REQUEST, message=str(exc)
         )

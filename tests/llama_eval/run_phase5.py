@@ -18,11 +18,12 @@ from grc_agent.llama_server import LlamaServerError, run_bounded_llama_turn
 
 from tests.llama_eval.harness import (
     DEFAULT_FIXTURE_NAME,
-    build_client,
     ensure_llama_server,
-    extract_executed_tool_calls,
-    extract_requested_tool_calls,
+    executed_tool_calls_since as _executed_tool_calls_since,
     isolated_fixture_workspace,
+    render_prompt as _render_prompt,
+    render_value_templates as _render_value_templates,
+    requested_tool_calls_since as _requested_tool_calls_since,
     text_contains_any,
     tool_call_matches_argument_checks,
     tool_call_matches_transaction_checks,
@@ -248,40 +249,6 @@ PHASE5_CASES: list[RecoveryCase] = [
 ]
 
 
-def _render_prompt(prompt: str, target_path: str, save_path: str) -> str:
-    return prompt.format(target_path=target_path, save_path=save_path)
-
-
-def _render_value_templates(value: Any, *, target_path: str, save_path: str) -> Any:
-    if isinstance(value, str):
-        return value.format(target_path=target_path, save_path=save_path)
-    if isinstance(value, dict):
-        return {
-            key: _render_value_templates(
-                nested_value, target_path=target_path, save_path=save_path
-            )
-            for key, nested_value in value.items()
-        }
-    if isinstance(value, list):
-        return [
-            _render_value_templates(item, target_path=target_path, save_path=save_path)
-            for item in value
-        ]
-    return value
-
-
-def _requested_tool_calls_since(
-    history: list[dict[str, Any]], start_index: int
-) -> list[dict[str, Any]]:
-    return extract_requested_tool_calls(history[start_index:])
-
-
-def _executed_tool_calls_since(
-    history: list[dict[str, Any]], start_index: int
-) -> list[dict[str, Any]]:
-    return extract_executed_tool_calls(history[start_index:])
-
-
 def _executed_tools_match(
     executed_tool_calls: list[dict[str, Any]],
     expected_executed_in_order: list[ExecutedToolSpec],
@@ -494,8 +461,7 @@ def _run_eval(
     cases: list[RecoveryCase],
     n_runs: int,
 ) -> dict[str, Any]:
-    resolved_url, resolved_model = ensure_llama_server(server_url, model)
-    client = build_client(resolved_url)
+    resolved_url, resolved_model, client = ensure_llama_server(server_url, model)
 
     results = []
     total = len(cases) * n_runs
@@ -602,7 +568,13 @@ def main() -> int:
         default=None,
         help="Run only the case with this name.",
     )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Quick check: force n_runs=1.",
+    )
     args = parser.parse_args()
+    n_runs = 1 if args.quick else args.n_runs
 
     cases = list(PHASE5_CASES)
     if args.category:
@@ -613,7 +585,7 @@ def main() -> int:
         print("No matching cases.", file=sys.stderr)
         return 1
 
-    report = _run_eval(args.server_url, args.model, cases, args.n_runs)
+    report = _run_eval(args.server_url, args.model, cases, n_runs)
     print("\n" + json.dumps(report, indent=2, sort_keys=False))
     return 0
 

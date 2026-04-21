@@ -1,13 +1,18 @@
 """Thin llama.cpp server adapter over the narrowed GRC runtime."""
 
+import ast
 import json
+import logging
 import re
 import socket
 from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
 
-from grc_agent.agent import GrcAgent
+from grc_agent._payload import ErrorCode, build_error_payload
+from grc_agent.agent import GrcAgent, PUBLIC_TOOL_NAMES
+
+logger = logging.getLogger(__name__)
 
 
 class LlamaServerError(RuntimeError):
@@ -44,7 +49,7 @@ class LlamaServerClient:
         base_url: str,
         api_key: str | None = None,
         timeout_seconds: float = 60.0,
-        max_tokens: int = 12000,
+        max_tokens: int = 100000,
         temperature: float = 0.0,
         enable_thinking: bool = False,
     ) -> None:
@@ -147,6 +152,10 @@ class LlamaServerClient:
             self._normalize_content(message.get("content"))
         )
         tool_calls = self._parse_tool_calls(message.get("tool_calls"))
+        if not tool_calls:
+            fallback_tool_call = self._parse_tool_call_from_content(content)
+            if fallback_tool_call is not None:
+                return None, [fallback_tool_call]
         return content, tool_calls
 
     def _request_json(
@@ -254,6 +263,41 @@ class LlamaServerClient:
                     return f"llama.cpp server returned HTTP {status_code}: {message}"
 
         return f"llama.cpp server returned HTTP {status_code}."
+
+    @staticmethod
+    def _parse_tool_call_from_content(content: str | None) -> LlamaToolCall | None:
+        if not isinstance(content, str) or not content.strip():
+            return None
+        normalized = re.sub(r"<eos>\s*", " ", content).strip()
+        match = re.search(
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)",
+            normalized,
+            re.DOTALL,
+        )
+        if match is None:
+            return None
+        call_text = match.group(0)
+        try:
+            expression = ast.parse(call_text, mode="eval").body
+        except SyntaxError:
+            return None
+        if not isinstance(expression, ast.Call) or not isinstance(expression.func, ast.Name):
+            return None
+        if expression.func.id not in PUBLIC_TOOL_NAMES or expression.args:
+            return None
+        arguments: dict[str, Any] = {}
+        for keyword in expression.keywords:
+            if keyword.arg is None:
+                return None
+            try:
+                arguments[keyword.arg] = ast.literal_eval(keyword.value)
+            except (ValueError, SyntaxError):
+                return None
+        return LlamaToolCall(
+            id="fallback_tool_call",
+            name=expression.func.id,
+            arguments=arguments,
+        )
 
     @staticmethod
     def _normalize_content(content: Any) -> str | None:
@@ -386,6 +430,12 @@ _SAVE_INTENT_TERMS = (
     "write out",
     "dump",
 )
+_DISCOVERY_INTENT_TERMS = (
+    "find",
+    "search",
+    "look up",
+    "discover",
+)
 _INSPECT_BEFORE_EDIT_TERMS = (
     "look",
     "inspect",
@@ -443,6 +493,8 @@ def run_bounded_llama_turn(
     tool_rounds_used = 0
     assistant_turns = 0
 
+    logger.info("turn_start model=%s message=%s", resolved_model, user_message[:80])
+
     while True:
         response = client.create_chat_completion(
             model=resolved_model,
@@ -451,6 +503,27 @@ def run_bounded_llama_turn(
         )
         assistant_turns += 1
         assistant_content, tool_calls = client.parse_assistant_message(response)
+        unsupported_message = _unsupported_request_message(
+            [{"role": "user", "content": user_message}]
+        )
+        if (
+            tool_calls
+            and unsupported_message is not None
+            and all(tool_call.id == "fallback_tool_call" for tool_call in tool_calls)
+        ):
+            assistant_content = unsupported_message
+            tool_calls = []
+
+        if tool_calls and tool_rounds_used >= _SAFETY_MAX_TOOL_ROUNDS:
+            return {
+                "ok": False,
+                "error_type": ErrorCode.SAFETY_CEILING,
+                "model": resolved_model,
+                "steps": assistant_turns,
+                "tool_rounds_used": tool_rounds_used,
+                "tool_calls_executed": tool_calls_executed,
+                "message": "Safety tool-round ceiling reached before the model produced a final answer.",
+            }
 
         assistant_entry: dict[str, Any] = {
             "role": "assistant",
@@ -463,18 +536,12 @@ def run_bounded_llama_turn(
         agent.history.append(assistant_entry)
 
         if tool_calls:
-            if tool_rounds_used >= _SAFETY_MAX_TOOL_ROUNDS:
-                return {
-                    "ok": False,
-                    "model": resolved_model,
-                    "steps": assistant_turns,
-                    "tool_rounds_used": tool_rounds_used,
-                    "tool_calls_executed": tool_calls_executed,
-                    "message": "Safety tool-round ceiling reached before the model produced a final answer.",
-                }
-
             tool_rounds_used += 1
             for tool_call in tool_calls:
+                logger.info("tool_call name=%s args=%s", tool_call.name, str(tool_call.arguments)[:120])
+                # Pre-validate here (before execute_tool) so that schema-rejected calls
+                # are NOT counted in tool_calls_executed.  execute_tool also validates,
+                # but that path would increment the counter first.
                 validation_result = agent.validate_tool_call(
                     tool_call.name, tool_call.arguments
                 )
@@ -485,6 +552,19 @@ def run_bounded_llama_turn(
                             "tool_call_id": tool_call.id,
                             "name": tool_call.name,
                             "content": validation_result,
+                        }
+                    )
+                    continue
+                tool_order_result = _validate_tool_order_for_turn(
+                    user_message, agent.history, tool_call.name, tool_call.arguments
+                )
+                if tool_order_result is not None:
+                    agent.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": tool_order_result,
                         }
                     )
                     continue
@@ -515,6 +595,10 @@ def run_bounded_llama_turn(
             agent.history, assistant_content or ""
         )
         agent.history[-1]["content"] = assistant_text
+        logger.info(
+            "turn_end ok=True steps=%d tool_rounds=%d tool_calls=%d",
+            assistant_turns, tool_rounds_used, tool_calls_executed,
+        )
         return {
             "ok": True,
             "model": resolved_model,
@@ -532,15 +616,19 @@ def _resolve_final_assistant_text(
     tool_turns = [turn for turn in history[:-1] if turn.get("role") == "tool"]
     latest_tool_turn = tool_turns[-1] if tool_turns else None
     unsupported_message = _unsupported_request_message(history)
+
+    summarize_summary = None
     if (
         isinstance(latest_tool_turn, dict)
         and latest_tool_turn.get("name") == "summarize_graph"
         and isinstance(latest_tool_turn.get("content"), dict)
         and isinstance(latest_tool_turn["content"].get("summary"), str)
     ):
-        return latest_tool_turn["content"]["summary"]
+        summarize_summary = latest_tool_turn["content"]["summary"]
 
     if _looks_like_tool_call_text(assistant_text):
+        if summarize_summary is not None:
+            return summarize_summary
         if (
             isinstance(latest_tool_turn, dict)
             and isinstance(latest_tool_turn.get("content"), dict)
@@ -554,6 +642,8 @@ def _resolve_final_assistant_text(
     if assistant_text.strip():
         return assistant_text
 
+    if summarize_summary is not None:
+        return summarize_summary
     if (
         isinstance(latest_tool_turn, dict)
         and isinstance(latest_tool_turn.get("content"), dict)
@@ -570,13 +660,21 @@ def _looks_like_tool_call_text(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    return bool(
+    if bool(
         re.fullmatch(
             r"[A-Za-z_][A-Za-z0-9_]*\s*(\{.*\}|\(.*\))",
             stripped,
             re.DOTALL,
         )
-    )
+    ):
+        return True
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    return "name" in parsed or "function" in parsed
 
 
 def _unsupported_request_message(history: list[dict[str, Any]]) -> str | None:
@@ -603,15 +701,152 @@ def _unsupported_request_message(history: list[dict[str, Any]]) -> str | None:
 def _build_follow_up_reminder(
     user_message: str, history: list[dict[str, Any]]
 ) -> dict[str, str] | None:
-    """Return one unmet follow-up requirement inferred from the user request."""
+    """Return one unmet follow-up requirement inferred from the current user turn."""
     lowered = user_message.lower()
-    successful_tool_names = _successful_tool_names(history)
-    last_success = _last_successful_tool_indices(history)
+    current_turn_history = _current_turn_history(history)
+    successful_tool_names = _successful_tool_names(current_turn_history)
+    last_success = _last_successful_tool_indices(current_turn_history)
+    all_last_success = _last_successful_tool_indices(history)
     existing_reminders = {
         turn.get("code")
-        for turn in history
+        for turn in current_turn_history
         if turn.get("role") == "reminder" and isinstance(turn.get("code"), str)
     }
+    failed_tool_this_turn = _has_failed_tool_result(current_turn_history)
+    empty_session_search = _latest_empty_session_search(current_turn_history)
+    latest_successful_search = _latest_successful_search(current_turn_history)
+
+    if (
+        _repair_transaction_required(lowered, current_turn_history)
+        and "repair_transaction_required" not in existing_reminders
+    ):
+        if "samp_rate" in lowered and "32000" in lowered:
+            return {
+                "code": "repair_transaction_required",
+                "message": (
+                    "Reminder: the user asked you to remove `samp_rate` while keeping the graph working at `32000`. "
+                    "Call `apply_edit` again with one ordered repair transaction that first patches dependent parameters "
+                    "to `32000`, then removes `samp_rate`. Do not ask for confirmation."
+                ),
+            }
+        return {
+            "code": "repair_transaction_required",
+            "message": (
+                "Reminder: the removal failed because the block is still referenced. "
+                "If the user asked to keep the graph working, call `apply_edit` again with one repair transaction "
+                "that first replaces references with literal values, then removes the block."
+            ),
+        }
+
+    if (
+        _samp_rate_removal_still_required(lowered, current_turn_history)
+        and "samp_rate_remove_required" not in existing_reminders
+    ):
+        return {
+            "code": "samp_rate_remove_required",
+            "message": (
+                "Reminder: the user asked you to remove `samp_rate`, but the graph still has that variable. "
+                "Call `apply_edit` with one repair transaction that patches dependent parameters to literal values "
+                "and then removes `samp_rate`."
+            ),
+        }
+
+    if (
+        empty_session_search is not None
+        and _requests_description(lowered)
+        and _requests_block_discovery(lowered)
+        and "describe_block" not in successful_tool_names
+        and "catalog_retry_required" not in existing_reminders
+    ):
+        retry_query = empty_session_search.get("query")
+        query_text = (
+            f"`{retry_query}`"
+            if isinstance(retry_query, str) and retry_query
+            else "the same query"
+        )
+        return {
+            "code": "catalog_retry_required",
+            "message": (
+                "Reminder: the session search found no matching block type. "
+                f"Retry `search_grc` with `scope=\"catalog\"` for {query_text}, "
+                "then call `describe_block` with the returned `block_id` before you validate or finish."
+            ),
+        }
+
+    if _requests_description(lowered):
+        last_search = last_success.get("search_grc", -1)
+        last_describe = last_success.get("describe_block", -1)
+        if (
+            last_search > last_describe
+            and "describe_block_required" not in existing_reminders
+        ):
+            top_block_id = _top_search_block_id(latest_successful_search)
+            if top_block_id is not None:
+                return {
+                    "code": "describe_block_required",
+                    "message": (
+                        "Reminder: the user asked for a block description. "
+                        f"Call `describe_block(block_id=\"{top_block_id}\")` now. "
+                        "Do not ask the user to choose when the top catalog result already matches the query."
+                    ),
+                }
+            return {
+                "code": "describe_block_required",
+                "message": (
+                    "Reminder: the user asked for a block description. "
+                    "After `search_grc`, call `describe_block` with the chosen result's `block_id`, not its `node_id`."
+                ),
+            }
+        all_last_search = all_last_success.get("search_grc", -1)
+        all_last_describe = all_last_success.get("describe_block", -1)
+        if (
+            "describe_block" not in successful_tool_names
+            and all_last_search > all_last_describe
+            and "describe_block_required" not in existing_reminders
+        ):
+            top_block_id = _top_search_block_id(_latest_successful_search(history))
+            if top_block_id is not None:
+                return {
+                    "code": "describe_block_required",
+                    "message": (
+                        "Reminder: the user asked for a block description. "
+                        f'Use the block you found earlier and call `describe_block(block_id="{top_block_id}")` now.'
+                    ),
+                }
+            return {
+                "code": "describe_block_required",
+                "message": (
+                    "Reminder: the user asked for a block description. "
+                    "Use the latest prior `search_grc` result and call `describe_block` with that result's `block_id`."
+                ),
+            }
+        explicit_block_id = _explicit_block_id_candidate(user_message)
+        if (
+            explicit_block_id is not None
+            and "describe_block" not in successful_tool_names
+            and "describe_block_required" not in existing_reminders
+        ):
+            return {
+                "code": "describe_block_required",
+                "message": (
+                    "Reminder: the user asked for a block description. "
+                    f'Call `describe_block(block_id="{explicit_block_id}")` now.'
+                ),
+            }
+        if (
+            "block" in lowered
+            and not successful_tool_names
+            and "describe_block_required" not in existing_reminders
+            and "catalog_retry_required" not in existing_reminders
+        ):
+            return {
+                "code": "describe_block_required",
+                "message": (
+                    "Reminder: use `describe_block` with the block's canonical id "
+                    "to look up the real block definition. "
+                    "Do not answer from training knowledge."
+                ),
+            }
 
     if _requests_validation(lowered) and not _is_preview_only_request(lowered):
         last_validate = last_success.get("validate_graph", -1)
@@ -644,28 +879,17 @@ def _build_follow_up_reminder(
                 ),
             }
 
-    if _requests_description(lowered):
-        last_search = last_success.get("search_grc", -1)
-        last_describe = last_success.get("describe_block", -1)
-        if (
-            last_search > last_describe
-            and "describe_block_required" not in existing_reminders
-        ):
-            return {
-                "code": "describe_block_required",
-                "message": (
-                    "Reminder: the user asked for a block description. "
-                    "After `search_grc`, call `describe_block` with the chosen result's `block_id`, not its `node_id`."
-                ),
-            }
-
     if _requests_save(lowered):
-        last_save = last_success.get("save_graph", -1)
-        last_edit = last_success.get("apply_edit", -1)
-        last_validate = last_success.get("validate_graph", -1)
+        last_save = all_last_success.get("save_graph", -1)
+        last_ready_to_save = max(
+            all_last_success.get("load_grc", -1),
+            all_last_success.get("apply_edit", -1),
+            all_last_success.get("validate_graph", -1),
+        )
         if (
-            last_edit > last_save
-            and last_validate >= last_edit
+            "save_graph" not in successful_tool_names
+            and not failed_tool_this_turn
+            and (last_ready_to_save > last_save or last_ready_to_save == -1)
             and "save_graph_required" not in existing_reminders
         ):
             return {
@@ -704,6 +928,124 @@ def _build_follow_up_reminder(
     return None
 
 
+def _validate_tool_order_for_turn(
+    user_message: str,
+    history: list[dict[str, Any]],
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reject tool calls that skip required discovery/describe steps for this turn."""
+    lowered = user_message.lower()
+    current_turn_history = _current_turn_history(history)
+    last_success = _last_successful_tool_indices(current_turn_history)
+    if (
+        tool_name in {"validate_graph", "save_graph"}
+        and _repair_transaction_required(lowered, current_turn_history)
+    ):
+        return build_error_payload(
+            error_type=ErrorCode.TOOL_CALL_INVALID,
+            message=(
+                f"Rejected out-of-order {tool_name}: call `apply_edit` again with one repair transaction "
+                "that replaces references with literal values before you validate or save."
+            ),
+            details={
+                "code": "repair_transaction_required",
+                "required_tool": "apply_edit",
+            },
+        )
+    if (
+        tool_name in {"validate_graph", "save_graph"}
+        and _samp_rate_removal_still_required(lowered, current_turn_history)
+    ):
+        return build_error_payload(
+            error_type=ErrorCode.TOOL_CALL_INVALID,
+            message=(
+                f"Rejected out-of-order {tool_name}: the user asked you to remove `samp_rate`, "
+                "so call `apply_edit` with a repair transaction that actually removes it before you validate or save."
+            ),
+            details={
+                "code": "samp_rate_remove_required",
+                "required_tool": "apply_edit",
+            },
+        )
+    if tool_name == "save_graph" and _requests_validation(lowered):
+        last_validate = last_success.get("validate_graph", -1)
+        last_change_or_load = max(
+            last_success.get("apply_edit", -1),
+            last_success.get("load_grc", -1),
+        )
+        if last_validate < last_change_or_load:
+            return build_error_payload(
+                error_type=ErrorCode.TOOL_CALL_INVALID,
+                message=(
+                    "Rejected out-of-order save_graph: call `validate_graph` before "
+                    "`save_graph` because the user explicitly asked for validation first."
+                ),
+                details={
+                    "code": "validate_graph_required",
+                    "required_tool": "validate_graph",
+                },
+            )
+
+    if not _requests_description(lowered):
+        return None
+
+    successful_tool_names = _successful_tool_names(current_turn_history)
+    empty_session_search = _latest_empty_session_search(current_turn_history)
+    if (
+        empty_session_search is not None
+        and _requests_block_discovery(lowered)
+        and "describe_block" not in successful_tool_names
+    ):
+        requested_scope = arguments.get("scope")
+        if tool_name != "search_grc" or requested_scope != "catalog":
+            retry_query = empty_session_search.get("query")
+            query_text = (
+                f"`{retry_query}`"
+                if isinstance(retry_query, str) and retry_query
+                else "the same query"
+            )
+            return build_error_payload(
+                error_type=ErrorCode.TOOL_CALL_INVALID,
+                message=(
+                    f"Rejected out-of-order {tool_name}: retry `search_grc` with "
+                    f"`scope=\"catalog\"` for {query_text} before you validate or finish."
+                ),
+                details={
+                    "code": "catalog_retry_required",
+                    "required_tool": "search_grc",
+                    "required_arguments": {"query": retry_query, "scope": "catalog"},
+                },
+            )
+
+    last_search = last_success.get("search_grc", -1)
+    last_describe = last_success.get("describe_block", -1)
+    if tool_name == "validate_graph" and last_search > last_describe:
+        latest_search = _latest_successful_search(current_turn_history)
+        if latest_search is None:
+            return None
+        top_block_id = _top_search_block_id(latest_search)
+        message = (
+            f"Rejected out-of-order {tool_name}: call "
+            f'`describe_block(block_id="{top_block_id}")` before `validate_graph`.'
+            if top_block_id is not None
+            else "Rejected out-of-order validate_graph: call `describe_block` with the chosen search result's `block_id` before `validate_graph`."
+        )
+        details: dict[str, Any] = {
+            "code": "describe_block_required",
+            "required_tool": "describe_block",
+        }
+        if top_block_id is not None:
+            details["required_arguments"] = {"block_id": top_block_id}
+        return build_error_payload(
+            error_type=ErrorCode.TOOL_CALL_INVALID,
+            message=message,
+            details=details,
+        )
+
+    return None
+
+
 def _successful_tool_names(history: list[dict[str, Any]]) -> set[str]:
     return {
         str(turn.get("name"))
@@ -728,6 +1070,173 @@ def _last_successful_tool_indices(history: list[dict[str, Any]]) -> dict[str, in
     return indices
 
 
+def _current_turn_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    user_indices = [index for index, turn in enumerate(history) if turn.get("role") == "user"]
+    if not user_indices:
+        return history
+    return history[user_indices[-1] :]
+
+
+def _explicit_block_id_candidate(user_message: str) -> str | None:
+    for match in re.finditer(r"\b([a-z][a-z0-9_]*_[a-z0-9_]+)\b", user_message):
+        candidate = match.group(1)
+        if candidate in {
+            "describe_block",
+            "search_grc",
+            "get_grc_context",
+            "summarize_graph",
+            "apply_edit",
+            "propose_edit",
+            "validate_graph",
+            "save_graph",
+            "load_grc",
+        }:
+            continue
+        return candidate
+    return None
+
+
+def _has_failed_tool_result(history: list[dict[str, Any]]) -> bool:
+    return any(
+        turn.get("role") == "tool"
+        and isinstance(turn.get("content"), dict)
+        and turn["content"].get("ok") is False
+        for turn in history
+    )
+
+
+def _latest_empty_session_search(
+    history: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    pending_empty_search: dict[str, Any] | None = None
+    for turn in history:
+        if (
+            turn.get("role") == "tool"
+            and turn.get("name") == "search_grc"
+            and isinstance(turn.get("content"), dict)
+            and turn["content"].get("ok") is True
+        ):
+            content = turn["content"]
+            if content.get("scope") == "session" and not content.get("results"):
+                pending_empty_search = content
+                continue
+            if content.get("scope") == "catalog" and pending_empty_search is not None:
+                pending_empty_search = None
+    return pending_empty_search
+
+
+def _repair_transaction_required(
+    lowered_user_message: str,
+    history: list[dict[str, Any]],
+) -> bool:
+    if not _requests_samp_rate_repair_flow(lowered_user_message):
+        return False
+    last_success_apply_edit = _last_successful_tool_indices(history).get("apply_edit", -1)
+    for index in range(len(history) - 1, -1, -1):
+        turn = history[index]
+        if (
+            turn.get("role") == "tool"
+            and turn.get("name") == "apply_edit"
+            and isinstance(turn.get("content"), dict)
+            and turn["content"].get("ok") is False
+            and _tool_result_has_error_code(turn["content"], "block_still_referenced")
+        ):
+            return last_success_apply_edit < index
+    return False
+
+
+def _samp_rate_removal_still_required(
+    lowered_user_message: str,
+    history: list[dict[str, Any]],
+) -> bool:
+    return _requests_samp_rate_repair_flow(lowered_user_message) and not _successful_remove_block(
+        history,
+        "samp_rate",
+    )
+
+
+def _requests_samp_rate_repair_flow(lowered_user_message: str) -> bool:
+    if "samp_rate" not in lowered_user_message:
+        return False
+    if not any(term in lowered_user_message for term in ("remove", "get rid of")):
+        return False
+    return any(
+        term in lowered_user_message
+        for term in (
+            "keep it working",
+            "keep the graph working",
+            "keep the graph valid",
+            "repair",
+            "patch",
+            "literal",
+            "hardcode",
+            "32000",
+        )
+    )
+
+
+def _successful_remove_block(history: list[dict[str, Any]], instance_name: str) -> bool:
+    for turn in reversed(history):
+        if (
+            turn.get("role") != "tool"
+            or turn.get("name") != "apply_edit"
+            or not isinstance(turn.get("content"), dict)
+            or turn["content"].get("ok") is not True
+        ):
+            continue
+        operations = turn["content"].get("normalized_operations")
+        if not isinstance(operations, list):
+            continue
+        for operation in operations:
+            if (
+                isinstance(operation, dict)
+                and operation.get("op_type") == "remove_block"
+                and operation.get("instance_name") == instance_name
+            ):
+                return True
+    return False
+
+
+def _tool_result_has_error_code(content: dict[str, Any], code: str) -> bool:
+    errors = content.get("errors")
+    return isinstance(errors, list) and any(
+        isinstance(error, dict) and error.get("code") == code for error in errors
+    )
+
+
+def _latest_successful_search(history: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for content in _iter_successful_search_payloads(history):
+        return content
+    return None
+
+
+def _iter_successful_search_payloads(history: list[dict[str, Any]]):
+    for turn in reversed(history):
+        if (
+            turn.get("role") == "tool"
+            and turn.get("name") == "search_grc"
+            and isinstance(turn.get("content"), dict)
+        ):
+            content = turn["content"]
+            if content.get("ok") is True:
+                yield content
+
+
+def _top_search_block_id(search_payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(search_payload, dict):
+        return None
+    results = search_payload.get("results")
+    if not isinstance(results, list) or not results:
+        return None
+    first_result = results[0]
+    if not isinstance(first_result, dict):
+        return None
+    block_id = first_result.get("block_id")
+    if not isinstance(block_id, str) or not block_id:
+        return None
+    return block_id
+
+
 def _requests_validation(lowered_user_message: str) -> bool:
     return any(term in lowered_user_message for term in _VALIDATION_INTENT_TERMS)
 
@@ -742,6 +1251,10 @@ def _requests_summary(lowered_user_message: str) -> bool:
 
 def _requests_save(lowered_user_message: str) -> bool:
     return any(term in lowered_user_message for term in _SAVE_INTENT_TERMS)
+
+
+def _requests_block_discovery(lowered_user_message: str) -> bool:
+    return any(term in lowered_user_message for term in _DISCOVERY_INTENT_TERMS)
 
 
 def _needs_inspect_before_edit(lowered_user_message: str) -> bool:

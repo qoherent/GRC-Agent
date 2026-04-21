@@ -36,7 +36,7 @@ class TransactionCommitTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["applied"])
         self.assertFalse(payload["commit_eligible"])
-        self.assertEqual(payload["error_type"], "GNUValidationFailed")
+        self.assertEqual(payload["error_type"], "gnu_validation_failed")
         self.assertEqual(payload["validation"]["status"], "invalid")
         assert session.flowgraph is not None
         self.assertEqual(session.flowgraph.raw_data, original_raw)

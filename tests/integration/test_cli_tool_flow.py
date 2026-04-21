@@ -97,7 +97,7 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(exit_code, 1)
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error_type"], "InvalidToolCall")
+        self.assertEqual(payload["error_type"], "tool_call_invalid")
         self.assertEqual(payload["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(payload["validation_errors"][0]["field"], "unexpected")
 
@@ -229,3 +229,21 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Assistant called apply_edit", output)
+
+    def test_health_command_returns_structured_json(self) -> None:
+        exit_code, output = self._run_cli("health")
+
+        payload = json.loads(output)
+        self.assertIn("status", payload)
+        self.assertIn("session_loaded", payload)
+        self.assertIn("retrieval_ready", payload)
+        self.assertIn("tool_count", payload)
+        self.assertGreater(payload["tool_count"], 0)
+        self.assertFalse(payload["session_loaded"])
+
+    def test_health_command_exit_code_matches_status(self) -> None:
+        exit_code, output = self._run_cli("health")
+
+        payload = json.loads(output)
+        expected = 0 if payload["status"] == "ok" else 1
+        self.assertEqual(exit_code, expected)

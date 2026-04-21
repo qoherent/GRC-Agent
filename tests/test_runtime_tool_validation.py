@@ -25,14 +25,14 @@ class RuntimeToolValidationTests(unittest.TestCase):
         result = validate_runtime_tool_call("set_variable", {}, self._schema_map())
 
         assert result is not None
-        self.assertEqual(result["error_type"], "UnknownTool")
+        self.assertEqual(result["error_type"], "unknown_tool")
         self.assertEqual(result["validation_errors"][0]["code"], "unknown_tool")
 
     def test_missing_required_argument_is_rejected(self) -> None:
         result = validate_runtime_tool_call("load_grc", {}, self._schema_map())
 
         assert result is not None
-        self.assertEqual(result["error_type"], "InvalidToolCall")
+        self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "missing_required")
         self.assertEqual(result["validation_errors"][0]["field"], "file_path")
 
@@ -44,7 +44,7 @@ class RuntimeToolValidationTests(unittest.TestCase):
         )
 
         assert result is not None
-        self.assertEqual(result["error_type"], "InvalidToolCall")
+        self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(result["validation_errors"][0]["field"], "unexpected")
 
@@ -56,7 +56,7 @@ class RuntimeToolValidationTests(unittest.TestCase):
         )
 
         assert result is not None
-        self.assertEqual(result["error_type"], "InvalidToolCall")
+        self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_type")
         self.assertEqual(result["validation_errors"][0]["field"], "k")
 
@@ -68,6 +68,6 @@ class RuntimeToolValidationTests(unittest.TestCase):
         )
 
         assert result is not None
-        self.assertEqual(result["error_type"], "InvalidToolCall")
+        self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_enum")
         self.assertEqual(result["validation_errors"][0]["field"], "scope")

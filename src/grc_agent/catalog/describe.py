@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import BlockNotFoundError, CatalogError, CatalogLoadError, build_error_payload
+from grc_agent._payload import ErrorCode
 from .loaders import find_block_source
 from .normalize import (
     build_signature,
@@ -33,7 +34,7 @@ def _describe_block_with_root(
     normalized_block_id = _normalize_block_id(block_id)
     if normalized_block_id is None:
         return build_error_payload(
-            error_type="InvalidBlockId",
+            error_type=ErrorCode.TOOL_CALL_INVALID,
             message="block_id must be a non-empty string.",
         )
 
@@ -42,7 +43,7 @@ def _describe_block_with_root(
         description = _build_block_description(raw_block)
     except BlockNotFoundError as exc:
         return build_error_payload(
-            error_type="BlockNotFound",
+            error_type=ErrorCode.BLOCK_NOT_FOUND,
             message=str(exc),
             details={
                 "block_id": exc.block_id,
@@ -50,7 +51,7 @@ def _describe_block_with_root(
         )
     except CatalogError as exc:
         return build_error_payload(
-            error_type=type(exc).__name__,
+            error_type=ErrorCode.CATALOG_LOAD_ERROR,
             message=str(exc),
         )
 

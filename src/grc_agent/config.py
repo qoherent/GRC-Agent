@@ -56,7 +56,7 @@ def default_app_config() -> AppConfig:
             model="unsloth/gemma-4-E2B-it-GGUF",
             hf_model="unsloth/gemma-4-E2B-it-GGUF:Q4_K_M",
             startup_timeout_seconds=300.0,
-            max_tokens=12000,
+            max_tokens=100000,
             temperature=0.0,
             enable_thinking=False,
             request_timeout_seconds=60.0,

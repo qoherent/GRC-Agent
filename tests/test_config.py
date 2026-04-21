@@ -28,7 +28,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.model, "unsloth/gemma-4-E2B-it-GGUF")
         self.assertEqual(config.llama.hf_model, "unsloth/gemma-4-E2B-it-GGUF:Q4_K_M")
         self.assertEqual(config.llama.startup_timeout_seconds, 300.0)
-        self.assertEqual(config.llama.max_tokens, 12000)
+        self.assertEqual(config.llama.max_tokens, 100000)
         self.assertEqual(config.llama.temperature, 1.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 60.0)

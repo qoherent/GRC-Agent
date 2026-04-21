@@ -5,6 +5,7 @@ from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from grc_agent.agent import GrcAgent, PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_fake_runtime
@@ -118,6 +119,31 @@ class GrcAgentTests(unittest.TestCase):
         )
         self.assertIn("blocks_throttle2_0", session_messages[0]["content"])
 
+    def test_session_history_messages_render_recorded_snapshot_not_live_session(
+        self,
+    ) -> None:
+        agent, _session = self._load_agent()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            alt_path = self._write_alt_fixture(Path(tmpdir))
+            agent.execute_tool("load_grc", {"file_path": str(alt_path)})
+
+        session_messages = [
+            message["content"]
+            for message in agent.get_model_messages()
+            if message.get("role") == "system"
+            and isinstance(message.get("content"), str)
+            and message["content"].startswith(
+                ("Active session:", "Switched active session:")
+            )
+        ]
+
+        self.assertEqual(len(session_messages), 2)
+        self.assertIn("path=" + str(self._fixture_path()), session_messages[0])
+        self.assertIn("variables=[samp_rate=32000]", session_messages[0])
+        self.assertIn("path=" + str(alt_path), session_messages[1])
+        self.assertIn("variables=[fresh_clock_value=32000]", session_messages[1])
+
     def test_execute_tool_unknown_name_returns_structured_error(self) -> None:
         agent, _session = self._load_agent()
 
@@ -125,7 +151,7 @@ class GrcAgentTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["tool"], "set_variable")
-        self.assertEqual(result["error_type"], "UnknownTool")
+        self.assertEqual(result["error_type"], "unknown_tool")
 
     def test_load_grc_tool_replaces_empty_session(self) -> None:
         agent = GrcAgent()
@@ -162,6 +188,27 @@ class GrcAgentTests(unittest.TestCase):
         self.assertIn("block_id", result["hint"])
         self.assertEqual(result["active_session"]["path"], str(self._fixture_path()))
 
+    def test_search_grc_uses_explicit_runtime_context(self) -> None:
+        agent, session = self._load_agent()
+
+        with mock.patch(
+            "grc_agent.agent._search_grc_with_context",
+            return_value={"ok": True, "scope": "session", "query": "samp_rate", "results": []},
+        ) as search_mock:
+            result = agent.execute_tool(
+                "search_grc",
+                {"query": "samp_rate", "scope": "session", "k": 3},
+            )
+
+        self.assertTrue(result["ok"])
+        search_mock.assert_called_once_with(
+            "samp_rate",
+            scope="session",
+            k=3,
+            session=session,
+            catalog_root=None,
+        )
+
     def test_execute_tool_rejects_schema_mismatches_before_execution(self) -> None:
         agent, _session = self._load_agent()
 
@@ -171,7 +218,7 @@ class GrcAgentTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "InvalidToolCall")
+        self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(result["validation_errors"][0]["field"], "unexpected")
 
@@ -231,13 +278,20 @@ class GrcAgentTests(unittest.TestCase):
         tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
         self.assertEqual(len(tool_entries), 1)
         self.assertFalse(tool_entries[0]["content"]["ok"])
-        self.assertEqual(tool_entries[0]["content"]["error_type"], "InvalidToolCall")
+        self.assertEqual(tool_entries[0]["content"]["error_type"], "tool_call_invalid")
         self.assertEqual(
             tool_entries[0]["content"]["validation_errors"][0]["code"],
             "unexpected_argument",
         )
 
-    def test_get_grc_context_routes_context_payload(self) -> None:
+    def test_execute_tool_rejects_unknown_tool_directly(self) -> None:
+        """execute_tool's internal validation layer must reject unknown tools directly."""
+        agent, _session = self._load_agent()
+
+        result = agent.execute_tool("nonexistent_tool_xyz", {})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "unknown_tool")
         agent, _session = self._load_agent()
 
         result = agent.execute_tool(
@@ -379,6 +433,22 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(result["returncode"], 0)
         self.assertIn("active_session", result)
 
+    def test_validate_graph_grcc_timeout_returns_validation_timeout(self) -> None:
+        """When grcc times out, validate_graph must return ok=False, error_type='validation_timeout'."""
+        agent, session = self._load_agent()
+
+        def _fake_timeout(raw_data: object) -> tuple[bool, str, str, int]:
+            return (False, "", "grcc validation timed out after 30s", -2)
+
+        with mock.patch.object(
+            session.__class__, "_run_grcc_validation", side_effect=_fake_timeout
+        ):
+            result = agent.execute_tool("validate_graph", {})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "validation_timeout")
+        self.assertEqual(result["tool"], "validate_graph")
+
     def test_load_grc_tool_missing_file_returns_error(self) -> None:
         agent = GrcAgent()
 
@@ -404,10 +474,41 @@ class GrcAgentTests(unittest.TestCase):
         result = agent.execute_tool("get_grc_context", {"node_id": "throttle"})
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "node_not_found")
+        self.assertEqual(result["error_type"], "block_not_found")
         self.assertIn("candidate_nodes", result)
         self.assertIn("blocks_throttle2_0", result["candidate_nodes"])
         self.assertIn("exact session instance name", result["hint"])
+
+    def test_health_check_ok_when_retrieval_ready(self) -> None:
+        session = FlowgraphSession()
+        agent = GrcAgent(session, catalog_root="/some/catalog")
+
+        report = agent.health_check()
+
+        self.assertEqual(report["status"], "ok")
+        self.assertFalse(report["session_loaded"])
+        self.assertTrue(report["retrieval_ready"])
+        self.assertGreater(report["tool_count"], 0)
+
+    def test_health_check_not_ready_without_retrieval(self) -> None:
+        agent = GrcAgent()
+
+        report = agent.health_check()
+
+        self.assertEqual(report["status"], "not_ready")
+        self.assertFalse(report["session_loaded"])
+        self.assertFalse(report["retrieval_ready"])
+
+    def test_health_check_session_loaded_not_required_for_ok(self) -> None:
+        """Health check must return 'ok' even without a loaded file, when retrieval is ready."""
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+        agent = GrcAgent(session, catalog_root="/some/catalog")
+
+        report = agent.health_check()
+
+        self.assertEqual(report["status"], "ok")
+        self.assertTrue(report["session_loaded"])
 
     def test_fake_cli_runtime_uses_phase_six_tool_names(self) -> None:
         output = StringIO()
@@ -420,6 +521,67 @@ class GrcAgentTests(unittest.TestCase):
         self.assertIn("Assistant called apply_edit", rendered)
         self.assertNotIn("Assistant called set_variable", rendered)
 
+    def test_compact_history_deduplicates_session_entries(self) -> None:
+        agent, _session = self._load_agent()
+        agent.history = [
+            {"role": "session", "content": {"path": "/a.grc"}},
+            {"role": "user", "content": "first question"},
+            {"role": "session", "content": {"path": "/b.grc"}},
+            {"role": "user", "content": "second question"},
+        ]
 
-if __name__ == "__main__":
-    unittest.main()
+        agent.compact_history()
+
+        session_entries = [t for t in agent.history if t.get("role") == "session"]
+        self.assertEqual(len(session_entries), 1)
+        self.assertEqual(session_entries[0]["content"]["path"], "/b.grc")
+
+    def test_compact_history_truncates_old_tool_results(self) -> None:
+        agent, _session = self._load_agent()
+        big_content = {"ok": True, "tool": "search_grc", "results": ["a"] * 500, "extra": "data"}
+        # Tools from the turn before the previous turn are compacted.
+        # We need 3 user turns so the tool (between user[0] and user[1]) is "2 turns ago".
+        agent.history = [
+            {"role": "user", "content": "first question"},
+            {"role": "tool", "tool_call_id": "t1", "name": "search_grc", "content": big_content},
+            {"role": "user", "content": "second question"},
+            {"role": "user", "content": "third question"},
+        ]
+
+        agent.compact_history()
+
+        tool_entries = [t for t in agent.history if t.get("role") == "tool"]
+        self.assertEqual(len(tool_entries), 1)
+        compacted = tool_entries[0]["content"]
+        self.assertIn("ok", compacted)
+        self.assertIn("tool", compacted)
+        self.assertNotIn("results", compacted)
+        self.assertNotIn("extra", compacted)
+
+    def test_compact_history_preserves_current_turn_tool_results(self) -> None:
+        agent, _session = self._load_agent()
+        current_content = {"ok": True, "tool": "validate_graph", "valid": True, "full_data": "x" * 200}
+        agent.history = [
+            {"role": "user", "content": "first question"},
+            {"role": "tool", "tool_call_id": "t1", "name": "validate_graph", "content": current_content},
+        ]
+
+        agent.compact_history()
+
+        tool_entries = [t for t in agent.history if t.get("role") == "tool"]
+        self.assertEqual(len(tool_entries), 1)
+        # Only one user turn → this is the current turn → NOT compacted.
+        self.assertIn("full_data", tool_entries[0]["content"])
+
+    def test_save_graph_exception_returns_internal_error(self) -> None:
+        agent, session = self._load_agent()
+        # Mark clean and validated so the save gate passes.
+        agent._last_validation_ok = True
+        agent._last_validated_state_revision = session.state_revision
+
+        with mock.patch.object(session, "save", side_effect=OSError("disk full")):
+            result = agent.execute_tool("save_graph", {})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "internal_error")
+        self.assertIn("disk full", result["message"])

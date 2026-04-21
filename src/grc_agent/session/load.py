@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from grc_agent._payload import build_error_payload
+from grc_agent._payload import build_error_payload, ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 
 
@@ -20,12 +20,12 @@ def load_grc(file_path: str | Path) -> FlowgraphSession | dict[str, Any]:
         session.load(file_path)
     except (FileNotFoundError, PermissionError, OSError) as exc:
         return build_error_payload(
-            error_type="file_load_error",
+            error_type=ErrorCode.FILE_LOAD_ERROR,
             message=str(exc),
         )
     except (ValueError, yaml.YAMLError) as exc:
         return build_error_payload(
-            error_type="invalid_grc",
+            error_type=ErrorCode.INVALID_GRC,
             message=str(exc),
         )
     return session

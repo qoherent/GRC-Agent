@@ -94,12 +94,12 @@ class TransactionCommitPayloadTests(unittest.TestCase):
             normalized_operations=[{"op_type": "remove_connection"}],
             warnings=[{"code": "warn"}],
             state_revision_before=1,
-            error_type="GNUValidationFailed",
+            error_type="gnu_validation_failed",
             errors=errors,
             validation=validation,
         )
 
-        self.assertEqual(payload["error_type"], "GNUValidationFailed")
+        self.assertEqual(payload["error_type"], "gnu_validation_failed")
         self.assertEqual(payload["errors"], errors)
         self.assertEqual(payload["error_count"], 1)
         self.assertEqual(payload["validation"], validation)

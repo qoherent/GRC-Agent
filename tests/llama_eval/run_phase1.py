@@ -18,7 +18,6 @@ from grc_agent.llama_server import LlamaServerError, run_bounded_llama_turn
 
 from tests.llama_eval.harness import (
     DEFAULT_FIXTURE_NAME,
-    build_client,
     ensure_llama_server,
     extract_executed_tool_calls,
     extract_requested_tool_calls,
@@ -338,8 +337,7 @@ def _run_eval(
     cases: list[EvalCase],
     n_runs: int,
 ) -> dict[str, Any]:
-    resolved_url, resolved_model = ensure_llama_server(server_url, model)
-    client = build_client(resolved_url)
+    resolved_url, resolved_model, client = ensure_llama_server(server_url, model)
 
     results = []
     total = len(cases) * n_runs
@@ -438,7 +436,13 @@ def main() -> int:
         default=None,
         help="Run only the case with this name.",
     )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Quick check: force n_runs=1.",
+    )
     args = parser.parse_args()
+    n_runs = 1 if args.quick else args.n_runs
 
     cases = list(PHASE1_CASES)
     if args.category:
@@ -449,7 +453,7 @@ def main() -> int:
         print("No matching cases.", file=sys.stderr)
         return 1
 
-    report = _run_eval(args.server_url, args.model, cases, args.n_runs)
+    report = _run_eval(args.server_url, args.model, cases, n_runs)
     print("\n" + json.dumps(report, indent=2, sort_keys=False))
     return 0
 

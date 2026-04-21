@@ -2,9 +2,8 @@
 
 from typing import Any
 
+from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.flowgraph_session import FlowgraphSession
-
-from grc_agent._payload import build_error_payload
 
 from .inspect import require_loaded_session
 
@@ -14,5 +13,5 @@ def session_provenance(session: FlowgraphSession) -> dict[str, Any]:
     try:
         require_loaded_session(session)
     except ValueError as exc:
-        return build_error_payload(error_type="missing_session", message=str(exc))
+        return build_error_payload(error_type=ErrorCode.MISSING_SESSION, message=str(exc))
     return session.session_provenance()

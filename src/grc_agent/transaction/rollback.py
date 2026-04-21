@@ -26,8 +26,9 @@ def restore_session_state(
     snapshot: SessionStateSnapshot,
 ) -> FlowgraphSession:
     """Replace one session's state with a previously captured snapshot."""
+    new_state = copy.deepcopy(snapshot.state)
     session.__dict__.clear()
-    session.__dict__.update(copy.deepcopy(snapshot.state))
+    session.__dict__.update(new_state)
     return session
 
 
