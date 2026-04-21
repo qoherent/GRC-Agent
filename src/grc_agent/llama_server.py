@@ -465,6 +465,8 @@ _SUMMARY_INTENT_TERMS = (
     "summarize",
     "give me a summary",
     "overview",
+    "dirty",
+    "dirtiness",
 )
 
 
