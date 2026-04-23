@@ -102,6 +102,7 @@ class HardeningContractTests(unittest.TestCase):
             validation_op_types,
             {
                 "update_params",
+                "update_states",
                 "add_connection",
                 "remove_connection",
                 "remove_block",

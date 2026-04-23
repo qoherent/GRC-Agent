@@ -7,7 +7,11 @@ from typing import Any
 
 from grc_agent.flowgraph_session import FlowgraphSession
 
-from .checks import SessionSnapshot, validate_and_apply_operation
+from .checks import (
+    SessionSnapshot,
+    validate_and_apply_operation,
+    validate_snapshot_integrity,
+)
 from .errors import build_preflight_payload, make_issue
 from .rules import normalize_operations
 
@@ -41,6 +45,7 @@ def preflight_transaction(
 
     snapshot = SessionSnapshot.from_session(session)
     warnings = []
+    affected_block_names: set[str] = set()
     for op_index, operation in enumerate(normalized_operations):
         errors, op_warnings = validate_and_apply_operation(
             snapshot,
@@ -55,9 +60,40 @@ def preflight_transaction(
                 warnings=warnings,
                 normalized_operations=[operation.to_dict() for operation in normalized_operations],
             )
+        affected_block_names.update(_affected_blocks_for_operation(operation))
+
+    integrity_errors, integrity_warnings = validate_snapshot_integrity(
+        snapshot,
+        affected_block_names=affected_block_names,
+        op_index=max(0, len(normalized_operations) - 1),
+        catalog_root=catalog_root,
+    )
+    warnings.extend(integrity_warnings)
+    if integrity_errors:
+        return build_preflight_payload(
+            errors=integrity_errors,
+            warnings=warnings,
+            normalized_operations=[operation.to_dict() for operation in normalized_operations],
+        )
 
     return build_preflight_payload(
         errors=[],
         warnings=warnings,
         normalized_operations=[operation.to_dict() for operation in normalized_operations],
     )
+
+
+def _affected_blocks_for_operation(operation: Any) -> set[str]:
+    payload = getattr(operation, "payload", None)
+    if not isinstance(payload, dict):
+        return set()
+    if operation.op_type in {"update_params", "update_states", "remove_block", "add_block"}:
+        instance_name = payload.get("instance_name")
+        return {instance_name} if isinstance(instance_name, str) else set()
+    if operation.op_type in {"add_connection", "remove_connection"}:
+        names = {
+            payload.get("src_block"),
+            payload.get("dst_block"),
+        }
+        return {name for name in names if isinstance(name, str)}
+    return set()

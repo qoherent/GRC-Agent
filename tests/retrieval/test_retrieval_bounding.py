@@ -17,7 +17,7 @@ from grc_agent.retrieval.search import _clear_retrieval_context
 
 
 class RetrievalBoundingTests(unittest.TestCase):
-    """Ensure retrieval stays bounded, provenance-aware, and deterministic."""
+    """Ensure retrieval stays bounded, compact, and deterministic."""
 
     def _catalog_root_or_skip(self) -> Path:
         try:
@@ -100,7 +100,7 @@ class RetrievalBoundingTests(unittest.TestCase):
         self.assertTrue(third["ok"])
         self.assertEqual(build_session_index.call_count, 2)
 
-    def test_results_include_provenance_and_stay_compact(self) -> None:
+    def test_results_stay_compact(self) -> None:
         catalog_root = self._catalog_root_or_skip()
         bind_retrieval_context(catalog_root=str(catalog_root))
 
@@ -109,13 +109,14 @@ class RetrievalBoundingTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertGreater(len(result["results"]), 0)
         for entry in result["results"]:
-            self.assertIn("provenance", entry)
-            self.assertIn("path", entry["provenance"])
-            self.assertIn("pointer", entry["provenance"])
-            self.assertIn("score", entry)
-            self.assertIn("source_scope", entry)
+            self.assertIn("node_id", entry)
+            self.assertIn("label", entry)
             self.assertIn("summary", entry)
             self.assertLessEqual(len(entry["summary"]), 160)
+            self.assertNotIn("provenance", entry)
+            self.assertNotIn("score", entry)
+            self.assertNotIn("source_scope", entry)
+            self.assertNotIn("reason", entry)
             self.assertNotIn("field_summary", entry)
             self.assertNotIn("block_description", entry)
             self.assertNotIn("adjacency_summary", entry)

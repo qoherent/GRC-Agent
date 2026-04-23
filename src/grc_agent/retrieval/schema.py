@@ -45,12 +45,7 @@ class IndexedNode:
         """Render this node into the public `search_grc` result shape."""
         result: dict[str, Any] = {
             "node_id": self.node_id,
-            "node_type": self.node_type,
             "label": self.label,
-            "reason": reason,
-            "provenance": self.provenance.to_dict(),
-            "score": round(score, 3),
-            "source_scope": self.source_scope,
         }
         if self.block_id:
             result["block_id"] = self.block_id

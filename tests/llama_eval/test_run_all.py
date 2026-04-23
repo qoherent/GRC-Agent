@@ -23,7 +23,7 @@ def _patch_run_all(phases_spec: list[tuple], server_url=None, model_alias=None):
     """Return patchers for ensure_llama_server and _PHASES."""
     mock_server = mock.patch(
         "tests.llama_eval.run_all.ensure_llama_server",
-        return_value=(server_url or "http://mock", model_alias or "mock-model", mock.Mock()),
+        return_value=(server_url or "http://mock", model_alias or "mock-model", None),
     )
     mock_phases = mock.patch.object(run_all, "_PHASES", phases_spec)
     return mock_server, mock_phases

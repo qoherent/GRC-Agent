@@ -1007,7 +1007,7 @@ class FlowgraphSession:
 
     # Block removal and parameter edits
 
-    def remove_block(self, instance_name: str) -> None:
+    def remove_block(self, instance_name: str, *, block_type: str | None = None) -> None:
         """Remove one detached, unreferenced block from both the model and raw YAML."""
         # Refuse to mutate anything if no graph has been loaded yet.
         if self.flowgraph is None:
@@ -1023,17 +1023,26 @@ class FlowgraphSession:
             index
             for index, block in enumerate(self.flowgraph.blocks)
             if block.instance_name == instance_name
+            and (block_type is None or block.block_type == block_type)
         ]
         raw_indexes = [
             index
             for index, entry in enumerate(raw_blocks)
-            if isinstance(entry, dict) and entry.get("name") == instance_name
+            if isinstance(entry, dict)
+            and entry.get("name") == instance_name
+            and (block_type is None or entry.get("id") == block_type)
         ]
 
         if not parsed_indexes or not raw_indexes:
-            raise ValueError(f"Block not found: {instance_name}")
+            msg = f"Block not found: {instance_name}"
+            if block_type:
+                msg += f" (type: {block_type})"
+            raise ValueError(msg)
+
         if len(parsed_indexes) != 1 or len(raw_indexes) != 1:
-            raise ValueError(f"Block name is not unique: {instance_name}")
+            raise ValueError(
+                f"Block name '{instance_name}' is not unique. Provide block_type to disambiguate."
+            )
 
         # The first implementation is conservative: connected blocks must be detached first.
         if any(
@@ -1062,40 +1071,62 @@ class FlowgraphSession:
         self.is_dirty = True
         self._bump_state_revision()
 
-    def set_param(self, instance_name: str, parameter_key: str, value: object) -> None:
+    def set_param(
+        self,
+        instance_name: str,
+        parameter_key: str,
+        value: object,
+        *,
+        block_type: str | None = None,
+    ) -> None:
         """Update one block parameter in both the model and raw YAML."""
         # Refuse to mutate anything if no graph has been loaded yet.
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
 
         # Find the parsed block object by its instance name.
-        block = next(
-            (
-                block
-                for block in self.flowgraph.blocks
-                if block.instance_name == instance_name
-            ),
-            None,
-        )
-        if block is None:
-            raise ValueError(f"Block not found: {instance_name}")
+        parsed_indexes = [
+            index
+            for index, block in enumerate(self.flowgraph.blocks)
+            if block.instance_name == instance_name
+            and (block_type is None or block.block_type == block_type)
+        ]
+
+        if not parsed_indexes:
+            msg = f"Block not found: {instance_name}"
+            if block_type:
+                msg += f" (type: {block_type})"
+            raise ValueError(msg)
+
+        if len(parsed_indexes) > 1:
+            raise ValueError(
+                f"Block name '{instance_name}' is not unique. Provide block_type to disambiguate."
+            )
+
+        block = self.flowgraph.blocks[parsed_indexes[0]]
 
         # The raw YAML must change too so save() and validate() see the mutation.
         raw_blocks = self.flowgraph.raw_data.get("blocks")
         if not isinstance(raw_blocks, list):
             raise ValueError("Flowgraph raw_data blocks section is invalid.")
 
-        # Find the matching raw block entry by its original name.
-        raw_block = next(
-            (
-                entry
-                for entry in raw_blocks
-                if isinstance(entry, dict) and entry.get("name") == instance_name
-            ),
-            None,
-        )
-        if raw_block is None:
+        # Find the matching raw block entry.
+        raw_indexes = [
+            index
+            for index, entry in enumerate(raw_blocks)
+            if isinstance(entry, dict)
+            and entry.get("name") == instance_name
+            and (block_type is None or entry.get("id") == block_type)
+        ]
+
+        if not raw_indexes:
             raise ValueError(f"Raw block not found: {instance_name}")
+        if len(raw_indexes) > 1:
+            raise ValueError(
+                f"Raw block name '{instance_name}' is not unique. Provide block_type to disambiguate."
+            )
+
+        raw_block = raw_blocks[raw_indexes[0]]
 
         # Confirm both parameter mappings are valid before mutating either representation.
         parameters = block.params.setdefault("parameters", {})
@@ -1114,6 +1145,70 @@ class FlowgraphSession:
         raw_parameters[parameter_key] = value
 
         # Any successful mutation means the in-memory session now differs from disk.
+        self.is_dirty = True
+        self._bump_state_revision()
+
+    def set_block_state(
+        self, instance_name: str, state: str, *, block_type: str | None = None
+    ) -> None:
+        """Update one block's enabled/disabled state in both the model and raw YAML."""
+        if self.flowgraph is None:
+            raise ValueError("No flowgraph loaded.")
+        if state not in {"enabled", "disabled"}:
+            raise ValueError(f"Invalid block state: {state}")
+
+        # If duplicate names exist, use block_type to disambiguate.
+        parsed_indexes = [
+            index
+            for index, block in enumerate(self.flowgraph.blocks)
+            if block.instance_name == instance_name
+            and (block_type is None or block.block_type == block_type)
+        ]
+
+        if not parsed_indexes:
+            msg = f"Block not found: {instance_name}"
+            if block_type:
+                msg += f" (type: {block_type})"
+            raise ValueError(msg)
+
+        if len(parsed_indexes) > 1:
+            raise ValueError(
+                f"Block name '{instance_name}' is not unique. Provide block_type to disambiguate."
+            )
+
+        block = self.flowgraph.blocks[parsed_indexes[0]]
+
+        raw_blocks = self.flowgraph.raw_data.get("blocks")
+        if not isinstance(raw_blocks, list):
+            raise ValueError("Flowgraph raw_data blocks section is invalid.")
+
+        raw_indexes = [
+            index
+            for index, entry in enumerate(raw_blocks)
+            if isinstance(entry, dict)
+            and entry.get("name") == instance_name
+            and (block_type is None or entry.get("id") == block_type)
+        ]
+
+        if not raw_indexes:
+            raise ValueError(f"Raw block not found: {instance_name}")
+        if len(raw_indexes) > 1:
+            raise ValueError(
+                f"Raw block name '{instance_name}' is not unique. Provide block_type to disambiguate."
+            )
+
+        raw_block = raw_blocks[raw_indexes[0]]
+        states = block.params.setdefault("states", {})
+        if not isinstance(states, dict):
+            raise ValueError(f"Block states section is invalid for: {instance_name}")
+
+        raw_states = raw_block.setdefault("states", {})
+        if not isinstance(raw_states, dict):
+            raise ValueError(f"Raw block states section is invalid for: {instance_name}")
+
+        states["state"] = state
+        raw_states["state"] = state
+
         self.is_dirty = True
         self._bump_state_revision()
 

@@ -20,8 +20,12 @@ from grc_agent.llama_server import (
     LlamaServerClient,
     LlamaServerError,
     _build_follow_up_reminder,
+    _canonicalize_tool_call,
     _looks_like_tool_call_text,
+    _resolve_final_assistant_text,
+    _stop_after_failed_tool_call,
     _validate_tool_order_for_turn,
+    LlamaToolCall,
     run_bounded_llama_turn,
 )
 
@@ -628,14 +632,11 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "role": "assistant",
                                 "tool_calls": [
                                     {
-                                        "name": "propose_edit",
+                                        "name": "search_grc",
                                         "arguments": json.dumps(
                                             {
-                                                "transaction": {
-                                                    "op_type": "update_params",
-                                                    "instance_name": "samp_rate",
-                                                    "params": {"value": "48000"},
-                                                }
+                                                "query": "Head",
+                                                "scope": "catalog",
                                             }
                                         ),
                                     }
@@ -651,14 +652,10 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "role": "assistant",
                                 "tool_calls": [
                                     {
-                                        "name": "apply_edit",
+                                        "name": "describe_block",
                                         "arguments": json.dumps(
                                             {
-                                                "transaction": {
-                                                    "op_type": "update_params",
-                                                    "instance_name": "samp_rate",
-                                                    "params": {"value": "48000"},
-                                                }
+                                                "block_id": "blocks_head",
                                             }
                                         ),
                                     }
@@ -672,7 +669,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": "Applied the transaction successfully.",
+                                "content": "The Head block limits how many items pass through.",
                             }
                         }
                     ]
@@ -687,7 +684,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         result = run_bounded_llama_turn(
             agent,
             client,
-            "Change the samp_rate variable to 48000.",
+            "Find the Head block and tell me about it.",
             model=llama_config.model,
         )
 
@@ -695,7 +692,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         self.assertEqual(result["tool_rounds_used"], 2)
         self.assertEqual(result["tool_calls_executed"], 2)
         self.assertEqual(
-            result["assistant_text"], "Applied the transaction successfully."
+            result["assistant_text"], "The Head block limits how many items pass through."
         )
 
     def test_bounded_llama_turn_reminds_model_to_validate_after_apply(self) -> None:
@@ -887,6 +884,38 @@ class LlamaServerAdapterTests(unittest.TestCase):
         self.assertEqual(
             tool_calls[0].arguments,
             {"block_id": "qtgui_time_sink_x"},
+        )
+
+    def test_parse_assistant_message_recovers_plain_text_transaction_stub(self) -> None:
+        client = self._client("http://127.0.0.1:1")
+        content, tool_calls = client.parse_assistant_message(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"instance_name": "samp_rate", "op_type": "update_params", '
+                                '"params": {"value": "44100"}}'
+                            ),
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNone(content)
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0].name, "apply_edit")
+        self.assertEqual(
+            tool_calls[0].arguments,
+            {
+                "transaction": {
+                    "instance_name": "samp_rate",
+                    "op_type": "update_params",
+                    "params": {"value": "44100"},
+                }
+            },
         )
 
     def test_bounded_llama_turn_rejects_validate_before_required_description(
@@ -1282,6 +1311,150 @@ class LlamaServerAdapterTests(unittest.TestCase):
         self.assertEqual(result["details"]["code"], "repair_transaction_required")
         self.assertEqual(result["details"]["required_tool"], "apply_edit")
 
+    def test_validate_graph_rejected_for_leave_graph_working_phrase(self) -> None:
+        result = _validate_tool_order_for_turn(
+            "I want the samp_rate variable gone, but leave the graph working.",
+            [
+                {
+                    "role": "user",
+                    "content": "I want the samp_rate variable gone, but leave the graph working.",
+                },
+                {
+                    "role": "tool",
+                    "name": "apply_edit",
+                    "content": {
+                        "ok": False,
+                        "errors": [{"code": "block_still_referenced"}],
+                    },
+                },
+            ],
+            "validate_graph",
+            {},
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["details"]["code"], "repair_transaction_required")
+        self.assertEqual(result["details"]["required_tool"], "apply_edit")
+
+    def test_propose_edit_rejected_for_actual_change_request(self) -> None:
+        result = _validate_tool_order_for_turn(
+            "Can you bump the sample rate up to 96k?",
+            [],
+            "propose_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "96000"},
+                }
+            },
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["details"]["code"], "apply_edit_required")
+        self.assertEqual(result["details"]["required_tool"], "apply_edit")
+
+    def test_propose_edit_allowed_for_preview_then_apply_request(self) -> None:
+        result = _validate_tool_order_for_turn(
+            "Before you change anything, preview setting samp_rate to 48000. If that looks good, apply it and validate.",
+            [],
+            "propose_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "48000"},
+                }
+            },
+        )
+
+        self.assertIsNone(result)
+
+    def test_failed_apply_edit_stops_the_current_tool_batch(self) -> None:
+        self.assertTrue(
+            _stop_after_failed_tool_call(
+                "apply_edit",
+                {"ok": False, "error_type": "preflight_rejected"},
+            )
+        )
+        self.assertFalse(
+            _stop_after_failed_tool_call(
+                "propose_edit",
+                {"ok": False, "error_type": "tool_call_invalid"},
+            )
+        )
+
+    def test_canonicalize_tool_call_fills_missing_update_params_op_type(self) -> None:
+        agent, _session = self._load_agent()
+        tool_call = LlamaToolCall(
+            id="tool-1",
+            name="apply_edit",
+            arguments={
+                "transaction": {
+                    "instance_name": "samp_rate",
+                    "params": {"value": "44100"},
+                }
+            },
+        )
+
+        normalized = _canonicalize_tool_call(agent, tool_call)
+
+        self.assertEqual(
+            normalized.arguments,
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "44100"},
+                }
+            },
+        )
+
+    def test_canonicalize_tool_call_repairs_quoted_embedded_transaction_operations(
+        self,
+    ) -> None:
+        agent, _session = self._load_agent()
+        tool_call = LlamaToolCall(
+            id="tool-1",
+            name="apply_edit",
+            arguments={
+                "transaction": [
+                    {
+                        '"op_type"': {
+                            '"instance_name"': "blocks_throttle2_0",
+                            '"op_type"': "update_params",
+                            '"params"': {'"samples_per_second"': "32000"},
+                        },
+                        '{"op_type"': {
+                            '"instance_name"': "samp_rate",
+                            '"op_type"': "remove_block",
+                        },
+                    }
+                ]
+            },
+        )
+
+        normalized = _canonicalize_tool_call(agent, tool_call)
+
+        self.assertEqual(
+            normalized.arguments,
+            {
+                "transaction": [
+                    {
+                        "instance_name": "blocks_throttle2_0",
+                        "op_type": "update_params",
+                        "params": {"samples_per_second": "32000"},
+                    },
+                    {
+                        "instance_name": "samp_rate",
+                        "op_type": "remove_block",
+                    },
+                ]
+            },
+        )
+
     def test_follow_up_reminder_requires_actual_samp_rate_removal_after_partial_edit(
         self,
     ) -> None:
@@ -1348,6 +1521,108 @@ class LlamaServerAdapterTests(unittest.TestCase):
         assert result is not None
         self.assertEqual(result["details"]["code"], "samp_rate_remove_required")
         self.assertEqual(result["details"]["required_tool"], "apply_edit")
+
+    def test_preview_only_request_rejects_extra_tools_after_propose_edit(self) -> None:
+        result = _validate_tool_order_for_turn(
+            "Preview removing the throttle block. If it won't work, explain why.",
+            [
+                {
+                    "role": "user",
+                    "content": "Preview removing the throttle block. If it won't work, explain why.",
+                },
+                {
+                    "role": "tool",
+                    "name": "propose_edit",
+                    "content": {"ok": False, "error_count": 1},
+                },
+            ],
+            "describe_block",
+            {"block_id": "blocks_throttle2"},
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["details"]["code"], "preview_result_explanation_required")
+
+    def test_preview_then_apply_follow_up_still_allows_apply_edit(self) -> None:
+        result = _validate_tool_order_for_turn(
+            "Use propose_edit to preview removing samp_rate. If the preview fails because the variable is still referenced, call apply_edit with one repair transaction that patches dependent parameters to 32000 and then removes samp_rate.",
+            [
+                {
+                    "role": "user",
+                    "content": "Use propose_edit to preview removing samp_rate. If the preview fails because the variable is still referenced, call apply_edit with one repair transaction that patches dependent parameters to 32000 and then removes samp_rate.",
+                },
+                {
+                    "role": "tool",
+                    "name": "propose_edit",
+                    "content": {"ok": False, "error_count": 1},
+                },
+            ],
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "update_params",
+                        "instance_name": "blocks_throttle2_0",
+                        "params": {"samples_per_second": "32000"},
+                    },
+                    {
+                        "op_type": "update_params",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "params": {"srate": "32000"},
+                    },
+                    {
+                        "op_type": "remove_block",
+                        "instance_name": "samp_rate",
+                    },
+                ]
+            },
+        )
+
+        self.assertIsNone(result)
+
+    def test_resolve_final_assistant_text_prefers_failed_preview_result_for_preview_only_request(
+        self,
+    ) -> None:
+        text = _resolve_final_assistant_text(
+            [
+                {
+                    "role": "user",
+                    "content": "Preview removing the throttle block. If it won't work, explain why.",
+                },
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tool-1",
+                            "type": "function",
+                            "function": {"name": "propose_edit", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "propose_edit",
+                    "tool_call_id": "tool-1",
+                    "content": {
+                        "ok": False,
+                        "message": "Transaction failed preflight validation.",
+                        "hint": "Disconnect all attached wires first. Then remove the block.",
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "content": "Describe the block `blocks_throttle2`.",
+                },
+            ],
+            "Describe the block `blocks_throttle2`.",
+        )
+
+        self.assertEqual(
+            text,
+            "Transaction failed preflight validation. Disconnect all attached wires first.",
+        )
 
 
         llama_config = self._llama_config()

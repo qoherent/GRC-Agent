@@ -83,7 +83,7 @@ class PreflightValidationRuleTests(unittest.TestCase):
         )
 
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["warning_count"], 0)
+        self.assertEqual(payload["error_count"], 0)
 
     def test_missing_connection_is_rejected(self) -> None:
         session = self._load_session()

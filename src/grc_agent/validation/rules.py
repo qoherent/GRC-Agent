@@ -16,6 +16,7 @@ from .messages import format_catalog_lookup_message
 
 OperationType = Literal[
     "update_params",
+    "update_states",
     "add_connection",
     "remove_connection",
     "remove_block",
@@ -25,6 +26,7 @@ OperationType = Literal[
 VALID_OPERATION_TYPES = frozenset(
     {
         "update_params",
+        "update_states",
         "add_connection",
         "remove_connection",
         "remove_block",
@@ -45,11 +47,23 @@ class ValidationOperation:
 
     def to_dict(self) -> dict[str, Any]:
         if self.op_type == "update_params":
-            return {
+            res = {
                 "op_type": self.op_type,
                 "instance_name": self.payload["instance_name"],
                 "params": copy.deepcopy(self.payload["params"]),
             }
+            if "block_type" in self.payload:
+                res["block_type"] = self.payload["block_type"]
+            return res
+        if self.op_type == "update_states":
+            res = {
+                "op_type": self.op_type,
+                "instance_name": self.payload["instance_name"],
+                "state": self.payload["state"],
+            }
+            if "block_type" in self.payload:
+                res["block_type"] = self.payload["block_type"]
+            return res
         if self.op_type in {"add_connection", "remove_connection"}:
             return {
                 "op_type": self.op_type,
@@ -59,10 +73,13 @@ class ValidationOperation:
                 "dst_port": self.payload["dst_port"],
             }
         if self.op_type == "remove_block":
-            return {
+            res = {
                 "op_type": self.op_type,
                 "instance_name": self.payload["instance_name"],
             }
+            if "block_type" in self.payload:
+                res["block_type"] = self.payload["block_type"]
+            return res
 
         rendered = {
             "op_type": self.op_type,
@@ -93,6 +110,7 @@ class PortRule:
 
     domain: str | None
     dtype: str | None
+    vlen: int | str | None
     multiplicity: int | str | None
     optional: bool | int | str | None
 
@@ -105,6 +123,7 @@ class BlockRules:
     parameters: dict[str, ParameterRule]
     inputs: tuple[PortRule, ...]
     outputs: tuple[PortRule, ...]
+    asserts: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -126,6 +145,7 @@ class ResolvedPort:
 
     domain: str | None
     dtype: str | None
+    vlen: int | None
     optional: bool | None
 
 
@@ -267,17 +287,51 @@ def resolve_port_slots(
 
         domain = _resolve_text_expression(port_rule.domain, context)
         dtype = _resolve_text_expression(port_rule.dtype, context)
+        vlen = _resolve_port_vlen(port_rule.vlen, context)
+        if vlen is None:
+            warnings.append(
+                f"Could not resolve {direction} port vector length for template {template_index}."
+            )
+        elif vlen < 0:
+            warnings.append(
+                f"Resolved {direction} port vector length was negative for template {template_index}."
+            )
+            vlen = 0
         optional = _resolve_optional_value(port_rule.optional, context)
         for _unused in range(multiplicity):
             resolved_ports.append(
                 ResolvedPort(
                     domain=domain,
                     dtype=dtype,
+                    vlen=vlen,
                     optional=optional,
                 )
             )
 
     return resolved_ports, warnings
+
+
+def validate_block_asserts(
+    *,
+    block_rules: BlockRules,
+    parameters: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Evaluate one block's catalog assertions against the current parameters."""
+    context = build_parameter_context(parameters, block_rules=block_rules)
+    failures: list[str] = []
+    warnings: list[str] = []
+    for assertion in block_rules.asserts:
+        expression = _unwrap_expression(assertion)
+        if expression is None:
+            warnings.append(f"Could not parse block assertion: {assertion}")
+            continue
+        resolved = evaluate_expression(expression, context)
+        if resolved is _UNRESOLVED:
+            warnings.append(f"Could not resolve block assertion: {assertion}")
+            continue
+        if not bool(resolved):
+            failures.append(assertion)
+    return failures, warnings
 
 
 def evaluate_expression(expression: str, context: dict[str, Any]) -> Any | object:
@@ -305,14 +359,16 @@ def _normalize_operation(
     candidate: dict[str, Any],
 ) -> tuple[list[ValidationIssue], ValidationOperation | None]:
     allowed_fields: dict[OperationType, tuple[str, ...]] = {
-        "update_params": ("op_type", "instance_name", "params"),
+        "update_params": ("op_type", "instance_name", "params", "block_type"),
+        "update_states": ("op_type", "instance_name", "state", "block_type"),
         "add_connection": ("op_type", "src_block", "src_port", "dst_block", "dst_port"),
         "remove_connection": ("op_type", "src_block", "src_port", "dst_block", "dst_port"),
-        "remove_block": ("op_type", "instance_name"),
+        "remove_block": ("op_type", "instance_name", "block_type"),
         "add_block": ("op_type", "instance_name", "block_type", "parameters", "states"),
     }
     required_fields: dict[OperationType, tuple[str, ...]] = {
         "update_params": ("instance_name", "params"),
+        "update_states": ("instance_name", "state"),
         "add_connection": ("src_block", "src_port", "dst_block", "dst_port"),
         "remove_connection": ("src_block", "src_port", "dst_block", "dst_port"),
         "remove_block": ("instance_name",),
@@ -349,7 +405,7 @@ def _normalize_operation(
 
     payload: dict[str, Any] = {}
 
-    if op_type in {"update_params", "remove_block", "add_block"}:
+    if op_type in {"update_params", "update_states", "remove_block", "add_block"}:
         instance_name = candidate.get("instance_name")
         if not isinstance(instance_name, str) or not instance_name.strip():
             issues.append(
@@ -363,6 +419,22 @@ def _normalize_operation(
             )
         else:
             payload["instance_name"] = instance_name.strip()
+
+        # Optional block_type discriminator
+        block_type_val = candidate.get("block_type")
+        if block_type_val is not None:
+            if not isinstance(block_type_val, str) or not block_type_val.strip():
+                issues.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field="block_type",
+                        code="invalid_field_type",
+                        message="block_type must be a non-empty string if provided.",
+                    )
+                )
+            else:
+                payload["block_type"] = block_type_val.strip()
 
     if op_type in {"add_connection", "remove_connection"}:
         for field_name in ("src_block", "dst_block"):
@@ -427,6 +499,34 @@ def _normalize_operation(
             issues.extend(parameter_issues)
             if not parameter_issues:
                 payload["params"] = copy.deepcopy(params)
+
+    if op_type == "update_states":
+        state = candidate.get("state")
+        if not isinstance(state, str) or not state.strip():
+            issues.append(
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="state",
+                    code="invalid_field_type",
+                    message="state must be a non-empty string.",
+                )
+            )
+        else:
+            normalized_state = state.strip()
+            if normalized_state not in {"enabled", "disabled"}:
+                issues.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field="state",
+                        code="invalid_state_value",
+                        message=f"Invalid block state: {normalized_state}",
+                        hint="Valid values: enabled, disabled.",
+                    )
+                )
+            else:
+                payload["state"] = normalized_state
 
     if op_type == "add_block":
         block_type = candidate.get("block_type")
@@ -538,6 +638,7 @@ def _get_cached_block_rules(
         PortRule(
             domain=_optional_text(port.get("domain")),
             dtype=_optional_text(port.get("dtype")),
+            vlen=port.get("vlen"),
             multiplicity=port.get("multiplicity"),
             optional=port.get("optional"),
         )
@@ -548,6 +649,7 @@ def _get_cached_block_rules(
         PortRule(
             domain=_optional_text(port.get("domain")),
             dtype=_optional_text(port.get("dtype")),
+            vlen=port.get("vlen"),
             multiplicity=port.get("multiplicity"),
             optional=port.get("optional"),
         )
@@ -560,6 +662,7 @@ def _get_cached_block_rules(
             parameters=parameter_rules,
             inputs=inputs,
             outputs=outputs,
+            asserts=tuple(str(item) for item in payload.get("asserts", [])),
         )
     )
 
@@ -612,6 +715,20 @@ def _resolve_optional_value(value: bool | int | str | None, context: dict[str, A
         return bool(resolved)
     if isinstance(resolved, str):
         return _coerce_bool_literal(resolved)
+    return None
+
+
+def _resolve_port_vlen(value: int | str | None, context: dict[str, Any]) -> int | None:
+    if value is None:
+        return 1
+
+    resolved = _resolve_expression_value(value, context)
+    if isinstance(resolved, bool):
+        return int(resolved)
+    if isinstance(resolved, int):
+        return resolved
+    if isinstance(resolved, str):
+        return _coerce_int_literal(resolved)
     return None
 
 

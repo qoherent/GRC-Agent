@@ -75,10 +75,21 @@ class GrcAgentTests(unittest.TestCase):
         )
         self.assertIn("After `search_grc`, block results include `block_id`", prompt)
         self.assertIn("ONLY use `propose_edit` when the user explicitly says", prompt)
+        self.assertIn("are real edit requests, not preview requests", prompt)
         self.assertIn(
             "Only call `save_graph` after successful validation",
             prompt,
         )
+        self.assertIn("Parameter values may stay as GNU/Python expressions", prompt)
+        self.assertIn("If the user explicitly names a loaded block or variable like `samp_rate`", prompt)
+        self.assertIn("Supported `op_type` values: `update_params`, `update_states`", prompt)
+        self.assertIn("For packetized modem chains", prompt)
+        self.assertIn("meta = pmt.dict_add(meta, key, value)", prompt)
+        self.assertIn("Delay = int(5.5 * sps + 7) * k", prompt)
+        self.assertIn("scale `32768`", prompt)
+        self.assertIn("`packet_len` tag", prompt)
+        self.assertIn("disable AGC", prompt)
+        self.assertIn("Do not claim you lack GNU Radio knowledge", prompt)
         self.assertIn("copy the tool summary verbatim as your final answer", prompt)
 
     def test_summarize_tool_message_to_model_is_plain_summary_text(self) -> None:
@@ -100,6 +111,49 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(tool_message["name"], "summarize_graph")
         self.assertEqual(tool_message["content"], summary_result["summary"])
 
+    def test_apply_edit_remove_samp_rate_failure_includes_exact_repair_hint(self) -> None:
+        agent, _session = self._load_agent()
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "remove_block",
+                    "instance_name": "samp_rate",
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("blocks_throttle2_0", result["hint"])
+        self.assertIn("qtgui_time_sink_x_0", result["hint"])
+        self.assertIn('"remove_block", "instance_name": "samp_rate"', result["hint"])
+
+    def test_apply_edit_infers_update_params_op_type_when_omitted(self) -> None:
+        agent, _session = self._load_agent()
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "instance_name": "samp_rate",
+                    "params": {"value": "44100"},
+                }
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "44100"},
+                }
+            ],
+        )
+
     def test_model_messages_include_active_session_context(self) -> None:
         agent, _session = self._load_agent()
 
@@ -114,9 +168,6 @@ class GrcAgentTests(unittest.TestCase):
         ]
         self.assertEqual(len(session_messages), 1)
         self.assertIn(str(self._fixture_path()), session_messages[0]["content"])
-        self.assertIn(
-            "Use exact session instance names", session_messages[0]["content"]
-        )
         self.assertIn("blocks_throttle2_0", session_messages[0]["content"])
 
     def test_session_history_messages_render_recorded_snapshot_not_live_session(
@@ -477,7 +528,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "block_not_found")
         self.assertIn("candidate_nodes", result)
         self.assertIn("blocks_throttle2_0", result["candidate_nodes"])
-        self.assertIn("exact session instance name", result["hint"])
+        self.assertIn("Closest session matches", result["hint"])
 
     def test_health_check_ok_when_retrieval_ready(self) -> None:
         session = FlowgraphSession()
@@ -511,10 +562,11 @@ class GrcAgentTests(unittest.TestCase):
         self.assertTrue(report["session_loaded"])
 
     def test_fake_cli_runtime_uses_phase_six_tool_names(self) -> None:
+        from grc_agent.config import default_app_config
         output = StringIO()
 
         with redirect_stdout(output):
-            exit_code = _run_fake_runtime(str(self._fixture_path()))
+            exit_code = _run_fake_runtime(str(self._fixture_path()), default_app_config())
 
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)

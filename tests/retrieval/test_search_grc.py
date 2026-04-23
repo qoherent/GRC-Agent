@@ -65,9 +65,8 @@ class SearchGrcTests(unittest.TestCase):
         top_result = result["results"][0]
         self.assertEqual(top_result["node_id"], "catalog:block:analog_agc_xx")
         self.assertEqual(top_result["block_id"], "analog_agc_xx")
-        self.assertEqual(top_result["node_type"], "block")
         self.assertEqual(top_result["label"], "AGC")
-        self.assertTrue(top_result["provenance"]["path"].endswith("analog_agc_xx.block.yml"))
+        self.assertIn("summary", top_result)
 
     def test_session_search_returns_expected_loaded_block(self) -> None:
         session = self._load_session()
@@ -81,9 +80,8 @@ class SearchGrcTests(unittest.TestCase):
         top_result = result["results"][0]
         self.assertEqual(top_result["node_id"], "session:block:samp_rate")
         self.assertEqual(top_result["block_id"], "variable")
-        self.assertEqual(top_result["node_type"], "session_block")
         self.assertEqual(top_result["label"], "samp_rate")
-        self.assertEqual(top_result["provenance"]["pointer"], "blocks[samp_rate]")
+        self.assertIn("summary", top_result)
 
     def test_scope_selection_changes_the_result_set(self) -> None:
         catalog_root = self._catalog_root_or_skip()

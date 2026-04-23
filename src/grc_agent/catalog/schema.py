@@ -56,7 +56,7 @@ class NormalizedParameter:
     base_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "id": self.id,
             "label": self.label,
             "dtype": self.dtype,
@@ -67,6 +67,11 @@ class NormalizedParameter:
             "option_labels": list(self.option_labels),
             "option_attributes": dict(self.option_attributes),
             "base_key": self.base_key,
+        }
+        return {
+            key: value
+            for key, value in payload.items()
+            if value not in (None, [], {})
         }
 
 
@@ -82,9 +87,10 @@ class NormalizedPort:
     multiplicity: int | str | None = None
     optional: bool | int | str | None = None
     hide: bool | str | None = None
+    color: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "label": self.label,
             "domain": self.domain,
             "id": self.id,
@@ -93,6 +99,12 @@ class NormalizedPort:
             "multiplicity": self.multiplicity,
             "optional": self.optional,
             "hide": self.hide,
+            "color": self.color,
+        }
+        return {
+            key: value
+            for key, value in payload.items()
+            if value is not None
         }
 
 
@@ -115,19 +127,24 @@ class BlockDescription:
     signature: str
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "ok": True,
             "block_id": self.block_id,
             "label": self.label,
             "category_path": list(self.category_path),
-            "flags": list(self.flags),
-            "loaded_from": self.loaded_from,
             "parameters": [parameter.to_dict() for parameter in self.parameters],
             "inputs": [port.to_dict() for port in self.inputs],
             "outputs": [port.to_dict() for port in self.outputs],
-            "asserts": list(self.asserts),
-            "documentation": self.documentation,
-            "doc_url": self.doc_url,
-            "warnings": list(self.warnings),
             "signature": self.signature,
         }
+        if self.flags:
+            payload["flags"] = list(self.flags)
+        if self.asserts:
+            payload["asserts"] = list(self.asserts)
+        if self.documentation is not None:
+            payload["documentation"] = self.documentation
+        if self.doc_url is not None:
+            payload["doc_url"] = self.doc_url
+        if self.warnings:
+            payload["warnings"] = list(self.warnings)
+        return payload

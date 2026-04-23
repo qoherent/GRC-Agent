@@ -26,12 +26,12 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(default_config_path().is_file())
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:8080")
         self.assertEqual(config.llama.model, "unsloth/gemma-4-E2B-it-GGUF")
-        self.assertEqual(config.llama.hf_model, "unsloth/gemma-4-E2B-it-GGUF:Q4_K_M")
+        self.assertEqual(config.llama.hf_model, "unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL")
         self.assertEqual(config.llama.startup_timeout_seconds, 300.0)
         self.assertEqual(config.llama.max_tokens, 100000)
         self.assertEqual(config.llama.temperature, 1.0)
         self.assertFalse(config.llama.enable_thinking)
-        self.assertEqual(config.llama.request_timeout_seconds, 60.0)
+        self.assertEqual(config.llama.request_timeout_seconds, 120.0)
 
     def test_cli_parser_defaults_come_from_repo_config(self) -> None:
         config = load_app_config()

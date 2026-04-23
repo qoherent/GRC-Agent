@@ -142,6 +142,34 @@ PHASE4_CASES: list[MultiTurnCase] = [
     ),
     MultiTurnCase(
         "follow_up_edit",
+        "add_var_then_disable",
+        [
+            TurnSpec(
+                "Add a variable called debug_gain set to 0.",
+                ["apply_edit"],
+                transaction_checks=[
+                    {
+                        "op_type": "add_block",
+                        "block_type": "variable",
+                        "instance_name": "debug_gain",
+                    },
+                ],
+            ),
+            TurnSpec(
+                "Disable debug_gain without removing it.",
+                ["apply_edit"],
+                transaction_checks=[
+                    {
+                        "op_type": "update_states",
+                        "instance_name": "debug_gain",
+                        "state": "disabled",
+                    },
+                ],
+            ),
+        ],
+    ),
+    MultiTurnCase(
+        "follow_up_edit",
         "edit_then_validate",
         [
             TurnSpec(

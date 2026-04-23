@@ -32,10 +32,18 @@ class LlamaConfig:
 
 
 @dataclass(frozen=True)
+class AgentConfig:
+    """Configurable defaults for the GrcAgent behavior."""
+
+    history_compact_budget: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Top-level runtime config."""
 
     llama: LlamaConfig
+    agent: AgentConfig
 
 
 def default_config_path() -> Path:
@@ -54,13 +62,16 @@ def default_app_config() -> AppConfig:
         llama=LlamaConfig(
             server_url="http://127.0.0.1:8080",
             model="unsloth/gemma-4-E2B-it-GGUF",
-            hf_model="unsloth/gemma-4-E2B-it-GGUF:Q4_K_M",
+            hf_model="unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL",
             startup_timeout_seconds=300.0,
             max_tokens=100000,
             temperature=0.0,
             enable_thinking=False,
             request_timeout_seconds=60.0,
-        )
+        ),
+        agent=AgentConfig(
+            history_compact_budget=100000,
+        ),
     )
 
 
@@ -102,6 +113,17 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
         )
 
     llama_table = _require_table(payload, "llama", context="root")
+    agent_table = payload.get("agent")
+    if not isinstance(agent_table, dict):
+        # Fallback to default agent config if missing from file, but llama table was found
+        agent_config = default_app_config().agent
+    else:
+        agent_config = AgentConfig(
+            history_compact_budget=_require_positive_int(
+                agent_table, "history_compact_budget", context="[agent]"
+            ),
+        )
+
     return AppConfig(
         llama=LlamaConfig(
             server_url=_require_non_empty_string(
@@ -132,7 +154,8 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 "request_timeout_seconds",
                 context="[llama]",
             ),
-        )
+        ),
+        agent=agent_config,
     )
 
 

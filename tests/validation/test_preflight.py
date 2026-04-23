@@ -50,6 +50,31 @@ class PreflightTransactionTests(unittest.TestCase):
         assert session.flowgraph is not None
         self.assertEqual(session.flowgraph.raw_data, original_raw)
 
+    def test_valid_update_states_passes_without_mutating_live_session(self) -> None:
+        session = self._load_session()
+        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "update_states",
+                "instance_name": "samp_rate",
+                "state": "disabled",
+            },
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["normalized_operations"], [
+            {
+                "op_type": "update_states",
+                "instance_name": "samp_rate",
+                "state": "disabled",
+            }
+        ])
+        self.assertFalse(session.is_dirty)
+        assert session.flowgraph is not None
+        self.assertEqual(session.flowgraph.raw_data, original_raw)
+
     def test_invalid_enum_value_is_rejected(self) -> None:
         session = self._load_session()
 
@@ -149,6 +174,7 @@ class PreflightTransactionTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["errors"][0]["op_index"], 1)
         self.assertEqual(payload["errors"][0]["code"], "incompatible_dtype")
+        self.assertIn("Type Converters", payload["errors"][0]["hint"])
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
         self.assertEqual(session.flowgraph.raw_data, original_raw)
@@ -189,6 +215,75 @@ class PreflightTransactionTests(unittest.TestCase):
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
         self.assertEqual(session.flowgraph.raw_data, original_raw)
+
+    def test_parameter_edit_revalidates_existing_connection_dtype(self) -> None:
+        session = self._load_session()
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "update_params",
+                "instance_name": "qtgui_time_sink_x_0",
+                "params": {"type": "complex"},
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["errors"][0]["code"], "incompatible_dtype")
+
+    def test_parameter_edit_revalidates_existing_connection_vlen(self) -> None:
+        session = self._load_session()
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "update_params",
+                "instance_name": "blocks_char_to_float_0",
+                "params": {"vlen": "2"},
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["errors"][0]["code"], "incompatible_vlen")
+
+    def test_parameter_edit_revalidates_block_asserts(self) -> None:
+        session = self._load_session()
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "update_params",
+                "instance_name": "blocks_throttle2_0",
+                "params": {"vlen": "0"},
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["errors"][0]["code"], "block_assert_failed")
+
+    def test_duplicate_enabled_symbol_ids_are_rejected(self) -> None:
+        session = self._load_session()
+        assert session.flowgraph is not None
+        session.flowgraph.raw_data["blocks"].append(
+            {
+                "name": "samp_rate",
+                "id": "variable",
+                "parameters": {"value": "123", "comment": ""},
+                "states": {"state": "enabled"},
+            }
+        )
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "update_params",
+                "instance_name": "blocks_throttle2_0",
+                "params": {"maximum": "0.2"},
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["errors"][0]["code"], "duplicate_enabled_symbol_id")
 
 
 if __name__ == "__main__":

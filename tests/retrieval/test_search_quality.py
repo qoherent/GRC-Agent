@@ -36,8 +36,8 @@ class RetrievalQualityTests(unittest.TestCase):
         result = search_grc("bandpass filter", scope="catalog", k=5)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["results"][0]["node_type"], "block")
         self.assertEqual(result["results"][0]["label"], "Band Pass Filter")
+        self.assertEqual(result["results"][0]["block_id"], "band_pass_filter")
 
     def test_qt_gui_time_sink_prefers_block_over_leaf_context(self) -> None:
         catalog_root = self._catalog_root_or_skip()
@@ -46,8 +46,8 @@ class RetrievalQualityTests(unittest.TestCase):
         result = search_grc("qt gui time sink", scope="catalog", k=5)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["results"][0]["node_type"], "block")
         self.assertEqual(result["results"][0]["label"], "QT GUI Time Sink")
+        self.assertEqual(result["results"][0]["block_id"], "qtgui_time_sink_x")
 
     def test_session_parameter_lookup_returns_parent_block_first(self) -> None:
         session = FlowgraphSession()
@@ -57,9 +57,9 @@ class RetrievalQualityTests(unittest.TestCase):
         result = search_grc("samp_rate", scope="session", k=5)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["results"][0]["node_type"], "session_block")
         self.assertEqual(result["results"][0]["label"], "samp_rate")
-        self.assertTrue(all(entry["node_type"] == "session_block" for entry in result["results"]))
+        self.assertTrue(all(entry["label"] for entry in result["results"]))
+        self.assertTrue(all("summary" in entry for entry in result["results"]))
 
     def test_catalog_results_stay_block_centric(self) -> None:
         catalog_root = self._catalog_root_or_skip()
@@ -69,5 +69,5 @@ class RetrievalQualityTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertGreater(len(result["results"]), 0)
-        allowed_node_types = {"block", "category", "domain"}
-        self.assertTrue(all(entry["node_type"] in allowed_node_types for entry in result["results"]))
+        self.assertTrue(all(entry["label"] for entry in result["results"]))
+        self.assertTrue(all("summary" in entry for entry in result["results"]))

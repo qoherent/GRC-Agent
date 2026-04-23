@@ -212,14 +212,14 @@ def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
     return parsed
 
 
-def _run_fake_runtime(file_path: str) -> int:
+def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
     """Exercise the routed runtime contract with deterministic fake actions."""
     print(f"Loading {file_path}...")
     session = _load_initial_session(file_path)
     retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
-    agent = GrcAgent(session, catalog_root=catalog_root)
+    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
     _print_active_session(agent)
 
     print("--- System Prompt ---")
@@ -248,7 +248,7 @@ def _run_llama_runtime(
     retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
-    agent = GrcAgent(session, catalog_root=catalog_root)
+    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
     _print_active_session(agent)
     llama_config = config.llama
     launcher = LlamaServerLauncher(
@@ -372,7 +372,7 @@ def _run_repl_loop(
 
 
 def _run_tool_command(
-    tool_name: str, tool_kwargs: dict[str, Any], file_path: str | None
+    tool_name: str, tool_kwargs: dict[str, Any], file_path: str | None, config: AppConfig
 ) -> int:
     """Execute one routed runtime tool directly and print the structured result."""
     session = _load_initial_session(file_path)
@@ -382,18 +382,18 @@ def _run_tool_command(
         if retrieval_status != 0:
             return retrieval_status
 
-    agent = GrcAgent(session, catalog_root=catalog_root)
+    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
     result = agent.execute_tool(tool_name, tool_kwargs)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("ok") else 1
 
 
-def _run_health_command() -> int:
+def _run_health_command(config: AppConfig) -> int:
     """Print a structured agent health check and return 0 when healthy."""
     readiness = initialize_retrieval()
     catalog_root = readiness.get("catalog_root") if readiness.get("ok") else None
     session = FlowgraphSession()
-    agent = GrcAgent(session, catalog_root=catalog_root)
+    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
     report = agent.health_check()
     if not readiness.get("ok"):
         report["retrieval_message"] = readiness.get("message", "Retrieval not ready.")
@@ -427,6 +427,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         logging.getLogger("grc_agent").setLevel(logging.DEBUG)
 
+    app_config = load_app_config(args.config)
+
     if args.command == "doctor":
         return _run_doctor_command(
             config_path=args.config,
@@ -435,13 +437,12 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "health":
-        return _run_health_command()
+        return _run_health_command(app_config)
 
     if args.command == "fake":
-        return _run_fake_runtime(args.file)
+        return _run_fake_runtime(args.file, app_config)
 
     if args.command == "chat":
-        app_config = load_app_config(args.config)
         return _run_llama_runtime(
             args.file,
             args.message,
@@ -458,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             tool_kwargs = _parse_tool_kwargs(args.args)
         except ValueError as exc:
             parser.error(str(exc))
-        return _run_tool_command(args.tool_name, tool_kwargs, args.file)
+        return _run_tool_command(args.tool_name, tool_kwargs, args.file, app_config)
 
     parser.error("Unknown command.")
     return 2

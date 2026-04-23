@@ -84,6 +84,39 @@ def ensure_llama_server(
         raise
 
 
+def restart_llama_server(
+    server_url: str | None = None,
+    model: str | None = None,
+) -> tuple[str, str, LlamaServerClient]:
+    """Force a fresh llama.cpp server instance and return a new client."""
+    config = load_app_config()
+    resolved_url = (server_url or config.llama.server_url).rstrip("/")
+    resolved_model = model or config.llama.model
+
+    launcher = LlamaServerLauncher(
+        config.llama,
+        server_url=resolved_url,
+        model_alias=resolved_model,
+    )
+
+    with launcher._lock():
+        launcher._cleanup_cached_state(launcher._prepare_matching_state())
+
+    result = launcher.ensure_server_ready()
+    print(f"Restarted llama.cpp server at {result.server_url} (pid={result.pid})")
+    return (
+        result.server_url,
+        result.model_alias,
+        LlamaServerClient(
+            result.server_url,
+            timeout_seconds=config.llama.request_timeout_seconds,
+            max_tokens=config.llama.max_tokens,
+            temperature=config.llama.temperature,
+            enable_thinking=config.llama.enable_thinking,
+        ),
+    )
+
+
 
 def extract_requested_tool_calls(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return normalized assistant-requested tool calls from chat history."""

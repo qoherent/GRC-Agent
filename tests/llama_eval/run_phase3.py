@@ -185,6 +185,19 @@ PHASE3_CASES: list[RealisticCase] = [
             {"op_type": "update_params", "instance_name": "samp_rate"},
         ],
     ),
+    RealisticCase(
+        "expression",
+        "preserve_symbolic_rate_expression",
+        "Set the time sink sample rate to samp_rate/2.",
+        ["apply_edit"],
+        transaction_checks=[
+            {
+                "op_type": "update_params",
+                "instance_name": "qtgui_time_sink_x_0",
+                "params": {"srate": "samp_rate/2"},
+            },
+        ],
+    ),
     # -- loading and saving explicit paths --
     RealisticCase(
         "load",
@@ -299,6 +312,56 @@ PHASE3_CASES: list[RealisticCase] = [
             {"op_type": "remove_block", "instance_name": "blocks_throttle2_0"},
         ],
     ),
+    # -- expert DSP no-tool cases --
+    RealisticCase(
+        "expert",
+        "tag_offset_math",
+        "You know this GNU Radio expert recipe. Reply with only the exact Python expression for converting tag.offset into the current input buffer index in a GNU Radio Python block.",
+        [],
+        text_contains_any_checks=["tag.offset - self.nitems_read(0)", "tag.offset - nitems_read(0)"],
+    ),
+    RealisticCase(
+        "expert",
+        "pmt_dict_immutability",
+        "How do I add a key to a PMT dictionary without mutating it in place?",
+        [],
+        text_contains_any_checks=["dict_add"],
+    ),
+    RealisticCase(
+        "expert",
+        "mary_delay_formula",
+        "I upgraded a modem to 16-QAM. What should happen to Unpack K Bits and the verification delay?",
+        [],
+        text_contains_any_checks=["5.5 * sps + 7"],
+    ),
+    RealisticCase(
+        "expert",
+        "binary_short_scaling",
+        "What scale factor should I use between floats and 16-bit shorts in GNU Radio file conversion?",
+        [],
+        text_contains_any_checks=["32768"],
+    ),
+    RealisticCase(
+        "expert",
+        "packet_length_alignment",
+        "What has to stay aligned in a GNU Radio packet formatter/parser chain?",
+        [],
+        text_contains_any_checks=["packet_len", "packet length"],
+    ),
+    RealisticCase(
+        "expert",
+        "qpsk_recipe",
+        "What are the standard matched-filter and recovery pieces in a QPSK receive chain?",
+        [],
+        text_contains_any_checks=["root_raised_cosine", "costas loop", "differential decoder"],
+    ),
+    RealisticCase(
+        "expert",
+        "spectrum_scan_agc",
+        "For USRP spectrum scanning, should AGC be disabled, and what is the exact relationship between visible bandwidth and sample rate?",
+        [],
+        text_contains_any_checks=["visible complex bandwidth", "disable agc"],
+    ),
     # -- unsupported / no-tool cases --
     RealisticCase(
         "negative",
@@ -392,7 +455,7 @@ PHASE3_CASES: list[RealisticCase] = [
     RealisticCase(
         "repair",
         "remove_variable_repair_32k",
-        "Get rid of samp_rate but keep the throttle at 32000.",
+        "Get rid of samp_rate, keep the throttle at 32000, and leave the graph valid.",
         ["apply_edit"],
         transaction_checks=[
             {

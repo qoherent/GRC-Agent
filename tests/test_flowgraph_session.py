@@ -649,6 +649,29 @@ class FlowgraphSessionTests(unittest.TestCase):
         self.assertIsNone(session.last_validation_stderr)
         self.assertIsNone(session.last_validation_returncode)
 
+    def test_set_block_state_updates_model_and_raw_data(self) -> None:
+        fixture_path = self._fixture_path()
+        session = FlowgraphSession()
+        session.load(fixture_path)
+        session.add_block("unused_var", "variable", {"value": "123"})
+
+        session.set_block_state("unused_var", "disabled")
+
+        self.assertTrue(session.is_dirty)
+        flowgraph = session.flowgraph
+        self.assertIsNotNone(flowgraph)
+        assert flowgraph is not None
+
+        block = next(block for block in flowgraph.blocks if block.instance_name == "unused_var")
+        self.assertEqual(block.params["states"]["state"], "disabled")
+
+        raw_block = next(
+            entry for entry in flowgraph.raw_data["blocks"] if entry["name"] == "unused_var"
+        )
+        self.assertEqual(raw_block["states"]["state"], "disabled")
+
+        self.assertTrue(session.validate())
+
     # Adding and connecting a copied sink block should update both model and raw YAML.
     def test_add_and_connect_qtgui_time_sink_updates_model_and_raw_data(self) -> None:
         fixture_path = self._fixture_path()

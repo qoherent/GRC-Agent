@@ -92,10 +92,10 @@ def main() -> int:
 
     n_runs = 1 if args.quick else args.n_runs
 
-    url, model, _ = ensure_llama_server(args.server_url, args.model)
-
     summaries: list[dict] = []
     overall_start = time.perf_counter()
+
+    resolved_url, resolved_model, _ = ensure_llama_server(args.server_url, args.model)
 
     for phase_num, all_cases, run_eval in _PHASES:
         if phase_num not in args.phases:
@@ -115,7 +115,7 @@ def main() -> int:
         print(sep)
 
         phase_start = time.perf_counter()
-        report = run_eval(url, model, cases, n_runs)
+        report = run_eval(resolved_url, resolved_model, cases, n_runs)
         phase_elapsed = time.perf_counter() - phase_start
 
         summary = report.get("summary", {})

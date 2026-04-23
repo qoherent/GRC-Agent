@@ -30,6 +30,7 @@ from .rules import (
     ValidationOperation,
     get_block_rules,
     resolve_port_slots,
+    validate_block_asserts,
 )
 
 
@@ -88,6 +89,12 @@ def validate_and_apply_operation(
             operation,
             op_index=op_index,
             catalog_root=catalog_root,
+        )
+    if operation.op_type == "update_states":
+        return _apply_update_states(
+            snapshot,
+            operation,
+            op_index=op_index,
         )
     if operation.op_type == "add_connection":
         return _apply_add_connection(
@@ -180,6 +187,47 @@ def _apply_update_params(
 
     for parameter_id, value in params.items():
         raw_parameters[parameter_id] = copy.deepcopy(value)
+    snapshot.refresh()
+    return [], []
+
+
+def _apply_update_states(
+    snapshot: SessionSnapshot,
+    operation: ValidationOperation,
+    *,
+    op_index: int,
+) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
+    op_type = operation.op_type
+    instance_name = operation.payload["instance_name"]
+    state = operation.payload["state"]
+
+    _block, raw_block, _raw_index, issues = _require_unique_block(
+        snapshot,
+        instance_name,
+        op_index=op_index,
+        op_type=op_type,
+        field="instance_name",
+    )
+    if issues:
+        return issues, []
+    assert raw_block is not None
+
+    raw_states = raw_block.get("states")
+    if raw_states is None:
+        raw_states = {}
+        raw_block["states"] = raw_states
+    if not isinstance(raw_states, dict):
+        return [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="state",
+                code="invalid_states_section",
+                message=f"Block states section is invalid for: {instance_name}",
+            )
+        ], []
+
+    raw_states["state"] = state
     snapshot.refresh()
     return [], []
 
@@ -552,6 +600,30 @@ def _apply_add_connection(
                     f"({source_port.dtype}) to {format_endpoint(dst_block_name, dst_port)} "
                     f"({destination_port.dtype})."
                 ),
+                hint=(
+                    "Insert an appropriate block from Type Converters between these ports."
+                ),
+            )
+        ], warnings
+
+    if (
+        source_port.domain == "stream"
+        and destination_port.domain == "stream"
+        and source_port.vlen is not None
+        and destination_port.vlen is not None
+        and source_port.vlen != destination_port.vlen
+    ):
+        return [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="connection",
+                code="incompatible_vlen",
+                message=(
+                    f"Cannot connect {format_endpoint(src_block_name, src_port)} "
+                    f"(vlen={source_port.vlen}) to {format_endpoint(dst_block_name, dst_port)} "
+                    f"(vlen={destination_port.vlen})."
+                ),
             )
         ], warnings
 
@@ -559,6 +631,258 @@ def _apply_add_connection(
         raw_connection_entry(src_block_name, src_port, dst_block_name, dst_port)
     )
     snapshot.refresh()
+    return [], warnings
+
+
+def validate_snapshot_integrity(
+    snapshot: SessionSnapshot,
+    *,
+    affected_block_names: set[str],
+    op_index: int,
+    catalog_root: str | Path | None = None,
+) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
+    """Revalidate affected blocks and adjacent connections after staged edits."""
+    if not affected_block_names:
+        return [], []
+
+    warnings: list[ValidationIssue] = []
+    errors: list[ValidationIssue] = []
+
+    duplicate_issue = _validate_enabled_symbol_uniqueness(snapshot, op_index=op_index)
+    if duplicate_issue is not None:
+        return [duplicate_issue], []
+
+    connected_neighbors = {
+        connection.src_block
+        for connection in snapshot.connections
+        if connection.src_block in affected_block_names or connection.dst_block in affected_block_names
+    } | {
+        connection.dst_block
+        for connection in snapshot.connections
+        if connection.src_block in affected_block_names or connection.dst_block in affected_block_names
+    }
+    block_names_to_check = affected_block_names | connected_neighbors
+
+    resolved_blocks: dict[str, tuple[list[ResolvedPort], list[ResolvedPort], str | None]] = {}
+    for block_name in sorted(block_names_to_check):
+        raw_block = next(
+            (
+                entry
+                for entry in snapshot.raw_blocks()
+                if isinstance(entry, dict) and entry.get("name") == block_name
+            ),
+            None,
+        )
+        block = next((item for item in snapshot.blocks if item.instance_name == block_name), None)
+        if raw_block is None or block is None:
+            continue
+
+        parameters = raw_block.get("parameters")
+        if not isinstance(parameters, dict):
+            errors.append(
+                make_issue(
+                    op_index=op_index,
+                    op_type="transaction",
+                    field="operations",
+                    code="invalid_parameter_section",
+                    message=f"Block parameters section is invalid for: {block_name}",
+                )
+            )
+            continue
+
+        rules, rule_issue = _require_block_rules(
+            block.block_type,
+            op_index=op_index,
+            op_type="transaction",
+            field="operations",
+            catalog_root=catalog_root,
+        )
+        if rule_issue is not None:
+            errors.append(rule_issue)
+            continue
+        assert rules is not None
+
+        assert_failures, assert_warnings = validate_block_asserts(
+            block_rules=rules,
+            parameters=parameters,
+        )
+        warnings.extend(
+            make_issue(
+                op_index=op_index,
+                op_type="transaction",
+                field="operations",
+                code="block_assert_unresolved",
+                message=warning,
+            )
+            for warning in assert_warnings
+        )
+        if assert_failures:
+            errors.append(
+                make_issue(
+                    op_index=op_index,
+                    op_type="transaction",
+                    field="operations",
+                    code="block_assert_failed",
+                    message=f"Block assertion failed for {block_name}: {assert_failures[0]}",
+                )
+            )
+            continue
+
+        input_ports, input_warnings = resolve_port_slots(
+            block_rules=rules,
+            parameters=parameters,
+            direction="inputs",
+        )
+        output_ports, output_warnings = resolve_port_slots(
+            block_rules=rules,
+            parameters=parameters,
+            direction="outputs",
+        )
+        warnings.extend(
+            _warnings_from_port_resolution(
+                input_warnings,
+                op_index=op_index,
+                op_type="transaction",
+                field="operations",
+            )
+        )
+        warnings.extend(
+            _warnings_from_port_resolution(
+                output_warnings,
+                op_index=op_index,
+                op_type="transaction",
+                field="operations",
+            )
+        )
+
+        states = raw_block.get("states")
+        state_text = states.get("state") if isinstance(states, dict) else None
+        resolved_blocks[block_name] = (input_ports, output_ports, state_text)
+
+    if errors:
+        return errors, warnings
+
+    input_counts: dict[tuple[str, int], int] = {}
+    for connection in snapshot.connections:
+        if connection.dst_block in resolved_blocks:
+            input_counts[(connection.dst_block, connection.dst_port)] = (
+                input_counts.get((connection.dst_block, connection.dst_port), 0) + 1
+            )
+
+    for connection in snapshot.connections:
+        if (
+            connection.src_block not in affected_block_names
+            and connection.dst_block not in affected_block_names
+        ):
+            continue
+        src_outputs = resolved_blocks.get(connection.src_block, ([], [], None))[1]
+        dst_inputs = resolved_blocks.get(connection.dst_block, ([], [], None))[0]
+
+        src_issue = _validate_port_index(
+            ports=src_outputs,
+            port_index=connection.src_port,
+            block_name=connection.src_block,
+            op_index=op_index,
+            op_type="transaction",
+            field="operations",
+            direction="output",
+        )
+        dst_issue = _validate_port_index(
+            ports=dst_inputs,
+            port_index=connection.dst_port,
+            block_name=connection.dst_block,
+            op_index=op_index,
+            op_type="transaction",
+            field="operations",
+            direction="input",
+        )
+        if src_issue is not None or dst_issue is not None:
+            return [issue for issue in (src_issue, dst_issue) if issue is not None], warnings
+
+        source_port = src_outputs[connection.src_port]
+        destination_port = dst_inputs[connection.dst_port]
+
+        if (
+            source_port.domain is not None
+            and destination_port.domain is not None
+            and source_port.domain != destination_port.domain
+        ):
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type="transaction",
+                    field="operations",
+                    code="incompatible_domain",
+                    message=(
+                        f"Existing connection became invalid: "
+                        f"{format_endpoint(connection.src_block, connection.src_port)} "
+                        f"({source_port.domain}) -> {format_endpoint(connection.dst_block, connection.dst_port)} "
+                        f"({destination_port.domain})."
+                    ),
+                )
+            ], warnings
+
+        if (
+            destination_port.domain != "message"
+            and input_counts.get((connection.dst_block, connection.dst_port), 0) > 1
+        ):
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type="transaction",
+                    field="operations",
+                    code="occupied_input_port",
+                    message=(
+                        "Existing connections became invalid because one input port now has "
+                        f"multiple stream connections: {format_endpoint(connection.dst_block, connection.dst_port)}"
+                    ),
+                )
+            ], warnings
+
+        if (
+            source_port.domain == "stream"
+            and destination_port.domain == "stream"
+            and source_port.dtype is not None
+            and destination_port.dtype is not None
+            and source_port.dtype != destination_port.dtype
+        ):
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type="transaction",
+                    field="operations",
+                    code="incompatible_dtype",
+                    message=(
+                        f"Existing connection became invalid: "
+                        f"{format_endpoint(connection.src_block, connection.src_port)} "
+                        f"({source_port.dtype}) -> {format_endpoint(connection.dst_block, connection.dst_port)} "
+                        f"({destination_port.dtype})."
+                    ),
+                )
+            ], warnings
+
+        if (
+            source_port.domain == "stream"
+            and destination_port.domain == "stream"
+            and source_port.vlen is not None
+            and destination_port.vlen is not None
+            and source_port.vlen != destination_port.vlen
+        ):
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type="transaction",
+                    field="operations",
+                    code="incompatible_vlen",
+                    message=(
+                        f"Existing connection became invalid: "
+                        f"{format_endpoint(connection.src_block, connection.src_port)} "
+                        f"(vlen={source_port.vlen}) -> {format_endpoint(connection.dst_block, connection.dst_port)} "
+                        f"(vlen={destination_port.vlen})."
+                    ),
+                )
+            ], warnings
+
     return [], warnings
 
 
@@ -750,3 +1074,34 @@ def _warnings_from_port_resolution(
         )
         for warning in warnings
     ]
+
+
+def _validate_enabled_symbol_uniqueness(
+    snapshot: SessionSnapshot,
+    *,
+    op_index: int,
+) -> ValidationIssue | None:
+    enabled_names: dict[str, int] = {}
+    for entry in snapshot.raw_blocks():
+        if not isinstance(entry, dict):
+            continue
+        block_name = entry.get("name")
+        if not isinstance(block_name, str) or not block_name:
+            continue
+        states = entry.get("states")
+        state = states.get("state") if isinstance(states, dict) else "enabled"
+        if state == "disabled":
+            continue
+        enabled_names[block_name] = enabled_names.get(block_name, 0) + 1
+
+    duplicates = sorted(name for name, count in enabled_names.items() if count > 1)
+    if not duplicates:
+        return None
+
+    return make_issue(
+        op_index=op_index,
+        op_type="transaction",
+        field="operations",
+        code="duplicate_enabled_symbol_id",
+        message=f"Enabled block name is not unique: {duplicates[0]}",
+    )

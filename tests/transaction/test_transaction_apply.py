@@ -78,6 +78,27 @@ class TransactionApplyTests(unittest.TestCase):
         self.assertIn("unused_var", [block.instance_name for block in session.flowgraph.blocks])
         self.assertNotEqual(session.flowgraph.raw_data, original_raw)
 
+    def test_apply_edit_can_disable_detached_variable_block(self) -> None:
+        session = self._load_session()
+        session.add_block("unused_var", "variable", {"value": "123"})
+
+        payload = apply_edit(
+            session,
+            {
+                "op_type": "update_states",
+                "instance_name": "unused_var",
+                "state": "disabled",
+            },
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["applied"])
+        self.assertEqual(payload["affected_blocks"], ["unused_var"])
+        assert session.flowgraph is not None
+        block = next(block for block in session.flowgraph.blocks if block.instance_name == "unused_var")
+        self.assertEqual(block.params["states"]["state"], "disabled")
+        self.assertTrue(session.last_validation_ok)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,11 +46,25 @@ def apply_operations(
 
     for operation in operations:
         op_type = operation["op_type"]
+        block_type = operation.get("block_type")
         if op_type == "update_params":
             instance_name = operation["instance_name"]
             affected_blocks.add(instance_name)
             for parameter_key, value in operation["params"].items():
-                session.set_param(instance_name, parameter_key, copy.deepcopy(value))
+                session.set_param(
+                    instance_name,
+                    parameter_key,
+                    copy.deepcopy(value),
+                    block_type=block_type,
+                )
+            continue
+
+        if op_type == "update_states":
+            instance_name = operation["instance_name"]
+            session.set_block_state(
+                instance_name, operation["state"], block_type=block_type
+            )
+            affected_blocks.add(instance_name)
             continue
 
         if op_type == "add_connection":
@@ -79,7 +93,7 @@ def apply_operations(
 
         if op_type == "remove_block":
             instance_name = operation["instance_name"]
-            session.remove_block(instance_name)
+            session.remove_block(instance_name, block_type=block_type)
             affected_blocks.add(instance_name)
             continue
 

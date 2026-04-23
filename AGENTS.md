@@ -11,6 +11,7 @@
 
 ## Decision principles
 
+- Utilize documented **Expert Recipes** and math patterns from `docs/TUTORIAL_RESEARCH.md` (e.g., SI unit expansion, resampler fractions, USRP tuning offsets).
 - Do not add save, validate, or mutation behavior unless the pass explicitly asks for it.
 - Ask for more details when needed. Do not make assumptions.
 - Reject any ad-hoc logic or flow that leads to redundancy, extra cost, latency, or worse performance.

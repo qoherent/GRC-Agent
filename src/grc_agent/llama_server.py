@@ -269,6 +269,24 @@ class LlamaServerClient:
         if not isinstance(content, str) or not content.strip():
             return None
         normalized = re.sub(r"<eos>\s*", " ", content).strip()
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and _looks_like_transaction_payload(
+            parsed.get("transaction")
+        ):
+            return LlamaToolCall(
+                id="fallback_tool_call",
+                name="apply_edit",
+                arguments={"transaction": parsed["transaction"]},
+            )
+        if _looks_like_transaction_payload(parsed):
+            return LlamaToolCall(
+                id="fallback_tool_call",
+                name="apply_edit",
+                arguments={"transaction": parsed},
+            )
         match = re.search(
             r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)",
             normalized,
@@ -443,6 +461,25 @@ _INSPECT_BEFORE_EDIT_TERMS = (
     "show",
     "see",
 )
+_EDIT_INTENT_TERMS = (
+    "change",
+    "edit",
+    "update",
+    "set",
+    "modify",
+    "apply",
+    "remove",
+    "add",
+    "disconnect",
+    "connect",
+    "disable",
+    "enable",
+    "bump",
+    "faster",
+    "slower",
+    "speed",
+    "make it",
+)
 _PREVIEW_INTENT_TERMS = (
     "preview",
     "dry-run",
@@ -515,6 +552,10 @@ def run_bounded_llama_turn(
         ):
             assistant_content = unsupported_message
             tool_calls = []
+        if tool_calls:
+            tool_calls = [
+                _canonicalize_tool_call(agent, tool_call) for tool_call in tool_calls
+            ]
 
         if tool_calls and tool_rounds_used >= _SAFETY_MAX_TOOL_ROUNDS:
             return {
@@ -556,6 +597,8 @@ def run_bounded_llama_turn(
                             "content": validation_result,
                         }
                     )
+                    if _stop_after_failed_tool_call(tool_call.name, validation_result):
+                        break
                     continue
                 tool_order_result = _validate_tool_order_for_turn(
                     user_message, agent.history, tool_call.name, tool_call.arguments
@@ -569,6 +612,8 @@ def run_bounded_llama_turn(
                             "content": tool_order_result,
                         }
                     )
+                    if _stop_after_failed_tool_call(tool_call.name, tool_order_result):
+                        break
                     continue
                 result = agent.execute_tool(tool_call.name, tool_call.arguments)
                 tool_calls_executed += 1
@@ -580,6 +625,8 @@ def run_bounded_llama_turn(
                         "content": result,
                     }
                 )
+                if _stop_after_failed_tool_call(tool_call.name, result):
+                    break
             continue
 
         follow_up_reminder = _build_follow_up_reminder(user_message, agent.history)
@@ -618,6 +665,17 @@ def _resolve_final_assistant_text(
     tool_turns = [turn for turn in history[:-1] if turn.get("role") == "tool"]
     latest_tool_turn = tool_turns[-1] if tool_turns else None
     unsupported_message = _unsupported_request_message(history)
+    latest_user_message = next(
+        (
+            str(turn.get("content"))
+            for turn in reversed(history)
+            if turn.get("role") == "user" and isinstance(turn.get("content"), str)
+        ),
+        "",
+    )
+    preview_failure_message = None
+    if _is_preview_only_request(latest_user_message.lower()):
+        preview_failure_message = _preview_failure_explanation(history)
 
     summarize_summary = None
     if (
@@ -627,6 +685,9 @@ def _resolve_final_assistant_text(
         and isinstance(latest_tool_turn["content"].get("summary"), str)
     ):
         summarize_summary = latest_tool_turn["content"]["summary"]
+
+    if preview_failure_message is not None:
+        return preview_failure_message
 
     if _looks_like_tool_call_text(assistant_text):
         if summarize_summary is not None:
@@ -655,6 +716,42 @@ def _resolve_final_assistant_text(
     if unsupported_message is not None and latest_tool_turn is None:
         return unsupported_message
     return "I could not complete that request with the available tools."
+
+
+def _canonicalize_tool_call(agent: GrcAgent, tool_call: LlamaToolCall) -> LlamaToolCall:
+    """Normalize edit-tool arguments before storing or executing them."""
+    if tool_call.name not in {"apply_edit", "propose_edit"}:
+        return tool_call
+    transaction = tool_call.arguments.get("transaction")
+    normalized_transaction = agent._normalize_transaction_instance_names(transaction)
+    if normalized_transaction == transaction:
+        return tool_call
+    normalized_arguments = dict(tool_call.arguments)
+    normalized_arguments["transaction"] = normalized_transaction
+    return LlamaToolCall(
+        id=tool_call.id,
+        name=tool_call.name,
+        arguments=normalized_arguments,
+    )
+
+
+def _looks_like_transaction_payload(payload: Any) -> bool:
+    """Return whether parsed JSON resembles one narrow transaction payload."""
+    if isinstance(payload, list):
+        return bool(payload) and all(_looks_like_transaction_payload(item) for item in payload)
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        key in payload
+        for key in ("op_type", "instance_name", "src_block", "dst_block", "block_type")
+    )
+
+
+def _stop_after_failed_tool_call(tool_name: str, result: dict[str, Any]) -> bool:
+    """Stop the current serial tool batch after failed stateful operations."""
+    if not isinstance(result, dict) or result.get("ok") is not False:
+        return False
+    return tool_name in {"load_grc", "apply_edit", "validate_graph", "save_graph"}
 
 
 def _looks_like_tool_call_text(text: str) -> bool:
@@ -940,6 +1037,35 @@ def _validate_tool_order_for_turn(
     lowered = user_message.lower()
     current_turn_history = _current_turn_history(history)
     last_success = _last_successful_tool_indices(current_turn_history)
+    if tool_name == "propose_edit" and _requests_edit(lowered) and not _requests_preview(
+        lowered
+    ):
+        return build_error_payload(
+            error_type=ErrorCode.TOOL_CALL_INVALID,
+            message=(
+                "Rejected out-of-order propose_edit: the user asked for the actual change, "
+                "not a preview. Call `apply_edit` instead and do not ask for confirmation."
+            ),
+            details={
+                "code": "apply_edit_required",
+                "required_tool": "apply_edit",
+            },
+        )
+    if (
+        tool_name != "propose_edit"
+        and _is_preview_only_request(lowered)
+        and _preview_result_already_available(current_turn_history)
+    ):
+        return build_error_payload(
+            error_type=ErrorCode.TOOL_CALL_INVALID,
+            message=(
+                f"Rejected out-of-order {tool_name}: the user asked only for a preview. "
+                "Explain the `propose_edit` result directly instead of calling more tools."
+            ),
+            details={
+                "code": "preview_result_explanation_required",
+            },
+        )
     if (
         tool_name in {"validate_graph", "save_graph"}
         and _repair_transaction_required(lowered, current_turn_history)
@@ -1160,7 +1286,7 @@ def _samp_rate_removal_still_required(
 def _requests_samp_rate_repair_flow(lowered_user_message: str) -> bool:
     if "samp_rate" not in lowered_user_message:
         return False
-    if not any(term in lowered_user_message for term in ("remove", "get rid of")):
+    if not any(term in lowered_user_message for term in ("remove", "get rid of", "gone")):
         return False
     return any(
         term in lowered_user_message
@@ -1168,6 +1294,9 @@ def _requests_samp_rate_repair_flow(lowered_user_message: str) -> bool:
             "keep it working",
             "keep the graph working",
             "keep the graph valid",
+            "leave it working",
+            "leave the graph working",
+            "leave graph working",
             "repair",
             "patch",
             "literal",
@@ -1204,6 +1333,38 @@ def _tool_result_has_error_code(content: dict[str, Any], code: str) -> bool:
     return isinstance(errors, list) and any(
         isinstance(error, dict) and error.get("code") == code for error in errors
     )
+
+
+def _preview_result_already_available(history: list[dict[str, Any]]) -> bool:
+    return any(
+        turn.get("role") == "tool"
+        and turn.get("name") == "propose_edit"
+        and isinstance(turn.get("content"), dict)
+        for turn in history
+    )
+
+
+def _preview_failure_explanation(history: list[dict[str, Any]]) -> str | None:
+    for turn in reversed(_current_turn_history(history)):
+        if (
+            turn.get("role") != "tool"
+            or turn.get("name") != "propose_edit"
+            or not isinstance(turn.get("content"), dict)
+            or turn["content"].get("ok") is not False
+        ):
+            continue
+        content = turn["content"]
+        message = content.get("message")
+        hint = content.get("hint")
+        if isinstance(message, str) and isinstance(hint, str) and hint:
+            first_sentence = hint.split(". ", 1)[0].strip()
+            if first_sentence and first_sentence not in message:
+                return f"{message} {first_sentence.rstrip('.')} .".replace(" .", ".")
+        if isinstance(message, str) and message:
+            return message
+        if isinstance(hint, str) and hint:
+            return hint
+    return None
 
 
 def _latest_successful_search(history: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1263,28 +1424,20 @@ def _needs_inspect_before_edit(lowered_user_message: str) -> bool:
     has_inspect_intent = any(
         term in lowered_user_message for term in _INSPECT_BEFORE_EDIT_TERMS
     )
-    has_edit_intent = any(
-        term in lowered_user_message
-        for term in (
-            "change",
-            "edit",
-            "update",
-            "set",
-            "modify",
-            "apply",
-            "remove",
-            "add",
-            "disconnect",
-            "connect",
-        )
-    )
+    has_edit_intent = _requests_edit(lowered_user_message)
     return has_inspect_intent and has_edit_intent
 
 
 def _is_preview_only_request(lowered_user_message: str) -> bool:
-    has_preview_intent = any(
-        term in lowered_user_message for term in _PREVIEW_INTENT_TERMS
-    )
+    has_preview_intent = _requests_preview(lowered_user_message)
     if not has_preview_intent:
         return False
     return not any(term in lowered_user_message for term in _PREVIEW_FOLLOW_UP_TERMS)
+
+
+def _requests_edit(lowered_user_message: str) -> bool:
+    return any(term in lowered_user_message for term in _EDIT_INTENT_TERMS)
+
+
+def _requests_preview(lowered_user_message: str) -> bool:
+    return any(term in lowered_user_message for term in _PREVIEW_INTENT_TERMS)

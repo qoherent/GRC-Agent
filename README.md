@@ -5,18 +5,17 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 ## Status
 
 - one `.grc` file per session
-- package-level catalog description now exposes `describe_block(block_id)` for structured GNU block truth
+- package-level catalog description now exposes `describe_block(block_id)` for structured GNU block truth, including **GUI port colors** (e.g., blue for complex, orange for float)
 - a bounded retrieval package now exposes `search_grc(...)` for GNU catalog and active-session search
 - package-level session inspection now exposes `load_grc(...)`, `summarize_graph(session)`, and `get_grc_context(session, ...)`
-- package-level preflight validation now exposes `preflight_transaction(session, operations)` for pure staged checks before mutation
-- package-level transaction editing now exposes `propose_edit(session, transaction)` and `apply_edit(session, transaction)` for atomic validated edits
+- package-level preflight validation now exposes `preflight_transaction(session, operations)` for pure staged checks before mutation; **type-mismatch errors now include actionable repair hints**
+- package-level transaction editing now exposes `propose_edit(session, transaction)` and `apply_edit(session, transaction)` for atomic validated edits; **duplicate block IDs are handled via optional block_type disambiguation**
 - `FlowgraphSession` owns parsed state, persistence, validation, and all graph-mutation primitives
 - `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
-- the structural-edit surface is frozen pending new experiments
 - a thin llama.cpp adapter is wired for single-turn and multi-turn CLI conversations
-- the live llama.cpp eval suite now covers phases 1-6, including multi-turn continuity, failure-recovery flows, and compound workflows for the supported single-session harness contract; see `docs/LLAMA_EVAL.md` for the exact latest evidence level
-- multi-turn conversations use proactive history compaction and session auto-refresh to control prompt growth; this is a budget guardrail, not a hard context-window guarantee
-- structured logging is available throughout the runtime; `--verbose` enables debug output
+- `chat` owns **concurrency-safe local llama.cpp startup** using file locking to prevent process races
+- the live llama.cpp eval suite now covers phases 1-6, including multi-turn continuity, failure-recovery flows, and compound workflows; see `docs/LLAMA_EVAL.md` for the latest evidence
+- multi-turn conversations use proactive history compaction (100k char default, configurable via `[agent]`) and session auto-refresh to control prompt growth
 - raw model prose is still not trusted outside the runtime's deterministic finalization rules for supported flows
 
 ## Repo Map

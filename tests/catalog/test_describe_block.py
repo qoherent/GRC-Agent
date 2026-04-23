@@ -33,7 +33,6 @@ class DescribeBlockTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["block_id"], "analog_agc_xx")
         self.assertEqual(result["label"], "AGC")
-        self.assertTrue(result["loaded_from"].endswith("analog_agc_xx.block.yml"))
         self.assertTrue(result["category_path"])
         self.assertEqual(result["category_path"][0], "Core")
         self.assertEqual(result["flags"], ["python", "cpp"])
@@ -41,7 +40,7 @@ class DescribeBlockTests(unittest.TestCase):
         self.assertEqual(result["parameters"][0]["dtype"], "enum")
         self.assertEqual(result["inputs"][0]["domain"], "stream")
         self.assertEqual(result["outputs"][0]["domain"], "stream")
-        self.assertEqual(result["asserts"], [])
+        self.assertNotIn("asserts", result)
         self.assertIn("analog_agc_xx(", result["signature"])
 
     def test_documentation_and_asserts_are_preserved(self) -> None:
@@ -71,7 +70,7 @@ class DescribeBlockTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["doc_url"], "UHD_FPGA_FFT")
-        self.assertIsNone(result["documentation"])
+        self.assertNotIn("documentation", result)
         self.assertEqual(result["inputs"][0]["id"], "port0")
         self.assertEqual(result["outputs"][0]["id"], "port0")
 
@@ -86,7 +85,6 @@ class DescribeBlockTests(unittest.TestCase):
             any("Hierarchical" in warning for warning in result["warnings"]),
             msg=result["warnings"],
         )
-        self.assertTrue(result["loaded_from"].endswith("filter_pfb_channelizer_hier.block.yml"))
 
     def test_unknown_block_returns_stable_error_shape(self) -> None:
         self._catalog_root_or_skip()

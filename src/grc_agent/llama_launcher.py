@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,9 +10,10 @@ import signal
 import socket
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from shutil import which
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from grc_agent.config import LlamaConfig
@@ -67,6 +69,7 @@ class LlamaServerLauncher:
             if state_path is not None
             else Path.home() / ".cache" / "grc_agent" / "llama_launcher_state.json"
         )
+        self.lock_path = self.state_path.with_suffix(".lock")
         self.log_dir = (
             Path(log_dir)
             if log_dir is not None
@@ -76,35 +79,48 @@ class LlamaServerLauncher:
 
     def ensure_server_ready(self) -> LlamaLaunchResult:
         """Reuse a healthy server or launch one locally before the chat turn starts."""
-        existing_state = self._prepare_matching_state()
+        with self._lock():
+            existing_state = self._prepare_matching_state()
 
-        if self._socket_is_open():
-            return self._wait_for_existing_backend(existing_state)
+            if self._socket_is_open():
+                return self._wait_for_existing_backend(existing_state)
 
-        if existing_state is not None:
-            return self._wait_for_existing_backend(existing_state)
+            if existing_state is not None:
+                return self._wait_for_existing_backend(existing_state)
 
-        process, log_path = self._start_server_process()
-        launched_state = _LauncherState(
-            base_url=self.server_url,
-            model_alias=self.model_alias,
-            hf_model=self.config.hf_model,
-            pid=process.pid,
-            log_path=str(log_path),
-        )
-        self._write_state(launched_state)
-        try:
-            launch_result = self._wait_for_ready(
-                launched_process=process,
-                cached_state=launched_state,
-                started=True,
+            process, log_path = self._start_server_process()
+            launched_state = _LauncherState(
+                base_url=self.server_url,
+                model_alias=self.model_alias,
+                hf_model=self.config.hf_model,
+                pid=process.pid,
+                log_path=str(log_path),
             )
-            self._remember_process(process)
-            return launch_result
-        except Exception:
-            self._clear_state()
-            self._terminate_process(process)
-            raise
+            self._write_state(launched_state)
+            try:
+                launch_result = self._wait_for_ready(
+                    launched_process=process,
+                    cached_state=launched_state,
+                    started=True,
+                )
+                self._remember_process(process)
+                return launch_result
+            except Exception:
+                self._clear_state()
+                self._terminate_process(process)
+                raise
+
+    @contextmanager
+    def _lock(self) -> Iterator[None]:
+        """Advisory file lock to prevent concurrent CLI startup races."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = self.lock_path.open("w")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
 
     def _wait_for_existing_backend(
         self, cached_state: _LauncherState | None

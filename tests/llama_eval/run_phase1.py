@@ -22,10 +22,15 @@ from tests.llama_eval.harness import (
     extract_executed_tool_calls,
     extract_requested_tool_calls,
     isolated_fixture_workspace,
+    restart_llama_server,
 )
 
 DEFAULT_N_RUNS = 3
 MAJORITY_THRESHOLD = 0.5
+
+
+def _is_llama_timeout(error_message: Any) -> bool:
+    return isinstance(error_message, str) and "Timed out connecting to llama.cpp server" in error_message
 
 
 @dataclass(frozen=True)
@@ -353,6 +358,12 @@ def _run_eval(
                 flush=True,
             )
             run_result = _run_case(client, resolved_model, case)
+            if _is_llama_timeout(run_result.get("error")):
+                resolved_url, resolved_model, client = restart_llama_server(
+                    resolved_url,
+                    resolved_model,
+                )
+                run_result = _run_case(client, resolved_model, case)
             print(
                 f" -> {'PASS' if run_result['matched'] else 'FAIL'} "
                 f"({', '.join(run_result['tools_called']) or 'no tools'})"
