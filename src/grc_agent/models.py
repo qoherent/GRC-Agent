@@ -18,16 +18,16 @@ class Block:
 
 @dataclass
 class Connection:
-    """Represents one wire between two block ports."""
+    """Represents one wire between two block ports.
 
-    # Name of the block sending data.
+    Stream connections use integer port indices.  Message connections
+    use string port names (e.g. ``"strobe"``, ``"pdus"``).
+    """
+
     src_block: str
-    # Output port number on the source block.
-    src_port: int
-    # Name of the block receiving data.
+    src_port: int | str
     dst_block: str
-    # Input port number on the destination block.
-    dst_port: int
+    dst_port: int | str
 
 
 @dataclass

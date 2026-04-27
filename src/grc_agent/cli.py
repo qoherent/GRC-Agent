@@ -6,7 +6,8 @@ import logging
 import sys
 from typing import Any
 
-from grc_agent.agent import GrcAgent, PUBLIC_TOOL_NAMES
+from grc_agent.agent import GrcAgent
+from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.config import AppConfig, load_app_config
 from grc_agent.doctor import print_doctor_report, run_doctor
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -86,7 +87,18 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Run one or more llama.cpp-backed turns against a loaded graph. "
         "With --message, runs a single turn; without it, starts an interactive REPL.",
     )
-    chat_parser.add_argument("file", help="Path to a .grc file to load.")
+    chat_parser.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="Path to a .grc file to load. Use --new to start from an empty graph.",
+    )
+    chat_parser.add_argument(
+        "--new",
+        action="store_true",
+        dest="new_graph",
+        help="Start from an empty graph instead of loading a file.",
+    )
     chat_parser.add_argument(
         "--message",
         required=False,
@@ -144,32 +156,67 @@ def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
     return argv
 
 
-def _print_history(agent: GrcAgent) -> None:
+def _parse_config_override(argv: list[str]) -> str | None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config")
+    args, _ = parser.parse_known_args(argv)
+    return args.config
+
+
+def _print_history(agent: GrcAgent, *, verbose: bool = False) -> None:
     """Render runtime history in a compact CLI-friendly form."""
+    if verbose:
+        print("\n--- History ---")
+        for turn in agent.history:
+            if turn.get("role") == "session" and isinstance(turn.get("content"), dict):
+                printable_turn = dict(turn)
+                printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
+                print(printable_turn)
+                continue
+            if turn.get("role") == "assistant" and turn.get("tool_calls"):
+                for tc in turn["tool_calls"]:
+                    fn = tc.get("function") or {}
+                    name = tc.get("name") or fn.get("name") or "?"
+                    args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else fn.get("arguments", {})
+                    print(f"Assistant called {name}: {json.dumps(args)}")
+                continue
+            if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
+                printable_turn = dict(turn)
+                printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
+                print(printable_turn)
+                continue
+            print(turn)
+        return
     print("\n--- History ---")
     for turn in agent.history:
-        if turn.get("role") == "session" and isinstance(turn.get("content"), dict):
-            printable_turn = dict(turn)
-            printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
-            print(printable_turn)
+        if turn.get("role") == "session":
             continue
         if turn.get("role") == "assistant" and turn.get("tool_calls"):
             for tc in turn["tool_calls"]:
-                # Flat structure (fake mode): {"name": ..., "arguments": ...}
-                # Nested structure (llama mode): {"function": {"name": ..., "arguments": ...}}
                 fn = tc.get("function") or {}
                 name = tc.get("name") or fn.get("name") or "?"
-                print(f"Assistant called {name}: {json.dumps(tc.get('arguments', fn.get('arguments', {})))}")
+                print(f"  Tool call: {name}")
             continue
         if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
-            printable_turn = dict(turn)
-            printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
-            print(printable_turn)
+            content = turn["content"]
+            ok = content.get("ok")
+            name = content.get("tool") or turn.get("name") or "?"
+            status = "ok" if ok else "FAILED"
+            msg = content.get("message", "")
+            line = f"  {name}: {status}"
+            if not ok and msg:
+                line += f" — {msg[:80]}"
+            print(line)
             continue
-        print(turn)
+        role = turn.get("role", "")
+        text = turn.get("content", "")
+        if role == "user" and isinstance(text, str):
+            print(f"  User: {text[:100]}")
+        elif role == "assistant" and isinstance(text, str) and text:
+            print(f"  Assistant: {text[:120]}")
 
 
-def _print_active_session(agent: GrcAgent) -> None:
+def _print_active_session(agent: GrcAgent, *, verbose: bool = False) -> None:
     """Render the currently bound session before running the chat loop."""
     active_session = agent.active_session_snapshot()
     print("\n--- Active Session ---")
@@ -177,12 +224,20 @@ def _print_active_session(agent: GrcAgent) -> None:
         print("No active flowgraph session.")
         return
     validation = active_session["validation"]["status"]
-    print(
-        f"{active_session['path']} "
-        f"(graph_id={active_session['graph_id']}, "
-        f"state_revision={active_session['state_revision']}, "
-        f"dirty={active_session['dirty']}, validation={validation})"
-    )
+    path = active_session.get("path") or "(new graph)"
+    if verbose:
+        print(
+            f"{path} "
+            f"(graph_id={active_session['graph_id']}, "
+            f"state_revision={active_session['state_revision']}, "
+            f"dirty={active_session['dirty']}, validation={validation})"
+        )
+    else:
+        print(
+            f"{path} "
+            f"(graph_id={active_session['graph_id']}, "
+            f"dirty={active_session['dirty']}, validation={validation})"
+        )
 
 
 def _prepare_retrieval() -> tuple[int, str | None]:
@@ -220,7 +275,7 @@ def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
     if retrieval_status != 0:
         return retrieval_status
     agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
-    _print_active_session(agent)
+    _print_active_session(agent, verbose=True)
 
     print("--- System Prompt ---")
     print(agent.get_system_prompt())
@@ -228,28 +283,34 @@ def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
 
     agent.run_step_fake(FAKE_USER_MESSAGE, FAKE_ACTIONS)
 
-    _print_history(agent)
+    _print_history(agent, verbose=True)
 
     return 0
 
 
 def _run_llama_runtime(
-    file_path: str,
+    file_path: str | None,
     user_message: str | None,
     config: AppConfig,
     server_url: str,
     model: str | None,
     api_key: str | None,
+    *,
+    verbose: bool = False,
 ) -> int:
     """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
-    print(f"Loading {file_path}...")
+    if file_path is not None:
+        print(f"Loading {file_path}...")
+        session = _load_initial_session(file_path)
+    else:
+        print("Starting new empty graph...")
+        session = FlowgraphSession.create()
     logger.info("chat_start file=%s message=%s", file_path, user_message[:80] if user_message else None)
-    session = _load_initial_session(file_path)
     retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
     agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
-    _print_active_session(agent)
+    _print_active_session(agent, verbose=verbose)
     llama_config = config.llama
     launcher = LlamaServerLauncher(
         llama_config,
@@ -264,15 +325,7 @@ def _run_llama_runtime(
         print("\n--- Launcher ---")
         print(str(exc))
         return 1
-
-    client = LlamaServerClient(
-        base_url=server_url,
-        api_key=api_key,
-        timeout_seconds=llama_config.request_timeout_seconds,
-        max_tokens=llama_config.max_tokens,
-        temperature=llama_config.temperature,
-        enable_thinking=llama_config.enable_thinking,
-    )
+    client = launch_result.client
 
     if launch_result.status == "started":
         logger.info("server_started url=%s pid=%s", launch_result.server_url, launch_result.pid)
@@ -288,9 +341,9 @@ def _run_llama_runtime(
         )
 
     if user_message is not None:
-        return _run_single_turn(agent, client, user_message, model)
+        return _run_single_turn(agent, client, user_message, model, verbose=verbose)
 
-    return _run_repl_loop(agent, client, model)
+    return _run_repl_loop(agent, client, model, verbose=verbose)
 
 
 def _run_single_turn(
@@ -298,6 +351,8 @@ def _run_single_turn(
     client: LlamaServerClient,
     user_message: str,
     model: str | None,
+    *,
+    verbose: bool = False,
 ) -> int:
     """Run one bounded llama turn and print the result."""
     try:
@@ -320,7 +375,7 @@ def _run_single_turn(
         print("\n--- Runtime ---")
         print(result["message"])
 
-    _print_history(agent)
+    _print_history(agent, verbose=verbose)
     return 0 if result["ok"] else 1
 
 
@@ -328,6 +383,8 @@ def _run_repl_loop(
     agent: GrcAgent,
     client: LlamaServerClient,
     model: str | None,
+    *,
+    verbose: bool = False,
 ) -> int:
     """Run an interactive REPL loop over the current agent and session."""
     print("\nInteractive REPL. Type /quit or /exit to stop.\n")
@@ -345,7 +402,7 @@ def _run_repl_loop(
         if user_input.lower() in ("/quit", "/exit"):
             break
 
-        _print_active_session(agent)
+        _print_active_session(agent, verbose=verbose)
 
         try:
             result = run_bounded_llama_turn(
@@ -365,7 +422,7 @@ def _run_repl_loop(
             print(f"\n--- Runtime ---\n{result['message']}")
             last_exit_code = 1
 
-        _print_history(agent)
+        _print_history(agent, verbose=verbose)
         print()
 
     return last_exit_code
@@ -421,13 +478,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     translated_argv = _maybe_translate_legacy_args(raw_argv)
-    parser = _build_parser()
+    if any(arg in {"-h", "--help"} for arg in translated_argv):
+        parser = _build_parser()
+        parser.parse_args(translated_argv)
+    config_override = _parse_config_override(translated_argv)
+    app_config = load_app_config(config_override)
+    parser = _build_parser(app_config)
     args = parser.parse_args(translated_argv)
 
     if args.verbose:
         logging.getLogger("grc_agent").setLevel(logging.DEBUG)
-
-    app_config = load_app_config(args.config)
 
     if args.command == "doctor":
         return _run_doctor_command(
@@ -443,8 +503,15 @@ def main(argv: list[str] | None = None) -> int:
         return _run_fake_runtime(args.file, app_config)
 
     if args.command == "chat":
+        if getattr(args, "new_graph", False):
+            file_arg = None
+        elif args.file is None:
+            parser.error("chat requires a .grc file or --new.")
+            return 2
+        else:
+            file_arg = args.file
         return _run_llama_runtime(
-            args.file,
+            file_arg,
             args.message,
             app_config,
             app_config.llama.server_url
@@ -452,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
             else args.llama_server_url,
             app_config.llama.model if args.model is None else args.model,
             args.api_key,
+            verbose=args.verbose,
         )
 
     if args.command == "tool":

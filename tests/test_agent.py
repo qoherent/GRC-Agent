@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from grc_agent.agent import GrcAgent, PUBLIC_TOOL_NAMES
+from grc_agent.agent import GrcAgent
+from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_fake_runtime
 from grc_agent.flowgraph_session import FlowgraphSession
 
@@ -73,11 +74,51 @@ class GrcAgentTests(unittest.TestCase):
             "The active session context tells you which `.grc` file is loaded",
             prompt,
         )
+        self.assertIn(
+            "If a tool result includes `suggested_next_tools` plus a hint that an explicit user-requested step is still pending",
+            prompt,
+        )
+        self.assertIn(
+            "Active-session previews, variable previews, block previews, and prior tool outputs are routing hints only",
+            prompt,
+        )
+        self.assertIn(
+            "`save_graph` only writes the current `.grc` file. Requests like `export as a standalone Python script`",
+            prompt,
+        )
         self.assertIn("After `search_grc`, block results include `block_id`", prompt)
+        self.assertIn(
+            "If a later follow-up asks what that found block looks like",
+            prompt,
+        )
         self.assertIn("ONLY use `propose_edit` when the user explicitly says", prompt)
         self.assertIn("are real edit requests, not preview requests", prompt)
         self.assertIn(
             "Only call `save_graph` after successful validation",
+            prompt,
+        )
+        self.assertIn(
+            "You may emit multiple tool calls in one assistant message",
+            prompt,
+        )
+        self.assertIn(
+            "An explicit save request still requires `save_graph` even if the graph is already clean or unchanged.",
+            prompt,
+        )
+        self.assertIn(
+            "If the same user turn asks for an edit plus validation, summary, or save",
+            prompt,
+        )
+        self.assertIn(
+            "After other successful flows, return one short factual sentence.",
+            prompt,
+        )
+        self.assertIn(
+            "you MUST still call `summarize_graph` for a state question like `Is the graph dirty?`",
+            prompt,
+        )
+        self.assertIn(
+            "`Describe the variable block type.` => `describe_block(block_id=\"variable\")`",
             prompt,
         )
         self.assertIn("Parameter values may stay as GNU/Python expressions", prompt)
@@ -111,24 +152,6 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(tool_message["name"], "summarize_graph")
         self.assertEqual(tool_message["content"], summary_result["summary"])
 
-    def test_apply_edit_remove_samp_rate_failure_includes_exact_repair_hint(self) -> None:
-        agent, _session = self._load_agent()
-
-        result = agent.execute_tool(
-            "apply_edit",
-            {
-                "transaction": {
-                    "op_type": "remove_block",
-                    "instance_name": "samp_rate",
-                }
-            },
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertIn("blocks_throttle2_0", result["hint"])
-        self.assertIn("qtgui_time_sink_x_0", result["hint"])
-        self.assertIn('"remove_block", "instance_name": "samp_rate"', result["hint"])
-
     def test_apply_edit_infers_update_params_op_type_when_omitted(self) -> None:
         agent, _session = self._load_agent()
 
@@ -150,6 +173,84 @@ class GrcAgentTests(unittest.TestCase):
                     "op_type": "update_params",
                     "instance_name": "samp_rate",
                     "params": {"value": "44100"},
+                }
+            ],
+        )
+
+    def test_propose_edit_repairs_list_encoded_remove_connection_operation(self) -> None:
+        agent, _session = self._load_agent()
+
+        result = agent.execute_tool(
+            "propose_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": [
+                            "remove_connection",
+                            "src_block",
+                            "analog_random_source_x_0",
+                            "src_port",
+                            0,
+                            "dst_block",
+                            "blocks_throttle2_0",
+                            "dst_port",
+                            0,
+                        ]
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "remove_connection",
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
+                }
+            ],
+        )
+
+    def test_propose_edit_ignores_unhashable_list_encoded_keys(self) -> None:
+        agent, _session = self._load_agent()
+
+        result = agent.execute_tool(
+            "propose_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": [
+                            "remove_connection",
+                            {"bad": "key"},
+                            "ignored",
+                            "src_block",
+                            "analog_random_source_x_0",
+                            "src_port",
+                            0,
+                            "dst_block",
+                            "blocks_throttle2_0",
+                            "dst_port",
+                            0,
+                        ]
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "remove_connection",
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
                 }
             ],
         )
@@ -194,6 +295,26 @@ class GrcAgentTests(unittest.TestCase):
         self.assertIn("variables=[samp_rate=32000]", session_messages[0])
         self.assertIn("path=" + str(alt_path), session_messages[1])
         self.assertIn("variables=[fresh_clock_value=32000]", session_messages[1])
+
+    def test_turn_refresh_session_message_omits_previews(self) -> None:
+        agent, _session = self._load_agent()
+
+        rendered = agent._session_history_content_as_text(
+            {
+                "path": "/tmp/example.grc",
+                "graph_id": "grc:test",
+                "state_revision": 2,
+                "dirty": True,
+                "validation": {"status": "valid", "returncode": 0},
+                "variable_preview": ["samp_rate=48000"],
+                "block_preview": ["blocks_throttle2_0 (blocks_throttle2; throttle)"],
+            },
+            reason="turn_refresh",
+        )
+
+        self.assertIn("dirty=True", rendered)
+        self.assertNotIn("variables=[", rendered)
+        self.assertNotIn("blocks=[", rendered)
 
     def test_execute_tool_unknown_name_returns_structured_error(self) -> None:
         agent, _session = self._load_agent()
@@ -244,7 +365,21 @@ class GrcAgentTests(unittest.TestCase):
 
         with mock.patch(
             "grc_agent.agent._search_grc_with_context",
-            return_value={"ok": True, "scope": "session", "query": "samp_rate", "results": []},
+            side_effect=[
+                {"ok": True, "scope": "session", "query": "samp_rate", "results": []},
+                {
+                    "ok": True,
+                    "scope": "catalog",
+                    "query": "samp_rate",
+                    "results": [
+                        {
+                            "block_id": "blocks_throttle2",
+                            "label": "Throttle",
+                            "summary": "Throttle block.",
+                        }
+                    ],
+                },
+            ],
         ) as search_mock:
             result = agent.execute_tool(
                 "search_grc",
@@ -252,13 +387,130 @@ class GrcAgentTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        search_mock.assert_called_once_with(
-            "samp_rate",
-            scope="session",
-            k=3,
-            session=session,
-            catalog_root=None,
+        self.assertEqual(search_mock.call_count, 2)
+        self.assertEqual(
+            search_mock.call_args_list[0],
+            mock.call(
+                "samp_rate",
+                scope="session",
+                k=3,
+                session=session,
+                catalog_root=None,
+            ),
         )
+        self.assertEqual(
+            search_mock.call_args_list[1],
+            mock.call(
+                "samp_rate",
+                scope="catalog",
+                k=3,
+                session=session,
+                catalog_root=None,
+            ),
+        )
+        self.assertEqual(
+            result["catalog_fallback_preview"][0]["block_id"],
+            "blocks_throttle2",
+        )
+
+    def test_search_grc_session_miss_hint_points_to_catalog_fallback_result(self) -> None:
+        agent, _session = self._load_agent()
+
+        with mock.patch(
+            "grc_agent.agent._search_grc_with_context",
+            side_effect=[
+                {
+                    "ok": True,
+                    "scope": "session",
+                    "query": "carrier recovery",
+                    "results": [],
+                },
+                {
+                    "ok": True,
+                    "scope": "catalog",
+                    "query": "carrier recovery",
+                    "results": [
+                        {
+                            "block_id": "digital_costas_loop_cc",
+                            "label": "Costas Loop",
+                            "summary": "Carrier recovery loop.",
+                        }
+                    ],
+                },
+            ],
+        ):
+            result = agent.execute_tool(
+                "search_grc",
+                {"query": "carrier recovery", "scope": "session", "k": 3},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["results"])
+        self.assertEqual(
+            result["catalog_fallback_preview"][0]["block_id"],
+            "digital_costas_loop_cc",
+        )
+        self.assertIn("describe_block", result["hint"])
+        self.assertIn("digital_costas_loop_cc", result["hint"])
+
+    def test_apply_edit_repairs_wrapped_add_block_list_payload(self) -> None:
+        agent, _session = self._load_agent()
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": {
+                            "add_block": [
+                                {
+                                    "instance_name": "cutoff",
+                                    "block_type": "variable",
+                                    "parameters": {"value": 1000},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "add_block",
+                    "block_type": "variable",
+                    "instance_name": "cutoff",
+                    "parameters": {"value": 1000},
+                }
+            ],
+        )
+
+    def test_search_tool_history_marks_preview_as_routing_only(self) -> None:
+        agent, _session = self._load_agent()
+        rendered = agent._tool_history_content_as_text(
+            {
+                "ok": True,
+                "query": "scrambler",
+                "scope": "catalog",
+                "results": [
+                    {
+                        "block_id": "digital_additive_scrambler_bb",
+                        "label": "Additive Scrambler",
+                        "summary": "A detailed summary that should not be preserved in tool history.",
+                    }
+                ],
+            },
+            tool_name="search_grc",
+        )
+
+        self.assertIn(
+            "next_step_note: search previews are routing only; for later follow-ups like `what does that block look like?`, call describe_block with the stored block_id, not get_grc_context.",
+            rendered,
+        )
+        self.assertNotIn("A detailed summary", rendered)
 
     def test_execute_tool_rejects_schema_mismatches_before_execution(self) -> None:
         agent, _session = self._load_agent()
@@ -410,6 +662,118 @@ class GrcAgentTests(unittest.TestCase):
         self.assertFalse(result["commit_eligible"])
         self.assertEqual(
             result["normalized_operations"][0]["instance_name"], "samp_rate"
+        )
+
+    def test_propose_edit_remove_connection_by_connection_id_does_not_mutate(self) -> None:
+        agent, session = self._load_agent()
+
+        add_trace = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "update_params",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "params": {"nconnections": "2"},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "blocks_char_to_float_0",
+                        "src_port": 0,
+                        "dst_block": "qtgui_time_sink_x_0",
+                        "dst_port": 1,
+                    },
+                ]
+            },
+        )
+        self.assertTrue(add_trace["ok"])
+        self.assertEqual(len(session.flowgraph.connections), 4)
+
+        result = agent.execute_tool(
+            "propose_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "update_params",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "params": {"nconnections": "1"},
+                    },
+                    {
+                        "op_type": "remove_connection",
+                        "connection_id": "blocks_char_to_float_0:0->qtgui_time_sink_x_0:1",
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(session.flowgraph.connections), 4)
+        sink_raw = next(
+            entry
+            for entry in session.flowgraph.raw_data["blocks"]
+            if entry["name"] == "qtgui_time_sink_x_0"
+        )
+        self.assertEqual(sink_raw["parameters"]["nconnections"], "2")
+
+    def test_apply_edit_remove_connection_by_connection_id_succeeds(self) -> None:
+        agent, session = self._load_agent()
+
+        add_trace = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "update_params",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "params": {"nconnections": "2"},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "blocks_char_to_float_0",
+                        "src_port": 0,
+                        "dst_block": "qtgui_time_sink_x_0",
+                        "dst_port": 1,
+                    },
+                ]
+            },
+        )
+        self.assertTrue(add_trace["ok"])
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "update_params",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "params": {"nconnections": "1"},
+                    },
+                    {
+                        "op_type": "remove_connection",
+                        "connection_id": "blocks_char_to_float_0:0->qtgui_time_sink_x_0:1",
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(session.flowgraph.connections), 3)
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "update_params",
+                    "instance_name": "qtgui_time_sink_x_0",
+                    "params": {"nconnections": "1"},
+                },
+                {
+                    "op_type": "remove_connection",
+                    "src_block": "blocks_char_to_float_0",
+                    "src_port": 0,
+                    "dst_block": "qtgui_time_sink_x_0",
+                    "dst_port": 1,
+                },
+            ],
         )
 
     def test_apply_edit_validates_and_allows_save_without_revalidation(self) -> None:
@@ -610,6 +974,55 @@ class GrcAgentTests(unittest.TestCase):
         self.assertNotIn("results", compacted)
         self.assertNotIn("extra", compacted)
 
+    def test_compact_history_preserves_search_previews(self) -> None:
+        agent, _session = self._load_agent()
+        agent.history = [
+            {"role": "user", "content": "first question"},
+            {
+                "role": "tool",
+                "tool_call_id": "t1",
+                "name": "search_grc",
+                "content": {
+                    "ok": True,
+                    "tool": "search_grc",
+                    "query": "carrier recovery",
+                    "scope": "session",
+                    "results": [
+                        {
+                            "block_id": "digital_costas_loop_cc",
+                            "label": "Costas Loop",
+                            "summary": "Carrier recovery loop.",
+                        }
+                    ],
+                    "catalog_fallback_preview": [
+                        {
+                            "block_id": "digital_fll_band_edge_cc",
+                            "label": "FLL Band-Edge",
+                            "summary": "Frequency recovery.",
+                        }
+                    ],
+                },
+            },
+            {"role": "user", "content": "second question"},
+            {"role": "user", "content": "third question"},
+        ]
+
+        agent.compact_history()
+
+        tool_entries = [t for t in agent.history if t.get("role") == "tool"]
+        self.assertEqual(len(tool_entries), 1)
+        compacted = tool_entries[0]["content"]
+        self.assertEqual(compacted["query"], "carrier recovery")
+        self.assertEqual(compacted["scope"], "session")
+        self.assertEqual(
+            compacted["results_preview"][0]["block_id"],
+            "digital_costas_loop_cc",
+        )
+        self.assertEqual(
+            compacted["catalog_fallback_preview"][0]["block_id"],
+            "digital_fll_band_edge_cc",
+        )
+
     def test_compact_history_preserves_current_turn_tool_results(self) -> None:
         agent, _session = self._load_agent()
         current_content = {"ok": True, "tool": "validate_graph", "valid": True, "full_data": "x" * 200}
@@ -637,3 +1050,115 @@ class GrcAgentTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_type"], "internal_error")
         self.assertIn("disk full", result["message"])
+
+    def test_new_grc_creates_empty_session(self) -> None:
+        agent = GrcAgent()
+        result = agent.execute_tool("new_grc", {})
+        self.assertTrue(result["ok"])
+        self.assertIn("provenance", result)
+        self.assertIsNotNone(agent.session.flowgraph)
+
+    def test_new_grc_with_custom_graph_id(self) -> None:
+        agent = GrcAgent()
+        result = agent.execute_tool("new_grc", {"graph_id": "my_test_graph"})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["provenance"]["graph_id"].startswith("grc:"))
+
+    def test_new_grc_rejects_unsupported_profile(self) -> None:
+        agent = GrcAgent()
+        result = agent.execute_tool("new_grc", {"profile": "audio"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "invalid_request")
+        self.assertIn("audio", result["message"])
+
+    def test_apply_edit_add_block_variable(self) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "add_block",
+                    "block_type": "variable",
+                    "instance_name": "debug_gain",
+                    "parameters": {"value": "0"},
+                }
+            },
+        )
+        self.assertTrue(result["ok"])
+
+    def test_apply_edit_add_block_rejects_missing_block_type(self) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "add_block",
+                    "instance_name": "debug_gain",
+                    "parameters": {"value": "0"},
+                }
+            },
+        )
+        self.assertFalse(result["ok"])
+
+    def test_apply_edit_add_block_rejects_invalid_block_id(self) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "add_block",
+                    "block_type": "nonexistent_block_xyz",
+                    "instance_name": "bad_block",
+                    "parameters": {"value": "0"},
+                }
+            },
+        )
+        self.assertFalse(result["ok"])
+
+    def test_apply_edit_add_block_rejects_duplicate_instance_name(self) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "add_block",
+                    "block_type": "variable",
+                    "instance_name": "samp_rate",
+                    "parameters": {"value": "0"},
+                }
+            },
+        )
+        self.assertFalse(result["ok"])
+
+    def test_state_driven_suggested_next_tools_after_apply_edit(self) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "48000"},
+                }
+            },
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn("suggested_next_tools", result)
+        self.assertIn("validate_graph", result["suggested_next_tools"])
+
+    def test_state_driven_suggested_next_tools_after_validate(self) -> None:
+        agent, _session = self._load_agent()
+        agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "48000"},
+                }
+            },
+        )
+        result = agent.execute_tool("validate_graph", {})
+        self.assertTrue(result["ok"])
+        self.assertIn("suggested_next_tools", result)
+        self.assertIn("save_graph", result["suggested_next_tools"])

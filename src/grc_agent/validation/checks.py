@@ -12,6 +12,7 @@ from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.models import Block, Connection
 from grc_agent.session_ops import (
     block_name_is_referenced_elsewhere,
+    connection_id,
     connection_entry_to_tuple,
     default_block_states,
     parse_blocks,
@@ -117,6 +118,13 @@ def validate_and_apply_operation(
         )
     if operation.op_type == "add_block":
         return _apply_add_block(
+            snapshot,
+            operation,
+            op_index=op_index,
+            catalog_root=catalog_root,
+        )
+    if operation.op_type == "insert_block_on_connection":
+        return _apply_insert_block_on_connection(
             snapshot,
             operation,
             op_index=op_index,
@@ -232,6 +240,25 @@ def _apply_update_states(
     return [], []
 
 
+def _fill_parameter_defaults(
+    caller_params: dict[str, Any],
+    *,
+    parameter_rules: dict[str, Any],
+) -> dict[str, Any]:
+    merged = copy.deepcopy(caller_params)
+    for param_id, rule in parameter_rules.items():
+        if param_id in merged:
+            continue
+        default = rule.default if hasattr(rule, "default") else rule.get("default")
+        if default is None:
+            continue
+        options = rule.options if hasattr(rule, "options") else rule.get("options")
+        if options and str(default) not in [str(o) for o in options]:
+            continue
+        merged[param_id] = str(default)
+    return merged
+
+
 def _apply_add_block(
     snapshot: SessionSnapshot,
     operation: ValidationOperation,
@@ -257,18 +284,6 @@ def _apply_add_block(
         return [lookup_issue], []
     assert lookup is not None
 
-    if block_type != "variable":
-        return [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="block_type",
-                code="unsupported_block_type",
-                message=f"Unsupported block type for add_block: {block_type}",
-                hint="Phase 4 only supports detached variable blocks.",
-            )
-        ], []
-
     raw_blocks = snapshot.raw_blocks()
     name_issues = _assert_new_block_name_available(
         snapshot,
@@ -280,31 +295,48 @@ def _apply_add_block(
     if name_issues:
         return name_issues, []
 
-    parameter_issues = _validate_parameter_updates(
-        block_type=block_type,
-        params=parameters,
-        parameter_rules=lookup.parameters,
-        allowed_parameter_ids={"comment"} if block_type == "variable" else set(),
-        op_index=op_index,
-        op_type=op_type,
-        field_prefix="parameters",
-    )
-    if parameter_issues:
-        return parameter_issues, []
+    if block_type == "variable":
+        parameter_issues = _validate_parameter_updates(
+            block_type=block_type,
+            params=parameters,
+            parameter_rules=lookup.parameters,
+            allowed_parameter_ids={"comment"},
+            op_index=op_index,
+            op_type=op_type,
+            field_prefix="parameters",
+        )
+        if parameter_issues:
+            return parameter_issues, []
+        if "value" not in parameters:
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="parameters.value",
+                    code="missing_required_param",
+                    message="Detached variable blocks require parameters.value.",
+                )
+            ], []
+        raw_parameters = copy.deepcopy(parameters)
+        raw_parameters.setdefault("comment", "")
+    else:
+        raw_parameters = _fill_parameter_defaults(
+            parameters,
+            parameter_rules=lookup.parameters,
+        )
+        parameter_issues = _validate_parameter_updates(
+            block_type=block_type,
+            params=raw_parameters,
+            parameter_rules=lookup.parameters,
+            allowed_parameter_ids=set(),
+            op_index=op_index,
+            op_type=op_type,
+            field_prefix="parameters",
+        )
+        if parameter_issues:
+            return parameter_issues, []
+        operation.payload["parameters"] = copy.deepcopy(raw_parameters)
 
-    if "value" not in parameters:
-        return [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="parameters.value",
-                code="missing_required_param",
-                message="Detached variable blocks require parameters.value.",
-            )
-        ], []
-
-    raw_parameters = copy.deepcopy(parameters)
-    raw_parameters.setdefault("comment", "")
     raw_states = (
         copy.deepcopy(states)
         if states is not None
@@ -320,6 +352,237 @@ def _apply_add_block(
     )
     snapshot.refresh()
     return [], []
+
+
+def _apply_insert_block_on_connection(
+    snapshot: SessionSnapshot,
+    operation: ValidationOperation,
+    *,
+    op_index: int,
+    catalog_root: str | Path | None,
+) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
+    op_type = operation.op_type
+    payload = operation.payload
+    connection_id_str = payload["connection_id"]
+    block_type = payload["block_type"]
+    instance_name = payload["instance_name"]
+    params = payload.get("params", {})
+    states = payload.get("states")
+
+    # 1. Resolve connection_id
+    target_conn: Connection | None = None
+    for conn in snapshot.connections:
+        if (
+            connection_id(conn.src_block, conn.src_port, conn.dst_block, conn.dst_port)
+            == connection_id_str
+        ):
+            target_conn = conn
+            break
+
+    if target_conn is None:
+        return [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="connection_id",
+                code="connection_not_found",
+                message=f"Connection not found: {connection_id_str}",
+            )
+        ], []
+
+    # 2. Reject if the connection uses string ports (message-domain)
+    if isinstance(target_conn.src_port, str) or isinstance(target_conn.dst_port, str):
+        return [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="connection_id",
+                code="message_connection_not_supported",
+                message=f"Message connections are not supported for insert_block_on_connection: {connection_id_str}",
+            )
+        ], []
+
+    # 3. Reject if either endpoint block is disabled/stated off
+    def _block_state(name: str) -> str:
+        for entry in snapshot.raw_blocks():
+            if isinstance(entry, dict) and entry.get("name") == name:
+                raw_states = entry.get("states")
+                if isinstance(raw_states, dict):
+                    return raw_states.get("state", "enabled")
+                return "enabled"
+        return "enabled"
+
+    if _block_state(target_conn.src_block) != "enabled" or _block_state(target_conn.dst_block) != "enabled":
+        return [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="connection_id",
+                code="disabled_connection_not_supported",
+                message=f"Cannot insert on a connection with disabled blocks: {connection_id_str}",
+            )
+        ], []
+
+    # 4. Reject if instance_name already exists
+    name_issues = _assert_new_block_name_available(
+        snapshot,
+        instance_name,
+        snapshot.raw_blocks(),
+        op_index=op_index,
+        op_type=op_type,
+    )
+    if name_issues:
+        return name_issues, []
+
+    # 5-9. Reuse add_block validation and simulate adding the block
+    add_block_payload: dict[str, Any] = {
+        "instance_name": instance_name,
+        "block_type": block_type,
+        "parameters": copy.deepcopy(params),
+    }
+    if states is not None:
+        add_block_payload["states"] = copy.deepcopy(states)
+
+    add_block_op = ValidationOperation(op_type="add_block", payload=add_block_payload)
+    add_errors, add_warnings = _apply_add_block(
+        snapshot,
+        add_block_op,
+        op_index=op_index,
+        catalog_root=catalog_root,
+    )
+    if add_errors:
+        return add_errors, add_warnings
+    warnings = list(add_warnings)
+
+    # 10. Resolve inserted-block ports deterministically
+    resolved_input_port, resolved_output_port, port_issues = _resolve_single_stream_ports(
+        block_type=block_type,
+        parameters=params,
+        catalog_root=catalog_root,
+        op_index=op_index,
+        op_type=op_type,
+    )
+    if port_issues:
+        return port_issues, []
+
+    # 11. Remove the original connection
+    remove_conn_payload: dict[str, Any] = {
+        "src_block": target_conn.src_block,
+        "src_port": target_conn.src_port,
+        "dst_block": target_conn.dst_block,
+        "dst_port": target_conn.dst_port,
+    }
+    remove_conn_op = ValidationOperation(op_type="remove_connection", payload=remove_conn_payload)
+    rem_errors, rem_warnings = _apply_remove_connection(
+        snapshot,
+        remove_conn_op,
+        op_index=op_index,
+    )
+    if rem_errors:
+        return rem_errors, rem_warnings
+    warnings.extend(rem_warnings)
+
+    # 12. Add src->new connection
+    conn1_payload: dict[str, Any] = {
+        "src_block": target_conn.src_block,
+        "src_port": target_conn.src_port,
+        "dst_block": instance_name,
+        "dst_port": resolved_input_port,
+    }
+    conn1_op = ValidationOperation(op_type="add_connection", payload=conn1_payload)
+    c1_errors, c1_warnings = _apply_add_connection(
+        snapshot,
+        conn1_op,
+        op_index=op_index,
+        catalog_root=catalog_root,
+    )
+    if c1_errors:
+        return c1_errors, c1_warnings
+    warnings.extend(c1_warnings)
+
+    # 13. Add new->dst connection
+    conn2_payload: dict[str, Any] = {
+        "src_block": instance_name,
+        "src_port": resolved_output_port,
+        "dst_block": target_conn.dst_block,
+        "dst_port": target_conn.dst_port,
+    }
+    conn2_op = ValidationOperation(op_type="add_connection", payload=conn2_payload)
+    c2_errors, c2_warnings = _apply_add_connection(
+        snapshot,
+        conn2_op,
+        op_index=op_index,
+        catalog_root=catalog_root,
+    )
+    if c2_errors:
+        return c2_errors, c2_warnings
+    warnings.extend(c2_warnings)
+
+    return [], warnings
+
+
+def _resolve_single_stream_ports(
+    *,
+    block_type: str,
+    parameters: dict[str, Any],
+    catalog_root: str | Path | None,
+    op_index: int,
+    op_type: str,
+) -> tuple[int, int, list[ValidationIssue]]:
+    """Resolve exactly one stream input and one stream output port for an inserted block.
+
+    Returns (input_port_index, output_port_index, issues).
+    If resolution fails, returns (0, 0, [issue, ...]).
+    """
+    lookup = get_block_rules(block_type, catalog_root=catalog_root)
+    if not lookup.ok:
+        return 0, 0, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="block_type",
+                code="catalog_block_unavailable",
+                message=f"Cannot insert unknown block type: {block_type}",
+            )
+        ]
+
+    ins, _warn1 = resolve_port_slots(
+        block_rules=lookup.rules,
+        parameters=parameters,
+        direction="inputs",
+    )
+    outs, _warn2 = resolve_port_slots(
+        block_rules=lookup.rules,
+        parameters=parameters,
+        direction="outputs",
+    )
+
+    stream_inputs = [p for p in ins if p.domain == "stream"]
+    stream_outputs = [p for p in outs if p.domain == "stream"]
+
+    if not stream_inputs or not stream_outputs:
+        return 0, 0, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="block_type",
+                code="insert_incompatible_ports",
+                message=f"Block {block_type} has no compatible stream input/output ports.",
+            )
+        ]
+
+    if len(stream_inputs) != 1 or len(stream_outputs) != 1:
+        return 0, 0, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="block_type",
+                code="insert_port_resolution_failed",
+                message=f"Block {block_type} has ambiguous stream ports (in={len(stream_inputs)}, out={len(stream_outputs)}).",
+            )
+        ]
+
+    return 0, 0, []
 
 
 def _apply_remove_block(
@@ -385,12 +648,81 @@ def _apply_remove_connection(
     op_index: int,
 ) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
     op_type = operation.op_type
-    target = (
-        operation.payload["src_block"],
-        operation.payload["src_port"],
-        operation.payload["dst_block"],
-        operation.payload["dst_port"],
-    )
+    payload = operation.payload
+    connection_ref = payload.get("connection_id")
+
+    target: tuple | None = None
+    if all(
+        field_name in payload
+        for field_name in ("src_block", "src_port", "dst_block", "dst_port")
+    ):
+        target = (
+            payload["src_block"],
+            payload["src_port"],
+            payload["dst_block"],
+            payload["dst_port"],
+        )
+
+    if isinstance(connection_ref, str):
+        matching_targets = [
+            (
+                connection.src_block,
+                connection.src_port,
+                connection.dst_block,
+                connection.dst_port,
+            )
+            for connection in snapshot.connections
+            if connection_id(
+                connection.src_block,
+                connection.src_port,
+                connection.dst_block,
+                connection.dst_port,
+            )
+            == connection_ref
+        ]
+        if not matching_targets:
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="connection_id",
+                    code="connection_not_found",
+                    message=f"Connection not found: {connection_ref}",
+                )
+            ], []
+        if len(matching_targets) > 1:
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="connection_id",
+                    code="ambiguous_connection",
+                    message=f"Connection id resolves to multiple edges: {connection_ref}",
+                )
+            ], []
+
+        resolved_target = matching_targets[0]
+        if target is not None and target != resolved_target:
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="connection_id",
+                    code="connection_endpoint_mismatch",
+                    message=(
+                        "connection_id does not match the provided endpoints: "
+                        f"{connection_ref}"
+                    ),
+                )
+            ], []
+        target = resolved_target
+        payload["src_block"] = resolved_target[0]
+        payload["src_port"] = resolved_target[1]
+        payload["dst_block"] = resolved_target[2]
+        payload["dst_port"] = resolved_target[3]
+        payload.pop("connection_id", None)
+
+    assert target is not None
 
     raw_connections = snapshot.raw_connections()
     raw_index = next(
@@ -545,6 +877,23 @@ def _apply_add_connection(
     )
     if src_port_issue is not None or dst_port_issue is not None:
         return [issue for issue in (src_port_issue, dst_port_issue) if issue is not None], warnings
+
+    if isinstance(src_port, str) or isinstance(dst_port, str):
+        has_duplicate_dst = any(
+            connection.dst_block == dst_block_name and connection.dst_port == dst_port
+            for connection in snapshot.connections
+        )
+        if has_duplicate_dst:
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="dst_port",
+                    code="occupied_input_port",
+                    message=f"Input port is already connected: {format_endpoint(dst_block_name, dst_port)}",
+                )
+            ], warnings
+        return [], warnings
 
     source_port = src_ports[src_port]
     destination_port = dst_ports[dst_port]
@@ -762,12 +1111,11 @@ def validate_snapshot_integrity(
     if errors:
         return errors, warnings
 
-    input_counts: dict[tuple[str, int], int] = {}
+    input_counts: dict[tuple, int] = {}
     for connection in snapshot.connections:
         if connection.dst_block in resolved_blocks:
-            input_counts[(connection.dst_block, connection.dst_port)] = (
-                input_counts.get((connection.dst_block, connection.dst_port), 0) + 1
-            )
+            key = (connection.dst_block, connection.dst_port)
+            input_counts[key] = input_counts.get(key, 0) + 1
 
     for connection in snapshot.connections:
         if (
@@ -798,6 +1146,9 @@ def validate_snapshot_integrity(
         )
         if src_issue is not None or dst_issue is not None:
             return [issue for issue in (src_issue, dst_issue) if issue is not None], warnings
+
+        if isinstance(connection.src_port, str) or isinstance(connection.dst_port, str):
+            continue
 
         source_port = src_outputs[connection.src_port]
         destination_port = dst_inputs[connection.dst_port]
@@ -1035,13 +1386,15 @@ def _assert_new_block_name_available(
 def _validate_port_index(
     *,
     ports: list[ResolvedPort],
-    port_index: int,
+    port_index: "int | str",
     block_name: str,
     op_index: int,
     op_type: str,
     field: str,
     direction: str,
 ) -> ValidationIssue | None:
+    if isinstance(port_index, str):
+        return None
     if 0 <= port_index < len(ports):
         return None
 

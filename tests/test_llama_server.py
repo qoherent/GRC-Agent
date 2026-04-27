@@ -12,20 +12,15 @@ import unittest
 from unittest import mock
 from urllib import error
 
-from grc_agent.agent import GrcAgent, PUBLIC_TOOL_NAMES
+from grc_agent.agent import GrcAgent
+from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_llama_runtime
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_server import (
     LlamaServerClient,
     LlamaServerError,
-    _build_follow_up_reminder,
-    _canonicalize_tool_call,
     _looks_like_tool_call_text,
-    _resolve_final_assistant_text,
-    _stop_after_failed_tool_call,
-    _validate_tool_order_for_turn,
-    LlamaToolCall,
     run_bounded_llama_turn,
 )
 
@@ -695,174 +690,6 @@ class LlamaServerAdapterTests(unittest.TestCase):
             result["assistant_text"], "The Head block limits how many items pass through."
         )
 
-    def test_bounded_llama_turn_reminds_model_to_validate_after_apply(self) -> None:
-        llama_config = self._llama_config()
-        server = self._start_server(
-            [
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "apply_edit",
-                                        "arguments": json.dumps(
-                                            {
-                                                "transaction": {
-                                                    "op_type": "update_params",
-                                                    "instance_name": "samp_rate",
-                                                    "params": {"value": "48000"},
-                                                }
-                                            }
-                                        ),
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "Done.",
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "validate_graph",
-                                        "arguments": "{}",
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "Validated after the edit.",
-                            }
-                        }
-                    ]
-                },
-            ],
-            model_id=llama_config.model,
-        )
-        agent, _session = self._load_agent()
-        client = self._client(self._server_url(server))
-        client.require_ready()
-
-        result = run_bounded_llama_turn(
-            agent,
-            client,
-            "Change the samp_rate variable to 48000 and validate the graph.",
-            model=llama_config.model,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["tool_rounds_used"], 2)
-        self.assertEqual(result["tool_calls_executed"], 2)
-        self.assertEqual(result["assistant_text"], "Validated after the edit.")
-        reminder_entries = [
-            turn for turn in agent.history if turn.get("role") == "reminder"
-        ]
-        self.assertEqual(len(reminder_entries), 1)
-        self.assertEqual(reminder_entries[0]["code"], "validate_graph_required")
-
-    def test_bounded_llama_turn_reminds_model_to_describe_after_search(self) -> None:
-        llama_config = self._llama_config()
-        server = self._start_server(
-            [
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "search_grc",
-                                        "arguments": json.dumps(
-                                            {"query": "AGC", "scope": "catalog"}
-                                        ),
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "I found some AGC blocks.",
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "describe_block",
-                                        "arguments": json.dumps(
-                                            {"block_id": "analog_agc_xx"}
-                                        ),
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "Described the AGC block.",
-                            }
-                        }
-                    ]
-                },
-            ],
-            model_id=llama_config.model,
-        )
-        agent, _session = self._load_agent()
-        client = self._client(self._server_url(server))
-        client.require_ready()
-
-        result = run_bounded_llama_turn(
-            agent,
-            client,
-            "Find an AGC block and describe its parameters.",
-            model=llama_config.model,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["tool_rounds_used"], 2)
-        self.assertEqual(result["tool_calls_executed"], 2)
-        self.assertEqual(result["assistant_text"], "Described the AGC block.")
-        reminder_entries = [
-            turn for turn in agent.history if turn.get("role") == "reminder"
-        ]
-        self.assertEqual(len(reminder_entries), 1)
-        self.assertEqual(reminder_entries[0]["code"], "describe_block_required")
-
     def test_parse_assistant_message_recovers_plain_text_tool_stub(self) -> None:
         client = self._client("http://127.0.0.1:1")
         content, tool_calls = client.parse_assistant_message(
@@ -901,7 +728,8 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         }
                     }
                 ]
-            }
+            },
+            fallback_transaction_checker=GrcAgent.looks_like_transaction_payload,
         )
 
         self.assertIsNone(content)
@@ -918,914 +746,183 @@ class LlamaServerAdapterTests(unittest.TestCase):
             },
         )
 
-    def test_bounded_llama_turn_rejects_validate_before_required_description(
-        self,
-    ) -> None:
-        llama_config = self._llama_config()
-        server = self._start_server(
-            [
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "search_grc",
-                                        "arguments": json.dumps(
-                                            {"query": "scrambler", "scope": "session"}
-                                        ),
-                                    }
-                                ],
-                            }
+    def test_parse_assistant_message_recovers_transaction_then_save_stub(self) -> None:
+        client = self._client("http://127.0.0.1:1")
+        content, tool_calls = client.parse_assistant_message(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"transaction": {"op_type": "update_params", '
+                                '"instance_name": "samp_rate", "params": {"value": "22050"}}}\n'
+                                "save_graph()"
+                            ),
                         }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "validate_graph",
-                                        "arguments": json.dumps({}),
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "search_grc",
-                                        "arguments": json.dumps(
-                                            {"query": "scrambler", "scope": "catalog"}
-                                        ),
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "describe_block",
-                                        "arguments": json.dumps(
-                                            {"block_id": "digital_scrambler_bb"}
-                                        ),
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "name": "validate_graph",
-                                        "arguments": json.dumps({}),
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": "Described the scrambler block and validated the graph.",
-                            }
-                        }
-                    ]
-                },
-            ],
-            model_id=llama_config.model,
-        )
-        agent, _session = self._load_agent()
-        client = self._client(self._server_url(server))
-        client.require_ready()
-
-        result = run_bounded_llama_turn(
-            agent,
-            client,
-            "Find a scrambler block, describe it, then validate the current graph.",
-            model=llama_config.model,
+                    }
+                ]
+            },
+            fallback_transaction_checker=GrcAgent.looks_like_transaction_payload,
         )
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["tool_calls_executed"], 4)
+        self.assertIsNone(content)
+        self.assertEqual([tool_call.name for tool_call in tool_calls], ["apply_edit", "save_graph"])
         self.assertEqual(
-            result["assistant_text"],
-            "Described the scrambler block and validated the graph.",
-        )
-        rejected_validate = [
-            turn
-            for turn in agent.history
-            if turn.get("role") == "tool"
-            and turn.get("name") == "validate_graph"
-            and isinstance(turn.get("content"), dict)
-            and turn["content"].get("ok") is False
-        ]
-        self.assertEqual(len(rejected_validate), 1)
-        self.assertEqual(
-            rejected_validate[0]["content"]["details"]["code"],
-            "catalog_retry_required",
-        )
-
-    def test_follow_up_reminder_is_turn_local_for_repeated_summary_requests(self) -> None:
-        reminder = _build_follow_up_reminder(
-            "Summarize the graph again.",
-            [
-                {"role": "user", "content": "Summarize the graph."},
-                {
-                    "role": "tool",
-                    "name": "summarize_graph",
-                    "content": {"ok": True, "summary": "Earlier summary."},
-                },
-                {"role": "assistant", "content": "Earlier summary."},
-                {"role": "user", "content": "Summarize the graph again."},
-                {"role": "assistant", "content": "Done."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "summarize_graph_required")
-
-    def test_follow_up_reminder_can_repeat_on_later_turn_after_prior_reminder(self) -> None:
-        reminder = _build_follow_up_reminder(
-            "Validate the graph.",
-            [
-                {"role": "user", "content": "Validate the graph."},
-                {
-                    "role": "reminder",
-                    "code": "validate_graph_required",
-                    "content": "Reminder: call validate_graph before you finish.",
-                },
-                {"role": "assistant", "content": "Done."},
-                {"role": "user", "content": "Validate the graph."},
-                {"role": "assistant", "content": "Done."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "validate_graph_required")
-
-    def test_follow_up_reminder_requests_catalog_retry_after_empty_session_search(self) -> None:
-        reminder = _build_follow_up_reminder(
-            "Find the FIR filter block, describe it, then make sure my current graph still validates.",
-            [
-                {
-                    "role": "user",
-                    "content": "Find the FIR filter block, describe it, then make sure my current graph still validates.",
-                },
-                {
-                    "role": "tool",
-                    "name": "search_grc",
-                    "content": {
-                        "ok": True,
-                        "scope": "session",
-                        "query": "FIR filter",
-                        "results": [],
-                    },
-                },
-                {"role": "assistant", "content": "I could not find it in the current graph."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "catalog_retry_required")
-        self.assertIn('scope="catalog"', reminder["message"])
-
-    def test_follow_up_reminder_uses_top_search_result_for_block_description(self) -> None:
-        reminder = _build_follow_up_reminder(
-            "I need a constellation decoder. Find the right block and tell me what its ports and parameters look like.",
-            [
-                {
-                    "role": "user",
-                    "content": "I need a constellation decoder. Find the right block and tell me what its ports and parameters look like.",
-                },
-                {
-                    "role": "tool",
-                    "name": "search_grc",
-                    "content": {
-                        "ok": True,
-                        "scope": "catalog",
-                        "query": "constellation decoder",
-                        "results": [
-                            {"block_id": "digital_constellation_decoder_cb"},
-                            {"block_id": "digital_constellation_soft_decoder_cf"},
-                        ],
-                    },
-                },
-                {"role": "assistant", "content": "Please pick one."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "describe_block_required")
-        self.assertIn("digital_constellation_decoder_cb", reminder["message"])
-
-    def test_follow_up_reminder_prioritizes_description_before_validation(self) -> None:
-        reminder = _build_follow_up_reminder(
-            "Find a scrambler block, describe it, then validate the current graph.",
-            [
-                {
-                    "role": "user",
-                    "content": "Find a scrambler block, describe it, then validate the current graph.",
-                },
-                {
-                    "role": "tool",
-                    "name": "search_grc",
-                    "content": {
-                        "ok": True,
-                        "scope": "catalog",
-                        "query": "scrambler",
-                        "results": [
-                            {"block_id": "digital_additive_scrambler_bb"},
-                            {"block_id": "digital_additive_scrambler_xx"},
-                        ],
-                    },
-                },
-                {"role": "assistant", "content": "I found some scrambler blocks."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "describe_block_required")
-        self.assertIn("digital_additive_scrambler_bb", reminder["message"])
-
-    def test_follow_up_reminder_reuses_prior_search_for_follow_up_description(self) -> None:
-        reminder = _build_follow_up_reminder(
-            "Describe the block you found.",
-            [
-                {"role": "user", "content": "Find an AGC block."},
-                {
-                    "role": "tool",
-                    "name": "search_grc",
-                    "content": {
-                        "ok": True,
-                        "scope": "catalog",
-                        "query": "AGC",
-                        "results": [
-                            {"block_id": "analog_agc_xx"},
-                            {"block_id": "analog_agc2_xx"},
-                        ],
-                    },
-                },
-                {"role": "assistant", "content": "I found some AGC blocks."},
-                {"role": "user", "content": "Describe the block you found."},
-                {"role": "assistant", "content": "Done."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "describe_block_required")
-        self.assertIn("analog_agc_xx", reminder["message"])
-
-    def test_follow_up_reminder_uses_explicit_block_id_in_user_message(self) -> None:
-        reminder = _build_follow_up_reminder(
-            "What are the parameters on qtgui_time_sink_x?",
-            [
-                {"role": "user", "content": "What are the parameters on qtgui_time_sink_x?"},
-                {"role": "assistant", "content": "It has several parameters."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "describe_block_required")
-        self.assertIn('describe_block(block_id="qtgui_time_sink_x")', reminder["message"])
-
-    def test_follow_up_reminder_fires_for_plain_english_block_describe(self) -> None:
-        # "variable" has no underscore, so explicit_block_id_candidate returns None.
-        # The "block" fallback should still fire.
-        reminder = _build_follow_up_reminder(
-            "Describe the variable block type.",
-            [
-                {"role": "user", "content": "Describe the variable block type."},
-                {"role": "assistant", "content": "The variable block lets you define variables."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "describe_block_required")
-        self.assertIn("describe_block", reminder["message"])
-        self.assertIn("training knowledge", reminder["message"])
-
-    def test_follow_up_reminder_block_fallback_suppressed_when_tool_succeeded(self) -> None:
-        # If any tool already succeeded this turn, the block fallback must not fire.
-        reminder = _build_follow_up_reminder(
-            "Describe the graph blocks.",
-            [
-                {"role": "user", "content": "Describe the graph blocks."},
-                {
-                    "role": "tool",
-                    "name": "summarize_graph",
-                    "tool_call_id": "c1",
-                    "content": {"ok": True, "summary": "Two blocks."},
-                },
-                {"role": "assistant", "content": "The graph has two blocks."},
-            ],
-        )
-        # summarize_graph succeeded → fallback must not override with describe_block reminder
-        self.assertIsNone(reminder)
-
-    def test_follow_up_reminder_requests_repair_after_referenced_remove_failure(
-        self,
-    ) -> None:
-        reminder = _build_follow_up_reminder(
-            "Get rid of samp_rate, keep it working with 32000.",
-            [
-                {
-                    "role": "user",
-                    "content": "Get rid of samp_rate, keep it working with 32000.",
-                },
-                {
-                    "role": "tool",
-                    "name": "apply_edit",
-                    "content": {
-                        "ok": False,
-                        "errors": [{"code": "block_still_referenced"}],
-                    },
-                },
-                {
-                    "role": "assistant",
-                    "content": "Would you like me to perform those steps?",
-                },
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "repair_transaction_required")
-        self.assertIn("32000", reminder["message"])
-        self.assertIn("apply_edit", reminder["message"])
-
-    def test_validate_graph_rejected_until_repair_transaction_runs(self) -> None:
-        result = _validate_tool_order_for_turn(
-            "Get rid of samp_rate, keep it working with 32000.",
-            [
-                {
-                    "role": "user",
-                    "content": "Get rid of samp_rate, keep it working with 32000.",
-                },
-                {
-                    "role": "tool",
-                    "name": "apply_edit",
-                    "content": {
-                        "ok": False,
-                        "errors": [{"code": "block_still_referenced"}],
-                    },
-                },
-            ],
-            "validate_graph",
-            {},
-        )
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertEqual(result["details"]["code"], "repair_transaction_required")
-        self.assertEqual(result["details"]["required_tool"], "apply_edit")
-
-    def test_validate_graph_rejected_for_leave_graph_working_phrase(self) -> None:
-        result = _validate_tool_order_for_turn(
-            "I want the samp_rate variable gone, but leave the graph working.",
-            [
-                {
-                    "role": "user",
-                    "content": "I want the samp_rate variable gone, but leave the graph working.",
-                },
-                {
-                    "role": "tool",
-                    "name": "apply_edit",
-                    "content": {
-                        "ok": False,
-                        "errors": [{"code": "block_still_referenced"}],
-                    },
-                },
-            ],
-            "validate_graph",
-            {},
-        )
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertEqual(result["details"]["code"], "repair_transaction_required")
-        self.assertEqual(result["details"]["required_tool"], "apply_edit")
-
-    def test_propose_edit_rejected_for_actual_change_request(self) -> None:
-        result = _validate_tool_order_for_turn(
-            "Can you bump the sample rate up to 96k?",
-            [],
-            "propose_edit",
+            tool_calls[0].arguments,
             {
                 "transaction": {
-                    "op_type": "update_params",
                     "instance_name": "samp_rate",
-                    "params": {"value": "96000"},
+                    "op_type": "update_params",
+                    "params": {"value": "22050"},
                 }
             },
         )
+        self.assertEqual(tool_calls[1].arguments, {})
 
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertEqual(result["details"]["code"], "apply_edit_required")
-        self.assertEqual(result["details"]["required_tool"], "apply_edit")
-
-    def test_propose_edit_allowed_for_preview_then_apply_request(self) -> None:
-        result = _validate_tool_order_for_turn(
-            "Before you change anything, preview setting samp_rate to 48000. If that looks good, apply it and validate.",
-            [],
-            "propose_edit",
+    def test_parse_assistant_message_repairs_unclosed_transaction_stub(self) -> None:
+        client = self._client("http://127.0.0.1:1")
+        content, tool_calls = client.parse_assistant_message(
             {
-                "transaction": {
-                    "op_type": "update_params",
-                    "instance_name": "samp_rate",
-                    "params": {"value": "48000"},
-                }
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"transaction": [{"op_type": "update_params", '
+                                '"instance_name": "qtgui_time_sink_x_0", '
+                                '"params": {"srate": "samp_rate/2"}]}'
+                            ),
+                        }
+                    }
+                ]
             },
+            fallback_transaction_checker=GrcAgent.looks_like_transaction_payload,
         )
 
-        self.assertIsNone(result)
-
-    def test_failed_apply_edit_stops_the_current_tool_batch(self) -> None:
-        self.assertTrue(
-            _stop_after_failed_tool_call(
-                "apply_edit",
-                {"ok": False, "error_type": "preflight_rejected"},
-            )
-        )
-        self.assertFalse(
-            _stop_after_failed_tool_call(
-                "propose_edit",
-                {"ok": False, "error_type": "tool_call_invalid"},
-            )
-        )
-
-    def test_canonicalize_tool_call_fills_missing_update_params_op_type(self) -> None:
-        agent, _session = self._load_agent()
-        tool_call = LlamaToolCall(
-            id="tool-1",
-            name="apply_edit",
-            arguments={
-                "transaction": {
-                    "instance_name": "samp_rate",
-                    "params": {"value": "44100"},
-                }
-            },
-        )
-
-        normalized = _canonicalize_tool_call(agent, tool_call)
-
+        self.assertIsNone(content)
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0].name, "apply_edit")
         self.assertEqual(
-            normalized.arguments,
+            tool_calls[0].arguments,
             {
-                "transaction": {
-                    "op_type": "update_params",
-                    "instance_name": "samp_rate",
-                    "params": {"value": "44100"},
-                }
-            },
-        )
-
-    def test_canonicalize_tool_call_repairs_quoted_embedded_transaction_operations(
-        self,
-    ) -> None:
-        agent, _session = self._load_agent()
-        tool_call = LlamaToolCall(
-            id="tool-1",
-            name="apply_edit",
-            arguments={
                 "transaction": [
                     {
-                        '"op_type"': {
-                            '"instance_name"': "blocks_throttle2_0",
-                            '"op_type"': "update_params",
-                            '"params"': {'"samples_per_second"': "32000"},
-                        },
-                        '{"op_type"': {
-                            '"instance_name"': "samp_rate",
-                            '"op_type"': "remove_block",
-                        },
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "op_type": "update_params",
+                        "params": {"srate": "samp_rate/2"},
                     }
                 ]
             },
         )
 
-        normalized = _canonicalize_tool_call(agent, tool_call)
-
-        self.assertEqual(
-            normalized.arguments,
-            {
-                "transaction": [
-                    {
-                        "instance_name": "blocks_throttle2_0",
-                        "op_type": "update_params",
-                        "params": {"samples_per_second": "32000"},
-                    },
-                    {
-                        "instance_name": "samp_rate",
-                        "op_type": "remove_block",
-                    },
-                ]
-            },
+    def test_failed_apply_edit_stops_the_current_tool_batch(self) -> None:
+        agent = GrcAgent()
+        self.assertTrue(
+            agent.should_stop_batch_after_result(
+                "apply_edit",
+                {"ok": False, "error_type": "preflight_rejected"},
+            )
+        )
+        self.assertFalse(
+            agent.should_stop_batch_after_result(
+                "propose_edit",
+                {"ok": False, "error_type": "tool_call_invalid"},
+            )
         )
 
-    def test_follow_up_reminder_requires_actual_samp_rate_removal_after_partial_edit(
-        self,
-    ) -> None:
-        reminder = _build_follow_up_reminder(
-            "Get rid of samp_rate, keep it working with 32000.",
-            [
-                {
-                    "role": "user",
-                    "content": "Get rid of samp_rate, keep it working with 32000.",
-                },
-                {
-                    "role": "tool",
-                    "name": "apply_edit",
-                    "content": {
-                        "ok": True,
-                        "normalized_operations": [
-                            {
-                                "op_type": "update_params",
-                                "instance_name": "blocks_throttle2_0",
-                                "params": {"samples_per_second": "32000"},
-                            }
-                        ],
-                    },
-                },
-                {"role": "assistant", "content": "The graph is valid."},
-            ],
-        )
-
-        self.assertIsNotNone(reminder)
-        assert reminder is not None
-        self.assertEqual(reminder["code"], "samp_rate_remove_required")
-        self.assertIn("remove `samp_rate`", reminder["message"])
-
-    def test_validate_graph_rejected_after_partial_edit_when_samp_rate_still_present(
-        self,
-    ) -> None:
-        result = _validate_tool_order_for_turn(
-            "Get rid of samp_rate, keep it working with 32000.",
-            [
-                {
-                    "role": "user",
-                    "content": "Get rid of samp_rate, keep it working with 32000.",
-                },
-                {
-                    "role": "tool",
-                    "name": "apply_edit",
-                    "content": {
-                        "ok": True,
-                        "normalized_operations": [
-                            {
-                                "op_type": "update_params",
-                                "instance_name": "blocks_throttle2_0",
-                                "params": {"samples_per_second": "32000"},
-                            }
-                        ],
-                    },
-                },
-            ],
-            "validate_graph",
-            {},
-        )
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertEqual(result["details"]["code"], "samp_rate_remove_required")
-        self.assertEqual(result["details"]["required_tool"], "apply_edit")
-
-    def test_preview_only_request_rejects_extra_tools_after_propose_edit(self) -> None:
-        result = _validate_tool_order_for_turn(
-            "Preview removing the throttle block. If it won't work, explain why.",
-            [
-                {
-                    "role": "user",
-                    "content": "Preview removing the throttle block. If it won't work, explain why.",
-                },
-                {
-                    "role": "tool",
-                    "name": "propose_edit",
-                    "content": {"ok": False, "error_count": 1},
-                },
-            ],
-            "describe_block",
-            {"block_id": "blocks_throttle2"},
-        )
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertEqual(result["details"]["code"], "preview_result_explanation_required")
-
-    def test_preview_then_apply_follow_up_still_allows_apply_edit(self) -> None:
-        result = _validate_tool_order_for_turn(
-            "Use propose_edit to preview removing samp_rate. If the preview fails because the variable is still referenced, call apply_edit with one repair transaction that patches dependent parameters to 32000 and then removes samp_rate.",
-            [
-                {
-                    "role": "user",
-                    "content": "Use propose_edit to preview removing samp_rate. If the preview fails because the variable is still referenced, call apply_edit with one repair transaction that patches dependent parameters to 32000 and then removes samp_rate.",
-                },
-                {
-                    "role": "tool",
-                    "name": "propose_edit",
-                    "content": {"ok": False, "error_count": 1},
-                },
-            ],
+    def test_execute_tool_normalizes_missing_update_params_op_type(self) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
             "apply_edit",
             {
+                "transaction": {
+                    "instance_name": "samp_rate",
+                    "params": {"value": "44100"},
+                }
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "44100"},
+                }
+            ],
+        )
+
+    def test_execute_tool_normalizes_quoted_embedded_transaction_operations(
+        self,
+    ) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
+            "propose_edit",
+            {
                 "transaction": [
                     {
-                        "op_type": "update_params",
-                        "instance_name": "blocks_throttle2_0",
-                        "params": {"samples_per_second": "32000"},
-                    },
-                    {
-                        "op_type": "update_params",
-                        "instance_name": "qtgui_time_sink_x_0",
-                        "params": {"srate": "32000"},
-                    },
-                    {
-                        "op_type": "remove_block",
-                        "instance_name": "samp_rate",
-                    },
+                        '"op_type"': {
+                            '"instance_name"': "samp_rate",
+                            '"op_type"': "update_params",
+                            '"params"': {'"value"': "32000"},
+                        }
+                    }
                 ]
             },
         )
 
-        self.assertIsNone(result)
-
-    def test_resolve_final_assistant_text_prefers_failed_preview_result_for_preview_only_request(
-        self,
-    ) -> None:
-        text = _resolve_final_assistant_text(
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["normalized_operations"],
             [
                 {
-                    "role": "user",
-                    "content": "Preview removing the throttle block. If it won't work, explain why.",
-                },
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "tool-1",
-                            "type": "function",
-                            "function": {"name": "propose_edit", "arguments": "{}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "name": "propose_edit",
-                    "tool_call_id": "tool-1",
-                    "content": {
-                        "ok": False,
-                        "message": "Transaction failed preflight validation.",
-                        "hint": "Disconnect all attached wires first. Then remove the block.",
-                    },
-                },
-                {
-                    "role": "assistant",
-                    "content": "Describe the block `blocks_throttle2`.",
-                },
+                    "instance_name": "samp_rate",
+                    "op_type": "update_params",
+                    "params": {"value": "32000"},
+                }
             ],
-            "Describe the block `blocks_throttle2`.",
         )
 
+    def test_normalize_tool_call_arguments_recovers_inline_node_id(self) -> None:
+        agent, _session = self._load_agent()
+        normalized = agent.normalize_tool_call_arguments(
+            "get_grc_context",
+            {
+                'node_id="samp_rate"}<tool_call|><eos><|channel>thought\nStep 1': 1.1,
+            },
+        )
+
+        self.assertEqual(normalized, {"node_id": "samp_rate"})
+
+    def test_execute_tool_normalizes_control_token_parameter_keys(self) -> None:
+        agent, _session = self._load_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "add_block",
+                    "block_type": "variable",
+                    "instance_name": "noise_level",
+                    "parameters": {"<|\"|>value<|\"|>": "0.1"},
+                }
+            },
+        )
+
+        self.assertTrue(result["ok"], result.get("message", ""))
         self.assertEqual(
-            text,
-            "Transaction failed preflight validation. Disconnect all attached wires first.",
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "add_block",
+                    "block_type": "variable",
+                    "instance_name": "noise_level",
+                    "parameters": {"value": "0.1"},
+                }
+            ],
         )
-
-
-        llama_config = self._llama_config()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            save_path = str(Path(tmpdir) / "saved_copy.grc")
-            server = self._start_server(
-                [
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "tool_calls": [
-                                        {
-                                            "name": "apply_edit",
-                                            "arguments": json.dumps(
-                                                {
-                                                    "transaction": {
-                                                        "op_type": "update_params",
-                                                        "instance_name": "samp_rate",
-                                                        "params": {"value": "16000"},
-                                                    }
-                                                }
-                                            ),
-                                        }
-                                    ],
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "tool_calls": [
-                                        {
-                                            "name": "save_graph",
-                                            "arguments": json.dumps({"path": save_path}),
-                                        }
-                                    ],
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "tool_calls": [
-                                        {
-                                            "name": "validate_graph",
-                                            "arguments": json.dumps({}),
-                                        }
-                                    ],
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "tool_calls": [
-                                        {
-                                            "name": "save_graph",
-                                            "arguments": json.dumps({"path": save_path}),
-                                        }
-                                    ],
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "content": "Validated the graph and saved it.",
-                                }
-                            }
-                        ]
-                    },
-                ],
-                model_id=llama_config.model,
-            )
-            agent, _session = self._load_agent()
-            client = self._client(self._server_url(server))
-            client.require_ready()
-
-            result = run_bounded_llama_turn(
-                agent,
-                client,
-                "Set samp_rate to 16000, validate the graph, and save it.",
-                model=llama_config.model,
-            )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["tool_calls_executed"], 3)
-        rejected_save = [
-            turn
-            for turn in agent.history
-            if turn.get("role") == "tool"
-            and turn.get("name") == "save_graph"
-            and isinstance(turn.get("content"), dict)
-            and turn["content"].get("ok") is False
-        ]
-        self.assertEqual(len(rejected_save), 1)
-        self.assertEqual(
-            rejected_save[0]["content"]["details"]["code"],
-            "validate_graph_required",
-        )
-
-    def test_bounded_llama_turn_reminds_model_to_save_after_apply_edit(self) -> None:
-        llama_config = self._llama_config()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            save_path = str(Path(tmpdir) / "saved_copy.grc")
-            server = self._start_server(
-                [
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "tool_calls": [
-                                        {
-                                            "name": "apply_edit",
-                                            "arguments": json.dumps(
-                                                {
-                                                    "transaction": {
-                                                        "op_type": "update_params",
-                                                        "instance_name": "samp_rate",
-                                                        "params": {"value": "48000"},
-                                                    }
-                                                }
-                                            ),
-                                        }
-                                    ],
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "content": "Done.",
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "tool_calls": [
-                                        {
-                                            "name": "save_graph",
-                                            "arguments": json.dumps({"path": save_path}),
-                                        }
-                                    ],
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "content": "Saved the graph.",
-                                }
-                            }
-                        ]
-                    },
-                ],
-                model_id=llama_config.model,
-            )
-            agent, _session = self._load_agent()
-            client = self._client(self._server_url(server))
-            client.require_ready()
-
-            result = run_bounded_llama_turn(
-                agent,
-                client,
-                f"Change samp_rate to 48000 and save it to {save_path}.",
-                model=llama_config.model,
-            )
-
-            self.assertTrue(result["ok"])
-            self.assertEqual(result["tool_rounds_used"], 2)
-            self.assertEqual(result["tool_calls_executed"], 2)
-            self.assertEqual(result["assistant_text"], "Saved the graph.")
-            self.assertTrue(Path(save_path).exists())
-            reminder_entries = [
-                turn for turn in agent.history if turn.get("role") == "reminder"
-            ]
-            self.assertEqual(len(reminder_entries), 1)
-            self.assertEqual(reminder_entries[0]["code"], "save_graph_required")
 
     def test_bounded_llama_turn_executes_multiple_tool_rounds(self) -> None:
         llama_config = self._llama_config()
@@ -2058,7 +1155,17 @@ class LlamaServerAdapterTests(unittest.TestCase):
                             }
                         }
                     ]
-                }
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "I could not complete that request with the available tools.",
+                            }
+                        }
+                    ]
+                },
             ],
             model_id=llama_config.model,
         )
@@ -2076,41 +1183,6 @@ class LlamaServerAdapterTests(unittest.TestCase):
         self.assertEqual(
             result["assistant_text"],
             "I could not complete that request with the available tools.",
-        )
-
-    def test_bounded_llama_turn_blocks_function_style_tool_call_text_without_executed_tools(
-        self,
-    ) -> None:
-        llama_config = self._llama_config()
-        server = self._start_server(
-            [
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": 'save_graph(path="random_bit_generator.py")',
-                            }
-                        }
-                    ]
-                }
-            ],
-            model_id=llama_config.model,
-        )
-        agent, _session = self._load_agent()
-        client = self._client(self._server_url(server))
-        client.require_ready()
-
-        result = run_bounded_llama_turn(
-            agent,
-            client,
-            "Export this as a standalone Python script.",
-            model=llama_config.model,
-        )
-
-        self.assertEqual(
-            result["assistant_text"],
-            "Exporting as standalone Python is unsupported.",
         )
 
     def test_cli_llama_runtime_uses_adapter_path(self) -> None:
@@ -2158,8 +1230,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)
         self.assertIn(f"Using model {llama_config.model}", rendered)
-        self.assertIn("random_bit_generator.grc: 5 blocks, 3 connections", rendered)
-        self.assertIn("summarize_graph", rendered)
+        self.assertIn("summarize_graph: ok", rendered)
 
     def test_cli_llama_runtime_strips_leading_control_tokens(self) -> None:
         config = load_app_config()
@@ -2205,7 +1276,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)
-        self.assertIn("random_bit_generator.grc: 5 blocks, 3 connections", rendered)
+        self.assertIn("summarize_graph: ok", rendered)
         self.assertNotIn("<eos>", rendered)
 
         chat_requests = [
@@ -2289,7 +1360,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)
         self.assertIn("Validation error received.", rendered)
-        self.assertIn("unexpected_argument", rendered)
+        self.assertIn("FAILED", rendered)
         self.assertNotIn("Traceback", rendered)
 
     def test_bounded_llama_turn_hits_safety_ceiling_before_append(self) -> None:

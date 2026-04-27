@@ -102,6 +102,89 @@ class PreflightValidationRuleTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["errors"][0]["code"], "connection_not_found")
 
+    def test_remove_connection_by_connection_id_passes_preflight(self) -> None:
+        session = self._load_session()
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "remove_connection",
+                "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+            },
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["normalized_operations"],
+            [
+                {
+                    "op_type": "remove_connection",
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
+                }
+            ],
+        )
+
+    def test_invalid_connection_id_is_rejected(self) -> None:
+        session = self._load_session()
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "remove_connection",
+                "connection_id": "does_not_exist:0->nowhere:0",
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["errors"][0]["code"], "connection_not_found")
+
+    def test_connection_id_endpoint_mismatch_is_rejected(self) -> None:
+        session = self._load_session()
+
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "remove_connection",
+                "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                "src_block": "blocks_throttle2_0",
+                "src_port": 0,
+                "dst_block": "blocks_char_to_float_0",
+                "dst_port": 0,
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["errors"][0]["code"],
+            "connection_endpoint_mismatch",
+        )
+
+    def test_remove_by_connection_id_then_reconnect_passes(self) -> None:
+        session = self._load_session()
+
+        payload = preflight_transaction(
+            session,
+            [
+                {
+                    "op_type": "remove_connection",
+                    "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                },
+                {
+                    "op_type": "add_connection",
+                    "src_block": "blocks_throttle2_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_char_to_float_0",
+                    "dst_port": 0,
+                },
+            ],
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["error_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

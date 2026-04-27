@@ -10,7 +10,7 @@ def format_allowed_values(options: Iterable[object]) -> str:
     return f"Valid values: {rendered}." if rendered else ""
 
 
-def format_endpoint(block_name: str, port: int) -> str:
+def format_endpoint(block_name: str, port: "int | str") -> str:
     return f"{block_name}({port})"
 
 

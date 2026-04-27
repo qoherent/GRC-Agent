@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from tests.llama_eval.harness import (
+    RUN_STATUS_INFRA_FAIL,
+    default_phase_summary,
     executed_tool_calls_since,
     extract_executed_tool_calls,
     extract_requested_tool_calls,
+    is_infra_error_message,
     normalize_transaction_operations,
     render_prompt,
     render_value_templates,
     requested_tool_calls_since,
+    run_phase_eval,
+    run_result_is_infra_failure,
     text_contains_any,
     tool_call_matches_argument_checks,
     tool_call_matches_transaction_checks,
@@ -148,6 +157,28 @@ class TransactionMatchingTests(unittest.TestCase):
                 }
             ),
             [{"op_type": "update_params"}, {"op_type": "add_connection"}],
+        )
+
+    def test_normalize_transaction_operations_expands_remove_connection_id(self) -> None:
+        self.assertEqual(
+            normalize_transaction_operations(
+                {
+                    "transaction": {
+                        "op_type": "remove_connection",
+                        "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                    }
+                }
+            ),
+            [
+                {
+                    "op_type": "remove_connection",
+                    "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
+                }
+            ],
         )
 
     def test_transaction_checks_match_ordered_partial_operations(self) -> None:
@@ -316,6 +347,199 @@ class SliceHelpersTests(unittest.TestCase):
         history = self._make_history()
         result = requested_tool_calls_since(history, 0)
         self.assertEqual(len(result), 2)
+
+
+class InfraFailureTests(unittest.TestCase):
+    def test_is_infra_error_message_detects_backend_connect_timeout(self) -> None:
+        self.assertTrue(
+            is_infra_error_message(
+                "Timed out connecting to llama.cpp server at http://127.0.0.1:8080/v1/chat/completions."
+            )
+        )
+
+    def test_run_result_is_infra_failure_requires_no_tool_activity(self) -> None:
+        self.assertTrue(
+            run_result_is_infra_failure(
+                {
+                    "tools_called": [],
+                    "requested_tool_calls": [],
+                    "executed_tool_calls": [],
+                    "error": "Timed out connecting to llama.cpp server at http://127.0.0.1:8080/v1/chat/completions.",
+                }
+            )
+        )
+        self.assertFalse(
+            run_result_is_infra_failure(
+                {
+                    "tools_called": ["save_graph"],
+                    "requested_tool_calls": [{"name": "save_graph", "arguments": {}}],
+                    "executed_tool_calls": [],
+                }
+            )
+        )
+        self.assertTrue(
+            run_result_is_infra_failure(
+                {
+                    "tools_called": ["describe_block"],
+                    "requested_tool_calls": [{"name": "describe_block", "arguments": {}}],
+                    "executed_tool_calls": [],
+                    "error": "Timed out connecting to llama.cpp server at http://127.0.0.1:8080/v1/chat/completions.",
+                }
+            )
+        )
+        self.assertTrue(
+            run_result_is_infra_failure(
+                {
+                    "tools_called": ["describe_block"],
+                    "error_type": "connect_timeout",
+                }
+            )
+        )
+
+
+class RunPhaseEvalTests(unittest.TestCase):
+    def _build_case_report(
+        self,
+        case: SimpleNamespace,
+        runs: list[dict[str, object]],
+        _n_runs: int,
+        _majority_threshold: float,
+    ) -> dict[str, object]:
+        return {
+            "category": case.category,
+            "name": case.name,
+            "runs": runs,
+            "passed": False,
+        }
+
+    def test_run_phase_eval_retries_infra_failure_once(self) -> None:
+        case = SimpleNamespace(category="cat", name="case1", prompt="hello")
+        client = SimpleNamespace(temperature=0.7)
+        run_case = mock.Mock(
+            side_effect=[
+                {
+                    "tools_called": [],
+                    "requested_tool_calls": [],
+                    "executed_tool_calls": [],
+                    "error": "Timed out connecting to llama.cpp server at http://127.0.0.1:8080/v1/chat/completions.",
+                },
+                {
+                    "tools_called": [],
+                    "requested_tool_calls": [],
+                    "executed_tool_calls": [],
+                    "error": "Timed out connecting to llama.cpp server at http://127.0.0.1:8080/v1/chat/completions.",
+                },
+            ]
+        )
+
+        with (
+            TemporaryDirectory() as tmpdir,
+            mock.patch(
+                "tests.llama_eval.harness.ensure_llama_server",
+                return_value=("http://server", "model", client),
+            ),
+            mock.patch(
+                "tests.llama_eval.harness.restart_llama_server",
+                return_value=("http://server", "model", client),
+            ) as restart_mock,
+        ):
+            report = run_phase_eval(
+                phase=99,
+                server_url="http://server",
+                model="model",
+                cases=[case],
+                n_runs=1,
+                majority_threshold=0.5,
+                run_case=run_case,
+                build_case_report=self._build_case_report,
+                render_status=lambda _case, run: str(run.get("status")),
+                results_path=Path(tmpdir) / "results.json",
+            )
+
+        restart_mock.assert_called_once()
+        self.assertEqual(run_case.call_count, 2)
+        run_result = report["cases"][0]["runs"][0]
+        self.assertEqual(run_result["status"], RUN_STATUS_INFRA_FAIL)
+        self.assertEqual(run_result["backend_restart_count"], 1)
+        self.assertEqual(report["summary"]["infra_failures"], 1)
+        self.assertEqual(report["summary"]["model_attempts"], 0)
+
+    def test_run_phase_eval_resume_reuses_persisted_run(self) -> None:
+        case = SimpleNamespace(category="cat", name="case1", prompt="hello")
+        client = SimpleNamespace(temperature=0.7)
+        initial_run_case = mock.Mock(
+            return_value={
+                "tools_called": ["save_graph"],
+                "requested_tool_calls": [{"name": "save_graph", "arguments": {}}],
+                "executed_tool_calls": [{"name": "save_graph", "arguments": {"ok": True}}],
+                "error": None,
+                "matched": True,
+            }
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            results_path = Path(tmpdir) / "results.json"
+            with mock.patch(
+                "tests.llama_eval.harness.ensure_llama_server",
+                return_value=("http://server", "model", client),
+            ):
+                run_phase_eval(
+                    phase=99,
+                    server_url="http://server",
+                    model="model",
+                    cases=[case],
+                    n_runs=1,
+                    majority_threshold=0.5,
+                    run_case=initial_run_case,
+                    build_case_report=self._build_case_report,
+                    render_status=lambda _case, run: str(run.get("status")),
+                    results_path=results_path,
+                )
+
+            resumed_run_case = mock.Mock()
+            with mock.patch(
+                "tests.llama_eval.harness.ensure_llama_server"
+            ) as ensure_mock:
+                report = run_phase_eval(
+                    phase=99,
+                    server_url="http://server",
+                    model="model",
+                    cases=[case],
+                    n_runs=1,
+                    majority_threshold=0.5,
+                    run_case=resumed_run_case,
+                    build_case_report=self._build_case_report,
+                    render_status=lambda _case, run: str(run.get("status")),
+                    results_path=results_path,
+                    resume=True,
+                )
+
+        resumed_run_case.assert_not_called()
+        ensure_mock.assert_not_called()
+        self.assertEqual(report["cases"][0]["runs"][0]["status"], "PASS")
+
+
+class SummaryTests(unittest.TestCase):
+    def test_default_phase_summary_reports_model_attempts_and_infra_failures(self) -> None:
+        summary = default_phase_summary(
+            [
+                {
+                    "category": "cat",
+                    "passed": True,
+                    "runs": [
+                        {"status": "PASS"},
+                        {"status": "FAIL"},
+                        {"status": "INFRA_FAIL"},
+                    ],
+                }
+            ],
+            1,
+        )
+        self.assertEqual(summary["model_passes"], 1)
+        self.assertEqual(summary["model_attempts"], 2)
+        self.assertEqual(summary["infra_failures"], 1)
+        self.assertEqual(summary["total_scheduled_runs"], 3)
+        self.assertFalse(summary["complete"])
 
 
 if __name__ == "__main__":

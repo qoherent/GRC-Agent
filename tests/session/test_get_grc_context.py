@@ -31,12 +31,22 @@ class GetGrcContextTests(unittest.TestCase):
             payload["edges"],
             [
                 {
+                    "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
                     "source": "analog_random_source_x_0",
                     "source_port": 0,
                     "target": "blocks_throttle2_0",
                     "target_port": 0,
                 },
                 {
+                    "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                    "src_block": "blocks_throttle2_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_char_to_float_0",
+                    "dst_port": 0,
                     "source": "blocks_throttle2_0",
                     "source_port": 0,
                     "target": "blocks_char_to_float_0",

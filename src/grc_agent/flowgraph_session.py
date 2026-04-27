@@ -19,6 +19,7 @@ import yaml
 from .models import Block, Connection, Flowgraph
 from .session_ops import (
     block_name_is_referenced_elsewhere as shared_block_name_is_referenced_elsewhere,
+    connection_id as shared_connection_id,
     connection_entry_to_tuple as shared_connection_entry_to_tuple,
     default_block_states as shared_default_block_states,
     parse_blocks as shared_parse_blocks,
@@ -33,6 +34,19 @@ DEFAULT_CONTEXT_MAX_NODES = 20
 MAX_CONTEXT_HOPS = 4
 MAX_CONTEXT_MAX_NODES = 50
 MAX_CONTEXT_PARAMETER_SAMPLE = 6
+
+
+def _block_role_hint(block_type: str) -> str:
+    lowered = block_type.lower()
+    if "source" in lowered:
+        return "; source"
+    if "sink" in lowered:
+        return "; sink"
+    if "throttle" in lowered:
+        return "; throttle"
+    if "char_to_float" in lowered:
+        return "; converter"
+    return ""
 
 
 class FlowgraphSession:
@@ -103,6 +117,76 @@ class FlowgraphSession:
         self.last_validation_ok = None
         self._bump_state_revision()
         logger.info("load path=%s blocks=%d connections=%d", source_path, len(blocks), len(connections))
+
+    @classmethod
+    def create(cls, *, path: str | Path | None = None, graph_id: str = "new_flowgraph") -> "FlowgraphSession":
+        """Create a minimal valid empty GRC session with no DSP blocks."""
+        raw_data: dict[str, Any] = {
+            "options": {
+                "parameters": {
+                    "author": "",
+                    "catch_exceptions": "True",
+                    "category": "[GRC Hier Blocks]",
+                    "cmake_opt": "",
+                    "comment": "",
+                    "copyright": "",
+                    "description": "",
+                    "gen_cmake": "On",
+                    "gen_linking": "dynamic",
+                    "generate_options": "qt_gui",
+                    "hier_block_src_path": ".:",
+                    "id": graph_id,
+                    "max_nouts": "0",
+                    "output_language": "python",
+                    "placement": "(0,0)",
+                    "qt_qss_theme": "",
+                    "realtime_scheduling": "",
+                    "run": "True",
+                    "run_command": "{python} -u {filename}",
+                    "run_options": "prompt",
+                    "sizing_mode": "fixed",
+                    "thread_safe_setters": "",
+                    "title": graph_id,
+                    "window_size": "(1000,1000)",
+                },
+                "states": {
+                    "bus_sink": False,
+                    "bus_source": False,
+                    "bus_structure": None,
+                    "coordinate": [8, 8],
+                    "rotation": 0,
+                    "state": "enabled",
+                },
+            },
+            "blocks": [],
+            "connections": [],
+            "metadata": {
+                "file_format": 1,
+            },
+        }
+
+        session = cls(path=path)
+        blocks = session._parse_blocks(raw_data.get("blocks"))
+        connections = session._parse_connections(raw_data.get("connections"))
+        metadata = {
+            key: value
+            for key, value in raw_data.items()
+            if key not in {"blocks", "connections"}
+        }
+        session.flowgraph = Flowgraph(
+            blocks=blocks,
+            connections=connections,
+            metadata=metadata,
+            raw_data=raw_data,
+        )
+        session.is_dirty = True
+        session.last_validation_stdout = None
+        session.last_validation_stderr = None
+        session.last_validation_returncode = None
+        session.last_validation_ok = None
+        session._bump_state_revision()
+        logger.info("create graph_id=%s", graph_id)
+        return session
 
     def save(self, path: str | Path | None = None) -> None:
         """Write the current in-memory graph to disk."""
@@ -207,6 +291,30 @@ class FlowgraphSession:
             "grc_version": top_level_metadata.get("grc_version"),
         }
 
+    def active_session_snapshot(self) -> dict[str, Any]:
+        """Return the compact active-session payload for runtime history and CLI output."""
+        flowgraph = self._require_loaded_flowgraph()
+        snapshot = self.session_provenance()
+        snapshot["state_revision"] = self.state_revision
+        snapshot["dirty"] = self.is_dirty
+        snapshot["validation"] = self.validation_state()
+        variable_preview: list[str] = []
+        block_preview: list[str] = []
+        for block in flowgraph.blocks:
+            if block.block_type == "variable":
+                value = block.params.get("parameters", {}).get("value", "")
+                variable_preview.append(f"{block.instance_name}={value}")
+                continue
+            role = _block_role_hint(block.block_type)
+            block_preview.append(
+                f"{block.instance_name} ({block.block_type}{role})"
+            )
+        if variable_preview:
+            snapshot["variable_preview"] = variable_preview
+        if block_preview:
+            snapshot["block_preview"] = block_preview[:6]
+        return snapshot
+
     def summary_payload(
         self, *, max_blocks: int = DEFAULT_SUMMARY_BLOCK_LIMIT
     ) -> dict[str, Any]:
@@ -231,6 +339,14 @@ class FlowgraphSession:
             if preview
             else f"{file_name}: empty graph."
         )
+        # Build the structured blocks list so the model can see truncated counts.
+        structured_blocks: list[dict[str, Any]] = [
+            {
+                "name": block.instance_name,
+                "type": block.block_type,
+            }
+            for block in preview_blocks
+        ]
         return {
             "ok": True,
             "summary": summary,
@@ -238,6 +354,16 @@ class FlowgraphSession:
             "graph_id": self.graph_id(),
             "block_count": len(flowgraph.blocks),
             "connection_count": len(flowgraph.connections),
+            "blocks_shown": len(structured_blocks),
+            "blocks_truncated": remaining,
+            "blocks": structured_blocks,
+            "connections": [
+                self._connection_payload(connection)
+                for connection in sorted(
+                    flowgraph.connections,
+                    key=self._connection_sort_key,
+                )
+            ],
             "variable_count": variable_count,
             "dirty": self.is_dirty,
             "validation": self.validation_state(),
@@ -317,6 +443,7 @@ class FlowgraphSession:
         ]
         edges = [
             {
+                **self._connection_payload(connection),
                 "source": connection.src_block,
                 "source_port": connection.src_port,
                 "target": connection.dst_block,
@@ -324,12 +451,7 @@ class FlowgraphSession:
             }
             for connection in sorted(
                 flowgraph.connections,
-                key=lambda edge: (
-                    edge.src_block,
-                    edge.src_port,
-                    edge.dst_block,
-                    edge.dst_port,
-                ),
+                key=self._connection_sort_key,
             )
             if connection.src_block in included_name_set
             and connection.dst_block in included_name_set
@@ -353,7 +475,7 @@ class FlowgraphSession:
     # Connection edits
 
     def disconnect(
-        self, src_block: str, src_port: int, dst_block: str, dst_port: int
+        self, src_block: str, src_port: "int | str", dst_block: str, dst_port: "int | str"
     ) -> None:
         """Remove exactly one connection from both the model and raw YAML."""
         # Refuse to mutate anything if no graph has been loaded yet.
@@ -407,7 +529,7 @@ class FlowgraphSession:
         self._bump_state_revision()
 
     def connect(
-        self, src_block: str, src_port: int, dst_block: str, dst_port: int
+        self, src_block: str, src_port: "int | str", dst_block: str, dst_port: "int | str"
     ) -> None:
         """Add exactly one connection to both the model and raw YAML."""
         # Refuse to mutate anything if no graph has been loaded yet.
@@ -479,55 +601,58 @@ class FlowgraphSession:
         block_type: str,
         parameters: dict[str, Any],
         states: dict[str, Any] | None = None,
+        *,
+        _skip_grcc: bool = False,
     ) -> None:
-        """Add one detached variable block after validating a candidate graph."""
-        # Refuse to mutate anything if no graph has been loaded yet.
+        """Add one block after validating a candidate graph.
+
+        When ``_skip_grcc`` is *True* the per-op grcc check is skipped so that
+        multi-op transactions can add disconnected stream blocks and connect
+        them later in the same atomic batch.  The caller (typically
+        ``apply_edit``) is responsible for running grcc on the final candidate.
+        """
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
 
-        # Keep the first implementation narrow and predictable.
         if not isinstance(instance_name, str) or not instance_name:
             raise ValueError("Block instance_name must be a non-empty string.")
-        if block_type != "variable":
-            raise ValueError(f"Unsupported block type for add_block: {block_type}")
+        if not isinstance(block_type, str) or not block_type:
+            raise ValueError("Block block_type must be a non-empty string.")
         if not isinstance(parameters, dict):
             raise ValueError("Block parameters must be a mapping.")
-        if "value" not in parameters:
-            raise ValueError("Variable blocks require parameters['value'].")
         if states is not None and not isinstance(states, dict):
             raise ValueError("Block states must be a mapping when provided.")
 
-        # The raw YAML must contain a list of block entries.
         raw_blocks = self.flowgraph.raw_data.get("blocks")
         if not isinstance(raw_blocks, list):
             raise ValueError("Flowgraph raw_data blocks section is invalid.")
 
-        # Block names must stay unique in both representations.
         self._assert_new_block_name_available(instance_name, raw_blocks)
 
-        # Build the raw block payload using the narrow variable-block defaults.
+        add_default_comment = block_type == "variable"
         raw_block, raw_parameters, raw_states = self._prepare_new_block_payload(
             instance_name=instance_name,
             block_type=block_type,
             parameters=parameters,
             states=states,
             existing_block_count=len(raw_blocks),
-            add_default_comment=True,
+            add_default_comment=add_default_comment,
         )
 
-        # Validate a copied graph first so failures never partially mutate the session.
-        candidate_raw_data = copy.deepcopy(self.flowgraph.raw_data)
-        candidate_raw_blocks = candidate_raw_data.get("blocks")
-        if not isinstance(candidate_raw_blocks, list):
-            raise ValueError("Flowgraph candidate blocks section is invalid.")
-        candidate_raw_blocks.append(copy.deepcopy(raw_block))
+        if not _skip_grcc:
+            candidate_raw_data = copy.deepcopy(self.flowgraph.raw_data)
+            candidate_raw_blocks = candidate_raw_data.get("blocks")
+            if not isinstance(candidate_raw_blocks, list):
+                raise ValueError(
+                    "Flowgraph candidate blocks section is invalid."
+                )
+            candidate_raw_blocks.append(copy.deepcopy(raw_block))
 
-        self._validate_candidate_raw_data_or_raise(
-            candidate_raw_data,
-            error_prefix="Added block failed validation",
-        )
+            self._validate_candidate_raw_data_or_raise(
+                candidate_raw_data,
+                error_prefix="Added block failed validation",
+            )
 
-        # Update the parsed model and raw YAML only after the candidate is accepted.
         self.flowgraph.blocks.append(
             Block(
                 instance_name=instance_name,
@@ -540,7 +665,6 @@ class FlowgraphSession:
         )
         raw_blocks.append(raw_block)
 
-        # Any successful mutation means the in-memory session now differs from disk.
         self.is_dirty = True
         self._bump_state_revision()
 
@@ -549,23 +673,21 @@ class FlowgraphSession:
         instance_name: str,
         parameters: dict[str, Any],
         src_block: str,
-        src_port: int,
+        src_port: "int | str",
         states: dict[str, Any] | None = None,
     ) -> None:
         """Add one qtgui_time_sink_x block and connect its single input before commit."""
-        # Refuse to mutate anything if no graph has been loaded yet.
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
 
-        # Keep the first stream workflow narrow and predictable.
         if not isinstance(instance_name, str) or not instance_name:
             raise ValueError("Block instance_name must be a non-empty string.")
         if not isinstance(parameters, dict):
             raise ValueError("Block parameters must be a mapping.")
         if not isinstance(src_block, str) or not src_block:
             raise ValueError("Source block name must be a non-empty string.")
-        if not isinstance(src_port, int):
-            raise ValueError("Source port must be an integer.")
+        if not isinstance(src_port, (int, str)):
+            raise ValueError("Source port must be an integer or string.")
         if states is not None and not isinstance(states, dict):
             raise ValueError("Block states must be a mapping when provided.")
 
@@ -650,24 +772,22 @@ class FlowgraphSession:
         instance_name: str,
         parameters: dict[str, Any],
         src_block: str,
-        src_port: int,
+        src_port: "int | str",
         sink_block: str,
         states: dict[str, Any] | None = None,
     ) -> None:
         """Add one blocks_char_to_float tap into an existing qtgui_time_sink_x block."""
-        # Refuse to mutate anything if no graph has been loaded yet.
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
 
-        # Keep the coordinated transform workflow narrow and predictable.
         if not isinstance(instance_name, str) or not instance_name:
             raise ValueError("Block instance_name must be a non-empty string.")
         if not isinstance(parameters, dict):
             raise ValueError("Block parameters must be a mapping.")
         if not isinstance(src_block, str) or not src_block:
             raise ValueError("Source block name must be a non-empty string.")
-        if not isinstance(src_port, int):
-            raise ValueError("Source port must be an integer.")
+        if not isinstance(src_port, (int, str)):
+            raise ValueError("Source port must be an integer or string.")
         if not isinstance(sink_block, str) or not sink_block:
             raise ValueError("Sink block name must be a non-empty string.")
         if states is not None and not isinstance(states, dict):
@@ -1251,7 +1371,7 @@ class FlowgraphSession:
             incoming_connections[connection.dst_block].append(connection)
             outgoing_connections[connection.src_block].append(connection)
 
-        def edge_sort_key(edge: Connection) -> tuple[str, int, str, int]:
+        def edge_sort_key(edge: Connection) -> tuple:
             return (edge.src_block, edge.src_port, edge.dst_block, edge.dst_port)
 
         self._block_matches_cache = {
@@ -1269,6 +1389,32 @@ class FlowgraphSession:
             for name, edges in sorted(outgoing_connections.items())
         }
         self._inspection_cache_revision = self._state_revision
+
+    @staticmethod
+    def _connection_sort_key(connection: Connection) -> tuple:
+        """Return the canonical sort key for stable connection output ordering."""
+        return (
+            connection.src_block,
+            connection.src_port,
+            connection.dst_block,
+            connection.dst_port,
+        )
+
+    @staticmethod
+    def _connection_payload(connection: Connection) -> dict[str, Any]:
+        """Render one connection into a stable endpoint-plus-id payload."""
+        return {
+            "connection_id": shared_connection_id(
+                connection.src_block,
+                connection.src_port,
+                connection.dst_block,
+                connection.dst_port,
+            ),
+            "src_block": connection.src_block,
+            "src_port": connection.src_port,
+            "dst_block": connection.dst_block,
+            "dst_port": connection.dst_port,
+        }
 
     def _context_node_payload(self, block: Block, *, distance: int) -> dict[str, Any]:
         """Render one block into the bounded session-context node payload."""
@@ -1409,9 +1555,9 @@ class FlowgraphSession:
     @staticmethod
     def _raw_connection_entry(
         src_block: str,
-        src_port: int,
+        src_port: "int | str",
         dst_block: str,
-        dst_port: int,
+        dst_port: "int | str",
     ) -> list[str]:
         """Build the on-disk four-item connection entry used by `.grc` files."""
         return shared_raw_connection_entry(src_block, src_port, dst_block, dst_port)
@@ -1591,6 +1737,6 @@ class FlowgraphSession:
         )
 
     @staticmethod
-    def _connection_entry_to_tuple(entry: Any) -> tuple[str, int, str, int] | None:
+    def _connection_entry_to_tuple(entry: Any) -> tuple | None:
         """Normalize one raw connection entry to the typed tuple form."""
         return shared_connection_entry_to_tuple(entry)

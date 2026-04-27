@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from grc_agent.config import LlamaConfig
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 
-from .llama_launcher_support import (
+from tests.llama_launcher_support import (
     reserve_free_port,
     terminate_pid,
     write_stub_llama_server,
@@ -53,6 +53,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
                 "--port",
                 str(urlparse(config.server_url).port),
                 "--jinja",
+                "--no-mmproj",
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

@@ -23,6 +23,32 @@ class SummarizeGraphTests(unittest.TestCase):
         self.assertTrue(payload["graph_id"].startswith("grc:"))
         self.assertEqual(payload["block_count"], 5)
         self.assertEqual(payload["connection_count"], 3)
+        self.assertEqual(
+            payload["connections"],
+            [
+                {
+                    "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
+                },
+                {
+                    "connection_id": "blocks_char_to_float_0:0->qtgui_time_sink_x_0:0",
+                    "src_block": "blocks_char_to_float_0",
+                    "src_port": 0,
+                    "dst_block": "qtgui_time_sink_x_0",
+                    "dst_port": 0,
+                },
+                {
+                    "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                    "src_block": "blocks_throttle2_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_char_to_float_0",
+                    "dst_port": 0,
+                },
+            ],
+        )
         self.assertEqual(payload["variable_count"], 1)
         self.assertFalse(payload["dirty"])
         self.assertEqual(payload["validation"]["status"], "unknown")

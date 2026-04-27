@@ -107,6 +107,7 @@ class HardeningContractTests(unittest.TestCase):
                 "remove_connection",
                 "remove_block",
                 "add_block",
+                "insert_block_on_connection",
             },
         )
 

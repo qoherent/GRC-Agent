@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Playground / generated artifacts (not tracked)
+playground/
+
+# Cache / eval artifacts
+.ruff_cache/
+.llama_eval/
+.opencode/
+
+# Backups
+*.bak
+

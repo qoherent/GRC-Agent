@@ -23,6 +23,33 @@ from grc_agent.llama_server import LlamaServerClient, LlamaServerError
 DEFAULT_STARTUP_POLL_SECONDS = 0.5
 _ACTIVE_LAUNCH_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
+# Detected once at first use; True if the installed llama.cpp supports --no-mmproj.
+_mmproj_state: dict[str, bool | None] = {"supported": None}
+
+
+def _detect_mmproj_support() -> bool:
+    """Check whether the installed llama-server binary supports --no-mmproj."""
+    binary = which("llama-server")
+    if binary is None:
+        return False
+    try:
+        result = subprocess.run(
+            [binary, "-h"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        return "--no-mmproj" in result.stdout or "--no-mmproj" in result.stderr
+    except Exception:
+        return False
+
+
+def _get_mmproj_support() -> bool:
+    """Return whether the installed llama-server supports --no-mmproj (detected once)."""
+    if _mmproj_state["supported"] is None:
+        _mmproj_state["supported"] = _detect_mmproj_support()
+    return bool(_mmproj_state["supported"])
+
 
 class LlamaLauncherError(RuntimeError):
     """Raised when the CLI cannot make the llama.cpp backend available."""
@@ -36,6 +63,7 @@ class LlamaLaunchResult:
     pid: int | None
     server_url: str
     model_alias: str
+    client: LlamaServerClient
 
 
 @dataclass(frozen=True)
@@ -110,6 +138,12 @@ class LlamaServerLauncher:
                 self._terminate_process(process)
                 raise
 
+    def restart_server_ready(self) -> LlamaLaunchResult:
+        """Terminate any matching cached backend and start or reuse a fresh ready backend."""
+        with self._lock():
+            self._cleanup_cached_state(self._prepare_matching_state())
+        return self.ensure_server_ready()
+
     @contextmanager
     def _lock(self) -> Iterator[None]:
         """Advisory file lock to prevent concurrent CLI startup races."""
@@ -153,20 +187,25 @@ class LlamaServerLauncher:
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"llama-server-{host.replace('.', '_')}-{port}.log"
+
+        args = [
+            binary,
+            "-hf",
+            self.config.hf_model,
+            "--alias",
+            self.model_alias,
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--jinja",
+        ]
+        if _get_mmproj_support():
+            args.append("--no-mmproj")
+
         with log_path.open("ab") as log_file:
             process = subprocess.Popen(
-                [
-                    binary,
-                    "-hf",
-                    self.config.hf_model,
-                    "--alias",
-                    self.model_alias,
-                    "--host",
-                    host,
-                    "--port",
-                    str(port),
-                    "--jinja",
-                ],
+                args,
                 stdin=subprocess.DEVNULL,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -212,6 +251,7 @@ class LlamaServerLauncher:
                         pid=cached_state.pid if cached_state is not None else None,
                         server_url=self.server_url,
                         model_alias=self.model_alias,
+                        client=client,
                     )
                 except LlamaServerError as exc:
                     last_error = str(exc)
@@ -347,6 +387,7 @@ class LlamaServerLauncher:
             and self._argument_value(cmdline, "--alias") == state.model_alias
             and self._argument_value(cmdline, "--host") == self._parsed_url.hostname
             and self._argument_value(cmdline, "--port") == str(self._parsed_url.port)
+            and ("--no-mmproj" in cmdline) == _get_mmproj_support()
         )
 
     @staticmethod

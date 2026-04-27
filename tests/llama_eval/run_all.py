@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 import sys
 import time
 
 from tests.llama_eval import (
+    harness,
     run_phase1,
     run_phase2,
     run_phase3,
@@ -16,9 +18,9 @@ from tests.llama_eval import (
     run_phase5,
     run_phase6,
 )
-from tests.llama_eval.harness import ensure_llama_server
 
 _ALL_PHASES = {1, 2, 3, 4, 5, 6}
+_DEFAULT_RESULTS_FILE = ".llama_eval/run_all_results.json"
 
 
 def _parse_phases(value: str) -> set[int]:
@@ -88,14 +90,52 @@ def main() -> int:
         default=None,
         help="Run only the case with this name (across all selected phases).",
     )
+    parser.add_argument(
+        "--results-file",
+        default=_DEFAULT_RESULTS_FILE,
+        help=(
+            "Path to the persisted run-results file used by --resume. "
+            f"Default: {_DEFAULT_RESULTS_FILE}."
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the persisted results file and skip completed runs.",
+    )
+    parser.add_argument(
+        "--rerun-failed",
+        action="store_true",
+        help="With --resume, rerun only prior FAIL or INFRA_FAIL entries.",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Delete any prior persisted results before starting.",
+    )
     args = parser.parse_args()
 
+    if args.rerun_failed and not args.resume:
+        parser.error("--rerun-failed requires --resume")
+
     n_runs = 1 if args.quick else args.n_runs
+    results_path = Path(args.results_file)
+
+    if args.fresh and results_path.exists():
+        results_path.unlink()
+
+    if not args.resume:
+        harness.write_run_store(
+            results_path,
+            {
+                "version": 1,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "runs": [],
+            },
+        )
 
     summaries: list[dict] = []
     overall_start = time.perf_counter()
-
-    resolved_url, resolved_model, _ = ensure_llama_server(args.server_url, args.model)
 
     for phase_num, all_cases, run_eval in _PHASES:
         if phase_num not in args.phases:
@@ -115,13 +155,30 @@ def main() -> int:
         print(sep)
 
         phase_start = time.perf_counter()
-        report = run_eval(resolved_url, resolved_model, cases, n_runs)
+        report = run_eval(
+            args.server_url,
+            args.model,
+            cases,
+            n_runs,
+            results_path=results_path,
+            resume=args.resume,
+            rerun_failed=args.rerun_failed,
+        )
         phase_elapsed = time.perf_counter() - phase_start
 
         summary = report.get("summary", {})
         total = summary.get("total", len(cases))
         passed = summary.get("passed", 0)
-        print(f"\nPhase {phase_num}: {passed}/{total} passed  ({phase_elapsed:.1f}s)")
+        model_attempts = summary.get("model_attempts", 0)
+        model_passes = summary.get("model_passes", 0)
+        infra_failures = summary.get("infra_failures", 0)
+        scheduled_runs = summary.get("total_scheduled_runs", len(cases) * n_runs)
+        completeness = "complete" if infra_failures == 0 else "incomplete"
+        print(
+            f"\nPhase {phase_num}: {model_passes}/{model_attempts} model attempts, "
+            f"{infra_failures} infra failures, {scheduled_runs} scheduled  "
+            f"({phase_elapsed:.1f}s, {completeness})"
+        )
 
         summaries.append(
             {
@@ -129,6 +186,11 @@ def main() -> int:
                 "total": total,
                 "passed": passed,
                 "failed": total - passed,
+                "model_attempts": model_attempts,
+                "model_passes": model_passes,
+                "infra_failures": infra_failures,
+                "scheduled_runs": scheduled_runs,
+                "complete": infra_failures == 0,
                 "elapsed": round(phase_elapsed, 1),
             }
         )
@@ -145,22 +207,46 @@ def main() -> int:
     print(f"\n{'=' * 60}")
     print("OVERALL SUMMARY")
     print(f"{'=' * 60}")
-    print(f"{'Phase':<8} {'Cases':<8} {'Pass':<8} {'Fail':<8} {'Time'}")
-    print("-" * 44)
+    print(
+        f"{'Phase':<8} {'Model':<14} {'Infra':<8} {'Sched':<8} {'State':<10} {'Time'}"
+    )
+    print("-" * 68)
     total_total = 0
     total_passed = 0
+    total_model_attempts = 0
+    total_model_passes = 0
+    total_infra_failures = 0
+    total_scheduled_runs = 0
     for s in summaries:
         total_total += s["total"]
         total_passed += s["passed"]
+        total_model_attempts += s["model_attempts"]
+        total_model_passes += s["model_passes"]
+        total_infra_failures += s["infra_failures"]
+        total_scheduled_runs += s["scheduled_runs"]
+        model_ratio = f"{s['model_passes']}/{s['model_attempts']}"
+        state_text = "complete" if s["complete"] else "incomplete"
         print(
-            f"{s['phase']:<8} {s['total']:<8} {s['passed']:<8} {s['failed']:<8} {s['elapsed']:.1f}s"
+            f"{s['phase']:<8} "
+            f"{model_ratio:<14} "
+            f"{s['infra_failures']:<8} "
+            f"{s['scheduled_runs']:<8} "
+            f"{state_text:<10} "
+            f"{s['elapsed']:.1f}s"
         )
-    print("-" * 44)
+    print("-" * 68)
+    overall_ratio = f"{total_model_passes}/{total_model_attempts}"
+    overall_state = "complete" if total_infra_failures == 0 else "incomplete"
     print(
-        f"{'ALL':<8} {total_total:<8} {total_passed:<8} {total_total - total_passed:<8} {overall_elapsed:.1f}s"
+        f"{'ALL':<8} "
+        f"{overall_ratio:<14} "
+        f"{total_infra_failures:<8} "
+        f"{total_scheduled_runs:<8} "
+        f"{overall_state:<10} "
+        f"{overall_elapsed:.1f}s"
     )
 
-    return 0 if total_passed == total_total else 1
+    return 0 if total_passed == total_total and total_infra_failures == 0 else 1
 
 
 if __name__ == "__main__":

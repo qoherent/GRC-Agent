@@ -17,6 +17,67 @@ FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS: tuple[str, ...] = (
 )
 
 
+ConnectionPort = int | str
+"""Type alias for a port that is either an integer index (stream) or a string name (message)."""
+
+
+def _normalize_port(value: Any) -> ConnectionPort:
+    """Return *value* as ``int`` when it looks numeric, otherwise ``str``."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def connection_id(
+    src_block: str,
+    src_port: ConnectionPort,
+    dst_block: str,
+    dst_port: ConnectionPort,
+) -> str:
+    """Return the stable public connection identifier for one edge."""
+    return f"{src_block}:{src_port}->{dst_block}:{dst_port}"
+
+
+def parse_connection_id(value: Any) -> tuple[str, ConnectionPort, str, ConnectionPort] | None:
+    """Parse one stable connection identifier back into endpoint fields."""
+    if not isinstance(value, str) or "->" not in value:
+        return None
+
+    src_text, dst_text = value.split("->", 1)
+    if ":" not in src_text or ":" not in dst_text:
+        return None
+
+    src_block, src_port_text = src_text.rsplit(":", 1)
+    dst_block, dst_port_text = dst_text.rsplit(":", 1)
+    if not src_block or not dst_block:
+        return None
+
+    src_port: ConnectionPort
+    dst_port: ConnectionPort
+    try:
+        src_port = int(src_port_text)
+    except ValueError:
+        src_port = src_port_text
+    try:
+        dst_port = int(dst_port_text)
+    except ValueError:
+        dst_port = dst_port_text
+
+    if isinstance(src_port, int) and src_port < 0:
+        return None
+    if isinstance(dst_port, int) and dst_port < 0:
+        return None
+    return (src_block, src_port, dst_block, dst_port)
+
+
 def parse_blocks(blocks_data: Any) -> list[Block]:
     """Parse the raw `blocks` section into typed block objects."""
     blocks: list[Block] = []
@@ -60,26 +121,21 @@ def parse_connections(connections_data: Any) -> list[Connection]:
                 f"Malformed connection entry at index {index}: expected four items."
             )
 
-        src_block, src_port, dst_block, dst_port = entry
+        src_block, src_port_raw, dst_block, dst_port_raw = entry
         if not isinstance(src_block, str) or not isinstance(dst_block, str):
             raise ValueError(
                 f"Malformed connection entry at index {index}: block names must be strings."
             )
 
-        try:
-            src_port_number = int(src_port)
-            dst_port_number = int(dst_port)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Malformed connection entry at index {index}: ports must be integers."
-            ) from exc
+        src_port = _normalize_port(src_port_raw)
+        dst_port = _normalize_port(dst_port_raw)
 
         connections.append(
             Connection(
                 src_block=src_block,
-                src_port=src_port_number,
+                src_port=src_port,
                 dst_block=dst_block,
-                dst_port=dst_port_number,
+                dst_port=dst_port,
             )
         )
 
@@ -88,9 +144,9 @@ def parse_connections(connections_data: Any) -> list[Connection]:
 
 def raw_connection_entry(
     src_block: str,
-    src_port: int,
+    src_port: ConnectionPort,
     dst_block: str,
-    dst_port: int,
+    dst_port: ConnectionPort,
 ) -> list[str]:
     """Build the on-disk four-item connection entry used by `.grc` files."""
     return [src_block, str(src_port), dst_block, str(dst_port)]
@@ -99,6 +155,9 @@ def raw_connection_entry(
 def default_block_states(existing_block_count: int) -> dict[str, Any]:
     """Return the minimal default `states` payload for generated blocks."""
     return {
+        "bus_sink": False,
+        "bus_source": False,
+        "bus_structure": None,
         "coordinate": [8, 8 + (existing_block_count * 24)],
         "rotation": 0,
         "state": "enabled",
@@ -129,17 +188,17 @@ def block_name_is_referenced_elsewhere(
     )
 
 
-def connection_entry_to_tuple(entry: Any) -> tuple[str, int, str, int] | None:
+def connection_entry_to_tuple(entry: Any) -> tuple[str, ConnectionPort, str, ConnectionPort] | None:
     """Normalize one raw connection entry to the typed tuple form."""
     if not isinstance(entry, list) or len(entry) != 4:
         return None
 
-    src_block, src_port, dst_block, dst_port = entry
+    src_block, src_port_raw, dst_block, dst_port_raw = entry
     if not isinstance(src_block, str) or not isinstance(dst_block, str):
         return None
 
     try:
-        return (src_block, int(src_port), dst_block, int(dst_port))
+        return (src_block, _normalize_port(src_port_raw), dst_block, _normalize_port(dst_port_raw))
     except (TypeError, ValueError):
         return None
 
@@ -163,10 +222,13 @@ def _value_references_identifier(value: Any, identifier: str) -> bool:
 
 
 __all__ = [
+    "ConnectionPort",
+    "connection_id",
     "FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS",
     "block_name_is_referenced_elsewhere",
     "connection_entry_to_tuple",
     "default_block_states",
+    "parse_connection_id",
     "parse_blocks",
     "parse_connections",
     "raw_connection_entry",

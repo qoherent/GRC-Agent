@@ -12,9 +12,11 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - package-level transaction editing now exposes `propose_edit(session, transaction)` and `apply_edit(session, transaction)` for atomic validated edits; **duplicate block IDs are handled via optional block_type disambiguation**
 - `FlowgraphSession` owns parsed state, persistence, validation, and all graph-mutation primitives
 - `GrcAgent` intentionally exposes a smaller model-facing runtime than the full session surface
+- the model-facing runtime now keeps the tools smart and the loop dumb: `agent.py` owns routing rules, follow-up hints, and transaction normalization while `llama_server.py` stays thin
 - a thin llama.cpp adapter is wired for single-turn and multi-turn CLI conversations
 - `chat` owns **concurrency-safe local llama.cpp startup** using file locking to prevent process races
 - the live llama.cpp eval suite now covers phases 1-6, including multi-turn continuity, failure-recovery flows, and compound workflows; see `docs/LLAMA_EVAL.md` for the latest evidence
+- latest full live sweep: `uv run python -m tests.llama_eval.run_all` -> **191/198** (Phase 1 `40/40`, Phase 5 `8/8`, Phase 6 `27/28`)
 - multi-turn conversations use proactive history compaction (100k char default, configurable via `[agent]`) and session auto-refresh to control prompt growth
 - raw model prose is still not trusted outside the runtime's deterministic finalization rules for supported flows
 
@@ -188,7 +190,7 @@ The repo now includes a thin llama.cpp adapter that calls only documented server
 - `chat` now owns local llama.cpp startup for the normal CLI path when the configured `server_url` is a plain local `http://127.0.0.1` or `http://localhost` base URL
 - the runtime is unbounded with a safety ceiling of 50 tool rounds
 - the default model id is the server alias, currently `unsloth/gemma-4-E2B-it-GGUF`
-- the default Hugging Face model source is `unsloth/gemma-4-E2B-it-GGUF:Q4_K_M`
+- the default Hugging Face model source is `unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL`
 - the default `max_tokens = 100000` is an operational ceiling, not the correctness guard
 - summarize final answers are resolved from the `summarize_graph` tool payload
 - other supported final answers fall back to the latest structured tool `message` only when the model leaves the final text empty or tool-call-shaped
@@ -216,7 +218,7 @@ If the configured local llama.cpp server is down, the CLI starts it automaticall
 For manual backend debugging only, the equivalent repo-configured launch command is:
 
 ```bash
-llama-server -hf unsloth/gemma-4-E2B-it-GGUF:Q4_K_M \
+llama-server -hf unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL \
 	--alias unsloth/gemma-4-E2B-it-GGUF \
 	--host 127.0.0.1 \
 	--port 8080 \

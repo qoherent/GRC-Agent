@@ -572,7 +572,10 @@ class FlowgraphSessionTests(unittest.TestCase):
         )
         self.assertEqual(raw_block["parameters"]["value"], "123")
         self.assertEqual(raw_block["parameters"]["comment"], "")
-        self.assertEqual(set(raw_block["states"].keys()), {"coordinate", "rotation", "state"})
+        self.assertEqual(
+            set(raw_block["states"].keys()),
+            {"bus_sink", "bus_source", "bus_structure", "coordinate", "rotation", "state"},
+        )
 
         self.assertTrue(session.validate())
 
@@ -618,13 +621,20 @@ class FlowgraphSessionTests(unittest.TestCase):
             session.add_block("blocks_char_to_float_1", "blocks_char_to_float", {"value": "1"})
 
     # Variable blocks require a value expression before candidate validation runs.
-    def test_add_block_missing_value_raises(self) -> None:
+    def test_add_block_arbitrary_type_allows_session_without_value_gate(self) -> None:
         fixture_path = self._fixture_path()
         session = FlowgraphSession()
         session.load(fixture_path)
 
-        with self.assertRaises(ValueError):
-            session.add_block("unused_var", "variable", {"comment": ""})
+        original_block_count = len(session.flowgraph.blocks)
+
+        session.add_block("new_var", "variable", {"value": "42", "comment": ""})
+
+        self.assertTrue(session.is_dirty)
+        self.assertEqual(len(session.flowgraph.blocks), original_block_count + 1)
+        new_block = session.flowgraph.blocks[-1]
+        self.assertEqual(new_block.instance_name, "new_var")
+        self.assertEqual(new_block.block_type, "variable")
 
     # Candidate-validation failures must leave the loaded session unchanged.
     def test_add_block_invalid_expression_rolls_back_without_mutation(self) -> None:
@@ -715,7 +725,10 @@ class FlowgraphSessionTests(unittest.TestCase):
             entry for entry in flowgraph.raw_data["blocks"] if entry["name"] == "qtgui_time_sink_x_1"
         )
         self.assertEqual(raw_block["id"], "qtgui_time_sink_x")
-        self.assertEqual(set(raw_block["states"].keys()), {"coordinate", "rotation", "state"})
+        self.assertEqual(
+            set(raw_block["states"].keys()),
+            {"bus_sink", "bus_source", "bus_structure", "coordinate", "rotation", "state"},
+        )
         self.assertIn(
             ["blocks_char_to_float_0", "0", "qtgui_time_sink_x_1", "0"],
             flowgraph.raw_data["connections"],
@@ -894,7 +907,7 @@ class FlowgraphSessionTests(unittest.TestCase):
             entry for entry in flowgraph.raw_data["blocks"] if entry["name"] == "blocks_char_to_float_1"
         )
         self.assertEqual(raw_block["id"], "blocks_char_to_float")
-        self.assertEqual(set(raw_block["states"].keys()), {"coordinate", "rotation", "state"})
+        self.assertEqual(set(raw_block["states"].keys()), {"bus_sink", "bus_source", "bus_structure", "coordinate", "rotation", "state"})
 
         raw_sink = next(
             entry for entry in flowgraph.raw_data["blocks"] if entry["name"] == "qtgui_time_sink_x_0"
@@ -1127,13 +1140,13 @@ class FlowgraphSessionTests(unittest.TestCase):
             entry for entry in flowgraph.raw_data["blocks"] if entry["name"] == "analog_random_source_x_1"
         )
         self.assertEqual(raw_source["id"], "analog_random_source_x")
-        self.assertEqual(set(raw_source["states"].keys()), {"coordinate", "rotation", "state"})
+        self.assertEqual(set(raw_source["states"].keys()), {"bus_sink", "bus_source", "bus_structure", "coordinate", "rotation", "state"})
 
         raw_transform = next(
             entry for entry in flowgraph.raw_data["blocks"] if entry["name"] == "blocks_char_to_float_1"
         )
         self.assertEqual(raw_transform["id"], "blocks_char_to_float")
-        self.assertEqual(set(raw_transform["states"].keys()), {"coordinate", "rotation", "state"})
+        self.assertEqual(set(raw_transform["states"].keys()), {"bus_sink", "bus_source", "bus_structure", "coordinate", "rotation", "state"})
 
         raw_sink = next(
             entry for entry in flowgraph.raw_data["blocks"] if entry["name"] == "qtgui_time_sink_x_0"

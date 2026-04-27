@@ -3,13 +3,10 @@
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 from grc_agent.agent import GrcAgent
@@ -18,11 +15,15 @@ from grc_agent.llama_server import LlamaServerError, run_bounded_llama_turn
 
 from tests.llama_eval.harness import (
     DEFAULT_FIXTURE_NAME,
-    ensure_llama_server,
+    build_phase_parser,
+    default_phase_summary,
     extract_executed_tool_calls,
     extract_requested_tool_calls,
     isolated_fixture_workspace,
+    majority_passed,
     render_value_templates as _render_value_templates,
+    run_phase_eval,
+    select_cases,
     text_contains_any,
     tool_call_matches_argument_checks,
     tool_call_matches_transaction_checks,
@@ -44,6 +45,11 @@ class RealisticCase:
     transaction_checks: list[dict[str, Any]] | None = None
     transaction_checks_ordered: bool = True
     text_contains_any_checks: list[str] | None = None
+    required_absent_nodes: tuple[str, ...] = ()
+    require_save_called: bool = False
+    require_summary_called: bool = False
+    require_validate_called: bool = False
+    accept_apply_edit_validation: bool = False
     fixture_name: str = DEFAULT_FIXTURE_NAME
     target_fixture_name: str | None = None
     description: str = ""
@@ -84,18 +90,21 @@ PHASE3_CASES: list[RealisticCase] = [
         "what_am_i_looking_at",
         "What am I looking at here?",
         ["summarize_graph"],
+        require_summary_called=True,
     ),
     RealisticCase(
         "natural",
         "is_this_going_to_work",
         "Is this going to compile and run?",
         ["validate_graph"],
+        require_validate_called=True,
     ),
     RealisticCase(
         "natural",
         "write_it_out",
         "Go ahead and write it out.",
         ["save_graph"],
+        require_save_called=True,
     ),
     # -- block/session inspection without tool naming --
     RealisticCase(
@@ -224,6 +233,7 @@ PHASE3_CASES: list[RealisticCase] = [
         ["save_graph"],
         checked_tool_name="save_graph",
         tool_arg_checks={"path": "{save_path}"},
+        require_save_called=True,
     ),
     # -- realistic rewiring / edit previews --
     RealisticCase(
@@ -282,6 +292,7 @@ PHASE3_CASES: list[RealisticCase] = [
         "remove_samp_rate_keep_valid",
         "I want the samp_rate variable gone, but leave the graph working.",
         ["apply_edit"],
+        required_absent_nodes=("samp_rate",),
         transaction_checks=[
             {
                 "op_type": "update_params",
@@ -457,6 +468,7 @@ PHASE3_CASES: list[RealisticCase] = [
         "remove_variable_repair_32k",
         "Get rid of samp_rate, keep the throttle at 32000, and leave the graph valid.",
         ["apply_edit"],
+        required_absent_nodes=("samp_rate",),
         transaction_checks=[
             {
                 "op_type": "update_params",
@@ -566,6 +578,47 @@ def _match_routing(case: RealisticCase, requested_tool_names: list[str]) -> bool
     )
 
 
+def _evaluate_postconditions(
+    case: RealisticCase,
+    *,
+    requested_tool_names: list[str],
+    session: FlowgraphSession,
+) -> dict[str, Any]:
+    block_names: list[str] = []
+    if session.flowgraph is not None:
+        block_names = [block.instance_name for block in session.flowgraph.blocks]
+
+    absent_nodes = {
+        node_name: (node_name not in block_names) for node_name in case.required_absent_nodes
+    }
+    save_called = ("save_graph" in requested_tool_names) if case.require_save_called else None
+    summary_called = (
+        "summarize_graph" in requested_tool_names if case.require_summary_called else None
+    )
+    validate_called = None
+    if case.require_validate_called:
+        validate_called = "validate_graph" in requested_tool_names
+        if (
+            not validate_called
+            and case.accept_apply_edit_validation
+            and "apply_edit" in requested_tool_names
+        ):
+            validate_called = True
+
+    passed = all(absent_nodes.values())
+    if save_called is False or summary_called is False or validate_called is False:
+        passed = False
+
+    return {
+        "passed": passed,
+        "final_block_names": block_names,
+        "required_absent_nodes": absent_nodes,
+        "save_called": save_called,
+        "summary_called": summary_called,
+        "validate_called": validate_called,
+    }
+
+
 def _run_case(client: Any, model: str, case: RealisticCase) -> dict[str, Any]:
     with isolated_fixture_workspace(case.fixture_name, case.target_fixture_name) as (
         workspace,
@@ -598,6 +651,11 @@ def _run_case(client: Any, model: str, case: RealisticCase) -> dict[str, Any]:
     executed_tool_calls = extract_executed_tool_calls(agent.history)
     requested_tool_names = [tool_call["name"] for tool_call in requested_tool_calls]
     routing_matched = _match_routing(case, requested_tool_names)
+    postconditions = _evaluate_postconditions(
+        case,
+        requested_tool_names=requested_tool_names,
+        session=session,
+    )
 
     checked_tool_name = _tool_name_for_checks(case)
     relevant_calls = (
@@ -650,7 +708,10 @@ def _run_case(client: Any, model: str, case: RealisticCase) -> dict[str, Any]:
         text_matched = text_contains_any(assistant_text, case.text_contains_any_checks)
 
     run_passed = (
-        routing_matched and arg_matched is not False and text_matched is not False
+        routing_matched
+        and arg_matched is not False
+        and text_matched is not False
+        and postconditions["passed"]
     )
 
     return {
@@ -669,102 +730,78 @@ def _run_case(client: Any, model: str, case: RealisticCase) -> dict[str, Any]:
         "assistant_text": assistant_text,
         "steps": result.get("steps") if result else None,
         "tool_calls_executed": result.get("tool_calls_executed") if result else None,
+        "postconditions": postconditions,
     }
 
 
-def _run_eval(
-    server_url: str,
-    model: str,
-    cases: list[RealisticCase],
-    n_runs: int,
-) -> dict[str, Any]:
-    resolved_url, resolved_model, client = ensure_llama_server(server_url, model)
-
-    results = []
-    total = len(cases) * n_runs
-    done = 0
-
-    for case in cases:
-        runs = []
-        for run_index in range(n_runs):
-            done += 1
-            print(
-                f"[{done}/{total}] {case.category}/{case.name} run {run_index + 1}/{n_runs}",
-                end="",
-                flush=True,
-            )
-            run_result = _run_case(client, resolved_model, case)
-            parts = [f"routing={'PASS' if run_result['routing_matched'] else 'FAIL'}"]
-            if case.tool_arg_checks is not None or case.transaction_checks is not None:
-                parts.append(f"args={'PASS' if run_result['arg_matched'] else 'FAIL'}")
-            if case.text_contains_any_checks:
-                parts.append(f"text={'PASS' if run_result['text_matched'] else 'FAIL'}")
-            parts.append(f"overall={'PASS' if run_result['passed'] else 'FAIL'}")
-            parts.append(f"({', '.join(run_result['tools_called']) or 'no tools'})")
-            print(" -> " + " ".join(parts))
-            runs.append(run_result)
-
-        routing_match_count = sum(1 for run in runs if run["routing_matched"])
-        arg_match_count = sum(1 for run in runs if run["arg_matched"] is True)
-        arg_total = sum(1 for run in runs if run["arg_matched"] is not None)
-        text_match_count = sum(1 for run in runs if run["text_matched"] is True)
-        text_total = sum(1 for run in runs if run["text_matched"] is not None)
-        pass_count = sum(1 for run in runs if run["passed"])
-
-        results.append(
-            {
-                "category": case.category,
-                "name": case.name,
-                "prompt": case.prompt,
-                "expected_tools_in_order": case.expected_tools_in_order,
-                "tool_arg_checks": case.tool_arg_checks,
-                "transaction_checks": case.transaction_checks,
-                "text_contains_any_checks": case.text_contains_any_checks,
-                "runs": runs,
-                "routing_match_count": routing_match_count,
-                "routing_pass_rate": routing_match_count / n_runs,
-                "arg_match_count": arg_match_count,
-                "arg_total": arg_total,
-                "text_match_count": text_match_count,
-                "text_total": text_total,
-                "pass_count": pass_count,
-                "pass_rate": pass_count / n_runs,
-                "routing_passed": routing_match_count > n_runs * MAJORITY_THRESHOLD,
-                "passed": pass_count > n_runs * MAJORITY_THRESHOLD,
-            }
+def _render_run_status(case: RealisticCase, run_result: dict[str, Any]) -> str:
+    parts = [f"routing={'PASS' if run_result['routing_matched'] else 'FAIL'}"]
+    if case.tool_arg_checks is not None or case.transaction_checks is not None:
+        parts.append(f"args={'PASS' if run_result['arg_matched'] else 'FAIL'}")
+    if case.text_contains_any_checks:
+        parts.append(f"text={'PASS' if run_result['text_matched'] else 'FAIL'}")
+    if any(
+        (
+            case.required_absent_nodes,
+            case.require_save_called,
+            case.require_summary_called,
+            case.require_validate_called,
         )
+    ):
+        parts.append(
+            f"post={'PASS' if run_result['postconditions']['passed'] else 'FAIL'}"
+        )
+    parts.append(f"overall={'PASS' if run_result['passed'] else 'FAIL'}")
+    parts.append(f"({', '.join(run_result['tools_called']) or 'no tools'})")
+    return " ".join(parts)
 
-    by_category: dict[str, dict[str, int]] = {}
-    for result in results:
-        category = result["category"]
-        if category not in by_category:
-            by_category[category] = {"passed": 0, "total": 0}
-        by_category[category]["total"] += 1
-        if result["passed"]:
-            by_category[category]["passed"] += 1
 
-    total_passed = sum(1 for result in results if result["passed"])
+def _build_case_report(
+    case: RealisticCase,
+    runs: list[dict[str, Any]],
+    n_runs: int,
+    majority_threshold: float,
+) -> dict[str, Any]:
+    routing_match_count = sum(1 for run in runs if run["routing_matched"])
+    arg_match_count = sum(1 for run in runs if run["arg_matched"] is True)
+    arg_total = sum(1 for run in runs if run["arg_matched"] is not None)
+    text_match_count = sum(1 for run in runs if run["text_matched"] is True)
+    text_total = sum(1 for run in runs if run["text_matched"] is not None)
+    pass_count = sum(1 for run in runs if run["passed"])
+    return {
+        "category": case.category,
+        "name": case.name,
+        "prompt": case.prompt,
+        "expected_tools_in_order": case.expected_tools_in_order,
+        "tool_arg_checks": case.tool_arg_checks,
+        "transaction_checks": case.transaction_checks,
+        "text_contains_any_checks": case.text_contains_any_checks,
+        "runs": runs,
+        "routing_match_count": routing_match_count,
+        "routing_pass_rate": routing_match_count / n_runs,
+        "arg_match_count": arg_match_count,
+        "arg_total": arg_total,
+        "text_match_count": text_match_count,
+        "text_total": text_total,
+        "pass_count": pass_count,
+        "pass_rate": pass_count / n_runs,
+        "routing_passed": majority_passed(routing_match_count, n_runs, majority_threshold),
+        "passed": majority_passed(pass_count, n_runs, majority_threshold),
+    }
+
+
+def _build_summary(results: list[dict[str, Any]], total_cases: int) -> dict[str, Any]:
+    summary = default_phase_summary(results, total_cases)
     total_routing_passed = sum(1 for result in results if result["routing_passed"])
     total_arg_pass = sum(result["arg_match_count"] for result in results)
     total_arg_runs = sum(result["arg_total"] for result in results)
     total_text_pass = sum(result["text_match_count"] for result in results)
     total_text_runs = sum(result["text_total"] for result in results)
-
-    return {
-        "phase": 3,
-        "model": resolved_model,
-        "temperature": client.temperature,
-        "n_runs": n_runs,
-        "majority_threshold": MAJORITY_THRESHOLD,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "cases": results,
-        "summary": {
-            "total": len(cases),
-            "passed": total_passed,
-            "pass_rate": round(total_passed / len(cases), 4) if cases else 0,
+    summary.update(
+        {
             "routing_passed": total_routing_passed,
-            "routing_pass_rate": round(total_routing_passed / len(cases), 4)
-            if cases
+            "routing_pass_rate": round(total_routing_passed / total_cases, 4)
+            if total_cases
             else 0,
             "arg_pass_rate": round(total_arg_pass / total_arg_runs, 4)
             if total_arg_runs
@@ -772,56 +809,48 @@ def _run_eval(
             "text_pass_rate": round(total_text_pass / total_text_runs, 4)
             if total_text_runs
             else None,
-            "by_category": by_category,
-        },
-    }
+        }
+    )
+    return summary
+
+
+def _run_eval(
+    server_url: str,
+    model: str,
+    cases: list[RealisticCase],
+    n_runs: int,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return run_phase_eval(
+        phase=3,
+        server_url=server_url,
+        model=model,
+        cases=cases,
+        n_runs=n_runs,
+        majority_threshold=MAJORITY_THRESHOLD,
+        run_case=_run_case,
+        build_case_report=_build_case_report,
+        render_status=_render_run_status,
+        build_summary=_build_summary,
+        **kwargs,
+    )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Phase 3 model eval: realistic prompts plus argument checks."
-    )
-    parser.add_argument(
-        "--server-url",
-        default=os.environ.get("GRC_AGENT_LIVE_LLAMA_URL"),
-        help="llama.cpp server URL. Defaults to config when not set.",
-    )
-    parser.add_argument(
-        "--model",
-        default=os.environ.get("GRC_AGENT_LIVE_LLAMA_MODEL"),
-        help="llama.cpp model alias. Defaults to config when not set.",
-    )
-    parser.add_argument(
-        "--n-runs",
-        type=int,
-        default=DEFAULT_N_RUNS,
-        help=f"Number of runs per case. Default: {DEFAULT_N_RUNS}.",
-    )
-    parser.add_argument(
-        "--category",
-        type=str,
-        default=None,
-        help="Run only cases in this category.",
-    )
-    parser.add_argument(
-        "--case",
-        type=str,
-        default=None,
-        help="Run only the case with this name.",
-    )
-    parser.add_argument(
-        "--quick",
-        action="store_true",
-        help="Quick check: force n_runs=1.",
+    parser = build_phase_parser(
+        "Phase 3 model eval: realistic prompts plus argument checks.",
+        default_n_runs=DEFAULT_N_RUNS,
+        server_help="llama.cpp server URL. Defaults to config when not set.",
+        model_help="llama.cpp model alias. Defaults to config when not set.",
     )
     args = parser.parse_args()
     n_runs = 1 if args.quick else args.n_runs
 
-    cases = list(PHASE3_CASES)
-    if args.category:
-        cases = [case for case in cases if case.category == args.category]
-    if args.case:
-        cases = [case for case in cases if case.name == args.case]
+    cases = select_cases(
+        PHASE3_CASES,
+        category=args.category,
+        case_name=args.case,
+    )
     if not cases:
         print("No matching cases.", file=sys.stderr)
         return 1

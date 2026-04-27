@@ -3,13 +3,10 @@
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 from grc_agent.agent import GrcAgent
@@ -18,11 +15,15 @@ from grc_agent.llama_server import LlamaServerError, run_bounded_llama_turn
 
 from tests.llama_eval.harness import (
     DEFAULT_FIXTURE_NAME,
-    ensure_llama_server,
+    build_phase_parser,
+    executed_tool_calls_since as _executed_tool_calls_since,
     isolated_fixture_workspace,
+    majority_passed,
     render_prompt as _render_prompt,
     render_value_templates as _render_value_templates,
     requested_tool_calls_since as _requested_tool_calls_since,
+    run_phase_eval,
+    select_cases,
     text_contains_any,
     tool_call_matches_argument_checks,
     tool_call_matches_transaction_checks,
@@ -49,6 +50,8 @@ class MultiTurnCase:
     category: str
     name: str
     turns: list[TurnSpec]
+    required_absent_nodes: tuple[str, ...] = ()
+    accept_apply_edit_validation: bool = False
     fixture_name: str = DEFAULT_FIXTURE_NAME
     target_fixture_name: str | None = None
     description: str = ""
@@ -880,6 +883,7 @@ PHASE4_CASES: list[MultiTurnCase] = [
 def _check_turn(
     turn_spec: TurnSpec,
     requested_tool_calls: list[dict[str, Any]],
+    executed_tool_calls: list[dict[str, Any]],
     assistant_text: str,
     *,
     target_path: str,
@@ -896,6 +900,11 @@ def _check_turn(
 
     relevant_calls = (
         [tc for tc in requested_tool_calls if tc["name"] == checked_tool_name]
+        if checked_tool_name
+        else []
+    )
+    relevant_executed_calls = (
+        [tc for tc in executed_tool_calls if tc["name"] == checked_tool_name]
         if checked_tool_name
         else []
     )
@@ -918,7 +927,7 @@ def _check_turn(
             tool_call_matches_transaction_checks(
                 tc, rendered, ordered=turn_spec.transaction_checks_ordered
             )
-            for tc in relevant_calls
+            for tc in relevant_calls + relevant_executed_calls
         )
 
     arg_matched = None
@@ -968,6 +977,8 @@ def _run_case(
         turn_results: list[dict[str, Any]] = []
         error_message: str | None = None
         ok = True
+        case_started_at = time.perf_counter()
+        all_requested_tool_names: list[str] = []
 
         for turn_index, turn_spec in enumerate(case.turns):
             prompt = _render_prompt(turn_spec.prompt, target_path, save_path)
@@ -987,54 +998,155 @@ def _run_case(
                     {
                         "turn_index": turn_index,
                         "prompt": prompt,
+                        "assistant_text": "",
+                        "requested_tool_calls": [],
+                        "ok": False,
                         "error": turn_error,
-                        "passed": False,
                         "tools_called": [],
                         "routing_matched": False,
                         "tool_arg_matched": None,
                         "transaction_matched": None,
                         "arg_matched": None,
                         "text_matched": None,
+                        "passed": False,
                         "elapsed_seconds": round(elapsed, 3),
-                        "assistant_text": "",
                     }
                 )
+                error_message = turn_error
                 break
 
             requested_tool_calls = _requested_tool_calls_since(
                 agent.history, history_start
             )
+            executed_tool_calls = _executed_tool_calls_since(agent.history, history_start)
+            all_requested_tool_names.extend(tc["name"] for tc in requested_tool_calls)
             assistant_text = result.get("assistant_text", "")
-
-            check = _check_turn(
+            turn_checks = _check_turn(
                 turn_spec,
                 requested_tool_calls,
+                executed_tool_calls,
                 assistant_text,
                 target_path=target_path,
                 save_path=save_path,
             )
-
             turn_results.append(
                 {
                     "turn_index": turn_index,
                     "prompt": prompt,
-                    "ok": result.get("ok", False),
-                    "error": turn_error,
-                    "elapsed_seconds": round(elapsed, 3),
                     "assistant_text": assistant_text,
-                    **check,
+                    "requested_tool_calls": requested_tool_calls,
+                    "executed_tool_calls": executed_tool_calls,
+                    "ok": result["ok"],
+                    "error": None if result["ok"] else result.get("message"),
+                    "elapsed_seconds": round(elapsed, 3),
+                    "steps": result.get("steps"),
+                    "tool_calls_executed": result.get("tool_calls_executed"),
+                    **turn_checks,
                 }
             )
-
-            if not result.get("ok"):
+            if not result["ok"]:
                 ok = False
+                error_message = result.get("message")
                 break
+
+        postconditions = _evaluate_case_postconditions(
+            case,
+            requested_tool_names=all_requested_tool_names,
+            session=session,
+        )
 
     return {
         "turn_results": turn_results,
+        "all_turns_passed": all(tr.get("passed", False) for tr in turn_results)
+        and postconditions["passed"],
         "ok": ok,
         "error": error_message,
-        "all_turns_passed": all(tr.get("passed", False) for tr in turn_results),
+        "elapsed_seconds": round(time.perf_counter() - case_started_at, 3),
+        "postconditions": postconditions,
+    }
+
+
+def _evaluate_case_postconditions(
+    case: MultiTurnCase,
+    *,
+    requested_tool_names: list[str],
+    session: FlowgraphSession,
+) -> dict[str, Any]:
+    block_names: list[str] = []
+    if session.flowgraph is not None:
+        block_names = [block.instance_name for block in session.flowgraph.blocks]
+
+    required_absent_nodes = {
+        node_name: (node_name not in block_names) for node_name in case.required_absent_nodes
+    }
+    expected_tools = {
+        tool_name
+        for turn in case.turns
+        for tool_name in turn.expected_tools_in_order
+    }
+    summary_called = (
+        "summarize_graph" in requested_tool_names if "summarize_graph" in expected_tools else None
+    )
+    save_called = "save_graph" in requested_tool_names if "save_graph" in expected_tools else None
+    validate_called = None
+    if "validate_graph" in expected_tools:
+        validate_called = "validate_graph" in requested_tool_names
+        if (
+            not validate_called
+            and case.accept_apply_edit_validation
+            and "apply_edit" in requested_tool_names
+        ):
+            validate_called = True
+
+    passed = all(required_absent_nodes.values())
+    if summary_called is False or save_called is False or validate_called is False:
+        passed = False
+
+    return {
+        "passed": passed,
+        "final_block_names": block_names,
+        "required_absent_nodes": required_absent_nodes,
+        "summary_called": summary_called,
+        "save_called": save_called,
+        "validate_called": validate_called,
+        "requested_tool_names": requested_tool_names,
+    }
+
+
+def _render_run_status(case: MultiTurnCase, run_result: dict[str, Any]) -> str:
+    n_turns = len(case.turns)
+    n_passed = sum(
+        1 for tr in run_result["turn_results"] if tr.get("passed", False)
+    )
+    status = "PASS" if run_result["all_turns_passed"] else "FAIL"
+    return (
+        f"{status} ({n_passed}/{n_turns} turns, "
+        f"post={'PASS' if run_result['postconditions']['passed'] else 'FAIL'})"
+    )
+
+
+def _build_case_report(
+    case: MultiTurnCase,
+    runs: list[dict[str, Any]],
+    n_runs: int,
+    majority_threshold: float,
+) -> dict[str, Any]:
+    pass_count = sum(1 for run in runs if run["all_turns_passed"])
+    per_turn_pass_counts: list[int] = [0] * len(case.turns)
+    for run in runs:
+        for turn_result in run.get("turn_results", []):
+            idx = turn_result.get("turn_index", 0)
+            if idx < len(per_turn_pass_counts) and turn_result.get("passed", False):
+                per_turn_pass_counts[idx] += 1
+    return {
+        "category": case.category,
+        "name": case.name,
+        "n_turns": len(case.turns),
+        "runs": runs,
+        "pass_count": pass_count,
+        "pass_rate": pass_count / n_runs,
+        "passed": majority_passed(pass_count, n_runs, majority_threshold),
+        "per_turn_pass_counts": per_turn_pass_counts,
     }
 
 
@@ -1043,127 +1155,37 @@ def _run_eval(
     model: str,
     cases: list[MultiTurnCase],
     n_runs: int,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    resolved_url, resolved_model, client = ensure_llama_server(server_url, model)
-
-    results = []
-    total = len(cases) * n_runs
-    done = 0
-
-    for case in cases:
-        runs = []
-        for run_index in range(n_runs):
-            done += 1
-            print(
-                f"[{done}/{total}] {case.category}/{case.name} run {run_index + 1}/{n_runs}",
-                end="",
-                flush=True,
-            )
-            run_result = _run_case(client, resolved_model, case)
-            n_turns = len(case.turns)
-            n_passed = sum(
-                1 for tr in run_result["turn_results"] if tr.get("passed", False)
-            )
-            status = "PASS" if run_result["all_turns_passed"] else "FAIL"
-            print(f" -> {status} ({n_passed}/{n_turns} turns)")
-            runs.append(run_result)
-
-        pass_count = sum(1 for run in runs if run["all_turns_passed"])
-        passed = pass_count > n_runs * MAJORITY_THRESHOLD
-
-        per_turn_pass_counts: list[int] = [0] * len(case.turns)
-        for run in runs:
-            for tr in run.get("turn_results", []):
-                idx = tr.get("turn_index", 0)
-                if idx < len(per_turn_pass_counts) and tr.get("passed", False):
-                    per_turn_pass_counts[idx] += 1
-
-        results.append(
-            {
-                "category": case.category,
-                "name": case.name,
-                "n_turns": len(case.turns),
-                "runs": runs,
-                "pass_count": pass_count,
-                "pass_rate": pass_count / n_runs,
-                "passed": passed,
-                "per_turn_pass_counts": per_turn_pass_counts,
-            }
-        )
-
-    by_category: dict[str, dict[str, int]] = {}
-    for result in results:
-        category = result["category"]
-        if category not in by_category:
-            by_category[category] = {"passed": 0, "total": 0}
-        by_category[category]["total"] += 1
-        if result["passed"]:
-            by_category[category]["passed"] += 1
-
-    total_passed = sum(1 for result in results if result["passed"])
-
-    return {
-        "phase": 4,
-        "model": resolved_model,
-        "temperature": client.temperature,
-        "n_runs": n_runs,
-        "majority_threshold": MAJORITY_THRESHOLD,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "cases": results,
-        "summary": {
-            "total": len(cases),
-            "passed": total_passed,
-            "pass_rate": round(total_passed / len(cases), 4) if cases else 0,
-            "by_category": by_category,
-        },
-    }
+    return run_phase_eval(
+        phase=4,
+        server_url=server_url,
+        model=model,
+        cases=cases,
+        n_runs=n_runs,
+        majority_threshold=MAJORITY_THRESHOLD,
+        run_case=_run_case,
+        build_case_report=_build_case_report,
+        render_status=_render_run_status,
+        **kwargs,
+    )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Phase 4 model eval: multi-turn conversation continuity."
-    )
-    parser.add_argument(
-        "--server-url",
-        default=os.environ.get("GRC_AGENT_LIVE_LLAMA_URL"),
-        help="llama.cpp server URL. Defaults to config.",
-    )
-    parser.add_argument(
-        "--model",
-        default=os.environ.get("GRC_AGENT_LIVE_LLAMA_MODEL"),
-        help="llama.cpp model alias. Defaults to config.",
-    )
-    parser.add_argument(
-        "--n-runs",
-        type=int,
-        default=DEFAULT_N_RUNS,
-        help=f"Number of runs per case. Default: {DEFAULT_N_RUNS}.",
-    )
-    parser.add_argument(
-        "--category",
-        type=str,
-        default=None,
-        help="Run only cases in this category.",
-    )
-    parser.add_argument(
-        "--case",
-        type=str,
-        default=None,
-        help="Run only the case with this name.",
-    )
-    parser.add_argument(
-        "--quick",
-        action="store_true",
-        help="Quick check: force n_runs=1.",
+    parser = build_phase_parser(
+        "Phase 4 model eval: multi-turn conversation continuity.",
+        default_n_runs=DEFAULT_N_RUNS,
+        server_help="llama.cpp server URL. Defaults to config.",
+        model_help="llama.cpp model alias. Defaults to config.",
     )
     args = parser.parse_args()
     n_runs = 1 if args.quick else args.n_runs
 
-    cases = list(PHASE4_CASES)
-    if args.category:
-        cases = [case for case in cases if case.category == args.category]
-    if args.case:
-        cases = [case for case in cases if case.name == args.case]
+    cases = select_cases(
+        PHASE4_CASES,
+        category=args.category,
+        case_name=args.case,
+    )
     if not cases:
         print("No matching cases.", file=sys.stderr)
         return 1

@@ -14,7 +14,7 @@ class AffectedChanges:
     """The blocks and connections touched by one transaction."""
 
     blocks: tuple[str, ...]
-    connections: tuple[tuple[str, int, str, int], ...]
+    connections: tuple[tuple, ...]
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -31,6 +31,24 @@ class AffectedChanges:
         }
 
 
+def _resolve_connection_id(session: FlowgraphSession, connection_id: str) -> tuple | None:
+    """Resolve a connection_id string (src:sport->dst:dport) to endpoint tuple.
+
+    Also supports legacy shorthand if ports are unambiguous.
+    """
+    parts = connection_id.split("->")
+    if len(parts) != 2:
+        return None
+    src_part = parts[0]
+    dst_part = parts[1]
+    try:
+        src_block, src_port = src_part.rsplit(":", 1)
+        dst_block, dst_port = dst_part.rsplit(":", 1)
+        return (src_block, int(src_port), dst_block, int(dst_port))
+    except (ValueError, IndexError):
+        return None
+
+
 def apply_operations(
     session: FlowgraphSession,
     operations: list[dict[str, Any]],
@@ -42,7 +60,7 @@ def apply_operations(
     the normalized operation list to the candidate `FlowgraphSession`.
     """
     affected_blocks: set[str] = set()
-    affected_connections: set[tuple[str, int, str, int]] = set()
+    affected_connections: set[tuple] = set()
 
     for operation in operations:
         op_type = operation["op_type"]
@@ -104,8 +122,33 @@ def apply_operations(
                 operation["block_type"],
                 copy.deepcopy(operation["parameters"]),
                 copy.deepcopy(operation.get("states")),
+                _skip_grcc=True,
             )
             affected_blocks.add(instance_name)
+            continue
+
+        if op_type == "insert_block_on_connection":
+            conn_id = operation["connection_id"]
+            resolved = _resolve_connection_id(session, conn_id)
+            if resolved is None:
+                raise ValueError(f"insert_block_on_connection: could not resolve connection_id '{conn_id}'")
+            src_block, src_port, dst_block, dst_port = resolved
+            instance_name = operation["instance_name"]
+            session.add_block(
+                instance_name,
+                operation["block_type"],
+                copy.deepcopy(operation["parameters"]),
+                copy.deepcopy(operation.get("states")),
+                _skip_grcc=True,
+            )
+            affected_blocks.add(instance_name)
+            session.disconnect(src_block, src_port, dst_block, dst_port)
+            affected_connections.add((src_block, src_port, dst_block, dst_port))
+            session.connect(src_block, src_port, instance_name, 0)
+            affected_connections.add((src_block, src_port, instance_name, 0))
+            session.connect(instance_name, 0, dst_block, dst_port)
+            affected_connections.add((instance_name, 0, dst_block, dst_port))
+            affected_blocks.update((src_block, dst_block))
             continue
 
         raise ValueError(f"Unsupported transaction op_type: {op_type}")

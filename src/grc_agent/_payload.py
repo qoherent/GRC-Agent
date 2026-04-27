@@ -5,6 +5,7 @@ from typing import Any
 
 class ErrorCode:
     MISSING_SESSION = "missing_session"
+    MISSING_BLOCK_TYPE = "missing_block_type"
     FILE_LOAD_ERROR = "file_load_error"
     INVALID_GRC = "invalid_grc"
     VALIDATION_ERROR = "validation_error"
@@ -18,6 +19,8 @@ class ErrorCode:
     SAVE_REFUSED = "save_refused"
     BLOCK_NOT_FOUND = "block_not_found"
     CONNECTION_NOT_FOUND = "connection_not_found"
+    AMBIGUOUS_CONNECTION = "ambiguous_connection"
+    CONNECTION_ENDPOINT_MISMATCH = "connection_endpoint_mismatch"
     BLOCK_ALREADY_EXISTS = "block_already_exists"
     CONNECTION_ALREADY_EXISTS = "connection_already_exists"
     UNSUPPORTED_OP = "unsupported_op"

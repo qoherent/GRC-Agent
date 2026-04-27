@@ -13,6 +13,7 @@ from grc_agent.retrieval import initialize_retrieval
 
 EXPECTED_PYTHON = (3, 12)
 EXPECTED_GNURADIO = "3.10.9.2"
+_LLAMA_CPP_SERVER_HELP = "Start with: grc-agent chat --new --message 'hello'"
 
 
 def _build_check(name: str, ok: bool, detail: str, **extra: Any) -> dict[str, Any]:
@@ -27,10 +28,10 @@ def _build_check(name: str, ok: bool, detail: str, **extra: Any) -> dict[str, An
 
 def _check_python() -> dict[str, Any]:
     version = sys.version_info
-    ok = (version.major, version.minor) == EXPECTED_PYTHON
+    ok = (version.major == 3 and version.minor >= 12)
     detail = (
         f"{version.major}.{version.minor}.{version.micro} "
-        f"(expected {EXPECTED_PYTHON[0]}.{EXPECTED_PYTHON[1]}.x)"
+        f"(expected >= 3.12)"
     )
     return _build_check("Python version", ok, detail)
 
@@ -59,10 +60,15 @@ def _check_config(config_path: str | None = None) -> dict[str, Any]:
     try:
         config = load_app_config(config_path)
     except ConfigError as exc:
-        return _build_check("App config", False, str(exc))
+        return _build_check(
+            "App config",
+            False,
+            f"{exc}. Run: grc-agent doctor --skip-retrieval",
+        )
 
     resolved_path = resolve_config_path(config_path)
     source = str(resolved_path) if resolved_path is not None else "built-in defaults"
+    llama_ok = config.llama.server_url and config.llama.model
     return _build_check(
         "App config",
         True,
@@ -70,13 +76,18 @@ def _check_config(config_path: str | None = None) -> dict[str, Any]:
         source=source,
         llama_server_url=config.llama.server_url,
         llama_model=config.llama.model,
+        llama_configured=llama_ok,
     )
 
 
 def _check_retrieval() -> dict[str, Any]:
     readiness = initialize_retrieval()
     if not readiness["ok"]:
-        return _build_check("Retrieval readiness", False, readiness["message"])
+        return _build_check(
+            "Retrieval readiness",
+            False,
+            f"{readiness['message']}. Check GNU Radio install and grc_agent.toml.",
+        )
 
     return _build_check(
         "Retrieval readiness",
@@ -87,10 +98,36 @@ def _check_retrieval() -> dict[str, Any]:
     )
 
 
+def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
+    try:
+        from grc_agent.config import load_app_config as _load
+        from grc_agent.llama_launcher import LlamaServerLauncher
+
+        config = _load(config_path)
+        launcher = LlamaServerLauncher(
+            config.llama,
+            server_url=config.llama.server_url,
+            model_alias=config.llama.model,
+        )
+        result = launcher.ensure_server_ready()
+        return _build_check(
+            "llama.cpp server",
+            True,
+            f"{result.model_alias} at {result.server_url} ({result.status})",
+        )
+    except Exception as exc:
+        return _build_check(
+            "llama.cpp server",
+            False,
+            f"{exc}. {_LLAMA_CPP_SERVER_HELP}",
+        )
+
+
 def run_doctor(
     *,
     config_path: str | None = None,
     check_retrieval: bool = True,
+    check_llama: bool = True,
 ) -> dict[str, Any]:
     """Run the packaged-app health checks and return a structured report."""
     checks = [
@@ -101,6 +138,8 @@ def run_doctor(
     ]
     if check_retrieval:
         checks.append(_check_retrieval())
+    if check_llama:
+        checks.append(_check_llama_server(config_path))
 
     ok = all(check["ok"] for check in checks)
     return {

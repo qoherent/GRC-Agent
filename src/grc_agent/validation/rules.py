@@ -21,6 +21,7 @@ OperationType = Literal[
     "remove_connection",
     "remove_block",
     "add_block",
+    "insert_block_on_connection",
 ]
 
 VALID_OPERATION_TYPES = frozenset(
@@ -31,6 +32,7 @@ VALID_OPERATION_TYPES = frozenset(
         "remove_connection",
         "remove_block",
         "add_block",
+        "insert_block_on_connection",
     }
 )
 
@@ -65,13 +67,24 @@ class ValidationOperation:
                 res["block_type"] = self.payload["block_type"]
             return res
         if self.op_type in {"add_connection", "remove_connection"}:
-            return {
+            res = {
                 "op_type": self.op_type,
-                "src_block": self.payload["src_block"],
-                "src_port": self.payload["src_port"],
-                "dst_block": self.payload["dst_block"],
-                "dst_port": self.payload["dst_port"],
             }
+            if "connection_id" in self.payload:
+                res["connection_id"] = self.payload["connection_id"]
+            if all(
+                field_name in self.payload
+                for field_name in ("src_block", "src_port", "dst_block", "dst_port")
+            ):
+                res.update(
+                    {
+                        "src_block": self.payload["src_block"],
+                        "src_port": self.payload["src_port"],
+                        "dst_block": self.payload["dst_block"],
+                        "dst_port": self.payload["dst_port"],
+                    }
+                )
+            return res
         if self.op_type == "remove_block":
             res = {
                 "op_type": self.op_type,
@@ -85,8 +98,14 @@ class ValidationOperation:
             "op_type": self.op_type,
             "instance_name": self.payload["instance_name"],
             "block_type": self.payload["block_type"],
-            "parameters": copy.deepcopy(self.payload["parameters"]),
         }
+        if self.op_type == "insert_block_on_connection":
+            rendered["connection_id"] = self.payload["connection_id"]
+            # "params" maps to "parameters" for add_block compatibility
+            params = self.payload.get("params", {})
+            rendered["parameters"] = copy.deepcopy(params)
+        else:
+            rendered["parameters"] = copy.deepcopy(self.payload["parameters"])
         states = self.payload.get("states")
         if states is not None:
             rendered["states"] = copy.deepcopy(states)
@@ -362,17 +381,26 @@ def _normalize_operation(
         "update_params": ("op_type", "instance_name", "params", "block_type"),
         "update_states": ("op_type", "instance_name", "state", "block_type"),
         "add_connection": ("op_type", "src_block", "src_port", "dst_block", "dst_port"),
-        "remove_connection": ("op_type", "src_block", "src_port", "dst_block", "dst_port"),
+        "remove_connection": (
+            "op_type",
+            "connection_id",
+            "src_block",
+            "src_port",
+            "dst_block",
+            "dst_port",
+        ),
         "remove_block": ("op_type", "instance_name", "block_type"),
         "add_block": ("op_type", "instance_name", "block_type", "parameters", "states"),
+        "insert_block_on_connection": ("op_type", "connection_id", "block_type", "instance_name", "params"),
     }
     required_fields: dict[OperationType, tuple[str, ...]] = {
         "update_params": ("instance_name", "params"),
         "update_states": ("instance_name", "state"),
         "add_connection": ("src_block", "src_port", "dst_block", "dst_port"),
-        "remove_connection": ("src_block", "src_port", "dst_block", "dst_port"),
+        "remove_connection": (),
         "remove_block": ("instance_name",),
         "add_block": ("instance_name", "block_type", "parameters"),
+        "insert_block_on_connection": ("connection_id", "block_type", "instance_name"),
     }
 
     issues: list[ValidationIssue] = []
@@ -437,7 +465,53 @@ def _normalize_operation(
                 payload["block_type"] = block_type_val.strip()
 
     if op_type in {"add_connection", "remove_connection"}:
+        endpoint_fields = ("src_block", "src_port", "dst_block", "dst_port")
+        if op_type == "remove_connection":
+            connection_id = candidate.get("connection_id")
+            if connection_id is not None:
+                if not isinstance(connection_id, str) or not connection_id.strip():
+                    issues.append(
+                        make_issue(
+                            op_index=op_index,
+                            op_type=op_type,
+                            field="connection_id",
+                            code="invalid_field_type",
+                            message="connection_id must be a non-empty string.",
+                        )
+                    )
+                else:
+                    payload["connection_id"] = connection_id.strip()
+
+            provided_endpoint_fields = [
+                field_name for field_name in endpoint_fields if field_name in candidate
+            ]
+            if provided_endpoint_fields:
+                for field_name in endpoint_fields:
+                    if field_name not in candidate:
+                        issues.append(
+                            make_issue(
+                                op_index=op_index,
+                                op_type=op_type,
+                                field=field_name,
+                                code="missing_field",
+                                message=f"Missing required field for {op_type}: {field_name}",
+                            )
+                        )
+            elif "connection_id" not in payload:
+                for field_name in endpoint_fields:
+                    issues.append(
+                        make_issue(
+                            op_index=op_index,
+                            op_type=op_type,
+                            field=field_name,
+                            code="missing_field",
+                            message=f"Missing required field for {op_type}: {field_name}",
+                        )
+                    )
+
         for field_name in ("src_block", "dst_block"):
+            if field_name not in candidate:
+                continue
             value = candidate.get(field_name)
             if not isinstance(value, str) or not value.strip():
                 issues.append(
@@ -453,19 +527,35 @@ def _normalize_operation(
             payload[field_name] = value.strip()
 
         for field_name in ("src_port", "dst_port"):
+            if field_name not in candidate:
+                continue
             value = candidate.get(field_name)
-            if not isinstance(value, int) or value < 0:
+            if isinstance(value, int):
+                if value < 0:
+                    issues.append(
+                        make_issue(
+                            op_index=op_index,
+                            op_type=op_type,
+                            field=field_name,
+                            code="invalid_field_type",
+                            message=f"{field_name} must be a non-negative integer.",
+                        )
+                    )
+                    continue
+                payload[field_name] = value
+            elif isinstance(value, str) and value:
+                payload[field_name] = value
+            else:
                 issues.append(
                     make_issue(
                         op_index=op_index,
                         op_type=op_type,
                         field=field_name,
                         code="invalid_field_type",
-                        message=f"{field_name} must be a non-negative integer.",
+                        message=f"{field_name} must be a non-negative integer or a non-empty string port name.",
                     )
                 )
                 continue
-            payload[field_name] = value
 
     if op_type == "update_params":
         params = candidate.get("params")
@@ -564,6 +654,87 @@ def _normalize_operation(
             issues.extend(parameter_issues)
             if not parameter_issues:
                 payload["parameters"] = copy.deepcopy(parameters)
+
+        states = candidate.get("states")
+        if states is not None:
+            if not isinstance(states, dict):
+                issues.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field="states",
+                        code="invalid_field_type",
+                        message="states must be a mapping when provided.",
+                    )
+                )
+            else:
+                payload["states"] = copy.deepcopy(states)
+
+    if op_type == "insert_block_on_connection":
+        instance_name = candidate.get("instance_name")
+        if not isinstance(instance_name, str) or not instance_name.strip():
+            issues.append(
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="instance_name",
+                    code="invalid_field_type",
+                    message="instance_name must be a non-empty string.",
+                )
+            )
+        else:
+            payload["instance_name"] = instance_name.strip()
+
+        block_type = candidate.get("block_type")
+        if not isinstance(block_type, str) or not block_type.strip():
+            issues.append(
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="block_type",
+                    code="invalid_field_type",
+                    message="block_type must be a non-empty string.",
+                )
+            )
+        else:
+            payload["block_type"] = block_type.strip()
+
+        connection_id = candidate.get("connection_id")
+        if not isinstance(connection_id, str) or not connection_id.strip():
+            issues.append(
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="connection_id",
+                    code="invalid_field_type",
+                    message="connection_id must be a non-empty string.",
+                )
+            )
+        else:
+            payload["connection_id"] = connection_id.strip()
+
+        params = candidate.get("params")
+        if params is not None:
+            if not isinstance(params, dict):
+                issues.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field="params",
+                        code="invalid_field_type",
+                        message="params must be a mapping when provided.",
+                    )
+                )
+            else:
+                parameter_issues = _validate_parameter_mapping(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="params",
+                    parameters=params,
+                )
+                issues.extend(parameter_issues)
+                if not parameter_issues:
+                    payload["params"] = copy.deepcopy(params)
 
         states = candidate.get("states")
         if states is not None:
