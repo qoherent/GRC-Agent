@@ -30,6 +30,7 @@ class InsertionCandidate:
     required_params: dict[str, Any]
     confidence: str
     insert_tool_args: dict[str, Any] | None = None
+    is_core: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,14 +94,22 @@ def _port_compatible(port: NormalizedPort, spec: PortSpec) -> bool:
     return True
 
 
-def _has_safe_defaults(desc: BlockDescription) -> tuple[bool, dict[str, Any], list[str]]:
+def _has_safe_defaults(
+    desc: BlockDescription, resolved_dtype: str | None = None
+) -> tuple[bool, dict[str, Any], list[str]]:
     required_params: dict[str, Any] = {}
     missing: list[str] = []
     for param in desc.parameters:
         if param.default is not None:
             required_params[param.id] = param.default
         elif param.options:
-            required_params[param.id] = param.options[0]
+            if param.id == "type" and resolved_dtype:
+                if resolved_dtype in param.options:
+                    required_params[param.id] = resolved_dtype
+                else:
+                    required_params[param.id] = param.options[0]
+            else:
+                required_params[param.id] = param.options[0]
         else:
             if param.hide not in ("all", "part"):
                 missing.append(param.id)
@@ -175,8 +184,13 @@ def suggest_insertions(
 
     # Resolve endpoint block types from session
     block_types: dict[str, str] = {}
+    block_params: dict[str, dict[str, str]] = {}
     for block in session.flowgraph.blocks:
         block_types[block.instance_name] = block.block_type
+        if isinstance(block.params, dict):
+            params = block.params.get("parameters", {})
+            if isinstance(params, dict):
+                block_params[block.instance_name] = params
 
     src_type = block_types.get(src_block)
     dst_type = block_types.get(dst_block)
@@ -214,13 +228,22 @@ def suggest_insertions(
     target_dtype = source_spec.dtype or dest_spec.dtype
     target_vlen = source_spec.vlen or dest_spec.vlen
 
+    # Fallback: resolve dtype from endpoint instance params when port is template
+    if target_dtype is None:
+        for endpoint in (src_block, dst_block):
+            params = block_params.get(endpoint, {})
+            if "type" in params and params["type"]:
+                target_dtype = params["type"]
+                break
+
     candidates = _find_candidates(
         target_domain=target_domain,
         target_dtype=target_dtype,
         target_vlen=target_vlen,
         connection_id=connection_id_str,
         existing_names={b.instance_name for b in session.flowgraph.blocks} if session.flowgraph else set(),
-        k=k * 3,  # over-fetch for ranking
+        k=max(k * 3, 500),  # over-fetch for ranking
+        resolved_dtype=target_dtype,
     )
 
     ranked = _rank_candidates(candidates)[:k]
@@ -300,6 +323,7 @@ def _find_candidates(
     connection_id: str,
     existing_names: set[str],
     k: int,
+    resolved_dtype: str | None = None,
 ) -> list[InsertionCandidate]:
     """Search catalog for blocks matching insertion criteria."""
     from grc_agent.catalog.loaders import get_catalog_snapshot
@@ -336,7 +360,7 @@ def _find_candidates(
                 ):
                     continue
 
-                has_defaults, required_params, missing = _has_safe_defaults(desc)
+                has_defaults, required_params, missing = _has_safe_defaults(desc, resolved_dtype)
                 reason = _build_reason(
                     desc, inp, out, has_defaults, missing
                 )
@@ -358,6 +382,7 @@ def _find_candidates(
                         required_params=required_params,
                         confidence=confidence,
                         insert_tool_args=insert_tool_args,
+                        is_core=_is_core_block(desc),
                     )
                 )
                 break  # one candidate per block is enough

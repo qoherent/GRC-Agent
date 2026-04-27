@@ -380,6 +380,11 @@ def _run_llama_turn(
             result.insert_primitive_used = True
         elif t.name == "suggest_compatible_insertions":
             result.suggest_compatible_insertions_called = True
+        elif t.name == "auto_insert_block":
+            result.auto_insert_called = True
+            result.auto_insert_ok = t.ok
+            if isinstance(t.payload, dict) and t.payload.get("clarification_required"):
+                result.clarification_requested = True
         elif t.name == "validate_graph":
             result.validate_graph_called = True
         elif t.name == "save_graph":

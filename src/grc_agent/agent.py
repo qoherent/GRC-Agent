@@ -70,6 +70,8 @@ class GrcAgent:
         self._turn_any_execution_failed = False
         self._turn_continuation_budget = 0
         self._transaction_normalizer = TransactionNormalizer(session=self.session)
+        self._pending_clarification: dict[str, Any] | None = None
+        self._pending_clarification_revision: int | None = None
 
     def get_system_prompt(self) -> str:
         return build_system_prompt()
@@ -133,6 +135,89 @@ class GrcAgent:
         if not isinstance(result, dict) or result.get("ok") is not False:
             return False
         return tool_name in {"new_grc", "load_grc", "apply_edit", "validate_graph", "save_graph"}
+
+    def resolve_pending_clarification(
+        self, user_message: str
+    ) -> dict[str, Any]:
+        """Resolve a pending clarification from a human user reply.
+
+        Returns a dict with one of:
+            mode="none"              — no pending clarification, proceed normally
+            mode="executed"          — option executed, result in "tool_result"
+            mode="expired"           — session changed since clarification, cleared
+            mode="reminder"          — unrelated text while pending, compact reminder
+            mode="custom"            — D / free text, cleared, proceed normally
+        """
+        from grc_agent.runtime.clarification import ClarificationRequest
+
+        if self._pending_clarification is None:
+            return {"mode": "none"}
+
+        # Expire if session revision changed since clarification was created
+        if (
+            self._pending_clarification_revision is not None
+            and self.session.state_revision != self._pending_clarification_revision
+        ):
+            self._clear_pending_clarification()
+            return {
+                "mode": "expired",
+                "text": "The pending question is no longer valid because the graph has changed.",
+            }
+
+        raw = user_message.strip()
+        if not raw:
+            return {"mode": "reminder", "text": self._pending_clarification_reminder()}
+
+        # Quick A/B/C/D check on the first character / prefix
+        upper = raw.upper()
+        prefix = upper[0] if upper else ""
+
+        if prefix in "ABC":
+            req = ClarificationRequest.from_dict(self._pending_clarification)
+            for opt in req.options:
+                if opt.label == prefix:
+                    result = self.execute_tool(opt.tool_name, opt.tool_args)
+                    self._clear_pending_clarification()
+                    return {"mode": "executed", "tool_result": result}
+            # Label in message but not matching any stored option
+            return {
+                "mode": "reminder",
+                "text": (
+                    f"'{prefix}' is not a valid option. "
+                    f"Choose one of: {', '.join(o.label for o in req.options)}. "
+                    f"Or use D / free text to describe what you want instead."
+                ),
+            }
+
+        # D or custom / free text
+        if prefix == "D" or len(raw) > 1:
+            self._clear_pending_clarification()
+            return {
+                "mode": "custom",
+                "text": "Continuing with custom request.",
+                "custom_hint": raw,
+            }
+
+        return {"mode": "reminder", "text": self._pending_clarification_reminder()}
+
+    def _pending_clarification_reminder(self) -> str:
+        if self._pending_clarification is None:
+            return ""
+        opts = self._pending_clarification.get("options", [])
+        lines = ["A pending choice requires your response:"]
+        for o in opts:
+            lines.append(f"  {o['label']}) {o['title']}: {o['description']}")
+        lines.append("  D) Other / custom (free text)")
+        return "\n".join(lines)
+
+    def _store_pending_clarification(self, payload: dict[str, Any]) -> None:
+        """Store a clarification produced by a tool for user resolution."""
+        self._pending_clarification = dict(payload)
+        self._pending_clarification_revision = self.session.state_revision
+
+    def _clear_pending_clarification(self) -> None:
+        self._pending_clarification = None
+        self._pending_clarification_revision = None
 
     def check_unsupported_request(self, user_message: str) -> dict[str, Any] | None:
         """Return a refusal response if the user message requests unsupported raw YAML editing."""
@@ -919,7 +1004,7 @@ class GrcAgent:
         target_hint: str | None = None,
         max_candidates: int = 10,
     ) -> ToolResult:
-        """Bounded agentic insert workflow: search, score, try, commit one validated candidate."""
+        """Bounded agentic insert workflow: search, score, try, commit or clarify."""
         from grc_agent.session.auto_insert import auto_insert_block
 
         missing_session = self._missing_session_result("auto_insert_block")
@@ -934,8 +1019,13 @@ class GrcAgent:
             max_candidates=max_candidates,
             catalog_root=self.catalog_root,
         )
+        if payload.get("clarification_required"):
+            # Store for human resolution; no live mutation happened.
+            self._store_pending_clarification(payload)
+            return self._payload_result("auto_insert_block", payload)
         if payload.get("ok"):
             self._record_successful_validation()
+            self._clear_pending_clarification()
         return self._payload_result("auto_insert_block", payload)
 
     def _propose_edit(self, transaction: Any) -> ToolResult:

@@ -52,6 +52,9 @@ def classify_result(
                 return "MODEL_ROUTING"
             return "VALIDATION_GAP"
 
+    if expectations.expect_mutation and result.clarification_requested and not result.mutation_committed:
+        return "PASS_CLARIFICATION_REQUESTED"
+
     if expectations.expect_save and not result.save_graph_called:
         if not result.mutation_attempted:
             return "SAVE_PATH_GAP"

@@ -57,8 +57,9 @@ class ScenarioResult:
     mutation_attempted: bool = False
     mutation_committed: bool = False
 
-    insert_primitive_used: bool = False
-    suggest_compatible_insertions_called: bool = False
+    auto_insert_called: bool = False
+    auto_insert_ok: bool | None = None
+    clarification_requested: bool = False
 
     failure_category: str = "PASS"
     invariant_violations: list[str] = field(default_factory=list)
@@ -78,6 +79,8 @@ class ScenarioResult:
 
 FAILURE_CATEGORIES = frozenset({
     "PASS",
+    "PASS_CLARIFICATION_REQUESTED",
+    "PASS_CLARIFICATION_RESOLVED",
     "INFRA_FAIL",
     "MODEL_ROUTING",
     "MODEL_REASONING",
@@ -92,4 +95,6 @@ FAILURE_CATEGORIES = frozenset({
     "RAW_YAML_GUARD_FAIL",
     "GRAPH_LOAD_FAIL",
     "STOP_THE_LINE",
+    "BAD_CLARIFICATION_OPTIONS",
+    "CLARIFICATION_EXPIRED",
 })

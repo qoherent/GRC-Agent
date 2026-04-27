@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 from grc_agent.agent import GrcAgent
+from grc_agent.runtime.clarification import render_clarification_prompt
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.config import AppConfig, load_app_config
 from grc_agent.doctor import print_doctor_report, run_doctor
@@ -346,6 +347,17 @@ def _run_llama_runtime(
     return _run_repl_loop(agent, client, model, verbose=verbose)
 
 
+def _maybe_render_pending_clarification(agent: GrcAgent) -> bool:
+    """If a pending clarification exists, render it and return True."""
+    if agent._pending_clarification is None:
+        return False
+    prompt_text = render_clarification_prompt(agent._pending_clarification)
+    print()
+    print("--- Clarification required ---")
+    print(prompt_text)
+    return True
+
+
 def _run_single_turn(
     agent: GrcAgent,
     client: LlamaServerClient,
@@ -375,6 +387,9 @@ def _run_single_turn(
         print("\n--- Runtime ---")
         print(result["message"])
 
+    # Check for pending clarification after turn completes
+    _maybe_render_pending_clarification(agent)
+
     _print_history(agent, verbose=verbose)
     return 0 if result["ok"] else 1
 
@@ -402,6 +417,33 @@ def _run_repl_loop(
         if user_input.lower() in ("/quit", "/exit"):
             break
 
+        # If pending clarification exists, resolve before model turn
+        if agent._pending_clarification is not None:
+            resolved = agent.resolve_pending_clarification(user_input)
+            mode = resolved.get("mode")
+            if mode == "executed":
+                tool_result = resolved.get("tool_result", {})
+                ok = tool_result.get("ok")
+                msg = tool_result.get("message", "")
+                print(f"\n--- Executed {'OK' if ok else 'FAILED'} ---")
+                if msg:
+                    print(msg)
+                _maybe_render_pending_clarification(agent)
+                continue
+            elif mode == "expired":
+                print("\n--- Expired ---")
+                print(resolved.get("text", "The question is no longer valid."))
+                continue
+            elif mode == "reminder":
+                print("\n--- Reminder ---")
+                print(resolved.get("text", ""))
+                _maybe_render_pending_clarification(agent)
+                continue
+            elif mode == "custom":
+                # Fall through to normal model flow with the custom text
+                user_input = resolved.get("custom_hint") or user_input
+            # mode == "none" should not happen when _pending_clarification is not None
+
         _print_active_session(agent, verbose=verbose)
 
         try:
@@ -422,6 +464,7 @@ def _run_repl_loop(
             print(f"\n--- Runtime ---\n{result['message']}")
             last_exit_code = 1
 
+        _maybe_render_pending_clarification(agent)
         _print_history(agent, verbose=verbose)
         print()
 

@@ -9,7 +9,8 @@ Relevance policy (hardened):
     If none validate, return safe failure.
 
 - If user goal is generic (e.g. "insert compatible block"):
-    commit the highest-ranked compatible candidate.
+    If exactly one strong candidate validates, commit it.
+    If multiple validated candidates exist, return ClarificationRequest.
 
 - If preferred_block_type is provided:
     only try that block_type (or sub-type if wildcard).
@@ -26,8 +27,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.session.insertion_suggestions import InsertionCandidate, suggest_insertions
 from grc_agent.transaction.apply import apply_edit
+from grc_agent.transaction.rollback import clone_session
+
+
+# How many validated candidates trigger a clarification instead of auto-commit.
+_CLARIFICATION_THRESHOLD = 2
+# Maximum number of options presented in the MCQ (A/B/C).
+_MAX_MCQ_OPTIONS = 3
 
 
 def auto_insert_block(
@@ -45,9 +54,10 @@ def auto_insert_block(
     3. Classify goal (explicit family vs generic vs unsupported).
     4. Filter candidates to matching family when goal is explicit.
     5. Score remaining candidates using generic signals.
-    6. Try top candidates in ranked order via apply_edit (clones internally).
-    7. Commit the first candidate that passes preflight + grcc validation.
-    8. If none succeed, return all attempted candidates with failure reasons.
+    6. Try top candidates on cloned sessions to find validated options.
+    7. If exactly one validates, commit on live session.
+    8. If multiple validate, return clarification with real executable options.
+    9. If none succeed, return safe rejection with diagnostics.
     """
     if session.flowgraph is None:
         return _error("NO_GRAPH_LOADED", "No flowgraph loaded in session.")
@@ -70,7 +80,7 @@ def auto_insert_block(
 
     # Collect candidates from all stream connections
     # For explicit-family goals, fetch more candidates to find matching family members
-    suggest_k = 50 if intent["mode"] == "explicit_family" else 5
+    suggest_k = 500 if intent["mode"] in ("explicit_family", "preferred_type") else 5
     all_candidates: list[tuple[str, InsertionCandidate]] = []
     for conn_id in stream_connections:
         suggestions = suggest_insertions(session, conn_id, k=suggest_k)
@@ -131,30 +141,109 @@ def auto_insert_block(
                 f"No semantically relevant candidate found.",
             )
 
+    # Step 1: Pre-validate candidates on cloned sessions (no live mutation).
+    validated: list[tuple[int, str, InsertionCandidate, dict[str, Any]]] = []
     attempted: list[dict[str, Any]] = []
     for score, conn_id, candidate in ranked:
-        result = _try_candidate(session, conn_id, candidate, catalog_root)
-        entry = {
-            "connection_id": conn_id,
-            "block_type": candidate.block_type,
-            "instance_name": candidate.insert_tool_args.get("instance_name") if candidate.insert_tool_args else None,
-            "score": score,
-            "goal_fit": _candidate_matches_family(candidate, intent.get("family_tokens", [])),
-            "ok": result.get("ok", False),
-            "error_type": result.get("error_type"),
-            "message": result.get("message"),
-        }
+        result = _try_candidate_on_clone(session, conn_id, candidate, catalog_root)
+        entry = _build_attempted_entry(score, conn_id, candidate, result, intent)
         attempted.append(entry)
         if result.get("ok"):
+            validated.append((score, conn_id, candidate, entry))
+            if len(validated) >= _CLARIFICATION_THRESHOLD:
+                break  # enough for clarification or single-commit decision
+        if len(attempted) >= max_candidates:
+            break
+
+    # Step 2: Decision
+    if len(validated) == 0:
+        return _safe_rejection(attempted, intent)
+
+    if len(validated) == 1:
+        # Exactly one strong candidate — commit on live session.
+        _score_val, conn_id, candidate, entry = validated[0]
+        live_result = _try_candidate(session, conn_id, candidate, catalog_root)
+        entry_from_live = _build_attempted_entry(
+            entry["score"], conn_id, candidate, live_result, intent
+        )
+        if live_result.get("ok"):
             return {
                 "ok": True,
                 "message": f"Inserted '{candidate.block_type}' into {conn_id}.",
-                "committed": entry,
-                "attempted": attempted,
-                "attempt_count": len(attempted),
+                "committed": entry_from_live,
+                "attempted": [entry_from_live],
+                "attempt_count": 1,
                 "goal_mode": intent["mode"],
             }
+        # Clone passed but live failed — extremely rare; expand attempted list.
+        full_attempted = list(attempted)
+        full_attempted.append(entry_from_live)
+        return _safe_rejection(full_attempted, intent)
 
+    # len(validated) >= _CLARIFICATION_THRESHOLD
+    return _build_clarification_payload(validated, attempted, goal, intent)
+
+
+# --------------------------------------------------------------------------- #
+# Candidate validation helpers
+# --------------------------------------------------------------------------- #
+
+
+def _try_candidate(
+    session,
+    conn_id: str,
+    candidate: InsertionCandidate,
+    catalog_root: str | None,
+) -> dict[str, Any]:
+    """Try one candidate via apply_edit. Live session is only mutated on success."""
+    if candidate.insert_tool_args is None:
+        return {
+            "ok": False,
+            "message": "Candidate missing insert_tool_args.",
+            "error_type": "MISSING_INSERT_TOOL_ARGS",
+        }
+    transaction = {
+        "op_type": "insert_block_on_connection",
+        "connection_id": conn_id,
+        "block_type": candidate.block_type,
+        "instance_name": candidate.insert_tool_args["instance_name"],
+        "params": candidate.insert_tool_args.get("params", {}),
+    }
+    return apply_edit(session, transaction, catalog_root)
+
+
+def _try_candidate_on_clone(
+    session,
+    conn_id: str,
+    candidate: InsertionCandidate,
+    catalog_root: str | None,
+) -> dict[str, Any]:
+    """Validate one candidate on a cloned session. Does NOT mutate live session."""
+    clone = clone_session(session)
+    return _try_candidate(clone, conn_id, candidate, catalog_root)
+
+
+def _build_attempted_entry(
+    score: int,
+    conn_id: str,
+    candidate: InsertionCandidate,
+    result: dict[str, Any],
+    intent: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a diagnostic entry for one candidate attempt."""
+    return {
+        "connection_id": conn_id,
+        "block_type": candidate.block_type,
+        "instance_name": candidate.insert_tool_args.get("instance_name") if candidate.insert_tool_args else None,
+        "score": score,
+        "goal_fit": _candidate_matches_family(candidate, intent.get("family_tokens", [])),
+        "ok": result.get("ok", False),
+        "error_type": result.get("error_type"),
+        "message": result.get("message"),
+    }
+
+
+def _safe_rejection(attempted: list[dict[str, Any]], intent: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": False,
         "message": f"All {len(attempted)} insertion candidates failed validation.",
@@ -162,8 +251,48 @@ def auto_insert_block(
         "attempted": attempted,
         "error_type": "AUTO_INSERT_ALL_CANDIDATES_FAILED",
         "attempt_count": len(attempted),
-        "goal_mode": intent["mode"],
+        "goal_mode": intent.get("mode"),
     }
+
+
+def _build_clarification_payload(
+    validated: list[tuple[int, str, InsertionCandidate, dict[str, Any]]],
+    attempted: list[dict[str, Any]],
+    goal: str,
+    intent: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a clarification payload from validated candidates. No live mutation."""
+    options: list[ClarificationOption] = []
+    for index, (score, conn_id, candidate, entry) in enumerate(validated[:_MAX_MCQ_OPTIONS]):
+        label = chr(ord("A") + index)
+        options.append(
+            ClarificationOption(
+                label=label,
+                title=f"Insert '{candidate.block_type}' into {conn_id}",
+                description=f"{candidate.reason} (confidence: {candidate.confidence})",
+                tool_name="insert_block_on_connection",
+                tool_args=candidate.insert_tool_args or {},
+                metadata={"score": score, "goal_mode": intent.get("mode"), "connection_id": conn_id},
+            )
+        )
+
+    req = ClarificationRequest(
+        kind="choose_insert_candidate",
+        question="Multiple compatible blocks were found for the goal. Which one should be inserted?",
+        options=options,
+    )
+
+    payload = req.to_dict()
+    payload["ok"] = False
+    payload["attempted"] = attempted
+    payload["attempt_count"] = len(attempted)
+    payload["goal_mode"] = intent.get("mode")
+    return payload
+
+
+# --------------------------------------------------------------------------- #
+# Stream connections
+# --------------------------------------------------------------------------- #
 
 
 def _stream_connections(session) -> list[str]:
@@ -237,7 +366,8 @@ def _classify_goal(goal: str, preferred_block_type: str | None) -> dict[str, Any
 
     # Strip generic framing words
     stripped = re.sub(
-        r"\b(insert|add|put|place|compatible|block|into|the|a|an|some|one|this|that)\b",
+        r"\b(insert|add|put|place|compatible|block|into|the|a|an|some|one|this|that"
+        r"|current|existing|flowgraph|graph|loaded|main|path|signal|stream)\b",
         "",
         goal_lower,
     )
@@ -350,26 +480,3 @@ def _score_candidates(
 
         scored.append((score, conn_id, candidate))
     return scored
-
-
-def _try_candidate(
-    session,
-    conn_id: str,
-    candidate: InsertionCandidate,
-    catalog_root: str | None,
-) -> dict[str, Any]:
-    """Try one candidate via apply_edit. Live session is only mutated on success."""
-    if candidate.insert_tool_args is None:
-        return {
-            "ok": False,
-            "message": "Candidate missing insert_tool_args.",
-            "error_type": "MISSING_INSERT_TOOL_ARGS",
-        }
-    transaction = {
-        "op_type": "insert_block_on_connection",
-        "connection_id": conn_id,
-        "block_type": candidate.block_type,
-        "instance_name": candidate.insert_tool_args["instance_name"],
-        "params": candidate.insert_tool_args.get("params", {}),
-    }
-    return apply_edit(session, transaction, catalog_root)

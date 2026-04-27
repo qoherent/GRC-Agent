@@ -24,7 +24,7 @@ validity.
 
 ## Model-facing contract
 
-Twelve tools, in fixed order:
+Thirteen tools, in fixed order:
 
 1. `new_grc(graph_id="new_flowgraph")`
 2. `load_grc(file_path)`
@@ -34,10 +34,15 @@ Twelve tools, in fixed order:
 6. `describe_block(block_id)`
 7. `suggest_compatible_insertions(connection_id, k=5)`
 8. `insert_block_on_connection(connection_id, block_type, instance_name, params=None)`
-9. `apply_edit(transaction)`
-10. `propose_edit(transaction)`
-11. `validate_graph()`
-12. `save_graph(path=None)`
+9. `auto_insert_block(goal, preferred_block_type=None, target_hint=None, max_candidates=10)`
+10. `apply_edit(transaction)`
+11. `propose_edit(transaction)`
+12. `validate_graph()`
+13. `save_graph(path=None)`
+
+### Clarification Contract v1
+
+`auto_insert_block` may return a data-driven MCQ when multiple validated candidates exist. Options A/B/C come from real executable candidates. D is always custom free text. No mutation occurs until a user selects an option. See `docs/CLARIFICATION_CONTRACT_V1.md`.
 
 Design rules:
 
@@ -66,6 +71,7 @@ Supported and verified today:
 | Removal | `remove_block` on detached blocks, with optional `block_type` disambiguation |
 | Add block | arbitrary catalog blocks via `add_block` with catalog-default parameter filling |
 | Compatible insertion | `suggest_compatible_insertions` returns catalog-backed candidates for a connection; model may use `insert_block_on_connection` when exact args are known, or `apply_edit` for lower-level transactions |
+| Autonomous insertion | `auto_insert_block` performs bounded candidate search, commits one grcc-valid goal-matching candidate, or returns `clarification_required` / safe rejection |
 | Rewire | ordered transactions may disconnect/reconnect within one staged edit |
 | Validation authority | `grcc` is final truth |
 
@@ -100,7 +106,7 @@ Derived rules from real `grcc` probes:
 - guard uses negation detection (`_keyword_is_negated`) to prevent false positives ("do not save" must not require `save_graph`)
 - `llama_server.py` delegates guard calls entirely to agent; no direct guard imports in the adapter layer
 
-## Architecture status — local alpha (frozen 2025-04-25)
+## Architecture status — local alpha (updated 2026-04-27)
 
 Current status: **local alpha ready for daily manual use.**
 
@@ -144,6 +150,7 @@ Do not patch isolated 2B model weirdness.
 
 1. `suggest_compatible_insertions()` — **IMPLEMENTED v1** in `src/grc_agent/session/insertion_suggestions.py`
 2. `insert_block_on_connection()` — **IMPLEMENTED v1** in `src/grc_agent/agent.py` as thin wrapper around `apply_edit`
+3. `auto_insert_block()` — **IMPLEMENTED v1** in `src/grc_agent/session/auto_insert.py`; supports Clarification Contract v1; dtype inference from endpoint params; preferred_type recall with suggest_k=500
 
 ### Backlog (not implemented)
 

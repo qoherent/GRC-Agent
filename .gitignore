@@ -20,3 +20,8 @@ playground/
 # Backups
 *.bak
 
+# grcc output artifacts
+/*.py
+!setup.py
+!conftest.py
+
