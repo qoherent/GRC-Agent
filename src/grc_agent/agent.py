@@ -1062,13 +1062,6 @@ class GrcAgent:
             if self.session.is_dirty:
                 suggestions.append("save_graph")
 
-        if (
-            completed_tool == "save_graph"
-            and self.session.flowgraph is not None
-            and self._last_validation_ok
-        ):
-            suggestions.append("summarize_graph")
-
         return suggestions
 
     def _apply_edit(self, transaction: Any) -> ToolResult:

@@ -576,7 +576,7 @@ def run_bounded_llama_turn(
     *,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Run an unbounded llama.cpp -> runtime loop against one loaded flowgraph."""
+    """Run a bounded llama.cpp -> runtime loop against one loaded flowgraph."""
     if not isinstance(user_message, str) or not user_message.strip():
         raise ValueError("user_message must be a non-empty string.")
 

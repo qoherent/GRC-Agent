@@ -39,7 +39,7 @@ class InsertionSuggestions:
     connection_id: str
     source: PortSpec | None = None
     destination: PortSpec | None = None
-    candidates: list[InsertionCandidate] = None
+    candidates: list[InsertionCandidate] | None = None
     error_type: str | None = None
     message: str | None = None
 

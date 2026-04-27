@@ -97,26 +97,6 @@ class ClarificationRequest:
         )
 
 
-@dataclass
-class ClarificationResolution:
-    """Result of matching a user reply against a pending ClarificationRequest."""
-
-    mode: str  # "none" | "execute" | "custom" | "expired" | "reminder"
-    tool_name: str | None = None
-    tool_args: dict[str, Any] | None = None
-    text: str | None = None
-    clarification_id: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "mode": self.mode,
-            "tool_name": self.tool_name,
-            "tool_args": self.tool_args,
-            "text": self.text,
-            "clarification_id": self.clarification_id,
-        }
-
-
 def render_clarification_prompt(payload: dict[str, Any]) -> str:
     """Render a stored clarification_required payload into a concise human MCQ.
 

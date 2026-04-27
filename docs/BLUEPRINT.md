@@ -42,7 +42,7 @@ Thirteen tools, in fixed order:
 
 ### Clarification Contract v1
 
-`auto_insert_block` may return a data-driven MCQ when multiple validated candidates exist. Options A/B/C come from real executable candidates. D is always custom free text. No mutation occurs until a user selects an option. See `docs/CLARIFICATION_CONTRACT_V1.md`.
+`auto_insert_block` may return a data-driven MCQ when multiple validated candidates exist. Options A/B/C come from real executable candidates. D is always custom free text. No mutation occurs until a user selects an option.
 
 Design rules:
 
@@ -55,7 +55,7 @@ Design rules:
 - invalid candidates never commit; the live session is never corrupted
 - the loop is dumb: no GNU Radio domain knowledge, no prompt regex, no transaction rewriting
 - all recovery hints are fact-driven: graph dependencies, catalog metadata, preflight errors, `grcc` output
-- **Live model capability limit**: the 2B gemma model does not autonomously discover `insert_block_on_connection`. It often cannot use it autonomously. The tool is reliable when exact args are provided. See `docs/LIVE_CAPABILITY_CHECK_V1.md` and `docs/2B_CAPABILITY_PROFILE_V1.md`.
+- **Live model capability limit**: the 2B gemma model does not autonomously discover `insert_block_on_connection`. It often cannot use it autonomously. The tool is reliable when exact args are provided. `auto_insert_block` handles natural-language insertion with clarification/rejection guards.
 - **Verified workflow tools**: `insert_block_on_connection` is implemented as a discoverability wrapper around `apply_edit`. Additional workflow wrappers require separate design review.
 - for insert/add requests, inspect the graph first, then call `suggest_compatible_insertions`, then use `insert_block_on_connection` when exact connection_id and block_type are known, or `apply_edit` for lower-level transactions
 
@@ -101,7 +101,7 @@ Derived rules from real `grcc` probes:
 - malformed wrapped or list-encoded transactions are normalized before execution
 - `add_block` auto-fills missing parameters from catalog defaults
 - adapter has no GNU Radio domain knowledge: transaction detection and batch-stop policy are behind agent API
-- eval harness records `INFRA_FAIL` separately from model failures, retries infra failures once, and persists `run_all` progress for `--resume`
+- eval harness records `INFRA_FAIL` separately from model failures, retries infra failures once; old six-phase suite archived to `scripts/eval/archive/llama_eval_legacy/`
 - turn-completion guard lives behind `GrcAgent` boundary: `init_turn_requirements()`, `record_tool_completion()`, `check_turn_continuation()`
 - guard uses negation detection (`_keyword_is_negated`) to prevent false positives ("do not save" must not require `save_graph`)
 - `llama_server.py` delegates guard calls entirely to agent; no direct guard imports in the adapter layer
@@ -155,9 +155,9 @@ Do not patch isolated 2B model weirdness.
 ### Backlog (not implemented)
 
 1. Stable `block_uid` for duplicate instance-name edits
-3. Stronger backend/model comparison
-4. Richer catalog descriptions
-5. Optional `new_grc(path=...)` UX improvement
+2. Stronger backend/model comparison
+3. Richer catalog descriptions
+4. Optional `new_grc(path=...)` UX improvement
 
 ## Eval baseline (2025-04-25, cleanup pass)
 
@@ -226,13 +226,11 @@ STOP_THE_LINE: 0
 
 Insertion helper called zero times across all 8 insertion tasks. Model always jumps directly to `apply_edit`. This is a model-size routing limitation, not a tool gap.
 
-See `docs/INTERACTIVE_PLANNING_EVAL_V1.md` for full results.
-
 ## Refactor Audit v1 (2025-04-26)
 
 Maintainability review of the entire codebase. Primary finding: `agent.py` at 2,025 lines is large due to mixed responsibilities (prompt + schemas + execution + normalization). Recommended extraction of tool schemas, prompt builder, and transaction normalization into separate modules — behavior-preserving only.
 
-No refactors applied yet. See `docs/REFACTOR_AUDIT_V1.md` for full analysis and priority list.
+No refactors applied yet.
 
 ## Vision / mmproj policy
 
@@ -261,8 +259,6 @@ uv run grc-agent chat tests/data/random_bit_generator.grc --message "Summarize t
 uv run grc-agent chat --message "Create a new flowgraph called test_graph and summarize it."
 ```
 
-See `docs/REAL_USAGE_LOG_V1.md` for full report.
-
 ## Harness v2 (2025-04-25)
 
 Eval infrastructure with invariant auditing and state-aware classification.
@@ -274,8 +270,6 @@ Eval infrastructure with invariant auditing and state-aware classification.
 - Confirmed: no unsafe mutations, no graph corruption, no wrong-file overwrites
 - Repeated patterns: save path omission (5), insertion knowledge gap (4)
 
-See `docs/HARNESS_V2.md` for full harness docs and scenario results.
-
 ## Targeted Fix Pass 1 (2025-04-25)
 
 Evidence-backed fixes only — no broad changes, no overfitting.
@@ -286,8 +280,6 @@ Evidence-backed fixes only — no broad changes, no overfitting.
 - Zero STOP_THE_LINE before and after fixes
 - Zero production runtime regressions
 
-See `docs/TARGETED_FIX_PASS1.md` for full report.
-
 ## Targeted Improvement Pass 2 (2025-04-25)
 
 Investigated compatible insertion failures without adding runtime tools.
@@ -297,9 +289,7 @@ Investigated compatible insertion failures without adding runtime tools.
 - Oracle result: 285 stream middle-block candidates, 202 with full defaults
 - Model behavior: model picks hardware blocks (`uhd_rfnoc_*`) and ignores context tools
 - Root cause: model-size limitation (2B cannot use context effectively), not missing tool
-- Decision: `suggest_compatible_insertions()` — **IMPLEMENTED** in pass-2 investigation; see `docs/COMPATIBLE_INSERTION_HELPER_V1.md`
-- Memo: `docs/COMPATIBLE_INSERTION_MEMO.md`
-- Report: `docs/TARGETED_IMPROVEMENT_PASS2.md`
+- Decision: `suggest_compatible_insertions()` — **IMPLEMENTED** in pass-2 investigation
 - No production runtime changes at the time (helper was added later)
 - Invariant violations: 0
 
@@ -309,8 +299,6 @@ Investigated compatible insertion failures without adding runtime tools.
 - **Gemma 4 E4B Q2**: tested on 32 cases, 22/32 PASS (69%), 0 STOP_THE_LINE — no meaningful improvement in insertion
 - **Current default**: `unsloth/gemma-4-E2B-it-GGUF` (2B Q4) retained as smallest, fastest, most stable
 - mmproj disabled when supported via runtime `--no-mmproj` detection
-
-See `docs/BACKEND_COMPARISON_V1.md` for full setup log, failure analysis, and comparison protocol.
 
 ## External Corpus v3 (2025-04-26)
 
@@ -323,8 +311,6 @@ Broader graph coverage tool-chain check — 20 additional GNU Radio example grap
 - Compatible insertion helper: 17/17 PASS (3 message-only SKIP)
 - Message port detection: 7/7 graphs correctly detected
 - No new tool gaps, no STOP_THE_LINE, no data loss
-
-See `docs/CORPUS_EVAL_V3.md` for full results.
 
 ## Cheating removal record
 
@@ -350,31 +336,13 @@ Reliable:
 - Simple single-parameter edits
 
 Partial:
+- Natural-language insertion through `auto_insert_block` — works for tested throttle/head cases; may return `clarification_required` (MCQ) or safe rejection
 - Insert with exact args (verified tool works; model cannot synthesize args autonomously)
 
 Unreliable:
-- Natural-language insertion from vague prompt
 - Multi-step graph creation
 - Copying structured tool output fields into another call
 
-Tool-only:
+Tool-only (reliable, exact-args required):
 - `insert_block_on_connection` (needs exact connection_id, block_type, params)
 - `suggest_compatible_insertions` (needs exact connection_id; returns copyable `insert_tool_args`)
-
-Full profile: `docs/2B_CAPABILITY_PROFILE_V1.md`
-
-## Standard gates
-
-- `uv run ruff check`
-- `uv run python -m unittest`
-- `uv run grc-agent fake tests/data/random_bit_generator.grc`
-
-## Verification commands
-
-```bash
-uv run ruff check
-uv run python -m unittest
-uv run grc-agent doctor
-uv run grc-agent chat tests/data/random_bit_generator.grc --message "Summarize the graph."
-uv run grc-agent chat --message "Create a new flowgraph called test_graph and summarize it."
-```

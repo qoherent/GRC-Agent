@@ -125,7 +125,6 @@ class TransactionNormalizer:
         return value
 
     @staticmethod
-    @staticmethod
     def _normalize_transaction_key(key: Any) -> Any:
         if not isinstance(key, str):
             return key

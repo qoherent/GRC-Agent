@@ -15,8 +15,8 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - the model-facing runtime now keeps the tools smart and the loop dumb: `agent.py` owns routing rules, follow-up hints, and transaction normalization while `llama_server.py` stays thin
 - a thin llama.cpp adapter is wired for single-turn and multi-turn CLI conversations
 - `chat` owns **concurrency-safe local llama.cpp startup** using file locking to prevent process races
-- the live llama.cpp eval suite now covers phases 1-6, including multi-turn continuity, failure-recovery flows, and compound workflows; see `docs/LLAMA_EVAL.md` for the latest evidence
-- latest full live sweep: `uv run python -m tests.llama_eval.run_all` -> **191/198** (Phase 1 `40/40`, Phase 5 `8/8`, Phase 6 `27/28`)
+- the live llama.cpp eval suite was trimmed from 198 cases to two tiers: Tier 1 (15 cases, daily) and Tier 2 (35 cases, release-time); see `docs/LLAMA_EVAL_TRIM_V1.md` for the methodology and results
+- latest Tier 1 sweep: `uv run python -m tests.llama_eval.tier1_live --quick`
 - multi-turn conversations use proactive history compaction (100k char default, configurable via `[agent]`) and session auto-refresh to control prompt growth
 - raw model prose is still not trusted outside the runtime's deterministic finalization rules for supported flows
 
@@ -26,7 +26,7 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 - [grc_agent.toml](grc_agent.toml): workspace override config for llama.cpp defaults when running from the repo
 - [tests](tests): focused `unittest` regression coverage
 - [tests/data/random_bit_generator.grc](tests/data/random_bit_generator.grc): canonical fixture flowgraph
-- [tests/llama_eval](tests/llama_eval): six-phase live model eval suite plus `run_all.py` convenience runner
+- [tests/llama_eval](tests/llama_eval): two-tier live model eval suite (`tier1_live.py` daily, `tier2_release.py` release-time); legacy archived to `scripts/eval/archive/llama_eval_legacy/`
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture, settled decisions, evidence, milestones, and backlog
 
 ## Planning Rule
@@ -250,7 +250,6 @@ For the current supported slice, correctness comes from the bounded runtime cont
 Use the packaged CLI entrypoint directly:
 
 ```bash
-uv run python scripts/check_env.py
 uv run grc-agent doctor
 uv run ruff check
 uv run python -m unittest
@@ -259,7 +258,7 @@ uv run grc-agent fake tests/data/random_bit_generator.grc
 
 What to expect:
 
-- `check_env.py` passes Python, `grcc`, and GNU Radio version checks
+- `grc-agent doctor` passes Python, `grcc`, and GNU Radio version checks
 - `grc-agent doctor` passes Python, `grcc`, GNU Radio, config, and retrieval readiness checks
 - `ruff check` is clean
 - `python -m unittest` passes the current regression suite
@@ -281,19 +280,14 @@ What to expect:
   uv run python -m unittest tests.test_llama_server_live
   ```
 - the env-gated live llama module now covers CLI cold-start, CLI reuse, a real live edit flow, summarize, and structured edit failure
-- the non-gating reliability matrix is:
-  ```bash
-  GRC_AGENT_LIVE_LLAMA_URL=http://127.0.0.1:8080 \
-  GRC_AGENT_LIVE_LLAMA_MODEL=unsloth/gemma-4-E2B-it-GGUF \
-  uv run python scripts/llama_reliability_matrix.py
-  ```
+- live model eval uses the two-tier suite: `uv run python -m tests.llama_eval.tier1_live --quick` (daily) and `uv run python -m tests.llama_eval.tier2_release --quick` (release-time)
 - the supported live cases are summarize, routed `apply_edit` success, and routed edit failure staying structured
 - GitHub Actions repeats the fast lint gate and a GNU-backed validation job on Ubuntu
 
 ## Safety Rules
 
 - the model never edits raw `.grc` YAML directly
-- all meaningful mutations flow through `FlowgraphSession`
+- all meaningful mutations go through verified tools (`apply_edit`, `insert_block_on_connection`, `auto_insert_block`) which stage changes on copied sessions, validate, then commit to the internal `FlowgraphSession` only if valid
 - the runtime save path is blocked until the current dirty state has passed validation
 - structural APIs only widen when a new experiment pass justifies them
 - final graph validity is established explicitly through `validate()`
