@@ -1,7 +1,7 @@
 """API probe script to compare GNU Radio official GRC API with our custom code.
 
 Run from project root with:
-    GRC_BLOCKS_PATH=/usr/share/gnuradio/grc/blocks python3 tests/probes/grc_api_probe.py
+    GRC_BLOCKS_PATH=/usr/share/gnuradio/grc/blocks python3 scripts/probes/grc_api_probe.py
 
 This is a research probe only — not part of production.
 """

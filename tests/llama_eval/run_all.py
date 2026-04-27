@@ -20,7 +20,7 @@ from tests.llama_eval import (
 )
 
 _ALL_PHASES = {1, 2, 3, 4, 5, 6}
-_DEFAULT_RESULTS_FILE = ".llama_eval/run_all_results.json"
+_DEFAULT_RESULTS_FILE = "/tmp/.llama_eval/run_all_results.json"
 
 
 def _parse_phases(value: str) -> set[int]:

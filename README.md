@@ -24,10 +24,9 @@ Local GNU Radio `.grc` assistant focused on safe, validated, local-first edits.
 
 - [src/grc_agent](src/grc_agent): retrieval, session, validation, transaction, runtime, and CLI package code
 - [grc_agent.toml](grc_agent.toml): workspace override config for llama.cpp defaults when running from the repo
-- [docs/PACKAGE_GUIDE.md](docs/PACKAGE_GUIDE.md): concise script-by-script map of the Python package
 - [tests](tests): focused `unittest` regression coverage
 - [tests/data/random_bit_generator.grc](tests/data/random_bit_generator.grc): canonical fixture flowgraph
-- [tests/llama_eval](tests/llama_eval): six-phase live model eval suite plus `run_all.py` convenience runner (see [docs/LLAMA_EVAL.md](docs/LLAMA_EVAL.md))
+- [tests/llama_eval](tests/llama_eval): six-phase live model eval suite plus `run_all.py` convenience runner
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): architecture, settled decisions, evidence, milestones, and backlog
 
 ## Planning Rule

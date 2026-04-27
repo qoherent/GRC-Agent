@@ -1,7 +1,7 @@
 """Comprehensive GNU API wrapper comparison against our parser.
 
 Run with:
-    PYTHONPATH=src python3 tests/probes/gnu_wrapper_full_comparison.py
+    PYTHONPATH=src python3 scripts/probes/gnu_wrapper_full_comparison.py
 
 Produces a Markdown report on stdout.
 """
