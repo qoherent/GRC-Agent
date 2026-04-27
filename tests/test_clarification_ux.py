@@ -68,6 +68,42 @@ def _build_float_graph_agent() -> GrcAgent:
     return agent
 
 
+def _seed_clarification(agent: GrcAgent) -> None:
+    req = ClarificationRequest(
+        kind="choose_insert_candidate",
+        question="Which block should be inserted?",
+        options=[
+            ClarificationOption(
+                label="A",
+                title="Insert blocks_head into src_0:0->throttle_0:0",
+                description="confidence: high",
+                tool_name="insert_block_on_connection",
+                tool_args={
+                    "connection_id": "src_0:0->throttle_0:0",
+                    "block_type": "blocks_head",
+                    "instance_name": "head_0",
+                    "params": {"type": "float", "num_items": "1024"},
+                },
+            ),
+            ClarificationOption(
+                label="B",
+                title="Insert blocks_throttle2 into throttle_0:0->sink_0:0",
+                description="confidence: high",
+                tool_name="insert_block_on_connection",
+                tool_args={
+                    "connection_id": "throttle_0:0->sink_0:0",
+                    "block_type": "blocks_throttle2",
+                    "instance_name": "throttle_1",
+                    "params": {"type": "float", "samples_per_second": "32000"},
+                },
+            ),
+        ],
+        custom_option=CustomClarificationOption(label="D", title="Other / custom"),
+        clarification_id="seeded-test-id",
+    )
+    agent._store_pending_clarification(req.to_dict())
+
+
 class RendererTests(unittest.TestCase):
     def _sample_payload(self) -> dict[str, Any]:
         req = ClarificationRequest(
@@ -148,6 +184,60 @@ class PendingReplyRoutingTests(unittest.TestCase):
             "max_candidates": 10,
         })
         return result
+
+    def test_exact_label_variants_execute_option_a(self) -> None:
+        for reply in ("A", "A)", "A."):
+            with self.subTest(reply=reply):
+                agent = _build_float_graph_agent()
+                _seed_clarification(agent)
+                before = len(agent.session.flowgraph.blocks)
+
+                resolved = agent.resolve_pending_clarification(reply)
+
+                self.assertEqual(resolved["mode"], "executed")
+                self.assertTrue(resolved["tool_result"].get("ok"))
+                self.assertEqual(len(agent.session.flowgraph.blocks), before + 1)
+                self.assertIsNone(agent._pending_clarification)
+                self.assertTrue(
+                    any(
+                        turn.get("role") == "assistant"
+                        and turn.get("clarification_selection", {}).get("label") == "A"
+                        and turn.get("tool_calls")
+                        for turn in agent.history
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        turn.get("role") == "tool"
+                        and turn.get("name") == "insert_block_on_connection"
+                        for turn in agent.history
+                    )
+                )
+
+    def test_long_text_starting_with_a_is_custom_not_option_a(self) -> None:
+        _seed_clarification(self.agent)
+        before = [b.instance_name for b in self.agent.session.flowgraph.blocks]
+
+        resolved = self.agent.resolve_pending_clarification(
+            "Actually use a different placement"
+        )
+
+        self.assertEqual(resolved["mode"], "custom")
+        after = [b.instance_name for b in self.agent.session.flowgraph.blocks]
+        self.assertEqual(before, after)
+        self.assertIsNone(self.agent._pending_clarification)
+
+    def test_invalid_exact_label_keeps_pending_and_no_mutation(self) -> None:
+        _seed_clarification(self.agent)
+        before = [b.instance_name for b in self.agent.session.flowgraph.blocks]
+
+        resolved = self.agent.resolve_pending_clarification("C")
+
+        self.assertEqual(resolved["mode"], "reminder")
+        self.assertIn("not a valid option", resolved["text"])
+        after = [b.instance_name for b in self.agent.session.flowgraph.blocks]
+        self.assertEqual(before, after)
+        self.assertIsNotNone(self.agent._pending_clarification)
 
     def test_user_reply_a_executes_option_a(self) -> None:
         result = self._trigger_clarification()

@@ -168,7 +168,7 @@ TIER1_CASES: list[Tier1Case] = [
     Tier1Case(
         category="clarification",
         name="clarification_triggered",
-        prompt="use auto_insert_block to add a throttle",
+        prompt="Use auto_insert_block to insert a compatible block; if multiple safe choices validate, ask me to choose.",
         expected_tools=["auto_insert_block"],
         accept_outcomes=("PASS", "PASS_CLARIFICATION"),
         description="MCQ clarification should appear for multi-placement",

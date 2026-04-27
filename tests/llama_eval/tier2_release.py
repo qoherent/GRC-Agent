@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tier 2 release model eval: broader coverage for release-time checks.
 
-35 cases selected from the original phase 1-6 suite, updated for
+36 cases selected from the original phase 1-6 suite, updated for
 the current tool contract. Run only at release time or manually.
 
 Run:
@@ -47,7 +47,7 @@ class Tier2Case:
 
 
 TIER2_CASES: list[Tier2Case] = [
-    # Single-tool routing (one per tool)
+    # Representative single-tool routing coverage.
     Tier2Case("summarize", "summarize_what_does", "What does this flowgraph do?", ["summarize_graph"]),
     Tier2Case("summarize", "summarize_blocks", "What blocks are in here?", ["summarize_graph"]),
     Tier2Case("load", "load_other", "Switch over to this other flowgraph: {target_path}", ["load_grc"], fixture_name="random_bit_generator_dual_sink.grc"),

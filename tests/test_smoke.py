@@ -1,6 +1,7 @@
 """Lightweight smoke tests for daily-use prototype validation.
 
-No model backend required. All tests run in under a few seconds.
+Most tests do not require a model backend. The chat CLI smoke only checks that
+startup reaches active-session rendering before any backend failure is reported.
 """
 
 import subprocess

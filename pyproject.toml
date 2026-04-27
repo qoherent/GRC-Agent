@@ -29,4 +29,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.ruff]
-extend-exclude = ["Temp", "tests/data/random_bit_generator.py"]
+extend-exclude = ["Temp"]

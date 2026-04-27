@@ -83,17 +83,6 @@ def _is_template(value: str | None) -> bool:
     return value is not None and "${" in value
 
 
-def _port_compatible(port: NormalizedPort, spec: PortSpec) -> bool:
-    if port.domain and spec.domain and port.domain != spec.domain:
-        return False
-    if not _is_template(port.dtype) and spec.dtype and port.dtype != spec.dtype:
-        return False
-    if not _is_template(str(port.vlen)) and spec.vlen is not None:
-        if str(port.vlen) != str(spec.vlen):
-            return False
-    return True
-
-
 def _has_safe_defaults(
     desc: BlockDescription, resolved_dtype: str | None = None
 ) -> tuple[bool, dict[str, Any], list[str]]:

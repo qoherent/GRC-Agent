@@ -168,29 +168,47 @@ class GrcAgent:
         if not raw:
             return {"mode": "reminder", "text": self._pending_clarification_reminder()}
 
-        # Quick A/B/C/D check on the first character / prefix
-        upper = raw.upper()
-        prefix = upper[0] if upper else ""
+        req = ClarificationRequest.from_dict(self._pending_clarification)
+        selected_label = self._parse_clarification_option_label(
+            raw,
+            labels={opt.label for opt in req.options},
+        )
 
-        if prefix in "ABC":
-            req = ClarificationRequest.from_dict(self._pending_clarification)
+        if selected_label is not None:
             for opt in req.options:
-                if opt.label == prefix:
+                if opt.label.upper() == selected_label:
+                    tool_call_id = self._record_clarification_option_call(raw, opt)
                     result = self.execute_tool(opt.tool_name, opt.tool_args)
+                    self._record_clarification_option_result(
+                        tool_call_id,
+                        opt.tool_name,
+                        result,
+                    )
                     self._clear_pending_clarification()
                     return {"mode": "executed", "tool_result": result}
+
+        label_reply = self._parse_clarification_option_label(
+            raw,
+            labels={"A", "B", "C"},
+        )
+        if label_reply is not None:
             # Label in message but not matching any stored option
             return {
                 "mode": "reminder",
                 "text": (
-                    f"'{prefix}' is not a valid option. "
+                    f"'{label_reply}' is not a valid option. "
                     f"Choose one of: {', '.join(o.label for o in req.options)}. "
                     f"Or use D / free text to describe what you want instead."
                 ),
             }
 
         # D or custom / free text
-        if prefix == "D" or len(raw) > 1:
+        custom_label = req.custom_option.label.upper()
+        custom_selected = self._parse_clarification_option_label(
+            raw,
+            labels={custom_label},
+        )
+        if custom_selected == custom_label or len(raw) > 1:
             self._clear_pending_clarification()
             return {
                 "mode": "custom",
@@ -199,6 +217,70 @@ class GrcAgent:
             }
 
         return {"mode": "reminder", "text": self._pending_clarification_reminder()}
+
+    @staticmethod
+    def _parse_clarification_option_label(
+        raw: str,
+        *,
+        labels: set[str],
+    ) -> str | None:
+        token = raw.strip().upper()
+        if not token:
+            return None
+        if len(token) == 2 and token[1] in ").":
+            token = token[0]
+        if len(token) == 1 and token in {label.upper() for label in labels}:
+            return token
+        return None
+
+    def _record_clarification_option_call(
+        self,
+        raw_reply: str,
+        option: Any,
+    ) -> str:
+        clarification_id = ""
+        if self._pending_clarification is not None:
+            clarification_id = str(
+                self._pending_clarification.get("clarification_id") or "pending"
+            )
+        tool_call_id = f"clarification_{clarification_id}_{option.label}"
+        self.history.append({"role": "user", "content": raw_reply})
+        self.history.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "clarification_selection": {
+                    "label": option.label,
+                    "clarification_id": clarification_id,
+                },
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": option.tool_name,
+                            "arguments": json.dumps(option.tool_args, sort_keys=True),
+                        },
+                    }
+                ],
+            }
+        )
+        return tool_call_id
+
+    def _record_clarification_option_result(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        result: dict[str, Any],
+    ) -> None:
+        self.history.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result,
+            }
+        )
 
     def _pending_clarification_reminder(self) -> str:
         if self._pending_clarification is None:

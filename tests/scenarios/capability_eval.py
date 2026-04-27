@@ -20,9 +20,9 @@ from grc_agent.flowgraph_session import FlowgraphSession
 FIXTURE = Path(__file__).resolve().parent.parent / "data" / "random_bit_generator.grc"
 
 
-def _load_agent() -> GrcAgent:
+def _load_agent(path: Path = FIXTURE) -> GrcAgent:
     session = FlowgraphSession()
-    session.load(FIXTURE)
+    session.load(path)
     return GrcAgent(session)
 
 
@@ -33,7 +33,7 @@ class CapabilityEvalBase(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.copy_path = Path(self.tmpdir) / "graph.grc"
         shutil.copy(FIXTURE, self.copy_path)
-        self.agent = _load_agent()
+        self.agent = _load_agent(self.copy_path)
         self.session: FlowgraphSession = self.agent.session
 
     def tearDown(self) -> None:
@@ -45,7 +45,7 @@ class CapabilityEvalBase(unittest.TestCase):
         self.assertTrue(r.get("ok"), f"save failed: {r.get('message')}")
         return path
 
-    def _grcc_validate(self, path: str) -> bool:
+    def _grcc_validate(self) -> bool:
         r = self.agent.execute_tool("validate_graph", {})
         return bool(r.get("ok") and r.get("valid"))
 
@@ -89,7 +89,7 @@ class ParameterEditTests(CapabilityEvalBase):
             }
         })
         self.assertTrue(r.get("ok"), r.get("message"))
-        self.assertTrue(self._grcc_validate(str(self.copy_path)))
+        self.assertTrue(self._grcc_validate())
 
     def test_preview_change_sample_rate(self) -> None:
         r = self.agent.execute_tool("propose_edit", {
@@ -134,7 +134,7 @@ class InsertBlockTests(CapabilityEvalBase):
             }
         })
         self.assertTrue(r.get("ok"), r.get("message"))
-        self.assertTrue(self._grcc_validate(str(self.copy_path)))
+        self.assertTrue(self._grcc_validate())
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +163,7 @@ class AddSinkSourceTests(CapabilityEvalBase):
             ]
         })
         self.assertTrue(r.get("ok"), r.get("message"))
-        self.assertTrue(self._grcc_validate(str(self.copy_path)))
+        self.assertTrue(self._grcc_validate())
 
     def test_add_qt_time_sink_incompatible_type(self) -> None:
         # byte source cannot directly connect to float time sink
@@ -211,12 +211,13 @@ class AddFilterTests(CapabilityEvalBase):
 # --------------------------------------------------------------------------- #
 
 class CreateFromEmptyTests(unittest.TestCase):
-    @unittest.skip("Empty-session creation requires new_graph tool (future)")
     def test_create_source_throttle_sink_and_validate(self) -> None:
         tmpdir = tempfile.mkdtemp()
         try:
             session = FlowgraphSession()
             agent = GrcAgent(session)
+            new_result = agent.execute_tool("new_grc", {"graph_id": "created_source_throttle_sink"})
+            self.assertTrue(new_result.get("ok"), new_result.get("message"))
             r = agent.execute_tool("apply_edit", {
                 "transaction": [
                     {
@@ -264,12 +265,13 @@ class CreateFromEmptyTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    @unittest.skip("Empty-session creation requires new_graph tool (future)")
     def test_create_sine_source_graph(self) -> None:
         tmpdir = tempfile.mkdtemp()
         try:
             session = FlowgraphSession()
             agent = GrcAgent(session)
+            new_result = agent.execute_tool("new_grc", {"graph_id": "created_sine_source"})
+            self.assertTrue(new_result.get("ok"), new_result.get("message"))
             r = agent.execute_tool("apply_edit", {
                 "transaction": [
                     {
@@ -354,7 +356,7 @@ class AutoInsertAgenticTests(CapabilityEvalBase):
             # Must be dirty after insert
             self.assertTrue(self.session.is_dirty)
             # Must validate successfully with grcc
-            valid = self._grcc_validate(str(self.copy_path))
+            valid = self._grcc_validate()
             self.assertTrue(valid)
         else:
             # Safe rejection: graph unchanged
