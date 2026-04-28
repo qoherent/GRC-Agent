@@ -28,10 +28,11 @@ options:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [8, 8]
+    coordinate:
+    - 8
+    - 8
     rotation: 0
     state: enabled
-
 blocks:
 - name: samp_rate
   id: variable
@@ -42,7 +43,9 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [184, 12]
+    coordinate:
+    - 184
+    - 12
     rotation: 0
     state: enabled
 - name: analog_random_source_x_0
@@ -62,7 +65,9 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [120, 144.0]
+    coordinate:
+    - 120
+    - 144.0
     rotation: 0
     state: enabled
 - name: blocks_char_to_float_0
@@ -79,7 +84,9 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [624, 168.0]
+    coordinate:
+    - 624
+    - 168.0
     rotation: 0
     state: enabled
 - name: blocks_throttle2_0
@@ -100,7 +107,9 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [424, 160.0]
+    coordinate:
+    - 424
+    - 160.0
     rotation: 0
     state: enabled
 - name: qtgui_time_sink_x_0
@@ -197,15 +206,24 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [848, 152.0]
+    coordinate:
+    - 848
+    - 152.0
     rotation: 0
     state: enabled
-
 connections:
-- [analog_random_source_x_0, '0', blocks_throttle2_0, '0']
-- [blocks_char_to_float_0, '0', qtgui_time_sink_x_0, '0']
-- [blocks_throttle2_0, '0', blocks_char_to_float_0, '0']
-
+- - analog_random_source_x_0
+  - '0'
+  - blocks_throttle2_0
+  - '0'
+- - blocks_char_to_float_0
+  - '0'
+  - qtgui_time_sink_x_0
+  - '0'
+- - blocks_throttle2_0
+  - '0'
+  - blocks_char_to_float_0
+  - '0'
 metadata:
   file_format: 1
   grc_version: 3.10.9.2

@@ -224,6 +224,40 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
             ],
         )
 
+    def test_doctor_does_not_start_llama_by_default(self) -> None:
+        with mock.patch(
+            "grc_agent.cli.run_doctor",
+            return_value={"ok": True, "checks": [], "summary": "ok"},
+        ) as run_doctor_mock:
+            exit_code, _ = self._run_cli("doctor", "--skip-retrieval")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_doctor_mock.call_args.kwargs["check_llama"], False)
+
+    def test_doctor_start_llama_opts_into_llama_check(self) -> None:
+        with mock.patch(
+            "grc_agent.cli.run_doctor",
+            return_value={"ok": True, "checks": [], "summary": "ok"},
+        ) as run_doctor_mock:
+            exit_code, _ = self._run_cli("doctor", "--skip-retrieval", "--start-llama")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_doctor_mock.call_args.kwargs["check_llama"], True)
+
+    def test_tool_subcommand_reports_missing_file_without_traceback(self) -> None:
+        exit_code, output = self._run_cli(
+            "tool",
+            "summarize_graph",
+            "--file",
+            "/tmp/does-not-exist-for-grc-agent.grc",
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_type"], "file_load_error")
+        self.assertIn("does-not-exist-for-grc-agent.grc", payload["message"])
+
     def test_legacy_fake_flag_still_routes_to_phase_six_fake_mode(self) -> None:
         exit_code, output = self._run_cli("--fake", str(self._fixture_path()))
 

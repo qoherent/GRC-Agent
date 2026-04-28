@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import shutil
+import tempfile
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -17,6 +19,9 @@ from grc_agent.runtime.tool_schemas import build_tool_schemas
 
 FIXTURE = Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 TX_STAGE0 = Path("/usr/share/gnuradio/examples/digital/packet/tx_stage0.grc")
+DIAL_TONE = Path("/usr/share/gnuradio/examples/audio/dial_tone.grc")
+SELECTOR = Path("/usr/share/gnuradio/examples/blocks/selector.grc")
+GRFREEDV = Path("/usr/share/gnuradio/examples/vocoder/grfreedv.grc")
 
 
 def _error_contains(result: dict, text: str) -> bool:
@@ -24,6 +29,27 @@ def _error_contains(result: dict, text: str) -> bool:
     if isinstance(errors, dict):
         errors = [errors]
     return any(text in str(e.get("message", "")) or text in str(e) for e in errors)
+
+
+def _variable_value(session: FlowgraphSession, instance_name: str) -> object:
+    for block in session.flowgraph.blocks:
+        if block.instance_name == instance_name and block.block_type == "variable":
+            return (block.params.get("parameters") or {}).get("value")
+    return None
+
+
+def _block_param_value(session: FlowgraphSession, instance_name: str, param: str) -> object:
+    for block in session.flowgraph.blocks:
+        if block.instance_name == instance_name:
+            return (block.params.get("parameters") or {}).get(param)
+    return None
+
+
+def _block_state(session: FlowgraphSession, instance_name: str) -> object:
+    for block in session.flowgraph.blocks:
+        if block.instance_name == instance_name:
+            return (block.params.get("states") or {}).get("state")
+    return None
 
 
 class TopLevelInsertToolTests(unittest.TestCase):
@@ -37,11 +63,28 @@ class TopLevelInsertToolTests(unittest.TestCase):
         schemas = build_tool_schemas()
         names = [s["function"]["name"] for s in schemas]
         self.assertIn("insert_block_on_connection", names)
+        self.assertIn("remove_connection", names)
         idx_insert = names.index("insert_block_on_connection")
         idx_suggest = names.index("suggest_compatible_insertions")
+        idx_remove = names.index("remove_connection")
         idx_apply = names.index("apply_edit")
         self.assertLess(idx_suggest, idx_insert)
         self.assertLess(idx_insert, idx_apply)
+        self.assertLess(idx_remove, idx_apply)
+
+    def test_remove_connection_wraps_verified_edit(self) -> None:
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "remove_connection",
+            {"connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0"},
+        )
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result["tool"], "remove_connection")
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertFalse(session.is_dirty)
 
     def test_tool_wraps_exact_insert_transaction(self) -> None:
         agent, session = self._load_agent()
@@ -75,6 +118,123 @@ class TopLevelInsertToolTests(unittest.TestCase):
         })
         self.assertEqual(r1.get("ok"), r2.get("ok"))
         self.assertEqual(r1.get("error_type"), r2.get("error_type"))
+
+    def test_installed_example_samp_rate_edit_uses_verified_apply_edit(self) -> None:
+        if not DIAL_TONE.exists():
+            self.skipTest("dial_tone.grc not available")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = Path(tmpdir) / DIAL_TONE.name
+            shutil.copy2(DIAL_TONE, graph_path)
+            session = FlowgraphSession()
+            session.load(graph_path)
+            agent = GrcAgent(session)
+
+            result = agent.execute_tool(
+                "apply_edit",
+                {
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "samp_rate",
+                        "params": {"value": "44100"},
+                    }
+                },
+            )
+
+            self.assertTrue(result.get("ok"), result)
+            self.assertTrue(session.is_dirty)
+            self.assertEqual(_variable_value(session, "samp_rate"), "44100")
+            validate = agent.execute_tool("validate_graph", {})
+            self.assertTrue(validate.get("ok"), validate)
+            self.assertTrue(validate.get("valid"), validate)
+
+    def test_installed_example_edit_validate_save_copy_uses_verified_tools(self) -> None:
+        if not SELECTOR.exists():
+            self.skipTest("selector.grc not available")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = Path(tmpdir) / SELECTOR.name
+            save_path = Path(tmpdir) / "selector_saved.grc"
+            shutil.copy2(SELECTOR, graph_path)
+            session = FlowgraphSession()
+            session.load(graph_path)
+            agent = GrcAgent(session)
+
+            edit = agent.execute_tool(
+                "apply_edit",
+                {
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "samp_rate",
+                        "params": {"value": "48000"},
+                    }
+                },
+            )
+            validate = agent.execute_tool("validate_graph", {})
+            save = agent.execute_tool("save_graph", {"path": str(save_path)})
+
+            reloaded = FlowgraphSession()
+            reloaded.load(save_path)
+            reloaded_validation = GrcAgent(reloaded).execute_tool("validate_graph", {})
+
+            self.assertTrue(edit.get("ok"), edit)
+            self.assertTrue(validate.get("valid"), validate)
+            self.assertTrue(save.get("ok"), save)
+            self.assertFalse(session.is_dirty)
+            self.assertEqual(_variable_value(reloaded, "samp_rate"), "48000")
+            self.assertTrue(reloaded_validation.get("valid"), reloaded_validation)
+
+    def test_installed_example_signal_source_param_edit_uses_verified_apply_edit(self) -> None:
+        if not SELECTOR.exists():
+            self.skipTest("selector.grc not available")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = Path(tmpdir) / SELECTOR.name
+            shutil.copy2(SELECTOR, graph_path)
+            session = FlowgraphSession()
+            session.load(graph_path)
+            agent = GrcAgent(session)
+
+            result = agent.execute_tool(
+                "apply_edit",
+                {
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "analog_sig_source_x_0",
+                        "params": {"amp": "0.5"},
+                    }
+                },
+            )
+            validate = agent.execute_tool("validate_graph", {})
+
+            self.assertTrue(result.get("ok"), result)
+            self.assertTrue(session.is_dirty)
+            self.assertEqual(_block_param_value(session, "analog_sig_source_x_0", "amp"), "0.5")
+            self.assertTrue(validate.get("valid"), validate)
+
+    def test_installed_example_state_edit_uses_verified_apply_edit(self) -> None:
+        if not GRFREEDV.exists():
+            self.skipTest("grfreedv.grc not available")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = Path(tmpdir) / GRFREEDV.name
+            shutil.copy2(GRFREEDV, graph_path)
+            session = FlowgraphSession()
+            session.load(graph_path)
+            agent = GrcAgent(session)
+
+            result = agent.execute_tool(
+                "apply_edit",
+                {
+                    "transaction": {
+                        "op_type": "update_states",
+                        "instance_name": "blocks_message_debug_0",
+                        "state": "disabled",
+                    }
+                },
+            )
+            validate = agent.execute_tool("validate_graph", {})
+
+            self.assertTrue(result.get("ok"), result)
+            self.assertTrue(session.is_dirty)
+            self.assertEqual(_block_state(session, "blocks_message_debug_0"), "disabled")
+            self.assertTrue(validate.get("valid"), validate)
 
     def test_invalid_connection_id_rejected(self) -> None:
         agent, _ = self._load_agent()

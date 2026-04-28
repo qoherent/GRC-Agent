@@ -342,8 +342,25 @@ class FlowgraphSession:
         snapshot["state_revision"] = self.state_revision
         snapshot["dirty"] = self.is_dirty
         snapshot["validation"] = self.validation_state()
+        snapshot["block_count"] = len(flowgraph.blocks)
+        snapshot["connection_count"] = len(flowgraph.connections)
+        snapshot["variable_count"] = sum(
+            1 for block in flowgraph.blocks if block.block_type == "variable"
+        )
         variable_preview: list[str] = []
         block_preview: list[str] = []
+        connection_preview = [
+            shared_connection_id(
+                connection.src_block,
+                connection.src_port,
+                connection.dst_block,
+                connection.dst_port,
+            )
+            for connection in sorted(
+                flowgraph.connections,
+                key=self._connection_sort_key,
+            )[:8]
+        ]
         for block in flowgraph.blocks:
             if block.block_type == "variable":
                 value = block.params.get("parameters", {}).get("value", "")
@@ -357,6 +374,8 @@ class FlowgraphSession:
             snapshot["variable_preview"] = variable_preview
         if block_preview:
             snapshot["block_preview"] = block_preview[:6]
+        if connection_preview:
+            snapshot["connection_preview"] = connection_preview
         return snapshot
 
     def summary_payload(
@@ -982,10 +1001,17 @@ class FlowgraphSession:
         """Return the canonical sort key for stable connection output ordering."""
         return (
             connection.src_block,
-            connection.src_port,
+            FlowgraphSession._port_sort_key(connection.src_port),
             connection.dst_block,
-            connection.dst_port,
+            FlowgraphSession._port_sort_key(connection.dst_port),
         )
+
+    @staticmethod
+    def _port_sort_key(port: int | str) -> tuple[int, str]:
+        """Sort stream indices before message ports without comparing unlike types."""
+        if isinstance(port, int) and not isinstance(port, bool):
+            return (0, str(port))
+        return (1, str(port))
 
     @staticmethod
     def _connection_payload(connection: Connection) -> dict[str, Any]:

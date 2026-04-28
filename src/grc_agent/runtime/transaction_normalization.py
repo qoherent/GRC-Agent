@@ -144,7 +144,8 @@ class TransactionNormalizer:
         if normalized:
             for candidate in (
                 "update_params", "update_states", "add_connection", "remove_connection",
-                "remove_block", "add_block", "op_type", "instance_name", "params",
+                "remove_block", "add_block", "insert_block_on_connection",
+                "op_type", "instance_name", "params",
                 "parameters", "state", "src_block", "src_port", "dst_block", "dst_port", "block_type",
             ):
                 if re.search(rf"\b{re.escape(candidate)}\b", normalized):
@@ -408,6 +409,7 @@ class TransactionNormalizer:
             "For parameter edits use update_params with instance_name and params. "
             "For remove_block use instance_name, not block_id. "
             "For add_block use block_type from the GNU catalog, instance_name, and parameters (not params). "
+            "For inserting into an existing wire, use insert_block_on_connection with connection_id, block_type, instance_name, and params. "
             "Use bare parameter keys like nconnections, srate, and value. "
             "For disconnects include src_block, src_port, dst_block, and dst_port."
         )
@@ -422,7 +424,15 @@ class TransactionNormalizer:
 
     @staticmethod
     def _supported_transaction_op_types() -> tuple[str, ...]:
-        return ("update_params", "update_states", "add_connection", "remove_connection", "remove_block", "add_block")
+        return (
+            "update_params",
+            "update_states",
+            "add_connection",
+            "remove_connection",
+            "remove_block",
+            "add_block",
+            "insert_block_on_connection",
+        )
 
     @staticmethod
     def _tool_argument_candidates() -> tuple[str, ...]:

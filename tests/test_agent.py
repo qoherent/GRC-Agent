@@ -8,9 +8,11 @@ import unittest
 from unittest import mock
 
 from grc_agent.agent import GrcAgent
+from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_fake_runtime
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.models import Connection
 
 
 class GrcAgentTests(unittest.TestCase):
@@ -42,6 +44,49 @@ class GrcAgentTests(unittest.TestCase):
         self.assertNotIn("set_variable", agent._tools)
         self.assertNotIn("set_param", agent._tools)
 
+    def test_turn_plan_narrows_disable_request_to_apply_edit_and_validate(self) -> None:
+        agent, _session = self._load_agent()
+
+        plan = agent.init_turn_requirements("Disable blocks_throttle2_0 and validate.")
+        schemas = agent.get_tool_schemas_for_turn()
+
+        self.assertEqual(plan.intent, "state_edit")
+        self.assertEqual([schema["function"]["name"] for schema in schemas], [
+            "apply_edit",
+            "validate_graph",
+        ])
+
+    def test_route_policy_rejects_remove_block_for_disable_request(self) -> None:
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        agent.init_turn_requirements("Disable blocks_throttle2_0.")
+
+        result = agent.validate_turn_route(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "remove_block",
+                    "instance_name": "blocks_throttle2_0",
+                }
+            },
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "route_mismatch")
+        self.assertEqual(session.state_revision, before_revision)
+
+    def test_connection_sort_key_handles_mixed_stream_and_message_ports(self) -> None:
+        connections = [
+            Connection("same_src", "msg", "same_dst", "out"),
+            Connection("same_src", 0, "same_dst", 0),
+        ]
+
+        ordered = sorted(connections, key=FlowgraphSession._connection_sort_key)
+
+        self.assertEqual([connection.src_port for connection in ordered], [0, "msg"])
+
     def test_tool_schemas_match_phase_six_surface(self) -> None:
         agent, _session = self._load_agent()
 
@@ -63,6 +108,10 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(
             schema_by_name["apply_edit"]["function"]["parameters"]["required"],
             ["transaction"],
+        )
+        self.assertEqual(
+            schema_by_name["remove_connection"]["function"]["parameters"]["required"],
+            ["connection_id"],
         )
 
     def test_system_prompt_mentions_read_and_edit_routes(self) -> None:
@@ -98,6 +147,11 @@ class GrcAgentTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
+            "For vague connection edits, inspect the graph before `apply_edit`",
+            prompt,
+        )
+        self.assertIn("prefer the `remove_connection(connection_id=...)` tool", prompt)
+        self.assertIn(
             "You may emit multiple tool calls in one assistant message",
             prompt,
         )
@@ -118,20 +172,55 @@ class GrcAgentTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
+            "Do NOT use `summarize_graph` for `I want to see the spectrum`",
+            prompt,
+        )
+        self.assertIn(
             "`Describe the variable block type.` => `describe_block(block_id=\"variable\")`",
             prompt,
         )
+        self.assertIn("carrier recovery / spectrum / frequency sink", prompt)
+        self.assertIn("prefer the `remove_connection(connection_id=...)` tool", prompt)
         self.assertIn("Parameter values may stay as GNU/Python expressions", prompt)
         self.assertIn("If the user explicitly names a loaded block or variable like `samp_rate`", prompt)
         self.assertIn("Supported `op_type` values: `update_params`, `update_states`", prompt)
-        self.assertIn("For packetized modem chains", prompt)
-        self.assertIn("meta = pmt.dict_add(meta, key, value)", prompt)
-        self.assertIn("Delay = int(5.5 * sps + 7) * k", prompt)
-        self.assertIn("scale `32768`", prompt)
-        self.assertIn("`packet_len` tag", prompt)
-        self.assertIn("disable AGC", prompt)
-        self.assertIn("Do not claim you lack GNU Radio knowledge", prompt)
+        self.assertIn(
+            "then call `suggest_compatible_insertions(connection_id)`, then use `insert_block_on_connection`",
+            prompt,
+        )
+        self.assertNotIn("then use `apply_edit` with one suggested candidate", prompt)
+        self.assertIn("use `search_manual`", prompt)
+        self.assertIn("Manual excerpts are explanation-only", prompt)
+        self.assertIn("Cite the returned manual source", prompt)
+        self.assertNotIn("EXPERT RECIPES", prompt)
+        self.assertNotIn("3D vector indexing", prompt)
+        self.assertNotIn("answer directly from these expert recipes", prompt)
         self.assertIn("copy the tool summary verbatim as your final answer", prompt)
+
+    def test_transaction_normalizer_supports_wrapped_insert_operation(self) -> None:
+        normalizer = TransactionNormalizer()
+
+        result = normalizer.normalize_transaction_instance_names(
+            {
+                "insert_block_on_connection": {
+                    "connection_id": "src:0->dst:0",
+                    "block_type": "blocks_head",
+                    "instance_name": "head_0",
+                    "params": {"num_items": "1024"},
+                }
+            }
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "op_type": "insert_block_on_connection",
+                "connection_id": "src:0->dst:0",
+                "block_type": "blocks_head",
+                "instance_name": "head_0",
+                "params": {"num_items": "1024"},
+            },
+        )
 
     def test_summarize_tool_message_to_model_is_plain_summary_text(self) -> None:
         agent, _session = self._load_agent()
@@ -270,6 +359,12 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(len(session_messages), 1)
         self.assertIn(str(self._fixture_path()), session_messages[0]["content"])
         self.assertIn("blocks_throttle2_0", session_messages[0]["content"])
+        self.assertIn("blocks=5", session_messages[0]["content"])
+        self.assertIn("connections=3", session_messages[0]["content"])
+        self.assertIn(
+            "analog_random_source_x_0:0->blocks_throttle2_0:0",
+            session_messages[0]["content"],
+        )
 
     def test_session_history_messages_render_recorded_snapshot_not_live_session(
         self,
@@ -306,15 +401,51 @@ class GrcAgentTests(unittest.TestCase):
                 "state_revision": 2,
                 "dirty": True,
                 "validation": {"status": "valid", "returncode": 0},
+                "block_count": 2,
+                "connection_count": 1,
+                "variable_count": 1,
                 "variable_preview": ["samp_rate=48000"],
                 "block_preview": ["blocks_throttle2_0 (blocks_throttle2; throttle)"],
+                "connection_preview": ["src:0->dst:0"],
             },
             reason="turn_refresh",
         )
 
         self.assertIn("dirty=True", rendered)
+        self.assertIn("blocks=2", rendered)
+        self.assertIn("connections=1", rendered)
+        self.assertIn("variables=1", rendered)
         self.assertNotIn("variables=[", rendered)
         self.assertNotIn("blocks=[", rendered)
+        self.assertNotIn("connections_preview=[", rendered)
+
+    def test_tool_history_compaction_keeps_active_session_counts_and_connections(self) -> None:
+        agent, _session = self._load_agent()
+
+        rendered = agent._tool_history_content_as_text(
+            {
+                "ok": True,
+                "active_session": {
+                    "path": "/tmp/example.grc",
+                    "graph_id": "grc:test",
+                    "state_revision": 2,
+                    "dirty": False,
+                    "validation": {"status": "valid", "returncode": 0},
+                    "block_count": 2,
+                    "connection_count": 1,
+                    "variable_count": 1,
+                    "variable_preview": ["samp_rate=48000"],
+                    "block_preview": ["blocks_throttle2_0 (blocks_throttle2; throttle)"],
+                    "connection_preview": ["src:0->dst:0"],
+                },
+            },
+            tool_name="validate_graph",
+        )
+
+        self.assertIn('"block_count": 2', rendered)
+        self.assertIn('"connection_count": 1', rendered)
+        self.assertIn('"variable_count": 1', rendered)
+        self.assertIn('"connection_preview": ["src:0->dst:0"]', rendered)
 
     def test_execute_tool_unknown_name_returns_structured_error(self) -> None:
         agent, _session = self._load_agent()

@@ -33,12 +33,14 @@ class _ScriptedLlamaServer(ThreadingHTTPServer):
         *,
         model_id: str = "test-llama-model",
         models_payload: dict[str, object] | None = None,
+        props_payload: dict[str, object] | None = None,
     ) -> None:
         super().__init__(server_address, _ScriptedLlamaHandler)
         self.responses = list(responses)
         self.requests_seen: list[dict[str, object]] = []
         self.model_id = model_id
         self.models_payload = models_payload
+        self.props_payload = props_payload
 
 
 class _ScriptedLlamaHandler(BaseHTTPRequestHandler):
@@ -66,6 +68,13 @@ class _ScriptedLlamaHandler(BaseHTTPRequestHandler):
                         }
                     ],
                 }
+            self._write_json(200, payload)
+            return
+
+        if self.path == "/props":
+            payload = server.props_payload
+            if payload is None:
+                payload = {"chat_template_tool_use": "test-template"}
             self._write_json(200, payload)
             return
 
@@ -214,12 +223,14 @@ class LlamaServerAdapterTests(unittest.TestCase):
         *,
         model_id: str = "test-llama-model",
         models_payload: dict[str, object] | None = None,
+        props_payload: dict[str, object] | None = None,
     ) -> _ScriptedLlamaServer:
         server = _ScriptedLlamaServer(
             ("127.0.0.1", 0),
             responses,
             model_id=model_id,
             models_payload=models_payload,
+            props_payload=props_payload,
         )
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -295,6 +306,26 @@ class LlamaServerAdapterTests(unittest.TestCase):
                         }
                     ]
                 },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "I could not correct the malformed mutation safely.",
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "I could not correct the malformed mutation safely.",
+                            }
+                        }
+                    ]
+                },
             ],
             model_id=llama_config.model,
         )
@@ -352,7 +383,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         )
         self.assertEqual(
             {schema["function"]["name"] for schema in first_payload["tools"]},
-            set(PUBLIC_TOOL_NAMES),
+            {"apply_edit"},
         )
         self.assertTrue(
             any(
@@ -443,6 +474,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             validation_entry["content"]["validation_errors"][0]["code"],
             "unexpected_argument",
         )
+        self.assertTrue(agent._turn_any_execution_failed)
 
     def test_bounded_llama_turn_rebinds_session_context_after_load_grc(self) -> None:
         llama_config = self._llama_config()
@@ -572,6 +604,21 @@ class LlamaServerAdapterTests(unittest.TestCase):
 
         self.assertEqual(client.get_model_id(), expected_model)
         client.require_model_alias(expected_model)
+
+    def test_get_server_properties_reads_props_endpoint(self) -> None:
+        server = self._start_server(
+            [],
+            props_payload={
+                "chat_template_tool_use": "tool-template",
+                "tool_call_parser": "native",
+            },
+        )
+        client = self._client(self._server_url(server))
+
+        props = client.get_server_properties()
+
+        self.assertEqual(props["chat_template_tool_use"], "tool-template")
+        self.assertEqual(props["tool_call_parser"], "native")
 
     def test_request_json_wraps_connect_timeout(self) -> None:
         client = self._client("http://127.0.0.1:65530")
@@ -815,6 +862,531 @@ class LlamaServerAdapterTests(unittest.TestCase):
                 ]
             },
         )
+
+    def test_parse_assistant_message_repairs_unclosed_native_tool_arguments(self) -> None:
+        client = self._client("http://127.0.0.1:1")
+        content, tool_calls = client.parse_assistant_message(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "apply_edit",
+                                        "arguments": (
+                                            '{"transaction": {"op_type": "remove_connection", '
+                                            '"src_block": "analog_random_source_x_0", '
+                                            '"src_port": 0, '
+                                            '"dst_block": "blocks_throttle2_0", '
+                                            '"dst_port": 0'
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNone(content)
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(
+            tool_calls[0].arguments,
+            {
+                "transaction": {
+                    "op_type": "remove_connection",
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
+                }
+            },
+        )
+
+    def test_parse_assistant_message_preserves_unrepairable_native_tool_name(self) -> None:
+        client = self._client("http://127.0.0.1:1")
+        content, tool_calls = client.parse_assistant_message(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "apply_edit",
+                                        "arguments": "{not valid json",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNone(content)
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0].name, "apply_edit")
+        self.assertEqual(
+            tool_calls[0].arguments,
+            {"__invalid_json_arguments__": "{not valid json"},
+        )
+
+    def test_bounded_llama_turn_reports_invalid_native_tool_arguments_to_model(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "apply_edit",
+                                            "arguments": "{not valid json",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "I could not correct the malformed mutation safely.",
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Change samp_rate to 48000.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(result["tool_rounds_used"], 1)
+        self.assertEqual(result.get("correction_retries_used"), 1)
+        tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
+        self.assertEqual(tool_entries[0]["name"], "apply_edit")
+        self.assertEqual(tool_entries[0]["content"]["error_type"], "tool_call_invalid")
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(len(chat_requests), 2)
+
+    def test_bounded_llama_turn_retries_malformed_mutation_once(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_bad",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "apply_edit",
+                                            "arguments": "{not valid json",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_good",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "apply_edit",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "transaction": {
+                                                        "op_type": "update_params",
+                                                        "instance_name": "samp_rate",
+                                                        "params": {"value": "48000"},
+                                                    }
+                                                }
+                                            ),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Updated samp_rate.",
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        agent, session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Change samp_rate to 48000.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 1)
+        self.assertEqual(result["tool_rounds_used"], 2)
+        self.assertEqual(result.get("correction_retries_used"), 1)
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(len(chat_requests), 3)
+        samp_rate = next(
+            block for block in session.flowgraph.blocks if block.instance_name == "samp_rate"
+        )
+        self.assertEqual(samp_rate.params["parameters"]["value"], "48000")
+
+    def test_bounded_llama_turn_rejects_disallowed_recovery_tool(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_bad",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "apply_edit",
+                                            "arguments": "{not valid json",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_preview",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "propose_edit",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "transaction": {
+                                                        "op_type": "update_params",
+                                                        "instance_name": "samp_rate",
+                                                        "params": {"value": "48000"},
+                                                    }
+                                                }
+                                            ),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        agent, session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Change samp_rate to 48000.",
+            model=llama_config.model,
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "recovery_disallowed_tool")
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(result.get("correction_retries_used"), 1)
+        samp_rate = next(
+            block for block in session.flowgraph.blocks if block.instance_name == "samp_rate"
+        )
+        self.assertEqual(samp_rate.params["parameters"]["value"], "32000")
+
+    def test_bounded_llama_turn_rejects_route_mismatch_without_mutation(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_remove",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "apply_edit",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "transaction": {
+                                                        "op_type": "remove_block",
+                                                        "instance_name": "blocks_throttle2_0",
+                                                    }
+                                                }
+                                            ),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Disable blocks_throttle2_0.",
+            model=llama_config.model,
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "route_mismatch")
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(session.state_revision, before_revision)
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(len(chat_requests), 1)
+        sent_tools = {
+            schema["function"]["name"]
+            for schema in chat_requests[0]["payload"]["tools"]
+        }
+        self.assertEqual(sent_tools, {"apply_edit"})
+        tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
+        self.assertEqual(tool_entries[0]["content"]["error_type"], "route_mismatch")
+
+    def test_bounded_llama_turn_completes_pending_actions_after_correction(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_bad",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "apply_edit",
+                                            "arguments": "{not valid json",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_good",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "apply_edit",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "transaction": {
+                                                        "op_type": "update_params",
+                                                        "instance_name": "samp_rate",
+                                                        "params": {"value": "48000"},
+                                                    }
+                                                }
+                                            ),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Updated samp_rate.",
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_validate",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "validate_graph",
+                                            "arguments": json.dumps({}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Updated and validated.",
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Change samp_rate to 48000 and validate the graph.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 2)
+        self.assertEqual(result.get("correction_retries_used"), 1)
+        tool_names = [
+            turn["name"] for turn in agent.history if turn.get("role") == "tool"
+        ]
+        self.assertEqual(tool_names, ["apply_edit", "apply_edit", "validate_graph"])
+
+    def test_bounded_llama_turn_clarifies_vague_connection_edit_without_model_call(
+        self,
+    ) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server([], model_id=llama_config.model)
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Disconnect the random source.",
+            model=llama_config.model,
+        )
+
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(chat_requests, [])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertIn("exact connection endpoints", result["assistant_text"])
+
+    def test_bounded_llama_turn_refuses_redo_without_model_call(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server([], model_id=llama_config.model)
+        agent, _session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Redo the last change.",
+            model=llama_config.model,
+        )
+
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(chat_requests, [])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertIn("redo", result["assistant_text"].lower())
+        self.assertIn("unsupported", result["assistant_text"].lower())
 
     def test_failed_apply_edit_stops_the_current_tool_batch(self) -> None:
         agent = GrcAgent()

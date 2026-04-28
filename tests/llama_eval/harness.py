@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import os
 import shutil
@@ -13,14 +15,51 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from grc_agent.config import load_app_config
+from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_server import LlamaServerClient
+from grc_agent.recovery import (
+    NO_RECOVERY_NEEDED,
+    RecoveryDecision,
+    classify_tool_result_for_recovery,
+)
 from grc_agent.session_ops import parse_connection_id
 
 DEFAULT_FIXTURE_NAME = "random_bit_generator.grc"
+DEFAULT_LIVE_EVAL_MAX_TOKENS = 2048
 RUN_STATUS_PASS = "PASS"
 RUN_STATUS_FAIL = "FAIL"
 RUN_STATUS_INFRA_FAIL = "INFRA_FAIL"
+REPORT_DIMENSIONS = (
+    "routing_pass",
+    "argument_pass",
+    "tool_success_pass",
+    "semantic_pass",
+    "safety_pass",
+    "end_state_pass",
+    "recovery_pass",
+)
+MUTATION_TOOL_NAMES = frozenset(
+    {
+        "new_grc",
+        "load_grc",
+        "apply_edit",
+        "insert_block_on_connection",
+        "auto_insert_block",
+        "remove_connection",
+        "save_graph",
+    }
+)
+RECOVERY_MUTATION_RETRY_TOOL_NAMES = frozenset(
+    {
+        "new_grc",
+        "load_grc",
+        "apply_edit",
+        "insert_block_on_connection",
+        "auto_insert_block",
+        "remove_connection",
+    }
+)
 
 CaseRunner = Callable[[LlamaServerClient, str, Any], dict[str, Any]]
 CaseReportBuilder = Callable[[Any, list[dict[str, Any]], int, float], dict[str, Any]]
@@ -28,8 +67,753 @@ StatusRenderer = Callable[[Any, dict[str, Any]], str]
 SummaryBuilder = Callable[[list[dict[str, Any]], int], dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class ToolExpectation:
+    """Declarative expectation for one model-requested tool call."""
+
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    transaction_operations: tuple[dict[str, Any], ...] = ()
+    ordered_transaction: bool = True
+    require_result_ok: bool = True
+
+
+@dataclass(frozen=True)
+class LiveTurnSpec:
+    """One user turn in a live eval scenario."""
+
+    prompt: str
+    expected_tool_calls: tuple[ToolExpectation, ...] = ()
+    semantic_checks: tuple[dict[str, Any], ...] = ()
+    accept_any_tool: bool = False
+    allow_safe_text_only: bool = False
+    clarification_response: bool = False
+    recovery_enabled: bool = False
+    expected_recovery_class: str | None = None
+
+    @property
+    def expected_tools(self) -> list[str]:
+        return [expectation.name for expectation in self.expected_tool_calls]
+
+
+@dataclass(frozen=True)
+class LiveScenario:
+    """Declarative live eval scenario shared by Tier 1/2/3 runners."""
+
+    category: str
+    name: str
+    turns: tuple[LiveTurnSpec, ...]
+    fixture_name: str = DEFAULT_FIXTURE_NAME
+    target_fixture_name: str | None = None
+    description: str = ""
+
+    @property
+    def prompt(self) -> str:
+        return self.turns[0].prompt if self.turns else ""
+
+
 def fixture_path(name: str = DEFAULT_FIXTURE_NAME) -> Path:
     return Path(__file__).resolve().parents[1] / "data" / name
+
+
+def _session_from_agent_or_session(agent_or_session: Any) -> FlowgraphSession:
+    session = getattr(agent_or_session, "session", agent_or_session)
+    if not isinstance(session, FlowgraphSession):
+        raise TypeError("Expected GrcAgent or FlowgraphSession.")
+    if session.flowgraph is None:
+        raise ValueError("No graph loaded.")
+    return session
+
+
+def graph_snapshot(agent_or_session: Any) -> dict[str, Any]:
+    """Return a stable test/eval snapshot of the current graph state."""
+    session = _session_from_agent_or_session(agent_or_session)
+    flowgraph = session.flowgraph
+    if flowgraph is None:
+        raise ValueError("No graph loaded.")
+
+    serialized = session._serialize_raw_data(flowgraph.raw_data)
+    blocks = [
+        {
+            "name": block.instance_name,
+            "type": block.block_type,
+            "parameters": dict(block.params.get("parameters") or {}),
+            "state": (block.params.get("states") or {}).get("state"),
+        }
+        for block in flowgraph.blocks
+    ]
+    blocks_by_name = {
+        block["name"]: {
+            "type": block["type"],
+            "parameters": block["parameters"],
+            "state": block["state"],
+        }
+        for block in sorted(blocks, key=lambda item: str(item["name"]))
+    }
+    variable_values = {
+        block.instance_name: block.params.get("parameters", {}).get("value")
+        for block in flowgraph.blocks
+        if block.block_type == "variable"
+    }
+    connection_ids = sorted(
+        f"{connection.src_block}:{connection.src_port}->{connection.dst_block}:{connection.dst_port}"
+        for connection in flowgraph.connections
+    )
+
+    validation = session.validation_state()
+    return {
+        "path": str(session.path) if session.path is not None else None,
+        "state_revision": session.state_revision,
+        "dirty": session.is_dirty,
+        "validation_status": validation.get("status"),
+        "validation_returncode": validation.get("returncode"),
+        "block_count": len(flowgraph.blocks),
+        "connection_count": len(flowgraph.connections),
+        "block_names": sorted(block["name"] for block in blocks),
+        "blocks_by_name": blocks_by_name,
+        "variable_values": dict(sorted(variable_values.items())),
+        "connection_ids": connection_ids,
+        "raw_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+    }
+
+
+def snapshot_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Return whether graph content changed between two snapshots."""
+    return before.get("raw_hash") != after.get("raw_hash")
+
+
+def graph_variable_value(snapshot: dict[str, Any], variable_name: str) -> Any:
+    values = snapshot.get("variable_values")
+    if not isinstance(values, dict):
+        return None
+    return values.get(variable_name)
+
+
+def graph_block_param_value(snapshot: dict[str, Any], instance_name: str, param: str) -> Any:
+    blocks = snapshot.get("blocks_by_name")
+    if not isinstance(blocks, dict):
+        return None
+    block = blocks.get(instance_name)
+    if not isinstance(block, dict):
+        return None
+    parameters = block.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    return parameters.get(param)
+
+
+def graph_block_state(snapshot: dict[str, Any], instance_name: str) -> Any:
+    blocks = snapshot.get("blocks_by_name")
+    if not isinstance(blocks, dict):
+        return None
+    block = blocks.get(instance_name)
+    if not isinstance(block, dict):
+        return None
+    return block.get("state")
+
+
+def saved_graph_reloads_and_validates(path: str | Path) -> dict[str, Any]:
+    """Reload a saved `.grc` file and validate it with the session's normal grcc path."""
+    target = Path(path)
+    result: dict[str, Any] = {
+        "path": str(target),
+        "exists": target.exists(),
+        "loaded": False,
+        "valid": False,
+        "error": None,
+    }
+    if not target.exists():
+        result["error"] = "file does not exist"
+        return result
+    session = FlowgraphSession()
+    try:
+        session.load(target)
+        result["loaded"] = True
+        result["valid"] = session.validate()
+        result["validation_returncode"] = session.last_validation_returncode
+        result["validation_stdout"] = session.last_validation_stdout
+        result["validation_stderr"] = session.last_validation_stderr
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def collect_backend_metadata(
+    client: LlamaServerClient | None,
+    *,
+    server_url: str,
+    model: str,
+    temperature: float,
+) -> dict[str, Any]:
+    """Collect best-effort llama.cpp metadata without failing eval execution."""
+    metadata: dict[str, Any] = {
+        "server_url": server_url,
+        "model": model,
+        "temperature": temperature,
+        "props_available": False,
+    }
+    if client is None:
+        return metadata
+
+    try:
+        props = client.get_server_properties()
+    except Exception as exc:
+        metadata["props_error"] = str(exc)
+        return metadata
+
+    metadata["props_available"] = True
+    for key in (
+        "chat_template",
+        "chat_template_tool_use",
+        "tool_call_format",
+        "tool_call_parser",
+    ):
+        if key in props:
+            metadata.update(_compact_backend_prop(key, props[key]))
+    metadata["backend_tool_call_risk"] = (
+        "low"
+        if props.get("chat_template_tool_use") or props.get("tool_call_parser")
+        else "generic_or_unknown"
+    )
+    return metadata
+
+
+def _compact_backend_prop(key: str, value: Any) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return {key: value}
+    if len(value) <= 240:
+        return {key: value}
+    return {
+        f"{key}_present": True,
+        f"{key}_chars": len(value),
+        f"{key}_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+        f"{key}_preview": value[:120],
+    }
+
+
+def run_live_scenario_once(
+    *,
+    client: LlamaServerClient,
+    model: str,
+    scenario: LiveScenario,
+) -> dict[str, Any]:
+    """Run one declarative live scenario in an isolated fixture workspace."""
+    from grc_agent.agent import GrcAgent
+    from grc_agent.llama_server import run_bounded_llama_turn
+
+    fixture_names = [scenario.fixture_name]
+    if scenario.target_fixture_name:
+        fixture_names.append(scenario.target_fixture_name)
+
+    with isolated_fixture_workspace(*fixture_names) as (workspace, paths):
+        fixture_path = paths[scenario.fixture_name]
+        target_path = (
+            str(paths[scenario.target_fixture_name])
+            if scenario.target_fixture_name
+            else ""
+        )
+        save_path = str(workspace / "output.grc")
+
+        agent = GrcAgent()
+        agent.execute_tool("load_grc", {"file_path": str(fixture_path)})
+
+        turn_results: list[dict[str, Any]] = []
+        error_message = ""
+        started_at = datetime.now(timezone.utc)
+
+        for turn_index, turn in enumerate(scenario.turns):
+            before_snapshot = graph_snapshot(agent)
+            history_start = len(agent.history)
+            prompt = render_prompt(
+                turn.prompt,
+                target_path=target_path,
+                save_path=save_path,
+            )
+            result: dict[str, Any] = {}
+            turn_error = ""
+            turn_started = datetime.now(timezone.utc)
+            try:
+                if turn.clarification_response:
+                    clarification = agent.resolve_pending_clarification(prompt)
+                    result = {
+                        "ok": clarification.get("mode")
+                        in {"executed", "reminder", "custom", "expired", "none"},
+                        "assistant_text": clarification.get("text", ""),
+                        "clarification_result": clarification,
+                    }
+                else:
+                    result = run_bounded_llama_turn(
+                        client=client,
+                        model=model,
+                        agent=agent,
+                        user_message=prompt,
+                    )
+            except Exception as exc:
+                turn_error = str(exc)
+                error_message = turn_error
+
+            after_snapshot = graph_snapshot(agent)
+            requested_tool_calls = requested_tool_calls_since(agent.history, history_start)
+            executed_tool_calls = executed_tool_calls_since(agent.history, history_start)
+            tool_dimensions = evaluate_tool_expectations(
+                requested_tool_calls=requested_tool_calls,
+                executed_tool_calls=executed_tool_calls,
+                expected_tool_calls=render_tool_expectations(
+                    turn.expected_tool_calls,
+                    target_path=target_path,
+                    save_path=save_path,
+                ),
+                accept_any_tool=turn.accept_any_tool,
+                allow_safe_text_only=turn.allow_safe_text_only,
+            )
+            semantic_dimensions = evaluate_semantic_checks(
+                checks=render_value_templates(
+                    turn.semantic_checks,
+                    target_path=target_path,
+                    save_path=save_path,
+                ),
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                run_result={
+                    "requested_tool_calls": requested_tool_calls,
+                    "executed_tool_calls": executed_tool_calls,
+                    "assistant_text": result.get("assistant_text", "") if result else "",
+                    "clarification_result": result.get("clarification_result")
+                    if result
+                    else None,
+                },
+                save_path=save_path,
+            )
+            recovery_dimensions = evaluate_turn_recovery(
+                client=client,
+                model=model,
+                agent=agent,
+                history_start=len(agent.history),
+                executed_tool_calls=executed_tool_calls,
+                recovery_enabled=turn.recovery_enabled,
+                expected_recovery_class=turn.expected_recovery_class,
+            )
+            turn_result = {
+                "turn_index": turn_index,
+                "prompt": prompt,
+                "tools_called": _tool_names(requested_tool_calls),
+                "requested_tool_calls": requested_tool_calls,
+                "executed_tool_calls": executed_tool_calls,
+                "before_snapshot": before_snapshot,
+                "after_snapshot": after_snapshot,
+                "assistant_text": result.get("assistant_text", "") if result else "",
+                "clarification_result": result.get("clarification_result")
+                if result
+                else None,
+                "ok": result.get("ok", False) if result else False,
+                "error": turn_error,
+                "elapsed_seconds": round(
+                    (datetime.now(timezone.utc) - turn_started).total_seconds(),
+                    3,
+                ),
+                **tool_dimensions,
+                **semantic_dimensions,
+                **recovery_dimensions,
+            }
+            turn_result["passed"] = (
+                turn_result["routing_pass"]
+                and turn_result["argument_pass"]
+                and turn_result["tool_success_pass"]
+                and turn_result["semantic_pass"]
+                and turn_result["safety_pass"]
+                and turn_result["end_state_pass"]
+                and turn_result["recovery_pass"]
+            )
+            turn_results.append(turn_result)
+
+            if turn_error:
+                break
+
+        overall = {
+            dimension: all(turn.get(dimension) is True for turn in turn_results)
+            if turn_results
+            else False
+            for dimension in REPORT_DIMENSIONS
+        }
+        return {
+            "tools_called": [
+                name
+                for turn_result in turn_results
+                for name in turn_result.get("tools_called", [])
+            ],
+            "requested_tool_calls": [
+                call
+                for turn_result in turn_results
+                for call in turn_result.get("requested_tool_calls", [])
+            ],
+            "executed_tool_calls": [
+                call
+                for turn_result in turn_results
+                for call in turn_result.get("executed_tool_calls", [])
+            ],
+            "turn_results": turn_results,
+            "matched": all(overall.values()) if overall else False,
+            "passed": all(overall.values()) if overall else False,
+            "ok": all(turn.get("ok") is True for turn in turn_results)
+            if turn_results
+            else False,
+            "error": error_message,
+            "elapsed_seconds": round(
+                (datetime.now(timezone.utc) - started_at).total_seconds(),
+                3,
+            ),
+            **overall,
+        }
+
+
+def dimension_pass_counts(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Count pass totals for optional report dimensions across all non-infra runs."""
+    counts = {
+        dimension: {"passed": 0, "total": 0}
+        for dimension in REPORT_DIMENSIONS
+    }
+    for result in results:
+        for run in result.get("runs", []):
+            if run.get("status") == RUN_STATUS_INFRA_FAIL:
+                continue
+            for dimension in REPORT_DIMENSIONS:
+                value = run.get(dimension)
+                if not isinstance(value, bool):
+                    continue
+                counts[dimension]["total"] += 1
+                if value:
+                    counts[dimension]["passed"] += 1
+    return counts
+
+
+def tool_expectations_from_names(tool_names: list[str]) -> tuple[ToolExpectation, ...]:
+    """Build name-only tool expectations for legacy case definitions."""
+    return tuple(ToolExpectation(name=tool_name) for tool_name in tool_names)
+
+
+def evaluate_tool_expectations(
+    *,
+    requested_tool_calls: list[dict[str, Any]],
+    executed_tool_calls: list[dict[str, Any]],
+    expected_tool_calls: tuple[ToolExpectation, ...],
+    accept_any_tool: bool = False,
+    allow_safe_text_only: bool = False,
+) -> dict[str, bool]:
+    """Evaluate routing, argument, and execution success independently."""
+    requested_names = _tool_names(requested_tool_calls)
+    executed_names = _tool_names(executed_tool_calls)
+    expected_names = [expectation.name for expectation in expected_tool_calls]
+
+    if allow_safe_text_only and not requested_tool_calls:
+        return {
+            "routing_pass": True,
+            "argument_pass": True,
+            "tool_success_pass": True,
+        }
+
+    if accept_any_tool:
+        return {
+            "routing_pass": bool(requested_tool_calls),
+            "argument_pass": bool(requested_tool_calls),
+            "tool_success_pass": any(_tool_result_ok(call) for call in executed_tool_calls),
+        }
+
+    routing_pass = tools_appear_in_expected_order(requested_names, expected_names)
+    argument_pass = routing_pass and _requested_calls_match_expectations(
+        requested_tool_calls,
+        expected_tool_calls,
+    )
+    tool_success_pass = tools_appear_in_expected_order(executed_names, expected_names)
+    if tool_success_pass:
+        tool_success_pass = _executed_calls_match_expectations(
+            executed_tool_calls,
+            expected_tool_calls,
+        )
+
+    return {
+        "routing_pass": routing_pass,
+        "argument_pass": argument_pass,
+        "tool_success_pass": tool_success_pass,
+    }
+
+
+def evaluate_semantic_checks(
+    *,
+    checks: tuple[dict[str, Any], ...],
+    before_snapshot: dict[str, Any],
+    after_snapshot: dict[str, Any],
+    run_result: dict[str, Any],
+    save_path: str,
+) -> dict[str, Any]:
+    """Evaluate reusable graph/end-state checks for live evals."""
+    if not checks:
+        return {"semantic_pass": True, "safety_pass": True, "end_state_pass": True}
+
+    details: list[dict[str, Any]] = []
+    semantic_pass = True
+    safety_pass = True
+    end_state_pass = True
+    extra: dict[str, Any] = {}
+
+    for check in checks:
+        kind = check.get("kind")
+        passed = False
+        if kind == "no_mutation":
+            passed = (
+                not snapshot_changed(before_snapshot, after_snapshot)
+                and before_snapshot.get("state_revision") == after_snapshot.get("state_revision")
+            )
+            safety_pass = safety_pass and passed
+            end_state_pass = end_state_pass and passed
+        elif kind == "mutation":
+            passed = snapshot_changed(before_snapshot, after_snapshot)
+            end_state_pass = end_state_pass and passed
+        elif kind == "variable_equals":
+            passed = graph_variable_value(after_snapshot, str(check.get("name"))) == str(
+                check.get("value")
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "block_param_equals":
+            passed = str(graph_block_param_value(
+                after_snapshot,
+                str(check.get("instance_name")),
+                str(check.get("param")),
+            )) == str(check.get("value"))
+            end_state_pass = end_state_pass and passed
+        elif kind == "block_state_equals":
+            passed = str(graph_block_state(
+                after_snapshot,
+                str(check.get("instance_name")),
+            )) == str(check.get("state"))
+            end_state_pass = end_state_pass and passed
+        elif kind == "dirty":
+            passed = after_snapshot.get("dirty") is bool(check.get("value", True))
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_path_valid":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            passed = (
+                after_snapshot.get("path") == expected_path
+                and after_snapshot.get("dirty") is False
+                and validation.get("exists") is True
+                and validation.get("loaded") is True
+                and validation.get("valid") is True
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "tool_result":
+            payload = first_executed_tool_result(run_result, str(check.get("tool")))
+            expected_arguments = check.get("arguments")
+            passed = isinstance(payload, dict)
+            if passed and isinstance(expected_arguments, dict):
+                passed = _partial_match(payload, expected_arguments)
+            end_state_pass = end_state_pass and passed
+        elif kind == "assistant_text_contains":
+            needles = check.get("needles")
+            passed = isinstance(needles, list) and text_contains_any(
+                str(run_result.get("assistant_text", "")),
+                [str(needle) for needle in needles],
+            )
+        elif kind == "no_mutation_tools":
+            passed = not any_mutation_tool_requested_or_executed(run_result)
+            safety_pass = safety_pass and passed
+        elif kind == "clarification_mode":
+            result = run_result.get("clarification_result")
+            if not isinstance(result, dict):
+                result = {}
+            passed = result.get("mode") == check.get("mode")
+            if check.get("mode") in {"reminder", "custom", "expired"}:
+                safety_pass = safety_pass and passed
+        elif kind == "path_equals":
+            expected_path = str(check.get("path"))
+            if expected_path == "{save_path}":
+                expected_path = save_path
+            passed = after_snapshot.get("path") == expected_path
+            end_state_pass = end_state_pass and passed
+        elif kind == "connection_absent":
+            connection_id = str(check.get("connection_id"))
+            passed = connection_id not in after_snapshot.get("connection_ids", [])
+            end_state_pass = end_state_pass and passed
+        elif kind == "connection_present":
+            connection_id = str(check.get("connection_id"))
+            passed = connection_id in after_snapshot.get("connection_ids", [])
+            end_state_pass = end_state_pass and passed
+        else:
+            passed = False
+
+        details.append({"kind": kind, "passed": passed})
+        semantic_pass = semantic_pass and passed
+
+    return {
+        "semantic_pass": semantic_pass,
+        "safety_pass": safety_pass,
+        "end_state_pass": end_state_pass,
+        "semantic_details": details,
+        **extra,
+    }
+
+
+def evaluate_turn_recovery(
+    *,
+    client: LlamaServerClient,
+    model: str,
+    agent: Any,
+    history_start: int,
+    executed_tool_calls: list[dict[str, Any]],
+    recovery_enabled: bool = False,
+    expected_recovery_class: str | None = None,
+) -> dict[str, Any]:
+    """Classify and optionally probe one bounded recovery follow-up.
+
+    Recovery is reported separately from the original turn result. The helper
+    never converts the initial failure into a pass; it only measures whether a
+    typed recovery policy exists and whether a model follow-up stays within it.
+    """
+    failed_call = latest_failed_executed_tool_call(executed_tool_calls)
+    decision = (
+        classify_tool_result_for_recovery(
+            str(failed_call.get("name")),
+            failed_call.get("arguments", {}),
+        )
+        if failed_call is not None
+        else RecoveryDecision(
+            recovery_class=NO_RECOVERY_NEEDED,
+            recoverable=False,
+            reason="no failed tool result",
+        )
+    )
+    decision_data = asdict(decision)
+    expected_match = (
+        expected_recovery_class is None
+        or decision.recovery_class == expected_recovery_class
+    )
+
+    result: dict[str, Any] = {
+        "recovery_pass": expected_match,
+        "recovery_attempted": False,
+        "recovery_decision": decision_data,
+        "recovery_requested_tool_calls": [],
+        "recovery_executed_tool_calls": [],
+        "recovery_allowed_tools_pass": True,
+        "recovery_retry_budget_pass": True,
+        "recovery_tool_success_pass": True,
+        "recovery_end_state_pass": True,
+        "recovery_changed_state": False,
+        "recovery_mutation_retry_count": 0,
+        "pre_recovery_snapshot": None,
+        "post_recovery_snapshot": None,
+        "recovery_error": "",
+    }
+
+    if (
+        not recovery_enabled
+        or not decision.recoverable
+        or not decision.prompt
+        or not expected_match
+    ):
+        return result
+
+    from grc_agent.llama_server import run_bounded_llama_turn
+
+    recovery_history_start = history_start
+    pre_recovery_snapshot = _maybe_graph_snapshot(agent)
+    try:
+        run_bounded_llama_turn(
+            client=client,
+            model=model,
+            agent=agent,
+            user_message=decision.prompt,
+            track_turn_requirements=False,
+        )
+    except Exception as exc:
+        result["recovery_error"] = str(exc)
+
+    requested = requested_tool_calls_since(agent.history, recovery_history_start)
+    executed = executed_tool_calls_since(agent.history, recovery_history_start)
+    post_recovery_snapshot = _maybe_graph_snapshot(agent)
+    requested_names = _tool_names(requested)
+    executed_names = _tool_names(executed)
+    allowed = set(decision.allowed_tools)
+    all_names = [*requested_names, *executed_names]
+    mutation_retry_count = sum(
+        1 for name in requested_names if name in RECOVERY_MUTATION_RETRY_TOOL_NAMES
+    )
+    allowed_tools_pass = all(name in allowed for name in all_names)
+    retry_budget_pass = mutation_retry_count <= decision.max_mutation_retries
+    tool_success_pass = all(_tool_result_ok(call) for call in executed)
+    changed_state = (
+        pre_recovery_snapshot is not None
+        and post_recovery_snapshot is not None
+        and snapshot_changed(pre_recovery_snapshot, post_recovery_snapshot)
+    )
+    end_state_pass = bool(tool_success_pass and not result["recovery_error"])
+
+    result.update(
+        {
+            "recovery_attempted": True,
+            "recovery_requested_tool_calls": requested,
+            "recovery_executed_tool_calls": executed,
+            "recovery_allowed_tools_pass": allowed_tools_pass,
+            "recovery_retry_budget_pass": retry_budget_pass,
+            "recovery_tool_success_pass": tool_success_pass,
+            "recovery_end_state_pass": end_state_pass,
+            "recovery_changed_state": changed_state,
+            "recovery_mutation_retry_count": mutation_retry_count,
+            "pre_recovery_snapshot": pre_recovery_snapshot,
+            "post_recovery_snapshot": post_recovery_snapshot,
+            "recovery_pass": expected_match
+            and allowed_tools_pass
+            and retry_budget_pass
+            and tool_success_pass
+            and end_state_pass
+            and not result["recovery_error"],
+        }
+    )
+    return result
+
+
+def _maybe_graph_snapshot(agent_or_session: Any) -> dict[str, Any] | None:
+    try:
+        return graph_snapshot(agent_or_session)
+    except (TypeError, ValueError):
+        return None
+
+
+def latest_failed_executed_tool_call(
+    executed_tool_calls: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the latest tool payload only when that latest payload failed."""
+    for call in reversed(executed_tool_calls):
+        payload = call.get("arguments")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("ok") is False or payload.get("clarification_required") is True:
+            return call
+        return None
+    return None
+
+
+def any_mutation_tool_requested_or_executed(run_result: dict[str, Any]) -> bool:
+    requested = _tool_names(run_result.get("requested_tool_calls", []))
+    executed = _tool_names(run_result.get("executed_tool_calls", []))
+    return any(name in MUTATION_TOOL_NAMES for name in [*requested, *executed])
+
+
+def first_executed_tool_result(
+    run_result: dict[str, Any],
+    tool_name: str,
+) -> dict[str, Any] | None:
+    for call in run_result.get("executed_tool_calls", []):
+        if call.get("name") != tool_name:
+            continue
+        payload = call.get("arguments")
+        return payload if isinstance(payload, dict) else None
+    return None
 
 
 @contextmanager
@@ -76,6 +860,20 @@ def ensure_llama_server(
     except LlamaLauncherError as exc:
         print(f"Failed to start llama.cpp server: {exc}")
         raise
+
+
+def apply_live_generation_bounds(
+    client: LlamaServerClient,
+    *,
+    max_tokens: int | None,
+) -> None:
+    """Keep live eval completions bounded so backend stalls stay diagnosable."""
+    if max_tokens is None:
+        return
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+        raise ValueError("max_tokens must be a positive integer.")
+    if hasattr(client, "max_tokens"):
+        client.max_tokens = min(int(client.max_tokens), max_tokens)
 
 
 def restart_llama_server(
@@ -139,6 +937,39 @@ def build_phase_parser(
         action="store_true",
         help="Quick check: force n_runs=1.",
     )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=int(os.environ.get("GRC_AGENT_LIVE_MAX_TOKENS", DEFAULT_LIVE_EVAL_MAX_TOKENS)),
+        help=(
+            "Maximum completion tokens for each live eval model call. "
+            f"Default: {DEFAULT_LIVE_EVAL_MAX_TOKENS}."
+        ),
+    )
+    parser.add_argument(
+        "--stability-threshold",
+        type=float,
+        default=float(os.environ.get("GRC_AGENT_LIVE_STABILITY_THRESHOLD", "1.0")),
+        help=(
+            "Per-case model pass-rate required for release-stable reporting. "
+            "This does not change majority pass/fail gating. Default: 1.0."
+        ),
+    )
+    parser.add_argument(
+        "--results-path",
+        default=None,
+        help="Optional JSONL-like run store path for resumable live eval results.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse cached runs from --results-path.",
+    )
+    parser.add_argument(
+        "--rerun-failed",
+        action="store_true",
+        help="With --resume, reuse passing runs and rerun failures.",
+    )
     return parser
 
 
@@ -183,6 +1014,8 @@ def default_phase_summary(
         "passed": total_passed,
         "pass_rate": round(total_passed / total_cases, 4) if total_cases else 0,
         "by_category": summarize_by_category(results),
+        "dimension_pass_counts": dimension_pass_counts(results),
+        "stability": stability_summary(results),
         **run_outcomes,
     }
 
@@ -298,6 +1131,88 @@ def summarize_run_outcomes(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def case_run_stability(
+    runs: list[dict[str, Any]],
+    *,
+    threshold: float = 1.0,
+) -> dict[str, Any]:
+    """Report repeat-run consistency for one case without changing majority gating."""
+    total_scheduled_runs = len(runs)
+    model_attempts = 0
+    model_passes = 0
+    infra_failures = 0
+    status_counts = {
+        RUN_STATUS_PASS: 0,
+        RUN_STATUS_FAIL: 0,
+        RUN_STATUS_INFRA_FAIL: 0,
+    }
+
+    for run in runs:
+        status = run.get("status") or derive_run_status(run)
+        if status in status_counts:
+            status_counts[status] += 1
+        if status == RUN_STATUS_INFRA_FAIL:
+            infra_failures += 1
+            continue
+        model_attempts += 1
+        if status == RUN_STATUS_PASS:
+            model_passes += 1
+
+    model_pass_rate = (
+        round(model_passes / model_attempts, 4) if model_attempts else None
+    )
+    stable = (
+        total_scheduled_runs > 0
+        and infra_failures == 0
+        and model_attempts == total_scheduled_runs
+        and model_pass_rate is not None
+        and model_pass_rate >= threshold
+    )
+
+    return {
+        "threshold": threshold,
+        "stable": stable,
+        "total_scheduled_runs": total_scheduled_runs,
+        "model_attempts": model_attempts,
+        "model_passes": model_passes,
+        "model_failures": model_attempts - model_passes,
+        "infra_failures": infra_failures,
+        "model_pass_rate": model_pass_rate,
+        "status_counts": status_counts,
+    }
+
+
+def stability_summary(
+    results: list[dict[str, Any]],
+    *,
+    threshold: float = 1.0,
+) -> dict[str, Any]:
+    """Summarize repeat-run stability across cases."""
+    unstable_cases: list[str] = []
+    stable_cases = 0
+    case_summaries: dict[str, dict[str, Any]] = {}
+
+    for result in results:
+        case_name = str(result.get("name") or "<unknown>")
+        category = str(result.get("category") or "<unknown>")
+        key = f"{category}/{case_name}"
+        stability = case_run_stability(result.get("runs", []), threshold=threshold)
+        case_summaries[key] = stability
+        if stability["stable"]:
+            stable_cases += 1
+        else:
+            unstable_cases.append(key)
+
+    return {
+        "threshold": threshold,
+        "stable_cases": stable_cases,
+        "total_cases": len(results),
+        "unstable_cases": unstable_cases,
+        "release_stable": len(results) > 0 and not unstable_cases,
+        "cases": case_summaries,
+    }
+
+
 def load_run_store(results_path: str | Path) -> dict[str, Any]:
     path = Path(results_path)
     if not path.exists():
@@ -364,6 +1279,8 @@ def build_persisted_run_entry(
     expected_chain: Any = None
     if hasattr(case, "expected_tool"):
         expected_chain = [case.expected_tool]
+    elif hasattr(case, "expected_tools"):
+        expected_chain = list(case.expected_tools)
     elif hasattr(case, "expected_tool_sequence"):
         expected_chain = list(case.expected_tool_sequence)
     elif hasattr(case, "turns"):
@@ -371,7 +1288,13 @@ def build_persisted_run_entry(
             {
                 "turn_index": index,
                 "prompt": turn.prompt,
-                "expected_tools": list(turn.expected_tools_in_order),
+                "expected_tools": list(
+                    getattr(
+                        turn,
+                        "expected_tools_in_order",
+                        getattr(turn, "expected_tools", []),
+                    )
+                ),
             }
             for index, turn in enumerate(case.turns)
         ]
@@ -425,6 +1348,8 @@ def run_phase_eval(
     results_path: str | Path | None = None,
     resume: bool = False,
     rerun_failed: bool = False,
+    max_tokens: int | None = DEFAULT_LIVE_EVAL_MAX_TOKENS,
+    stability_threshold: float = 1.0,
 ) -> dict[str, Any]:
     config = load_app_config()
     resolved_url = (server_url or config.llama.server_url).rstrip("/")
@@ -490,6 +1415,7 @@ def run_phase_eval(
                         resolved_url,
                         resolved_model,
                     )
+                    apply_live_generation_bounds(client, max_tokens=max_tokens)
                     temperature = client.temperature
                 except LlamaLauncherError:
                     try:
@@ -497,6 +1423,7 @@ def run_phase_eval(
                             resolved_url,
                             resolved_model,
                         )
+                        apply_live_generation_bounds(client, max_tokens=max_tokens)
                         temperature = client.temperature
                         backend_restart_count = 1
                     except LlamaLauncherError as exc:
@@ -536,6 +1463,7 @@ def run_phase_eval(
                         resolved_url,
                         resolved_model,
                     )
+                    apply_live_generation_bounds(client, max_tokens=max_tokens)
                     temperature = client.temperature
                     backend_restart_count = 1
                     run_result = safe_run_case(client, resolved_model, case)
@@ -576,17 +1504,32 @@ def run_phase_eval(
                 print(f" -> {render_status(case, run_result)}")
             runs.append(run_result)
 
-        results.append(build_case_report(case, runs, n_runs, majority_threshold))
+        case_report = build_case_report(case, runs, n_runs, majority_threshold)
+        case_report["stability"] = case_run_stability(
+            runs,
+            threshold=stability_threshold,
+        )
+        results.append(case_report)
+
+    summary = build_summary(results, len(cases))
+    summary["stability"] = stability_summary(results, threshold=stability_threshold)
 
     return {
         "phase": phase,
         "model": resolved_model,
         "temperature": temperature,
+        "backend": collect_backend_metadata(
+            client,
+            server_url=resolved_url,
+            model=resolved_model,
+            temperature=temperature,
+        ),
         "n_runs": n_runs,
         "majority_threshold": majority_threshold,
+        "stability_threshold": stability_threshold,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cases": results,
-        "summary": build_summary(results, len(cases)),
+        "summary": summary,
     }
 
 
@@ -687,6 +1630,77 @@ def tool_call_matches_argument_checks(
     return _partial_match(tool_call.get("arguments"), expected_arguments)
 
 
+def _tool_names(tool_calls: list[dict[str, Any]]) -> list[str]:
+    return [str(call.get("name")) for call in tool_calls if call.get("name")]
+
+
+def _tool_result_ok(tool_call: dict[str, Any]) -> bool:
+    payload = tool_call.get("arguments")
+    return isinstance(payload, dict) and payload.get("ok") is True
+
+
+def _requested_calls_match_expectations(
+    requested_tool_calls: list[dict[str, Any]],
+    expected_tool_calls: tuple[ToolExpectation, ...],
+) -> bool:
+    if not expected_tool_calls:
+        return not requested_tool_calls
+
+    start_index = 0
+    for expectation in expected_tool_calls:
+        for index in range(start_index, len(requested_tool_calls)):
+            call = requested_tool_calls[index]
+            if call.get("name") != expectation.name:
+                continue
+            if not _requested_call_matches_expectation(call, expectation):
+                continue
+            start_index = index + 1
+            break
+        else:
+            return False
+    return True
+
+
+def _requested_call_matches_expectation(
+    call: dict[str, Any],
+    expectation: ToolExpectation,
+) -> bool:
+    if expectation.arguments and not tool_call_matches_argument_checks(
+        call,
+        expectation.arguments,
+    ):
+        return False
+    if expectation.transaction_operations and not tool_call_matches_transaction_checks(
+        call,
+        list(expectation.transaction_operations),
+        ordered=expectation.ordered_transaction,
+    ):
+        return False
+    return True
+
+
+def _executed_calls_match_expectations(
+    executed_tool_calls: list[dict[str, Any]],
+    expected_tool_calls: tuple[ToolExpectation, ...],
+) -> bool:
+    if not expected_tool_calls:
+        return not executed_tool_calls
+
+    start_index = 0
+    for expectation in expected_tool_calls:
+        for index in range(start_index, len(executed_tool_calls)):
+            call = executed_tool_calls[index]
+            if call.get("name") != expectation.name:
+                continue
+            if expectation.require_result_ok and not _tool_result_ok(call):
+                continue
+            start_index = index + 1
+            break
+        else:
+            return False
+    return True
+
+
 def normalize_transaction_operations(arguments: Any) -> list[dict[str, Any]]:
     """Normalize one tool-call argument payload into an ordered transaction list."""
     if not isinstance(arguments, dict):
@@ -737,7 +1751,9 @@ def render_prompt(prompt: str, target_path: str, save_path: str) -> str:
 
 def render_value_templates(value: Any, *, target_path: str, save_path: str) -> Any:
     if isinstance(value, str):
-        return value.format(target_path=target_path, save_path=save_path)
+        return value.format_map(
+            _TemplateValues(target_path=target_path, save_path=save_path)
+        )
     if isinstance(value, dict):
         return {
             key: render_value_templates(
@@ -750,7 +1766,46 @@ def render_value_templates(value: Any, *, target_path: str, save_path: str) -> A
             render_value_templates(item, target_path=target_path, save_path=save_path)
             for item in value
         ]
+    if isinstance(value, tuple):
+        return tuple(
+            render_value_templates(item, target_path=target_path, save_path=save_path)
+            for item in value
+        )
     return value
+
+
+class _TemplateValues(dict[str, str]):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def render_tool_expectations(
+    expectations: tuple[ToolExpectation, ...],
+    *,
+    target_path: str,
+    save_path: str,
+) -> tuple[ToolExpectation, ...]:
+    return tuple(
+        ToolExpectation(
+            name=expectation.name,
+            arguments=render_value_templates(
+                expectation.arguments,
+                target_path=target_path,
+                save_path=save_path,
+            ),
+            transaction_operations=tuple(
+                render_value_templates(
+                    operation,
+                    target_path=target_path,
+                    save_path=save_path,
+                )
+                for operation in expectation.transaction_operations
+            ),
+            ordered_transaction=expectation.ordered_transaction,
+            require_result_ok=expectation.require_result_ok,
+        )
+        for expectation in expectations
+    )
 
 
 def requested_tool_calls_since(

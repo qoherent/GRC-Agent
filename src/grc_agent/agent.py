@@ -8,6 +8,7 @@ from grc_agent.catalog import describe_block
 from grc_agent._payload import ErrorCode
 from grc_agent.config import AgentConfig, default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.manual import search_manual
 from grc_agent.retrieval.search import _search_grc_with_context
 from grc_agent.runtime.prompt import build_system_prompt
 from grc_agent.runtime.tool_schemas import build_tool_schemas
@@ -134,7 +135,14 @@ class GrcAgent:
     ) -> bool:
         if not isinstance(result, dict) or result.get("ok") is not False:
             return False
-        return tool_name in {"new_grc", "load_grc", "apply_edit", "validate_graph", "save_graph"}
+        return tool_name in {
+            "new_grc",
+            "load_grc",
+            "apply_edit",
+            "remove_connection",
+            "validate_graph",
+            "save_graph",
+        }
 
     def resolve_pending_clarification(
         self, user_message: str
@@ -302,7 +310,7 @@ class GrcAgent:
         self._pending_clarification_revision = None
 
     def check_unsupported_request(self, user_message: str) -> dict[str, Any] | None:
-        """Return a refusal response if the user message requests unsupported raw YAML editing."""
+        """Return a refusal response for unsupported runtime actions."""
         lowered = user_message.lower()
         for keywords in self._RAW_YAML_EDIT_PATTERNS:
             if all(kw in lowered for kw in keywords):
@@ -318,7 +326,69 @@ class GrcAgent:
                         "propose_edit for previews, save_graph to persist changes."
                     ),
                 }
+        unsupported_operations: tuple[tuple[str, tuple[str, ...]], ...] = (
+            ("undo", ("undo",)),
+            ("redo", ("redo",)),
+            ("Python export", ("export", "python")),
+            ("standalone Python export", ("standalone", "python")),
+            ("code generation", ("generate", "code")),
+        )
+        for label, keywords in unsupported_operations:
+            if all(kw in lowered for kw in keywords):
+                return {
+                    "ok": True,
+                    "model": "guard",
+                    "steps": 0,
+                    "tool_rounds_used": 0,
+                    "tool_calls_executed": 0,
+                    "assistant_text": (
+                        f"{label} is unsupported. I cannot perform that action "
+                        "through the current verified GRC tool contract."
+                    ),
+                }
         return None
+
+    def check_ambiguous_connection_edit(self, user_message: str) -> dict[str, Any] | None:
+        """Ask for exact endpoints before vague connection mutations reach the model."""
+        lowered = user_message.lower()
+        connection_edit = any(
+            phrase in lowered
+            for phrase in (
+                "disconnect",
+                "unwire",
+                "remove connection",
+                "delete connection",
+                "remove the wire",
+                "delete the wire",
+            )
+        )
+        if not connection_edit:
+            return None
+
+        has_exact_endpoint_language = (
+            "->" in user_message
+            or (
+                " output " in f" {lowered} "
+                and " input " in f" {lowered} "
+                and any(char.isdigit() for char in user_message)
+            )
+            or ("src_block" in lowered and "dst_block" in lowered)
+        )
+        if has_exact_endpoint_language:
+            return None
+
+        return {
+            "ok": True,
+            "model": "guard",
+            "steps": 0,
+            "tool_rounds_used": 0,
+            "tool_calls_executed": 0,
+            "assistant_text": (
+                "I need exact connection endpoints before changing wires. "
+                "Provide source block, source port, destination block, and destination port, "
+                "or ask me to inspect the graph first."
+            ),
+        }
 
     def init_turn_requirements(self, user_message: str) -> None:
         """Parse user message and initialise turn-completion tracking."""
@@ -333,6 +403,10 @@ class GrcAgent:
             self._turn_completed_actions.add(tool_name)
         if not ok:
             self._turn_any_execution_failed = True
+
+    def mark_turn_recovery_success(self) -> None:
+        """Allow normal turn nudges after a bounded correction succeeds."""
+        self._turn_any_execution_failed = False
 
     def check_turn_continuation(self) -> tuple[bool, str]:
         """Return (should_nudge, nudge_text) if remaining actions need a nudge."""
@@ -634,8 +708,12 @@ class GrcAgent:
                 }
                 if isinstance(active_validation, dict)
                 else active_validation,
+                "block_count": active_session.get("block_count"),
+                "connection_count": active_session.get("connection_count"),
+                "variable_count": active_session.get("variable_count"),
                 "variable_preview": active_session.get("variable_preview"),
                 "block_preview": active_session.get("block_preview"),
+                "connection_preview": active_session.get("connection_preview"),
             }
 
         if tool_name == "search_grc":
@@ -705,6 +783,15 @@ class GrcAgent:
         )
         variables_hint = ""
         blocks_hint = ""
+        connections_hint = ""
+        count_parts = []
+        if isinstance(content.get("block_count"), int):
+            count_parts.append(f"blocks={content.get('block_count')}")
+        if isinstance(content.get("connection_count"), int):
+            count_parts.append(f"connections={content.get('connection_count')}")
+        if isinstance(content.get("variable_count"), int):
+            count_parts.append(f"variables={content.get('variable_count')}")
+        counts_hint = f" {', '.join(count_parts)};" if count_parts else ""
         if reason != "turn_refresh":
             variable_preview = content.get("variable_preview")
             if isinstance(variable_preview, list) and variable_preview:
@@ -712,13 +799,19 @@ class GrcAgent:
             block_preview = content.get("block_preview")
             if isinstance(block_preview, list) and block_preview:
                 blocks_hint = f" blocks=[{', '.join(str(item) for item in block_preview[:6])}];"
+            connection_preview = content.get("connection_preview")
+            if isinstance(connection_preview, list) and connection_preview:
+                connections_hint = (
+                    " connections_preview=["
+                    f"{', '.join(str(item) for item in connection_preview[:8])}];"
+                )
         return (
             f"{action}: path={content.get('path')}, "
             f"graph_id={content.get('graph_id')}, "
             f"state_revision={content.get('state_revision')}, "
             f"dirty={content.get('dirty')}, "
             f"validation={validation_status};"
-            f"{variables_hint}{blocks_hint}"
+            f"{counts_hint}{variables_hint}{blocks_hint}{connections_hint}"
         )
 
     # ------------------------------------------------------------------- #
@@ -762,9 +855,11 @@ class GrcAgent:
             "search_grc": self._search_grc,
             "get_grc_context": self._get_grc_context,
             "describe_block": self._describe_block,
+            "search_manual": self._search_manual,
             "suggest_compatible_insertions": self._suggest_compatible_insertions,
             "insert_block_on_connection": self._insert_block_on_connection,
             "auto_insert_block": self._auto_insert_block,
+            "remove_connection": self._remove_connection,
             "apply_edit": self._apply_edit,
             "propose_edit": self._propose_edit,
             "validate_graph": self._validate_graph,
@@ -1025,6 +1120,18 @@ class GrcAgent:
             )
         return result
 
+    def _search_manual(self, query: str, k: int | None = None) -> ToolResult:
+        if k is None:
+            payload = search_manual(query)
+        else:
+            payload = search_manual(query, k=k)
+        if payload.get("ok"):
+            payload["hint"] = (
+                "Manual results are explanation-only. Do not use them as transaction "
+                "recipes; use catalog/session tools plus grcc validation for graph changes."
+            )
+        return self._payload_result("search_manual", payload)
+
     def _suggest_compatible_insertions(self, connection_id: str, k: int = 5) -> ToolResult:
         """Read-only suggestion for blocks that can be inserted into a connection."""
         result = suggest_insertions(self.session, connection_id, k)
@@ -1109,6 +1216,17 @@ class GrcAgent:
             self._record_successful_validation()
             self._clear_pending_clarification()
         return self._payload_result("auto_insert_block", payload)
+
+    def _remove_connection(self, connection_id: str) -> ToolResult:
+        """Thin wrapper: delegates to apply_edit with op_type=remove_connection."""
+        result = self._apply_edit(
+            {
+                "op_type": "remove_connection",
+                "connection_id": connection_id,
+            }
+        )
+        result["tool"] = "remove_connection"
+        return result
 
     def _propose_edit(self, transaction: Any) -> ToolResult:
         missing_session = self._missing_session_result("propose_edit")

@@ -9,9 +9,11 @@ PUBLIC_TOOL_NAMES: tuple[str, ...] = (
     "search_grc",
     "get_grc_context",
     "describe_block",
+    "search_manual",
     "suggest_compatible_insertions",
     "insert_block_on_connection",
     "auto_insert_block",
+    "remove_connection",
     "apply_edit",
     "propose_edit",
     "validate_graph",
@@ -149,6 +151,23 @@ def build_tool_schemas() -> list[dict[str, Any]]:
             required=["block_id"],
         ),
         _schema(
+            "search_manual",
+            "Search bundled GNU Radio tutorial/manual pages for explanation-only context with citations. "
+            "Use this for how/why/conceptual GNU Radio questions. "
+            "Do NOT use manual results as mutation authority; graph changes must use catalog/session tools and grcc validation.",
+            {
+                "query": {
+                    "type": "string",
+                    "description": "Conceptual GNU Radio question or search text.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Optional maximum number of cited excerpts.",
+                },
+            },
+            required=["query"],
+        ),
+        _schema(
             "suggest_compatible_insertions",
             "Suggest catalog-backed blocks that can be inserted into an existing connection. "
             "Use this BEFORE insert_block_on_connection when the user asks to add/insert a compatible block into an existing connection or path. "
@@ -222,6 +241,19 @@ def build_tool_schemas() -> list[dict[str, Any]]:
                 },
             },
             required=["goal"],
+        ),
+        _schema(
+            "remove_connection",
+            "Remove one existing connection by exact connection_id through the verified edit pipeline. "
+            "Use only when the user provided or you inspected an exact connection_id. "
+            "If endpoints are vague, inspect or ask for exact endpoints first.",
+            {
+                "connection_id": {
+                    "type": "string",
+                    "description": "Exact connection id in form src_block:src_port->dst_block:dst_port.",
+                },
+            },
+            required=["connection_id"],
         ),
         _schema(
             "apply_edit",

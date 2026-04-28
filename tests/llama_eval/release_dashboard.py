@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""Aggregate persisted live-eval run stores into a release stability dashboard."""
+
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+import json
+import sys
+from typing import Any, Iterable
+
+from tests.llama_eval.harness import (
+    case_run_stability,
+    load_run_store,
+)
+
+PHASE_NAMES = {
+    10: "tier1_live",
+    20: "tier2_release",
+    30: "tier3_multiturn",
+    40: "tier4_external_examples",
+}
+
+
+def build_release_dashboard(
+    stores: Iterable[dict[str, Any]],
+    *,
+    required_phases: tuple[int, ...] = (20, 30, 40),
+    min_runs_per_case: int = 3,
+    stability_threshold: float = 1.0,
+) -> dict[str, Any]:
+    """Build one dashboard from one or more persisted live-eval result stores."""
+    grouped: dict[int, dict[tuple[str, str], list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    malformed_entries = 0
+
+    for store in stores:
+        runs = store.get("runs", [])
+        if not isinstance(runs, list):
+            malformed_entries += 1
+            continue
+        for entry in runs:
+            if not isinstance(entry, dict):
+                malformed_entries += 1
+                continue
+            parsed = _run_from_store_entry(entry)
+            if parsed is None:
+                malformed_entries += 1
+                continue
+            phase, category, case_name, run = parsed
+            grouped[phase][(category, case_name)].append(run)
+
+    phase_reports: dict[str, Any] = {}
+    unstable_cases: list[str] = []
+    short_run_cases: list[str] = []
+    total_model_attempts = 0
+    total_model_passes = 0
+    total_infra_failures = 0
+    total_scheduled_runs = 0
+
+    for phase in sorted(grouped):
+        phase_name = phase_name_for(phase)
+        case_reports: dict[str, Any] = {}
+        phase_unstable_cases: list[str] = []
+        phase_short_run_cases: list[str] = []
+        phase_model_attempts = 0
+        phase_model_passes = 0
+        phase_infra_failures = 0
+        phase_total_scheduled = 0
+
+        for (category, case_name), runs in sorted(grouped[phase].items()):
+            runs = sorted(runs, key=lambda run: int(run.get("run_index", 0)))
+            stability = case_run_stability(
+                runs,
+                threshold=stability_threshold,
+            )
+            case_key = f"{category}/{case_name}"
+            qualified_key = f"{phase_name}/{case_key}"
+            run_count_ok = stability["total_scheduled_runs"] >= min_runs_per_case
+            stable = bool(stability["stable"] and run_count_ok)
+            report = {
+                **stability,
+                "run_count_ok": run_count_ok,
+                "stable": stable,
+            }
+            case_reports[case_key] = report
+
+            phase_model_attempts += int(stability["model_attempts"])
+            phase_model_passes += int(stability["model_passes"])
+            phase_infra_failures += int(stability["infra_failures"])
+            phase_total_scheduled += int(stability["total_scheduled_runs"])
+            if not stability["stable"]:
+                phase_unstable_cases.append(case_key)
+                unstable_cases.append(qualified_key)
+            if not run_count_ok:
+                phase_short_run_cases.append(case_key)
+                short_run_cases.append(qualified_key)
+
+        phase_release_ready = (
+            bool(case_reports)
+            and not phase_unstable_cases
+            and not phase_short_run_cases
+        )
+        phase_reports[str(phase)] = {
+            "phase": phase,
+            "name": phase_name,
+            "release_ready": phase_release_ready,
+            "case_count": len(case_reports),
+            "model_attempts": phase_model_attempts,
+            "model_passes": phase_model_passes,
+            "infra_failures": phase_infra_failures,
+            "total_scheduled_runs": phase_total_scheduled,
+            "model_pass_rate": _ratio(phase_model_passes, phase_model_attempts),
+            "unstable_cases": phase_unstable_cases,
+            "short_run_cases": phase_short_run_cases,
+            "cases": case_reports,
+        }
+        total_model_attempts += phase_model_attempts
+        total_model_passes += phase_model_passes
+        total_infra_failures += phase_infra_failures
+        total_scheduled_runs += phase_total_scheduled
+
+    missing_required_phases = [
+        phase for phase in required_phases if phase not in grouped
+    ]
+    release_ready = (
+        malformed_entries == 0
+        and not missing_required_phases
+        and not unstable_cases
+        and not short_run_cases
+        and total_infra_failures == 0
+        and total_scheduled_runs > 0
+    )
+
+    return {
+        "release_ready": release_ready,
+        "required_phases": list(required_phases),
+        "missing_required_phases": missing_required_phases,
+        "min_runs_per_case": min_runs_per_case,
+        "stability_threshold": stability_threshold,
+        "model_attempts": total_model_attempts,
+        "model_passes": total_model_passes,
+        "infra_failures": total_infra_failures,
+        "total_scheduled_runs": total_scheduled_runs,
+        "model_pass_rate": _ratio(total_model_passes, total_model_attempts),
+        "unstable_cases": unstable_cases,
+        "short_run_cases": short_run_cases,
+        "malformed_entries": malformed_entries,
+        "phases": phase_reports,
+    }
+
+
+def phase_name_for(phase: int) -> str:
+    return PHASE_NAMES.get(phase, f"phase_{phase}")
+
+
+def _run_from_store_entry(
+    entry: dict[str, Any],
+) -> tuple[int, str, str, dict[str, Any]] | None:
+    phase = entry.get("phase")
+    category = entry.get("category")
+    case_name = entry.get("case_name")
+    run_index = entry.get("run_index")
+    if not isinstance(phase, int):
+        return None
+    if not isinstance(category, str) or not category:
+        return None
+    if not isinstance(case_name, str) or not case_name:
+        return None
+    if not isinstance(run_index, int):
+        return None
+
+    raw_run = entry.get("run_result")
+    run = dict(raw_run) if isinstance(raw_run, dict) else {}
+    status = entry.get("status") or run.get("status")
+    if isinstance(status, str):
+        run["status"] = status
+    run["run_index"] = run_index
+    return phase, category, case_name, run
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    if denominator == 0:
+        return None
+    return round(numerator / denominator, 4)
+
+
+def _load_stores(paths: list[str]) -> list[dict[str, Any]]:
+    return [load_run_store(path) for path in paths]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Build a persisted live-eval release stability dashboard."
+    )
+    parser.add_argument(
+        "--results-path",
+        action="append",
+        required=True,
+        help="Persisted run-store JSON path. May be supplied multiple times.",
+    )
+    parser.add_argument(
+        "--required-phase",
+        type=int,
+        action="append",
+        default=None,
+        help="Required live-eval phase number. May be supplied multiple times.",
+    )
+    parser.add_argument(
+        "--min-runs-per-case",
+        type=int,
+        default=3,
+        help="Minimum persisted runs required for each case. Default: 3.",
+    )
+    parser.add_argument(
+        "--stability-threshold",
+        type=float,
+        default=1.0,
+        help="Required per-case model pass rate. Default: 1.0.",
+    )
+    parser.add_argument(
+        "--no-fail",
+        action="store_true",
+        help="Always exit 0 after printing the dashboard.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.min_runs_per_case < 1:
+        parser.error("--min-runs-per-case must be >= 1")
+    if not 0 < args.stability_threshold <= 1:
+        parser.error("--stability-threshold must be in the range (0, 1].")
+
+    dashboard = build_release_dashboard(
+        _load_stores(args.results_path),
+        required_phases=tuple(args.required_phase or (20, 30, 40)),
+        min_runs_per_case=args.min_runs_per_case,
+        stability_threshold=args.stability_threshold,
+    )
+    print(json.dumps(dashboard, indent=2, sort_keys=False))
+    if args.no_fail or dashboard["release_ready"]:
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

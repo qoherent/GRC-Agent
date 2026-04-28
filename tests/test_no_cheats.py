@@ -32,3 +32,22 @@ class NoCheatsTests(unittest.TestCase):
                     offenders.append(f"{path.relative_to(repo_root)}: {fragment}")
 
         self.assertEqual(offenders, [])
+
+    def test_manual_retrieval_is_not_imported_by_mutation_paths(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mutation_paths = [
+            repo_root / "src" / "grc_agent" / "transaction",
+            repo_root / "src" / "grc_agent" / "validation",
+            repo_root / "src" / "grc_agent" / "session" / "auto_insert.py",
+            repo_root / "src" / "grc_agent" / "session" / "insertion_suggestions.py",
+        ]
+
+        offenders: list[str] = []
+        for path in mutation_paths:
+            files = [path] if path.is_file() else sorted(path.rglob("*.py"))
+            for file_path in files:
+                text = file_path.read_text(encoding="utf-8")
+                if "grc_agent.manual" in text:
+                    offenders.append(str(file_path.relative_to(repo_root)))
+
+        self.assertEqual(offenders, [])

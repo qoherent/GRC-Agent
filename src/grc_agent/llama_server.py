@@ -11,6 +11,7 @@ from urllib import error, request
 
 from grc_agent._payload import ErrorCode
 from grc_agent.agent import GrcAgent
+from grc_agent.recovery import RECOVERABLE_MISSING_ARGUMENTS, classify_tool_result_for_recovery
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class LlamaServerClient:
         base_url: str,
         api_key: str | None = None,
         timeout_seconds: float = 60.0,
-        max_tokens: int = 100000,
+        max_tokens: int = 4096,
         temperature: float = 0.0,
         enable_thinking: bool = False,
     ) -> None:
@@ -103,6 +104,10 @@ class LlamaServerClient:
                 "llama.cpp server alias mismatch: "
                 f"configured '{expected_alias}', discovered '{discovered_alias}'."
             )
+
+    def get_server_properties(self) -> dict[str, Any]:
+        """Return llama.cpp server properties from `/props` when supported."""
+        return self._request_json("GET", "/props")
 
     def create_chat_completion(
         self,
@@ -524,11 +529,15 @@ class LlamaServerClient:
                 )
 
             call_id = call.get("id")
+            parsed_arguments = LlamaServerClient._parse_tool_arguments(
+                arguments,
+                index,
+            )
             normalized_calls.append(
                 LlamaToolCall(
                     id=str(call_id) if call_id is not None else f"tool_call_{index}",
                     name=name,
-                    arguments=LlamaServerClient._parse_tool_arguments(arguments, index),
+                    arguments=parsed_arguments,
                 )
             )
 
@@ -545,10 +554,22 @@ class LlamaServerClient:
         elif isinstance(arguments, str):
             try:
                 parsed_arguments = json.loads(arguments)
-            except json.JSONDecodeError as exc:
-                raise LlamaServerError(
-                    f"llama.cpp tool call {call_index} returned invalid JSON arguments."
-                ) from exc
+            except json.JSONDecodeError:
+                repaired = LlamaServerClient._repair_unclosed_json_stub(arguments)
+                if repaired is None:
+                    return {
+                        "__invalid_json_arguments__": LlamaServerClient._argument_preview(
+                            arguments
+                        )
+                    }
+                try:
+                    parsed_arguments = json.loads(repaired)
+                except json.JSONDecodeError:
+                    return {
+                        "__invalid_json_arguments__": LlamaServerClient._argument_preview(
+                            arguments
+                        )
+                    }
         else:
             raise LlamaServerError(
                 f"llama.cpp tool call {call_index} returned unsupported argument shape."
@@ -559,6 +580,14 @@ class LlamaServerClient:
                 f"llama.cpp tool call {call_index} arguments must decode to an object."
             )
         return parsed_arguments
+
+    @staticmethod
+    def _argument_preview(arguments: str) -> str:
+        """Keep malformed tool arguments visible but bounded for schema rejection."""
+        normalized = arguments.strip()
+        if len(normalized) <= 200:
+            return normalized
+        return f"{normalized[:200]}..."
 
     @staticmethod
     def _is_timeout_reason(reason: Any) -> bool:
@@ -575,6 +604,7 @@ def run_bounded_llama_turn(
     user_message: str,
     *,
     model: str | None = None,
+    track_turn_requirements: bool = True,
 ) -> dict[str, Any]:
     """Run a bounded llama.cpp -> runtime loop against one loaded flowgraph."""
     if not isinstance(user_message, str) or not user_message.strip():
@@ -596,11 +626,25 @@ def run_bounded_llama_turn(
         logger.info("unsupported_request_blocked message=%s", user_message[:80])
         return unsupported
 
+    ambiguous_connection_edit = agent.check_ambiguous_connection_edit(user_message)
+    if ambiguous_connection_edit is not None:
+        agent.history.append(
+            {
+                "role": "assistant",
+                "content": ambiguous_connection_edit["assistant_text"],
+            }
+        )
+        logger.info("ambiguous_connection_edit_blocked message=%s", user_message[:80])
+        return ambiguous_connection_edit
+
     tool_calls_executed = 0
     tool_rounds_used = 0
     assistant_turns = 0
+    correction_retries_used = 0
+    correction_allowed_tools: set[str] | None = None
 
-    agent.init_turn_requirements(user_message)
+    if track_turn_requirements:
+        agent.init_turn_requirements(user_message)
 
     logger.info("turn_start model=%s message=%s", resolved_model, user_message[:80])
 
@@ -652,8 +696,38 @@ def run_bounded_llama_turn(
 
         if tool_calls:
             tool_rounds_used += 1
+            stopping_failure: dict[str, Any] | None = None
+            correction_turn_succeeded = False
             for tool_call in tool_calls:
-                logger.info("tool_call name=%s args=%s", tool_call.name, str(tool_call.arguments)[:120])
+                logger.info(
+                    "tool_call name=%s args=%s",
+                    tool_call.name,
+                    str(tool_call.arguments)[:120],
+                )
+                if (
+                    correction_allowed_tools is not None
+                    and tool_call.name not in correction_allowed_tools
+                ):
+                    stopping_failure = {
+                        "tool": tool_call.name,
+                        "ok": False,
+                        "error_type": "recovery_disallowed_tool",
+                        "message": (
+                            f"Recovery tool '{tool_call.name}' is not allowed for this "
+                            "bounded correction."
+                        ),
+                        "allowed_tools": sorted(correction_allowed_tools),
+                    }
+                    agent.record_tool_completion(tool_call.name, False)
+                    agent.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": stopping_failure,
+                        }
+                    )
+                    break
                 # Pre-validate here (before execute_tool) so that schema-rejected calls
                 # are NOT counted in tool_calls_executed.  execute_tool also validates,
                 # but that path would increment the counter first.
@@ -661,6 +735,7 @@ def run_bounded_llama_turn(
                     tool_call.name, tool_call.arguments
                 )
                 if validation_result is not None:
+                    agent.record_tool_completion(tool_call.name, False)
                     agent.history.append(
                         {
                             "role": "tool",
@@ -670,11 +745,14 @@ def run_bounded_llama_turn(
                         }
                     )
                     if agent.should_stop_batch_after_result(tool_call.name, validation_result):
+                        stopping_failure = validation_result
                         break
                     continue
                 result = agent.execute_tool(tool_call.name, tool_call.arguments)
                 tool_calls_executed += 1
                 agent.record_tool_completion(tool_call.name, result.get("ok") is True)
+                if correction_allowed_tools is not None and result.get("ok") is True:
+                    correction_turn_succeeded = True
                 agent.history.append(
                     {
                         "role": "tool",
@@ -684,10 +762,50 @@ def run_bounded_llama_turn(
                     }
                 )
                 if agent.should_stop_batch_after_result(tool_call.name, result):
+                    stopping_failure = result
                     break
+            if stopping_failure is not None:
+                recovery_decision = classify_tool_result_for_recovery(
+                    str(stopping_failure.get("tool", "")),
+                    stopping_failure,
+                )
+                if (
+                    recovery_decision.recovery_class == RECOVERABLE_MISSING_ARGUMENTS
+                    and correction_retries_used < recovery_decision.max_mutation_retries
+                    and recovery_decision.prompt
+                ):
+                    correction_retries_used += 1
+                    correction_allowed_tools = set(recovery_decision.allowed_tools)
+                    agent.history.append(
+                        {"role": "user", "content": recovery_decision.prompt}
+                    )
+                    logger.info(
+                        "turn_recovery_retry class=%s retry=%d",
+                        recovery_decision.recovery_class,
+                        correction_retries_used,
+                    )
+                    continue
+                assistant_text = _tool_failure_text(stopping_failure)
+                agent.history.append({"role": "assistant", "content": assistant_text})
+                return {
+                    "ok": False,
+                    "model": resolved_model,
+                    "steps": assistant_turns,
+                    "tool_rounds_used": tool_rounds_used,
+                    "tool_calls_executed": tool_calls_executed,
+                    "assistant_text": assistant_text,
+                    "error_type": stopping_failure.get("error_type"),
+                    "message": stopping_failure.get("message", assistant_text),
+                    "correction_retries_used": correction_retries_used,
+                }
+            if correction_turn_succeeded:
+                agent.mark_turn_recovery_success()
+            correction_allowed_tools = None
             continue
 
-        should_nudge, nudge = agent.check_turn_continuation()
+        should_nudge, nudge = (
+            agent.check_turn_continuation() if track_turn_requirements else (False, "")
+        )
         if should_nudge:
             agent.history[-1]["content"] = assistant_content or ""
             agent.history.append({"role": "user", "content": nudge})
@@ -710,8 +828,19 @@ def run_bounded_llama_turn(
             "steps": assistant_turns,
             "tool_rounds_used": tool_rounds_used,
             "tool_calls_executed": tool_calls_executed,
+            "correction_retries_used": correction_retries_used,
             "assistant_text": assistant_text,
         }
+
+
+def _tool_failure_text(result: dict[str, Any]) -> str:
+    message = result.get("message")
+    if isinstance(message, str) and message.strip():
+        return message
+    error_type = result.get("error_type")
+    if isinstance(error_type, str) and error_type.strip():
+        return f"Tool call failed: {error_type}."
+    return "I could not complete that request with the available tools."
 
 
 def _resolve_final_assistant_text(
@@ -775,6 +904,3 @@ def _looks_like_tool_call_text(text: str) -> bool:
     if not isinstance(parsed, dict):
         return False
     return "name" in parsed or "function" in parsed
-
-
-

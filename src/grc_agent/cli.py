@@ -6,10 +6,11 @@ import logging
 import sys
 from typing import Any
 
+from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.agent import GrcAgent
 from grc_agent.runtime.clarification import render_clarification_prompt
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
-from grc_agent.config import AppConfig, load_app_config
+from grc_agent.config import AppConfig, ConfigError, load_app_config
 from grc_agent.doctor import print_doctor_report, run_doctor
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
@@ -18,7 +19,9 @@ from grc_agent.llama_server import (
     LlamaServerError,
     run_bounded_llama_turn,
 )
+from grc_agent.manual import search_manual
 from grc_agent.retrieval import initialize_retrieval
+from grc_agent.session.load import load_grc as load_grc_session
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,11 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         "--skip-retrieval",
         action="store_true",
         help="Skip retrieval readiness checks.",
+    )
+    doctor_parser.add_argument(
+        "--start-llama",
+        action="store_true",
+        help="Opt into starting/reusing llama.cpp as part of doctor checks.",
     )
 
     subparsers.add_parser(
@@ -138,6 +146,29 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         "--args",
         default="{}",
         help="JSON object of tool arguments.",
+    )
+
+    manual_parser = subparsers.add_parser(
+        "manual",
+        help="Search the bundled GNU Radio manual corpus without mutating graphs.",
+    )
+    manual_subparsers = manual_parser.add_subparsers(dest="manual_command")
+    manual_subparsers.required = True
+    manual_search_parser = manual_subparsers.add_parser(
+        "search",
+        help="Search cleaned tutorial/manual pages and return cited excerpts.",
+    )
+    manual_search_parser.add_argument("query", help="Manual search query.")
+    manual_search_parser.add_argument(
+        "--k",
+        type=int,
+        default=3,
+        help="Maximum number of cited excerpts to return.",
+    )
+    manual_search_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the search payload as JSON.",
     )
 
     return parser
@@ -254,8 +285,27 @@ def _prepare_retrieval() -> tuple[int, str | None]:
 def _load_initial_session(file_path: str | None) -> FlowgraphSession:
     session = FlowgraphSession()
     if file_path is not None:
-        session.load(file_path)
+        loaded = load_grc_session(file_path)
+        if isinstance(loaded, dict):
+            raise CliError(loaded)
+        session = loaded
     return session
+
+
+class CliError(RuntimeError):
+    """CLI-friendly structured error."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(str(payload.get("message", "CLI error.")))
+        self.payload = payload
+
+
+def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print("\n--- Error ---")
+    print(payload.get("message", "Command failed."))
 
 
 def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
@@ -271,7 +321,11 @@ def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
 def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
     """Exercise the routed runtime contract with deterministic fake actions."""
     print(f"Loading {file_path}...")
-    session = _load_initial_session(file_path)
+    try:
+        session = _load_initial_session(file_path)
+    except CliError as exc:
+        _print_cli_error(exc.payload)
+        return 1
     retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
@@ -302,7 +356,11 @@ def _run_llama_runtime(
     """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
     if file_path is not None:
         print(f"Loading {file_path}...")
-        session = _load_initial_session(file_path)
+        try:
+            session = _load_initial_session(file_path)
+        except CliError as exc:
+            _print_cli_error(exc.payload)
+            return 1
     else:
         print("Starting new empty graph...")
         session = FlowgraphSession.create()
@@ -475,7 +533,11 @@ def _run_tool_command(
     tool_name: str, tool_kwargs: dict[str, Any], file_path: str | None, config: AppConfig
 ) -> int:
     """Execute one routed runtime tool directly and print the structured result."""
-    session = _load_initial_session(file_path)
+    try:
+        session = _load_initial_session(file_path)
+    except CliError as exc:
+        print(json.dumps(exc.payload, indent=2, sort_keys=True))
+        return 1
     catalog_root: str | None = None
     if tool_name in _RETRIEVAL_READY_TOOLS:
         retrieval_status, catalog_root = _prepare_retrieval()
@@ -501,14 +563,37 @@ def _run_health_command(config: AppConfig) -> int:
     return 0 if report["status"] == "ok" else 1
 
 
+def _run_manual_search_command(query: str, k: int, *, json_output: bool) -> int:
+    payload = search_manual(query, k=k)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Manual search: {payload.get('query', query)}")
+        for index, result in enumerate(payload.get("results", []), start=1):
+            citation = result.get("citation", {})
+            print(f"\n{index}. {result.get('title')} — {result.get('section')}")
+            print(result.get("excerpt", ""))
+            print(
+                f"Source: {citation.get('path')}:{citation.get('line_start')}"
+            )
+        for warning in payload.get("warnings", []) or []:
+            print(f"Warning: {warning}")
+    return 0 if payload.get("ok") else 1
+
+
 def _run_doctor_command(
     *,
     config_path: str | None,
     json_output: bool,
     skip_retrieval: bool,
+    check_llama: bool,
 ) -> int:
     """Execute the packaged-app doctor checks."""
-    report = run_doctor(config_path=config_path, check_retrieval=not skip_retrieval)
+    report = run_doctor(
+        config_path=config_path,
+        check_retrieval=not skip_retrieval,
+        check_llama=check_llama,
+    )
     print_doctor_report(report, json_output=json_output)
     return 0 if report["ok"] else 1
 
@@ -525,7 +610,16 @@ def main(argv: list[str] | None = None) -> int:
         parser = _build_parser()
         parser.parse_args(translated_argv)
     config_override = _parse_config_override(translated_argv)
-    app_config = load_app_config(config_override)
+    try:
+        app_config = load_app_config(config_override)
+    except ConfigError as exc:
+        _print_cli_error(
+            build_error_payload(
+                error_type=ErrorCode.INVALID_REQUEST,
+                message=str(exc),
+            )
+        )
+        return 1
     parser = _build_parser(app_config)
     args = parser.parse_args(translated_argv)
 
@@ -537,6 +631,7 @@ def main(argv: list[str] | None = None) -> int:
             config_path=args.config,
             json_output=args.json,
             skip_retrieval=args.skip_retrieval,
+            check_llama=args.start_llama,
         )
 
     if args.command == "health":
@@ -571,6 +666,14 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         return _run_tool_command(args.tool_name, tool_kwargs, args.file, app_config)
+
+    if args.command == "manual":
+        if args.manual_command == "search":
+            return _run_manual_search_command(
+                args.query,
+                args.k,
+                json_output=args.json,
+            )
 
     parser.error("Unknown command.")
     return 2
