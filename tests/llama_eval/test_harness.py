@@ -543,7 +543,10 @@ class _ScriptedClient:
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        tool_choice: str | dict[str, object] = "auto",
+        response_format: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        _ = (model, messages, tools, tool_choice, response_format)
         if not self.responses:
             raise AssertionError("no scripted response remaining")
         return self.responses.pop(0)
@@ -638,6 +641,10 @@ class LiveScenarioRunnerTests(unittest.TestCase):
         self.assertTrue(result["tool_success_pass"], result)
         self.assertTrue(result["semantic_pass"], result)
         self.assertTrue(result["end_state_pass"], result)
+        self.assertEqual(
+            result["turn_results"][0]["turn_plan"]["intent"],
+            "param_edit",
+        )
 
     def test_persisted_entry_supports_live_turn_specs(self) -> None:
         scenario = LiveScenario(
@@ -671,8 +678,8 @@ class LiveScenarioRunnerTests(unittest.TestCase):
                     "assistant_text": None,
                     "tool_calls": [
                         _ScriptedToolCall(
-                            "apply_edit",
-                            {"transaction": {"op_type": "remove_connection"}},
+                            "remove_connection",
+                            {},
                         )
                     ],
                 },
@@ -696,7 +703,7 @@ class LiveScenarioRunnerTests(unittest.TestCase):
                         "blocks_throttle2_0 input 0."
                     ),
                     expected_tool_calls=(
-                        ToolExpectation("apply_edit", require_result_ok=False),
+                        ToolExpectation("remove_connection", require_result_ok=False),
                     ),
                     recovery_enabled=True,
                     expected_recovery_class=RECOVERABLE_MISSING_ARGUMENTS,
@@ -710,6 +717,124 @@ class LiveScenarioRunnerTests(unittest.TestCase):
         self.assertTrue(result["tool_success_pass"], result)
         self.assertTrue(result["recovery_pass"], result)
         self.assertTrue(result["turn_results"][0]["recovery_attempted"], result)
+
+    def test_run_live_scenario_once_applies_pre_turn_setup_before_snapshot(self) -> None:
+        client = _ScriptedClient(
+            [
+                {
+                    "assistant_text": None,
+                    "tool_calls": [_ScriptedToolCall("validate_graph", {})],
+                },
+                {"assistant_text": "Validated.", "tool_calls": []},
+            ]
+        )
+        scenario = LiveScenario(
+            category="setup",
+            name="pre_turn_verified_tool",
+            turns=(
+                LiveTurnSpec(
+                    prompt="Validate the current graph.",
+                    pre_turn_tool_name="apply_edit",
+                    pre_turn_tool_args={
+                        "transaction": {
+                            "op_type": "update_params",
+                            "instance_name": "samp_rate",
+                            "params": {"value": "48000"},
+                        }
+                    },
+                    expected_tool_calls=(ToolExpectation("validate_graph"),),
+                    semantic_checks=(
+                        {"kind": "no_mutation"},
+                        {"kind": "variable_equals", "name": "samp_rate", "value": "48000"},
+                    ),
+                ),
+            ),
+        )
+
+        result = run_live_scenario_once(client=client, model="model", scenario=scenario)
+
+        self.assertTrue(result["matched"], result)
+        self.assertEqual(result["tools_called"], ["validate_graph"])
+        self.assertEqual(
+            result["turn_results"][0]["before_snapshot"]["variable_values"]["samp_rate"],
+            "48000",
+        )
+        self.assertEqual(
+            [entry["tool"] for entry in result["turn_results"][0]["pre_turn_setup"]],
+            ["apply_edit", "validate_graph"],
+        )
+        self.assertTrue(result["turn_results"][0]["pre_turn_setup"][1]["valid"])
+
+    def test_run_live_scenario_once_allows_pre_turn_clarification_setup(self) -> None:
+        scenario = LiveScenario(
+            category="setup",
+            name="pre_turn_clarification",
+            fixture_name="rewire_stream_ambiguous.grc",
+            turns=(
+                LiveTurnSpec(
+                    prompt="C",
+                    clarification_response=True,
+                    pre_turn_tool_name="rewire_connection",
+                    pre_turn_tool_args={
+                        "old_connection_id": (
+                            "blocks_throttle2_0:0->blocks_char_to_float_0:0"
+                        ),
+                        "new_src_port": 0,
+                        "new_dst_block": "blocks_char_to_float_0",
+                        "new_dst_port": 0,
+                    },
+                    pre_turn_allow_clarification=True,
+                    expected_tool_calls=(ToolExpectation("rewire_connection"),),
+                    semantic_checks=(
+                        {"kind": "clarification_mode", "mode": "executed"},
+                        {
+                            "kind": "connection_present",
+                            "connection_id": (
+                                "blocks_throttle2_1:0->blocks_char_to_float_0:0"
+                            ),
+                        },
+                    ),
+                ),
+            ),
+        )
+
+        result = run_live_scenario_once(
+            client=_ScriptedClient([]),
+            model="model",
+            scenario=scenario,
+        )
+
+        self.assertTrue(result["matched"], result)
+        self.assertEqual(result["tools_called"], ["rewire_connection"])
+        self.assertEqual(
+            [entry["tool"] for entry in result["turn_results"][0]["pre_turn_setup"]],
+            ["rewire_connection", "validate_graph"],
+        )
+        self.assertTrue(
+            result["turn_results"][0]["pre_turn_setup"][0]["clarification_required"]
+        )
+        self.assertTrue(result["turn_results"][0]["pre_turn_setup"][1]["valid"])
+
+    def test_run_live_scenario_once_rejects_non_mutation_pre_turn_setup(self) -> None:
+        scenario = LiveScenario(
+            category="setup",
+            name="pre_turn_rejects_save",
+            turns=(
+                LiveTurnSpec(
+                    prompt="Validate the current graph.",
+                    pre_turn_tool_name="save_graph",
+                    pre_turn_tool_args={"path": "{save_path}"},
+                    expected_tool_calls=(ToolExpectation("validate_graph"),),
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported pre-turn setup tool"):
+            run_live_scenario_once(
+                client=_ScriptedClient([]),
+                model="model",
+                scenario=scenario,
+            )
 
 
 class RecoveryHarnessTests(unittest.TestCase):
@@ -813,6 +938,45 @@ class RecoveryHarnessTests(unittest.TestCase):
         self.assertTrue(result["recovery_pass"], result)
         self.assertEqual(result["recovery_requested_tool_calls"], [])
         self.assertEqual(result["recovery_mutation_retry_count"], 0)
+
+    def test_remove_connection_missing_arguments_uses_wrapper_for_bounded_follow_up(self) -> None:
+        client = _ScriptedClient(
+            [
+                {
+                    "assistant_text": "I checked the graph and cannot safely infer the endpoint.",
+                    "tool_calls": [],
+                }
+            ]
+        )
+        agent = GrcAgent()
+        history_start = len(agent.history)
+        executed_tool_calls = [
+            {
+                "name": "remove_connection",
+                "arguments": {
+                    "ok": False,
+                    "error_type": "tool_call_invalid",
+                    "validation_errors": [
+                        {"code": "missing_required", "field": "connection_id"}
+                    ],
+                },
+            }
+        ]
+
+        result = evaluate_turn_recovery(
+            client=client,
+            model="model",
+            agent=agent,
+            history_start=history_start,
+            executed_tool_calls=executed_tool_calls,
+            recovery_enabled=True,
+            expected_recovery_class=RECOVERABLE_MISSING_ARGUMENTS,
+        )
+
+        self.assertTrue(result["recovery_attempted"], result)
+        self.assertTrue(result["recovery_pass"], result)
+        self.assertIn("remove_connection", result["recovery_decision"]["allowed_tools"])
+        self.assertNotIn("apply_edit", result["recovery_decision"]["allowed_tools"])
 
     def test_recovery_pass_fails_when_model_exceeds_mutation_retry_budget(self) -> None:
         client = _ScriptedClient(
@@ -1182,6 +1346,105 @@ class GraphSnapshotTests(unittest.TestCase):
         self.assertTrue(validation["exists"], validation)
         self.assertTrue(validation["loaded"], validation)
         self.assertTrue(validation["valid"], validation)
+        self.assertIn(
+            "analog_random_source_x_0:0->blocks_throttle2_0:0",
+            validation["snapshot"]["connection_ids"],
+        )
+
+    def test_saved_connection_checks_reload_saved_graph(self) -> None:
+        session = self._loaded_session()
+        agent = GrcAgent(session)
+
+        with TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "saved.grc"
+            before = graph_snapshot(agent)
+            validation_result = agent.execute_tool("validate_graph", {})
+            self.assertTrue(validation_result.get("ok"), validation_result)
+            result = agent.execute_tool("save_graph", {"path": str(save_path)})
+            self.assertTrue(result.get("ok"), result)
+            after = graph_snapshot(agent)
+
+            present = evaluate_semantic_checks(
+                checks=(
+                    {
+                        "kind": "saved_connection_present",
+                        "path": str(save_path),
+                        "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                    },
+                    {
+                        "kind": "saved_connection_absent",
+                        "path": str(save_path),
+                        "connection_id": "missing:0->missing:0",
+                    },
+                ),
+                before_snapshot=before,
+                after_snapshot=after,
+                run_result={},
+                save_path=str(save_path),
+            )
+
+        self.assertTrue(present["semantic_pass"], present)
+        self.assertTrue(present["end_state_pass"], present)
+
+    def test_saved_value_checks_reload_saved_graph(self) -> None:
+        session = self._loaded_session()
+        agent = GrcAgent(session)
+        session.set_param("samp_rate", "value", "64000")
+
+        with TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "saved.grc"
+            before = graph_snapshot(agent)
+            validation_result = agent.execute_tool("validate_graph", {})
+            self.assertTrue(validation_result.get("ok"), validation_result)
+            result = agent.execute_tool("save_graph", {"path": str(save_path)})
+            self.assertTrue(result.get("ok"), result)
+            after = graph_snapshot(agent)
+
+            saved = evaluate_semantic_checks(
+                checks=(
+                    {
+                        "kind": "saved_path_valid",
+                        "path": str(save_path),
+                        "copy": True,
+                    },
+                    {
+                        "kind": "saved_variable_equals",
+                        "path": str(save_path),
+                        "name": "samp_rate",
+                        "value": 64000,
+                    },
+                    {
+                        "kind": "saved_block_param_equals",
+                        "path": str(save_path),
+                        "instance_name": "samp_rate",
+                        "param": "value",
+                        "value": 64000,
+                    },
+                    {
+                        "kind": "saved_block_state_equals",
+                        "path": str(save_path),
+                        "instance_name": "blocks_throttle2_0",
+                        "state": "enabled",
+                    },
+                    {
+                        "kind": "saved_block_present",
+                        "path": str(save_path),
+                        "instance_name": "blocks_throttle2_0",
+                    },
+                    {
+                        "kind": "saved_block_absent",
+                        "path": str(save_path),
+                        "instance_name": "missing_block",
+                    },
+                ),
+                before_snapshot=before,
+                after_snapshot=after,
+                run_result={},
+                save_path=str(save_path),
+            )
+
+        self.assertTrue(saved["semantic_pass"], saved)
+        self.assertTrue(saved["end_state_pass"], saved)
 
     def test_evaluate_semantic_checks_reports_variable_and_mutation_state(self) -> None:
         session = self._loaded_session()
@@ -1194,6 +1457,25 @@ class GraphSnapshotTests(unittest.TestCase):
                 {"kind": "mutation"},
                 {"kind": "variable_equals", "name": "samp_rate", "value": "48000"},
                 {"kind": "dirty", "value": True},
+            ),
+            before_snapshot=before,
+            after_snapshot=after,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertTrue(result["semantic_pass"], result)
+        self.assertTrue(result["end_state_pass"], result)
+
+    def test_evaluate_semantic_checks_variable_value_compares_numeric_semantically(self) -> None:
+        session = self._loaded_session()
+        before = graph_snapshot(session)
+        session.set_param("samp_rate", "value", 48000)
+        after = graph_snapshot(session)
+
+        result = evaluate_semantic_checks(
+            checks=(
+                {"kind": "variable_equals", "name": "samp_rate", "value": "48000"},
             ),
             before_snapshot=before,
             after_snapshot=after,
@@ -1313,6 +1595,125 @@ class GraphSnapshotTests(unittest.TestCase):
 
         self.assertTrue(present["semantic_pass"], present)
         self.assertFalse(absent["semantic_pass"], absent)
+
+    def test_evaluate_semantic_checks_reports_exact_graph_delta(self) -> None:
+        session = self._loaded_session()
+        before = graph_snapshot(session)
+        session.set_param("samp_rate", "value", "48000")
+        after = graph_snapshot(session)
+
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"samp_rate": "48000"},
+                        "block_params": {"samp_rate": {"value": "48000"}},
+                        "dirty": True,
+                    },
+                },
+            ),
+            before_snapshot=before,
+            after_snapshot=after,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertTrue(result["semantic_pass"], result)
+        self.assertTrue(result["end_state_pass"], result)
+
+    def test_evaluate_semantic_checks_exact_graph_delta_detects_unlisted_change(self) -> None:
+        session = self._loaded_session()
+        before = graph_snapshot(session)
+        session.set_param("samp_rate", "value", "48000")
+        session.set_block_state("blocks_throttle2_0", "disabled")
+        after = graph_snapshot(session)
+
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"samp_rate": "48000"},
+                        "block_params": {"samp_rate": {"value": "48000"}},
+                        "dirty": True,
+                    },
+                },
+            ),
+            before_snapshot=before,
+            after_snapshot=after,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertFalse(result["semantic_pass"], result)
+        self.assertFalse(result["end_state_pass"], result)
+
+    def test_evaluate_semantic_checks_exact_graph_delta_accepts_no_change(self) -> None:
+        session = self._loaded_session()
+        snapshot = graph_snapshot(session)
+
+        result = evaluate_semantic_checks(
+            checks=({"kind": "exact_graph_delta", "delta": {}},),
+            before_snapshot=snapshot,
+            after_snapshot=snapshot,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertTrue(result["semantic_pass"], result)
+
+    def test_evaluate_semantic_checks_exact_graph_delta_treats_numeric_scalars_semantically(self) -> None:
+        before = {
+            "raw_hash": "before",
+            "block_names": ["samp_rate"],
+            "connection_ids": [],
+            "variable_values": {"samp_rate": "32000"},
+            "blocks_by_name": {
+                "samp_rate": {
+                    "parameters": {"value": "32000"},
+                    "state": "enabled",
+                }
+            },
+            "dirty": False,
+            "validation_status": "unknown",
+            "validation_returncode": None,
+        }
+        after = {
+            **before,
+            "raw_hash": "after",
+            "variable_values": {"samp_rate": 96000},
+            "blocks_by_name": {
+                "samp_rate": {
+                    "parameters": {"value": 96000},
+                    "state": "enabled",
+                }
+            },
+            "dirty": True,
+            "validation_status": "valid",
+            "validation_returncode": 0,
+        }
+
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"samp_rate": "96000"},
+                        "block_params": {"samp_rate": {"value": "96000"}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+            ),
+            before_snapshot=before,
+            after_snapshot=after,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertTrue(result["semantic_pass"], result)
 
 
 class InfraFailureTests(unittest.TestCase):
@@ -1771,7 +2172,7 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
 
         if not (GNU_EXAMPLES / "audio/dial_tone.grc").exists():
             self.skipTest("dial_tone.grc not installed")
-        cases = {case.name: case for case in _available_cases()}
+        cases = {case.name: case for case in _available_cases(include_probes=True)}
 
         case = cases["dial_tone_samp_rate_edit_validate"]
         turn = case.turns[0]
@@ -1779,9 +2180,14 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
         self.assertEqual([tool.name for tool in turn.expected_tool_calls], ["apply_edit", "validate_graph"])
         self.assertIn(
             {
-                "kind": "variable_equals",
-                "name": "samp_rate",
-                "value": "44100",
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "variables": {"samp_rate": "44100"},
+                    "block_params": {"samp_rate": {"value": "44100"}},
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
             },
             turn.semantic_checks,
         )
@@ -1802,9 +2208,13 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
         )
         self.assertIn(
             {
-                "kind": "variable_equals",
-                "name": "samp_rate",
-                "value": "48000",
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "variables": {"samp_rate": "48000"},
+                    "block_params": {"samp_rate": {"value": "48000"}},
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
             },
             turn.semantic_checks,
         )
@@ -1823,20 +2233,23 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
         self.assertEqual([tool.name for tool in turn.expected_tool_calls], ["apply_edit", "validate_graph"])
         self.assertIn(
             {
-                "kind": "block_param_equals",
-                "instance_name": "analog_sig_source_x_0",
-                "param": "amp",
-                "value": "0.5",
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "block_params": {"analog_sig_source_x_0": {"amp": "0.5"}},
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
             },
             turn.semantic_checks,
         )
 
-    def test_tier4_probe_includes_external_state_edit_validate_case(self) -> None:
+    def test_tier4_includes_promoted_state_edit_validate_case(self) -> None:
         from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
 
         if not (GNU_EXAMPLES / "vocoder/grfreedv.grc").exists():
             self.skipTest("grfreedv.grc not installed")
-        cases = {case.name: case for case in _available_cases(include_probes=True)}
+        cases = {case.name: case for case in _available_cases()}
 
         case = cases["grfreedv_message_debug_disable_validate"]
         turn = case.turns[0]
@@ -1844,12 +2257,605 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
         self.assertEqual([tool.name for tool in turn.expected_tool_calls], ["apply_edit", "validate_graph"])
         self.assertIn(
             {
-                "kind": "block_state_equals",
-                "instance_name": "blocks_message_debug_0",
-                "state": "disabled",
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "block_states": {"blocks_message_debug_0": "disabled"},
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
             },
             turn.semantic_checks,
         )
+
+    def test_tier4_promoted_mutation_cases_have_exact_graph_delta(self) -> None:
+        from tests.llama_eval.tier4_external_examples import _available_cases
+
+        cases = _available_cases()
+        if not cases:
+            self.skipTest("No installed GNU Radio example graphs available")
+
+        mutation_tools = {
+            "apply_edit",
+            "remove_connection",
+            "rewire_connection",
+            "insert_block_on_connection",
+            "auto_insert_block",
+        }
+        promoted_mutations = [
+            case
+            for case in cases
+            if any(
+                tool.name in mutation_tools
+                for turn in case.turns
+                for tool in turn.expected_tool_calls
+            )
+        ]
+
+        self.assertTrue(promoted_mutations)
+        for case in promoted_mutations:
+            for turn in case.turns:
+                if any(tool.name in mutation_tools for tool in turn.expected_tool_calls):
+                    self.assertTrue(
+                        any(check.get("kind") == "exact_graph_delta" for check in turn.semantic_checks),
+                        f"{case.name} missing exact_graph_delta",
+                    )
+
+    def test_tier4_expands_installed_example_coverage(self) -> None:
+        from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
+
+        required = (
+            "pdu/simple_pdu_to_stream_example.grc",
+            "digital/packet/tx_stage0.grc",
+            "tags/test_tag_prop.grc",
+            "qt-gui/qtgui_message_inputs.grc",
+        )
+        if not all((GNU_EXAMPLES / relative).exists() for relative in required):
+            self.skipTest("required installed GNU Radio examples not installed")
+        cases = {case.name: case for case in _available_cases()}
+
+        self.assertIn("pdu_simple_validate", cases)
+        self.assertIn("tx_stage0_message_disconnect_validate", cases)
+        self.assertIn("tags_samp_rate_edit_validate", cases)
+        self.assertIn("qtgui_message_inputs_pkt_len_edit_validate", cases)
+
+        disconnect_turn = cases["tx_stage0_message_disconnect_validate"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in disconnect_turn.expected_tool_calls],
+            ["remove_connection", "validate_graph"],
+        )
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "removed_connections": [
+                        "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                    ],
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            disconnect_turn.semantic_checks,
+        )
+
+    def test_tier4_includes_stream_message_and_rollback_coverage(self) -> None:
+        from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
+
+        required = (
+            "blocks/stream_mux_demo.grc",
+            "analog/sig_source_msg_ports.grc",
+            "blocks/var_to_msg.grc",
+        )
+        if not all((GNU_EXAMPLES / relative).exists() for relative in required):
+            self.skipTest("required installed GNU Radio examples not installed")
+        release_cases = {case.name: case for case in _available_cases()}
+        probe_cases = {case.name: case for case in _available_cases(include_probes=True)}
+
+        self.assertIn("stream_mux_validate", release_cases)
+        self.assertIn("sig_source_msg_ports_context", release_cases)
+        self.assertIn("var_to_msg_test_value_edit_validate", release_cases)
+        self.assertIn("var_to_msg_remove_throttle_rolls_back", release_cases)
+        self.assertIn("var_to_msg_remove_throttle_rolls_back", probe_cases)
+
+        rollback_turn = release_cases["var_to_msg_remove_throttle_rolls_back"].turns[0]
+        self.assertEqual(
+            release_cases["var_to_msg_remove_throttle_rolls_back"].category,
+            "external_rollback",
+        )
+        self.assertEqual([tool.name for tool in rollback_turn.expected_tool_calls], ["apply_edit"])
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, rollback_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, rollback_turn.semantic_checks)
+
+    def test_tier4_includes_save_reload_after_disconnect_and_rewire(self) -> None:
+        from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
+
+        required = (
+            "digital/packet/tx_stage0.grc",
+            "digital/burst_shaper.grc",
+        )
+        if not all((GNU_EXAMPLES / relative).exists() for relative in required):
+            self.skipTest("required installed GNU Radio examples not installed")
+        cases = {case.name: case for case in _available_cases()}
+
+        disconnect_turn = cases["tx_stage0_message_disconnect_validate_save"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in disconnect_turn.expected_tool_calls],
+            ["remove_connection", "validate_graph", "save_graph"],
+        )
+        self.assertIn({"kind": "saved_path_valid", "path": "{save_path}"}, disconnect_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "removed_connections": [
+                        "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                    ],
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            disconnect_turn.semantic_checks,
+        )
+
+        rewire_turn = cases["burst_shaper_stream_rewire_validate_save"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in rewire_turn.expected_tool_calls],
+            ["rewire_connection", "validate_graph", "save_graph"],
+        )
+        self.assertIn({"kind": "saved_path_valid", "path": "{save_path}"}, rewire_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "removed_connections": [
+                        "blocks_throttle_0:0->blocks_tag_debug_0:0"
+                    ],
+                    "added_connections": [
+                        "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                    ],
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            rewire_turn.semantic_checks,
+        )
+
+        clarified_case = cases["burst_shaper_clarified_rewire_validate_save"]
+        self.assertEqual(len(clarified_case.turns), 3)
+
+        clarification_turn = clarified_case.turns[0]
+        self.assertEqual(
+            [tool.name for tool in clarification_turn.expected_tool_calls],
+            ["rewire_connection"],
+        )
+        self.assertFalse(clarification_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, clarification_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, clarification_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "tool_result",
+                "tool": "rewire_connection",
+                "arguments": {
+                    "clarification_required": True,
+                    "kind": "rewire_connection_disambiguation",
+                },
+            },
+            clarification_turn.semantic_checks,
+        )
+
+        clarified_rewire_turn = clarified_case.turns[1]
+        self.assertTrue(clarified_rewire_turn.clarification_response)
+        self.assertEqual(
+            [tool.name for tool in clarified_rewire_turn.expected_tool_calls],
+            ["rewire_connection"],
+        )
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "removed_connections": [
+                        "blocks_throttle_0:0->blocks_tag_debug_0:0"
+                    ],
+                    "added_connections": [
+                        "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                    ],
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            clarified_rewire_turn.semantic_checks,
+        )
+
+        clarified_save_turn = clarified_case.turns[2]
+        self.assertEqual(
+            [tool.name for tool in clarified_save_turn.expected_tool_calls],
+            ["validate_graph", "save_graph"],
+        )
+        self.assertIn({"kind": "saved_path_valid", "path": "{save_path}"}, clarified_save_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "saved_connection_absent",
+                "path": "{save_path}",
+                "connection_id": "blocks_throttle_0:0->blocks_tag_debug_0:0",
+            },
+            clarified_save_turn.semantic_checks,
+        )
+        self.assertIn(
+            {
+                "kind": "saved_connection_present",
+                "path": "{save_path}",
+                "connection_id": (
+                    "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                ),
+            },
+            clarified_save_turn.semantic_checks,
+        )
+
+    def test_tier4_includes_broader_installed_reliability_cases(self) -> None:
+        from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
+
+        required = (
+            "analog/sig_source_msg_ports.grc",
+            "digital/packet/simple_bpsk_tx.grc",
+            "pdu/pdu_tools_demo.grc",
+            "blocks/stream_demux_demo.grc",
+            "filter/filter_taps.grc",
+            "digital/burst_shaper.grc",
+            "digital/packet/uhd_packet_rx.grc",
+        )
+        if not all((GNU_EXAMPLES / relative).exists() for relative in required):
+            self.skipTest("required installed GNU Radio examples not installed")
+        cases = {case.name: case for case in _available_cases()}
+
+        identity_turn = cases["burst_shaper_duplicate_family_summary"].turns[0]
+        self.assertEqual([tool.name for tool in identity_turn.expected_tool_calls], ["summarize_graph"])
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, identity_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, identity_turn.semantic_checks)
+
+        disconnect_turn = cases["sig_source_msg_random_disconnect_validate_save"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in disconnect_turn.expected_tool_calls],
+            ["remove_connection", "validate_graph", "save_graph"],
+        )
+        self.assertIn({"kind": "saved_path_valid", "path": "{save_path}"}, disconnect_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "removed_connections": [
+                        "blocks_message_strobe_random_0:strobe->analog_sig_source_x_0:cmd"
+                    ],
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            disconnect_turn.semantic_checks,
+        )
+
+        state_turn = cases["simple_bpsk_tag_debug_enable_validate_save"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in state_turn.expected_tool_calls],
+            ["apply_edit", "validate_graph", "save_graph"],
+        )
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "block_states": {"blocks_tag_debug_0": "enabled"},
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            state_turn.semantic_checks,
+        )
+        self.assertIn({"kind": "saved_path_valid", "path": "{save_path}"}, state_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "saved_block_state_equals",
+                "path": "{save_path}",
+                "instance_name": "blocks_tag_debug_0",
+                "state": "enabled",
+            },
+            state_turn.semantic_checks,
+        )
+
+        filter_save_turn = cases["filter_cutoff_low_edit_validate_save"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in filter_save_turn.expected_tool_calls],
+            ["apply_edit", "validate_graph", "save_graph"],
+        )
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "variables": {"cutoff_low": 3000},
+                    "block_params": {"cutoff_low": {"value": 3000}},
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            filter_save_turn.semantic_checks,
+        )
+        self.assertIn(
+            {"kind": "saved_path_valid", "path": "{save_path}", "copy": True},
+            filter_save_turn.semantic_checks,
+        )
+        self.assertIn(
+            {
+                "kind": "saved_variable_equals",
+                "path": "{save_path}",
+                "name": "cutoff_low",
+                "value": "3000",
+            },
+            filter_save_turn.semantic_checks,
+        )
+        self.assertIn(
+            {
+                "kind": "saved_block_param_equals",
+                "path": "{save_path}",
+                "instance_name": "cutoff_low",
+                "param": "value",
+                "value": "3000",
+            },
+            filter_save_turn.semantic_checks,
+        )
+
+        pdu_turn = cases["pdu_tools_random_pdu_maxsize_edit_validate"].turns[0]
+        self.assertEqual([tool.name for tool in pdu_turn.expected_tool_calls], ["apply_edit", "validate_graph"])
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "block_params": {"random_pdu": {"maxsize": "8192"}},
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            pdu_turn.semantic_checks,
+        )
+
+        pdu_rollback_turn = cases["pdu_tools_message_disconnect_rolls_back"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in pdu_rollback_turn.expected_tool_calls],
+            ["remove_connection"],
+        )
+        self.assertFalse(pdu_rollback_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, pdu_rollback_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, pdu_rollback_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "tool_result",
+                "tool": "remove_connection",
+                "arguments": {
+                    "ok": False,
+                    "applied": False,
+                    "error_type": "preflight_rejected",
+                },
+            },
+            pdu_rollback_turn.semantic_checks,
+        )
+
+        demux_turn = cases["stream_demux_lengths_edit_validate"].turns[0]
+        self.assertEqual([tool.name for tool in demux_turn.expected_tool_calls], ["apply_edit", "validate_graph"])
+        self.assertIn(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "block_params": {"blocks_stream_demux_0": {"lengths": [1, 3, 5]}},
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            demux_turn.semantic_checks,
+        )
+
+        mixed_domain_turn = cases["var_to_msg_stream_to_message_add_clarifies"].turns[0]
+        self.assertEqual(mixed_domain_turn.expected_tool_calls, ())
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, mixed_domain_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, mixed_domain_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "connection_absent",
+                "connection_id": "blocks_null_source_0:0->blocks_message_debug_0:store",
+            },
+            mixed_domain_turn.semantic_checks,
+        )
+
+        reverse_mixed_domain_turn = cases["var_to_msg_message_to_stream_add_clarifies"].turns[0]
+        self.assertEqual(reverse_mixed_domain_turn.expected_tool_calls, ())
+        self.assertIn(
+            {"kind": "exact_graph_delta", "delta": {}},
+            reverse_mixed_domain_turn.semantic_checks,
+        )
+        self.assertIn({"kind": "no_mutation"}, reverse_mixed_domain_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "connection_absent",
+                "connection_id": "blocks_var_to_msg_0:msgout->blocks_null_sink_0:0",
+            },
+            reverse_mixed_domain_turn.semantic_checks,
+        )
+
+        duplicate_name_turn = cases["uhd_packet_rx_duplicate_constellation_edit_rejected"].turns[0]
+        self.assertEqual([tool.name for tool in duplicate_name_turn.expected_tool_calls], ["apply_edit"])
+        self.assertFalse(duplicate_name_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, duplicate_name_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, duplicate_name_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "tool_result",
+                "tool": "apply_edit",
+                "arguments": {
+                    "ok": False,
+                    "applied": False,
+                    "error_type": "preflight_rejected",
+                    "errors": [
+                        {
+                            "field": "instance_name",
+                            "code": "block_name_not_unique",
+                        }
+                    ],
+                },
+            },
+            duplicate_name_turn.semantic_checks,
+        )
+
+        duplicate_wbfm_turn = cases["uhd_wbfm_duplicate_tun_freq_edit_rejected"].turns[0]
+        self.assertEqual([tool.name for tool in duplicate_wbfm_turn.expected_tool_calls], ["apply_edit"])
+        self.assertFalse(duplicate_wbfm_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, duplicate_wbfm_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, duplicate_wbfm_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "tool_result",
+                "tool": "apply_edit",
+                "arguments": {
+                    "ok": False,
+                    "applied": False,
+                    "error_type": "preflight_rejected",
+                    "errors": [
+                        {
+                            "field": "instance_name",
+                            "code": "block_name_not_unique",
+                        }
+                    ],
+                },
+            },
+            duplicate_wbfm_turn.semantic_checks,
+        )
+
+    def test_tier4_includes_negative_installed_reliability_cases(self) -> None:
+        from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
+
+        required = (
+            "blocks/selector.grc",
+            "audio/dial_tone.grc",
+        )
+        if not all((GNU_EXAMPLES / relative).exists() for relative in required):
+            self.skipTest("required installed GNU Radio examples not installed")
+        cases = {case.name: case for case in _available_cases()}
+        probe_cases = {case.name: case for case in _available_cases(include_probes=True)}
+
+        disconnect_turn = cases["selector_output_disconnect_rolls_back"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in disconnect_turn.expected_tool_calls],
+            ["remove_connection"],
+        )
+        self.assertFalse(disconnect_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, disconnect_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, disconnect_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "tool_result",
+                "tool": "remove_connection",
+                "arguments": {
+                    "ok": False,
+                    "applied": False,
+                    "error_type": "gnu_validation_failed",
+                },
+            },
+            disconnect_turn.semantic_checks,
+        )
+
+        rewire_turn = cases["selector_occupied_rewire_rolls_back"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in rewire_turn.expected_tool_calls],
+            ["rewire_connection"],
+        )
+        self.assertFalse(rewire_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, rewire_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, rewire_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "tool_result",
+                "tool": "rewire_connection",
+                "arguments": {
+                    "ok": False,
+                    "applied": False,
+                    "error_type": "preflight_rejected",
+                },
+            },
+            rewire_turn.semantic_checks,
+        )
+
+        remove_turn = cases["selector_connected_block_remove_rolls_back"].turns[0]
+        self.assertEqual([tool.name for tool in remove_turn.expected_tool_calls], ["apply_edit"])
+        self.assertFalse(remove_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, remove_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, remove_turn.semantic_checks)
+
+        saved_remove_case = cases["selector_saved_connected_block_remove_rolls_back"]
+        self.assertEqual(len(saved_remove_case.turns), 2)
+        save_turn = saved_remove_case.turns[0]
+        self.assertEqual([tool.name for tool in save_turn.expected_tool_calls], ["save_graph"])
+        self.assertIn(
+            {"kind": "saved_path_valid", "path": "{save_path}", "copy": True},
+            save_turn.semantic_checks,
+        )
+        self.assertIn(
+            {
+                "kind": "saved_block_present",
+                "path": "{save_path}",
+                "instance_name": "blocks_selector_0",
+            },
+            save_turn.semantic_checks,
+        )
+        saved_remove_turn = saved_remove_case.turns[1]
+        self.assertEqual([tool.name for tool in saved_remove_turn.expected_tool_calls], ["apply_edit"])
+        self.assertFalse(saved_remove_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, saved_remove_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, saved_remove_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "saved_connection_present",
+                "path": "{save_path}",
+                "connection_id": "blocks_selector_0:0->qtgui_time_sink_x_0:0",
+            },
+            saved_remove_turn.semantic_checks,
+        )
+
+        duplicate_probe = probe_cases["dial_tone_duplicate_connection_rolls_back"]
+        self.assertEqual(duplicate_probe.category, "external_probe")
+        self.assertNotIn("dial_tone_duplicate_connection_rolls_back", cases)
+        duplicate_add_turn = duplicate_probe.turns[0]
+        self.assertEqual([tool.name for tool in duplicate_add_turn.expected_tool_calls], ["apply_edit"])
+        self.assertFalse(duplicate_add_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, duplicate_add_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, duplicate_add_turn.semantic_checks)
+        self.assertIn(
+            {
+                "kind": "tool_result",
+                "tool": "apply_edit",
+                "arguments": {
+                    "ok": False,
+                    "applied": False,
+                    "error_type": "preflight_rejected",
+                },
+            },
+            duplicate_add_turn.semantic_checks,
+        )
+
+        occupied_probe = probe_cases["dial_tone_occupied_input_add_rolls_back"]
+        self.assertEqual(occupied_probe.category, "external_probe")
+        self.assertNotIn("dial_tone_occupied_input_add_rolls_back", cases)
+        occupied_add_turn = occupied_probe.turns[0]
+        self.assertEqual([tool.name for tool in occupied_add_turn.expected_tool_calls], ["apply_edit"])
+        self.assertFalse(occupied_add_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, occupied_add_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, occupied_add_turn.semantic_checks)
+
+        disconnect_turn = cases["dial_tone_output_disconnect_rolls_back"].turns[0]
+        self.assertEqual(
+            [tool.name for tool in disconnect_turn.expected_tool_calls],
+            ["remove_connection"],
+        )
+        self.assertFalse(disconnect_turn.expected_tool_calls[0].require_result_ok)
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, disconnect_turn.semantic_checks)
+        self.assertIn({"kind": "no_mutation"}, disconnect_turn.semantic_checks)
 
 
 if __name__ == "__main__":

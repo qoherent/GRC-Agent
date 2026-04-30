@@ -14,6 +14,9 @@ class Block:
     block_type: str
     # The full nested block payload is preserved here for future use.
     params: dict[str, Any] = field(default_factory=dict)
+    # Deterministic internal identity derived from the source block entry.
+    # This is read-only identity evidence, not a mutation handle.
+    block_uid: str = ""
 
 
 @dataclass

@@ -110,6 +110,212 @@ class FlowgraphSessionTests(unittest.TestCase):
         # The summary should include the last block preview entry.
         self.assertIn("qtgui_time_sink_x_0 (qtgui_time_sink_x)", summary)
 
+    def test_block_uids_are_stable_across_save_reload(self) -> None:
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+
+        self.assertIsNotNone(session.flowgraph)
+        assert session.flowgraph is not None
+        before = {
+            block.instance_name: block.block_uid
+            for block in session.flowgraph.blocks
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "reloaded.grc"
+            session.save(save_path)
+            reloaded = FlowgraphSession()
+            reloaded.load(save_path)
+
+        self.assertIsNotNone(reloaded.flowgraph)
+        assert reloaded.flowgraph is not None
+        after = {
+            block.instance_name: block.block_uid
+            for block in reloaded.flowgraph.blocks
+        }
+        self.assertEqual(before, after)
+        self.assertTrue(all(uid.startswith("block:") for uid in after.values()))
+
+    def test_block_uids_distinguish_duplicate_instance_names(self) -> None:
+        raw_data = self._fixture_raw_data()
+        first = self._detached_variable_block("dup")
+        second = self._detached_variable_block("dup")
+        second["id"] = "import"
+        second["parameters"] = {"alias": "", "comment": "", "imports": "import math"}
+        second["states"]["coordinate"] = [72, 96]
+        raw_data["blocks"].extend([first, second])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(tmpdir, raw_data, "duplicate_names.grc")
+            session = FlowgraphSession()
+            session.load(fixture_path)
+
+        self.assertIsNotNone(session.flowgraph)
+        assert session.flowgraph is not None
+        duplicate_uids = [
+            block.block_uid
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup"
+        ]
+
+        self.assertEqual(len(duplicate_uids), 2)
+        self.assertEqual(len(set(duplicate_uids)), 2)
+        summary_blocks = session.summary_payload(max_blocks=20)["blocks"]
+        duplicate_summary = [
+            block for block in summary_blocks if block["name"] == "dup"
+        ]
+        self.assertEqual(len(duplicate_summary), 2)
+        self.assertEqual(
+            {block["block_uid"] for block in duplicate_summary},
+            set(duplicate_uids),
+        )
+
+    def test_resolve_block_reference_reports_duplicate_candidates(self) -> None:
+        raw_data = self._fixture_raw_data()
+        first = self._detached_variable_block("dup")
+        second = self._detached_variable_block("dup")
+        second["id"] = "import"
+        second["parameters"] = {"alias": "", "comment": "", "imports": "import math"}
+        second["states"]["coordinate"] = [72, 96]
+        raw_data["blocks"].extend([first, second])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(tmpdir, raw_data, "duplicate_names.grc")
+            session = FlowgraphSession()
+            session.load(fixture_path)
+
+        resolved = session.resolve_block_reference("dup")
+
+        self.assertFalse(resolved["unique"])
+        self.assertEqual(resolved["state_revision"], session.state_revision)
+        self.assertEqual(
+            [(candidate["name"], candidate["block_type"]) for candidate in resolved["candidates"]],
+            [("dup", "variable"), ("dup", "import")],
+        )
+        self.assertEqual(
+            len({candidate["block_uid"] for candidate in resolved["candidates"]}),
+            2,
+        )
+
+    def test_resolved_block_reference_revision_is_invalidated_by_graph_change(self) -> None:
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+        resolved = session.resolve_block_reference("samp_rate")
+
+        session.set_param("samp_rate", "value", "48000")
+
+        self.assertTrue(resolved["unique"])
+        self.assertNotEqual(resolved["state_revision"], session.state_revision)
+        self.assertEqual(
+            session.resolve_block_reference("samp_rate")["state_revision"],
+            session.state_revision,
+        )
+
+    def test_find_connection_candidates_resolves_exact_endpoint(self) -> None:
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+
+        resolved = session.find_connection_candidates(
+            src_block="analog_random_source_x_0",
+            src_port=0,
+            dst_block="blocks_throttle2_0",
+            dst_port=0,
+        )
+
+        self.assertTrue(resolved["unique"])
+        self.assertEqual(resolved["state_revision"], session.state_revision)
+        self.assertEqual(
+            resolved["candidates"][0]["connection_id"],
+            "analog_random_source_x_0:0->blocks_throttle2_0:0",
+        )
+
+    def test_find_connection_candidates_keeps_partial_matches_explicit(self) -> None:
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+
+        resolved = session.find_connection_candidates(src_block="blocks_throttle2_0")
+
+        self.assertTrue(resolved["unique"])
+        self.assertEqual(
+            [candidate["connection_id"] for candidate in resolved["candidates"]],
+            ["blocks_throttle2_0:0->blocks_char_to_float_0:0"],
+        )
+
+    def test_find_connection_candidates_reports_ambiguous_endpoint_matches(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["connections"].append(
+            ["blocks_throttle2_0", "0", "qtgui_time_sink_x_0", "1"]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(tmpdir, raw_data, "ambiguous_edges.grc")
+            session = FlowgraphSession()
+            session.load(fixture_path)
+
+        resolved = session.find_connection_candidates(src_block="blocks_throttle2_0")
+
+        self.assertFalse(resolved["unique"])
+        self.assertEqual(
+            [candidate["connection_id"] for candidate in resolved["candidates"]],
+            [
+                "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                "blocks_throttle2_0:0->qtgui_time_sink_x_0:1",
+            ],
+        )
+
+    def test_duplicate_name_mutation_rejects_without_disambiguation(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup")
+        second["id"] = "import"
+        second["parameters"] = {"alias": "", "comment": "", "imports": "import math"}
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(tmpdir, raw_data, "duplicate_names.grc")
+            session = FlowgraphSession()
+            session.load(fixture_path)
+            before = session._serialize_raw_data(session.flowgraph.raw_data)
+
+            with self.assertRaises(ValueError):
+                session.set_param("dup", "comment", "wrong target")
+
+            after = session._serialize_raw_data(session.flowgraph.raw_data)
+
+        self.assertEqual(before, after)
+        self.assertFalse(session.is_dirty)
+
+    def test_duplicate_name_mutation_can_use_block_type_without_wrong_target(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup")
+        second["id"] = "import"
+        second["parameters"] = {"alias": "", "comment": "", "imports": "import math"}
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = self._write_temp_graph(tmpdir, raw_data, "duplicate_names.grc")
+            session = FlowgraphSession()
+            session.load(fixture_path)
+            session.set_param("dup", "comment", "safe", block_type="variable")
+
+        self.assertIsNotNone(session.flowgraph)
+        assert session.flowgraph is not None
+        variable = next(
+            block
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "variable"
+        )
+        imported = next(
+            block
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "import"
+        )
+        self.assertEqual(variable.params["parameters"]["comment"], "safe")
+        self.assertEqual(imported.params["parameters"]["comment"], "")
+
     # Missing files should fail immediately so callers can surface the error directly.
     def test_load_missing_file_raises(self) -> None:
         # Create a new session so there is no previous state involved.

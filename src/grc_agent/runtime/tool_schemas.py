@@ -10,10 +10,12 @@ PUBLIC_TOOL_NAMES: tuple[str, ...] = (
     "get_grc_context",
     "describe_block",
     "search_manual",
+    "semantic_search_grc",
     "suggest_compatible_insertions",
     "insert_block_on_connection",
     "auto_insert_block",
     "remove_connection",
+    "rewire_connection",
     "apply_edit",
     "propose_edit",
     "validate_graph",
@@ -168,6 +170,30 @@ def build_tool_schemas() -> list[dict[str, Any]]:
             required=["query"],
         ),
         _schema(
+            "semantic_search_grc",
+            "Search the local read-only vector index for semantically similar GNU Radio catalog blocks or documentation chunks. "
+            "Use only for read-only discovery or explanation when lexical search is likely insufficient. "
+            "This tool never authorizes graph mutation; any edit still requires exact TurnPlan intent, verified tools, and grcc validation. "
+            "If the index is missing, tell the user to run `grc-agent vector build`.",
+            {
+                "query": {
+                    "type": "string",
+                    "description": "Semantic search text. Maximum 800 characters.",
+                    "maxLength": 800,
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "catalog", "manual", "tutorial"],
+                    "description": "Which read-only vector records to search.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Optional maximum results. Default 5, capped at 10.",
+                },
+            },
+            required=["query"],
+        ),
+        _schema(
             "suggest_compatible_insertions",
             "Suggest catalog-backed blocks that can be inserted into an existing connection. "
             "Use this BEFORE insert_block_on_connection when the user asks to add/insert a compatible block into an existing connection or path. "
@@ -245,15 +271,79 @@ def build_tool_schemas() -> list[dict[str, Any]]:
         _schema(
             "remove_connection",
             "Remove one existing connection by exact connection_id through the verified edit pipeline. "
-            "Use only when the user provided or you inspected an exact connection_id. "
-            "If endpoints are vague, inspect or ask for exact endpoints first.",
+            "Use connection_id when available. Endpoint fields are accepted only so the runtime can resolve "
+            "one exact existing connection_id or ask for clarification; endpoint fields are never a separate "
+            "mutation path.",
             {
                 "connection_id": {
                     "type": "string",
                     "description": "Exact connection id in form src_block:src_port->dst_block:dst_port.",
                 },
+                "src_block": {
+                    "type": "string",
+                    "description": "Optional source block name used only to resolve an exact connection_id.",
+                },
+                "src_port": {
+                    "type": ["integer", "string"],
+                    "description": "Optional source port used only to resolve an exact connection_id.",
+                },
+                "dst_block": {
+                    "type": "string",
+                    "description": "Optional destination block name used only to resolve an exact connection_id.",
+                },
+                "dst_port": {
+                    "type": ["integer", "string"],
+                    "description": "Optional destination port used only to resolve an exact connection_id.",
+                },
             },
-            required=["connection_id"],
+            required=[],
+        ),
+        _schema(
+            "rewire_connection",
+            "Atomically replace one existing connection with one new connection through the verified edit pipeline. "
+            "The old connection may be given as old_connection_id or endpoint hints; endpoint hints are used only "
+            "to resolve one exact old connection_id or ask for clarification. New endpoint hints may be partial only "
+            "when they resolve to one executable candidate or a bounded clarification choice; never guess placement. "
+            "This wrapper internally applies one ordered remove_connection + add_connection transaction and never commits a partial disconnect.",
+            {
+                "old_connection_id": {
+                    "type": "string",
+                    "description": "Optional exact old connection id in form src_block:src_port->dst_block:dst_port.",
+                },
+                "old_src_block": {
+                    "type": "string",
+                    "description": "Optional old source block name used only to resolve one existing old connection.",
+                },
+                "old_src_port": {
+                    "type": ["integer", "string"],
+                    "description": "Optional old source port used only to resolve one existing old connection.",
+                },
+                "old_dst_block": {
+                    "type": "string",
+                    "description": "Optional old destination block name used only to resolve one existing old connection.",
+                },
+                "old_dst_port": {
+                    "type": ["integer", "string"],
+                    "description": "Optional old destination port used only to resolve one existing old connection.",
+                },
+                "new_src_block": {
+                    "type": "string",
+                    "description": "New source block name. Omit only when endpoint hints are intended to resolve candidates.",
+                },
+                "new_src_port": {
+                    "type": ["integer", "string"],
+                    "description": "New source port. Omit only when endpoint hints are intended to resolve candidates.",
+                },
+                "new_dst_block": {
+                    "type": "string",
+                    "description": "New destination block name. Omit only when endpoint hints are intended to resolve candidates.",
+                },
+                "new_dst_port": {
+                    "type": ["integer", "string"],
+                    "description": "New destination port. Omit only when endpoint hints are intended to resolve candidates.",
+                },
+            },
+            required=[],
         ),
         _schema(
             "apply_edit",

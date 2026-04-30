@@ -142,11 +142,13 @@ def _apply_update_params(
 ) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
     op_type = operation.op_type
     instance_name = operation.payload["instance_name"]
+    block_type = operation.payload.get("block_type")
     params = operation.payload["params"]
 
     block, raw_block, _raw_index, issues = _require_unique_block(
         snapshot,
         instance_name,
+        block_type=block_type,
         op_index=op_index,
         op_type=op_type,
         field="instance_name",
@@ -207,11 +209,13 @@ def _apply_update_states(
 ) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
     op_type = operation.op_type
     instance_name = operation.payload["instance_name"]
+    block_type = operation.payload.get("block_type")
     state = operation.payload["state"]
 
     _block, raw_block, _raw_index, issues = _require_unique_block(
         snapshot,
         instance_name,
+        block_type=block_type,
         op_index=op_index,
         op_type=op_type,
         field="instance_name",
@@ -593,10 +597,12 @@ def _apply_remove_block(
 ) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
     op_type = operation.op_type
     instance_name = operation.payload["instance_name"]
+    block_type = operation.payload.get("block_type")
 
     block, _raw_block, raw_index, issues = _require_unique_block(
         snapshot,
         instance_name,
+        block_type=block_type,
         op_index=op_index,
         op_type=op_type,
         field="instance_name",
@@ -1241,38 +1247,50 @@ def _require_unique_block(
     snapshot: SessionSnapshot,
     instance_name: str,
     *,
+    block_type: str | None = None,
     op_index: int,
     op_type: str,
     field: str,
 ) -> tuple[Block | None, dict[str, Any] | None, int | None, list[ValidationIssue]]:
     parsed_matches = [
-        block for block in snapshot.blocks if block.instance_name == instance_name
+        block
+        for block in snapshot.blocks
+        if block.instance_name == instance_name
+        and (block_type is None or block.block_type == block_type)
     ]
     raw_matches = [
         (index, entry)
         for index, entry in enumerate(snapshot.raw_blocks())
-        if isinstance(entry, dict) and entry.get("name") == instance_name
+        if isinstance(entry, dict)
+        and entry.get("name") == instance_name
+        and (block_type is None or entry.get("id") == block_type)
     ]
 
     if not parsed_matches or not raw_matches:
+        message = f"Block not found: {instance_name}"
+        if block_type:
+            message += f" (type: {block_type})"
         return None, None, None, [
             make_issue(
                 op_index=op_index,
                 op_type=op_type,
                 field=field,
                 code="block_not_found",
-                message=f"Block not found: {instance_name}",
+                message=message,
             )
         ]
 
     if len(parsed_matches) != 1 or len(raw_matches) != 1:
+        message = f"Block name is not unique: {instance_name}"
+        if block_type:
+            message += f" (type: {block_type})"
         return None, None, None, [
             make_issue(
                 op_index=op_index,
                 op_type=op_type,
                 field=field,
                 code="block_name_not_unique",
-                message=f"Block name is not unique: {instance_name}",
+                message=message,
             )
         ]
 

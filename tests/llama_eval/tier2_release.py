@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Tier 2 release model eval: broader coverage for release-time checks.
 
-36 cases selected from the original phase 1-6 suite, updated for
-the current tool contract. Run only at release time or manually.
+Selected cases from the original phase 1-6 suite, updated for the current
+tool contract. Run only at release time or manually.
 
 Run:
     uv run python -m tests.llama_eval.tier2_release
@@ -94,6 +94,19 @@ def _set_samp_rate_expectation(value: str) -> tuple[ToolExpectation, ...]:
             ),
         ),
     )
+
+
+def _samp_rate_delta(value: str, *, dirty: bool | None = True, validated: bool = True) -> dict:
+    delta: dict[str, Any] = {
+        "variables": {"samp_rate": value},
+        "block_params": {"samp_rate": {"value": value}},
+    }
+    if dirty is not None:
+        delta["dirty"] = dirty
+    if validated:
+        delta["validation_status"] = "valid"
+        delta["validation_returncode"] = 0
+    return delta
 
 
 TIER2_CASES: list[Tier2Case] = [
@@ -205,9 +218,7 @@ TIER2_CASES: list[Tier2Case] = [
         ["apply_edit"],
         expected_tool_calls=_set_samp_rate_expectation("48000"),
         semantic_checks=(
-            {"kind": "mutation"},
-            {"kind": "variable_equals", "name": "samp_rate", "value": "48000"},
-            {"kind": "dirty", "value": True},
+            {"kind": "exact_graph_delta", "delta": _samp_rate_delta("48000")},
         ),
     ),
     Tier2Case(
@@ -217,9 +228,7 @@ TIER2_CASES: list[Tier2Case] = [
         ["apply_edit"],
         expected_tool_calls=_set_samp_rate_expectation("16000"),
         semantic_checks=(
-            {"kind": "mutation"},
-            {"kind": "variable_equals", "name": "samp_rate", "value": "16000"},
-            {"kind": "dirty", "value": True},
+            {"kind": "exact_graph_delta", "delta": _samp_rate_delta("16000")},
         ),
     ),
     Tier2Case(
@@ -247,9 +256,16 @@ TIER2_CASES: list[Tier2Case] = [
         "Add a variable called noise_level set to 0.1.",
         ["apply_edit"],
         semantic_checks=(
-            {"kind": "mutation"},
-            {"kind": "variable_equals", "name": "noise_level", "value": "0.1"},
-            {"kind": "dirty", "value": True},
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "added_blocks": ["noise_level"],
+                    "variables": {"noise_level": "0.1"},
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
         ),
     ),
     Tier2Case(
@@ -284,8 +300,7 @@ TIER2_CASES: list[Tier2Case] = [
             *_set_samp_rate_expectation("22050"),
         ),
         semantic_checks=(
-            {"kind": "mutation"},
-            {"kind": "variable_equals", "name": "samp_rate", "value": "22050"},
+            {"kind": "exact_graph_delta", "delta": _samp_rate_delta("22050")},
         ),
     ),
     Tier2Case(
@@ -298,7 +313,10 @@ TIER2_CASES: list[Tier2Case] = [
             ToolExpectation("validate_graph"),
         ),
         semantic_checks=(
-            {"kind": "variable_equals", "name": "samp_rate", "value": "96000"},
+            {
+                "kind": "exact_graph_delta",
+                "delta": _samp_rate_delta("96000", validated=True),
+            },
             {"kind": "tool_result", "tool": "validate_graph", "arguments": {"valid": True}},
         ),
     ),
@@ -313,7 +331,10 @@ TIER2_CASES: list[Tier2Case] = [
             ToolExpectation("save_graph"),
         ),
         semantic_checks=(
-            {"kind": "variable_equals", "name": "samp_rate", "value": "16000"},
+            {
+                "kind": "exact_graph_delta",
+                "delta": _samp_rate_delta("16000", dirty=None, validated=True),
+            },
             {"kind": "tool_result", "tool": "validate_graph", "arguments": {"valid": True}},
             {"kind": "saved_path_valid", "path": "{after_path}"},
         ),
@@ -328,8 +349,7 @@ TIER2_CASES: list[Tier2Case] = [
             *_set_samp_rate_expectation("8000"),
         ),
         semantic_checks=(
-            {"kind": "mutation"},
-            {"kind": "variable_equals", "name": "samp_rate", "value": "8000"},
+            {"kind": "exact_graph_delta", "delta": _samp_rate_delta("8000")},
         ),
     ),
     Tier2Case(
@@ -343,7 +363,10 @@ TIER2_CASES: list[Tier2Case] = [
             ToolExpectation("validate_graph"),
         ),
         semantic_checks=(
-            {"kind": "variable_equals", "name": "samp_rate", "value": "48000"},
+            {
+                "kind": "exact_graph_delta",
+                "delta": _samp_rate_delta("48000", validated=True),
+            },
             {"kind": "tool_result", "tool": "validate_graph", "arguments": {"valid": True}},
         ),
     ),
@@ -431,6 +454,55 @@ TIER2_CASES: list[Tier2Case] = [
         "Put that float stream on a second trace in the time sink.",
         ["apply_edit"],
         semantic_checks=({"kind": "mutation"},),
+    ),
+    Tier2Case(
+        "rewire",
+        "exact_stream_rewire",
+        (
+            "Rewire connection_id "
+            "blocks_throttle2_0:0->blocks_char_to_float_0:0 to "
+            "analog_random_source_x_0:0->blocks_char_to_float_0:0, then validate."
+        ),
+        ["rewire_connection", "validate_graph"],
+        expected_tool_calls=(
+            ToolExpectation(
+                "rewire_connection",
+                arguments={
+                    "old_connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                    "new_src_block": "analog_random_source_x_0",
+                    "new_src_port": 0,
+                    "new_dst_block": "blocks_char_to_float_0",
+                    "new_dst_port": 0,
+                },
+            ),
+            ToolExpectation("validate_graph"),
+        ),
+        semantic_checks=(
+            {
+                "kind": "exact_graph_delta",
+                "delta": {
+                    "added_connections": [
+                        "analog_random_source_x_0:0->blocks_char_to_float_0:0"
+                    ],
+                    "removed_connections": [
+                        "blocks_throttle2_0:0->blocks_char_to_float_0:0"
+                    ],
+                    "dirty": True,
+                    "validation_status": "valid",
+                    "validation_returncode": 0,
+                },
+            },
+            {
+                "kind": "connection_absent",
+                "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+            },
+            {
+                "kind": "connection_present",
+                "connection_id": "analog_random_source_x_0:0->blocks_char_to_float_0:0",
+            },
+            {"kind": "tool_result", "tool": "validate_graph", "arguments": {"valid": True}},
+        ),
+        description="Exact atomic stream rewire: remove old edge and add new edge in one transaction.",
     ),
     Tier2Case(
         "rewire",

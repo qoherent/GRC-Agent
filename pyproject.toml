@@ -11,7 +11,12 @@ requires-python = ">=3.12"
 dependencies = [
     "graphifyy==0.4.11",
     "networkx>=3.6.1",
+    # GNU Radio 3.10.x Python bindings in the supported local environment are
+    # built against the NumPy 1.x ABI. Remove this when the supported GNU Radio
+    # target and deterministic gates pass with NumPy 2.x.
+    "numpy<2 ; python_full_version < '3.13'",
     "pyyaml>=6.0.3",
+    "qdrant-client[fastembed]>=1.14.2",
 ]
 
 [project.scripts]

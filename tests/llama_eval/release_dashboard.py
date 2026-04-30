@@ -19,13 +19,14 @@ PHASE_NAMES = {
     20: "tier2_release",
     30: "tier3_multiturn",
     40: "tier4_external_examples",
+    50: "tier5_adversarial",
 }
 
 
 def build_release_dashboard(
     stores: Iterable[dict[str, Any]],
     *,
-    required_phases: tuple[int, ...] = (20, 30, 40),
+    required_phases: tuple[int, ...] = (20, 30, 40, 50),
     min_runs_per_case: int = 3,
     stability_threshold: float = 1.0,
 ) -> dict[str, Any]:
@@ -233,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dashboard = build_release_dashboard(
         _load_stores(args.results_path),
-        required_phases=tuple(args.required_phase or (20, 30, 40)),
+        required_phases=tuple(args.required_phase or (20, 30, 40, 50)),
         min_runs_per_case=args.min_runs_per_case,
         stability_threshold=args.stability_threshold,
     )

@@ -114,13 +114,16 @@ class LlamaServerClient:
         model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        *,
+        tool_choice: str | dict[str, Any] = "auto",
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Call the OpenAI-compatible chat completions route with fixed tool settings."""
         payload = {
             "model": model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": "auto",
+            "tool_choice": tool_choice,
             "parallel_tool_calls": False,
             "parse_tool_calls": True,
             "max_tokens": self.max_tokens,
@@ -129,6 +132,8 @@ class LlamaServerClient:
                 "enable_thinking": self.enable_thinking,
             },
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
         return self._request_json("POST", "/v1/chat/completions", payload=payload)
 
     def parse_assistant_message(
@@ -643,16 +648,146 @@ def run_bounded_llama_turn(
     correction_retries_used = 0
     correction_allowed_tools: set[str] | None = None
 
-    if track_turn_requirements:
-        agent.init_turn_requirements(user_message)
+    turn_plan = agent.init_turn_requirements(user_message) if track_turn_requirements else None
+    if turn_plan is not None and turn_plan.requires_clarification:
+        if turn_plan.unsupported_reason == "insertion_anchor_missing":
+            assistant_text = (
+                "I need clarification before inserting a block: specify where it should go, "
+                "such as an exact connection ID, source/destination, or signal path."
+            )
+        elif turn_plan.unsupported_reason == "uncertain_mutation":
+            assistant_text = (
+                "I need clarification before changing the graph: provide the exact action, "
+                "target block or variable, and any required connection or placement details."
+            )
+        else:
+            assistant_text = (
+                "I need clarification before changing the graph because the request mixes "
+                "disable/enable state changes with removal. Please choose one action."
+            )
+        agent.history.append({"role": "assistant", "content": assistant_text})
+        return {
+            "ok": True,
+            "model": resolved_model,
+            "steps": 0,
+            "tool_rounds_used": 0,
+            "tool_calls_executed": 0,
+            "assistant_text": assistant_text,
+            "turn_plan": turn_plan.as_dict(),
+        }
+
+    deterministic_tool_call = None
+    if turn_plan is not None:
+        deterministic_tool_call_payload = agent.deterministic_turn_tool_call(user_message)
+        if deterministic_tool_call_payload is not None:
+            deterministic_tool_call = LlamaToolCall(
+                id=str(deterministic_tool_call_payload["id"]),
+                name=str(deterministic_tool_call_payload["name"]),
+                arguments=dict(deterministic_tool_call_payload["arguments"]),
+            )
+    if deterministic_tool_call is not None:
+        assistant_entry: dict[str, Any] = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [deterministic_tool_call.as_history_tool_call()],
+        }
+        agent.history.append(assistant_entry)
+        tool_rounds_used += 1
+
+        route_result = agent.validate_turn_route(
+            deterministic_tool_call.name,
+            deterministic_tool_call.arguments,
+        )
+        validation_result = (
+            route_result
+            if route_result is not None
+            else agent.validate_tool_call(
+                deterministic_tool_call.name,
+                deterministic_tool_call.arguments,
+            )
+        )
+        if validation_result is not None:
+            agent.record_tool_completion(deterministic_tool_call.name, False)
+            agent.history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": deterministic_tool_call.id,
+                    "name": deterministic_tool_call.name,
+                    "content": validation_result,
+                }
+            )
+            assistant_text = _tool_failure_text(validation_result)
+            agent.history.append({"role": "assistant", "content": assistant_text})
+            return {
+                "ok": False,
+                "model": resolved_model,
+                "steps": assistant_turns,
+                "tool_rounds_used": tool_rounds_used,
+                "tool_calls_executed": tool_calls_executed,
+                "assistant_text": assistant_text,
+                "error_type": validation_result.get("error_type"),
+                "message": validation_result.get("message", assistant_text),
+                "correction_retries_used": correction_retries_used,
+                "turn_plan": turn_plan.as_dict(),
+            }
+
+        result = agent.execute_tool(
+            deterministic_tool_call.name,
+            deterministic_tool_call.arguments,
+        )
+        tool_calls_executed += 1
+        agent.record_tool_completion(
+            deterministic_tool_call.name,
+            result.get("ok") is True,
+        )
+        agent.history.append(
+            {
+                "role": "tool",
+                "tool_call_id": deterministic_tool_call.id,
+                "name": deterministic_tool_call.name,
+                "content": result,
+            }
+        )
+        if agent.should_stop_batch_after_result(deterministic_tool_call.name, result):
+            assistant_text = _tool_failure_text(result)
+            agent.history.append({"role": "assistant", "content": assistant_text})
+            return {
+                "ok": False,
+                "model": resolved_model,
+                "steps": assistant_turns,
+                "tool_rounds_used": tool_rounds_used,
+                "tool_calls_executed": tool_calls_executed,
+                "assistant_text": assistant_text,
+                "error_type": result.get("error_type"),
+                "message": result.get("message", assistant_text),
+                "correction_retries_used": correction_retries_used,
+                "turn_plan": turn_plan.as_dict(),
+            }
+        should_nudge, nudge = agent.check_turn_continuation()
+        if should_nudge:
+            agent.history.append({"role": "user", "content": nudge})
+        else:
+            assistant_text = str(result.get("message") or "Request completed.")
+            agent.history.append({"role": "assistant", "content": assistant_text})
+            return {
+                "ok": True,
+                "model": resolved_model,
+                "steps": assistant_turns,
+                "tool_rounds_used": tool_rounds_used,
+                "tool_calls_executed": tool_calls_executed,
+                "correction_retries_used": correction_retries_used,
+                "assistant_text": assistant_text,
+                "turn_plan": turn_plan.as_dict(),
+            }
 
     logger.info("turn_start model=%s message=%s", resolved_model, user_message[:80])
 
     while True:
+        tool_schemas = agent.get_tool_schemas_for_turn(correction_allowed_tools)
         response = client.create_chat_completion(
             model=resolved_model,
             messages=agent.get_model_messages(),
-            tools=agent.get_tool_schemas(),
+            tools=tool_schemas,
         )
         assistant_turns += 1
         assistant_content, tool_calls = client.parse_assistant_message(
@@ -728,6 +863,23 @@ def run_bounded_llama_turn(
                         }
                     )
                     break
+                route_result = agent.validate_turn_route(
+                    tool_call.name,
+                    tool_call.arguments,
+                    allowed_tool_names=correction_allowed_tools,
+                )
+                if route_result is not None:
+                    agent.record_tool_completion(tool_call.name, False)
+                    agent.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": route_result,
+                        }
+                    )
+                    stopping_failure = route_result
+                    break
                 # Pre-validate here (before execute_tool) so that schema-rejected calls
                 # are NOT counted in tool_calls_executed.  execute_tool also validates,
                 # but that path would increment the counter first.
@@ -797,6 +949,7 @@ def run_bounded_llama_turn(
                     "error_type": stopping_failure.get("error_type"),
                     "message": stopping_failure.get("message", assistant_text),
                     "correction_retries_used": correction_retries_used,
+                    "turn_plan": turn_plan.as_dict() if turn_plan is not None else None,
                 }
             if correction_turn_succeeded:
                 agent.mark_turn_recovery_success()
@@ -830,6 +983,7 @@ def run_bounded_llama_turn(
             "tool_calls_executed": tool_calls_executed,
             "correction_retries_used": correction_retries_used,
             "assistant_text": assistant_text,
+            "turn_plan": turn_plan.as_dict() if turn_plan is not None else None,
         }
 
 

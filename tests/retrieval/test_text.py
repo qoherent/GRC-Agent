@@ -68,6 +68,34 @@ class ExpandTermsTests(unittest.TestCase):
         result = expand_terms(["hello", "", "world"])
         self.assertEqual(result, ("hello", "world", "helloworld"))
 
+    def test_expands_audio_smoother_alias(self) -> None:
+        result = expand_terms(["audio", "smoother"])
+
+        self.assertIn("low", result)
+        self.assertIn("pass", result)
+        self.assertIn("filter", result)
+
+    def test_expands_automatic_gain_control_alias(self) -> None:
+        result = expand_terms(["automatic", "gain", "control"])
+
+        self.assertIn("agc", result)
+
+    def test_expands_spectrum_alias(self) -> None:
+        result = expand_terms(["spectrum"])
+
+        self.assertIn("frequency", result)
+        self.assertIn("waterfall", result)
+        self.assertIn("sink", result)
+
+    def test_expands_rate_limiter_alias(self) -> None:
+        result = expand_terms(["rate", "limiter"])
+
+        self.assertIn("throttle", result)
+
+    def test_expands_scope_trace_aliases(self) -> None:
+        self.assertIn("time", expand_terms(["scope"]))
+        self.assertIn("sink", expand_terms(["trace"]))
+
 
 if __name__ == "__main__":
     unittest.main()

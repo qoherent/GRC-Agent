@@ -42,10 +42,11 @@ class ClarificationRequest:
         default_factory=lambda: CustomClarificationOption()
     )
     clarification_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    state_revision: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Public payload shape exposed to callers and history."""
-        return {
+        payload = {
             "clarification_required": True,
             "clarification_id": self.clarification_id,
             "kind": self.kind,
@@ -67,6 +68,9 @@ class ClarificationRequest:
                 "free_text": self.custom_option.free_text,
             },
         }
+        if self.state_revision is not None:
+            payload["state_revision"] = self.state_revision
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ClarificationRequest":
@@ -94,6 +98,7 @@ class ClarificationRequest:
                 free_text=custom.get("free_text", True),
             ),
             clarification_id=payload.get("clarification_id", ""),
+            state_revision=payload.get("state_revision"),
         )
 
 

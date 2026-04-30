@@ -406,6 +406,7 @@ class FlowgraphSession:
         structured_blocks: list[dict[str, Any]] = [
             {
                 "name": block.instance_name,
+                "block_uid": block.block_uid,
                 "type": block.block_type,
             }
             for block in preview_blocks
@@ -956,6 +957,103 @@ class FlowgraphSession:
             raise ValueError("No flowgraph loaded.")
         return self.flowgraph
 
+    def resolve_block_reference(
+        self,
+        instance_name: str | None = None,
+        *,
+        block_uid: str | None = None,
+        block_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Return read-only block identity candidates for clarification flows.
+
+        `block_uid` is identity evidence only. This resolver intentionally does
+        not mutate and does not authorize later mutation without a fresh
+        revision check.
+        """
+        flowgraph = self._require_loaded_flowgraph()
+        candidates = []
+        for block in flowgraph.blocks:
+            if instance_name is not None and block.instance_name != instance_name:
+                continue
+            if block_uid is not None and block.block_uid != block_uid:
+                continue
+            if block_type is not None and block.block_type != block_type:
+                continue
+            candidates.append(self._block_identity_payload(block))
+
+        return {
+            "state_revision": self.state_revision,
+            "unique": len(candidates) == 1,
+            "candidates": candidates,
+        }
+
+    def find_connection_candidates(
+        self,
+        *,
+        src_block: str | None = None,
+        src_port: int | str | None = None,
+        dst_block: str | None = None,
+        dst_port: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Return read-only connection candidates matching exact endpoint hints."""
+        flowgraph = self._require_loaded_flowgraph()
+        candidates = [
+            self._connection_payload(connection)
+            for connection in sorted(flowgraph.connections, key=self._connection_sort_key)
+            if self._connection_matches(
+                connection,
+                src_block=src_block,
+                src_port=src_port,
+                dst_block=dst_block,
+                dst_port=dst_port,
+            )
+        ]
+        return {
+            "state_revision": self.state_revision,
+            "unique": len(candidates) == 1,
+            "candidates": candidates,
+        }
+
+    @staticmethod
+    def _block_identity_payload(block: Block) -> dict[str, Any]:
+        parameters = block.params.get("parameters")
+        states = block.params.get("states")
+        return {
+            "name": block.instance_name,
+            "block_uid": block.block_uid,
+            "block_type": block.block_type,
+            "state": states.get("state") if isinstance(states, dict) else None,
+            "coordinate": states.get("coordinate") if isinstance(states, dict) else None,
+            "parameter_keys": sorted(parameters) if isinstance(parameters, dict) else [],
+        }
+
+    @staticmethod
+    def _connection_matches(
+        connection: Connection,
+        *,
+        src_block: str | None,
+        src_port: int | str | None,
+        dst_block: str | None,
+        dst_port: int | str | None,
+    ) -> bool:
+        if src_block is not None and connection.src_block != src_block:
+            return False
+        if dst_block is not None and connection.dst_block != dst_block:
+            return False
+        if src_port is not None and not FlowgraphSession._port_matches(
+            connection.src_port, src_port
+        ):
+            return False
+        if dst_port is not None and not FlowgraphSession._port_matches(
+            connection.dst_port, dst_port
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _port_matches(actual: int | str, requested: int | str) -> bool:
+        return actual == requested or str(actual) == str(requested)
+
     def _ensure_inspection_cache(self) -> None:
         """Build cached lookup and adjacency indexes for bounded inspection."""
         flowgraph = self._require_loaded_flowgraph()
@@ -1035,6 +1133,7 @@ class FlowgraphSession:
         parameter_map = parameters if isinstance(parameters, dict) else {}
         return {
             "node_id": block.instance_name,
+            "block_uid": block.block_uid,
             "label": block.instance_name,
             "block_type": block.block_type,
             "distance": distance,

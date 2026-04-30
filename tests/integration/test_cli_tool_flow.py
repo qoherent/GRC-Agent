@@ -101,6 +101,229 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(payload["validation_errors"][0]["field"], "unexpected")
 
+    def test_vector_miss_subcommand_records_jsonl_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            intake_path = Path(tmpdir) / "misses.jsonl"
+            exit_code, output = self._run_cli(
+                "vector",
+                "miss",
+                "leveler block",
+                "--expected-block",
+                "analog_agc_xx",
+                "--actual-top-id",
+                "blocks_xor_xx",
+                "--category",
+                "ambiguous_wording",
+                "--source",
+                "real_user",
+                "--notes",
+                "Observed in manual use.",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+            lines = intake_path.read_text(encoding="utf-8").splitlines()
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["record"]["query"], "leveler block")
+        self.assertEqual(payload["record"]["expected_block_ids"], ["analog_agc_xx"])
+        self.assertEqual(payload["record"]["actual_top_ids"], ["blocks_xor_xx"])
+        self.assertEqual(payload["record"]["source"], "real_user")
+        self.assertEqual(len(lines), 1)
+
+    def test_vector_misses_subcommand_summarizes_clusters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            intake_path = Path(tmpdir) / "misses.jsonl"
+            self._run_cli(
+                "vector",
+                "miss",
+                "show waveform",
+                "--expected-block",
+                "qtgui_time_sink_x",
+                "--actual-top-id",
+                "blocks_probe_signal_x",
+                "--category",
+                "missing_metadata",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+            self._run_cli(
+                "vector",
+                "miss",
+                "waveform viewer",
+                "--expected-block",
+                "qtgui_time_sink_x",
+                "--actual-top-id",
+                "analog_random_source_x",
+                "--category",
+                "missing_metadata",
+                "--source",
+                "manual_review",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+
+            exit_code, output = self._run_cli(
+                "vector",
+                "misses",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["total_records"], 2)
+        self.assertEqual(payload["cluster_count"], 1)
+        self.assertEqual(payload["clusters"][0]["count"], 2)
+        self.assertEqual(
+            payload["clusters"][0]["recommended_action"],
+            "metadata_candidate",
+        )
+
+    def test_vector_proposals_subcommand_reports_candidates_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            intake_path = Path(tmpdir) / "misses.jsonl"
+            self._run_cli(
+                "vector",
+                "miss",
+                "show waveform",
+                "--expected-block",
+                "qtgui_time_sink_x",
+                "--actual-top-id",
+                "blocks_probe_signal_x",
+                "--category",
+                "missing_metadata",
+                "--source",
+                "real_user",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+            self._run_cli(
+                "vector",
+                "miss",
+                "waveform viewer",
+                "--expected-block",
+                "qtgui_time_sink_x",
+                "--actual-top-id",
+                "analog_random_source_x",
+                "--category",
+                "missing_metadata",
+                "--source",
+                "manual_review",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+
+            exit_code, output = self._run_cli(
+                "vector",
+                "proposals",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(payload["candidates"][0]["proposed_block"], "qtgui_time_sink_x")
+
+    def test_dogfood_record_subcommand_records_sanitized_jsonl_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            intake_path = Path(tmpdir) / "dogfood.jsonl"
+            exit_code, output = self._run_cli(
+                "dogfood",
+                "record",
+                "Edit /home/me/radio/private_flow.grc and validate private_flow.grc",
+                "--graph",
+                "/home/me/radio/private_flow.grc",
+                "--source",
+                "user_graph",
+                "--task-type",
+                "param_edit",
+                "--failure-category",
+                "routing_failure",
+                "--severity",
+                "medium",
+                "--expected",
+                "apply param edit in /home/me/radio/private_flow.grc",
+                "--actual",
+                "used wrong block in private_flow.grc",
+                "--actual-tool",
+                "apply_edit",
+                "--notes",
+                "Observed in /home/me/radio/private_flow.grc",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+            lines = intake_path.read_text(encoding="utf-8").splitlines()
+
+        payload = json.loads(output)
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["record"]["graph_ref"], "<user_graph>")
+        self.assertEqual(payload["record"]["actual_tools"], ["apply_edit"])
+        self.assertEqual(len(lines), 1)
+        self.assertNotIn("/home/me", serialized)
+        self.assertNotIn("private_flow.grc", serialized)
+
+    def test_dogfood_report_subcommand_summarizes_clusters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            intake_path = Path(tmpdir) / "dogfood.jsonl"
+            self._run_cli(
+                "dogfood",
+                "record",
+                "change cutoff fails",
+                "--source",
+                "real_user",
+                "--task-type",
+                "param_edit",
+                "--failure-category",
+                "argument_copying_failure",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+            self._run_cli(
+                "dogfood",
+                "record",
+                "change cutoff fails",
+                "--source",
+                "manual_review",
+                "--task-type",
+                "param_edit",
+                "--failure-category",
+                "argument_copying_failure",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+
+            exit_code, output = self._run_cli(
+                "dogfood",
+                "report",
+                "--intake-path",
+                str(intake_path),
+                "--json",
+            )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["total_records"], 2)
+        self.assertEqual(payload["cluster_count"], 1)
+        self.assertEqual(payload["clusters"][0]["recommendation"], "candidate_generic_gap")
+
     def test_chat_subcommand_starts_server_and_completes_real_turn(self) -> None:
         port = reserve_free_port()
         model_alias = "stub-live-model"
@@ -281,3 +504,110 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
         payload = json.loads(output)
         expected = 0 if payload["status"] == "ok" else 1
         self.assertEqual(exit_code, expected)
+
+    def test_vector_build_subcommand_reports_json(self) -> None:
+        with mock.patch(
+            "grc_agent.cli.build_vector_index",
+            return_value={
+                "ok": True,
+                "collection_alias": "grc_agent_retrieval_v1",
+                "record_count": 3,
+                "records_by_source_type": {"catalog_block": 1, "manual_chunk": 2},
+            },
+        ) as build_vector_index:
+            exit_code, output = self._run_cli(
+                "vector",
+                "build",
+                "--index-dir",
+                "/tmp/vector-index",
+                "--json",
+            )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["collection_alias"], "grc_agent_retrieval_v1")
+        self.assertEqual(build_vector_index.call_args.kwargs["index_dir"], "/tmp/vector-index")
+
+    def test_vector_search_subcommand_reports_json(self) -> None:
+        with mock.patch(
+            "grc_agent.cli.semantic_search_grc",
+            return_value={
+                "ok": True,
+                "tool": "semantic_search_grc",
+                "query": "audio smoother",
+                "scope": "catalog",
+                "results": [],
+                "warnings": [],
+            },
+        ) as semantic_search:
+            exit_code, output = self._run_cli(
+                "vector",
+                "search",
+                "audio smoother",
+                "--scope",
+                "catalog",
+                "--k",
+                "5",
+                "--json",
+            )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["tool"], "semantic_search_grc")
+        self.assertEqual(semantic_search.call_args.args[0], "audio smoother")
+
+    def test_vector_gc_subcommand_defaults_to_dry_run(self) -> None:
+        with mock.patch(
+            "grc_agent.cli.prune_vector_collections",
+            return_value={
+                "ok": True,
+                "dry_run": True,
+                "active_collection": "active",
+                "previous_collection": "previous",
+                "would_delete_collections": ["stale"],
+                "deleted_collections": [],
+            },
+        ) as prune_vector_collections:
+            exit_code, output = self._run_cli(
+                "vector",
+                "gc",
+                "--index-dir",
+                "/tmp/vector-index",
+                "--json",
+            )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["would_delete_collections"], ["stale"])
+        self.assertEqual(prune_vector_collections.call_args.kwargs["index_dir"], "/tmp/vector-index")
+        self.assertTrue(prune_vector_collections.call_args.kwargs["dry_run"])
+
+    def test_vector_gc_subcommand_applies_only_with_apply_flag(self) -> None:
+        with mock.patch(
+            "grc_agent.cli.prune_vector_collections",
+            return_value={
+                "ok": True,
+                "dry_run": False,
+                "active_collection": "active",
+                "previous_collection": "previous",
+                "would_delete_collections": ["stale"],
+                "deleted_collections": ["stale"],
+            },
+        ) as prune_vector_collections:
+            exit_code, output = self._run_cli(
+                "vector",
+                "gc",
+                "--apply",
+                "--json",
+            )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["dry_run"])
+        self.assertEqual(payload["deleted_collections"], ["stale"])
+        self.assertFalse(prune_vector_collections.call_args.kwargs["dry_run"])

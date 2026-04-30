@@ -16,6 +16,11 @@ playground/
 .ruff_cache/
 .llama_eval/
 .opencode/
+.grc_agent/
+
+# Generated eval/report JSON artifacts
+reports/**/*.json
+reports/**/*.jsonl
 
 # Backups
 *.bak
@@ -24,4 +29,3 @@ playground/
 /*.py
 !setup.py
 !conftest.py
-

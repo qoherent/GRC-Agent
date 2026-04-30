@@ -83,21 +83,16 @@ def classify_tool_result_for_recovery(
                 recoverable=False,
                 reason="grcc rejected the requested end state",
             )
-        if tool_name != "apply_edit":
-            return RecoveryDecision(
-                recovery_class=NONRECOVERABLE_FAILED_MUTATION,
-                recoverable=False,
-                reason="failed mutation does not match a bounded recovery class",
-            )
         if _has_missing_field_error(result):
+            mutation_tool = "remove_connection" if tool_name == "remove_connection" else "apply_edit"
             return RecoveryDecision(
                 recovery_class=RECOVERABLE_MISSING_ARGUMENTS,
                 recoverable=True,
-                allowed_tools=(*READ_ONLY_INSPECTION_TOOLS, "apply_edit"),
+                allowed_tools=(*READ_ONLY_INSPECTION_TOOLS, mutation_tool),
                 max_mutation_retries=1,
                 prompt=(
                     "The previous mutation tool result was missing required arguments. "
-                    "Use read-only inspection only if needed, then call apply_edit at most "
+                    f"Use read-only inspection only if needed, then call {mutation_tool} at most "
                     "once for the same user intent. Do not call propose_edit because the "
                     "user requested a real mutation, not a preview. Use exact graph "
                     "endpoints from tool output. If the corrected action is not clearly "

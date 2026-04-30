@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from contextlib import redirect_stdout
 
+from tests.llama_eval.harness import build_persisted_run_entry
 from tests.llama_eval.release_dashboard import build_release_dashboard, main
 
 
@@ -40,12 +41,14 @@ class ReleaseDashboardTests(unittest.TestCase):
                 _entry(phase=30, category="followup", case_name="save", run_index=1, status="PASS"),
                 _entry(phase=40, category="external", case_name="dial", run_index=0, status="PASS"),
                 _entry(phase=40, category="external", case_name="dial", run_index=1, status="PASS"),
+                _entry(phase=50, category="uncertain", case_name="vague", run_index=0, status="PASS"),
+                _entry(phase=50, category="uncertain", case_name="vague", run_index=1, status="PASS"),
             ]
         }
 
         dashboard = build_release_dashboard(
             [store],
-            required_phases=(20, 30, 40),
+            required_phases=(20, 30, 40, 50),
             min_runs_per_case=2,
             stability_threshold=1.0,
         )
@@ -54,6 +57,28 @@ class ReleaseDashboardTests(unittest.TestCase):
         self.assertEqual(dashboard["missing_required_phases"], [])
         self.assertEqual(dashboard["short_run_cases"], [])
         self.assertEqual(dashboard["unstable_cases"], [])
+        self.assertIn("50", dashboard["phases"])
+        self.assertEqual(dashboard["phases"]["50"]["name"], "tier5_adversarial")
+
+    def test_dashboard_defaults_require_tier5(self) -> None:
+        store = {
+            "runs": [
+                _entry(phase=20, category="edit", case_name="param", run_index=0, status="PASS"),
+                _entry(phase=20, category="edit", case_name="param", run_index=1, status="PASS"),
+                _entry(phase=20, category="edit", case_name="param", run_index=2, status="PASS"),
+                _entry(phase=30, category="followup", case_name="save", run_index=0, status="PASS"),
+                _entry(phase=30, category="followup", case_name="save", run_index=1, status="PASS"),
+                _entry(phase=30, category="followup", case_name="save", run_index=2, status="PASS"),
+                _entry(phase=40, category="external", case_name="dial", run_index=0, status="PASS"),
+                _entry(phase=40, category="external", case_name="dial", run_index=1, status="PASS"),
+                _entry(phase=40, category="external", case_name="dial", run_index=2, status="PASS"),
+            ]
+        }
+
+        dashboard = build_release_dashboard([store])
+
+        self.assertFalse(dashboard["release_ready"], dashboard)
+        self.assertEqual(dashboard["missing_required_phases"], [50])
 
     def test_dashboard_reports_missing_short_and_unstable_cases(self) -> None:
         store = {
@@ -109,6 +134,36 @@ class ReleaseDashboardTests(unittest.TestCase):
                 )
 
         self.assertEqual(code, 2)
+
+    def test_persisted_run_entry_includes_release_metadata(self) -> None:
+        case = type(
+            "Case",
+            (),
+            {
+                "category": "edit",
+                "name": "param",
+                "prompt": "Change samp_rate to 48000.",
+                "expected_tools": ["apply_edit"],
+            },
+        )()
+
+        entry = build_persisted_run_entry(
+            phase=20,
+            case=case,
+            run_index=0,
+            run_result={"status": "PASS", "tools_called": ["apply_edit"]},
+            backend_restart_count=0,
+        )
+
+        metadata = entry["release_metadata"]
+        self.assertIn("git_commit", metadata)
+        self.assertIn("prompt_version", metadata)
+        self.assertIn("prompt_sha256", metadata)
+        self.assertIn("tool_schema_sha256", metadata)
+        self.assertIn("turn_plan_policy_version", metadata)
+        self.assertIn("turn_plan_policy_sha256", metadata)
+        self.assertIn("results_schema_version", metadata)
+        self.assertIn("fixture", metadata)
 
 
 if __name__ == "__main__":

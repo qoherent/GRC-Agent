@@ -1,0 +1,133 @@
+options:
+  parameters:
+    author: ''
+    catch_exceptions: 'True'
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: ''
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: rewire_message_ambiguous
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: rewire_message_ambiguous
+    window_size: (1000,1000)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 8
+    - 8
+    rotation: 0
+    state: enabled
+blocks:
+- name: strobe_0
+  id: blocks_message_strobe
+  parameters:
+    msg: pmt.intern("TEST")
+    period: '1000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 8
+    - 8
+    rotation: 0
+    state: enabled
+- name: strobe_1
+  id: blocks_message_strobe
+  parameters:
+    msg: pmt.intern("TEST")
+    period: '1000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 8
+    - 32
+    rotation: 0
+    state: enabled
+- name: debug_0
+  id: blocks_message_debug
+  parameters:
+    en_uvec: 'True'
+    log_level: info
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 8
+    - 56
+    rotation: 0
+    state: enabled
+- name: debug_1
+  id: blocks_message_debug
+  parameters:
+    en_uvec: 'True'
+    log_level: info
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 8
+    - 80
+    rotation: 0
+    state: enabled
+- name: debug_2
+  id: blocks_message_debug
+  parameters:
+    en_uvec: 'True'
+    log_level: info
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 8
+    - 104
+    rotation: 0
+    state: enabled
+- name: pdu_0
+  id: pdu_random_pdu
+  parameters:
+    minsize: '50'
+    maxsize: '2000'
+    mask: '0xFF'
+    length_modulo: '2'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 8
+    - 128
+    rotation: 0
+    state: enabled
+connections:
+- - strobe_0
+  - strobe
+  - debug_0
+  - print
+- - strobe_0
+  - strobe
+  - pdu_0
+  - generate
+metadata:
+  file_format: 1

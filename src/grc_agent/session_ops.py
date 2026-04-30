@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections import defaultdict
 from typing import Any
 
 from .models import Block, Connection
@@ -86,6 +89,7 @@ def parse_blocks(blocks_data: Any) -> list[Block]:
     if not isinstance(blocks_data, list):
         raise ValueError("Flowgraph blocks section must be a list.")
 
+    uid_occurrences: dict[str, int] = defaultdict(int)
     for index, entry in enumerate(blocks_data):
         if not isinstance(entry, dict):
             raise ValueError(
@@ -100,11 +104,56 @@ def parse_blocks(blocks_data: Any) -> list[Block]:
             )
 
         params = {key: value for key, value in entry.items() if key not in {"name", "id"}}
+        uid_key = _block_uid_key(entry)
+        occurrence = uid_occurrences[uid_key]
+        uid_occurrences[uid_key] += 1
         blocks.append(
-            Block(instance_name=instance_name, block_type=block_type, params=params)
+            Block(
+                instance_name=instance_name,
+                block_type=block_type,
+                params=params,
+                block_uid=stable_block_uid(entry, occurrence=occurrence),
+            )
         )
 
     return blocks
+
+
+def stable_block_uid(raw_block: dict[str, Any], *, occurrence: int = 0) -> str:
+    """Return a deterministic internal ID for one source block entry.
+
+    The UID is intentionally read-only. It helps inspection/evals distinguish
+    duplicate display names without authorizing mutation by hidden handles.
+    """
+    payload = {
+        "name": raw_block.get("name"),
+        "id": raw_block.get("id"),
+        "coordinate": _raw_block_coordinate(raw_block),
+        "rotation": _raw_block_rotation(raw_block),
+        "occurrence": occurrence,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return f"block:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _block_uid_key(raw_block: dict[str, Any]) -> str:
+    payload = {
+        "name": raw_block.get("name"),
+        "id": raw_block.get("id"),
+        "coordinate": _raw_block_coordinate(raw_block),
+        "rotation": _raw_block_rotation(raw_block),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _raw_block_coordinate(raw_block: dict[str, Any]) -> Any:
+    states = raw_block.get("states")
+    return states.get("coordinate") if isinstance(states, dict) else None
+
+
+def _raw_block_rotation(raw_block: dict[str, Any]) -> Any:
+    states = raw_block.get("states")
+    return states.get("rotation") if isinstance(states, dict) else None
 
 
 def parse_connections(connections_data: Any) -> list[Connection]:
@@ -232,4 +281,5 @@ __all__ = [
     "parse_blocks",
     "parse_connections",
     "raw_connection_entry",
+    "stable_block_uid",
 ]

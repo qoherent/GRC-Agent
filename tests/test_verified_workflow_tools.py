@@ -64,13 +64,16 @@ class TopLevelInsertToolTests(unittest.TestCase):
         names = [s["function"]["name"] for s in schemas]
         self.assertIn("insert_block_on_connection", names)
         self.assertIn("remove_connection", names)
+        self.assertIn("rewire_connection", names)
         idx_insert = names.index("insert_block_on_connection")
         idx_suggest = names.index("suggest_compatible_insertions")
         idx_remove = names.index("remove_connection")
+        idx_rewire = names.index("rewire_connection")
         idx_apply = names.index("apply_edit")
         self.assertLess(idx_suggest, idx_insert)
         self.assertLess(idx_insert, idx_apply)
         self.assertLess(idx_remove, idx_apply)
+        self.assertLess(idx_rewire, idx_apply)
 
     def test_remove_connection_wraps_verified_edit(self) -> None:
         agent, session = self._load_agent()

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,9 @@ from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_server import LlamaServerClient
+from grc_agent.runtime import prompt as runtime_prompt
+from grc_agent.runtime import tool_schemas as runtime_tool_schemas
+from grc_agent.runtime import turn_plan as runtime_turn_plan
 from grc_agent.recovery import (
     NO_RECOVERY_NEEDED,
     RecoveryDecision,
@@ -27,6 +31,7 @@ from grc_agent.session_ops import parse_connection_id
 
 DEFAULT_FIXTURE_NAME = "random_bit_generator.grc"
 DEFAULT_LIVE_EVAL_MAX_TOKENS = 2048
+RESULTS_SCHEMA_VERSION = "2026-04-28.intent-hardening"
 RUN_STATUS_PASS = "PASS"
 RUN_STATUS_FAIL = "FAIL"
 RUN_STATUS_INFRA_FAIL = "INFRA_FAIL"
@@ -47,6 +52,7 @@ MUTATION_TOOL_NAMES = frozenset(
         "insert_block_on_connection",
         "auto_insert_block",
         "remove_connection",
+        "rewire_connection",
         "save_graph",
     }
 )
@@ -58,6 +64,16 @@ RECOVERY_MUTATION_RETRY_TOOL_NAMES = frozenset(
         "insert_block_on_connection",
         "auto_insert_block",
         "remove_connection",
+        "rewire_connection",
+    }
+)
+PRE_TURN_SETUP_TOOL_NAMES = frozenset(
+    {
+        "apply_edit",
+        "insert_block_on_connection",
+        "auto_insert_block",
+        "remove_connection",
+        "rewire_connection",
     }
 )
 
@@ -85,6 +101,10 @@ class LiveTurnSpec:
     prompt: str
     expected_tool_calls: tuple[ToolExpectation, ...] = ()
     semantic_checks: tuple[dict[str, Any], ...] = ()
+    pre_turn_tool_name: str = ""
+    pre_turn_tool_args: dict[str, Any] = field(default_factory=dict)
+    pre_turn_allow_clarification: bool = False
+    pre_turn_require_valid_graph: bool = True
     accept_any_tool: bool = False
     allow_safe_text_only: bool = False
     clarification_response: bool = False
@@ -182,6 +202,119 @@ def snapshot_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
     return before.get("raw_hash") != after.get("raw_hash")
 
 
+def graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact semantic graph delta tracked by live evals."""
+    delta: dict[str, Any] = {}
+
+    before_blocks = set(_string_list(before.get("block_names")))
+    after_blocks = set(_string_list(after.get("block_names")))
+    _add_non_empty(delta, "added_blocks", sorted(after_blocks - before_blocks))
+    _add_non_empty(delta, "removed_blocks", sorted(before_blocks - after_blocks))
+
+    before_connections = set(_string_list(before.get("connection_ids")))
+    after_connections = set(_string_list(after.get("connection_ids")))
+    _add_non_empty(delta, "added_connections", sorted(after_connections - before_connections))
+    _add_non_empty(delta, "removed_connections", sorted(before_connections - after_connections))
+
+    variable_delta = _value_delta(
+        _dict_value(before.get("variable_values")),
+        _dict_value(after.get("variable_values")),
+    )
+    _add_non_empty(delta, "variables", variable_delta)
+
+    before_by_name = _dict_value(before.get("blocks_by_name"))
+    after_by_name = _dict_value(after.get("blocks_by_name"))
+    block_params_delta: dict[str, Any] = {}
+    block_states_delta: dict[str, Any] = {}
+    for block_name in sorted(before_blocks & after_blocks):
+        before_block = _dict_value(before_by_name.get(block_name))
+        after_block = _dict_value(after_by_name.get(block_name))
+        params = _value_delta(
+            _dict_value(before_block.get("parameters")),
+            _dict_value(after_block.get("parameters")),
+        )
+        if params:
+            block_params_delta[block_name] = params
+        if before_block.get("state") != after_block.get("state"):
+            block_states_delta[block_name] = after_block.get("state")
+    _add_non_empty(delta, "block_params", block_params_delta)
+    _add_non_empty(delta, "block_states", block_states_delta)
+
+    if before.get("dirty") != after.get("dirty"):
+        delta["dirty"] = after.get("dirty")
+    if before.get("validation_status") != after.get("validation_status"):
+        delta["validation_status"] = after.get("validation_status")
+    if before.get("validation_returncode") != after.get("validation_returncode"):
+        delta["validation_returncode"] = after.get("validation_returncode")
+
+    return delta
+
+
+def _string_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _value_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    changes: dict[str, Any] = {}
+    for key in sorted(set(before) | set(after)):
+        if before.get(key) != after.get(key):
+            changes[str(key)] = after.get(key)
+    return changes
+
+
+def _add_non_empty(target: dict[str, Any], key: str, value: Any) -> None:
+    if value:
+        target[key] = value
+
+
+def _normalize_graph_delta(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {
+            "added_blocks",
+            "removed_blocks",
+            "added_connections",
+            "removed_connections",
+        }:
+            list_item = item if isinstance(item, list) else []
+            _add_non_empty(normalized, str(key), sorted(str(entry) for entry in list_item))
+        elif key in {"variables", "block_params", "block_states"}:
+            dict_item = item if isinstance(item, dict) else {}
+            _add_non_empty(normalized, str(key), _normalize_nested_mapping(dict_item))
+        elif item is not None:
+            normalized[str(key)] = item
+    return normalized
+
+
+def _normalize_nested_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key in sorted(value):
+        item = value[key]
+        if isinstance(item, dict):
+            nested = _normalize_nested_mapping(item)
+            if nested:
+                normalized[str(key)] = nested
+        elif item is not None:
+            normalized[str(key)] = _normalize_delta_scalar(item)
+    return normalized
+
+
+def _normalize_delta_scalar(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return str(value)
+    return value
+
+
 def graph_variable_value(snapshot: dict[str, Any], variable_name: str) -> Any:
     values = snapshot.get("variable_values")
     if not isinstance(values, dict):
@@ -229,6 +362,7 @@ def saved_graph_reloads_and_validates(path: str | Path) -> dict[str, Any]:
     try:
         session.load(target)
         result["loaded"] = True
+        result["snapshot"] = graph_snapshot(session)
         result["valid"] = session.validate()
         result["validation_returncode"] = session.last_validation_returncode
         result["validation_stdout"] = session.last_validation_stdout
@@ -291,6 +425,109 @@ def _compact_backend_prop(key: str, value: Any) -> dict[str, Any]:
     }
 
 
+def _compact_pre_turn_setup_result(
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist evidence that eval setup used public tools and left a valid graph."""
+    return {
+        "tool": tool_name,
+        "arguments": arguments,
+        "ok": result.get("ok"),
+        "valid": result.get("valid"),
+        "clarification_required": result.get("clarification_required"),
+        "error_type": result.get("error_type"),
+        "state_revision": result.get("state_revision"),
+        "state_revision_before": result.get("state_revision_before"),
+        "state_revision_after": result.get("state_revision_after"),
+        "validation_status": _nested_value(result, ("validation", "status")),
+        "validation_returncode": _nested_value(result, ("validation", "returncode")),
+    }
+
+
+def _nested_value(value: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    current: Any = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def collect_release_metadata(
+    *,
+    case: Any | None = None,
+    model_alias: str | None = None,
+    backend_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return reproducibility metadata persisted with live eval rows."""
+    prompt_text = runtime_prompt.build_system_prompt()
+    tool_schema_text = json.dumps(
+        runtime_tool_schemas.build_tool_schemas(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    policy_text = _source_text_for(runtime_turn_plan)
+    backend = backend_metadata if isinstance(backend_metadata, dict) else {}
+    return {
+        "results_schema_version": RESULTS_SCHEMA_VERSION,
+        "git_commit": _git_commit(),
+        "git_dirty": _git_dirty(),
+        "prompt_version": getattr(runtime_prompt, "__version__", "unknown"),
+        "prompt_sha256": _sha256_text(prompt_text),
+        "tool_schema_sha256": _sha256_text(tool_schema_text),
+        "turn_plan_policy_version": getattr(runtime_turn_plan, "__version__", "unknown"),
+        "turn_plan_policy_sha256": _sha256_text(policy_text),
+        "model_alias": model_alias or backend.get("model") or "",
+        "backend_metadata": backend,
+        "chat_template_hash": backend.get("chat_template_sha256")
+        or backend.get("chat_template_tool_use_sha256")
+        or "",
+        "fixture": getattr(case, "fixture_name", DEFAULT_FIXTURE_NAME) if case is not None else "",
+        "target_fixture": getattr(case, "target_fixture_name", None) if case is not None else None,
+    }
+
+
+def _source_text_for(module: Any) -> str:
+    path = getattr(module, "__file__", "")
+    if not path:
+        return repr(module)
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return repr(module)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _git_dirty() -> bool | None:
+    try:
+        output = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+    return bool(output.strip())
+
+
 def run_live_scenario_once(
     *,
     client: LlamaServerClient,
@@ -322,6 +559,51 @@ def run_live_scenario_once(
         started_at = datetime.now(timezone.utc)
 
         for turn_index, turn in enumerate(scenario.turns):
+            pre_turn_setup: list[dict[str, Any]] = []
+            if turn.pre_turn_tool_name:
+                if turn.pre_turn_tool_name not in PRE_TURN_SETUP_TOOL_NAMES:
+                    raise RuntimeError(
+                        "unsupported pre-turn setup tool: "
+                        f"{turn.pre_turn_tool_name}"
+                    )
+                setup_args = render_value_templates(
+                    turn.pre_turn_tool_args,
+                    target_path=target_path,
+                    save_path=save_path,
+                )
+                setup_result = agent.execute_tool(turn.pre_turn_tool_name, setup_args)
+                pre_turn_setup.append(
+                    _compact_pre_turn_setup_result(
+                        turn.pre_turn_tool_name,
+                        setup_args,
+                        setup_result,
+                    )
+                )
+                setup_ok = bool(setup_result.get("ok"))
+                setup_clarifies = (
+                    turn.pre_turn_allow_clarification
+                    and setup_result.get("clarification_required") is True
+                )
+                if not setup_ok and not setup_clarifies:
+                    raise RuntimeError(
+                        "pre-turn setup tool failed: "
+                        f"{turn.pre_turn_tool_name} {setup_result}"
+                    )
+                if turn.pre_turn_require_valid_graph:
+                    validation_result = agent.execute_tool("validate_graph", {})
+                    pre_turn_setup.append(
+                        _compact_pre_turn_setup_result(
+                            "validate_graph",
+                            {},
+                            validation_result,
+                        )
+                    )
+                    if not validation_result.get("ok") or not validation_result.get("valid"):
+                        raise RuntimeError(
+                            "pre-turn setup graph validation failed: "
+                            f"{validation_result}"
+                        )
+
             before_snapshot = graph_snapshot(agent)
             history_start = len(agent.history)
             prompt = render_prompt(
@@ -405,6 +687,8 @@ def run_live_scenario_once(
                 "clarification_result": result.get("clarification_result")
                 if result
                 else None,
+                "pre_turn_setup": pre_turn_setup,
+                "turn_plan": result.get("turn_plan") if result else None,
                 "ok": result.get("ok", False) if result else False,
                 "error": turn_error,
                 "elapsed_seconds": round(
@@ -558,6 +842,7 @@ def evaluate_semantic_checks(
     for check in checks:
         kind = check.get("kind")
         passed = False
+        detail: dict[str, Any] = {"kind": kind}
         if kind == "no_mutation":
             passed = (
                 not snapshot_changed(before_snapshot, after_snapshot)
@@ -569,7 +854,7 @@ def evaluate_semantic_checks(
             passed = snapshot_changed(before_snapshot, after_snapshot)
             end_state_pass = end_state_pass and passed
         elif kind == "variable_equals":
-            passed = graph_variable_value(after_snapshot, str(check.get("name"))) == str(
+            passed = str(graph_variable_value(after_snapshot, str(check.get("name")))) == str(
                 check.get("value")
             )
             end_state_pass = end_state_pass and passed
@@ -589,6 +874,14 @@ def evaluate_semantic_checks(
         elif kind == "dirty":
             passed = after_snapshot.get("dirty") is bool(check.get("value", True))
             end_state_pass = end_state_pass and passed
+        elif kind == "exact_graph_delta":
+            actual_delta = _normalize_graph_delta(graph_delta(before_snapshot, after_snapshot))
+            expected_delta = _normalize_graph_delta(check.get("delta"))
+            passed = actual_delta == expected_delta
+            detail["expected_delta"] = expected_delta
+            detail["actual_delta"] = actual_delta
+            safety_pass = safety_pass and passed
+            end_state_pass = end_state_pass and passed
         elif kind == "saved_path_valid":
             raw_path = check.get("path") or save_path
             expected_path = (
@@ -604,6 +897,138 @@ def evaluate_semantic_checks(
                 and validation.get("exists") is True
                 and validation.get("loaded") is True
                 and validation.get("valid") is True
+            )
+            if passed and check.get("copy") is True:
+                passed = expected_path != str(before_snapshot.get("path"))
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_variable_equals":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            snapshot = validation.get("snapshot")
+            passed = (
+                validation.get("exists") is True
+                and validation.get("loaded") is True
+                and isinstance(snapshot, dict)
+                and str(graph_variable_value(snapshot, str(check.get("name"))))
+                == str(check.get("value"))
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_block_param_equals":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            snapshot = validation.get("snapshot")
+            passed = (
+                validation.get("exists") is True
+                and validation.get("loaded") is True
+                and isinstance(snapshot, dict)
+                and str(graph_block_param_value(
+                    snapshot,
+                    str(check.get("instance_name")),
+                    str(check.get("param")),
+                ))
+                == str(check.get("value"))
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_block_state_equals":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            snapshot = validation.get("snapshot")
+            passed = (
+                validation.get("exists") is True
+                and validation.get("loaded") is True
+                and isinstance(snapshot, dict)
+                and str(graph_block_state(snapshot, str(check.get("instance_name"))))
+                == str(check.get("state"))
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_block_present":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            snapshot = validation.get("snapshot")
+            block_name = str(check.get("instance_name"))
+            passed = (
+                validation.get("exists") is True
+                and validation.get("loaded") is True
+                and isinstance(snapshot, dict)
+                and block_name in snapshot.get("block_names", [])
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_block_absent":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            snapshot = validation.get("snapshot")
+            block_name = str(check.get("instance_name"))
+            passed = (
+                validation.get("exists") is True
+                and validation.get("loaded") is True
+                and isinstance(snapshot, dict)
+                and block_name not in snapshot.get("block_names", [])
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_connection_present":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            snapshot = validation.get("snapshot")
+            connection_id = str(check.get("connection_id"))
+            passed = (
+                validation.get("exists") is True
+                and validation.get("loaded") is True
+                and isinstance(snapshot, dict)
+                and connection_id in snapshot.get("connection_ids", [])
+            )
+            end_state_pass = end_state_pass and passed
+        elif kind == "saved_connection_absent":
+            raw_path = check.get("path") or save_path
+            expected_path = (
+                str(after_snapshot.get("path"))
+                if raw_path == "{after_path}"
+                else str(raw_path)
+            )
+            validation = saved_graph_reloads_and_validates(expected_path)
+            extra.setdefault("saved_graph_validations", []).append(validation)
+            snapshot = validation.get("snapshot")
+            connection_id = str(check.get("connection_id"))
+            passed = (
+                validation.get("exists") is True
+                and validation.get("loaded") is True
+                and isinstance(snapshot, dict)
+                and connection_id not in snapshot.get("connection_ids", [])
             )
             end_state_pass = end_state_pass and passed
         elif kind == "tool_result":
@@ -646,7 +1071,8 @@ def evaluate_semantic_checks(
         else:
             passed = False
 
-        details.append({"kind": kind, "passed": passed})
+        detail["passed"] = passed
+        details.append(detail)
         semantic_pass = semantic_pass and passed
 
     return {
@@ -1273,6 +1699,8 @@ def build_persisted_run_entry(
     run_index: int,
     run_result: dict[str, Any],
     backend_restart_count: int,
+    model_alias: str | None = None,
+    backend_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status = run_result.get("status") or derive_run_status(run_result)
     prompt = getattr(case, "prompt", None)
@@ -1314,6 +1742,11 @@ def build_persisted_run_entry(
         "expected_chain": expected_chain,
         "actual_chain": run_result.get("tools_called"),
         "turn_results": turn_results,
+        "release_metadata": collect_release_metadata(
+            case=case,
+            model_alias=model_alias,
+            backend_metadata=backend_metadata,
+        ),
         "run_result": run_result,
     }
 
@@ -1447,6 +1880,7 @@ def run_phase_eval(
                                     run_index=run_index,
                                     run_result=run_result,
                                     backend_restart_count=1,
+                                    model_alias=resolved_model,
                                 ),
                             )
                         print(" -> INFRA_FAIL")
@@ -1495,6 +1929,13 @@ def run_phase_eval(
                         run_index=run_index,
                         run_result=run_result,
                         backend_restart_count=backend_restart_count,
+                        model_alias=resolved_model,
+                        backend_metadata=collect_backend_metadata(
+                            client,
+                            server_url=resolved_url,
+                            model=resolved_model,
+                            temperature=temperature,
+                        ),
                     ),
                 )
 

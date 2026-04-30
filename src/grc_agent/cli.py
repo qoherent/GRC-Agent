@@ -12,6 +12,14 @@ from grc_agent.runtime.clarification import render_clarification_prompt
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.config import AppConfig, ConfigError, load_app_config
 from grc_agent.doctor import print_doctor_report, run_doctor
+from grc_agent.dogfood import (
+    VALID_DOGFOOD_SOURCES,
+    VALID_FAILURE_CATEGORIES,
+    VALID_SEVERITIES,
+    VALID_TASK_TYPES,
+    record_dogfood_case,
+    summarize_dogfood_cases,
+)
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_server import (
@@ -21,6 +29,17 @@ from grc_agent.llama_server import (
 )
 from grc_agent.manual import search_manual
 from grc_agent.retrieval import initialize_retrieval
+from grc_agent.retrieval.vector import (
+    build_vector_index,
+    prune_vector_collections,
+    propose_vector_metadata,
+    record_vector_miss,
+    semantic_search_grc,
+    VALID_MISS_CATEGORIES,
+    VALID_MISS_SOURCES,
+    summarize_vector_misses,
+    vector_index_stats,
+)
 from grc_agent.session.load import load_grc as load_grc_session
 
 logger = logging.getLogger(__name__)
@@ -169,6 +188,253 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print the search payload as JSON.",
+    )
+
+    vector_parser = subparsers.add_parser(
+        "vector",
+        help="Build and query the local read-only vector retrieval index.",
+    )
+    vector_subparsers = vector_parser.add_subparsers(dest="vector_command")
+    vector_subparsers.required = True
+    vector_build_parser = vector_subparsers.add_parser(
+        "build",
+        help="Build the local Qdrant/FastEmbed vector index.",
+    )
+    vector_build_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
+    vector_build_parser.add_argument("--catalog-root", help="Optional GNU Radio catalog root.")
+    vector_build_parser.add_argument(
+        "--docs-only",
+        action="store_true",
+        help="Build a non-release docs-only index when GNU Radio catalog metadata is unavailable.",
+    )
+    vector_build_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print build report as JSON.",
+    )
+    vector_stats_parser = vector_subparsers.add_parser(
+        "stats",
+        help="Print local vector index stats.",
+    )
+    vector_stats_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
+    vector_stats_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print stats as JSON.",
+    )
+    vector_gc_parser = vector_subparsers.add_parser(
+        "gc",
+        help="Garbage-collect old local vector collections after release evidence is captured.",
+    )
+    vector_gc_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
+    vector_gc_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Delete stale collections. Without this flag, only print a dry-run report.",
+    )
+    vector_gc_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print garbage-collection report as JSON.",
+    )
+    vector_search_parser = vector_subparsers.add_parser(
+        "search",
+        help="Search the local read-only vector index.",
+    )
+    vector_search_parser.add_argument("query", help="Semantic query text.")
+    vector_search_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
+    vector_search_parser.add_argument(
+        "--scope",
+        choices=["all", "catalog", "manual", "tutorial"],
+        default="all",
+        help="Record scope to search.",
+    )
+    vector_search_parser.add_argument(
+        "--k",
+        type=int,
+        default=5,
+        help="Maximum number of results.",
+    )
+    vector_search_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print search payload as JSON.",
+    )
+    vector_miss_parser = vector_subparsers.add_parser(
+        "miss",
+        help="Record a sanitized real-user vector retrieval miss as JSONL evidence.",
+    )
+    vector_miss_parser.add_argument("query", help="User query that missed expected retrieval.")
+    vector_miss_parser.add_argument(
+        "--expected-block",
+        action="append",
+        default=[],
+        dest="expected_block_ids",
+        help="Expected canonical block ID. May be repeated.",
+    )
+    vector_miss_parser.add_argument(
+        "--actual-top-id",
+        action="append",
+        default=[],
+        dest="actual_top_ids",
+        help="Actual top vector/lexical result ID. May be repeated.",
+    )
+    vector_miss_parser.add_argument(
+        "--observed-top-id",
+        action="append",
+        dest="observed_top_ids",
+        help="Deprecated alias for --actual-top-id.",
+    )
+    vector_miss_parser.add_argument(
+        "--scope",
+        choices=["all", "catalog", "manual", "tutorial"],
+        default="all",
+        help="Search scope where the miss occurred.",
+    )
+    vector_miss_parser.add_argument(
+        "--category",
+        choices=sorted(VALID_MISS_CATEGORIES),
+        default="untriaged",
+        help="Initial triage category.",
+    )
+    vector_miss_parser.add_argument(
+        "--source",
+        choices=sorted(VALID_MISS_SOURCES),
+        default="real_user",
+        help="Evidence source.",
+    )
+    vector_miss_parser.add_argument(
+        "--notes",
+        default="",
+        help="Short human note. Do not include graph mutation recipes.",
+    )
+    vector_miss_parser.add_argument(
+        "--intake-path",
+        help="Optional JSONL path. Defaults to reports/retrieval/real_user_misses.jsonl.",
+    )
+    vector_miss_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print recorded miss payload as JSON.",
+    )
+    vector_misses_parser = vector_subparsers.add_parser(
+        "misses",
+        help="Summarize and deduplicate recorded vector retrieval misses.",
+    )
+    vector_misses_parser.add_argument(
+        "--intake-path",
+        help="Optional JSONL path. Defaults to reports/retrieval/real_user_misses.jsonl.",
+    )
+    vector_misses_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print miss summary as JSON.",
+    )
+    vector_proposals_parser = vector_subparsers.add_parser(
+        "proposals",
+        help="Generate a human-review metadata proposal report from miss clusters.",
+    )
+    vector_proposals_parser.add_argument(
+        "--intake-path",
+        help="Optional JSONL path. Defaults to reports/retrieval/real_user_misses.jsonl.",
+    )
+    vector_proposals_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print proposal report as JSON.",
+    )
+
+    dogfood_parser = subparsers.add_parser(
+        "dogfood",
+        help="Record and summarize structured real-use dogfooding evidence.",
+    )
+    dogfood_subparsers = dogfood_parser.add_subparsers(dest="dogfood_command")
+    dogfood_subparsers.required = True
+    dogfood_record_parser = dogfood_subparsers.add_parser(
+        "record",
+        help="Record one sanitized dogfooding observation as JSONL evidence.",
+    )
+    dogfood_record_parser.add_argument("prompt", help="User prompt or task attempted.")
+    dogfood_record_parser.add_argument(
+        "--graph",
+        default="",
+        help="Graph path or safe identifier. User graph paths are redacted.",
+    )
+    dogfood_record_parser.add_argument(
+        "--source",
+        choices=sorted(VALID_DOGFOOD_SOURCES),
+        default="manual_review",
+        help="Evidence source.",
+    )
+    dogfood_record_parser.add_argument(
+        "--task-type",
+        choices=sorted(VALID_TASK_TYPES),
+        default="other",
+        help="Task category.",
+    )
+    dogfood_record_parser.add_argument(
+        "--failure-category",
+        choices=sorted(VALID_FAILURE_CATEGORIES),
+        default="no_failure",
+        help="Failure category, or no_failure for baseline observations.",
+    )
+    dogfood_record_parser.add_argument(
+        "--severity",
+        choices=sorted(VALID_SEVERITIES),
+        default="info",
+        help="Observed severity.",
+    )
+    dogfood_record_parser.add_argument("--expected", default="", help="Expected behavior.")
+    dogfood_record_parser.add_argument("--actual", default="", help="Actual behavior.")
+    dogfood_record_parser.add_argument(
+        "--actual-tool",
+        action="append",
+        default=[],
+        dest="actual_tools",
+        help="Observed tool name. May be repeated.",
+    )
+    dogfood_record_parser.add_argument(
+        "--graph-delta",
+        default="",
+        help="Short graph-delta summary, if known.",
+    )
+    dogfood_record_parser.add_argument(
+        "--validation-state",
+        default="",
+        help="Validation state summary, if known.",
+    )
+    dogfood_record_parser.add_argument(
+        "--save-state",
+        default="",
+        help="Save/reload state summary, if known.",
+    )
+    dogfood_record_parser.add_argument(
+        "--reproducible",
+        action="store_true",
+        help="Mark this observation as reproducible.",
+    )
+    dogfood_record_parser.add_argument("--notes", default="", help="Short notes.")
+    dogfood_record_parser.add_argument(
+        "--intake-path",
+        help="Optional JSONL path. Defaults to reports/dogfood/intake.jsonl.",
+    )
+    dogfood_record_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print recorded observation as JSON.",
+    )
+    dogfood_report_parser = dogfood_subparsers.add_parser(
+        "report",
+        help="Summarize and cluster dogfooding observations.",
+    )
+    dogfood_report_parser.add_argument(
+        "--intake-path",
+        help="Optional JSONL path. Defaults to reports/dogfood/intake.jsonl.",
+    )
+    dogfood_report_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print dogfooding report as JSON.",
     )
 
     return parser
@@ -581,6 +847,213 @@ def _run_manual_search_command(query: str, k: int, *, json_output: bool) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def _print_vector_payload(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if not payload.get("ok"):
+        print(payload.get("message", "Vector command failed."))
+        return
+    if "would_delete_collections" in payload:
+        mode = "dry run" if payload.get("dry_run") else "applied"
+        print(f"Vector GC {mode}: {len(payload.get('would_delete_collections', []))} old collections")
+        if payload.get("retention_policy"):
+            print(f"Retention: {payload.get('retention_policy')}")
+        if payload.get("active_collection"):
+            print(f"Active: {payload.get('active_collection')}")
+        if payload.get("previous_collection"):
+            print(f"Previous: {payload.get('previous_collection')}")
+        for name in payload.get("would_delete_collections", []):
+            prefix = "Would delete" if payload.get("dry_run") else "Deleted"
+            print(f"{prefix}: {name}")
+        return
+    if payload.get("tool") == "record_vector_miss":
+        record = payload.get("record", {})
+        print(f"Recorded vector miss: {record.get('query', '')}")
+        print(f"Path: {payload.get('intake_path', '')}")
+        if record.get("category"):
+            print(f"Category: {record.get('category')}")
+        return
+    if payload.get("tool") == "summarize_vector_misses":
+        print(
+            f"Vector misses: {payload.get('total_records', 0)} records, "
+            f"{payload.get('cluster_count', 0)} clusters"
+        )
+        for cluster in payload.get("clusters", [])[:10]:
+            queries = ", ".join(cluster.get("queries", [])[:3])
+            expected = ", ".join(cluster.get("expected_block_ids", [])) or "unknown"
+            print(
+                f"- {cluster.get('count')}x {expected}: {queries} "
+                f"[{cluster.get('recommended_action')}]"
+            )
+        for warning in payload.get("warnings", []) or []:
+            print(f"Warning: {warning}")
+        return
+    if payload.get("tool") == "propose_vector_metadata":
+        print(f"Metadata proposal candidates: {payload.get('candidate_count', 0)}")
+        for candidate in payload.get("candidates", [])[:10]:
+            print(
+                f"- {candidate.get('proposed_block')}: "
+                f"{candidate.get('proposed_stable_capability_phrase')}"
+            )
+        blocked = payload.get("blocked_clusters", [])
+        if blocked:
+            print(f"Blocked clusters: {len(blocked)}")
+        for warning in payload.get("warnings", []) or []:
+            print(f"Warning: {warning}")
+        return
+    if "results" in payload:
+        print(f"Vector search: {payload.get('query', '')}")
+        for index, result in enumerate(payload.get("results", []), start=1):
+            print(
+                f"\n{index}. {result.get('title')} "
+                f"({result.get('source_type')}, score={result.get('vector_score_raw')})"
+            )
+            if result.get("canonical_block_id"):
+                print(f"Block: {result.get('canonical_block_id')}")
+            print(result.get("excerpt", ""))
+            provenance = result.get("provenance", {})
+            if isinstance(provenance, dict):
+                print(f"Source: {provenance.get('path')}")
+        for warning in payload.get("warnings", []) or []:
+            print(f"Warning: {warning}")
+        return
+    print(
+        f"Vector index {payload.get('collection_alias', '')}: "
+        f"{payload.get('record_count', payload.get('points_count', 0))} records"
+    )
+    records_by_source_type = payload.get("records_by_source_type")
+    if isinstance(records_by_source_type, dict):
+        for source_type, count in sorted(records_by_source_type.items()):
+            print(f"  {source_type}: {count}")
+
+
+def _print_dogfood_payload(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if not payload.get("ok"):
+        print(payload.get("message", "Dogfood command failed."))
+        return
+    if payload.get("tool") == "record_dogfood_case":
+        record = payload.get("record", {})
+        print(f"Recorded dogfood case: {record.get('task_type', 'other')}")
+        print(f"Category: {record.get('failure_category', 'no_failure')}")
+        print(f"Path: {payload.get('intake_path', '')}")
+        return
+    if payload.get("tool") == "summarize_dogfood_cases":
+        print(
+            f"Dogfood cases: {payload.get('total_records', 0)} records, "
+            f"{payload.get('cluster_count', 0)} clusters"
+        )
+        for cluster in payload.get("clusters", [])[:10]:
+            prompts = ", ".join(cluster.get("representative_prompts", [])[:2])
+            print(
+                f"- {cluster.get('count')}x {cluster.get('cluster_id')} "
+                f"[{cluster.get('recommendation')}]: {prompts}"
+            )
+        for warning in payload.get("warnings", []) or []:
+            print(f"Warning: {warning}")
+
+
+def _run_vector_command(args: argparse.Namespace) -> int:
+    try:
+        if args.vector_command == "build":
+            payload = build_vector_index(
+                index_dir=args.index_dir,
+                catalog_root=args.catalog_root,
+                docs_only=args.docs_only,
+            )
+            _print_vector_payload(payload, json_output=args.json)
+            return 0
+        if args.vector_command == "stats":
+            payload = vector_index_stats(index_dir=args.index_dir)
+            _print_vector_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+        if args.vector_command == "gc":
+            payload = prune_vector_collections(
+                index_dir=args.index_dir,
+                dry_run=not args.apply,
+            )
+            _print_vector_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+        if args.vector_command == "search":
+            payload = semantic_search_grc(
+                args.query,
+                scope=args.scope,
+                k=args.k,
+                index_dir=args.index_dir,
+            )
+            _print_vector_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+        if args.vector_command == "miss":
+            actual_top_ids = args.actual_top_ids or args.observed_top_ids or []
+            payload = record_vector_miss(
+                args.query,
+                expected_block_ids=args.expected_block_ids,
+                actual_top_ids=actual_top_ids,
+                scope=args.scope,
+                category=args.category,
+                source=args.source,
+                notes=args.notes,
+                intake_path=args.intake_path,
+            )
+            _print_vector_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+        if args.vector_command == "misses":
+            payload = summarize_vector_misses(intake_path=args.intake_path)
+            _print_vector_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+        if args.vector_command == "proposals":
+            payload = propose_vector_metadata(intake_path=args.intake_path)
+            _print_vector_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+    except Exception as exc:
+        payload = build_error_payload(
+            error_type=ErrorCode.INTERNAL_ERROR,
+            message=str(exc),
+        )
+        _print_vector_payload(payload, json_output=getattr(args, "json", False))
+        return 1
+    return 2
+
+
+def _run_dogfood_command(args: argparse.Namespace) -> int:
+    try:
+        if args.dogfood_command == "record":
+            payload = record_dogfood_case(
+                prompt=args.prompt,
+                graph=args.graph,
+                source=args.source,
+                task_type=args.task_type,
+                failure_category=args.failure_category,
+                severity=args.severity,
+                expected=args.expected,
+                actual=args.actual,
+                actual_tools=args.actual_tools,
+                graph_delta=args.graph_delta,
+                validation_state=args.validation_state,
+                save_state=args.save_state,
+                reproducible=args.reproducible,
+                notes=args.notes,
+                intake_path=args.intake_path,
+            )
+            _print_dogfood_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+        if args.dogfood_command == "report":
+            payload = summarize_dogfood_cases(intake_path=args.intake_path)
+            _print_dogfood_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+    except Exception as exc:
+        payload = build_error_payload(
+            error_type=ErrorCode.INTERNAL_ERROR,
+            message=str(exc),
+        )
+        _print_dogfood_payload(payload, json_output=getattr(args, "json", False))
+        return 1
+    return 2
+
+
 def _run_doctor_command(
     *,
     config_path: str | None,
@@ -674,6 +1147,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.k,
                 json_output=args.json,
             )
+
+    if args.command == "vector":
+        return _run_vector_command(args)
+
+    if args.command == "dogfood":
+        return _run_dogfood_command(args)
 
     parser.error("Unknown command.")
     return 2

@@ -13,7 +13,6 @@ from unittest import mock
 from urllib import error
 
 from grc_agent.agent import GrcAgent
-from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_llama_runtime
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -1223,8 +1222,210 @@ class LlamaServerAdapterTests(unittest.TestCase):
             for schema in chat_requests[0]["payload"]["tools"]
         }
         self.assertEqual(sent_tools, {"apply_edit"})
+        transaction_schema = chat_requests[0]["payload"]["tools"][0]["function"][
+            "parameters"
+        ]["properties"]["transaction"]
+        self.assertEqual(
+            transaction_schema["properties"]["op_type"]["enum"],
+            ["update_states"],
+        )
         tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
         self.assertEqual(tool_entries[0]["content"]["error_type"], "route_mismatch")
+
+    def test_bounded_llama_turn_clarifies_compound_state_and_remove_request(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server([], model_id=llama_config.model)
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Disable blocks_throttle2_0 and remove it.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(result["turn_plan"]["intent"], "ambiguous")
+        self.assertEqual(session.state_revision, before_revision)
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(chat_requests, [])
+
+    def test_bounded_llama_turn_clarifies_missing_insertion_anchor(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server([], model_id=llama_config.model)
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Add a compatible filter and save it.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(result["turn_plan"]["intent"], "uncertain_mutation")
+        self.assertEqual(
+            result["turn_plan"]["unsupported_reason"],
+            "insertion_anchor_missing",
+        )
+        self.assertIn("where", result["assistant_text"])
+        self.assertEqual(session.state_revision, before_revision)
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(chat_requests, [])
+
+    def test_bounded_llama_turn_clarifies_vague_uncertain_mutation_without_model_call(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server([], model_id=llama_config.model)
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Swap the signal chain around and save it.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(result["turn_plan"]["intent"], "uncertain_mutation")
+        self.assertEqual(result["turn_plan"]["unsupported_reason"], "uncertain_mutation")
+        self.assertIn("clarification", result["assistant_text"])
+        self.assertEqual(session.state_revision, before_revision)
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(chat_requests, [])
+
+    def test_bounded_llama_turn_executes_exact_add_variable_without_model_call(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server([], model_id=llama_config.model)
+        agent, session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Add a variable called noise_level set to 0.1.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 1)
+        self.assertEqual(result["turn_plan"]["intent"], "add_variable")
+        self.assertGreater(session.state_revision, 1)
+        block = next(
+            block for block in session.flowgraph.blocks if block.instance_name == "noise_level"
+        )
+        self.assertEqual(block.block_type, "variable")
+        self.assertEqual(
+            block.params["parameters"]["value"],
+            "0.1",
+        )
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(chat_requests, [])
+
+    def test_bounded_llama_turn_executes_exact_rewire_without_model_call(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server([], model_id=llama_config.model)
+        agent, session = self._load_agent()
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Rewire connection_id blocks_throttle2_0:0->blocks_char_to_float_0:0 "
+            "to new endpoint analog_random_source_x_0:0->blocks_char_to_float_0:0.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 1)
+        self.assertEqual(result["turn_plan"]["intent"], "rewire")
+        connection_ids = {
+            f"{connection.src_block}:{connection.src_port}->"
+            f"{connection.dst_block}:{connection.dst_port}"
+            for connection in session.flowgraph.connections
+        }
+        self.assertNotIn(
+            "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+            connection_ids,
+        )
+        self.assertIn(
+            "analog_random_source_x_0:0->blocks_char_to_float_0:0",
+            connection_ids,
+        )
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(chat_requests, [])
+
+    def test_assistant_text_that_looks_like_rewire_does_not_mutate(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": (
+                                    "rewire connection_id "
+                                    "blocks_throttle2_0:0->blocks_char_to_float_0:0 "
+                                    "to analog_random_source_x_0:0->blocks_char_to_float_0:0"
+                                ),
+                            }
+                        }
+                    ]
+                }
+            ],
+            model_id=llama_config.model,
+        )
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Say hello.",
+            model=llama_config.model,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
 
     def test_bounded_llama_turn_completes_pending_actions_after_correction(self) -> None:
         llama_config = self._llama_config()
@@ -1748,7 +1949,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         result = run_bounded_llama_turn(
             agent,
             client,
-            "Add a throttle block and connect it correctly.",
+            "Change samp_rate to 48000.",
             model=llama_config.model,
         )
 

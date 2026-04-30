@@ -47,6 +47,41 @@ def _set_samp_rate_expectation(value: str) -> tuple[ToolExpectation, ...]:
     )
 
 
+def _samp_rate_delta(value: str, *, dirty: bool = True) -> dict[str, Any]:
+    return {
+        "variables": {"samp_rate": value},
+        "block_params": {"samp_rate": {"value": value}},
+        "dirty": dirty,
+        "validation_status": "valid",
+        "validation_returncode": 0,
+    }
+
+
+def _rewire_delta(
+    removed: str,
+    added: str,
+    *,
+    include_validation: bool = True,
+) -> dict[str, Any]:
+    delta: dict[str, Any] = {
+        "added_connections": [added],
+        "removed_connections": [removed],
+        "dirty": True,
+    }
+    if include_validation:
+        delta.update(
+            {
+                "validation_status": "valid",
+                "validation_returncode": 0,
+            }
+        )
+    return delta
+
+
+def _rewire_clarification_expectation() -> tuple[ToolExpectation, ...]:
+    return (ToolExpectation("rewire_connection", require_result_ok=False),)
+
+
 TIER3_CASES: list[LiveScenario] = [
     LiveScenario(
         category="followup",
@@ -57,7 +92,7 @@ TIER3_CASES: list[LiveScenario] = [
                 prompt="Change samp_rate to 48000.",
                 expected_tool_calls=_set_samp_rate_expectation("48000"),
                 semantic_checks=(
-                    {"kind": "variable_equals", "name": "samp_rate", "value": "48000"},
+                    {"kind": "exact_graph_delta", "delta": _samp_rate_delta("48000")},
                 ),
             ),
             LiveTurnSpec(
@@ -83,7 +118,7 @@ TIER3_CASES: list[LiveScenario] = [
                 prompt="Set samp_rate to 16000.",
                 expected_tool_calls=_set_samp_rate_expectation("16000"),
                 semantic_checks=(
-                    {"kind": "variable_equals", "name": "samp_rate", "value": "16000"},
+                    {"kind": "exact_graph_delta", "delta": _samp_rate_delta("16000")},
                 ),
             ),
             LiveTurnSpec(
@@ -107,7 +142,7 @@ TIER3_CASES: list[LiveScenario] = [
                 prompt="Apply that samp_rate change now.",
                 expected_tool_calls=_set_samp_rate_expectation("64000"),
                 semantic_checks=(
-                    {"kind": "variable_equals", "name": "samp_rate", "value": "64000"},
+                    {"kind": "exact_graph_delta", "delta": _samp_rate_delta("64000")},
                 ),
             ),
         ),
@@ -220,6 +255,256 @@ TIER3_CASES: list[LiveScenario] = [
                     {
                         "kind": "assistant_text_contains",
                         "needles": ["exact connection endpoints", "inspect"],
+                    },
+                ),
+            ),
+        ),
+    ),
+    LiveScenario(
+        category="rewire_clarification",
+        name="ambiguous_old_endpoint_option_executes",
+        fixture_name="rewire_message_ambiguous.grc",
+        description=(
+            "An ambiguous old message-port endpoint asks for clarification, then rewires "
+            "the selected existing edge through the verified wrapper."
+        ),
+        turns=(
+            LiveTurnSpec(
+                prompt=(
+                    "Call rewire_connection with old_src_block strobe_0, "
+                    "old_src_port strobe, new_src_block strobe_1, new_src_port "
+                    "strobe, new_dst_block debug_1, and new_dst_port print. "
+                    "Do not provide old_dst_block or old_dst_port; if multiple "
+                    "old edges match, ask me to choose."
+                ),
+                expected_tool_calls=_rewire_clarification_expectation(),
+                semantic_checks=(
+                    {"kind": "no_mutation"},
+                    {
+                        "kind": "tool_result",
+                        "tool": "rewire_connection",
+                        "arguments": {
+                            "clarification_required": True,
+                            "kind": "rewire_connection_disambiguation",
+                        },
+                    },
+                ),
+            ),
+            LiveTurnSpec(
+                prompt="A",
+                clarification_response=True,
+                expected_tool_calls=(ToolExpectation("rewire_connection"),),
+                semantic_checks=(
+                    {"kind": "clarification_mode", "mode": "executed"},
+                    {
+                        "kind": "exact_graph_delta",
+                        "delta": _rewire_delta(
+                            "strobe_0:strobe->debug_0:print",
+                            "strobe_1:strobe->debug_1:print",
+                        ),
+                    },
+                ),
+            ),
+        ),
+    ),
+    LiveScenario(
+        category="rewire_clarification",
+        name="ambiguous_new_source_option_executes_message",
+        fixture_name="rewire_message_ambiguous.grc",
+        description=(
+            "A partial new message source asks for clarification, then selected source "
+            "executes as one atomic rewire."
+        ),
+        turns=(
+            LiveTurnSpec(
+                prompt=(
+                    "Call rewire_connection with old_connection_id "
+                    "strobe_0:strobe->debug_0:print, new_src_port strobe, "
+                    "new_dst_block debug_1, and new_dst_port print. Do not provide "
+                    "new_src_block; if multiple new source blocks match, ask me to choose."
+                ),
+                expected_tool_calls=_rewire_clarification_expectation(),
+                semantic_checks=(
+                    {"kind": "no_mutation"},
+                    {
+                        "kind": "tool_result",
+                        "tool": "rewire_connection",
+                        "arguments": {
+                            "clarification_required": True,
+                            "kind": "rewire_new_endpoint_disambiguation",
+                        },
+                    },
+                ),
+            ),
+            LiveTurnSpec(
+                prompt="B",
+                clarification_response=True,
+                expected_tool_calls=(ToolExpectation("rewire_connection"),),
+                semantic_checks=(
+                    {"kind": "clarification_mode", "mode": "executed"},
+                    {
+                        "kind": "exact_graph_delta",
+                        "delta": _rewire_delta(
+                            "strobe_0:strobe->debug_0:print",
+                            "strobe_1:strobe->debug_1:print",
+                        ),
+                    },
+                ),
+            ),
+        ),
+    ),
+    LiveScenario(
+        category="rewire_clarification",
+        name="ambiguous_new_destination_option_executes_message",
+        fixture_name="rewire_message_ambiguous.grc",
+        description=(
+            "A partial new message destination asks for clarification, then selected "
+            "destination executes as one atomic rewire."
+        ),
+        turns=(
+            LiveTurnSpec(
+                prompt=(
+                    "Call rewire_connection with old_connection_id "
+                    "strobe_0:strobe->debug_0:print, new_src_block strobe_0, "
+                    "new_src_port as the string strobe, and new_dst_port as the string "
+                    "print. Do not provide new_dst_block; if multiple destination blocks "
+                    "match, ask me to choose."
+                ),
+                expected_tool_calls=_rewire_clarification_expectation(),
+                semantic_checks=(
+                    {"kind": "no_mutation"},
+                    {
+                        "kind": "tool_result",
+                        "tool": "rewire_connection",
+                        "arguments": {
+                            "clarification_required": True,
+                            "kind": "rewire_new_endpoint_disambiguation",
+                        },
+                    },
+                ),
+            ),
+            LiveTurnSpec(
+                prompt="B",
+                clarification_response=True,
+                expected_tool_calls=(ToolExpectation("rewire_connection"),),
+                semantic_checks=(
+                    {"kind": "clarification_mode", "mode": "executed"},
+                    {
+                        "kind": "exact_graph_delta",
+                        "delta": _rewire_delta(
+                            "strobe_0:strobe->debug_0:print",
+                            "strobe_0:strobe->debug_2:print",
+                        ),
+                    },
+                ),
+            ),
+        ),
+    ),
+    LiveScenario(
+        category="rewire_clarification",
+        name="ambiguous_new_source_option_executes_stream",
+        fixture_name="rewire_stream_ambiguous.grc",
+        description=(
+            "A stored partial new stream source clarification executes the selected "
+            "source as one atomic rewire."
+        ),
+        turns=(
+            LiveTurnSpec(
+                prompt="C",
+                clarification_response=True,
+                pre_turn_tool_name="rewire_connection",
+                pre_turn_tool_args={
+                    "old_connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                    "new_src_port": 0,
+                    "new_dst_block": "blocks_char_to_float_0",
+                    "new_dst_port": 0,
+                },
+                pre_turn_allow_clarification=True,
+                expected_tool_calls=(ToolExpectation("rewire_connection"),),
+                semantic_checks=(
+                    {"kind": "clarification_mode", "mode": "executed"},
+                    {
+                        "kind": "exact_graph_delta",
+                        "delta": _rewire_delta(
+                            "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                            "blocks_throttle2_1:0->blocks_char_to_float_0:0",
+                            include_validation=False,
+                        ),
+                    },
+                ),
+            ),
+        ),
+    ),
+    LiveScenario(
+        category="rewire_clarification",
+        name="stale_new_source_selection_rejected",
+        fixture_name="rewire_message_ambiguous.grc",
+        description=(
+            "A stored rewire endpoint clarification expires if the graph changes before "
+            "the user selects an option."
+        ),
+        turns=(
+            LiveTurnSpec(
+                prompt=(
+                    "Call rewire_connection with old_connection_id "
+                    "strobe_0:strobe->debug_0:print, new_src_port strobe, "
+                    "new_dst_block debug_1, and new_dst_port print. Do not provide "
+                    "new_src_block; if multiple new source blocks match, ask me to choose."
+                ),
+                expected_tool_calls=_rewire_clarification_expectation(),
+                semantic_checks=(
+                    {"kind": "no_mutation"},
+                    {
+                        "kind": "tool_result",
+                        "tool": "rewire_connection",
+                        "arguments": {"clarification_required": True},
+                    },
+                ),
+            ),
+            LiveTurnSpec(
+                prompt="C",
+                clarification_response=True,
+                pre_turn_tool_name="apply_edit",
+                pre_turn_tool_args={
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "debug_1",
+                        "params": {"log_level": "debug"},
+                    }
+                },
+                semantic_checks=(
+                    {"kind": "no_mutation"},
+                    {"kind": "clarification_mode", "mode": "expired"},
+                ),
+            ),
+        ),
+    ),
+    LiveScenario(
+        category="rewire_clarification",
+        name="invalid_new_endpoint_rolls_back_no_partial_disconnect",
+        fixture_name="rewire_message_ambiguous.grc",
+        description=(
+            "An exact but invalid new endpoint fails safely and leaves the old edge in place."
+        ),
+        turns=(
+            LiveTurnSpec(
+                prompt=(
+                    "Use rewire_connection to rewire connection_id "
+                    "strobe_0:strobe->debug_0:print to new endpoint "
+                    "strobe_0:strobe->missing_debug:print."
+                ),
+                expected_tool_calls=(
+                    ToolExpectation("rewire_connection", require_result_ok=False),
+                ),
+                semantic_checks=(
+                    {"kind": "no_mutation"},
+                    {
+                        "kind": "connection_present",
+                        "connection_id": "strobe_0:strobe->debug_0:print",
+                    },
+                    {
+                        "kind": "connection_absent",
+                        "connection_id": "strobe_0:strobe->missing_debug:print",
                     },
                 ),
             ),

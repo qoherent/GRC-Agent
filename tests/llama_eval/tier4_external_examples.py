@@ -57,46 +57,130 @@ def _scenario_if_present(
     )
 
 
+def _multi_turn_scenario_if_present(
+    *,
+    category: str,
+    name: str,
+    relative_path: str,
+    turns: tuple[LiveTurnSpec, ...],
+    description: str,
+) -> LiveScenario | None:
+    graph_path = GNU_EXAMPLES / relative_path
+    if not graph_path.exists():
+        return None
+    return LiveScenario(
+        category=category,
+        name=name,
+        description=f"{description} Source: {graph_path}",
+        fixture_name=str(graph_path),
+        turns=turns,
+    )
+
+
 def _probe_cases() -> list[LiveScenario]:
     cases = [
         _scenario_if_present(
-            category="external_edit_probe",
-            name="grfreedv_message_debug_disable_validate",
-            relative_path="vocoder/grfreedv.grc",
+            category="external_probe",
+            name="dial_tone_duplicate_connection_rolls_back",
+            relative_path="audio/dial_tone.grc",
             prompt=(
-                "Disable the blocks_message_debug_0 block in this installed GNU Radio "
-                "FreeDV example, then validate it."
+                "Call apply_edit with an add_connection transaction from "
+                "analog_sig_source_x_0 port 0 to blocks_add_xx port 0 in this "
+                "installed dial tone example. If that connection already exists, "
+                "leave the graph unchanged."
             ),
             expected_tool_calls=(
                 ToolExpectation(
                     "apply_edit",
                     transaction_operations=(
                         {
-                            "op_type": "update_states",
-                            "instance_name": "blocks_message_debug_0",
-                            "state": "disabled",
+                            "op_type": "add_connection",
+                            "src_block": "analog_sig_source_x_0",
+                            "src_port": 0,
+                            "dst_block": "blocks_add_xx",
+                            "dst_port": 0,
                         },
                     ),
+                    require_result_ok=False,
                 ),
-                ToolExpectation("validate_graph"),
             ),
             semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
                 {
-                    "kind": "block_state_equals",
-                    "instance_name": "blocks_message_debug_0",
-                    "state": "disabled",
+                    "kind": "connection_present",
+                    "connection_id": "analog_sig_source_x_0:0->blocks_add_xx:0",
                 },
                 {
                     "kind": "tool_result",
-                    "tool": "validate_graph",
-                    "arguments": {"valid": True},
+                    "tool": "apply_edit",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "preflight_rejected",
+                    },
                 },
             ),
             description=(
-                "Opt-in verified block-state edit on an installed vocoder example. "
-                "Promote only after repeated stable live runs."
+                "Known-gap probe for duplicate stream add-connection preflight "
+                "rollback on an installed audio example. The runtime rollback is "
+                "valid, but the 2B model currently routes the request to safe "
+                "clarification instead of apply_edit."
             ),
-        )
+        ),
+        _scenario_if_present(
+            category="external_probe",
+            name="dial_tone_occupied_input_add_rolls_back",
+            relative_path="audio/dial_tone.grc",
+            prompt=(
+                "Call apply_edit with an add_connection transaction from "
+                "analog_sig_source_x_0 port 0 to audio_sink port 0 in this installed "
+                "dial tone example. If audio_sink input 0 is already occupied, "
+                "leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "add_connection",
+                            "src_block": "analog_sig_source_x_0",
+                            "src_port": 0,
+                            "dst_block": "audio_sink",
+                            "dst_port": 0,
+                        },
+                    ),
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "connection_present",
+                    "connection_id": "blocks_add_xx:0->audio_sink:0",
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": "analog_sig_source_x_0:0->audio_sink:0",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "apply_edit",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "preflight_rejected",
+                    },
+                },
+            ),
+            description=(
+                "Known-gap probe for occupied-input stream add-connection "
+                "preflight rollback on an installed audio example. The runtime "
+                "rollback is valid, but the 2B model currently routes the request "
+                "to safe clarification instead of apply_edit."
+            ),
+        ),
     ]
     return [case for case in cases if case is not None]
 
@@ -131,6 +215,16 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
                 ToolExpectation("validate_graph"),
             ),
             semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"samp_rate": "44100"},
+                        "block_params": {"samp_rate": {"value": "44100"}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
                 {"kind": "variable_equals", "name": "samp_rate", "value": "44100"},
                 {
                     "kind": "tool_result",
@@ -139,6 +233,44 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
                 },
             ),
             description="Verified sample-rate edit on a copied installed audio example.",
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="dial_tone_output_disconnect_rolls_back",
+            relative_path="audio/dial_tone.grc",
+            prompt=(
+                "Remove the exact connection_id blocks_add_xx:0->audio_sink:0 "
+                "from this installed dial tone example. If GNU validation fails, "
+                "leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "remove_connection",
+                    arguments={"connection_id": "blocks_add_xx:0->audio_sink:0"},
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "connection_present",
+                    "connection_id": "blocks_add_xx:0->audio_sink:0",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "remove_connection",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "gnu_validation_failed",
+                    },
+                },
+            ),
+            description=(
+                "Promoted rollback proof for GNU-invalid stream disconnect on an "
+                "installed audio example."
+            ),
         ),
         _scenario_if_present(
             category="external",
@@ -158,6 +290,101 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
         ),
         _scenario_if_present(
             category="external",
+            name="stream_mux_validate",
+            relative_path="blocks/stream_mux_demo.grc",
+            prompt="Validate this installed GNU Radio stream mux example.",
+            expected_tool_calls=(ToolExpectation("validate_graph"),),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description="Validation on an installed stream-mux blocks example.",
+        ),
+        _scenario_if_present(
+            category="external",
+            name="sig_source_msg_ports_context",
+            relative_path="analog/sig_source_msg_ports.grc",
+            prompt=(
+                "Show me what is around analog_sig_source_x_0 in this installed "
+                "message-port signal-source example."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "get_grc_context",
+                    arguments={"node_id": "analog_sig_source_x_0"},
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+            ),
+            description=(
+                "Read-only context on an installed analog example with message ports."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rewire",
+            name="sig_source_msg_random_disconnect_validate_save",
+            relative_path="analog/sig_source_msg_ports.grc",
+            prompt=(
+                "Remove the exact connection_id "
+                "blocks_message_strobe_random_0:strobe->analog_sig_source_x_0:cmd "
+                "from this installed message-port signal-source example, validate it, "
+                "then save a copy to {save_path}."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "remove_connection",
+                    arguments={
+                        "connection_id": (
+                            "blocks_message_strobe_random_0:strobe->analog_sig_source_x_0:cmd"
+                        ),
+                    },
+                ),
+                ToolExpectation("validate_graph"),
+                ToolExpectation("save_graph", arguments={"path": "{save_path}"}),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "removed_connections": [
+                            "blocks_message_strobe_random_0:strobe->analog_sig_source_x_0:cmd"
+                        ],
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": (
+                        "blocks_message_strobe_random_0:strobe->analog_sig_source_x_0:cmd"
+                    ),
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+                {"kind": "saved_path_valid", "path": "{save_path}"},
+            ),
+            description=(
+                "Verified exact message-port disconnect, validate, and explicit save-copy "
+                "on an installed analog message-port example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external",
             name="selector_save_copy",
             relative_path="blocks/selector.grc",
             prompt="Save a copy of this installed GNU Radio example to {save_path}.",
@@ -166,6 +393,230 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
             ),
             semantic_checks=({"kind": "saved_path_valid", "path": "{save_path}"},),
             description="Explicit save-copy on an installed blocks example.",
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="selector_output_disconnect_rolls_back",
+            relative_path="blocks/selector.grc",
+            prompt=(
+                "Remove the exact connection_id "
+                "blocks_selector_0:0->qtgui_time_sink_x_0:0 "
+                "from this installed selector example. If GNU validation fails, "
+                "leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "remove_connection",
+                    arguments={
+                        "connection_id": "blocks_selector_0:0->qtgui_time_sink_x_0:0",
+                    },
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "connection_present",
+                    "connection_id": "blocks_selector_0:0->qtgui_time_sink_x_0:0",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "remove_connection",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "gnu_validation_failed",
+                    },
+                },
+            ),
+            description=(
+                "Promoted rollback proof for a GNU-invalid exact disconnect on an "
+                "installed selector example. The candidate failure must leave the "
+                "live graph unchanged."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="selector_occupied_rewire_rolls_back",
+            relative_path="blocks/selector.grc",
+            prompt=(
+                "Rewire connection_id blocks_selector_0:0->qtgui_time_sink_x_0:0 "
+                "to new endpoint blocks_selector_0:0->qtgui_time_sink_x_1:0 "
+                "in this installed selector example. If the target input is already "
+                "occupied, leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "rewire_connection",
+                    arguments={
+                        "old_connection_id": "blocks_selector_0:0->qtgui_time_sink_x_0:0",
+                        "new_src_block": "blocks_selector_0",
+                        "new_src_port": 0,
+                        "new_dst_block": "qtgui_time_sink_x_1",
+                        "new_dst_port": 0,
+                    },
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "connection_present",
+                    "connection_id": "blocks_selector_0:0->qtgui_time_sink_x_0:0",
+                },
+                {
+                    "kind": "connection_present",
+                    "connection_id": "blocks_selector_0:1->qtgui_time_sink_x_1:0",
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": "blocks_selector_0:0->qtgui_time_sink_x_1:0",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "rewire_connection",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "preflight_rejected",
+                    },
+                },
+            ),
+            description=(
+                "Promoted rollback proof for an occupied-input exact rewire on an "
+                "installed selector example. No partial disconnect may commit."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="selector_connected_block_remove_rolls_back",
+            relative_path="blocks/selector.grc",
+            prompt=(
+                "Remove the blocks_selector_0 block from this installed selector "
+                "example. If it is still connected, leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "remove_block",
+                            "instance_name": "blocks_selector_0",
+                        },
+                    ),
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "tool_result",
+                    "tool": "apply_edit",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "preflight_rejected",
+                    },
+                },
+            ),
+            description=(
+                "Promoted rollback proof for connected block removal on an installed "
+                "selector example. The preflight rejection must leave the graph "
+                "unchanged."
+            ),
+        ),
+        _multi_turn_scenario_if_present(
+            category="external_rollback",
+            name="selector_saved_connected_block_remove_rolls_back",
+            relative_path="blocks/selector.grc",
+            turns=(
+                LiveTurnSpec(
+                    prompt=(
+                        "Save a copy of this installed selector example to "
+                        "{save_path}."
+                    ),
+                    expected_tool_calls=(
+                        ToolExpectation(
+                            "save_graph",
+                            arguments={"path": "{save_path}"},
+                        ),
+                    ),
+                    semantic_checks=(
+                        {"kind": "saved_path_valid", "path": "{save_path}", "copy": True},
+                        {
+                            "kind": "saved_block_present",
+                            "path": "{save_path}",
+                            "instance_name": "blocks_selector_0",
+                        },
+                        {
+                            "kind": "saved_connection_present",
+                            "path": "{save_path}",
+                            "connection_id": (
+                                "blocks_selector_0:0->qtgui_time_sink_x_0:0"
+                            ),
+                        },
+                    ),
+                ),
+                LiveTurnSpec(
+                    prompt=(
+                        "Remove the blocks_selector_0 block from the saved selector "
+                        "copy. If it is still connected, leave the graph unchanged "
+                        "and do not save again."
+                    ),
+                    expected_tool_calls=(
+                        ToolExpectation(
+                            "apply_edit",
+                            transaction_operations=(
+                                {
+                                    "op_type": "remove_block",
+                                    "instance_name": "blocks_selector_0",
+                                },
+                            ),
+                            require_result_ok=False,
+                        ),
+                    ),
+                    semantic_checks=(
+                        {"kind": "exact_graph_delta", "delta": {}},
+                        {"kind": "no_mutation"},
+                        {
+                            "kind": "connection_present",
+                            "connection_id": (
+                                "blocks_selector_0:0->qtgui_time_sink_x_0:0"
+                            ),
+                        },
+                        {
+                            "kind": "tool_result",
+                            "tool": "apply_edit",
+                            "arguments": {
+                                "ok": False,
+                                "applied": False,
+                                "error_type": "preflight_rejected",
+                            },
+                        },
+                        {
+                            "kind": "saved_block_present",
+                            "path": "{save_path}",
+                            "instance_name": "blocks_selector_0",
+                        },
+                        {
+                            "kind": "saved_connection_present",
+                            "path": "{save_path}",
+                            "connection_id": (
+                                "blocks_selector_0:0->qtgui_time_sink_x_0:0"
+                            ),
+                        },
+                    ),
+                ),
+            ),
+            description=(
+                "Negative persistence proof on an installed selector example: "
+                "after an explicit save-copy, connected block removal must fail "
+                "unchanged and the saved graph must still reload with the original "
+                "block and connection."
+            ),
         ),
         _scenario_if_present(
             category="external_edit",
@@ -187,6 +638,15 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
             ),
             semantic_checks=(
                 {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "block_params": {"analog_sig_source_x_0": {"amp": "0.5"}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
                     "kind": "block_param_equals",
                     "instance_name": "analog_sig_source_x_0",
                     "param": "amp",
@@ -199,6 +659,225 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
                 },
             ),
             description="Verified non-variable block-parameter edit on an installed blocks example.",
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="var_to_msg_test_value_edit_validate",
+            relative_path="blocks/var_to_msg.grc",
+            prompt=(
+                "Set the test block value parameter to 7 in this installed "
+                "var-to-message example, then validate it."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "test",
+                            "params": {"value": "7"},
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "block_params": {"test": {"value": 7}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "block_param_equals",
+                    "instance_name": "test",
+                    "param": "value",
+                    "value": "7",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description=(
+                "Verified non-variable value edit on an installed message-port blocks example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="var_to_msg_remove_throttle_rolls_back",
+            relative_path="blocks/var_to_msg.grc",
+            prompt="Remove the blocks_throttle_0 block from this installed var-to-message example.",
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "remove_block",
+                            "instance_name": "blocks_throttle_0",
+                        },
+                    ),
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+            ),
+            description=(
+                "Promoted rollback proof for connected block removal on an installed "
+                "blocks example. The preflight rejection must leave the graph unchanged."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_safety",
+            name="var_to_msg_stream_to_message_add_clarifies",
+            relative_path="blocks/var_to_msg.grc",
+            prompt=(
+                "Connect blocks_null_source_0 stream output 0 to "
+                "blocks_message_debug_0 message port store in this installed "
+                "var-to-message example."
+            ),
+            expected_tool_calls=(),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "connection_absent",
+                    "connection_id": (
+                        "blocks_null_source_0:0->blocks_message_debug_0:store"
+                    ),
+                },
+            ),
+            description=(
+                "Promoted safety proof for a mixed stream-to-message connection "
+                "request on an installed message-port example. The model should "
+                "clarify rather than guess an incompatible add_connection mutation."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_safety",
+            name="var_to_msg_message_to_stream_add_clarifies",
+            relative_path="blocks/var_to_msg.grc",
+            prompt=(
+                "Connect blocks_var_to_msg_0 message output msgout to "
+                "blocks_null_sink_0 stream input 0 in this installed "
+                "var-to-message example."
+            ),
+            expected_tool_calls=(),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "connection_absent",
+                    "connection_id": (
+                        "blocks_var_to_msg_0:msgout->blocks_null_sink_0:0"
+                    ),
+                },
+            ),
+            description=(
+                "Promoted safety proof for a mixed message-to-stream connection "
+                "request on an installed message-port example. The model should "
+                "clarify rather than guess an incompatible add_connection mutation."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="filter_cutoff_low_edit_validate",
+            relative_path="filter/filter_taps.grc",
+            prompt="Set cutoff_low to 3000 in this installed filter taps example, then validate it.",
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "cutoff_low",
+                            "params": {"value": "3000"},
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"cutoff_low": 3000},
+                        "block_params": {"cutoff_low": {"value": 3000}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description="Verified variable edit on an installed filter-taps example.",
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="filter_cutoff_low_edit_validate_save",
+            relative_path="filter/filter_taps.grc",
+            prompt=(
+                "Set cutoff_low to 3000 in this installed filter taps example, "
+                "validate it, then save a copy to {save_path}."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "cutoff_low",
+                            "params": {"value": "3000"},
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+                ToolExpectation("save_graph", arguments={"path": "{save_path}"}),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"cutoff_low": 3000},
+                        "block_params": {"cutoff_low": {"value": 3000}},
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+                {"kind": "saved_path_valid", "path": "{save_path}", "copy": True},
+                {
+                    "kind": "saved_variable_equals",
+                    "path": "{save_path}",
+                    "name": "cutoff_low",
+                    "value": "3000",
+                },
+                {
+                    "kind": "saved_block_param_equals",
+                    "path": "{save_path}",
+                    "instance_name": "cutoff_low",
+                    "param": "value",
+                    "value": "3000",
+                },
+            ),
+            description=(
+                "Verified variable edit, validate, explicit save-copy, and saved "
+                "parameter persistence on an installed filter-taps example."
+            ),
         ),
         _scenario_if_present(
             category="external_edit",
@@ -223,6 +902,15 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
                 ToolExpectation("save_graph", arguments={"path": "{save_path}"}),
             ),
             semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"samp_rate": "48000"},
+                        "block_params": {"samp_rate": {"value": "48000"}},
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
                 {"kind": "variable_equals", "name": "samp_rate", "value": "48000"},
                 {
                     "kind": "tool_result",
@@ -232,6 +920,828 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
                 {"kind": "saved_path_valid", "path": "{save_path}"},
             ),
             description="Verified edit, validate, and explicit save-copy on an installed blocks example.",
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="grfreedv_message_debug_disable_validate",
+            relative_path="vocoder/grfreedv.grc",
+            prompt=(
+                "Disable the blocks_message_debug_0 block in this installed GNU Radio "
+                "FreeDV example, then validate it."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_states",
+                            "instance_name": "blocks_message_debug_0",
+                            "state": "disabled",
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "block_states": {"blocks_message_debug_0": "disabled"},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "block_state_equals",
+                    "instance_name": "blocks_message_debug_0",
+                    "state": "disabled",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description=(
+                "Verified block-state edit on an installed vocoder example. "
+                "Exercises typed tool narrowing for explicit disable requests."
+            ),
+        ),
+        _scenario_if_present(
+            category="external",
+            name="pdu_simple_validate",
+            relative_path="pdu/simple_pdu_to_stream_example.grc",
+            prompt="Validate this installed GNU Radio PDU to stream example.",
+            expected_tool_calls=(ToolExpectation("validate_graph"),),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description="Validation on an installed PDU example with message-to-stream conversion.",
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="pdu_tools_random_pdu_maxsize_edit_validate",
+            relative_path="pdu/pdu_tools_demo.grc",
+            prompt=(
+                "Set random_pdu maxsize to 8192 in this installed PDU tools "
+                "demo, then validate it."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "random_pdu",
+                            "params": {"maxsize": "8192"},
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "block_params": {"random_pdu": {"maxsize": "8192"}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "block_param_equals",
+                    "instance_name": "random_pdu",
+                    "param": "maxsize",
+                    "value": "8192",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description="Verified non-variable PDU block-parameter edit on an installed PDU example.",
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="uhd_packet_rx_duplicate_constellation_edit_rejected",
+            relative_path="digital/packet/uhd_packet_rx.grc",
+            prompt=(
+                "Set the Const_PLD block comment to duplicate check in this "
+                "installed packet receiver example. If the target name is "
+                "duplicated, leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "Const_PLD",
+                            "params": {"comment": "duplicate check"},
+                        },
+                    ),
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "tool_result",
+                    "tool": "apply_edit",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "preflight_rejected",
+                        "errors": [
+                            {
+                                "field": "instance_name",
+                                "code": "block_name_not_unique",
+                            }
+                        ],
+                    },
+                },
+            ),
+            description=(
+                "Promoted duplicate-identity safety proof on an installed packet "
+                "example with same-name same-type constellation variables. The "
+                "runtime must reject the ambiguous name and avoid mutating the "
+                "wrong duplicate."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="uhd_wbfm_duplicate_tun_freq_edit_rejected",
+            relative_path="uhd/uhd_wbfm_receive.grc",
+            prompt=(
+                "Set the tun_freq block comment to duplicate check in this "
+                "installed WBFM receiver example. If the target name is "
+                "duplicated, leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "tun_freq",
+                            "params": {"comment": "duplicate check"},
+                        },
+                    ),
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "tool_result",
+                    "tool": "apply_edit",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "preflight_rejected",
+                        "errors": [
+                            {
+                                "field": "instance_name",
+                                "code": "block_name_not_unique",
+                            }
+                        ],
+                    },
+                },
+            ),
+            description=(
+                "Promoted duplicate-identity safety proof on an installed UHD "
+                "WBFM receiver example. Same-name same-type variable range "
+                "targets must reject without mutating a first or arbitrary "
+                "duplicate."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rollback",
+            name="pdu_tools_message_disconnect_rolls_back",
+            relative_path="pdu/pdu_tools_demo.grc",
+            prompt=(
+                "Remove the exact connection_id random_pdu:pdus->pdu_set:pdus "
+                "from this installed PDU tools demo. If preflight rejects the "
+                "disconnect, leave the graph unchanged."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "remove_connection",
+                    arguments={"connection_id": "random_pdu:pdus->pdu_set:pdus"},
+                    require_result_ok=False,
+                ),
+            ),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+                {
+                    "kind": "connection_present",
+                    "connection_id": "random_pdu:pdus->pdu_set:pdus",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "remove_connection",
+                    "arguments": {
+                        "ok": False,
+                        "applied": False,
+                        "error_type": "preflight_rejected",
+                    },
+                },
+            ),
+            description=(
+                "Promoted rollback proof for message-port disconnect preflight "
+                "rejection on an installed PDU example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="simple_bpsk_tag_debug_enable_validate_save",
+            relative_path="digital/packet/simple_bpsk_tx.grc",
+            prompt=(
+                "Enable the blocks_tag_debug_0 block in this installed simple BPSK "
+                "transmitter example, validate it, then save a copy to {save_path}."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_states",
+                            "instance_name": "blocks_tag_debug_0",
+                            "state": "enabled",
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+                ToolExpectation("save_graph", arguments={"path": "{save_path}"}),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "block_states": {"blocks_tag_debug_0": "enabled"},
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "block_state_equals",
+                    "instance_name": "blocks_tag_debug_0",
+                    "state": "enabled",
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+                {"kind": "saved_path_valid", "path": "{save_path}"},
+                {
+                    "kind": "saved_block_state_equals",
+                    "path": "{save_path}",
+                    "instance_name": "blocks_tag_debug_0",
+                    "state": "enabled",
+                },
+            ),
+            description=(
+                "Verified state edit, validate, and explicit save-copy on an installed "
+                "digital packet example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rewire",
+            name="tx_stage0_message_disconnect_validate",
+            relative_path="digital/packet/tx_stage0.grc",
+            prompt=(
+                "Remove the exact connection_id "
+                "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu "
+                "from this installed packet example, then call validate_graph "
+                "to validate it."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "remove_connection",
+                    arguments={
+                        "connection_id": (
+                            "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                        ),
+                    },
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "removed_connections": [
+                            "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                        ],
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": (
+                        "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                    ),
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description=(
+                "Verified exact message-port disconnect on an installed digital packet example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rewire",
+            name="tx_stage0_message_disconnect_validate_save",
+            relative_path="digital/packet/tx_stage0.grc",
+            prompt=(
+                "Remove the exact connection_id "
+                "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu "
+                "from this installed packet example, validate it, then save a copy "
+                "to {save_path}."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "remove_connection",
+                    arguments={
+                        "connection_id": (
+                            "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                        ),
+                    },
+                ),
+                ToolExpectation("validate_graph"),
+                ToolExpectation("save_graph", arguments={"path": "{save_path}"}),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "removed_connections": [
+                            "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                        ],
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": (
+                        "pdu_random_pdu_0:pdus->blocks_message_debug_0:print_pdu"
+                    ),
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+                {"kind": "saved_path_valid", "path": "{save_path}"},
+            ),
+            description=(
+                "Verified exact message-port disconnect, validate, and explicit save-copy "
+                "on an installed digital packet example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rewire",
+            name="qtgui_message_inputs_message_rewire_validate",
+            relative_path="qt-gui/qtgui_message_inputs.grc",
+            prompt=(
+                "Rewire connection_id "
+                "pdu_tagged_stream_to_pdu_0:pdus->qtgui_const_sink_x_0:in "
+                "to new endpoint pdu_tagged_stream_to_pdu_1:pdus->qtgui_const_sink_x_0:in "
+                "in this installed Qt GUI message inputs example."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "rewire_connection",
+                    arguments={
+                        "old_connection_id": (
+                            "pdu_tagged_stream_to_pdu_0:pdus->qtgui_const_sink_x_0:in"
+                        ),
+                        "new_src_block": "pdu_tagged_stream_to_pdu_1",
+                        "new_src_port": "pdus",
+                        "new_dst_block": "qtgui_const_sink_x_0",
+                        "new_dst_port": "in",
+                    },
+                ),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "removed_connections": [
+                            "pdu_tagged_stream_to_pdu_0:pdus->qtgui_const_sink_x_0:in"
+                        ],
+                        "added_connections": [
+                            "pdu_tagged_stream_to_pdu_1:pdus->qtgui_const_sink_x_0:in"
+                        ],
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": (
+                        "pdu_tagged_stream_to_pdu_0:pdus->qtgui_const_sink_x_0:in"
+                    ),
+                },
+                {
+                    "kind": "connection_present",
+                    "connection_id": (
+                        "pdu_tagged_stream_to_pdu_1:pdus->qtgui_const_sink_x_0:in"
+                    ),
+                },
+            ),
+            description=(
+                "Verified exact message-port rewire on an installed Qt GUI example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rewire",
+            name="burst_shaper_stream_rewire_validate",
+            relative_path="digital/burst_shaper.grc",
+            prompt=(
+                "Rewire connection_id "
+                "blocks_throttle_0:0->blocks_tag_debug_0:0 "
+                "to new endpoint blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0 "
+                "in this installed burst shaper example, then validate it."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "rewire_connection",
+                    arguments={
+                        "old_connection_id": (
+                            "blocks_throttle_0:0->blocks_tag_debug_0:0"
+                        ),
+                        "new_src_block": "blocks_vector_source_x_0_0",
+                        "new_src_port": 0,
+                        "new_dst_block": "blocks_tag_debug_0",
+                        "new_dst_port": 0,
+                    },
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "removed_connections": [
+                            "blocks_throttle_0:0->blocks_tag_debug_0:0"
+                        ],
+                        "added_connections": [
+                            "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                        ],
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": "blocks_throttle_0:0->blocks_tag_debug_0:0",
+                },
+                {
+                    "kind": "connection_present",
+                    "connection_id": (
+                        "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                    ),
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description=(
+                "Verified exact stream-port rewire on an installed digital example."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_rewire",
+            name="burst_shaper_stream_rewire_validate_save",
+            relative_path="digital/burst_shaper.grc",
+            prompt=(
+                "Rewire connection_id "
+                "blocks_throttle_0:0->blocks_tag_debug_0:0 "
+                "to new endpoint blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0 "
+                "in this installed burst shaper example, validate it, then save a copy "
+                "to {save_path}."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "rewire_connection",
+                    arguments={
+                        "old_connection_id": (
+                            "blocks_throttle_0:0->blocks_tag_debug_0:0"
+                        ),
+                        "new_src_block": "blocks_vector_source_x_0_0",
+                        "new_src_port": 0,
+                        "new_dst_block": "blocks_tag_debug_0",
+                        "new_dst_port": 0,
+                    },
+                ),
+                ToolExpectation("validate_graph"),
+                ToolExpectation("save_graph", arguments={"path": "{save_path}"}),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "removed_connections": [
+                            "blocks_throttle_0:0->blocks_tag_debug_0:0"
+                        ],
+                        "added_connections": [
+                            "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                        ],
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "connection_absent",
+                    "connection_id": "blocks_throttle_0:0->blocks_tag_debug_0:0",
+                },
+                {
+                    "kind": "connection_present",
+                    "connection_id": (
+                        "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                    ),
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+                {"kind": "saved_path_valid", "path": "{save_path}"},
+            ),
+            description=(
+                "Verified exact stream-port rewire, validate, and explicit save-copy "
+                "on an installed digital example."
+            ),
+        ),
+        _multi_turn_scenario_if_present(
+            category="external_rewire",
+            name="burst_shaper_clarified_rewire_validate_save",
+            relative_path="digital/burst_shaper.grc",
+            turns=(
+                LiveTurnSpec(
+                    prompt=(
+                        "Call rewire_connection with old_src_block blocks_throttle_0, "
+                        "old_src_port 0, new_src_block blocks_vector_source_x_0_0, "
+                        "new_src_port 0, new_dst_block blocks_tag_debug_0, and "
+                        "new_dst_port 0. Do not provide old_dst_block or old_dst_port; "
+                        "if multiple old edges match, ask me to choose."
+                    ),
+                    expected_tool_calls=(
+                        ToolExpectation("rewire_connection", require_result_ok=False),
+                    ),
+                    semantic_checks=(
+                        {"kind": "exact_graph_delta", "delta": {}},
+                        {"kind": "no_mutation"},
+                        {
+                            "kind": "tool_result",
+                            "tool": "rewire_connection",
+                            "arguments": {
+                                "clarification_required": True,
+                                "kind": "rewire_connection_disambiguation",
+                            },
+                        },
+                    ),
+                ),
+                LiveTurnSpec(
+                    prompt="A",
+                    clarification_response=True,
+                    expected_tool_calls=(ToolExpectation("rewire_connection"),),
+                    semantic_checks=(
+                        {"kind": "clarification_mode", "mode": "executed"},
+                        {
+                            "kind": "exact_graph_delta",
+                            "delta": {
+                                "removed_connections": [
+                                    "blocks_throttle_0:0->blocks_tag_debug_0:0"
+                                ],
+                                "added_connections": [
+                                    "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                                ],
+                                "dirty": True,
+                                "validation_status": "valid",
+                                "validation_returncode": 0,
+                            },
+                        },
+                    ),
+                ),
+                LiveTurnSpec(
+                    prompt="Validate it, then save a copy to {save_path}.",
+                    expected_tool_calls=(
+                        ToolExpectation("validate_graph"),
+                        ToolExpectation("save_graph", arguments={"path": "{save_path}"}),
+                    ),
+                    semantic_checks=(
+                        {
+                            "kind": "connection_absent",
+                            "connection_id": "blocks_throttle_0:0->blocks_tag_debug_0:0",
+                        },
+                        {
+                            "kind": "connection_present",
+                            "connection_id": (
+                                "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                            ),
+                        },
+                        {
+                            "kind": "tool_result",
+                            "tool": "validate_graph",
+                            "arguments": {"valid": True},
+                        },
+                        {"kind": "saved_path_valid", "path": "{save_path}"},
+                        {
+                            "kind": "saved_connection_absent",
+                            "path": "{save_path}",
+                            "connection_id": "blocks_throttle_0:0->blocks_tag_debug_0:0",
+                        },
+                        {
+                            "kind": "saved_connection_present",
+                            "path": "{save_path}",
+                            "connection_id": (
+                                "blocks_vector_source_x_0_0:0->blocks_tag_debug_0:0"
+                            ),
+                        },
+                    ),
+                ),
+            ),
+            description=(
+                "Clarification-backed old-edge rewire on an installed digital "
+                "example, followed by explicit validate/save and saved-graph "
+                "reload proof that the selected rewire persisted."
+            ),
+        ),
+        _scenario_if_present(
+            category="external",
+            name="burst_shaper_duplicate_family_summary",
+            relative_path="digital/burst_shaper.grc",
+            prompt=(
+                "Summarize this installed burst shaper example and include the "
+                "duplicate-looking block families."
+            ),
+            expected_tool_calls=(ToolExpectation("summarize_graph"),),
+            semantic_checks=(
+                {"kind": "exact_graph_delta", "delta": {}},
+                {"kind": "no_mutation"},
+            ),
+            description=(
+                "Read-only identity/context inspection on an installed graph with "
+                "multiple same-family block instances. block_uid remains read-only."
+            ),
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="stream_demux_lengths_edit_validate",
+            relative_path="blocks/stream_demux_demo.grc",
+            prompt=(
+                "Set blocks_stream_demux_0 lengths to (1,3,5) in this installed "
+                "stream demux demo, then validate it."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "blocks_stream_demux_0",
+                            "params": {"lengths": [1, 3, 5]},
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "block_params": {
+                            "blocks_stream_demux_0": {"lengths": [1, 3, 5]}
+                        },
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {
+                    "kind": "block_param_equals",
+                    "instance_name": "blocks_stream_demux_0",
+                    "param": "lengths",
+                    "value": [1, 3, 5],
+                },
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description="Verified stream-demux block-parameter edit on an installed blocks example.",
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="tags_samp_rate_edit_validate",
+            relative_path="tags/test_tag_prop.grc",
+            prompt="Change samp_rate to 16000 in this installed tag propagation example, then validate it.",
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "samp_rate",
+                            "params": {"value": "16000"},
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"samp_rate": "16000"},
+                        "block_params": {"samp_rate": {"value": "16000"}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {"kind": "variable_equals", "name": "samp_rate", "value": "16000"},
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description="Verified variable edit on an installed tag propagation example.",
+        ),
+        _scenario_if_present(
+            category="external_edit",
+            name="qtgui_message_inputs_pkt_len_edit_validate",
+            relative_path="qt-gui/qtgui_message_inputs.grc",
+            prompt=(
+                "Change pkt_len to 512 in this installed Qt GUI message inputs "
+                "example, then validate it."
+            ),
+            expected_tool_calls=(
+                ToolExpectation(
+                    "apply_edit",
+                    transaction_operations=(
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "pkt_len",
+                            "params": {"value": "512"},
+                        },
+                    ),
+                ),
+                ToolExpectation("validate_graph"),
+            ),
+            semantic_checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"pkt_len": "512"},
+                        "block_params": {"pkt_len": {"value": "512"}},
+                        "dirty": True,
+                        "validation_status": "valid",
+                        "validation_returncode": 0,
+                    },
+                },
+                {"kind": "variable_equals", "name": "pkt_len", "value": "512"},
+                {
+                    "kind": "tool_result",
+                    "tool": "validate_graph",
+                    "arguments": {"valid": True},
+                },
+            ),
+            description=(
+                "Verified variable edit on an installed Qt GUI/message-port example."
+            ),
         ),
     ]
     available = [case for case in cases if case is not None]

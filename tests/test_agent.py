@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import yaml
+
 from grc_agent.agent import GrcAgent
 from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
@@ -27,6 +29,45 @@ class GrcAgentTests(unittest.TestCase):
         session.load(self._fixture_path())
         return GrcAgent(session), session
 
+    def _build_message_rewire_agent(self) -> tuple[GrcAgent, FlowgraphSession]:
+        agent = GrcAgent()
+        result = agent.execute_tool("new_grc", {"graph_id": "message_rewire_test"})
+        self.assertTrue(result["ok"])
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_strobe",
+                        "instance_name": "strobe_0",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_debug",
+                        "instance_name": "debug_0",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_debug",
+                        "instance_name": "debug_1",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_0",
+                        "src_port": "strobe",
+                        "dst_block": "debug_0",
+                        "dst_port": "print",
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+        return agent, agent.session
+
     def _write_alt_fixture(self, directory: Path) -> Path:
         alt_path = directory / "random_bit_generator_alt.grc"
         alt_path.write_text(
@@ -36,6 +77,71 @@ class GrcAgentTests(unittest.TestCase):
             encoding="utf-8",
         )
         return alt_path
+
+    def _fixture_raw_data(self) -> dict:
+        return yaml.safe_load(self._fixture_path().read_text(encoding="utf-8"))
+
+    def _detached_variable_block(self, name: str = "dup", *, state: str = "enabled") -> dict:
+        return {
+            "name": name,
+            "id": "variable",
+            "parameters": {"comment": "", "value": "123"},
+            "states": {
+                "bus_sink": False,
+                "bus_source": False,
+                "bus_structure": None,
+                "coordinate": [16, 16],
+                "rotation": 0,
+                "state": state,
+            },
+        }
+
+    def _detached_import_block(self, name: str = "dup", *, state: str = "disabled") -> dict:
+        return {
+            "name": name,
+            "id": "import",
+            "parameters": {"alias": "", "comment": "", "imports": "import math"},
+            "states": {
+                "bus_sink": False,
+                "bus_source": False,
+                "bus_structure": None,
+                "coordinate": [96, 128],
+                "rotation": 0,
+                "state": state,
+            },
+        }
+
+    def _load_agent_from_raw(self, raw_data: dict) -> tuple[GrcAgent, FlowgraphSession]:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "graph.grc"
+            path.write_text(
+                yaml.safe_dump(raw_data, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            session = FlowgraphSession()
+            session.load(path)
+        return GrcAgent(session), session
+
+    def _graph_identity_snapshot(self, session: FlowgraphSession) -> tuple:
+        assert session.flowgraph is not None
+        blocks = tuple(
+            (
+                block.instance_name,
+                block.block_type,
+                yaml.safe_dump(block.params, sort_keys=True, allow_unicode=True),
+            )
+            for block in session.flowgraph.blocks
+        )
+        connections = tuple(
+            (
+                connection.src_block,
+                connection.src_port,
+                connection.dst_block,
+                connection.dst_port,
+            )
+            for connection in session.flowgraph.connections
+        )
+        return (session.state_revision, session.is_dirty, blocks, connections)
 
     def test_runtime_tool_surface_matches_phase_six_contract(self) -> None:
         agent, _session = self._load_agent()
@@ -56,10 +162,122 @@ class GrcAgentTests(unittest.TestCase):
             "validate_graph",
         ])
 
+    def test_turn_plan_narrows_state_edit_transaction_schema(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements("Disable blocks_throttle2_0.")
+
+        schema = agent.get_tool_schemas_for_turn()[0]
+        transaction = schema["function"]["parameters"]["properties"]["transaction"]
+
+        self.assertEqual(transaction["properties"]["op_type"]["enum"], ["update_states"])
+        self.assertEqual(transaction["properties"]["state"]["enum"], ["enabled", "disabled"])
+        self.assertFalse(transaction["additionalProperties"])
+
+    def test_turn_plan_narrows_exact_parameter_key_when_named(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements("Set blocks_throttle2_0 samples_per_second to 48000.")
+
+        schema = next(
+            schema
+            for schema in agent.get_tool_schemas_for_turn()
+            if schema["function"]["name"] == "apply_edit"
+        )
+        transaction = schema["function"]["parameters"]["properties"]["transaction"]
+        params = transaction["properties"]["params"]
+
+        self.assertEqual(transaction["properties"]["op_type"]["enum"], ["update_params"])
+        self.assertEqual(
+            transaction["properties"]["instance_name"]["enum"],
+            ["blocks_throttle2_0"],
+        )
+        self.assertEqual(list(params["properties"]), ["samples_per_second"])
+        self.assertFalse(params["additionalProperties"])
+
+    def test_turn_plan_narrows_exact_preview_apply_validate_surface(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements("Preview setting samp_rate to 48000, apply it, and validate.")
+
+        tool_names = [schema["function"]["name"] for schema in agent.get_tool_schemas_for_turn()]
+
+        self.assertEqual(tool_names, ["propose_edit", "apply_edit", "validate_graph"])
+
+    def test_preview_do_not_apply_does_not_expose_or_nudge_apply_edit(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Preview changing samp_rate to 48000. Do not apply it."
+        )
+
+        tool_names = [schema["function"]["name"] for schema in agent.get_tool_schemas_for_turn()]
+        self.assertEqual(tool_names, ["propose_edit"])
+
+        route_error = agent.validate_turn_route(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "48000"},
+                }
+            },
+        )
+        self.assertIsNotNone(route_error)
+        self.assertEqual(route_error["error_type"], "route_mismatch")
+
+        agent.record_tool_completion("propose_edit", ok=True)
+        self.assertEqual(agent.check_turn_continuation(), (False, ""))
+
+    def test_turn_plan_narrows_context_node_when_target_known(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Show me what uses the samp_rate block, then change its value to 22050."
+        )
+
+        schema = agent.get_tool_schemas_for_turn()[0]
+        node_id = schema["function"]["parameters"]["properties"]["node_id"]
+
+        self.assertEqual(schema["function"]["name"], "get_grc_context")
+        self.assertEqual(node_id["enum"], ["samp_rate"])
+
     def test_route_policy_rejects_remove_block_for_disable_request(self) -> None:
         agent, session = self._load_agent()
         before_revision = session.state_revision
         agent.init_turn_requirements("Disable blocks_throttle2_0.")
+
+        result = agent.validate_turn_route(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "remove_block",
+                    "instance_name": "blocks_throttle2_0",
+                }
+            },
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "route_mismatch")
+        self.assertEqual(session.state_revision, before_revision)
+
+    def test_uncertain_mutation_requires_clarification_without_tool_surface(self) -> None:
+        agent, _session = self._load_agent()
+
+        plan = agent.init_turn_requirements("Swap the signal chain around and save it.")
+        tool_names = [schema["function"]["name"] for schema in agent.get_tool_schemas_for_turn()]
+
+        self.assertEqual(plan.intent, "uncertain_mutation")
+        self.assertTrue(plan.requires_clarification)
+        self.assertEqual(plan.unsupported_reason, "uncertain_mutation")
+        self.assertEqual(tool_names, [])
+        self.assertNotIn("apply_edit", tool_names)
+        self.assertNotIn("propose_edit", tool_names)
+        self.assertNotIn("save_graph", tool_names)
+        self.assertNotIn("remove_connection", tool_names)
+
+    def test_uncertain_mutation_route_gate_blocks_apply_edit_without_mutation(self) -> None:
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        agent.init_turn_requirements("Swap the signal chain around and save it.")
 
         result = agent.validate_turn_route(
             "apply_edit",
@@ -111,8 +329,79 @@ class GrcAgentTests(unittest.TestCase):
         )
         self.assertEqual(
             schema_by_name["remove_connection"]["function"]["parameters"]["required"],
-            ["connection_id"],
+            [],
         )
+
+    def test_exact_rewire_turn_schema_requires_exact_new_endpoints(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Rewire connection_id blocks_throttle2_0:0->blocks_char_to_float_0:0 "
+            "to analog_random_source_x_0:0->blocks_char_to_float_0:0, then validate."
+        )
+
+        schemas = agent.get_tool_schemas_for_turn()
+        schema_by_name = {schema["function"]["name"]: schema for schema in schemas}
+
+        self.assertEqual(
+            schema_by_name["rewire_connection"]["function"]["parameters"]["required"],
+            ["new_src_block", "new_src_port", "new_dst_block", "new_dst_port"],
+        )
+        properties = schema_by_name["rewire_connection"]["function"]["parameters"]["properties"]
+        self.assertEqual(properties["new_src_block"]["enum"], ["analog_random_source_x_0"])
+        self.assertEqual(properties["new_src_port"]["enum"], [0])
+        self.assertEqual(properties["new_dst_block"]["enum"], ["blocks_char_to_float_0"])
+        self.assertEqual(properties["new_dst_port"]["enum"], [0])
+
+    def test_exact_message_rewire_turn_schema_preserves_string_ports(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Rewire connection_id pdu_tagged_stream_to_pdu_0:pdus->qtgui_const_sink_x_0:in "
+            "to pdu_tagged_stream_to_pdu_1:pdus->qtgui_const_sink_x_0:in."
+        )
+
+        schemas = agent.get_tool_schemas_for_turn()
+        schema_by_name = {schema["function"]["name"]: schema for schema in schemas}
+        properties = schema_by_name["rewire_connection"]["function"]["parameters"]["properties"]
+
+        self.assertEqual(properties["new_src_block"]["enum"], ["pdu_tagged_stream_to_pdu_1"])
+        self.assertEqual(properties["new_src_port"]["enum"], ["pdus"])
+        self.assertEqual(properties["new_dst_block"]["enum"], ["qtgui_const_sink_x_0"])
+        self.assertEqual(properties["new_dst_port"]["enum"], ["in"])
+
+    def test_deterministic_exact_rewire_is_runtime_owned_and_validated(self) -> None:
+        agent, session = self._load_agent()
+        agent.init_turn_requirements(
+            "Rewire connection_id blocks_throttle2_0:0->blocks_char_to_float_0:0 "
+            "to new endpoint analog_random_source_x_0:0->blocks_char_to_float_0:0."
+        )
+
+        tool_call = agent.deterministic_turn_tool_call(agent._turn_user_message)
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        self.assertEqual(tool_call["name"], "rewire_connection")
+        self.assertIsNone(
+            agent.validate_turn_route(tool_call["name"], tool_call["arguments"])
+        )
+        self.assertIsNone(agent.validate_tool_call(tool_call["name"], tool_call["arguments"]))
+        result = agent.execute_tool(tool_call["name"], tool_call["arguments"])
+        self.assertTrue(result["ok"], result.get("message"))
+        connection_ids = {
+            f"{connection.src_block}:{connection.src_port}->"
+            f"{connection.dst_block}:{connection.dst_port}"
+            for connection in session.flowgraph.connections
+        }
+        self.assertNotIn("blocks_throttle2_0:0->blocks_char_to_float_0:0", connection_ids)
+        self.assertIn("analog_random_source_x_0:0->blocks_char_to_float_0:0", connection_ids)
+
+    def test_deterministic_exact_rewire_requires_rewire_turn_plan(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Summarize blocks_throttle2_0:0->blocks_char_to_float_0:0 "
+            "and analog_random_source_x_0:0->blocks_char_to_float_0:0."
+        )
+
+        self.assertIsNone(agent.deterministic_turn_tool_call(agent._turn_user_message))
 
     def test_system_prompt_mentions_read_and_edit_routes(self) -> None:
         agent, _session = self._load_agent()
@@ -1260,6 +1549,1112 @@ class GrcAgentTests(unittest.TestCase):
             },
         )
         self.assertFalse(result["ok"])
+
+    def test_apply_edit_rejects_block_uid_as_hidden_mutation_target(self) -> None:
+        agent, session = self._load_agent()
+        assert session.flowgraph is not None
+        uid = next(
+            block.block_uid
+            for block in session.flowgraph.blocks
+            if block.instance_name == "samp_rate"
+        )
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "block_uid": uid,
+                    "params": {"value": "48000"},
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("block_uid", str(result))
+        self.assertEqual(session.state_revision, before_revision)
+
+    def test_apply_edit_rejects_block_uid_even_with_instance_name(self) -> None:
+        agent, session = self._load_agent()
+        assert session.flowgraph is not None
+        uid = next(
+            block.block_uid
+            for block in session.flowgraph.blocks
+            if block.instance_name == "samp_rate"
+        )
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "block_uid": uid,
+                    "params": {"value": "48000"},
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("block_uid", str(result))
+        self.assertEqual(session.state_revision, before_revision)
+
+    def test_apply_edit_duplicate_name_param_edit_creates_executable_clarification(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        raw_data["blocks"].append(self._detached_import_block("dup", state="disabled"))
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "dup",
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["clarification_required"])
+        self.assertEqual(result["state_revision"], before_revision)
+        self.assertIsNotNone(agent._pending_clarification)
+        options = result["options"]
+        self.assertEqual(
+            [(option["tool_name"], option["tool_args"]["transaction"]["block_type"]) for option in options],
+            [("apply_edit", "variable"), ("apply_edit", "import")],
+        )
+        self.assertTrue(
+            all("block_uid" not in str(option["tool_args"]) for option in options)
+        )
+
+        resolved = agent.resolve_pending_clarification("A")
+
+        self.assertEqual(resolved["mode"], "executed")
+        self.assertTrue(resolved["tool_result"]["ok"])
+        assert session.flowgraph is not None
+        variable = next(
+            block
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "variable"
+        )
+        imported = next(
+            block
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "import"
+        )
+        self.assertEqual(variable.params["parameters"]["value"], "456")
+        self.assertEqual(imported.params["parameters"]["imports"], "import math")
+
+    def test_apply_edit_duplicate_name_state_edit_creates_executable_clarification(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        raw_data["blocks"].append(self._detached_import_block("dup"))
+        agent, session = self._load_agent_from_raw(raw_data)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_states",
+                    "instance_name": "dup",
+                    "state": "disabled",
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["clarification_required"])
+        resolved = agent.resolve_pending_clarification("B")
+
+        self.assertEqual(resolved["mode"], "executed")
+        self.assertTrue(resolved["tool_result"]["ok"])
+        assert session.flowgraph is not None
+        variable = next(
+            block
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "variable"
+        )
+        imported = next(
+            block
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "import"
+        )
+        self.assertEqual(variable.params["states"]["state"], "enabled")
+        self.assertEqual(imported.params["states"]["state"], "disabled")
+
+    def test_same_name_same_type_duplicate_is_not_executable_by_clarification(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "dup",
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertNotIn("clarification_required", result)
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(session.state_revision, before_revision)
+
+    def test_same_name_same_type_duplicate_param_edit_rejects_without_mutation(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_snapshot = self._graph_identity_snapshot(session)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "dup",
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "preflight_rejected")
+        self.assertEqual(result["errors"][0]["code"], "block_name_not_unique")
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_same_name_same_type_duplicate_state_edit_rejects_without_mutation(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_snapshot = self._graph_identity_snapshot(session)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_states",
+                    "instance_name": "dup",
+                    "state": "disabled",
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "preflight_rejected")
+        self.assertEqual(result["errors"][0]["code"], "block_name_not_unique")
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_same_name_same_type_duplicate_remove_block_rejects_without_mutation(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_snapshot = self._graph_identity_snapshot(session)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "remove_block",
+                    "instance_name": "dup",
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "preflight_rejected")
+        self.assertEqual(result["errors"][0]["code"], "block_name_not_unique")
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_stale_duplicate_name_clarification_selection_is_rejected(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        raw_data["blocks"].append(self._detached_import_block("dup", state="disabled"))
+        agent, session = self._load_agent_from_raw(raw_data)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "dup",
+                    "params": {"value": "456"},
+                }
+            },
+        )
+        self.assertTrue(result["clarification_required"])
+
+        session.set_param("samp_rate", "value", "48000")
+        before_stale_resolution = self._graph_identity_snapshot(session)
+        resolved = agent.resolve_pending_clarification("A")
+
+        self.assertEqual(resolved["mode"], "expired")
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(self._graph_identity_snapshot(session), before_stale_resolution)
+
+    def test_disambiguated_detached_duplicate_remove_block_rejects_name_reference(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        raw_data["blocks"].append(self._detached_import_block("dup", state="disabled"))
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "remove_block",
+                    "instance_name": "dup",
+                    "block_type": "variable",
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "preflight_rejected")
+        self.assertEqual(result["errors"][0]["code"], "block_still_referenced")
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "remove_block",
+                    "instance_name": "dup",
+                    "block_type": "variable",
+                }
+            ],
+        )
+
+    def test_remove_connection_wrapper_accepts_exact_endpoint_and_normalizes_to_connection_id(self) -> None:
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+
+        with mock.patch.object(
+            agent,
+            "_remove_connection_by_id",
+            return_value={"tool": "remove_connection", "ok": True},
+        ) as remove_by_id:
+            result = agent.execute_tool(
+                "remove_connection",
+                {
+                    "src_block": "analog_random_source_x_0",
+                    "src_port": 0,
+                    "dst_block": "blocks_throttle2_0",
+                    "dst_port": 0,
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        remove_by_id.assert_called_once_with(
+            "analog_random_source_x_0:0->blocks_throttle2_0:0"
+        )
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(result["tool"], "remove_connection")
+
+    def test_remove_connection_endpoint_with_no_match_fails_without_mutation(self) -> None:
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "remove_connection",
+            {
+                "src_block": "analog_random_source_x_0",
+                "src_port": 0,
+                "dst_block": "qtgui_time_sink_x_0",
+                "dst_port": 99,
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "connection_not_found")
+        self.assertEqual(session.state_revision, before_revision)
+
+    def test_remove_connection_ambiguous_endpoint_creates_connection_id_clarification(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["connections"].append(
+            ["blocks_throttle2_0", "0", "qtgui_time_sink_x_0", "1"]
+        )
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "remove_connection",
+            {"src_block": "blocks_throttle2_0", "src_port": 0},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["clarification_required"])
+        self.assertEqual(result["state_revision"], before_revision)
+        self.assertIsNotNone(agent._pending_clarification)
+        self.assertEqual(
+            [option["tool_args"] for option in result["options"]],
+            [
+                {"connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0"},
+                {"connection_id": "blocks_throttle2_0:0->qtgui_time_sink_x_0:1"},
+            ],
+        )
+
+    def test_apply_edit_atomic_message_rewire_by_connection_id(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        before_blocks = [(b.instance_name, b.block_type) for b in session.flowgraph.blocks]
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "remove_connection",
+                        "connection_id": "strobe_0:strobe->debug_0:print",
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_0",
+                        "src_port": "strobe",
+                        "dst_block": "debug_1",
+                        "dst_port": "print",
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(result["ok"], result.get("message"))
+        connections = {
+            f"{c.src_block}:{c.src_port}->{c.dst_block}:{c.dst_port}"
+            for c in session.flowgraph.connections
+        }
+        self.assertNotIn("strobe_0:strobe->debug_0:print", connections)
+        self.assertIn("strobe_0:strobe->debug_1:print", connections)
+        self.assertEqual(len(connections), 1)
+        self.assertEqual(
+            [(b.instance_name, b.block_type) for b in session.flowgraph.blocks],
+            before_blocks,
+        )
+        self.assertGreater(session.state_revision, before_revision)
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "remove_connection",
+                    "src_block": "strobe_0",
+                    "src_port": "strobe",
+                    "dst_block": "debug_0",
+                    "dst_port": "print",
+                },
+                {
+                    "op_type": "add_connection",
+                    "src_block": "strobe_0",
+                    "src_port": "strobe",
+                    "dst_block": "debug_1",
+                    "dst_port": "print",
+                },
+            ],
+        )
+
+    def test_apply_edit_atomic_stream_rewire_by_old_endpoint_fields(self) -> None:
+        agent, session = self._load_agent()
+        before_blocks = [(b.instance_name, b.block_type) for b in session.flowgraph.blocks]
+        before_connections = {
+            f"{c.src_block}:{c.src_port}->{c.dst_block}:{c.dst_port}"
+            for c in session.flowgraph.connections
+        }
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "remove_connection",
+                        "src_block": "blocks_throttle2_0",
+                        "src_port": 0,
+                        "dst_block": "blocks_char_to_float_0",
+                        "dst_port": 0,
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "analog_random_source_x_0",
+                        "src_port": 0,
+                        "dst_block": "blocks_char_to_float_0",
+                        "dst_port": 0,
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(result["ok"], result.get("message"))
+        connections = {
+            f"{c.src_block}:{c.src_port}->{c.dst_block}:{c.dst_port}"
+            for c in session.flowgraph.connections
+        }
+        self.assertEqual(len(connections), len(before_connections))
+        self.assertNotIn("blocks_throttle2_0:0->blocks_char_to_float_0:0", connections)
+        self.assertIn("analog_random_source_x_0:0->blocks_char_to_float_0:0", connections)
+        self.assertEqual(
+            [(b.instance_name, b.block_type) for b in session.flowgraph.blocks],
+            before_blocks,
+        )
+
+    def test_apply_edit_invalid_rewire_new_endpoint_rolls_back_old_connection(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "remove_connection",
+                        "connection_id": "strobe_0:strobe->debug_0:print",
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_0",
+                        "src_port": "strobe",
+                        "dst_block": "missing_debug",
+                        "dst_port": "print",
+                    },
+                ]
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "preflight_rejected")
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+
+    def test_apply_edit_invalid_rewire_gnu_end_state_rolls_back_old_connections(self) -> None:
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "remove_connection",
+                        "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                    },
+                    {
+                        "op_type": "remove_connection",
+                        "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "analog_random_source_x_0",
+                        "src_port": 0,
+                        "dst_block": "blocks_char_to_float_0",
+                        "dst_port": 0,
+                    },
+                ]
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "gnu_validation_failed")
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+
+    def test_rewire_connection_wrapper_resolves_old_endpoint_to_atomic_transaction(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_src_block": "strobe_0",
+                "old_src_port": "strobe",
+                "old_dst_block": "debug_0",
+                "old_dst_port": "print",
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print",
+            },
+        )
+
+        self.assertTrue(result["ok"], result.get("message"))
+        self.assertEqual(result["tool"], "rewire_connection")
+        self.assertEqual(
+            result["normalized_operations"],
+            [
+                {
+                    "op_type": "remove_connection",
+                    "src_block": "strobe_0",
+                    "src_port": "strobe",
+                    "dst_block": "debug_0",
+                    "dst_port": "print",
+                },
+                {
+                    "op_type": "add_connection",
+                    "src_block": "strobe_0",
+                    "src_port": "strobe",
+                    "dst_block": "debug_1",
+                    "dst_port": "print",
+                },
+            ],
+        )
+        connections = {
+            f"{c.src_block}:{c.src_port}->{c.dst_block}:{c.dst_port}"
+            for c in session.flowgraph.connections
+        }
+        self.assertEqual(connections, {"strobe_0:strobe->debug_1:print"})
+
+    def test_rewire_connection_ambiguous_old_endpoint_creates_clarification(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "pdu_random_pdu",
+                        "instance_name": "pdu_0",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_0",
+                        "src_port": "strobe",
+                        "dst_block": "pdu_0",
+                        "dst_port": "generate",
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_src_block": "strobe_0",
+                "old_src_port": "strobe",
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print_pdu",
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["clarification_required"])
+        self.assertEqual(result["kind"], "rewire_connection_disambiguation")
+        self.assertEqual(result["state_revision"], before_revision)
+        self.assertIsNotNone(agent._pending_clarification)
+        self.assertEqual(
+            [option["tool_name"] for option in result["options"]],
+            ["rewire_connection", "rewire_connection"],
+        )
+        self.assertEqual(
+            [option["tool_args"]["old_connection_id"] for option in result["options"]],
+            [
+                "strobe_0:strobe->debug_0:print",
+                "strobe_0:strobe->pdu_0:generate",
+            ],
+        )
+
+    def test_rewire_connection_stale_clarification_is_rejected(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "pdu_random_pdu",
+                        "instance_name": "pdu_0",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_0",
+                        "src_port": "strobe",
+                        "dst_block": "pdu_0",
+                        "dst_port": "generate",
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_src_block": "strobe_0",
+                "old_src_port": "strobe",
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print_pdu",
+            },
+        )
+        self.assertTrue(result["clarification_required"])
+        session.set_param("debug_1", "log_level", "debug")
+
+        resolved = agent.resolve_pending_clarification("A")
+
+        self.assertEqual(resolved["mode"], "expired")
+        self.assertIsNone(agent._pending_clarification)
+
+    def test_rewire_connection_invalid_new_endpoint_rolls_back_old_connection(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "strobe_0:strobe->debug_0:print",
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_block": "missing_debug",
+                "new_dst_port": "print",
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["tool"], "rewire_connection")
+        self.assertEqual(result["error_type"], "preflight_rejected")
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+
+    def test_rewire_connection_missing_entire_new_side_rejects_without_mutation(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "strobe_0:strobe->debug_0:print",
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertEqual(
+            result["validation_errors"],
+            [
+                {
+                    "code": "missing_required",
+                    "field": "new_destination",
+                    "message": (
+                        "Provide exact fields or at least one bounded hint for "
+                        "this new endpoint side."
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+
+    def test_rewire_connection_ambiguous_new_source_creates_clarification(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_strobe",
+                        "instance_name": "strobe_1",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "pdu_random_pdu",
+                        "instance_name": "pdu_0",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_1",
+                        "src_port": "strobe",
+                        "dst_block": "pdu_0",
+                        "dst_port": "generate",
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "strobe_0:strobe->debug_0:print",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print",
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["clarification_required"])
+        self.assertEqual(result["kind"], "rewire_new_endpoint_disambiguation")
+        self.assertEqual(result["state_revision"], before_revision)
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+        self.assertIsNotNone(agent._pending_clarification)
+        self.assertEqual(
+            [option["tool_args"]["new_src_block"] for option in result["options"]],
+            ["strobe_0", "strobe_1"],
+        )
+        self.assertEqual(
+            [option["tool_args"]["old_connection_id"] for option in result["options"]],
+            [
+                "strobe_0:strobe->debug_0:print",
+                "strobe_0:strobe->debug_0:print",
+            ],
+        )
+
+    def test_rewire_connection_ambiguous_new_destination_uses_selected_endpoint(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_strobe",
+                        "instance_name": "strobe_1",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_debug",
+                        "instance_name": "debug_2",
+                        "parameters": {},
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "strobe_0:strobe->debug_0:print",
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_port": "print",
+            },
+        )
+        self.assertTrue(result["clarification_required"])
+        self.assertEqual(
+            [option["tool_args"]["new_dst_block"] for option in result["options"]],
+            ["debug_1", "debug_2"],
+        )
+
+        resolved = agent.resolve_pending_clarification("B")
+
+        self.assertEqual(resolved["mode"], "executed")
+        tool_result = resolved["tool_result"]
+        self.assertTrue(tool_result["ok"], tool_result.get("message"))
+        connections = {
+            f"{c.src_block}:{c.src_port}->{c.dst_block}:{c.dst_port}"
+            for c in session.flowgraph.connections
+        }
+        self.assertNotIn("strobe_0:strobe->debug_1:print", connections)
+        self.assertIn("strobe_0:strobe->debug_2:print", connections)
+        self.assertNotIn("strobe_0:strobe->debug_0:print", connections)
+
+    def test_rewire_connection_message_numeric_port_hints_do_not_create_clarification(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_debug",
+                        "instance_name": "debug_2",
+                        "parameters": {},
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "strobe_0:strobe->debug_0:print",
+                "new_src_block": "strobe_0",
+                "new_src_port": 0,
+                "new_dst_port": 1,
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertNotIn("clarification_required", result)
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+
+    def test_rewire_connection_new_endpoint_clarification_rejects_stale_selection(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_strobe",
+                        "instance_name": "strobe_1",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "pdu_random_pdu",
+                        "instance_name": "pdu_0",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_1",
+                        "src_port": "strobe",
+                        "dst_block": "pdu_0",
+                        "dst_port": "generate",
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "strobe_0:strobe->debug_0:print",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print",
+            },
+        )
+        self.assertTrue(result["clarification_required"])
+        before_connections = list(session.flowgraph.connections)
+        session.set_param("debug_1", "log_level", "debug")
+
+        resolved = agent.resolve_pending_clarification("A")
+
+        self.assertEqual(resolved["mode"], "expired")
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+
+    def test_rewire_connection_too_many_new_endpoint_candidates_does_not_auto_pick(self) -> None:
+        agent, session = self._build_message_rewire_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_strobe",
+                        "instance_name": "strobe_1",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_strobe",
+                        "instance_name": "strobe_2",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_message_strobe",
+                        "instance_name": "strobe_3",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "pdu_random_pdu",
+                        "instance_name": "pdu_1",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "pdu_random_pdu",
+                        "instance_name": "pdu_2",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "pdu_random_pdu",
+                        "instance_name": "pdu_3",
+                        "parameters": {},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_1",
+                        "src_port": "strobe",
+                        "dst_block": "pdu_1",
+                        "dst_port": "generate",
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_2",
+                        "src_port": "strobe",
+                        "dst_block": "pdu_2",
+                        "dst_port": "generate",
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "strobe_3",
+                        "src_port": "strobe",
+                        "dst_block": "pdu_3",
+                        "dst_port": "generate",
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+        before_revision = session.state_revision
+        before_connections = list(session.flowgraph.connections)
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "strobe_0:strobe->debug_0:print",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print",
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "ambiguous_rewire_endpoint")
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertEqual(session.flowgraph.connections, before_connections)
+        self.assertIsNone(agent._pending_clarification)
+
+    def test_rewire_connection_stream_new_source_clarification_uses_selected_endpoint(self) -> None:
+        agent, session = self._load_agent()
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": [
+                    {
+                        "op_type": "update_params",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "params": {"nconnections": "2"},
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "analog_random_source_x",
+                        "instance_name": "analog_random_source_x_1",
+                        "parameters": {
+                            "type": "byte",
+                            "min": "0",
+                            "max": "2",
+                            "num_samps": "1000",
+                            "repeat": "True",
+                        },
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_throttle2",
+                        "instance_name": "blocks_throttle2_1",
+                        "parameters": {
+                            "type": "byte",
+                            "samples_per_second": "samp_rate",
+                            "vlen": "1",
+                            "ignoretag": "True",
+                            "limit": "auto",
+                            "maximum": "0.1",
+                        },
+                    },
+                    {
+                        "op_type": "add_block",
+                        "block_type": "blocks_char_to_float",
+                        "instance_name": "blocks_char_to_float_1",
+                        "parameters": {"vlen": "1", "scale": "1"},
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "analog_random_source_x_1",
+                        "src_port": 0,
+                        "dst_block": "blocks_throttle2_1",
+                        "dst_port": 0,
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "blocks_throttle2_1",
+                        "src_port": 0,
+                        "dst_block": "blocks_char_to_float_1",
+                        "dst_port": 0,
+                    },
+                    {
+                        "op_type": "add_connection",
+                        "src_block": "blocks_char_to_float_1",
+                        "src_port": 0,
+                        "dst_block": "qtgui_time_sink_x_0",
+                        "dst_port": 1,
+                    },
+                ]
+            },
+        )
+        self.assertTrue(result["ok"], result.get("message"))
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                "new_src_port": 0,
+                "new_dst_block": "blocks_char_to_float_0",
+                "new_dst_port": 0,
+            },
+        )
+
+        self.assertTrue(result["clarification_required"])
+        self.assertEqual(result["kind"], "rewire_new_endpoint_disambiguation")
+        self.assertEqual(
+            [option["tool_args"]["new_src_block"] for option in result["options"]],
+            [
+                "analog_random_source_x_0",
+                "analog_random_source_x_1",
+                "blocks_throttle2_1",
+            ],
+        )
+
+        resolved = agent.resolve_pending_clarification("C")
+
+        self.assertEqual(resolved["mode"], "executed")
+        tool_result = resolved["tool_result"]
+        self.assertTrue(tool_result["ok"], tool_result.get("message"))
+        connections = {
+            f"{c.src_block}:{c.src_port}->{c.dst_block}:{c.dst_port}"
+            for c in session.flowgraph.connections
+        }
+        self.assertIn("blocks_throttle2_1:0->blocks_char_to_float_0:0", connections)
+        self.assertNotIn("blocks_throttle2_0:0->blocks_char_to_float_0:0", connections)
 
     def test_state_driven_suggested_next_tools_after_apply_edit(self) -> None:
         agent, _session = self._load_agent()

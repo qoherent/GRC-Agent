@@ -1,7 +1,9 @@
 """Thin runtime wrapper for routed package-level `.grc` tools."""
 
+import copy
 import json
 import logging
+import re
 from typing import Any, Callable
 
 from grc_agent.catalog import describe_block
@@ -10,23 +12,45 @@ from grc_agent.config import AgentConfig, default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.manual import search_manual
 from grc_agent.retrieval.search import _search_grc_with_context
+from grc_agent.retrieval.vector import semantic_search_grc
+from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.runtime.prompt import build_system_prompt
-from grc_agent.runtime.tool_schemas import build_tool_schemas
+from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES, build_tool_schemas
+from grc_agent.runtime.turn_plan import (
+    INTENT_ADD_VARIABLE,
+    INTENT_PREVIEW,
+    INTENT_REWIRE,
+    TurnPlan,
+    build_turn_plan,
+    enrich_turn_plan_with_graph_context,
+)
 from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime_tool_validation import (
     build_tool_schema_map,
     validate_runtime_tool_call,
 )
+from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
 from grc_agent.session import get_grc_context, load_grc, summarize_graph
 from grc_agent.session.insertion_suggestions import suggest_insertions
 from grc_agent.transaction import apply_edit, propose_edit
-from grc_agent.turn_guard import build_continuation_prompt, parse_required_actions
+from grc_agent.turn_guard import build_continuation_prompt
 
 logger = logging.getLogger(__name__)
 
 ToolResult = dict[str, Any]
 ToolCallable = Callable[..., ToolResult]
 HistoryEntry = dict[str, Any]
+
+_ADD_VARIABLE_EXACT_PATTERN = re.compile(
+    r"\b(?:add|create)\s+(?:a\s+)?variable\s+"
+    r"(?:(?:called|named)\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+"
+    r"(?:(?:set\s+to)|(?:with\s+(?:a\s+)?value\s+of)|(?:with\s+value)|value)\s+"
+    r"(?P<value>[^\n]+)",
+    re.IGNORECASE,
+)
+_CONNECTION_ID_TOKEN_PATTERN = re.compile(
+    r"[A-Za-z0-9_./-]+:[^\s,;()]+->[A-Za-z0-9_./-]+:[^\s,;()]+"
+)
 
 
 class GrcAgent:
@@ -70,6 +94,8 @@ class GrcAgent:
         self._turn_completed_actions: set[str] = set()
         self._turn_any_execution_failed = False
         self._turn_continuation_budget = 0
+        self._turn_plan = TurnPlan()
+        self._turn_user_message = ""
         self._transaction_normalizer = TransactionNormalizer(session=self.session)
         self._pending_clarification: dict[str, Any] | None = None
         self._pending_clarification_revision: int | None = None
@@ -80,6 +106,27 @@ class GrcAgent:
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Return the fixed tool schemas exposed to a chat-completions client."""
         return self._tool_schemas
+
+    def get_tool_schemas_for_turn(
+        self,
+        allowed_tool_names: set[str] | tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return schemas narrowed by the active typed turn policy."""
+        if allowed_tool_names is None:
+            allowed_order = tuple(self._turn_plan.allowed_tools)
+        elif isinstance(allowed_tool_names, set):
+            allowed_order = tuple(name for name in PUBLIC_TOOL_NAMES if name in allowed_tool_names)
+        else:
+            allowed_order = tuple(allowed_tool_names)
+        schemas_by_name = {
+            schema["function"]["name"]: schema
+            for schema in self._tool_schemas
+        }
+        return [
+            self._schema_narrowed_for_turn(schemas_by_name[name])
+            for name in allowed_order
+            if name in schemas_by_name
+        ]
 
     def execute_tool(self, tool_name: str, kwargs: dict[str, Any]) -> ToolResult:
         """Execute one runtime tool and return a structured result."""
@@ -156,8 +203,6 @@ class GrcAgent:
             mode="reminder"          — unrelated text while pending, compact reminder
             mode="custom"            — D / free text, cleared, proceed normally
         """
-        from grc_agent.runtime.clarification import ClarificationRequest
-
         if self._pending_clarification is None:
             return {"mode": "none"}
 
@@ -302,8 +347,21 @@ class GrcAgent:
 
     def _store_pending_clarification(self, payload: dict[str, Any]) -> None:
         """Store a clarification produced by a tool for user resolution."""
-        self._pending_clarification = dict(payload)
-        self._pending_clarification_revision = self.session.state_revision
+        stored = copy.deepcopy(payload)
+        revision = stored.get("state_revision")
+        if not isinstance(revision, int):
+            revision = self.session.state_revision
+            stored["state_revision"] = revision
+        for option in stored.get("options", []):
+            if not isinstance(option, dict):
+                continue
+            metadata = option.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                option["metadata"] = metadata
+            metadata.setdefault("state_revision", revision)
+        self._pending_clarification = stored
+        self._pending_clarification_revision = revision
 
     def _clear_pending_clarification(self) -> None:
         self._pending_clarification = None
@@ -390,12 +448,63 @@ class GrcAgent:
             ),
         }
 
-    def init_turn_requirements(self, user_message: str) -> None:
-        """Parse user message and initialise turn-completion tracking."""
-        self._turn_required_actions = parse_required_actions(user_message)
+    def init_turn_requirements(self, user_message: str) -> TurnPlan:
+        """Parse user message and initialise typed turn-completion tracking."""
+        self._turn_user_message = user_message
+        plan = build_turn_plan(user_message)
+        if self.session.flowgraph is not None:
+            plan = enrich_turn_plan_with_graph_context(
+                plan,
+                user_message,
+                self.session.flowgraph.blocks,
+            )
+        self._turn_plan = plan
+        self._turn_required_actions = set(self._turn_plan.required_actions)
         self._turn_completed_actions = set()
         self._turn_any_execution_failed = False
         self._turn_continuation_budget = 1
+        return self._turn_plan
+
+    def active_turn_plan(self) -> TurnPlan:
+        """Return the current typed turn plan."""
+        return self._turn_plan
+
+    def validate_turn_route(
+        self,
+        tool_name: str,
+        kwargs: dict[str, Any],
+        *,
+        allowed_tool_names: set[str] | tuple[str, ...] | None = None,
+    ) -> ToolResult | None:
+        """Reject model tool calls that contradict the active turn policy."""
+        plan = self._turn_plan
+        effective_allowed = (
+            set(plan.allowed_tools)
+            if allowed_tool_names is None
+            else set(allowed_tool_names)
+        )
+        if tool_name not in effective_allowed:
+            return self._route_mismatch_result(
+                tool_name,
+                f"Tool `{tool_name}` is not allowed for intent `{plan.intent}`.",
+            )
+        if not plan.expected_op_types or tool_name not in {"apply_edit", "propose_edit"}:
+            return None
+
+        op_types = self._transaction_op_types(kwargs.get("transaction"))
+        if not op_types:
+            return None
+        unexpected = sorted(set(op_types) - set(plan.expected_op_types))
+        if not unexpected:
+            return None
+        return self._route_mismatch_result(
+            tool_name,
+            (
+                f"Intent `{plan.intent}` only allows operation type(s) "
+                f"{', '.join(plan.expected_op_types)}, but the model attempted "
+                f"{', '.join(unexpected)}."
+            ),
+        )
 
     def record_tool_completion(self, tool_name: str, ok: bool) -> None:
         """Record a tool execution result for turn-completion tracking."""
@@ -415,6 +524,239 @@ class GrcAgent:
             return False, ""
         self._turn_continuation_budget -= 1
         return True, build_continuation_prompt(remaining)
+
+    def deterministic_turn_tool_call(
+        self,
+        user_message: str,
+    ) -> dict[str, Any] | None:
+        """Return an exact verified-tool call for simple typed intents.
+
+        This keeps deterministic routing policy behind GrcAgent while the
+        llama.cpp adapter remains a transport/bounded-loop layer. Callers must
+        still run route validation, schema validation, and normal tool
+        execution before any graph mutation.
+        """
+        if self._turn_plan.intent == INTENT_REWIRE:
+            return self._deterministic_exact_rewire_tool_call(user_message)
+        if self._turn_plan.intent == INTENT_ADD_VARIABLE:
+            return self._deterministic_exact_add_variable_tool_call(user_message)
+        return None
+
+    def _deterministic_exact_add_variable_tool_call(
+        self,
+        user_message: str,
+    ) -> dict[str, Any] | None:
+        match = _ADD_VARIABLE_EXACT_PATTERN.search(user_message)
+        if match is None:
+            return None
+        value = re.split(
+            r"(?:\s+(?:and|then)\s+)|[,;]",
+            match.group("value").strip(),
+            maxsplit=1,
+        )[0]
+        value = value.strip().strip("\"'").rstrip(".")
+        if not value:
+            return None
+        tool_name = (
+            "propose_edit"
+            if INTENT_PREVIEW in {self._turn_plan.intent}
+            or (
+                "propose_edit" in self._turn_plan.required_actions
+                and "apply_edit" not in self._turn_plan.required_actions
+            )
+            else "apply_edit"
+        )
+        if tool_name not in self._turn_plan.allowed_tools:
+            return None
+        return {
+            "id": "deterministic_add_variable",
+            "name": tool_name,
+            "arguments": {
+                "transaction": {
+                    "op_type": "add_block",
+                    "block_type": "variable",
+                    "instance_name": match.group("name"),
+                    "parameters": {"value": value},
+                }
+            },
+        }
+
+    def _deterministic_exact_rewire_tool_call(
+        self,
+        user_message: str,
+    ) -> dict[str, Any] | None:
+        if "rewire_connection" not in self._turn_plan.allowed_tools:
+            return None
+
+        parsed_connection_ids: list[tuple[str, int | str, str, int | str]] = []
+        for match in _CONNECTION_ID_TOKEN_PATTERN.finditer(user_message):
+            parsed = parse_connection_id(match.group(0).rstrip(".,;"))
+            if parsed is None:
+                continue
+            parsed_connection_ids.append(parsed)
+            if len(parsed_connection_ids) == 2:
+                break
+
+        if len(parsed_connection_ids) != 2:
+            return None
+
+        old_src_block, old_src_port, old_dst_block, old_dst_port = parsed_connection_ids[0]
+        new_src_block, new_src_port, new_dst_block, new_dst_port = parsed_connection_ids[1]
+        return {
+            "id": "deterministic_rewire_connection",
+            "name": "rewire_connection",
+            "arguments": {
+                "old_connection_id": render_connection_id(
+                    old_src_block,
+                    old_src_port,
+                    old_dst_block,
+                    old_dst_port,
+                ),
+                "new_src_block": new_src_block,
+                "new_src_port": new_src_port,
+                "new_dst_block": new_dst_block,
+                "new_dst_port": new_dst_port,
+            },
+        }
+
+    def _route_mismatch_result(self, tool_name: str, message: str) -> ToolResult:
+        return self._tool_result(
+            tool_name=tool_name,
+            ok=False,
+            message=(
+                f"{message} No graph change was made because the requested route "
+                "did not match the typed turn policy."
+            ),
+            error_type="route_mismatch",
+            turn_plan=self._turn_plan.as_dict(),
+            allowed_tools=list(self._turn_plan.allowed_tools),
+            expected_op_types=list(self._turn_plan.expected_op_types),
+        )
+
+    @staticmethod
+    def _transaction_op_types(transaction: Any) -> tuple[str, ...]:
+        operations = transaction if isinstance(transaction, list) else [transaction]
+        op_types: list[str] = []
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            op_type = operation.get("op_type")
+            if isinstance(op_type, str) and op_type:
+                op_types.append(op_type)
+        return tuple(op_types)
+
+    def _turn_exact_new_rewire_endpoint(
+        self,
+    ) -> tuple[str, int | str, str, int | str] | None:
+        """Return exact `to src:port->dst:port` endpoint for schema narrowing."""
+        for match in re.finditer(r"\bto\s+([^\s,;]+->[^\s,;]+)", self._turn_user_message):
+            parsed = parse_connection_id(match.group(1).rstrip(".:"))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _schema_narrowed_for_turn(self, schema: dict[str, Any]) -> dict[str, Any]:
+        name = schema["function"]["name"]
+        if name == "get_grc_context" and self._turn_plan.target_ref:
+            narrowed = copy.deepcopy(schema)
+            parameters = narrowed["function"]["parameters"]
+            node_id = parameters["properties"]["node_id"]
+            node_id["enum"] = [self._turn_plan.target_ref]
+            node_id["description"] = (
+                "Exact loaded session node selected by the typed turn policy."
+            )
+            return narrowed
+        if (
+            name == "rewire_connection"
+            and self._turn_plan.intent == "rewire"
+            and (exact_new_endpoint := self._turn_exact_new_rewire_endpoint()) is not None
+        ):
+            narrowed = copy.deepcopy(schema)
+            parameters = narrowed["function"]["parameters"]
+            parameters["required"] = [
+                "new_src_block",
+                "new_src_port",
+                "new_dst_block",
+                "new_dst_port",
+            ]
+            src_block, src_port, dst_block, dst_port = exact_new_endpoint
+            properties = parameters["properties"]
+            properties["new_src_block"]["enum"] = [src_block]
+            properties["new_src_port"]["enum"] = [src_port]
+            properties["new_dst_block"]["enum"] = [dst_block]
+            properties["new_dst_port"]["enum"] = [dst_port]
+            return narrowed
+        if (
+            name not in {"apply_edit", "propose_edit"}
+            or self._turn_plan.expected_op_types
+            not in {("update_states",), ("update_params",)}
+        ):
+            return schema
+
+        narrowed = copy.deepcopy(schema)
+        parameters = narrowed["function"]["parameters"]
+        transaction = parameters["properties"]["transaction"]
+        if self._turn_plan.expected_op_types == ("update_params",):
+            if not self._turn_plan.target_ref or not self._turn_plan.parameter_name:
+                return schema
+            transaction.clear()
+            transaction.update(
+                {
+                    "type": "object",
+                    "description": "One update_params operation for an exact loaded block parameter.",
+                    "properties": {
+                        "op_type": {
+                            "type": "string",
+                            "enum": ["update_params"],
+                        },
+                        "instance_name": {
+                            "type": "string",
+                            "enum": [self._turn_plan.target_ref],
+                        },
+                        "params": {
+                            "type": "object",
+                            "properties": {
+                                self._turn_plan.parameter_name: {
+                                    "type": ["string", "number", "integer", "boolean"],
+                                }
+                            },
+                            "required": [self._turn_plan.parameter_name],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["op_type", "instance_name", "params"],
+                    "additionalProperties": False,
+                }
+            )
+            return narrowed
+
+        transaction.clear()
+        transaction.update(
+            {
+                "type": "object",
+                "description": (
+                    "One update_states operation. Use this only to enable or disable "
+                    "one loaded block instance."
+                ),
+                "properties": {
+                    "op_type": {
+                        "type": "string",
+                        "enum": ["update_states"],
+                    },
+                    "instance_name": {
+                        "type": "string",
+                        "description": "Loaded block instance name.",
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["enabled", "disabled"],
+                    },
+                },
+                "required": ["op_type", "instance_name", "state"],
+                "additionalProperties": False,
+            }
+        )
+        return narrowed
 
     @staticmethod
     def looks_like_transaction_payload(payload: Any) -> bool:
@@ -645,6 +987,14 @@ class GrcAgent:
             )
             if fallback_preview:
                 compact["catalog_fallback_preview"] = fallback_preview
+        if tool_name == "semantic_search_grc":
+            for key in ("query", "scope"):
+                value = content.get(key)
+                if isinstance(value, str) and value:
+                    compact[key] = value
+            results_preview = GrcAgent._semantic_search_result_preview(content.get("results"))
+            if results_preview:
+                compact["results_preview"] = results_preview
         if not compact:
             compact["ok"] = content.get("ok", False)
             compact["message"] = "result truncated"
@@ -730,6 +1080,11 @@ class GrcAgent:
             )
             if fallback_preview:
                 compact["catalog_fallback_preview"] = fallback_preview
+        if tool_name == "semantic_search_grc":
+            compact.pop("results", None)
+            history_preview = self._semantic_search_result_preview(content.get("results"))
+            if history_preview:
+                compact["results_preview"] = history_preview
 
         if tool_name == "get_grc_context":
             compact.pop("nodes", None)
@@ -763,6 +1118,10 @@ class GrcAgent:
         if tool_name == "get_grc_context":
             lines.append(
                 "next_step_note: inspection data is routing only; do not answer later edit or preview requests from it."
+            )
+        if tool_name == "semantic_search_grc":
+            lines.append(
+                "next_step_note: semantic search is read-only candidate discovery; it cannot authorize apply_edit, save_graph, insertions, removals, or repairs."
             )
         lines.append(json.dumps(compact, sort_keys=True))
         return "\n".join(lines)
@@ -843,6 +1202,30 @@ class GrcAgent:
                 preview.append(compact)
         return preview
 
+    @staticmethod
+    def _semantic_search_result_preview(
+        results: Any,
+        *,
+        max_items: int = 3,
+    ) -> list[dict[str, str]]:
+        if not isinstance(results, list):
+            return []
+        preview: list[dict[str, str]] = []
+        for item in results[:max_items]:
+            if not isinstance(item, dict):
+                continue
+            compact: dict[str, str] = {}
+            for key in ("canonical_block_id", "record_id", "source_type", "title"):
+                value = item.get(key)
+                if isinstance(value, str) and value:
+                    compact[key] = value
+            score = item.get("vector_score_raw")
+            if isinstance(score, int | float):
+                compact["vector_score_raw"] = str(score)
+            if compact:
+                preview.append(compact)
+        return preview
+
     # ------------------------------------------------------------------- #
     # Tool registry builders
     # ------------------------------------------------------------------- #
@@ -856,10 +1239,12 @@ class GrcAgent:
             "get_grc_context": self._get_grc_context,
             "describe_block": self._describe_block,
             "search_manual": self._search_manual,
+            "semantic_search_grc": self._semantic_search_grc,
             "suggest_compatible_insertions": self._suggest_compatible_insertions,
             "insert_block_on_connection": self._insert_block_on_connection,
             "auto_insert_block": self._auto_insert_block,
             "remove_connection": self._remove_connection,
+            "rewire_connection": self._rewire_connection,
             "apply_edit": self._apply_edit,
             "propose_edit": self._propose_edit,
             "validate_graph": self._validate_graph,
@@ -1132,6 +1517,23 @@ class GrcAgent:
             )
         return self._payload_result("search_manual", payload)
 
+    def _semantic_search_grc(
+        self,
+        query: str,
+        scope: str = "all",
+        k: int | None = None,
+    ) -> ToolResult:
+        if k is None:
+            payload = semantic_search_grc(query, scope=scope)
+        else:
+            payload = semantic_search_grc(query, scope=scope, k=k)
+        if payload.get("ok"):
+            payload["hint"] = (
+                "Semantic search results are read-only candidates. They cannot authorize graph edits, "
+                "saves, insertions, removals, repairs, params payloads, or transaction payloads."
+            )
+        return self._payload_result("semantic_search_grc", payload)
+
     def _suggest_compatible_insertions(self, connection_id: str, k: int = 5) -> ToolResult:
         """Read-only suggestion for blocks that can be inserted into a connection."""
         result = suggest_insertions(self.session, connection_id, k)
@@ -1217,7 +1619,81 @@ class GrcAgent:
             self._clear_pending_clarification()
         return self._payload_result("auto_insert_block", payload)
 
-    def _remove_connection(self, connection_id: str) -> ToolResult:
+    def _remove_connection(
+        self,
+        connection_id: str | None = None,
+        src_block: str | None = None,
+        src_port: int | str | None = None,
+        dst_block: str | None = None,
+        dst_port: int | str | None = None,
+    ) -> ToolResult:
+        """Resolve connection arguments to one connection_id, then delegate."""
+        missing_session = self._missing_session_result("remove_connection")
+        if missing_session is not None:
+            return missing_session
+
+        endpoint_args = {
+            "src_block": src_block,
+            "src_port": src_port,
+            "dst_block": dst_block,
+            "dst_port": dst_port,
+        }
+        has_endpoint_hint = any(value is not None for value in endpoint_args.values())
+        if has_endpoint_hint:
+            resolved = self.session.find_connection_candidates(
+                src_block=src_block,
+                src_port=src_port,
+                dst_block=dst_block,
+                dst_port=dst_port,
+            )
+            candidates = resolved["candidates"]
+            if not candidates:
+                return self._tool_result(
+                    tool_name="remove_connection",
+                    ok=False,
+                    message="No existing connection matches the provided endpoint fields.",
+                    error_type="connection_not_found",
+                    state_revision=self.session.state_revision,
+                )
+            if len(candidates) > 1:
+                payload = self._connection_clarification_payload(candidates)
+                self._store_pending_clarification(payload)
+                return self._payload_result("remove_connection", payload)
+
+            resolved_connection_id = candidates[0]["connection_id"]
+            if connection_id is not None and connection_id != resolved_connection_id:
+                return self._tool_result(
+                    tool_name="remove_connection",
+                    ok=False,
+                    message=(
+                        "connection_id does not match the provided endpoint fields: "
+                        f"{connection_id}"
+                    ),
+                    error_type="connection_endpoint_mismatch",
+                    state_revision=self.session.state_revision,
+                )
+            connection_id = resolved_connection_id
+
+        if not isinstance(connection_id, str) or not connection_id.strip():
+            return self._tool_result(
+                tool_name="remove_connection",
+                ok=False,
+                message=(
+                    "remove_connection requires either connection_id or enough "
+                    "endpoint fields to resolve one existing connection."
+                ),
+                error_type=ErrorCode.TOOL_CALL_INVALID,
+                validation_errors=[
+                    {
+                        "code": "missing_required",
+                        "field": "connection_id",
+                        "message": "Provide connection_id or endpoint fields.",
+                    }
+                ],
+            )
+        return self._remove_connection_by_id(connection_id.strip())
+
+    def _remove_connection_by_id(self, connection_id: str) -> ToolResult:
         """Thin wrapper: delegates to apply_edit with op_type=remove_connection."""
         result = self._apply_edit(
             {
@@ -1227,6 +1703,619 @@ class GrcAgent:
         )
         result["tool"] = "remove_connection"
         return result
+
+    def _connection_clarification_payload(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        labels = ("A", "B", "C")
+        options: list[ClarificationOption] = []
+        revision = self.session.state_revision
+        for label, candidate in zip(labels, candidates, strict=False):
+            connection_id = candidate["connection_id"]
+            options.append(
+                ClarificationOption(
+                    label=label,
+                    title=connection_id,
+                    description=(
+                        f"{candidate['src_block']}:{candidate['src_port']} -> "
+                        f"{candidate['dst_block']}:{candidate['dst_port']}"
+                    ),
+                    tool_name="remove_connection",
+                    tool_args={"connection_id": connection_id},
+                    metadata={
+                        "state_revision": revision,
+                        "connection_id": connection_id,
+                    },
+                )
+            )
+        request = ClarificationRequest(
+            kind="connection_disambiguation",
+            question="Multiple existing connections match. Choose the one to remove.",
+            options=options,
+            state_revision=revision,
+        )
+        payload = request.to_dict()
+        payload.update(
+            {
+                "ok": False,
+                "message": "Multiple existing connections match the provided endpoints.",
+                "error_type": "ambiguous_connection",
+            }
+        )
+        return payload
+
+    def _rewire_connection(
+        self,
+        old_connection_id: str | None = None,
+        old_src_block: str | None = None,
+        old_src_port: int | str | None = None,
+        old_dst_block: str | None = None,
+        old_dst_port: int | str | None = None,
+        new_src_block: str | None = None,
+        new_src_port: int | str | None = None,
+        new_dst_block: str | None = None,
+        new_dst_port: int | str | None = None,
+    ) -> ToolResult:
+        """Resolve the old edge, then run one atomic remove+add transaction."""
+        missing_session = self._missing_session_result("rewire_connection")
+        if missing_session is not None:
+            return missing_session
+
+        old_resolution = self._resolve_old_rewire_connection_id(
+            old_connection_id=old_connection_id,
+            old_src_block=old_src_block,
+            old_src_port=old_src_port,
+            old_dst_block=old_dst_block,
+            old_dst_port=old_dst_port,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
+        )
+        if old_resolution.get("clarification_required"):
+            self._store_pending_clarification(old_resolution)
+            return self._payload_result("rewire_connection", old_resolution)
+        if not old_resolution.get("ok"):
+            return self._payload_result("rewire_connection", old_resolution)
+
+        resolved_old_connection_id = old_resolution["old_connection_id"]
+        new_resolution = self._resolve_rewire_new_endpoint_args(
+            old_connection_id=resolved_old_connection_id,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
+        )
+        if new_resolution.get("clarification_required"):
+            self._store_pending_clarification(new_resolution)
+            return self._payload_result("rewire_connection", new_resolution)
+        if not new_resolution.get("ok"):
+            return self._payload_result("rewire_connection", new_resolution)
+
+        result = self._apply_edit(
+            [
+                {
+                    "op_type": "remove_connection",
+                    "connection_id": resolved_old_connection_id,
+                },
+                {
+                    "op_type": "add_connection",
+                    "src_block": new_resolution["new_src_block"],
+                    "src_port": new_resolution["new_src_port"],
+                    "dst_block": new_resolution["new_dst_block"],
+                    "dst_port": new_resolution["new_dst_port"],
+                },
+            ]
+        )
+        result["tool"] = "rewire_connection"
+        return result
+
+    @staticmethod
+    def _has_endpoint_value(value: Any) -> bool:
+        return value is not None and not (isinstance(value, str) and not value.strip())
+
+    def _rewire_new_endpoint_is_exact(
+        self,
+        *,
+        new_src_block: str | None,
+        new_src_port: int | str | None,
+        new_dst_block: str | None,
+        new_dst_port: int | str | None,
+    ) -> bool:
+        return all(
+            self._has_endpoint_value(value)
+            for value in (new_src_block, new_src_port, new_dst_block, new_dst_port)
+        )
+
+    def _resolve_rewire_new_endpoint_args(
+        self,
+        *,
+        old_connection_id: str,
+        new_src_block: str | None,
+        new_src_port: int | str | None,
+        new_dst_block: str | None,
+        new_dst_port: int | str | None,
+    ) -> dict[str, Any]:
+        if self._rewire_new_endpoint_is_exact(
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
+        ):
+            return {
+                "ok": True,
+                "new_src_block": str(new_src_block),
+                "new_src_port": new_src_port,
+                "new_dst_block": str(new_dst_block),
+                "new_dst_port": new_dst_port,
+            }
+
+        missing_fields = [
+            field
+            for field, value in (
+                ("new_src_block", new_src_block),
+                ("new_src_port", new_src_port),
+                ("new_dst_block", new_dst_block),
+                ("new_dst_port", new_dst_port),
+            )
+            if not self._has_endpoint_value(value)
+        ]
+        has_source_hint = self._has_endpoint_value(new_src_block) or self._has_endpoint_value(new_src_port)
+        has_destination_hint = self._has_endpoint_value(new_dst_block) or self._has_endpoint_value(new_dst_port)
+        if not has_source_hint or not has_destination_hint:
+            missing_side = "new_source" if not has_source_hint else "new_destination"
+            return {
+                "ok": False,
+                "message": (
+                    "rewire_connection requires at least one hint for both the "
+                    "new source and new destination; it will not infer an entire endpoint side."
+                ),
+                "error_type": ErrorCode.TOOL_CALL_INVALID,
+                "state_revision": self.session.state_revision,
+                "validation_errors": [
+                    {
+                        "code": "missing_required",
+                        "field": missing_side,
+                        "message": (
+                            "Provide exact fields or at least one bounded hint for "
+                            "this new endpoint side."
+                        ),
+                    }
+                ],
+            }
+        candidates = self._rewire_new_endpoint_candidates(
+            old_connection_id=old_connection_id,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
+        )
+        if not candidates:
+            return {
+                "ok": False,
+                "message": (
+                    "rewire_connection requires exact new endpoints or endpoint hints "
+                    "that resolve to existing executable candidates."
+                ),
+                "error_type": ErrorCode.TOOL_CALL_INVALID,
+                "state_revision": self.session.state_revision,
+                "validation_errors": [
+                    {
+                        "code": "missing_required",
+                        "field": field,
+                        "message": (
+                            "Provide an exact new endpoint field or enough endpoint "
+                            "hints to resolve executable candidates."
+                        ),
+                    }
+                    for field in missing_fields
+                ],
+            }
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            return {"ok": True, **candidate}
+        if len(candidates) > 3:
+            return {
+                "ok": False,
+                "message": (
+                    "Too many executable new endpoint candidates match. "
+                    "Provide exact new source and destination endpoints."
+                ),
+                "error_type": "ambiguous_rewire_endpoint",
+                "state_revision": self.session.state_revision,
+                "candidate_count": len(candidates),
+            }
+        return self._rewire_new_endpoint_clarification_payload(
+            old_connection_id=old_connection_id,
+            candidates=candidates,
+        )
+
+    def _rewire_new_endpoint_candidates(
+        self,
+        *,
+        old_connection_id: str,
+        new_src_block: str | None,
+        new_src_port: int | str | None,
+        new_dst_block: str | None,
+        new_dst_port: int | str | None,
+    ) -> list[dict[str, Any]]:
+        parsed_old = parse_connection_id(old_connection_id)
+        if parsed_old is None:
+            return []
+        source_candidates = self._connection_endpoint_candidates(
+            side="source",
+            block=new_src_block,
+            port=new_src_port,
+        )
+        destination_candidates = self._connection_endpoint_candidates(
+            side="destination",
+            block=new_dst_block,
+            port=new_dst_port,
+        )
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[str, int | str, str, int | str]] = set()
+        for source_block, source_port in source_candidates:
+            for destination_block, destination_port in destination_candidates:
+                connection = (source_block, source_port, destination_block, destination_port)
+                if connection == parsed_old or connection in seen:
+                    continue
+                seen.add(connection)
+                candidate = {
+                    "new_src_block": source_block,
+                    "new_src_port": source_port,
+                    "new_dst_block": destination_block,
+                    "new_dst_port": destination_port,
+                }
+                if self._rewire_candidate_passes_preflight(old_connection_id, candidate):
+                    candidates.append(candidate)
+        return candidates
+
+    def _connection_endpoint_candidates(
+        self,
+        *,
+        side: str,
+        block: str | None,
+        port: int | str | None,
+    ) -> list[tuple[str, int | str]]:
+        if self._has_endpoint_value(block) and self._has_endpoint_value(port):
+            loaded_block = self._loaded_block_by_name(str(block))
+            if loaded_block is None:
+                return []
+            if not self._loaded_block_has_port(
+                block_type=loaded_block.block_type,
+                port=port,
+                side=side,
+            ):
+                return []
+            return [(str(block), port)]
+        flowgraph = self.session.flowgraph
+        if flowgraph is None:
+            return []
+        candidates: set[tuple[str, int | str]] = set()
+        if self._has_endpoint_value(port):
+            if self._has_endpoint_value(block):
+                candidates.add((str(block), port))
+            else:
+                for loaded_block in flowgraph.blocks:
+                    if self._loaded_block_has_port(
+                        block_type=loaded_block.block_type,
+                        port=port,
+                        side=side,
+                    ):
+                        candidates.add((loaded_block.instance_name, port))
+        for connection in flowgraph.connections:
+            if side == "source":
+                endpoint_block = connection.src_block
+                endpoint_port = connection.src_port
+            else:
+                endpoint_block = connection.dst_block
+                endpoint_port = connection.dst_port
+            if self._has_endpoint_value(block) and endpoint_block != block:
+                continue
+            if self._has_endpoint_value(port) and not FlowgraphSession._port_matches(endpoint_port, port):
+                continue
+            candidates.add((endpoint_block, endpoint_port))
+        return sorted(candidates, key=lambda item: (item[0], str(item[1])))
+
+    def _loaded_block_by_name(self, instance_name: str) -> Any | None:
+        flowgraph = self.session.flowgraph
+        if flowgraph is None:
+            return None
+        return next(
+            (
+                loaded_block
+                for loaded_block in flowgraph.blocks
+                if loaded_block.instance_name == instance_name
+            ),
+            None,
+        )
+
+    def _loaded_block_has_port(
+        self,
+        *,
+        block_type: str,
+        port: int | str,
+        side: str,
+    ) -> bool:
+        description = describe_block(block_type)
+        if not description.get("ok"):
+            return False
+        field_name = "outputs" if side == "source" else "inputs"
+        ports = description.get(field_name)
+        if not isinstance(ports, list):
+            return False
+        if not isinstance(port, str):
+            return any(
+                isinstance(candidate, dict)
+                and candidate.get("domain") != "message"
+                and not candidate.get("id")
+                for candidate in ports
+            )
+        return any(
+            isinstance(candidate, dict) and candidate.get("id") == port
+            for candidate in ports
+        )
+
+    def _rewire_candidate_passes_preflight(
+        self,
+        old_connection_id: str,
+        candidate: dict[str, Any],
+    ) -> bool:
+        proposal = propose_edit(
+            self.session,
+            [
+                {
+                    "op_type": "remove_connection",
+                    "connection_id": old_connection_id,
+                },
+                {
+                    "op_type": "add_connection",
+                    "src_block": candidate["new_src_block"],
+                    "src_port": candidate["new_src_port"],
+                    "dst_block": candidate["new_dst_block"],
+                    "dst_port": candidate["new_dst_port"],
+                },
+            ],
+            self.catalog_root,
+        )
+        return bool(proposal.get("ok"))
+
+    def _rewire_new_endpoint_clarification_payload(
+        self,
+        *,
+        old_connection_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        revision = self.session.state_revision
+        options: list[ClarificationOption] = []
+        for label, candidate in zip(("A", "B", "C"), candidates, strict=False):
+            new_connection_id = render_connection_id(
+                candidate["new_src_block"],
+                candidate["new_src_port"],
+                candidate["new_dst_block"],
+                candidate["new_dst_port"],
+            )
+            options.append(
+                ClarificationOption(
+                    label=label,
+                    title=new_connection_id,
+                    description=f"replace {old_connection_id} with {new_connection_id}",
+                    tool_name="rewire_connection",
+                    tool_args={
+                        "old_connection_id": old_connection_id,
+                        "new_src_block": candidate["new_src_block"],
+                        "new_src_port": candidate["new_src_port"],
+                        "new_dst_block": candidate["new_dst_block"],
+                        "new_dst_port": candidate["new_dst_port"],
+                    },
+                    metadata={
+                        "state_revision": revision,
+                        "old_connection_id": old_connection_id,
+                        "new_connection_id": new_connection_id,
+                    },
+                )
+            )
+        request = ClarificationRequest(
+            kind="rewire_new_endpoint_disambiguation",
+            question="Multiple executable new endpoints match. Choose the exact rewire target.",
+            options=options,
+            state_revision=revision,
+        )
+        payload = request.to_dict()
+        payload.update(
+            {
+                "ok": False,
+                "message": "Multiple executable new endpoints match the provided hints.",
+                "error_type": "ambiguous_rewire_endpoint",
+            }
+        )
+        return payload
+
+    def _resolve_old_rewire_connection_id(
+        self,
+        *,
+        old_connection_id: str | None,
+        old_src_block: str | None,
+        old_src_port: int | str | None,
+        old_dst_block: str | None,
+        old_dst_port: int | str | None,
+        new_src_block: str | None,
+        new_src_port: int | str | None,
+        new_dst_block: str | None,
+        new_dst_port: int | str | None,
+    ) -> dict[str, Any]:
+        old_endpoint_args = {
+            "src_block": old_src_block,
+            "src_port": old_src_port,
+            "dst_block": old_dst_block,
+            "dst_port": old_dst_port,
+        }
+        has_old_hint = any(value is not None for value in old_endpoint_args.values())
+
+        if has_old_hint:
+            resolved = self.session.find_connection_candidates(**old_endpoint_args)
+            candidates = resolved["candidates"]
+            if not candidates:
+                return {
+                    "ok": False,
+                    "message": "No existing old connection matches the provided endpoint fields.",
+                    "error_type": "connection_not_found",
+                    "state_revision": self.session.state_revision,
+                }
+            if len(candidates) > 1:
+                if not self._rewire_new_endpoint_is_exact(
+                    new_src_block=new_src_block,
+                    new_src_port=new_src_port,
+                    new_dst_block=new_dst_block,
+                    new_dst_port=new_dst_port,
+                ):
+                    return {
+                        "ok": False,
+                        "message": (
+                            "Multiple old connections match. Provide an exact old "
+                            "connection before resolving partial new endpoint hints."
+                        ),
+                        "error_type": "ambiguous_connection",
+                        "state_revision": self.session.state_revision,
+                    }
+                return self._rewire_clarification_payload(
+                    candidates,
+                    new_src_block=str(new_src_block),
+                    new_src_port=new_src_port,
+                    new_dst_block=str(new_dst_block),
+                    new_dst_port=new_dst_port,
+                )
+            resolved_connection_id = candidates[0]["connection_id"]
+            if old_connection_id is not None and old_connection_id != resolved_connection_id:
+                return {
+                    "ok": False,
+                    "message": (
+                        "old_connection_id does not match the provided old endpoint fields: "
+                        f"{old_connection_id}"
+                    ),
+                    "error_type": "connection_endpoint_mismatch",
+                    "state_revision": self.session.state_revision,
+                }
+            return {"ok": True, "old_connection_id": resolved_connection_id}
+
+        if not isinstance(old_connection_id, str) or not old_connection_id.strip():
+            return {
+                "ok": False,
+                "message": (
+                    "rewire_connection requires old_connection_id or enough old "
+                    "endpoint fields to resolve one existing connection."
+                ),
+                "error_type": ErrorCode.TOOL_CALL_INVALID,
+                "state_revision": self.session.state_revision,
+                "validation_errors": [
+                    {
+                        "code": "missing_required",
+                        "field": "old_connection_id",
+                        "message": "Provide old_connection_id or old endpoint fields.",
+                    }
+                ],
+            }
+
+        parsed = parse_connection_id(old_connection_id.strip())
+        if parsed is None:
+            return {
+                "ok": False,
+                "message": "old_connection_id must be in form src_block:src_port->dst_block:dst_port.",
+                "error_type": ErrorCode.TOOL_CALL_INVALID,
+                "state_revision": self.session.state_revision,
+            }
+        src_block, src_port, dst_block, dst_port = parsed
+        resolved = self.session.find_connection_candidates(
+            src_block=src_block,
+            src_port=src_port,
+            dst_block=dst_block,
+            dst_port=dst_port,
+        )
+        candidates = resolved["candidates"]
+        if not candidates:
+            return {
+                "ok": False,
+                "message": f"Old connection not found: {old_connection_id.strip()}",
+                "error_type": "connection_not_found",
+                "state_revision": self.session.state_revision,
+            }
+        if len(candidates) > 1:
+            if not self._rewire_new_endpoint_is_exact(
+                new_src_block=new_src_block,
+                new_src_port=new_src_port,
+                new_dst_block=new_dst_block,
+                new_dst_port=new_dst_port,
+            ):
+                return {
+                    "ok": False,
+                    "message": (
+                        "Multiple old connections match. Provide an exact old "
+                        "connection before resolving partial new endpoint hints."
+                    ),
+                    "error_type": "ambiguous_connection",
+                    "state_revision": self.session.state_revision,
+                }
+            return self._rewire_clarification_payload(
+                candidates,
+                new_src_block=str(new_src_block),
+                new_src_port=new_src_port,
+                new_dst_block=str(new_dst_block),
+                new_dst_port=new_dst_port,
+            )
+        return {"ok": True, "old_connection_id": candidates[0]["connection_id"]}
+
+    def _rewire_clarification_payload(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        new_src_block: str,
+        new_src_port: int | str | None,
+        new_dst_block: str,
+        new_dst_port: int | str | None,
+    ) -> dict[str, Any]:
+        revision = self.session.state_revision
+        options: list[ClarificationOption] = []
+        for label, candidate in zip(("A", "B", "C"), candidates, strict=False):
+            old_connection_id = candidate["connection_id"]
+            options.append(
+                ClarificationOption(
+                    label=label,
+                    title=old_connection_id,
+                    description=(
+                        f"replace {candidate['src_block']}:{candidate['src_port']} -> "
+                        f"{candidate['dst_block']}:{candidate['dst_port']} with "
+                        f"{new_src_block}:{new_src_port} -> {new_dst_block}:{new_dst_port}"
+                    ),
+                    tool_name="rewire_connection",
+                    tool_args={
+                        "old_connection_id": old_connection_id,
+                        "new_src_block": new_src_block,
+                        "new_src_port": new_src_port,
+                        "new_dst_block": new_dst_block,
+                        "new_dst_port": new_dst_port,
+                    },
+                    metadata={
+                        "state_revision": revision,
+                        "old_connection_id": old_connection_id,
+                    },
+                )
+            )
+        request = ClarificationRequest(
+            kind="rewire_connection_disambiguation",
+            question="Multiple old connections match. Choose the exact edge to rewire.",
+            options=options,
+            state_revision=revision,
+        )
+        payload = request.to_dict()
+        payload.update(
+            {
+                "ok": False,
+                "message": "Multiple old connections match the provided endpoint hints.",
+                "error_type": "ambiguous_connection",
+            }
+        )
+        return payload
 
     def _propose_edit(self, transaction: Any) -> ToolResult:
         missing_session = self._missing_session_result("propose_edit")
@@ -1264,6 +2353,99 @@ class GrcAgent:
 
         return suggestions
 
+    def _duplicate_block_clarification_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Build executable clarification for duplicate names only when safe."""
+        errors = payload.get("errors")
+        operations = payload.get("normalized_operations")
+        if not isinstance(errors, list) or not isinstance(operations, list):
+            return None
+
+        duplicate_errors = [
+            error
+            for error in errors
+            if isinstance(error, dict)
+            and error.get("code") == "block_name_not_unique"
+            and isinstance(error.get("op_index"), int)
+        ]
+        if len(duplicate_errors) != 1 or len(operations) != 1:
+            return None
+
+        op_index = duplicate_errors[0]["op_index"]
+        if op_index < 0 or op_index >= len(operations):
+            return None
+        operation = operations[op_index]
+        if not isinstance(operation, dict):
+            return None
+        if operation.get("op_type") not in {"update_params", "update_states", "remove_block"}:
+            return None
+        if "block_type" in operation:
+            # Same-name same-type duplicates are not executable without a UID-based schema.
+            return None
+        instance_name = operation.get("instance_name")
+        if not isinstance(instance_name, str) or not instance_name:
+            return None
+
+        resolved = self.session.resolve_block_reference(instance_name)
+        candidates = resolved.get("candidates", [])
+        if not isinstance(candidates, list) or len(candidates) < 2 or len(candidates) > 3:
+            return None
+
+        block_types = [
+            candidate.get("block_type")
+            for candidate in candidates
+            if isinstance(candidate, dict) and isinstance(candidate.get("block_type"), str)
+        ]
+        if len(block_types) != len(candidates) or len(set(block_types)) != len(block_types):
+            return None
+
+        revision = self.session.state_revision
+        options: list[ClarificationOption] = []
+        for label, candidate in zip(("A", "B", "C"), candidates, strict=False):
+            block_type = candidate["block_type"]
+            transaction = copy.deepcopy(operation)
+            transaction["block_type"] = block_type
+            options.append(
+                ClarificationOption(
+                    label=label,
+                    title=f"{instance_name} ({block_type})",
+                    description=(
+                        f"state={candidate.get('state')}; "
+                        f"coordinate={candidate.get('coordinate')}"
+                    ),
+                    tool_name="apply_edit",
+                    tool_args={"transaction": transaction},
+                    metadata={
+                        "state_revision": revision,
+                        "block_uid": candidate.get("block_uid"),
+                        "block_type": block_type,
+                    },
+                )
+            )
+
+        request = ClarificationRequest(
+            kind="block_disambiguation",
+            question=f"Multiple blocks are named `{instance_name}`. Choose the exact target.",
+            options=options,
+            state_revision=revision,
+        )
+        clarification = request.to_dict()
+        clarification.update(
+            {
+                "ok": False,
+                "message": (
+                    "Multiple blocks match the requested instance_name. "
+                    "Choose one candidate before mutating."
+                ),
+                "error_type": "ambiguous_block",
+                "errors": copy.deepcopy(errors),
+                "normalized_operations": copy.deepcopy(operations),
+            }
+        )
+        return clarification
+
     def _apply_edit(self, transaction: Any) -> ToolResult:
         missing_session = self._missing_session_result("apply_edit")
         if missing_session is not None:
@@ -1275,6 +2457,9 @@ class GrcAgent:
         )
         if payload.get("ok"):
             self._record_successful_validation()
+        elif clarification := self._duplicate_block_clarification_payload(payload):
+            self._store_pending_clarification(clarification)
+            return self._payload_result("apply_edit", clarification)
         result = self._payload_result("apply_edit", payload)
         if result.get("ok"):
             suggested = self._state_driven_suggested_next_tools(completed_tool="apply_edit")

@@ -4,7 +4,7 @@ The rules, examples, and formatting are versioned together so that behaviour
 only changes when the file actually changes.
 """
 
-__version__ = "2025-04-26"
+__version__ = "2026-04-29-rewire-new-endpoint-clarification"
 
 
 def build_system_prompt() -> str:
@@ -81,6 +81,9 @@ def build_system_prompt() -> str:
         "Use `update_states` when the user explicitly says disable / enable for one unique loaded block. "
         "Use plain JSON keys like `nconnections`, `srate`, and `value`, not quoted key names.\n"
         "9. For rewires, pass all operations in one ordered transaction list. "
+        "When replacing one existing edge with another, prefer `rewire_connection`: provide the old connection_id or old endpoint hints plus exact new endpoints when known. "
+        "If the new endpoint is ambiguous, provide bounded endpoint hints only; the runtime will ask for clarification rather than picking the first match. "
+        "If using raw `apply_edit`, remove the old exact `connection_id` and add the new exact endpoints in the same call; never disconnect first and then repair in a later call. "
         "To add a second trace to the time sink: "
         '`[{\"op_type\": \"update_params\", \"instance_name\": \"qtgui_time_sink_x_0\", '
         '\"params\": {\"nconnections\": \"2\"}}, {\"op_type\": \"add_connection\", '
@@ -165,6 +168,8 @@ def build_system_prompt() -> str:
         "Manual excerpts are explanation-only context, not mutation authority, and never replace `search_grc`, `describe_block`, `summarize_graph`, `get_grc_context`, verified edit tools, or `grcc` validation. "
         "Cite the returned manual source when using manual context. Do not invent tutorial-derived graph recipes, block defaults, block allowlists, or block blacklists.\n"
         "21. If a GNU Radio explanation question names a specific catalog block, prefer `describe_block`; if it asks conceptual how/why without a specific block id, prefer `search_manual`. "
+        "Use `semantic_search_grc` only when that read-only tool is exposed and the user explicitly asks for semantic/similar search or lexical search is not enough. "
+        "Semantic search results are candidate evidence only; they never authorize edits, inserts, saves, repairs, or params. "
         "If the same turn asks both conceptual background and a graph change, do the explanation lookup first, then use only catalog/session tools for the graph operation.\n"
         "22. MULTI-ACTION CHAINING: When the user requests multiple actions in the same turn, complete every requested action with tools before answering. "
         "Do not stop after the first successful tool if another requested action remains. "
