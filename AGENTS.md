@@ -2,7 +2,7 @@
 
 ## Vision
 
-GRC Agent should become a reliable local autonomous assistant for GNU Radio Companion graphs: it should understand natural prompts, inspect the active graph, make validated tool-based mutations, verify outcomes, and ask the user naturally when required information is missing or contradictory.
+GRC Agent should become a reliable local assistant for GNU Radio Companion graphs: it should understand natural prompts, inspect the active graph, make validated tool-based mutations, verify outcomes, and ask the user naturally when required information is missing or contradictory.
 
 Autonomy must come from typed state, explicit tools, deterministic validation, and measured behavior. It must not come from hidden repairs, prompt tricks, YAML patching, fixture-specific shortcuts, or unbounded retries.
 
@@ -53,6 +53,10 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 
 ## Tool And Workflow Design
 
+- Default model-facing chat surface is MVP wrappers only:
+  `inspect_graph`, `search_blocks`, `search_help`, `change_graph`.
+- Legacy low-level tools remain internal/compatibility-only unless explicitly
+  enabled for developer compatibility mode.
 - Tool order matters. Models prefer earlier tools.
 - Keep `apply_edit` before `propose_edit` unless a separate live eval proves a safer alternative.
 - Keep tool descriptions concise and non-contradictory; put durable routing policy in one place.
@@ -65,6 +69,21 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 
 ## Autonomy Design
 
+- Advisor-first intent classification is the intended direction: a local LLM
+  advisor classifies user intent into a small structured mode, and runtime code
+  maps that mode to a bounded tool class.
+- Advisor is currently shadow-only and does not control default runtime routing.
+- Do not solve intent routing with regexes, phrase dictionaries, or hardcoded
+  natural-language branches. Intent routing belongs to the Advisor.
+- Runtime code enforces contracts and graph safety: enum/schema validation,
+  allowed tool lists, operation type validation, preflight, `grcc`, rollback,
+  explicit save state, and UID target-ref structure.
+- Runtime code must not maintain phrase lists for preview wording, raw YAML
+  wording, vague topology wording, block UID wording, or natural-language
+  synonyms.
+- If the Advisor is uncertain, it must output `clarify` or `unsupported`;
+  improve advisor prompt/context/evals rather than bypassing it with growing
+  hardcoded language rules.
 - Prefer a typed turn-state/executor policy over more prompt rules.
 - Track requested actions, completed actions, failed actions, mutation state, validation state, save requirements, clarification state, and retry budget explicitly.
 - The orchestrator may decide whether to continue, stop, report failure, or ask the user; it must not synthesize graph recipes or mutate outside tools.
@@ -74,6 +93,11 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 ## Eval And Testing
 
 - Keep deterministic safety tests separate from live/model evals.
+- Default development gate is deterministic (`ruff`, `unittest`,
+  `tests.retrieval_eval.vector_regression`).
+- Live quick tiers run only after runtime/model-facing behavior changes.
+- `--n-runs 3` + `release_dashboard` is release-only evidence, not routine.
+- Advisor/model bakeoff scripts are research-only and must be run explicitly.
 - Tier 1 and Tier 2 live evals are routing and behavior evidence, not proof of full autonomy.
 - Live eval reports should distinguish routing pass, tool success, semantic/end-state pass, and safety pass.
 - Add semantic checks before changing tool design: exact params, graph diffs, saved files, reload/`grcc`, clarification resolution, and no-mutation previews.

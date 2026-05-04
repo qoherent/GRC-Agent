@@ -11,7 +11,7 @@ import yaml
 
 from grc_agent.agent import GrcAgent
 from grc_agent.runtime.transaction_normalization import TransactionNormalizer
-from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
+from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_fake_runtime
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.models import Connection
@@ -142,6 +142,21 @@ class GrcAgentTests(unittest.TestCase):
             for connection in session.flowgraph.connections
         )
         return (session.state_revision, session.is_dirty, blocks, connections)
+
+    def _block_target_ref(self, session: FlowgraphSession, *, name: str, block_type: str, index: int = 0) -> dict:
+        assert session.flowgraph is not None
+        matches = [
+            block
+            for block in session.flowgraph.blocks
+            if block.instance_name == name and block.block_type == block_type
+        ]
+        block = matches[index]
+        return {
+            "block_uid": block.block_uid,
+            "expected_instance_name": block.instance_name,
+            "expected_block_type": block.block_type,
+            "base_state_revision": session.state_revision,
+        }
 
     def test_runtime_tool_surface_matches_phase_six_contract(self) -> None:
         agent, _session = self._load_agent()
@@ -311,10 +326,10 @@ class GrcAgentTests(unittest.TestCase):
         schemas = agent.get_tool_schemas()
         schema_by_name = {schema["function"]["name"]: schema for schema in schemas}
 
-        self.assertEqual(
-            [schema["function"]["name"] for schema in schemas],
-            list(PUBLIC_TOOL_NAMES),
-        )
+        names = [schema["function"]["name"] for schema in schemas]
+        self.assertEqual(names[: len(PUBLIC_TOOL_NAMES)], list(PUBLIC_TOOL_NAMES))
+        for mvp_name in MVP_MODEL_TOOL_NAMES:
+            self.assertIn(mvp_name, names)
         self.assertEqual(
             schema_by_name["load_grc"]["function"]["parameters"]["required"],
             ["file_path"],
@@ -1687,32 +1702,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(variable.params["states"]["state"], "enabled")
         self.assertEqual(imported.params["states"]["state"], "disabled")
 
-    def test_same_name_same_type_duplicate_is_not_executable_by_clarification(self) -> None:
-        raw_data = self._fixture_raw_data()
-        raw_data["blocks"].append(self._detached_variable_block("dup"))
-        second = self._detached_variable_block("dup", state="disabled")
-        second["states"]["coordinate"] = [96, 128]
-        raw_data["blocks"].append(second)
-        agent, session = self._load_agent_from_raw(raw_data)
-        before_revision = session.state_revision
-
-        result = agent.execute_tool(
-            "apply_edit",
-            {
-                "transaction": {
-                    "op_type": "update_params",
-                    "instance_name": "dup",
-                    "params": {"value": "456"},
-                }
-            },
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertNotIn("clarification_required", result)
-        self.assertIsNone(agent._pending_clarification)
-        self.assertEqual(session.state_revision, before_revision)
-
-    def test_same_name_same_type_duplicate_param_edit_rejects_without_mutation(self) -> None:
+    def test_same_name_same_type_duplicate_param_edit_creates_uid_target_ref_clarification(self) -> None:
         raw_data = self._fixture_raw_data()
         raw_data["blocks"].append(self._detached_variable_block("dup"))
         second = self._detached_variable_block("dup", state="disabled")
@@ -1733,12 +1723,57 @@ class GrcAgentTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "preflight_rejected")
-        self.assertEqual(result["errors"][0]["code"], "block_name_not_unique")
-        self.assertIsNone(agent._pending_clarification)
+        self.assertTrue(result["clarification_required"])
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+        options = result["options"]
+        self.assertEqual(len(options), 2)
+        for option in options:
+            transaction = option["tool_args"]["transaction"]
+            self.assertNotIn("instance_name", transaction)
+            self.assertIn("target_ref", transaction)
+            self.assertEqual(
+                transaction["target_ref"]["base_state_revision"],
+                session.state_revision,
+            )
+
+        resolved = agent.resolve_pending_clarification("B")
+
+        self.assertEqual(resolved["mode"], "executed")
+        self.assertTrue(resolved["tool_result"]["ok"], resolved)
+        assert session.flowgraph is not None
+        dup_values = [
+            block.params["parameters"]["value"]
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "variable"
+        ]
+        self.assertEqual(dup_values, ["123", "456"])
+
+    def test_same_name_same_type_duplicate_param_edit_does_not_mutate_before_clarification(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_snapshot = self._graph_identity_snapshot(session)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "dup",
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["clarification_required"])
+        self.assertIsNotNone(agent._pending_clarification)
         self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
 
-    def test_same_name_same_type_duplicate_state_edit_rejects_without_mutation(self) -> None:
+    def test_same_name_same_type_duplicate_state_edit_does_not_mutate_before_clarification(self) -> None:
         raw_data = self._fixture_raw_data()
         raw_data["blocks"].append(self._detached_variable_block("dup"))
         second = self._detached_variable_block("dup", state="disabled")
@@ -1759,10 +1794,54 @@ class GrcAgentTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "preflight_rejected")
-        self.assertEqual(result["errors"][0]["code"], "block_name_not_unique")
-        self.assertIsNone(agent._pending_clarification)
+        self.assertTrue(result["clarification_required"])
+        self.assertIsNotNone(agent._pending_clarification)
         self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_same_name_same_type_duplicate_state_edit_creates_target_ref_and_mutates_selected_only(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_states",
+                    "instance_name": "dup",
+                    "state": "disabled",
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["clarification_required"])
+        options = result["options"]
+        self.assertEqual(len(options), 2)
+        for option in options:
+            transaction = option["tool_args"]["transaction"]
+            self.assertNotIn("instance_name", transaction)
+            self.assertEqual(transaction["op_type"], "update_states")
+            self.assertIn("target_ref", transaction)
+            self.assertEqual(
+                transaction["target_ref"]["base_state_revision"],
+                session.state_revision,
+            )
+
+        resolved = agent.resolve_pending_clarification("B")
+
+        self.assertEqual(resolved["mode"], "executed")
+        self.assertTrue(resolved["tool_result"]["ok"], resolved)
+        assert session.flowgraph is not None
+        dup_states = [
+            block.params["states"]["state"]
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "variable"
+        ]
+        self.assertEqual(dup_states, ["enabled", "disabled"])
 
     def test_same_name_same_type_duplicate_remove_block_rejects_without_mutation(self) -> None:
         raw_data = self._fixture_raw_data()
@@ -1784,9 +1863,201 @@ class GrcAgentTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_type"], "preflight_rejected")
-        self.assertEqual(result["errors"][0]["code"], "block_name_not_unique")
-        self.assertIsNone(agent._pending_clarification)
+        self.assertTrue(result["clarification_required"])
+        self.assertIsNotNone(agent._pending_clarification)
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_same_name_same_type_duplicate_param_edit_succeeds_with_valid_block_uid_target_ref(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        target_ref = self._block_target_ref(session, name="dup", block_type="variable", index=1)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "target_ref": target_ref,
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
+        assert session.flowgraph is not None
+        dup_values = [
+            block.params["parameters"]["value"]
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "variable"
+        ]
+        self.assertEqual(dup_values, ["123", "456"])
+
+    def test_same_name_same_type_duplicate_state_edit_succeeds_with_valid_block_uid_target_ref(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        target_ref = self._block_target_ref(session, name="dup", block_type="variable", index=0)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_states",
+                    "target_ref": target_ref,
+                    "state": "disabled",
+                }
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
+        assert session.flowgraph is not None
+        dup_states = [
+            block.params["states"]["state"]
+            for block in session.flowgraph.blocks
+            if block.instance_name == "dup" and block.block_type == "variable"
+        ]
+        self.assertEqual(dup_states, ["disabled", "disabled"])
+
+    def test_same_name_same_type_duplicate_remove_block_with_uid_target_ref_rejects_without_mutation(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_import_block("dup"))
+        second = self._detached_import_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        target_ref = self._block_target_ref(session, name="dup", block_type="import", index=1)
+
+        before_snapshot = self._graph_identity_snapshot(session)
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "remove_block",
+                    "target_ref": target_ref,
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errors"][0]["code"], "block_still_referenced")
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_block_uid_target_ref_rejects_stale_state_revision_without_mutation(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        target_ref = self._block_target_ref(session, name="dup", block_type="variable", index=1)
+        session.set_param("samp_rate", "value", "48000")
+        before_snapshot = self._graph_identity_snapshot(session)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "target_ref": target_ref,
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errors"][0]["code"], "stale_state_revision")
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_block_uid_target_ref_rejects_unknown_partial_and_mismatched_identity(self) -> None:
+        agent, session = self._load_agent()
+        valid_ref = self._block_target_ref(session, name="samp_rate", block_type="variable")
+        cases = [
+            ({**valid_ref, "block_uid": "block:abc"}, "invalid_block_uid"),
+            ({**valid_ref, "block_uid": "block:0000000000000000"}, "block_uid_not_found"),
+            ({**valid_ref, "expected_instance_name": "not_samp_rate"}, "block_uid_instance_mismatch"),
+            ({**valid_ref, "expected_block_type": "import"}, "block_uid_type_mismatch"),
+        ]
+        for target_ref, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                before_snapshot = self._graph_identity_snapshot(session)
+                result = agent.execute_tool(
+                    "apply_edit",
+                    {
+                        "transaction": {
+                            "op_type": "update_params",
+                            "target_ref": target_ref,
+                            "params": {"value": "48000"},
+                        }
+                    },
+                )
+
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["errors"][0]["code"], expected_code)
+                self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_block_uid_target_ref_rejects_unsupported_connection_and_add_block_operations(self) -> None:
+        agent, session = self._load_agent()
+        target_ref = self._block_target_ref(session, name="samp_rate", block_type="variable")
+        cases = [
+            {
+                "op_type": "add_connection",
+                "target_ref": target_ref,
+                "src_block": "analog_random_source_x_0",
+                "src_port": 0,
+                "dst_block": "blocks_throttle2_0",
+                "dst_port": 0,
+            },
+            {
+                "op_type": "remove_connection",
+                "target_ref": target_ref,
+                "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+            },
+            {
+                "op_type": "add_block",
+                "target_ref": target_ref,
+                "instance_name": "new_var",
+                "block_type": "variable",
+                "parameters": {"value": "1"},
+            },
+        ]
+        for transaction in cases:
+            with self.subTest(op_type=transaction["op_type"]):
+                before_snapshot = self._graph_identity_snapshot(session)
+                result = agent.execute_tool("apply_edit", {"transaction": transaction})
+
+                self.assertFalse(result["ok"], result)
+                self.assertIn("target_ref", str(result))
+                self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
+
+    def test_propose_edit_with_block_uid_target_ref_does_not_mutate(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        target_ref = self._block_target_ref(session, name="dup", block_type="variable", index=1)
+        before_snapshot = self._graph_identity_snapshot(session)
+
+        result = agent.execute_tool(
+            "propose_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "target_ref": target_ref,
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
         self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
 
     def test_stale_duplicate_name_clarification_selection_is_rejected(self) -> None:
@@ -1814,6 +2085,71 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(resolved["mode"], "expired")
         self.assertIsNone(agent._pending_clarification)
         self.assertEqual(self._graph_identity_snapshot(session), before_stale_resolution)
+
+    def test_stale_same_name_same_type_duplicate_clarification_selection_is_rejected(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+
+        result = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_states",
+                    "instance_name": "dup",
+                    "state": "disabled",
+                }
+            },
+        )
+        self.assertTrue(result["clarification_required"])
+
+        session.set_param("samp_rate", "value", "48000")
+        before_stale_resolution = self._graph_identity_snapshot(session)
+        resolved = agent.resolve_pending_clarification("B")
+
+        self.assertEqual(resolved["mode"], "expired")
+        self.assertIsNone(agent._pending_clarification)
+        self.assertEqual(self._graph_identity_snapshot(session), before_stale_resolution)
+
+    def test_preview_only_duplicate_target_request_cannot_apply(self) -> None:
+        raw_data = self._fixture_raw_data()
+        raw_data["blocks"].append(self._detached_variable_block("dup"))
+        second = self._detached_variable_block("dup", state="disabled")
+        second["states"]["coordinate"] = [96, 128]
+        raw_data["blocks"].append(second)
+        agent, session = self._load_agent_from_raw(raw_data)
+        before_snapshot = self._graph_identity_snapshot(session)
+
+        agent.init_turn_requirements("Preview changing dup value to 456. Do not apply it.")
+        route_error = agent.validate_turn_route(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "dup",
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertIsNotNone(route_error)
+        self.assertEqual(route_error["error_type"], "route_mismatch")
+        preview = agent.execute_tool(
+            "propose_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "instance_name": "dup",
+                    "params": {"value": "456"},
+                }
+            },
+        )
+
+        self.assertFalse(preview["ok"])
+        self.assertEqual(self._graph_identity_snapshot(session), before_snapshot)
 
     def test_disambiguated_detached_duplicate_remove_block_rejects_name_reference(self) -> None:
         raw_data = self._fixture_raw_data()

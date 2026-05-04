@@ -36,6 +36,10 @@ class AgentConfig:
     """Configurable defaults for the GrcAgent behavior."""
 
     history_compact_budget: int
+    advisor_enabled: bool = False
+    advisor_limited_advisory: bool = False
+    advisor_shadow_telemetry: bool = True
+    legacy_model_tool_surface: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,10 @@ def default_app_config() -> AppConfig:
         ),
         agent=AgentConfig(
             history_compact_budget=100000,
+            advisor_enabled=False,
+            advisor_limited_advisory=False,
+            advisor_shadow_telemetry=True,
+            legacy_model_tool_surface=False,
         ),
     )
 
@@ -121,6 +129,18 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
         agent_config = AgentConfig(
             history_compact_budget=_require_positive_int(
                 agent_table, "history_compact_budget", context="[agent]"
+            ),
+            advisor_enabled=_optional_bool(
+                agent_table, "advisor_enabled", default=False, context="[agent]"
+            ),
+            advisor_limited_advisory=_optional_bool(
+                agent_table, "advisor_limited_advisory", default=False, context="[agent]"
+            ),
+            advisor_shadow_telemetry=_optional_bool(
+                agent_table, "advisor_shadow_telemetry", default=True, context="[agent]"
+            ),
+            legacy_model_tool_surface=_optional_bool(
+                agent_table, "legacy_model_tool_surface", default=False, context="[agent]"
             ),
         )
 
@@ -215,6 +235,19 @@ def _require_bool(payload: dict[str, Any], key: str, *, context: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{context}.{key} must be true or false.")
     return value
+
+
+def _optional_bool(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: bool,
+    context: str,
+) -> bool:
+    """Read one optional boolean config value."""
+    if key not in payload:
+        return default
+    return _require_bool(payload, key, context=context)
 
 
 __all__ = [

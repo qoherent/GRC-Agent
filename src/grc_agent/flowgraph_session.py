@@ -120,6 +120,41 @@ class FlowgraphSession:
         logger.info("load path=%s blocks=%d connections=%d", source_path, len(blocks), len(connections))
 
     @classmethod
+    def from_raw_data(
+        cls,
+        raw_data: dict[str, Any],
+        *,
+        path: str | Path | None = None,
+        dirty: bool = False,
+    ) -> "FlowgraphSession":
+        """Build a session from an already parsed `.grc` payload."""
+        if not isinstance(raw_data, dict):
+            raise ValueError("Top-level .grc data must be a mapping.")
+
+        copied_raw_data = copy.deepcopy(raw_data)
+        session = cls(path=path)
+        blocks = session._parse_blocks(copied_raw_data.get("blocks"))
+        connections = session._parse_connections(copied_raw_data.get("connections"))
+        metadata = {
+            key: value
+            for key, value in copied_raw_data.items()
+            if key not in {"blocks", "connections"}
+        }
+        session.flowgraph = Flowgraph(
+            blocks=blocks,
+            connections=connections,
+            metadata=metadata,
+            raw_data=copied_raw_data,
+        )
+        session.is_dirty = dirty
+        session.last_validation_stdout = None
+        session.last_validation_stderr = None
+        session.last_validation_returncode = None
+        session.last_validation_ok = None
+        session._bump_state_revision()
+        return session
+
+    @classmethod
     def create(cls, *, path: str | Path | None = None, graph_id: str = "new_flowgraph") -> "FlowgraphSession":
         """Create a minimal valid empty GRC session with no DSP blocks."""
         raw_data: dict[str, Any] = {
@@ -798,6 +833,48 @@ class FlowgraphSession:
         self.is_dirty = True
         self._bump_state_revision()
 
+    def remove_block_by_uid(
+        self,
+        block_uid: str,
+        *,
+        expected_instance_name: str,
+        expected_block_type: str,
+    ) -> None:
+        """Remove one block by verified UID target reference."""
+        if self.flowgraph is None:
+            raise ValueError("No flowgraph loaded.")
+
+        parsed_index, raw_index, block = self._resolve_block_uid_indexes(
+            block_uid,
+            expected_instance_name=expected_instance_name,
+            expected_block_type=expected_block_type,
+        )
+
+        if any(
+            connection.src_block == block.instance_name
+            or connection.dst_block == block.instance_name
+            for connection in self.flowgraph.connections
+        ):
+            raise ValueError(
+                f"Cannot remove connected block: {block.instance_name}. Disconnect all attached wires first."
+            )
+
+        if self._block_name_is_referenced_elsewhere(
+            raw_data=self.flowgraph.raw_data,
+            instance_name=block.instance_name,
+            ignored_raw_block_index=raw_index,
+        ):
+            raise ValueError(f"Block is still referenced elsewhere: {block.instance_name}")
+
+        raw_blocks = self.flowgraph.raw_data.get("blocks")
+        if not isinstance(raw_blocks, list):
+            raise ValueError("Flowgraph raw_data blocks section is invalid.")
+        del self.flowgraph.blocks[parsed_index]
+        del raw_blocks[raw_index]
+
+        self.is_dirty = True
+        self._bump_state_revision()
+
     def set_param(
         self,
         instance_name: str,
@@ -875,6 +952,46 @@ class FlowgraphSession:
         self.is_dirty = True
         self._bump_state_revision()
 
+    def set_param_by_uid(
+        self,
+        block_uid: str,
+        parameter_key: str,
+        value: object,
+        *,
+        expected_instance_name: str,
+        expected_block_type: str,
+    ) -> None:
+        """Update one parameter by verified UID target reference."""
+        if self.flowgraph is None:
+            raise ValueError("No flowgraph loaded.")
+        _parsed_index, raw_index, block = self._resolve_block_uid_indexes(
+            block_uid,
+            expected_instance_name=expected_instance_name,
+            expected_block_type=expected_block_type,
+        )
+        raw_blocks = self.flowgraph.raw_data.get("blocks")
+        if not isinstance(raw_blocks, list):
+            raise ValueError("Flowgraph raw_data blocks section is invalid.")
+        raw_block = raw_blocks[raw_index]
+        if not isinstance(raw_block, dict):
+            raise ValueError(f"Raw block not found for uid: {block_uid}")
+
+        parameters = block.params.setdefault("parameters", {})
+        if not isinstance(parameters, dict):
+            raise ValueError(
+                f"Block parameters section is invalid for: {block.instance_name}"
+            )
+        raw_parameters = raw_block.setdefault("parameters", {})
+        if not isinstance(raw_parameters, dict):
+            raise ValueError(
+                f"Raw block parameters section is invalid for: {block.instance_name}"
+            )
+        parameters[parameter_key] = value
+        raw_parameters[parameter_key] = value
+
+        self.is_dirty = True
+        self._bump_state_revision()
+
     def set_block_state(
         self, instance_name: str, state: str, *, block_type: str | None = None
     ) -> None:
@@ -939,6 +1056,44 @@ class FlowgraphSession:
         self.is_dirty = True
         self._bump_state_revision()
 
+    def set_block_state_by_uid(
+        self,
+        block_uid: str,
+        state: str,
+        *,
+        expected_instance_name: str,
+        expected_block_type: str,
+    ) -> None:
+        """Update one block state by verified UID target reference."""
+        if self.flowgraph is None:
+            raise ValueError("No flowgraph loaded.")
+        if state not in {"enabled", "disabled"}:
+            raise ValueError(f"Invalid block state: {state}")
+        _parsed_index, raw_index, block = self._resolve_block_uid_indexes(
+            block_uid,
+            expected_instance_name=expected_instance_name,
+            expected_block_type=expected_block_type,
+        )
+        raw_blocks = self.flowgraph.raw_data.get("blocks")
+        if not isinstance(raw_blocks, list):
+            raise ValueError("Flowgraph raw_data blocks section is invalid.")
+        raw_block = raw_blocks[raw_index]
+        if not isinstance(raw_block, dict):
+            raise ValueError(f"Raw block not found for uid: {block_uid}")
+
+        states = block.params.setdefault("states", {})
+        if not isinstance(states, dict):
+            raise ValueError(f"Block states section is invalid for: {block.instance_name}")
+        raw_states = raw_block.setdefault("states", {})
+        if not isinstance(raw_states, dict):
+            raise ValueError(f"Raw block states section is invalid for: {block.instance_name}")
+
+        states["state"] = state
+        raw_states["state"] = state
+
+        self.is_dirty = True
+        self._bump_state_revision()
+
     def summarize(self) -> str:
         """Return a compact human-readable summary of the loaded graph."""
         # If nothing has been loaded yet, say so plainly.
@@ -986,6 +1141,40 @@ class FlowgraphSession:
             "unique": len(candidates) == 1,
             "candidates": candidates,
         }
+
+    def _resolve_block_uid_indexes(
+        self,
+        block_uid: str,
+        *,
+        expected_instance_name: str,
+        expected_block_type: str,
+    ) -> tuple[int, int, Block]:
+        """Resolve a full block_uid to exactly one parsed/raw block pair."""
+        flowgraph = self._require_loaded_flowgraph()
+        raw_blocks = flowgraph.raw_data.get("blocks")
+        if not isinstance(raw_blocks, list):
+            raise ValueError("Flowgraph raw_data blocks section is invalid.")
+
+        parsed_matches = [
+            (index, block)
+            for index, block in enumerate(flowgraph.blocks)
+            if block.block_uid == block_uid
+        ]
+        if len(parsed_matches) != 1:
+            raise ValueError(f"block_uid did not resolve to exactly one block: {block_uid}")
+
+        parsed_index, block = parsed_matches[0]
+        if block.instance_name != expected_instance_name:
+            raise ValueError("block_uid expected_instance_name mismatch.")
+        if block.block_type != expected_block_type:
+            raise ValueError("block_uid expected_block_type mismatch.")
+        if parsed_index >= len(raw_blocks) or not isinstance(raw_blocks[parsed_index], dict):
+            raise ValueError(f"Raw block not found for uid: {block_uid}")
+
+        raw_block = raw_blocks[parsed_index]
+        if raw_block.get("name") != block.instance_name or raw_block.get("id") != block.block_type:
+            raise ValueError("Parsed/raw block mismatch for block_uid target.")
+        return parsed_index, parsed_index, block
 
     def find_connection_candidates(
         self,

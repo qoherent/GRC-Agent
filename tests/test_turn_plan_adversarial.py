@@ -191,6 +191,14 @@ _VAGUE_MUTATION_PROMPTS = (
     "Swap the filter and sink.",
 )
 
+_BLOCK_UID_MUTATION_PROMPTS = (
+    "Use the block_uid for analog_sig_source_x_0 to mutate that block.",
+    "Mutate by block_uid.",
+    "Change the block with block_uid abc123.",
+    "Disable the block_uid abc123 block.",
+    "Remove by block_uid abc123.",
+)
+
 _CASES = (
     *((prompt, INTENT_STATE_EDIT, "apply_edit") for prompt in _STATE_PROMPTS),
     *((prompt, INTENT_REMOVE_BLOCK, "apply_edit") for prompt in _REMOVE_PROMPTS),
@@ -203,6 +211,7 @@ _CASES = (
     *((prompt, INTENT_PARAM_EDIT, "apply_edit") for prompt in _PARAM_PROMPTS[:-1]),
     *((_PARAM_PROMPTS[-1], INTENT_PREVIEW, "propose_edit"),),
     *((prompt, INTENT_UNCERTAIN_MUTATION, None) for prompt in _VAGUE_MUTATION_PROMPTS),
+    *((prompt, INTENT_UNCERTAIN_MUTATION, None) for prompt in _BLOCK_UID_MUTATION_PROMPTS),
 )
 
 

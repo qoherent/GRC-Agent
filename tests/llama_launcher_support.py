@@ -84,7 +84,12 @@ class _Handler(BaseHTTPRequestHandler):
                     {
                         "message": {
                             "role": "assistant",
-                            "tool_calls": [{"name": "summarize_graph", "arguments": "{}"}],
+                            "tool_calls": [
+                                {
+                                    "name": "inspect_graph",
+                                    "arguments": json.dumps({"operation": "summarize"}),
+                                }
+                            ],
                         }
                     }
                 ]

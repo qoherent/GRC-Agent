@@ -42,13 +42,16 @@ class SessionSnapshot:
     raw_data: dict[str, Any]
     blocks: list[Block]
     connections: list[Connection]
+    state_revision: int | None = None
 
     @classmethod
     def from_session(cls, session: FlowgraphSession) -> "SessionSnapshot":
         if session.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
         raw_data = copy.deepcopy(session.flowgraph.raw_data)
-        return cls.from_raw_data(raw_data)
+        snapshot = cls.from_raw_data(raw_data)
+        snapshot.state_revision = session.state_revision
+        return snapshot
 
     @classmethod
     def from_raw_data(cls, raw_data: dict[str, Any]) -> "SessionSnapshot":
@@ -141,18 +144,26 @@ def _apply_update_params(
     catalog_root: str | Path | None,
 ) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
     op_type = operation.op_type
-    instance_name = operation.payload["instance_name"]
+    instance_name = operation.payload.get("instance_name", "")
     block_type = operation.payload.get("block_type")
     params = operation.payload["params"]
 
-    block, raw_block, _raw_index, issues = _require_unique_block(
-        snapshot,
-        instance_name,
-        block_type=block_type,
-        op_index=op_index,
-        op_type=op_type,
-        field="instance_name",
-    )
+    if "target_ref" in operation.payload:
+        block, raw_block, _raw_index, issues = _require_block_target_ref(
+            snapshot,
+            operation,
+            op_index=op_index,
+            field="target_ref",
+        )
+    else:
+        block, raw_block, _raw_index, issues = _require_unique_block(
+            snapshot,
+            instance_name,
+            block_type=block_type,
+            op_index=op_index,
+            op_type=op_type,
+            field="instance_name",
+        )
     if issues:
         return issues, []
     assert block is not None
@@ -208,18 +219,26 @@ def _apply_update_states(
     op_index: int,
 ) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
     op_type = operation.op_type
-    instance_name = operation.payload["instance_name"]
+    instance_name = operation.payload.get("instance_name", "")
     block_type = operation.payload.get("block_type")
     state = operation.payload["state"]
 
-    _block, raw_block, _raw_index, issues = _require_unique_block(
-        snapshot,
-        instance_name,
-        block_type=block_type,
-        op_index=op_index,
-        op_type=op_type,
-        field="instance_name",
-    )
+    if "target_ref" in operation.payload:
+        _block, raw_block, _raw_index, issues = _require_block_target_ref(
+            snapshot,
+            operation,
+            op_index=op_index,
+            field="target_ref",
+        )
+    else:
+        _block, raw_block, _raw_index, issues = _require_unique_block(
+            snapshot,
+            instance_name,
+            block_type=block_type,
+            op_index=op_index,
+            op_type=op_type,
+            field="instance_name",
+        )
     if issues:
         return issues, []
     assert raw_block is not None
@@ -271,7 +290,7 @@ def _apply_add_block(
     catalog_root: str | Path | None,
 ) -> tuple[list[ValidationIssue], list[ValidationIssue]]:
     op_type = operation.op_type
-    instance_name = operation.payload["instance_name"]
+    instance_name = operation.payload.get("instance_name", "")
     block_type = operation.payload["block_type"]
     parameters = operation.payload["parameters"]
     states = operation.payload.get("states")
@@ -599,14 +618,22 @@ def _apply_remove_block(
     instance_name = operation.payload["instance_name"]
     block_type = operation.payload.get("block_type")
 
-    block, _raw_block, raw_index, issues = _require_unique_block(
-        snapshot,
-        instance_name,
-        block_type=block_type,
-        op_index=op_index,
-        op_type=op_type,
-        field="instance_name",
-    )
+    if "target_ref" in operation.payload:
+        block, _raw_block, raw_index, issues = _require_block_target_ref(
+            snapshot,
+            operation,
+            op_index=op_index,
+            field="target_ref",
+        )
+    else:
+        block, _raw_block, raw_index, issues = _require_unique_block(
+            snapshot,
+            instance_name,
+            block_type=block_type,
+            op_index=op_index,
+            op_type=op_type,
+            field="instance_name",
+        )
     if issues:
         return issues, []
     assert block is not None
@@ -1296,6 +1323,167 @@ def _require_unique_block(
 
     raw_index, raw_entry = raw_matches[0]
     return parsed_matches[0], raw_entry, raw_index, []
+
+
+def _require_block_target_ref(
+    snapshot: SessionSnapshot,
+    operation: ValidationOperation,
+    *,
+    op_index: int,
+    field: str,
+) -> tuple[Block | None, dict[str, Any] | None, int | None, list[ValidationIssue]]:
+    op_type = operation.op_type
+    target_ref = operation.payload.get("target_ref")
+    if not isinstance(target_ref, dict):
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field=field,
+                code="invalid_target_ref",
+                message="target_ref must be a mapping.",
+            )
+        ]
+
+    block_uid = target_ref.get("block_uid")
+    expected_name = target_ref.get("expected_instance_name")
+    expected_type = target_ref.get("expected_block_type")
+    base_revision = target_ref.get("base_state_revision")
+    if not isinstance(block_uid, str) or not _is_full_block_uid(block_uid):
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.block_uid",
+                code="invalid_block_uid",
+                message="target_ref.block_uid must be a full block_uid value.",
+            )
+        ]
+    if not isinstance(expected_name, str) or not expected_name.strip():
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.expected_instance_name",
+                code="invalid_target_ref",
+                message="target_ref.expected_instance_name must be a non-empty string.",
+            )
+        ]
+    if not isinstance(expected_type, str) or not expected_type.strip():
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.expected_block_type",
+                code="invalid_target_ref",
+                message="target_ref.expected_block_type must be a non-empty string.",
+            )
+        ]
+    if not isinstance(base_revision, int) or isinstance(base_revision, bool):
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.base_state_revision",
+                code="invalid_target_ref",
+                message="target_ref.base_state_revision must be the integer state_revision.",
+            )
+        ]
+    if snapshot.state_revision is None or base_revision != snapshot.state_revision:
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.base_state_revision",
+                code="stale_state_revision",
+                message="target_ref.base_state_revision is stale for the current graph.",
+            )
+        ]
+
+    parsed_matches = [
+        (index, block)
+        for index, block in enumerate(snapshot.blocks)
+        if block.block_uid == block_uid
+    ]
+    if len(parsed_matches) != 1:
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.block_uid",
+                code="block_uid_not_found",
+                message=f"block_uid did not resolve to exactly one current block: {block_uid}",
+            )
+        ]
+
+    raw_blocks = snapshot.raw_blocks()
+    parsed_index, block = parsed_matches[0]
+    raw_block = raw_blocks[parsed_index] if parsed_index < len(raw_blocks) else None
+    if not isinstance(raw_block, dict):
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.block_uid",
+                code="block_uid_not_found",
+                message=f"block_uid raw block mapping is unavailable: {block_uid}",
+            )
+        ]
+
+    if block.instance_name != expected_name:
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.expected_instance_name",
+                code="block_uid_instance_mismatch",
+                message="target_ref.expected_instance_name does not match the resolved block.",
+            )
+        ]
+    if block.block_type != expected_type:
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="target_ref.expected_block_type",
+                code="block_uid_type_mismatch",
+                message="target_ref.expected_block_type does not match the resolved block.",
+            )
+        ]
+
+    explicit_name = operation.payload.get("instance_name")
+    explicit_type = operation.payload.get("block_type")
+    if isinstance(explicit_name, str) and explicit_name and explicit_name != block.instance_name:
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="instance_name",
+                code="block_uid_instance_mismatch",
+                message="instance_name does not match target_ref.",
+            )
+        ]
+    if isinstance(explicit_type, str) and explicit_type and explicit_type != block.block_type:
+        return None, None, None, [
+            make_issue(
+                op_index=op_index,
+                op_type=op_type,
+                field="block_type",
+                code="block_uid_type_mismatch",
+                message="block_type does not match target_ref.",
+            )
+        ]
+
+    operation.payload["instance_name"] = block.instance_name
+    operation.payload["block_type"] = block.block_type
+    return block, raw_block, parsed_index, []
+
+
+def _is_full_block_uid(value: str) -> bool:
+    if not value.startswith("block:") or len(value) != len("block:") + 16:
+        return False
+    suffix = value.split(":", 1)[1]
+    return all(char in "0123456789abcdef" for char in suffix)
 
 
 def _require_block_rules(

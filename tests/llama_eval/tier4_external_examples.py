@@ -27,6 +27,7 @@ from tests.llama_eval.harness import (
 DEFAULT_N_RUNS = 1
 MAJORITY_THRESHOLD = 0.5
 GNU_EXAMPLES = Path("/usr/share/gnuradio/examples")
+FEC_DUPLICATE_POLYS_UID_A = "block:dbc46d86bc640163"
 
 
 def _scenario_if_present(
@@ -1065,22 +1066,16 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
                     "tool": "apply_edit",
                     "arguments": {
                         "ok": False,
-                        "applied": False,
-                        "error_type": "preflight_rejected",
-                        "errors": [
-                            {
-                                "field": "instance_name",
-                                "code": "block_name_not_unique",
-                            }
-                        ],
+                        "clarification_required": True,
+                        "error_type": "ambiguous_block",
                     },
                 },
             ),
             description=(
                 "Promoted duplicate-identity safety proof on an installed packet "
                 "example with same-name same-type constellation variables. The "
-                "runtime must reject the ambiguous name and avoid mutating the "
-                "wrong duplicate."
+                "runtime must clarify or reject the ambiguous name and avoid "
+                "mutating the wrong duplicate."
             ),
         ),
         _scenario_if_present(
@@ -1113,22 +1108,16 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
                     "tool": "apply_edit",
                     "arguments": {
                         "ok": False,
-                        "applied": False,
-                        "error_type": "preflight_rejected",
-                        "errors": [
-                            {
-                                "field": "instance_name",
-                                "code": "block_name_not_unique",
-                            }
-                        ],
+                        "clarification_required": True,
+                        "error_type": "ambiguous_block",
                     },
                 },
             ),
             description=(
                 "Promoted duplicate-identity safety proof on an installed UHD "
                 "WBFM receiver example. Same-name same-type variable range "
-                "targets must reject without mutating a first or arbitrary "
-                "duplicate."
+                "targets must clarify or reject without mutating a first or "
+                "arbitrary duplicate."
             ),
         ),
         _scenario_if_present(
@@ -1741,6 +1730,70 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
             ),
             description=(
                 "Verified variable edit on an installed Qt GUI/message-port example."
+            ),
+        ),
+        _multi_turn_scenario_if_present(
+            category="external_duplicate",
+            name="fec_duplicate_polys_uid_target_ref_clarification",
+            relative_path="fec/fecapi_cc_decoders.grc",
+            turns=(
+                LiveTurnSpec(
+                    prompt=(
+                        "Set the duplicate variable named polys to value 1 in "
+                        "this installed FEC decoder example. If multiple blocks "
+                        "match, ask me to choose the exact target."
+                    ),
+                    expected_tool_calls=(
+                        ToolExpectation(
+                            "apply_edit",
+                            transaction_operations=(
+                                {
+                                    "op_type": "update_params",
+                                    "instance_name": "polys",
+                                    "params": {"value": "1"},
+                                },
+                            ),
+                            require_result_ok=False,
+                        ),
+                    ),
+                    semantic_checks=(
+                        {"kind": "exact_graph_delta", "delta": {}},
+                        {
+                            "kind": "tool_result",
+                            "tool": "apply_edit",
+                            "arguments": {"clarification_required": True},
+                        },
+                    ),
+                ),
+                LiveTurnSpec(
+                    prompt="A",
+                    clarification_response=True,
+                    accept_any_tool=True,
+                    semantic_checks=(
+                        {"kind": "clarification_mode", "mode": "executed"},
+                        {
+                            "kind": "uid_exact_graph_delta",
+                            "delta": {
+                                "block_params_by_uid": {
+                                    FEC_DUPLICATE_POLYS_UID_A: {"value": "1"}
+                                },
+                                "dirty": True,
+                                "validation_status": "valid",
+                                "validation_returncode": 0,
+                            },
+                        },
+                        {
+                            "kind": "uid_block_param_equals",
+                            "block_uid": FEC_DUPLICATE_POLYS_UID_A,
+                            "param": "value",
+                            "value": "1",
+                        },
+                    ),
+                ),
+            ),
+            description=(
+                "Guarded target_ref duplicate-block clarification on an installed "
+                "FEC graph with UID-aware exact graph-delta proof."
             ),
         ),
     ]

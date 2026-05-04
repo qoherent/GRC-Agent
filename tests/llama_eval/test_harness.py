@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
 from unittest import mock
+
+import yaml
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -33,8 +36,12 @@ from tests.llama_eval.harness import (
     extract_executed_tool_calls,
     extract_requested_tool_calls,
     fixture_path,
+    graph_delta,
     graph_block_param_value,
     graph_block_state,
+    graph_block_uid,
+    graph_block_param_value_by_uid,
+    graph_block_state_by_uid,
     graph_snapshot,
     graph_variable_value,
     is_infra_error_message,
@@ -52,6 +59,7 @@ from tests.llama_eval.harness import (
     tool_call_matches_argument_checks,
     tool_call_matches_transaction_checks,
     tools_appear_in_expected_order,
+    uid_graph_delta,
 )
 
 
@@ -1270,6 +1278,36 @@ class GraphSnapshotTests(unittest.TestCase):
         session.load(fixture_path())
         return session
 
+    def _duplicate_session(self) -> FlowgraphSession:
+        base = self._loaded_session()
+        assert base.flowgraph is not None
+        raw_data = copy.deepcopy(base.flowgraph.raw_data)
+        raw_data["blocks"].append(
+            {
+                "name": "dup",
+                "id": "variable",
+                "parameters": {"comment": "", "value": "1"},
+                "states": {"coordinate": [64, 64], "rotation": 0, "state": "enabled"},
+            }
+        )
+        raw_data["blocks"].append(
+            {
+                "name": "dup",
+                "id": "variable",
+                "parameters": {"comment": "", "value": "2"},
+                "states": {"coordinate": [128, 64], "rotation": 0, "state": "disabled"},
+            }
+        )
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "duplicates.grc"
+            path.write_text(
+                yaml.safe_dump(raw_data, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            session = FlowgraphSession()
+            session.load(path)
+        return session
+
     def test_graph_snapshot_includes_stable_values_and_connection_ids(self) -> None:
         session = self._loaded_session()
 
@@ -1279,11 +1317,266 @@ class GraphSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["variable_values"]["samp_rate"], "32000")
         self.assertIn("samp_rate", snapshot["block_names"])
         self.assertIn("samp_rate", snapshot["blocks_by_name"])
+        self.assertIn("blocks_by_uid", snapshot)
+        self.assertIn("duplicate_block_groups", snapshot)
         self.assertIn(
             "analog_random_source_x_0:0->blocks_throttle2_0:0",
             snapshot["connection_ids"],
         )
         self.assertIsInstance(snapshot["raw_hash"], str)
+
+    def test_uid_snapshot_distinguishes_same_name_same_type_duplicates(self) -> None:
+        session = self._duplicate_session()
+        snapshot = graph_snapshot(session)
+
+        first_uid = graph_block_uid(
+            snapshot,
+            instance_name="dup",
+            block_type="variable",
+            index=0,
+        )
+        second_uid = graph_block_uid(
+            snapshot,
+            instance_name="dup",
+            block_type="variable",
+            index=1,
+        )
+
+        self.assertIsNotNone(first_uid)
+        self.assertIsNotNone(second_uid)
+        self.assertNotEqual(first_uid, second_uid)
+        self.assertEqual(
+            snapshot["duplicate_block_groups"]["dup|variable"],
+            [first_uid, second_uid],
+        )
+        self.assertEqual(len([name for name in snapshot["block_names"] if name == "dup"]), 2)
+        self.assertEqual(
+            graph_block_param_value_by_uid(snapshot, first_uid, "value"),
+            "1",
+        )
+        self.assertEqual(
+            graph_block_param_value_by_uid(snapshot, second_uid, "value"),
+            "2",
+        )
+
+    def test_uid_graph_delta_identifies_selected_duplicate_param_only(self) -> None:
+        session = self._duplicate_session()
+        before = graph_snapshot(session)
+        selected_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=1)
+        other_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=0)
+        assert selected_uid is not None
+        assert other_uid is not None
+
+        session.set_param_by_uid(
+            selected_uid,
+            "value",
+            "42",
+            expected_instance_name="dup",
+            expected_block_type="variable",
+        )
+        after = graph_snapshot(session)
+
+        self.assertEqual(
+            uid_graph_delta(before, after),
+            {
+                "block_params_by_uid": {selected_uid: {"value": "42"}},
+                "dirty": True,
+            },
+        )
+        self.assertEqual(graph_block_param_value_by_uid(after, selected_uid, "value"), "42")
+        self.assertEqual(graph_block_param_value_by_uid(after, other_uid, "value"), "1")
+
+    def test_uid_graph_delta_identifies_selected_duplicate_state_only(self) -> None:
+        session = self._duplicate_session()
+        before = graph_snapshot(session)
+        selected_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=0)
+        other_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=1)
+        assert selected_uid is not None
+        assert other_uid is not None
+
+        session.set_block_state_by_uid(
+            selected_uid,
+            "disabled",
+            expected_instance_name="dup",
+            expected_block_type="variable",
+        )
+        after = graph_snapshot(session)
+
+        self.assertEqual(
+            uid_graph_delta(before, after),
+            {
+                "block_states_by_uid": {selected_uid: "disabled"},
+                "dirty": True,
+            },
+        )
+        self.assertEqual(graph_block_state_by_uid(after, selected_uid), "disabled")
+        self.assertEqual(graph_block_state_by_uid(after, other_uid), "disabled")
+
+    def test_uid_exact_graph_delta_check_proves_selected_duplicate_only(self) -> None:
+        session = self._duplicate_session()
+        before = graph_snapshot(session)
+        selected_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=1)
+        assert selected_uid is not None
+        session.set_param_by_uid(
+            selected_uid,
+            "value",
+            "42",
+            expected_instance_name="dup",
+            expected_block_type="variable",
+        )
+        after = graph_snapshot(session)
+
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "uid_exact_graph_delta",
+                    "delta": {
+                        "block_params_by_uid": {selected_uid: {"value": "42"}},
+                        "dirty": True,
+                    },
+                },
+                {
+                    "kind": "uid_block_param_equals",
+                    "block_uid": selected_uid,
+                    "param": "value",
+                    "value": "42",
+                },
+            ),
+            before_snapshot=before,
+            after_snapshot=after,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertTrue(result["semantic_pass"], result)
+        self.assertTrue(result["end_state_pass"], result)
+
+    def test_uid_exact_graph_delta_detects_wrong_duplicate_change(self) -> None:
+        session = self._duplicate_session()
+        before = graph_snapshot(session)
+        expected_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=1)
+        wrong_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=0)
+        assert expected_uid is not None
+        assert wrong_uid is not None
+        session.set_param_by_uid(
+            wrong_uid,
+            "value",
+            "42",
+            expected_instance_name="dup",
+            expected_block_type="variable",
+        )
+        after = graph_snapshot(session)
+
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "uid_exact_graph_delta",
+                    "delta": {
+                        "block_params_by_uid": {expected_uid: {"value": "42"}},
+                        "dirty": True,
+                    },
+                },
+            ),
+            before_snapshot=before,
+            after_snapshot=after,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertFalse(result["semantic_pass"], result)
+        actual_delta = result["semantic_details"][0]["actual_delta"]
+        self.assertEqual(actual_delta["block_params_by_uid"], {wrong_uid: {"value": "42"}})
+
+    def test_uid_delta_proves_stale_preview_and_unsupported_failures_unchanged(self) -> None:
+        session = self._duplicate_session()
+        agent = GrcAgent(session)
+        before = graph_snapshot(agent)
+        selected_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=1)
+        assert selected_uid is not None
+        target_ref = {
+            "block_uid": selected_uid,
+            "expected_instance_name": "dup",
+            "expected_block_type": "variable",
+            "base_state_revision": session.state_revision,
+        }
+
+        preview = agent.execute_tool(
+            "propose_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "target_ref": target_ref,
+                    "params": {"value": "42"},
+                }
+            },
+        )
+        after_preview = graph_snapshot(agent)
+        self.assertTrue(preview["ok"], preview)
+        self.assertEqual(uid_graph_delta(before, after_preview), {})
+
+        session.set_param("samp_rate", "value", "48000")
+        before_stale = graph_snapshot(agent)
+        stale = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "update_params",
+                    "target_ref": target_ref,
+                    "params": {"value": "42"},
+                }
+            },
+        )
+        after_stale = graph_snapshot(agent)
+        self.assertFalse(stale["ok"], stale)
+        self.assertEqual(uid_graph_delta(before_stale, after_stale), {})
+
+        fresh_ref = {
+            **target_ref,
+            "base_state_revision": session.state_revision,
+        }
+        before_unsupported = graph_snapshot(agent)
+        unsupported = agent.execute_tool(
+            "apply_edit",
+            {
+                "transaction": {
+                    "op_type": "add_connection",
+                    "target_ref": fresh_ref,
+                    "src_block": "dup",
+                    "src_port": 0,
+                    "dst_block": "dup",
+                    "dst_port": 0,
+                }
+            },
+        )
+        after_unsupported = graph_snapshot(agent)
+        self.assertFalse(unsupported["ok"], unsupported)
+        self.assertEqual(uid_graph_delta(before_unsupported, after_unsupported), {})
+
+    def test_name_keyed_delta_is_ambiguous_but_uid_delta_is_precise(self) -> None:
+        session = self._duplicate_session()
+        before = graph_snapshot(session)
+        selected_uid = graph_block_uid(before, instance_name="dup", block_type="variable", index=0)
+        assert selected_uid is not None
+
+        session.set_param_by_uid(
+            selected_uid,
+            "value",
+            "99",
+            expected_instance_name="dup",
+            expected_block_type="variable",
+        )
+        after = graph_snapshot(session)
+
+        name_delta = graph_delta(before, after)
+        precise_delta = uid_graph_delta(before, after)
+        self.assertNotIn("block_params_by_uid", name_delta)
+        self.assertEqual(
+            precise_delta,
+            {
+                "block_params_by_uid": {selected_uid: {"value": "99"}},
+                "dirty": True,
+            },
+        )
 
     def test_graph_snapshot_detects_parameter_change(self) -> None:
         session = self._loaded_session()
@@ -2339,6 +2632,30 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
             disconnect_turn.semantic_checks,
         )
 
+    def test_tier4_includes_uid_duplicate_target_ref_case(self) -> None:
+        from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
+
+        if not (GNU_EXAMPLES / "fec/fecapi_cc_decoders.grc").exists():
+            self.skipTest("required installed GNU Radio FEC example not installed")
+        cases = {case.name: case for case in _available_cases()}
+
+        self.assertIn("fec_duplicate_polys_uid_target_ref_clarification", cases)
+        case = cases["fec_duplicate_polys_uid_target_ref_clarification"]
+        first_turn, second_turn = case.turns
+
+        self.assertEqual(first_turn.expected_tool_calls[0].name, "apply_edit")
+        self.assertIn({"kind": "exact_graph_delta", "delta": {}}, first_turn.semantic_checks)
+        self.assertTrue(second_turn.clarification_response)
+        self.assertIn(
+            {
+                "kind": "uid_block_param_equals",
+                "block_uid": "block:dbc46d86bc640163",
+                "param": "value",
+                "value": "1",
+            },
+            second_turn.semantic_checks,
+        )
+
     def test_tier4_includes_stream_message_and_rollback_coverage(self) -> None:
         from tests.llama_eval.tier4_external_examples import GNU_EXAMPLES, _available_cases
 
@@ -2691,14 +3008,8 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
                 "tool": "apply_edit",
                 "arguments": {
                     "ok": False,
-                    "applied": False,
-                    "error_type": "preflight_rejected",
-                    "errors": [
-                        {
-                            "field": "instance_name",
-                            "code": "block_name_not_unique",
-                        }
-                    ],
+                    "clarification_required": True,
+                    "error_type": "ambiguous_block",
                 },
             },
             duplicate_name_turn.semantic_checks,
@@ -2715,14 +3026,8 @@ class Tier4ExternalExamplesTests(unittest.TestCase):
                 "tool": "apply_edit",
                 "arguments": {
                     "ok": False,
-                    "applied": False,
-                    "error_type": "preflight_rejected",
-                    "errors": [
-                        {
-                            "field": "instance_name",
-                            "code": "block_name_not_unique",
-                        }
-                    ],
+                    "clarification_required": True,
+                    "error_type": "ambiguous_block",
                 },
             },
             duplicate_wbfm_turn.semantic_checks,

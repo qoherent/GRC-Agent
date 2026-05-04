@@ -155,10 +155,13 @@ def graph_snapshot(agent_or_session: Any) -> dict[str, Any]:
     serialized = session._serialize_raw_data(flowgraph.raw_data)
     blocks = [
         {
+            "uid": block.block_uid,
             "name": block.instance_name,
             "type": block.block_type,
             "parameters": dict(block.params.get("parameters") or {}),
             "state": (block.params.get("states") or {}).get("state"),
+            "coordinate": (block.params.get("states") or {}).get("coordinate"),
+            "rotation": (block.params.get("states") or {}).get("rotation"),
         }
         for block in flowgraph.blocks
     ]
@@ -170,6 +173,24 @@ def graph_snapshot(agent_or_session: Any) -> dict[str, Any]:
         }
         for block in sorted(blocks, key=lambda item: str(item["name"]))
     }
+    blocks_by_uid = {
+        str(block["uid"]): {
+            "name": block["name"],
+            "type": block["type"],
+            "parameters": block["parameters"],
+            "state": block["state"],
+            "coordinate": block["coordinate"],
+            "rotation": block["rotation"],
+        }
+        for block in sorted(blocks, key=lambda item: str(item["uid"]))
+    }
+    duplicate_block_groups: dict[str, list[str]] = {}
+    grouped_uids: dict[tuple[str, str], list[str]] = {}
+    for block in blocks:
+        grouped_uids.setdefault((str(block["name"]), str(block["type"])), []).append(str(block["uid"]))
+    for (name, block_type), uids in sorted(grouped_uids.items()):
+        if len(uids) > 1:
+            duplicate_block_groups[f"{name}|{block_type}"] = list(uids)
     variable_values = {
         block.instance_name: block.params.get("parameters", {}).get("value")
         for block in flowgraph.blocks
@@ -191,6 +212,9 @@ def graph_snapshot(agent_or_session: Any) -> dict[str, Any]:
         "connection_count": len(flowgraph.connections),
         "block_names": sorted(block["name"] for block in blocks),
         "blocks_by_name": blocks_by_name,
+        "block_uids": sorted(str(block["uid"]) for block in blocks),
+        "blocks_by_uid": blocks_by_uid,
+        "duplicate_block_groups": duplicate_block_groups,
         "variable_values": dict(sorted(variable_values.items())),
         "connection_ids": connection_ids,
         "raw_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
@@ -250,6 +274,62 @@ def graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]
     return delta
 
 
+def uid_graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Return an exact UID-keyed delta for duplicate-safe eval assertions."""
+    delta: dict[str, Any] = {}
+
+    before_uids = set(_string_list(before.get("block_uids")))
+    after_uids = set(_string_list(after.get("block_uids")))
+    _add_non_empty(delta, "added_block_uids", sorted(after_uids - before_uids))
+    _add_non_empty(delta, "removed_block_uids", sorted(before_uids - after_uids))
+
+    before_connections = set(_string_list(before.get("connection_ids")))
+    after_connections = set(_string_list(after.get("connection_ids")))
+    _add_non_empty(delta, "added_connections", sorted(after_connections - before_connections))
+    _add_non_empty(delta, "removed_connections", sorted(before_connections - after_connections))
+
+    before_by_uid = _dict_value(before.get("blocks_by_uid"))
+    after_by_uid = _dict_value(after.get("blocks_by_uid"))
+    params_delta: dict[str, Any] = {}
+    states_delta: dict[str, Any] = {}
+    layout_delta: dict[str, Any] = {}
+    for uid in sorted(before_uids & after_uids):
+        before_block = _dict_value(before_by_uid.get(uid))
+        after_block = _dict_value(after_by_uid.get(uid))
+        params = _value_delta(
+            _dict_value(before_block.get("parameters")),
+            _dict_value(after_block.get("parameters")),
+        )
+        if params:
+            params_delta[uid] = params
+        if before_block.get("state") != after_block.get("state"):
+            states_delta[uid] = after_block.get("state")
+        layout = _value_delta(
+            {
+                "coordinate": before_block.get("coordinate"),
+                "rotation": before_block.get("rotation"),
+            },
+            {
+                "coordinate": after_block.get("coordinate"),
+                "rotation": after_block.get("rotation"),
+            },
+        )
+        if layout:
+            layout_delta[uid] = layout
+    _add_non_empty(delta, "block_params_by_uid", params_delta)
+    _add_non_empty(delta, "block_states_by_uid", states_delta)
+    _add_non_empty(delta, "block_layout_by_uid", layout_delta)
+
+    if before.get("dirty") != after.get("dirty"):
+        delta["dirty"] = after.get("dirty")
+    if before.get("validation_status") != after.get("validation_status"):
+        delta["validation_status"] = after.get("validation_status")
+    if before.get("validation_returncode") != after.get("validation_returncode"):
+        delta["validation_returncode"] = after.get("validation_returncode")
+
+    return delta
+
+
 def _string_list(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -281,12 +361,21 @@ def _normalize_graph_delta(value: Any) -> dict[str, Any]:
         if key in {
             "added_blocks",
             "removed_blocks",
+            "added_block_uids",
+            "removed_block_uids",
             "added_connections",
             "removed_connections",
         }:
             list_item = item if isinstance(item, list) else []
             _add_non_empty(normalized, str(key), sorted(str(entry) for entry in list_item))
-        elif key in {"variables", "block_params", "block_states"}:
+        elif key in {
+            "variables",
+            "block_params",
+            "block_states",
+            "block_params_by_uid",
+            "block_states_by_uid",
+            "block_layout_by_uid",
+        }:
             dict_item = item if isinstance(item, dict) else {}
             _add_non_empty(normalized, str(key), _normalize_nested_mapping(dict_item))
         elif item is not None:
@@ -333,6 +422,45 @@ def graph_block_param_value(snapshot: dict[str, Any], instance_name: str, param:
     if not isinstance(parameters, dict):
         return None
     return parameters.get(param)
+
+
+def graph_block_uid(
+    snapshot: dict[str, Any],
+    *,
+    instance_name: str,
+    block_type: str,
+    index: int = 0,
+) -> str | None:
+    groups = snapshot.get("duplicate_block_groups")
+    if not isinstance(groups, dict):
+        return None
+    uids = groups.get(f"{instance_name}|{block_type}")
+    if not isinstance(uids, list) or index < 0 or index >= len(uids):
+        return None
+    return str(uids[index])
+
+
+def graph_block_param_value_by_uid(snapshot: dict[str, Any], block_uid: str, param: str) -> Any:
+    blocks = snapshot.get("blocks_by_uid")
+    if not isinstance(blocks, dict):
+        return None
+    block = blocks.get(block_uid)
+    if not isinstance(block, dict):
+        return None
+    parameters = block.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    return parameters.get(param)
+
+
+def graph_block_state_by_uid(snapshot: dict[str, Any], block_uid: str) -> Any:
+    blocks = snapshot.get("blocks_by_uid")
+    if not isinstance(blocks, dict):
+        return None
+    block = blocks.get(block_uid)
+    if not isinstance(block, dict):
+        return None
+    return block.get("state")
 
 
 def graph_block_state(snapshot: dict[str, Any], instance_name: str) -> Any:
@@ -543,6 +671,7 @@ def run_live_scenario_once(
         fixture_names.append(scenario.target_fixture_name)
 
     with isolated_fixture_workspace(*fixture_names) as (workspace, paths):
+        app_config = load_app_config()
         fixture_path = paths[scenario.fixture_name]
         target_path = (
             str(paths[scenario.target_fixture_name])
@@ -629,6 +758,11 @@ def run_live_scenario_once(
                         model=model,
                         agent=agent,
                         user_message=prompt,
+                        # Compatibility mode for legacy live tiers while MVP wrappers harden.
+                        mvp_tool_profile=False,
+                        advisor_enabled=app_config.agent.advisor_enabled,
+                        advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
+                        advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
                     )
             except Exception as exc:
                 turn_error = str(exc)
@@ -871,11 +1005,32 @@ def evaluate_semantic_checks(
                 str(check.get("instance_name")),
             )) == str(check.get("state"))
             end_state_pass = end_state_pass and passed
+        elif kind == "uid_block_param_equals":
+            passed = str(graph_block_param_value_by_uid(
+                after_snapshot,
+                str(check.get("block_uid")),
+                str(check.get("param")),
+            )) == str(check.get("value"))
+            end_state_pass = end_state_pass and passed
+        elif kind == "uid_block_state_equals":
+            passed = str(graph_block_state_by_uid(
+                after_snapshot,
+                str(check.get("block_uid")),
+            )) == str(check.get("state"))
+            end_state_pass = end_state_pass and passed
         elif kind == "dirty":
             passed = after_snapshot.get("dirty") is bool(check.get("value", True))
             end_state_pass = end_state_pass and passed
         elif kind == "exact_graph_delta":
             actual_delta = _normalize_graph_delta(graph_delta(before_snapshot, after_snapshot))
+            expected_delta = _normalize_graph_delta(check.get("delta"))
+            passed = actual_delta == expected_delta
+            detail["expected_delta"] = expected_delta
+            detail["actual_delta"] = actual_delta
+            safety_pass = safety_pass and passed
+            end_state_pass = end_state_pass and passed
+        elif kind == "uid_exact_graph_delta":
+            actual_delta = _normalize_graph_delta(uid_graph_delta(before_snapshot, after_snapshot))
             expected_delta = _normalize_graph_delta(check.get("delta"))
             passed = actual_delta == expected_delta
             detail["expected_delta"] = expected_delta
@@ -1146,6 +1301,7 @@ def evaluate_turn_recovery(
 
     from grc_agent.llama_server import run_bounded_llama_turn
 
+    app_config = load_app_config()
     recovery_history_start = history_start
     pre_recovery_snapshot = _maybe_graph_snapshot(agent)
     try:
@@ -1155,6 +1311,11 @@ def evaluate_turn_recovery(
             agent=agent,
             user_message=decision.prompt,
             track_turn_requirements=False,
+            # Compatibility mode for legacy live tiers while MVP wrappers harden.
+            mvp_tool_profile=False,
+            advisor_enabled=app_config.agent.advisor_enabled,
+            advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
+            advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
         )
     except Exception as exc:
         result["recovery_error"] = str(exc)

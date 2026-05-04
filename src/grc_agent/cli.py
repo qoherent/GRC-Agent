@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+from pathlib import Path
 import sys
 from typing import Any
 
@@ -21,6 +22,7 @@ from grc_agent.dogfood import (
     summarize_dogfood_cases,
 )
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.history import GraphHistoryJournal
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_server import (
     LlamaServerClient,
@@ -61,6 +63,10 @@ FAKE_ACTIONS = [
 ]
 
 _RETRIEVAL_READY_TOOLS = {"search_grc", "describe_block", "propose_edit", "apply_edit"}
+_INSTALLED_GRAPH_ROOTS = (
+    Path("/usr/share/gnuradio/examples"),
+    Path("/usr/local/share/gnuradio/examples"),
+)
 
 
 def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
@@ -437,6 +443,68 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Print dogfooding report as JSON.",
     )
 
+    history_parser = subparsers.add_parser(
+        "history",
+        help="List, inspect, diff, and restore local graph checkpoints.",
+    )
+    history_parser.add_argument(
+        "--journal-path",
+        help="Optional history JSONL path. Defaults to .grc_agent/history/journal.jsonl.",
+    )
+    history_subparsers = history_parser.add_subparsers(dest="history_command")
+    history_subparsers.required = True
+    history_list_parser = history_subparsers.add_parser(
+        "list",
+        help="List local accepted checkpoints and failure journal entries.",
+    )
+    history_list_parser.add_argument(
+        "--accepted-only",
+        action="store_true",
+        help="Show only accepted checkpoints.",
+    )
+    history_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print records as JSON.",
+    )
+    history_show_parser = history_subparsers.add_parser(
+        "show",
+        help="Show one checkpoint or failure journal entry.",
+    )
+    history_show_parser.add_argument("id", help="History record ID.")
+    history_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print full record as JSON.",
+    )
+    history_diff_parser = history_subparsers.add_parser(
+        "diff",
+        help="Diff two accepted checkpoint snapshots.",
+    )
+    history_diff_parser.add_argument("id1", help="Older history record ID.")
+    history_diff_parser.add_argument("id2", help="Newer history record ID.")
+    history_diff_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print diff as JSON.",
+    )
+    history_restore_parser = history_subparsers.add_parser(
+        "restore",
+        help="Restore one checkpoint to an explicit copy path.",
+    )
+    history_restore_parser.add_argument("id", help="History record ID.")
+    history_restore_parser.add_argument(
+        "--to",
+        required=True,
+        dest="to_path",
+        help="Explicit copy path to write. Existing files are refused.",
+    )
+    history_restore_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print restore result as JSON.",
+    )
+
     return parser
 
 
@@ -572,6 +640,45 @@ def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
         return
     print("\n--- Error ---")
     print(payload.get("message", "Command failed."))
+    error_type = str(payload.get("error_type") or "")
+    hint = ""
+    if error_type == ErrorCode.FILE_LOAD_ERROR:
+        hint = (
+            "Hint: verify the .grc path exists and is readable. "
+            "Use a copied graph, not an original installed/example file."
+        )
+    elif error_type == ErrorCode.INVALID_GRC:
+        hint = (
+            "Hint: this file is not a valid .grc payload for the current loader. "
+            "Open it in GNU Radio Companion and save a clean copy."
+        )
+    elif error_type == ErrorCode.RETRIEVAL_NOT_READY:
+        hint = (
+            "Hint: run `uv run grc-agent doctor` and ensure GNU Radio catalog "
+            "metadata is discoverable."
+        )
+    if hint:
+        print(hint)
+
+
+def _warn_if_original_graph_path(file_path: str | None) -> None:
+    """Emit a non-blocking warning when a known installed example path is used directly."""
+    if not file_path:
+        return
+    try:
+        resolved = Path(file_path).expanduser().resolve(strict=False)
+    except Exception:
+        return
+    for root in _INSTALLED_GRAPH_ROOTS:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        print(
+            "Warning: this path appears to be an installed GNU Radio example. "
+            "Copy it first and edit only the copy."
+        )
+        break
 
 
 def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
@@ -586,6 +693,7 @@ def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
 
 def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
     """Exercise the routed runtime contract with deterministic fake actions."""
+    _warn_if_original_graph_path(file_path)
     print(f"Loading {file_path}...")
     try:
         session = _load_initial_session(file_path)
@@ -621,6 +729,7 @@ def _run_llama_runtime(
 ) -> int:
     """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
     if file_path is not None:
+        _warn_if_original_graph_path(file_path)
         print(f"Loading {file_path}...")
         try:
             session = _load_initial_session(file_path)
@@ -666,9 +775,9 @@ def _run_llama_runtime(
         )
 
     if user_message is not None:
-        return _run_single_turn(agent, client, user_message, model, verbose=verbose)
+        return _run_single_turn(agent, client, user_message, model, config, verbose=verbose)
 
-    return _run_repl_loop(agent, client, model, verbose=verbose)
+    return _run_repl_loop(agent, client, model, config, verbose=verbose)
 
 
 def _maybe_render_pending_clarification(agent: GrcAgent) -> bool:
@@ -687,16 +796,23 @@ def _run_single_turn(
     client: LlamaServerClient,
     user_message: str,
     model: str | None,
+    config: AppConfig | None = None,
     *,
     verbose: bool = False,
 ) -> int:
     """Run one bounded llama turn and print the result."""
+    if config is None:
+        config = load_app_config()
     try:
         result = run_bounded_llama_turn(
             agent,
             client,
             user_message,
             model=model,
+            advisor_enabled=config.agent.advisor_enabled,
+            advisor_limited_advisory=config.agent.advisor_limited_advisory,
+            advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
+            mvp_tool_profile=not config.agent.legacy_model_tool_surface,
         )
     except LlamaServerError as exc:
         print("\n--- Runtime ---")
@@ -722,10 +838,13 @@ def _run_repl_loop(
     agent: GrcAgent,
     client: LlamaServerClient,
     model: str | None,
+    config: AppConfig | None = None,
     *,
     verbose: bool = False,
 ) -> int:
     """Run an interactive REPL loop over the current agent and session."""
+    if config is None:
+        config = load_app_config()
     print("\nInteractive REPL. Type /quit or /exit to stop.\n")
     last_exit_code = 0
 
@@ -776,6 +895,10 @@ def _run_repl_loop(
                 client,
                 user_input,
                 model=model,
+                advisor_enabled=config.agent.advisor_enabled,
+                advisor_limited_advisory=config.agent.advisor_limited_advisory,
+                advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
+                mvp_tool_profile=not config.agent.legacy_model_tool_surface,
             )
         except LlamaServerError as exc:
             print(f"\n--- Runtime Error ---\n{exc}")
@@ -853,6 +976,8 @@ def _print_vector_payload(payload: dict[str, Any], *, json_output: bool) -> None
         return
     if not payload.get("ok"):
         print(payload.get("message", "Vector command failed."))
+        if str(payload.get("error_type")) == "missing_index":
+            print("Hint: build the local index first with `uv run grc-agent vector build`.")
         return
     if "would_delete_collections" in payload:
         mode = "dry run" if payload.get("dry_run") else "applied"
@@ -954,6 +1079,108 @@ def _print_dogfood_payload(payload: dict[str, Any], *, json_output: bool) -> Non
             )
         for warning in payload.get("warnings", []) or []:
             print(f"Warning: {warning}")
+
+
+def _print_history_records(records: list[dict[str, Any]], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps({"ok": True, "records": records}, indent=2, sort_keys=True))
+        return
+    print(f"History records: {len(records)}")
+    for record in records:
+        status = "accepted" if record.get("accepted") else "failure"
+        print(
+            f"- {record.get('id')} [{status}] "
+            f"{record.get('tool_name')} {record.get('operation_type')} "
+            f"rev={record.get('state_revision')} path={record.get('graph_path')}"
+        )
+
+
+def _print_history_record(record: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(record, indent=2, sort_keys=True))
+        return
+    print(f"ID: {record.get('id')}")
+    print(f"Type: {record.get('record_type')} accepted={record.get('accepted')}")
+    print(f"Tool: {record.get('tool_name')} operation={record.get('operation_type')}")
+    print(f"Revision: {record.get('state_revision')}")
+    print(f"Path: {record.get('graph_path')}")
+    if record.get("save_path"):
+        print(f"Save path: {record.get('save_path')}")
+    print(f"Before: {record.get('before_hash')}")
+    print(f"After: {record.get('after_hash')}")
+    validation = record.get("validation_result")
+    if isinstance(validation, dict):
+        print(f"Validation: {validation.get('status')} returncode={validation.get('returncode')}")
+    delta = record.get("graph_delta")
+    if isinstance(delta, dict):
+        print(
+            "Delta: "
+            f"changed={delta.get('changed')} "
+            f"blocks+={len(delta.get('added_blocks', []))} "
+            f"blocks-={len(delta.get('removed_blocks', []))} "
+            f"blocks~={len(delta.get('changed_blocks', []))} "
+            f"connections+={len(delta.get('added_connections', []))} "
+            f"connections-={len(delta.get('removed_connections', []))}"
+        )
+
+
+def _print_history_payload(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if not payload.get("ok"):
+        print(payload.get("message", "History command failed."))
+        if str(payload.get("error_type")) == "restore_target_exists":
+            print("Hint: choose a new `--to` path; restore never overwrites existing files.")
+        return
+    if "graph_delta" in payload:
+        delta = payload["graph_delta"]
+        print(f"History diff: {payload.get('from')} -> {payload.get('to')}")
+        print(json.dumps(delta, indent=2, sort_keys=True))
+        text_diff = payload.get("text_diff", [])
+        if text_diff:
+            print("\n".join(text_diff[:80]))
+        return
+    if "path" in payload:
+        print(f"Restored checkpoint {payload.get('id')} to {payload.get('path')}")
+        validation = payload.get("validation", {})
+        print(f"Validation: {validation.get('status')} returncode={validation.get('returncode')}")
+
+
+def _run_history_command(args: argparse.Namespace) -> int:
+    journal = GraphHistoryJournal(args.journal_path)
+    try:
+        if args.history_command == "list":
+            records = journal.list_records(accepted_only=args.accepted_only)
+            _print_history_records(records, json_output=args.json)
+            return 0
+        if args.history_command == "show":
+            record = journal.get_record(args.id)
+            _print_history_record(record, json_output=args.json)
+            return 0
+        if args.history_command == "diff":
+            payload = journal.diff_records(args.id1, args.id2)
+            _print_history_payload(payload, json_output=args.json)
+            return 0
+        if args.history_command == "restore":
+            payload = journal.restore_record(args.id, args.to_path)
+            _print_history_payload(payload, json_output=args.json)
+            return 0 if payload.get("ok") else 1
+    except KeyError as exc:
+        payload = build_error_payload(
+            error_type=ErrorCode.INVALID_REQUEST,
+            message=f"History record not found: {exc.args[0]}",
+        )
+        _print_history_payload(payload, json_output=getattr(args, "json", False))
+        return 1
+    except Exception as exc:
+        payload = build_error_payload(
+            error_type=ErrorCode.INTERNAL_ERROR,
+            message=str(exc),
+        )
+        _print_history_payload(payload, json_output=getattr(args, "json", False))
+        return 1
+    return 2
 
 
 def _run_vector_command(args: argparse.Namespace) -> int:
@@ -1153,6 +1380,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "dogfood":
         return _run_dogfood_command(args)
+
+    if args.command == "history":
+        return _run_history_command(args)
 
     parser.error("Unknown command.")
     return 2

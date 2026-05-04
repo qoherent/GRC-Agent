@@ -32,6 +32,10 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
+        self.assertFalse(config.agent.advisor_enabled)
+        self.assertFalse(config.agent.advisor_limited_advisory)
+        self.assertTrue(config.agent.advisor_shadow_telemetry)
+        self.assertFalse(config.agent.legacy_model_tool_surface)
 
     def test_cli_parser_defaults_come_from_repo_config(self) -> None:
         config = load_app_config()
@@ -68,6 +72,12 @@ class RuntimeConfigTests(unittest.TestCase):
                     "temperature = 0.2\n"
                     "enable_thinking = true\n"
                     "request_timeout_seconds = 30.0\n"
+                    "\n[agent]\n"
+                    "history_compact_budget = 5000\n"
+                    "advisor_enabled = true\n"
+                    "advisor_limited_advisory = true\n"
+                    "advisor_shadow_telemetry = false\n"
+                    "legacy_model_tool_surface = true\n"
                 ),
                 encoding="utf-8",
             )
@@ -77,6 +87,10 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:9000")
         self.assertEqual(config.llama.model, "custom-model")
         self.assertTrue(config.llama.enable_thinking)
+        self.assertTrue(config.agent.advisor_enabled)
+        self.assertTrue(config.agent.advisor_limited_advisory)
+        self.assertFalse(config.agent.advisor_shadow_telemetry)
+        self.assertTrue(config.agent.legacy_model_tool_surface)
 
     def test_resolve_config_path_prefers_env_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

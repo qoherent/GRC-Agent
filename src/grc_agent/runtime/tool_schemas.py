@@ -22,6 +22,18 @@ PUBLIC_TOOL_NAMES: tuple[str, ...] = (
     "save_graph",
 )
 
+MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
+    "inspect_graph",
+    "search_blocks",
+    "search_help",
+    "change_graph",
+)
+
+MODEL_TOOL_NAMES_ORDERED: tuple[str, ...] = (
+    *PUBLIC_TOOL_NAMES,
+    *MVP_MODEL_TOOL_NAMES,
+)
+
 
 def _schema(
     name: str,
@@ -51,7 +63,7 @@ def build_tool_schemas() -> list[dict[str, Any]]:
     Tool order matters — models prefer earlier tools.
     `suggest_compatible_insertions` must appear before `apply_edit`.
     """
-    return [
+    legacy_schemas = [
         _schema(
             "new_grc",
             "Create a new empty GRC flowgraph session. "
@@ -400,3 +412,149 @@ def build_tool_schemas() -> list[dict[str, Any]]:
             },
         ),
     ]
+    mvp_schemas = [
+        _schema(
+            "inspect_graph",
+            "Single model-facing graph inspection surface. "
+            "Use this for summary, block/connection context, validate, list blocks/connections/variables, "
+            "or compact checkpoint/history overview. Returns bounded compact output only.",
+            {
+                "operation": {
+                    "type": "string",
+                    "enum": [
+                        "summarize",
+                        "context",
+                        "validate",
+                        "list_blocks",
+                        "list_connections",
+                        "list_variables",
+                        "history_summary",
+                    ],
+                    "description": "Inspection operation.",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Optional target block/variable name for context operations.",
+                },
+                "max_items": {
+                    "type": "integer",
+                    "description": "Optional compact output bound.",
+                },
+                "debug": {
+                    "type": "boolean",
+                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
+                },
+            },
+            required=["operation"],
+        ),
+        _schema(
+            "search_blocks",
+            "Single model-facing block search. Returns compact block candidates only: block_id, name, summary. "
+            "Internally combines semantic and lexical retrieval with exact-ID boost.",
+            {
+                "query": {
+                    "type": "string",
+                    "description": "Block capability or block-id query.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Optional maximum candidates (default 5).",
+                },
+                "debug": {
+                    "type": "boolean",
+                    "description": "When true, include internal ranking/debug metadata.",
+                },
+                "enrich": {
+                    "type": "boolean",
+                    "description": "When true, optionally enrich missing summaries via internal block descriptions.",
+                },
+            },
+            required=["query"],
+        ),
+        _schema(
+            "search_help",
+            "Single model-facing help search over manual/tutorial docs. Explanation-only context with citations. "
+            "Must never authorize mutations.",
+            {
+                "query": {
+                    "type": "string",
+                    "description": "GNU Radio concept or troubleshooting question.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Optional maximum cited excerpts (default 3).",
+                },
+                "debug": {
+                    "type": "boolean",
+                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
+                },
+            },
+            required=["query"],
+        ),
+        _schema(
+            "change_graph",
+            "Single model-facing graph change surface. "
+            "Set dry_run=true for preview and dry_run=false for committed mutation. "
+            "Internally routes through verified mutation handlers with preflight, grcc validation, and rollback.",
+            {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview only when true; live mutation when false.",
+                },
+                "user_goal": {
+                    "type": "string",
+                    "description": "Bounded natural-language mutation goal.",
+                },
+                "target_ref": {
+                    "type": "object",
+                    "description": "Optional guarded duplicate-target reference.",
+                    "properties": {
+                        "block_uid": {"type": "string"},
+                        "expected_instance_name": {"type": "string"},
+                        "expected_block_type": {"type": "string"},
+                        "base_state_revision": {"type": "integer"},
+                    },
+                    "required": [
+                        "block_uid",
+                        "expected_instance_name",
+                        "expected_block_type",
+                        "base_state_revision",
+                    ],
+                    "additionalProperties": False,
+                },
+                "block_id": {
+                    "type": "string",
+                    "description": "Optional selected catalog block id.",
+                },
+                "instance_name": {
+                    "type": "string",
+                    "description": "Optional exact loaded block/variable instance name.",
+                },
+                "connection_id": {
+                    "type": "string",
+                    "description": "Optional exact connection id.",
+                },
+                "src_block": {"type": "string"},
+                "src_port": {"type": ["integer", "string"]},
+                "dst_block": {"type": "string"},
+                "dst_port": {"type": ["integer", "string"]},
+                "new_src_block": {"type": "string"},
+                "new_src_port": {"type": ["integer", "string"]},
+                "new_dst_block": {"type": "string"},
+                "new_dst_port": {"type": ["integer", "string"]},
+                "param_key": {"type": "string"},
+                "param_value": {"type": ["string", "number", "integer", "boolean"]},
+                "state": {"type": "string", "enum": ["enabled", "disabled"]},
+                "variable_name": {"type": "string"},
+                "variable_value": {
+                    "type": ["string", "number", "integer", "boolean"]
+                },
+                "debug": {
+                    "type": "boolean",
+                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
+                },
+            },
+            required=["dry_run", "user_goal"],
+        ),
+    ]
+    return [*legacy_schemas, *mvp_schemas]

@@ -17,10 +17,19 @@ playground/
 .llama_eval/
 .opencode/
 .grc_agent/
+.cache/
+benchmark_outputs/
+tmp/
 
 # Generated eval/report JSON artifacts
 reports/**/*.json
 reports/**/*.jsonl
+!reports/retrieval/vector_eval_governed_metadata.json
+
+# Local copied/smoke graph artifacts
+*.saved.grc
+*.restored.grc
+*.tmp.grc
 
 # Backups
 *.bak

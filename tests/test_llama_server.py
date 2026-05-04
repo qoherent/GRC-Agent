@@ -1,6 +1,7 @@
 """Tests for the thin llama.cpp adapter over the narrowed runtime surface."""
 
 from contextlib import redirect_stdout
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 import json
@@ -22,6 +23,8 @@ from grc_agent.llama_server import (
     _looks_like_tool_call_text,
     run_bounded_llama_turn,
 )
+from grc_agent.recovery import RECOVERABLE_MISSING_ARGUMENTS, RecoveryDecision
+from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES
 
 
 class _ScriptedLlamaServer(ThreadingHTTPServer):
@@ -1707,7 +1710,10 @@ class LlamaServerAdapterTests(unittest.TestCase):
                             "message": {
                                 "role": "assistant",
                                 "tool_calls": [
-                                    {"name": "summarize_graph", "arguments": "{}"}
+                                    {
+                                        "name": "summarize_graph",
+                                        "arguments": "{}",
+                                    }
                                 ],
                             }
                         }
@@ -1764,7 +1770,10 @@ class LlamaServerAdapterTests(unittest.TestCase):
                             "message": {
                                 "role": "assistant",
                                 "tool_calls": [
-                                    {"name": "summarize_graph", "arguments": "{}"}
+                                    {
+                                        "name": "summarize_graph",
+                                        "arguments": "{}",
+                                    }
                                 ],
                             }
                         }
@@ -1969,7 +1978,10 @@ class LlamaServerAdapterTests(unittest.TestCase):
                             "message": {
                                 "role": "assistant",
                                 "tool_calls": [
-                                    {"name": "summarize_graph", "arguments": "{}"}
+                                    {
+                                        "name": "inspect_graph",
+                                        "arguments": json.dumps({"operation": "summarize"}),
+                                    }
                                 ],
                             }
                         }
@@ -2003,7 +2015,85 @@ class LlamaServerAdapterTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)
         self.assertIn(f"Using model {llama_config.model}", rendered)
+        self.assertIn("inspect_graph: ok", rendered)
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertGreaterEqual(len(chat_requests), 1)
+        first_tools = {
+            schema["function"]["name"]
+            for schema in chat_requests[0]["payload"]["tools"]
+        }
+        self.assertEqual(first_tools, set(MVP_MODEL_TOOL_NAMES))
+
+    def test_cli_llama_runtime_compatibility_mode_exposes_legacy_tools_only_when_enabled(
+        self,
+    ) -> None:
+        config = load_app_config()
+        config = replace(
+            config,
+            agent=replace(config.agent, legacy_model_tool_surface=True),
+        )
+        llama_config = config.llama
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "summarize_graph",
+                                        "arguments": json.dumps({}),
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "The graph has 5 blocks and 3 connections.",
+                            }
+                        }
+                    ]
+                },
+            ],
+            model_id=llama_config.model,
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = _run_llama_runtime(
+                str(self._fixture_path()),
+                "Summarize the graph.",
+                config,
+                self._server_url(server),
+                llama_config.model,
+                None,
+            )
+
+        rendered = output.getvalue()
+        self.assertEqual(exit_code, 0, rendered)
         self.assertIn("summarize_graph: ok", rendered)
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertGreaterEqual(len(chat_requests), 1)
+        first_tools = {
+            schema["function"]["name"]
+            for schema in chat_requests[0]["payload"]["tools"]
+        }
+        self.assertIn("summarize_graph", first_tools)
+        self.assertNotIn("inspect_graph", first_tools)
 
     def test_cli_llama_runtime_strips_leading_control_tokens(self) -> None:
         config = load_app_config()
@@ -2016,7 +2106,10 @@ class LlamaServerAdapterTests(unittest.TestCase):
                             "message": {
                                 "role": "assistant",
                                 "tool_calls": [
-                                    {"name": "summarize_graph", "arguments": "{}"}
+                                    {
+                                        "name": "inspect_graph",
+                                        "arguments": json.dumps({"operation": "summarize"}),
+                                    }
                                 ],
                             }
                         }
@@ -2049,7 +2142,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertEqual(exit_code, 0)
-        self.assertIn("summarize_graph: ok", rendered)
+        self.assertIn("inspect_graph: ok", rendered)
         self.assertNotIn("<eos>", rendered)
 
         chat_requests = [
@@ -2092,11 +2185,10 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "role": "assistant",
                                 "tool_calls": [
                                     {
-                                        "name": "search_grc",
+                                        "name": "search_blocks",
                                         "arguments": json.dumps(
                                             {
                                                 "query": "samp_rate",
-                                                "scope": "session",
                                                 "unexpected": True,
                                             }
                                         ),
@@ -2183,6 +2275,71 @@ class LlamaServerAdapterTests(unittest.TestCase):
         # assistant turns should appear in history.
         assistant_turns = [t for t in agent.history if t.get("role") == "assistant"]
         self.assertEqual(len(assistant_turns), 2)
+
+    def test_mvp_recovery_retry_intersection_does_not_reexpose_legacy_tools(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "apply_edit",
+                                        "arguments": json.dumps(
+                                            {
+                                                "transaction": {
+                                                    "op_type": "update_params",
+                                                    "instance_name": "samp_rate",
+                                                    "params": {"value": "48000"},
+                                                }
+                                            }
+                                        ),
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ],
+            model_id=llama_config.model,
+        )
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        with mock.patch(
+            "grc_agent.llama_server.classify_tool_result_for_recovery",
+            return_value=RecoveryDecision(
+                recovery_class=RECOVERABLE_MISSING_ARGUMENTS,
+                recoverable=True,
+                allowed_tools=("summarize_graph", "apply_edit"),
+                max_mutation_retries=1,
+                prompt="Retry once with corrected args.",
+                reason="forced test recovery path",
+            ),
+        ):
+            result = run_bounded_llama_turn(
+                agent,
+                client,
+                "Set samp_rate.",
+                model=llama_config.model,
+                mvp_tool_profile=True,
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(session.state_revision, before_revision)
+        self.assertIn("not allowed for this turn", result["assistant_text"])
+        chat_requests = [
+            request
+            for request in server.requests_seen
+            if request["path"] == "/v1/chat/completions"
+        ]
+        self.assertEqual(len(chat_requests), 1)
 
 
 class LooksLikeToolCallTextTests(unittest.TestCase):

@@ -178,6 +178,16 @@ def build_turn_plan(user_message: str) -> TurnPlan:
     preview = _contains_any(text, _PREVIEW_PHRASES)
     explicit_apply_after_preview = preview and _explicit_apply_after_preview(text)
     explicit_insertion_tool = _explicit_insertion_tool(text)
+    if _looks_like_block_uid_mutation(text):
+        return TurnPlan(
+            intent=INTENT_UNCERTAIN_MUTATION,
+            allowed_tools=UNCERTAIN_MUTATION_TOOLS,
+            requires_clarification=True,
+            expected_op_types=(),
+            required_actions=(),
+            unsupported_reason="block_uid_read_only",
+            evidence_span="block_uid",
+        )
     if explicit_insertion_tool:
         return TurnPlan(
             intent=INTENT_INSERTION,
@@ -517,6 +527,28 @@ def _has_insertion_anchor_hint(text: str) -> bool:
 
 def _looks_like_uncertain_mutation(text: str) -> bool:
     return bool(_first_phrase(text, _UNCERTAIN_MUTATION_PHRASES))
+
+
+def _looks_like_block_uid_mutation(text: str) -> bool:
+    if "block_uid" not in text:
+        return False
+    return _contains_any(
+        text,
+        (
+            "mutate",
+            "change",
+            "set",
+            "update",
+            "edit",
+            "disable",
+            "enable",
+            "remove",
+            "delete",
+            "by block_uid",
+            "use the block_uid",
+            "use block_uid",
+        ),
+    )
 
 
 def _looks_like_connection_disconnect(text: str) -> bool:

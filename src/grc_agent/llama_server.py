@@ -12,7 +12,15 @@ from urllib import error, request
 from grc_agent._payload import ErrorCode
 from grc_agent.agent import GrcAgent
 from grc_agent.recovery import RECOVERABLE_MISSING_ARGUMENTS, classify_tool_result_for_recovery
-from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
+from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
+from grc_agent.runtime.turnplan_advisor import (
+    AdvisorModeObservation,
+    AdvisorObservation,
+    AdvisorPermissionDecision,
+    compile_advisor_permission,
+    run_turnplan_mode_advisor,
+    run_turnplan_advisor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -601,6 +609,7 @@ class LlamaServerClient:
 
 
 _SAFETY_MAX_TOOL_ROUNDS = 50
+_DEFAULT_MVP_ALLOWED_TOOLS: set[str] = set(MVP_MODEL_TOOL_NAMES)
 
 
 def run_bounded_llama_turn(
@@ -610,6 +619,12 @@ def run_bounded_llama_turn(
     *,
     model: str | None = None,
     track_turn_requirements: bool = True,
+    advisor_enabled: bool = False,
+    advisor_limited_advisory: bool = False,
+    advisor_shadow_telemetry: bool = True,
+    advisor_timeout_seconds: float = 4.0,
+    mvp_tool_profile: bool = False,
+    wrapper_eval_telemetry: bool = False,
 ) -> dict[str, Any]:
     """Run a bounded llama.cpp -> runtime loop against one loaded flowgraph."""
     if not isinstance(user_message, str) or not user_message.strip():
@@ -647,8 +662,65 @@ def run_bounded_llama_turn(
     assistant_turns = 0
     correction_retries_used = 0
     correction_allowed_tools: set[str] | None = None
+    advisor_shadow: AdvisorObservation | None = None
+    advisor_mode_shadow: AdvisorModeObservation | None = None
+    advisor_permission: AdvisorPermissionDecision | None = None
+    advisor_allowed_tools: set[str] | None = None
 
     turn_plan = agent.init_turn_requirements(user_message) if track_turn_requirements else None
+    if (
+        advisor_enabled
+        and advisor_limited_advisory
+        and not mvp_tool_profile
+        and turn_plan is not None
+        and agent._pending_clarification is None
+    ):
+        advisor_mode_shadow = run_turnplan_mode_advisor(
+            client=client,
+            model=resolved_model,
+            user_message=user_message,
+            session=agent.session,
+            deterministic_plan=turn_plan,
+            timeout_seconds=advisor_timeout_seconds,
+            prompt_version="v7",
+        )
+        if advisor_mode_shadow.mode_result is not None and advisor_mode_shadow.schema_valid:
+            advisor_permission = compile_advisor_permission(
+                user_message=user_message,
+                advisor_mode=advisor_mode_shadow.mode_result.mode,
+            )
+            deterministic_mutation_exposed = bool(
+                set(turn_plan.allowed_tools)
+                & {
+                    "apply_edit",
+                    "remove_connection",
+                    "rewire_connection",
+                    "insert_block_on_connection",
+                    "auto_insert_block",
+                    "save_graph",
+                }
+            )
+            if (
+                advisor_permission.compiled_permission == "ask_clarification"
+                and turn_plan.requires_clarification
+            ):
+                pass
+            elif advisor_permission.compiled_permission == "deny_unsupported":
+                pass
+            elif advisor_permission.compiled_permission in {"allow_preview", "allow_readonly"}:
+                pass
+            elif advisor_permission.compiled_mode == "validate" and not deterministic_mutation_exposed:
+                pass
+    elif advisor_enabled and advisor_shadow_telemetry and turn_plan is not None:
+        advisor_shadow = run_turnplan_advisor(
+            client=client,
+            model=resolved_model,
+            user_message=user_message,
+            session=agent.session,
+            deterministic_plan=turn_plan,
+            pending_clarification=agent._pending_clarification,
+            timeout_seconds=advisor_timeout_seconds,
+        )
     if turn_plan is not None and turn_plan.requires_clarification:
         if turn_plan.unsupported_reason == "insertion_anchor_missing":
             assistant_text = (
@@ -666,7 +738,8 @@ def run_bounded_llama_turn(
                 "disable/enable state changes with removal. Please choose one action."
             )
         agent.history.append({"role": "assistant", "content": assistant_text})
-        return {
+        return _with_advisor_shadow(
+            {
             "ok": True,
             "model": resolved_model,
             "steps": 0,
@@ -674,12 +747,32 @@ def run_bounded_llama_turn(
             "tool_calls_executed": 0,
             "assistant_text": assistant_text,
             "turn_plan": turn_plan.as_dict(),
-        }
+            },
+            advisor_shadow,
+        )
 
     deterministic_tool_call = None
+    base_allowed_tools = (
+        set(_DEFAULT_MVP_ALLOWED_TOOLS)
+        if mvp_tool_profile
+        else (
+            set(turn_plan.allowed_tools)
+            if turn_plan is not None
+            else set(PUBLIC_TOOL_NAMES)
+        )
+    )
     if turn_plan is not None:
         deterministic_tool_call_payload = agent.deterministic_turn_tool_call(user_message)
-        if deterministic_tool_call_payload is not None:
+        if (
+            deterministic_tool_call_payload is not None
+            and (
+                str(deterministic_tool_call_payload["name"]) in base_allowed_tools
+                and (
+                    advisor_allowed_tools is None
+                    or str(deterministic_tool_call_payload["name"]) in advisor_allowed_tools
+                )
+            )
+        ):
             deterministic_tool_call = LlamaToolCall(
                 id=str(deterministic_tool_call_payload["id"]),
                 name=str(deterministic_tool_call_payload["name"]),
@@ -718,7 +811,8 @@ def run_bounded_llama_turn(
             )
             assistant_text = _tool_failure_text(validation_result)
             agent.history.append({"role": "assistant", "content": assistant_text})
-            return {
+            return _with_advisor_shadow(
+                {
                 "ok": False,
                 "model": resolved_model,
                 "steps": assistant_turns,
@@ -729,7 +823,9 @@ def run_bounded_llama_turn(
                 "message": validation_result.get("message", assistant_text),
                 "correction_retries_used": correction_retries_used,
                 "turn_plan": turn_plan.as_dict(),
-            }
+                },
+                advisor_shadow,
+            )
 
         result = agent.execute_tool(
             deterministic_tool_call.name,
@@ -740,6 +836,12 @@ def run_bounded_llama_turn(
             deterministic_tool_call.name,
             result.get("ok") is True,
         )
+        for alias in _mvp_completion_aliases(
+            tool_name=deterministic_tool_call.name,
+            arguments=deterministic_tool_call.arguments,
+            result=result,
+        ):
+            agent.record_tool_completion(alias, result.get("ok") is True)
         agent.history.append(
             {
                 "role": "tool",
@@ -751,7 +853,8 @@ def run_bounded_llama_turn(
         if agent.should_stop_batch_after_result(deterministic_tool_call.name, result):
             assistant_text = _tool_failure_text(result)
             agent.history.append({"role": "assistant", "content": assistant_text})
-            return {
+            return _with_advisor_shadow(
+                {
                 "ok": False,
                 "model": resolved_model,
                 "steps": assistant_turns,
@@ -762,14 +865,17 @@ def run_bounded_llama_turn(
                 "message": result.get("message", assistant_text),
                 "correction_retries_used": correction_retries_used,
                 "turn_plan": turn_plan.as_dict(),
-            }
+                },
+                advisor_shadow,
+            )
         should_nudge, nudge = agent.check_turn_continuation()
         if should_nudge:
             agent.history.append({"role": "user", "content": nudge})
         else:
             assistant_text = str(result.get("message") or "Request completed.")
             agent.history.append({"role": "assistant", "content": assistant_text})
-            return {
+            return _with_advisor_shadow(
+                {
                 "ok": True,
                 "model": resolved_model,
                 "steps": assistant_turns,
@@ -778,12 +884,21 @@ def run_bounded_llama_turn(
                 "correction_retries_used": correction_retries_used,
                 "assistant_text": assistant_text,
                 "turn_plan": turn_plan.as_dict(),
-            }
+                },
+                advisor_shadow,
+            )
 
     logger.info("turn_start model=%s message=%s", resolved_model, user_message[:80])
 
     while True:
-        tool_schemas = agent.get_tool_schemas_for_turn(correction_allowed_tools)
+        active_allowed_tools = (
+            correction_allowed_tools
+            if correction_allowed_tools is not None
+            else advisor_allowed_tools
+        )
+        if active_allowed_tools is None:
+            active_allowed_tools = set(base_allowed_tools)
+        tool_schemas = agent.get_tool_schemas_for_turn(active_allowed_tools)
         response = client.create_chat_completion(
             model=resolved_model,
             messages=agent.get_model_messages(),
@@ -800,24 +915,31 @@ def run_bounded_llama_turn(
                 LlamaToolCall(
                     id=tool_call.id,
                     name=tool_call.name,
-                    arguments=agent.normalize_tool_call_arguments(
+                    arguments=_maybe_enable_wrapper_eval_telemetry(
                         tool_call.name,
-                        tool_call.arguments,
+                        agent.normalize_tool_call_arguments(
+                            tool_call.name,
+                            tool_call.arguments,
+                        ),
+                        enabled=wrapper_eval_telemetry,
                     ),
                 )
                 for tool_call in tool_calls
             ]
 
         if tool_calls and tool_rounds_used >= _SAFETY_MAX_TOOL_ROUNDS:
-            return {
-                "ok": False,
-                "error_type": ErrorCode.SAFETY_CEILING,
+                return _with_advisor_shadow(
+                    {
+                    "ok": False,
+                    "error_type": ErrorCode.SAFETY_CEILING,
                 "model": resolved_model,
                 "steps": assistant_turns,
                 "tool_rounds_used": tool_rounds_used,
-                "tool_calls_executed": tool_calls_executed,
-                "message": "Safety tool-round ceiling reached before the model produced a final answer.",
-            }
+                    "tool_calls_executed": tool_calls_executed,
+                    "message": "Safety tool-round ceiling reached before the model produced a final answer.",
+                    },
+                    advisor_shadow,
+                )
 
         assistant_entry: dict[str, Any] = {
             "role": "assistant",
@@ -840,18 +962,22 @@ def run_bounded_llama_turn(
                     str(tool_call.arguments)[:120],
                 )
                 if (
-                    correction_allowed_tools is not None
-                    and tool_call.name not in correction_allowed_tools
+                    active_allowed_tools is not None
+                    and tool_call.name not in active_allowed_tools
                 ):
+                    disallowed_error_type = (
+                        "recovery_disallowed_tool"
+                        if correction_retries_used > 0
+                        else "route_mismatch"
+                    )
                     stopping_failure = {
                         "tool": tool_call.name,
                         "ok": False,
-                        "error_type": "recovery_disallowed_tool",
+                        "error_type": disallowed_error_type,
                         "message": (
-                            f"Recovery tool '{tool_call.name}' is not allowed for this "
-                            "bounded correction."
+                            f"Tool '{tool_call.name}' is not allowed for this turn."
                         ),
-                        "allowed_tools": sorted(correction_allowed_tools),
+                        "allowed_tools": sorted(active_allowed_tools),
                     }
                     agent.record_tool_completion(tool_call.name, False)
                     agent.history.append(
@@ -866,7 +992,7 @@ def run_bounded_llama_turn(
                 route_result = agent.validate_turn_route(
                     tool_call.name,
                     tool_call.arguments,
-                    allowed_tool_names=correction_allowed_tools,
+                    allowed_tool_names=active_allowed_tools,
                 )
                 if route_result is not None:
                     agent.record_tool_completion(tool_call.name, False)
@@ -903,6 +1029,12 @@ def run_bounded_llama_turn(
                 result = agent.execute_tool(tool_call.name, tool_call.arguments)
                 tool_calls_executed += 1
                 agent.record_tool_completion(tool_call.name, result.get("ok") is True)
+                for alias in _mvp_completion_aliases(
+                    tool_name=tool_call.name,
+                    arguments=tool_call.arguments,
+                    result=result,
+                ):
+                    agent.record_tool_completion(alias, result.get("ok") is True)
                 if correction_allowed_tools is not None and result.get("ok") is True:
                     correction_turn_succeeded = True
                 agent.history.append(
@@ -926,8 +1058,29 @@ def run_bounded_llama_turn(
                     and correction_retries_used < recovery_decision.max_mutation_retries
                     and recovery_decision.prompt
                 ):
+                    retry_allowed_tools = set(recovery_decision.allowed_tools)
+                    if mvp_tool_profile:
+                        retry_allowed_tools &= _DEFAULT_MVP_ALLOWED_TOOLS
+                    if not retry_allowed_tools:
+                        assistant_text = _tool_failure_text(stopping_failure)
+                        agent.history.append({"role": "assistant", "content": assistant_text})
+                        return _with_advisor_shadow(
+                            {
+                                "ok": False,
+                                "model": resolved_model,
+                                "steps": assistant_turns,
+                                "tool_rounds_used": tool_rounds_used,
+                                "tool_calls_executed": tool_calls_executed,
+                                "assistant_text": assistant_text,
+                                "error_type": stopping_failure.get("error_type"),
+                                "message": stopping_failure.get("message", assistant_text),
+                                "correction_retries_used": correction_retries_used,
+                                "turn_plan": turn_plan.as_dict() if turn_plan is not None else None,
+                            },
+                            advisor_shadow,
+                        )
                     correction_retries_used += 1
-                    correction_allowed_tools = set(recovery_decision.allowed_tools)
+                    correction_allowed_tools = retry_allowed_tools
                     agent.history.append(
                         {"role": "user", "content": recovery_decision.prompt}
                     )
@@ -939,7 +1092,8 @@ def run_bounded_llama_turn(
                     continue
                 assistant_text = _tool_failure_text(stopping_failure)
                 agent.history.append({"role": "assistant", "content": assistant_text})
-                return {
+                return _with_advisor_shadow(
+                    {
                     "ok": False,
                     "model": resolved_model,
                     "steps": assistant_turns,
@@ -950,7 +1104,9 @@ def run_bounded_llama_turn(
                     "message": stopping_failure.get("message", assistant_text),
                     "correction_retries_used": correction_retries_used,
                     "turn_plan": turn_plan.as_dict() if turn_plan is not None else None,
-                }
+                    },
+                    advisor_shadow,
+                )
             if correction_turn_succeeded:
                 agent.mark_turn_recovery_success()
             correction_allowed_tools = None
@@ -975,7 +1131,8 @@ def run_bounded_llama_turn(
             "turn_end ok=True steps=%d tool_rounds=%d tool_calls=%d",
             assistant_turns, tool_rounds_used, tool_calls_executed,
         )
-        return {
+        return _with_advisor_shadow(
+            {
             "ok": True,
             "model": resolved_model,
             "steps": assistant_turns,
@@ -984,7 +1141,74 @@ def run_bounded_llama_turn(
             "correction_retries_used": correction_retries_used,
             "assistant_text": assistant_text,
             "turn_plan": turn_plan.as_dict() if turn_plan is not None else None,
-        }
+            },
+            advisor_shadow,
+        )
+
+
+def _with_advisor_shadow(
+    result: dict[str, Any],
+    advisor_shadow: AdvisorObservation | None,
+    advisor_mode_shadow: AdvisorModeObservation | None = None,
+    advisor_permission: AdvisorPermissionDecision | None = None,
+) -> dict[str, Any]:
+    if advisor_shadow is not None:
+        result["turnplan_advisor_shadow"] = advisor_shadow.as_dict()
+    if advisor_mode_shadow is not None:
+        result["turnplan_advisor_mode_shadow"] = advisor_mode_shadow.as_dict()
+    if advisor_permission is not None:
+        result["turnplan_advisor_permission_shadow"] = advisor_permission.as_dict()
+    return result
+
+
+def _mvp_completion_aliases(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+) -> tuple[str, ...]:
+    """Map MVP wrapper calls onto legacy required-action names for turn completion."""
+    if tool_name == "inspect_graph":
+        operation = str(arguments.get("operation") or "").strip().lower()
+        if operation == "summarize":
+            return ("summarize_graph",)
+        if operation == "context":
+            return ("get_grc_context",)
+        if operation == "validate":
+            return ("validate_graph",)
+        return ()
+    if tool_name == "search_blocks":
+        return ("search_grc",)
+    if tool_name == "search_help":
+        return ("search_manual",)
+    if tool_name == "change_graph":
+        if bool(arguments.get("dry_run")):
+            return ("propose_edit",)
+        operation = str(result.get("operation_summary") or "")
+        if operation == "remove_connection":
+            return ("remove_connection",)
+        if operation == "rewire_connection":
+            return ("rewire_connection",)
+        return ("apply_edit",)
+    return ()
+
+
+def _maybe_enable_wrapper_eval_telemetry(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Inject debug telemetry flag for MVP wrappers during eval-only runs."""
+    if not enabled:
+        return arguments
+    if tool_name not in {"inspect_graph", "search_blocks", "search_help", "change_graph"}:
+        return arguments
+    if bool(arguments.get("debug")):
+        return arguments
+    injected = dict(arguments)
+    injected["debug"] = True
+    return injected
 
 
 def _tool_failure_text(result: dict[str, Any]) -> str:

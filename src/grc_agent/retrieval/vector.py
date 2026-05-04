@@ -704,6 +704,30 @@ def semantic_search_grc(
     }
 
 
+def vector_index_version_token(index_dir: str | Path | None = None) -> str:
+    """Return a lightweight manifest-derived version token for cache keys."""
+    qdrant_path = resolve_vector_index_dir(index_dir)
+    manifest_path = _manifest_path(qdrant_path)
+    if not manifest_path.is_file():
+        return "missing_index"
+    try:
+        manifest = _read_manifest(qdrant_path)
+        if manifest is None:
+            return "missing_index"
+        mtime_ns = manifest_path.stat().st_mtime_ns
+        return "|".join(
+            [
+                str(manifest.get("active_collection", "")),
+                str(manifest.get("corpus_version", "")),
+                str(manifest.get("index_schema_version", "")),
+                str(manifest.get("build_timestamp", "")),
+                str(mtime_ns),
+            ]
+        )
+    except Exception:
+        return "manifest_unavailable"
+
+
 def record_vector_miss(
     query: str,
     *,
@@ -1469,5 +1493,6 @@ __all__ = [
     "resolve_vector_index_dir",
     "semantic_search_grc",
     "summarize_vector_misses",
+    "vector_index_version_token",
     "vector_index_stats",
 ]

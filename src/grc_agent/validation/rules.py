@@ -51,20 +51,26 @@ class ValidationOperation:
         if self.op_type == "update_params":
             res = {
                 "op_type": self.op_type,
-                "instance_name": self.payload["instance_name"],
                 "params": copy.deepcopy(self.payload["params"]),
             }
+            if "instance_name" in self.payload:
+                res["instance_name"] = self.payload["instance_name"]
             if "block_type" in self.payload:
                 res["block_type"] = self.payload["block_type"]
+            if "target_ref" in self.payload:
+                res["target_ref"] = copy.deepcopy(self.payload["target_ref"])
             return res
         if self.op_type == "update_states":
             res = {
                 "op_type": self.op_type,
-                "instance_name": self.payload["instance_name"],
                 "state": self.payload["state"],
             }
+            if "instance_name" in self.payload:
+                res["instance_name"] = self.payload["instance_name"]
             if "block_type" in self.payload:
                 res["block_type"] = self.payload["block_type"]
+            if "target_ref" in self.payload:
+                res["target_ref"] = copy.deepcopy(self.payload["target_ref"])
             return res
         if self.op_type in {"add_connection", "remove_connection"}:
             res = {
@@ -88,10 +94,13 @@ class ValidationOperation:
         if self.op_type == "remove_block":
             res = {
                 "op_type": self.op_type,
-                "instance_name": self.payload["instance_name"],
             }
+            if "instance_name" in self.payload:
+                res["instance_name"] = self.payload["instance_name"]
             if "block_type" in self.payload:
                 res["block_type"] = self.payload["block_type"]
+            if "target_ref" in self.payload:
+                res["target_ref"] = copy.deepcopy(self.payload["target_ref"])
             return res
 
         rendered = {
@@ -378,8 +387,8 @@ def _normalize_operation(
     candidate: dict[str, Any],
 ) -> tuple[list[ValidationIssue], ValidationOperation | None]:
     allowed_fields: dict[OperationType, tuple[str, ...]] = {
-        "update_params": ("op_type", "instance_name", "params", "block_type"),
-        "update_states": ("op_type", "instance_name", "state", "block_type"),
+        "update_params": ("op_type", "instance_name", "params", "block_type", "target_ref"),
+        "update_states": ("op_type", "instance_name", "state", "block_type", "target_ref"),
         "add_connection": ("op_type", "src_block", "src_port", "dst_block", "dst_port"),
         "remove_connection": (
             "op_type",
@@ -389,16 +398,16 @@ def _normalize_operation(
             "dst_block",
             "dst_port",
         ),
-        "remove_block": ("op_type", "instance_name", "block_type"),
+        "remove_block": ("op_type", "instance_name", "block_type", "target_ref"),
         "add_block": ("op_type", "instance_name", "block_type", "parameters", "states"),
         "insert_block_on_connection": ("op_type", "connection_id", "block_type", "instance_name", "params"),
     }
     required_fields: dict[OperationType, tuple[str, ...]] = {
-        "update_params": ("instance_name", "params"),
-        "update_states": ("instance_name", "state"),
+        "update_params": ("params",),
+        "update_states": ("state",),
         "add_connection": ("src_block", "src_port", "dst_block", "dst_port"),
         "remove_connection": (),
-        "remove_block": ("instance_name",),
+        "remove_block": (),
         "add_block": ("instance_name", "block_type", "parameters"),
         "insert_block_on_connection": ("connection_id", "block_type", "instance_name"),
     }
@@ -434,8 +443,39 @@ def _normalize_operation(
     payload: dict[str, Any] = {}
 
     if op_type in {"update_params", "update_states", "remove_block", "add_block"}:
+        target_ref = candidate.get("target_ref")
+        if target_ref is not None:
+            if op_type == "add_block":
+                issues.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field="target_ref",
+                        code="unexpected_field",
+                        message="target_ref is not supported for add_block.",
+                    )
+                )
+            elif not isinstance(target_ref, dict):
+                issues.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field="target_ref",
+                        code="invalid_field_type",
+                        message="target_ref must be a mapping.",
+                    )
+                )
+            else:
+                payload["target_ref"] = copy.deepcopy(target_ref)
+                expected_name = target_ref.get("expected_instance_name")
+                expected_type = target_ref.get("expected_block_type")
+                if isinstance(expected_name, str) and expected_name.strip():
+                    payload.setdefault("instance_name", expected_name.strip())
+                if isinstance(expected_type, str) and expected_type.strip():
+                    payload.setdefault("block_type", expected_type.strip())
+
         instance_name = candidate.get("instance_name")
-        if not isinstance(instance_name, str) or not instance_name.strip():
+        if target_ref is None and (not isinstance(instance_name, str) or not instance_name.strip()):
             issues.append(
                 make_issue(
                     op_index=op_index,
@@ -446,7 +486,8 @@ def _normalize_operation(
                 )
             )
         else:
-            payload["instance_name"] = instance_name.strip()
+            if isinstance(instance_name, str) and instance_name.strip():
+                payload["instance_name"] = instance_name.strip()
 
         # Optional block_type discriminator
         block_type_val = candidate.get("block_type")

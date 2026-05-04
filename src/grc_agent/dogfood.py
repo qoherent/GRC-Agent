@@ -25,6 +25,7 @@ VALID_TASK_TYPES = frozenset({
     "inspect",
     "validate",
     "param_edit",
+    "add_variable",
     "state_edit",
     "disable_enable",
     "disconnect",
@@ -33,12 +34,16 @@ VALID_TASK_TYPES = frozenset({
     "preview",
     "retrieval",
     "clarification",
+    "negative",
+    "block_uid_mutation",
+    "duplicate_safety",
     "other",
 })
 VALID_FAILURE_CATEGORIES = frozenset({
     "no_failure",
     "routing_failure",
     "argument_copying_failure",
+    "safe_preflight_rejection",
     "preflight_false_reject",
     "unsafe_mutation_risk",
     "grcc_failure",
@@ -290,7 +295,7 @@ def _cluster_recommendation(records: list[dict[str, Any]]) -> str:
     if any(record["severity"] == "stop_the_line" for record in records):
         return "stop_and_investigate"
     categories = {record["failure_category"] for record in records}
-    if categories == {"no_failure"}:
+    if categories <= {"no_failure", "safe_preflight_rejection"}:
         return "baseline_observation"
     if len(records) >= 3 or len({record["source"] for record in records}) >= 2:
         return "candidate_generic_gap"

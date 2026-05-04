@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "summary": {
+    "total_cases": 290,
+    "vector_top_k_hits": 276,
+    "lexical_top_k_hits": 168,
+    "safety_passes": 290,
+    "provenance_passes": 290,
+    "deterministic_rebuild_pass": true
+  },
+  "miss_analysis": {
+    "vector_miss_count": 14,
+    "lexical_win_count": 5,
+    "exact_id_miss_count": 0,
+    "false_positive_failure_count": 0,
+    "source_type_miss_count": 0
+  }
+}

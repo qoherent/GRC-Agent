@@ -1,21 +1,33 @@
 """Thin runtime wrapper for routed package-level `.grc` tools."""
 
 import copy
+from collections import OrderedDict
+from functools import lru_cache
 import json
 import logging
 import re
+from pathlib import Path
+import time
 from typing import Any, Callable
 
 from grc_agent.catalog import describe_block
+from grc_agent.catalog.loaders import build_catalog_snapshot
 from grc_agent._payload import ErrorCode
 from grc_agent.config import AgentConfig, default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.history import (
+    GraphHistoryJournal,
+    GraphSnapshot,
+    lineage_key_for_session,
+    operation_type_from_result,
+    snapshot_session,
+)
 from grc_agent.manual import search_manual
 from grc_agent.retrieval.search import _search_grc_with_context
-from grc_agent.retrieval.vector import semantic_search_grc
+from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
 from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.runtime.prompt import build_system_prompt
-from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES, build_tool_schemas
+from grc_agent.runtime.tool_schemas import MODEL_TOOL_NAMES_ORDERED, build_tool_schemas
 from grc_agent.runtime.turn_plan import (
     INTENT_ADD_VARIABLE,
     INTENT_PREVIEW,
@@ -51,6 +63,86 @@ _ADD_VARIABLE_EXACT_PATTERN = re.compile(
 _CONNECTION_ID_TOKEN_PATTERN = re.compile(
     r"[A-Za-z0-9_./-]+:[^\s,;()]+->[A-Za-z0-9_./-]+:[^\s,;()]+"
 )
+_ALIAS_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
+_SEARCH_BLOCK_SUMMARY_MAX_CHARS = 120
+_SEARCH_BLOCKS_CACHE_MAX_SIZE = 64
+_JOURNALED_MUTATION_TOOLS = {
+    "apply_edit",
+    "remove_connection",
+    "rewire_connection",
+    "insert_block_on_connection",
+    "auto_insert_block",
+    "change_graph",
+}
+
+
+def _normalize_alias_key(value: str) -> str:
+    normalized = " ".join(value.split()).strip().lower()
+    if not normalized:
+        return ""
+    normalized = _ALIAS_TOKEN_PATTERN.sub(" ", normalized).strip()
+    return normalized
+
+
+def _alias_candidates_for_block(block_id: str, label: str) -> set[str]:
+    candidates = {
+        block_id.lower().strip(),
+        label.lower().strip(),
+        _normalize_alias_key(block_id),
+        _normalize_alias_key(label),
+        f"catalog:block:{block_id}".lower(),
+        _normalize_alias_key(f"catalog:block:{block_id}"),
+    }
+    suffix = block_id
+    if "." in suffix:
+        suffix = suffix.rsplit(".", 1)[-1]
+    if "_" in suffix:
+        suffix = suffix.split("_", 1)[-1]
+    suffix = suffix.strip().lower()
+    if suffix:
+        candidates.add(suffix)
+        candidates.add(_normalize_alias_key(suffix))
+    return {item for item in candidates if item}
+
+
+def _compact_block_summary(summary: Any) -> str:
+    if not isinstance(summary, str):
+        return ""
+    compact = " ".join(summary.split())
+    if len(compact) <= _SEARCH_BLOCK_SUMMARY_MAX_CHARS:
+        return compact
+    return compact[: _SEARCH_BLOCK_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+
+
+@lru_cache(maxsize=4)
+def _catalog_alias_to_block_map(catalog_root: str | None) -> dict[str, str]:
+    snapshot = build_catalog_snapshot(catalog_root)
+    first_seen: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for block_id, block in snapshot.blocks.items():
+        label = str(block.payload.get("label", "")).strip()
+        for alias in _alias_candidates_for_block(block_id, label):
+            existing = first_seen.get(alias)
+            if existing is None:
+                first_seen[alias] = block_id
+                continue
+            if existing != block_id:
+                ambiguous.add(alias)
+    for alias in ambiguous:
+        first_seen.pop(alias, None)
+    return first_seen
+
+
+@lru_cache(maxsize=4)
+def _catalog_version_token(catalog_root: str | None) -> str:
+    snapshot = build_catalog_snapshot(catalog_root)
+    newest_mtime = 0
+    for path in [*snapshot.files.block, *snapshot.files.tree, *snapshot.files.domain]:
+        try:
+            newest_mtime = max(newest_mtime, path.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return f"{snapshot.root}|blocks={len(snapshot.blocks)}|mtime_ns={newest_mtime}"
 
 
 class GrcAgent:
@@ -78,15 +170,19 @@ class GrcAgent:
         *,
         catalog_root: str | None = None,
         config: AgentConfig | None = None,
+        history_journal_path: str | Path | None = None,
     ) -> None:
         self.session = FlowgraphSession() if session is None else session
         self.catalog_root = str(catalog_root) if catalog_root is not None else None
         self.config = config or default_app_config().agent
+        self._history_journal = GraphHistoryJournal(history_journal_path)
+        self._history_lineage_key: str | None = None
         self.history: list[HistoryEntry] = []
         self._last_validated_state_revision: int | None = None
         self._last_validation_ok: bool | None = None
         self._reset_validation_tracking()
         self._tools = self._build_tool_registry()
+        self._mvp_tools = self._build_mvp_tool_registry()
         self._tool_schemas = build_tool_schemas()
         self._tool_schema_map = build_tool_schema_map(self._tool_schemas)
         self._record_active_session_history(reason="initial_session")
@@ -99,6 +195,10 @@ class GrcAgent:
         self._transaction_normalizer = TransactionNormalizer(session=self.session)
         self._pending_clarification: dict[str, Any] | None = None
         self._pending_clarification_revision: int | None = None
+        self._search_blocks_cache: OrderedDict[
+            tuple[str, int, str], dict[str, Any]
+        ] = OrderedDict()
+        self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
         return build_system_prompt()
@@ -115,7 +215,9 @@ class GrcAgent:
         if allowed_tool_names is None:
             allowed_order = tuple(self._turn_plan.allowed_tools)
         elif isinstance(allowed_tool_names, set):
-            allowed_order = tuple(name for name in PUBLIC_TOOL_NAMES if name in allowed_tool_names)
+            allowed_order = tuple(
+                name for name in MODEL_TOOL_NAMES_ORDERED if name in allowed_tool_names
+            )
         else:
             allowed_order = tuple(allowed_tool_names)
         schemas_by_name = {
@@ -131,24 +233,54 @@ class GrcAgent:
     def execute_tool(self, tool_name: str, kwargs: dict[str, Any]) -> ToolResult:
         """Execute one runtime tool and return a structured result."""
         kwargs = self.normalize_tool_call_arguments(tool_name, kwargs)
+        before_snapshot = self._checkpoint_before(tool_name)
         validation_result = self.validate_tool_call(tool_name, kwargs)
         if validation_result is not None:
             logger.info("tool_call_rejected tool=%s error_type=%s", tool_name, validation_result.get("error_type"))
+            self._record_tool_journal(
+                tool_name=tool_name,
+                result=validation_result,
+                before=before_snapshot,
+            )
             return validation_result
 
-        func = self._tools[tool_name]
+        func = self._tools.get(tool_name) or self._mvp_tools.get(tool_name)
+        if func is None:
+            result = self._tool_result(
+                tool_name=tool_name,
+                ok=False,
+                message=f"Unknown tool: {tool_name}",
+                error_type=ErrorCode.TOOL_CALL_INVALID,
+            )
+            self._record_tool_journal(
+                tool_name=tool_name,
+                result=result,
+                before=before_snapshot,
+            )
+            return result
         try:
             result = func(**kwargs)
             logger.info("tool_executed tool=%s ok=%s", tool_name, result.get("ok"))
+            self._record_tool_journal(
+                tool_name=tool_name,
+                result=result,
+                before=before_snapshot,
+            )
             return result
         except Exception as error:
             logger.exception("tool_exception tool=%s error=%s", tool_name, error)
-            return self._tool_result(
+            result = self._tool_result(
                 tool_name=tool_name,
                 ok=False,
                 message=str(error),
                 error_type=ErrorCode.INTERNAL_ERROR,
             )
+            self._record_tool_journal(
+                tool_name=tool_name,
+                result=result,
+                before=before_snapshot,
+            )
+            return result
 
     def normalize_tool_call_arguments(
         self,
@@ -794,6 +926,7 @@ class GrcAgent:
         If it has 'tool', it's a tool call. If it has 'text', it's a message.
         """
         self.history.append({"role": "user", "content": user_msg})
+        self._turn_user_message = user_msg
 
         for action in fake_assistant_actions:
             if "text" in action:
@@ -1251,6 +1384,15 @@ class GrcAgent:
             "save_graph": self._save_graph,
         }
 
+    def _build_mvp_tool_registry(self) -> dict[str, ToolCallable]:
+        """Return the simplified model-facing MVP tool surface."""
+        return {
+            "inspect_graph": self._inspect_graph,
+            "search_blocks": self._search_blocks,
+            "search_help": self._search_help,
+            "change_graph": self._change_graph,
+        }
+
     # ------------------------------------------------------------------- #
     # Session / validation helpers
     # ------------------------------------------------------------------- #
@@ -1268,11 +1410,129 @@ class GrcAgent:
         self._last_validation_ok = True
         self._last_validated_state_revision = self.session.state_revision
 
-    def _replace_session(self, session: FlowgraphSession) -> None:
+    def _replace_session(self, session: FlowgraphSession, *, reason: str = "load_grc") -> None:
         self.session = session
         self._transaction_normalizer = TransactionNormalizer(session=session)
         self._reset_validation_tracking()
-        self._record_active_session_history(reason="load_grc")
+        self._record_active_session_history(reason=reason)
+        self._history_lineage_key = None
+        self._maybe_record_baseline_checkpoint(reason=reason)
+
+    def _checkpoint_before(self, tool_name: str) -> GraphSnapshot | None:
+        if (
+            tool_name not in _JOURNALED_MUTATION_TOOLS
+            and tool_name != "save_graph"
+        ):
+            return None
+        if self.session.flowgraph is None:
+            return None
+        try:
+            return snapshot_session(self.session)
+        except Exception:
+            logger.exception("history_checkpoint_capture_failed tool=%s", tool_name)
+            return None
+
+    def _ensure_history_lineage_key(self) -> str:
+        if self._history_lineage_key is None:
+            self._history_lineage_key = lineage_key_for_session(self.session)
+        return self._history_lineage_key
+
+    def _maybe_record_baseline_checkpoint(self, *, reason: str) -> None:
+        if self.session.flowgraph is None:
+            return
+        try:
+            self._history_journal.record_checkpoint(
+                lineage_key=self._ensure_history_lineage_key(),
+                session=self.session,
+                before=None,
+                request_text=self._turn_user_message,
+                tool_name=reason,
+                operation_type="load",
+                validation_result=self.session.validation_state(),
+            )
+        except Exception:
+            logger.exception("history_baseline_checkpoint_failed reason=%s", reason)
+
+    def _record_tool_journal(
+        self,
+        *,
+        tool_name: str,
+        result: dict[str, Any],
+        before: GraphSnapshot | None,
+    ) -> None:
+        if self.session.flowgraph is None:
+            return
+        if tool_name == "propose_edit":
+            return
+        if tool_name == "change_graph":
+            if result.get("ok") and not bool(result.get("dry_run")):
+                self._record_accepted_checkpoint(tool_name, result, before)
+            elif not result.get("ok"):
+                self._record_failure_journal(tool_name, result, before)
+            return
+        if tool_name == "save_graph":
+            if result.get("ok"):
+                self._record_accepted_checkpoint(tool_name, result, before)
+            return
+        if tool_name not in _JOURNALED_MUTATION_TOOLS:
+            return
+        if result.get("ok"):
+            self._record_accepted_checkpoint(tool_name, result, before)
+            return
+        self._record_failure_journal(tool_name, result, before)
+
+    def _record_accepted_checkpoint(
+        self,
+        tool_name: str,
+        result: dict[str, Any],
+        before: GraphSnapshot | None,
+    ) -> None:
+        try:
+            checkpoint = self._history_journal.record_checkpoint(
+                lineage_key=self._ensure_history_lineage_key(),
+                session=self.session,
+                before=before,
+                request_text=self._turn_user_message,
+                tool_name=tool_name,
+                operation_type=operation_type_from_result(tool_name, result),
+                validation_result=(
+                    result.get("validation")
+                    if isinstance(result.get("validation"), dict)
+                    else self.session.validation_state()
+                ),
+                save_path=result.get("path") if tool_name == "save_graph" else None,
+            )
+            checkpoint_id = checkpoint.get("id")
+            if (
+                isinstance(checkpoint_id, str)
+                and checkpoint_id
+                and not result.get("checkpoint_id")
+            ):
+                result["checkpoint_id"] = checkpoint_id
+            telemetry = result.get("dispatch_telemetry")
+            if isinstance(telemetry, dict):
+                telemetry["checkpoint_created"] = True
+        except Exception:
+            logger.exception("history_accepted_checkpoint_failed tool=%s", tool_name)
+
+    def _record_failure_journal(
+        self,
+        tool_name: str,
+        result: dict[str, Any],
+        before: GraphSnapshot | None,
+    ) -> None:
+        try:
+            self._history_journal.record_failure(
+                lineage_key=self._ensure_history_lineage_key(),
+                session=self.session,
+                before=before,
+                request_text=self._turn_user_message,
+                tool_name=tool_name,
+                operation_type=operation_type_from_result(tool_name, result),
+                result=result,
+            )
+        except Exception:
+            logger.exception("history_failure_journal_failed tool=%s", tool_name)
 
     def _tool_result(
         self, tool_name: str, ok: bool, message: str, **extra: Any
@@ -1329,6 +1589,1005 @@ class GrcAgent:
     # Tool handlers
     # ================================================================= #
 
+    def _inspect_graph(
+        self,
+        operation: str,
+        target: str | None = None,
+        max_items: int | None = None,
+        debug: bool = False,
+    ) -> ToolResult:
+        started = time.monotonic()
+        before_revision = self.session.state_revision
+        before_dirty = self.session.is_dirty
+        op = str(operation).strip().lower()
+        handlers: list[str] = []
+        output_truncated = False
+        if op == "summarize":
+            handlers.append("summarize_graph")
+            payload = summarize_graph(self.session, max_blocks=max_items) if max_items else summarize_graph(self.session)
+            output_truncated = bool(payload.get("blocks_truncated", 0))
+            result = self._payload_result("inspect_graph", self._compact_inspect_payload(op, payload))
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=output_truncated,
+            )
+        if op == "validate":
+            handlers.append("validate_graph")
+            result = self._validate_graph()
+            wrapper_result = self._payload_result(
+                "inspect_graph",
+                {
+                    "ok": bool(result.get("ok")),
+                    "operation": op,
+                    "valid": bool(result.get("valid")),
+                    "message": result.get("message"),
+                    "error_type": result.get("error_type"),
+                    "validation_result": {
+                        "valid": bool(result.get("valid")),
+                        "returncode": result.get("returncode"),
+                        "stderr": result.get("stderr"),
+                    },
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=wrapper_result,
+                validation_run=True,
+                output_truncated=False,
+            )
+        if op == "context":
+            if not isinstance(target, str) or not target.strip():
+                result = self._tool_result(
+                    "inspect_graph",
+                    ok=False,
+                    message="context requires target.",
+                    error_type=ErrorCode.INVALID_REQUEST,
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="inspect_graph",
+                    wrapper_action=op,
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=result,
+                    validation_run=False,
+                    output_truncated=False,
+                )
+            handlers.append("get_grc_context")
+            payload = self._get_grc_context(target.strip(), max_nodes=max_items or 20)
+            output_truncated = bool(payload.get("truncated"))
+            result = self._payload_result("inspect_graph", self._compact_inspect_payload(op, payload))
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=output_truncated,
+            )
+
+        missing_session = self._missing_session_result("inspect_graph")
+        if missing_session is not None:
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=missing_session,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        snapshot = self.active_session_snapshot() or {}
+        if op == "list_blocks":
+            handlers.append("session_snapshot.list_blocks")
+            items = list((snapshot.get("block_preview") or []))
+            total_items = len(items)
+            if isinstance(max_items, int) and max_items > 0:
+                items = items[:max_items]
+            output_truncated = len(items) < total_items
+            result = self._payload_result(
+                "inspect_graph",
+                {"ok": True, "operation": op, "items": items},
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=output_truncated,
+            )
+        if op == "list_connections":
+            handlers.append("session_snapshot.list_connections")
+            items = list((snapshot.get("connection_preview") or []))
+            total_items = len(items)
+            if isinstance(max_items, int) and max_items > 0:
+                items = items[:max_items]
+            output_truncated = len(items) < total_items
+            result = self._payload_result(
+                "inspect_graph",
+                {"ok": True, "operation": op, "items": items},
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=output_truncated,
+            )
+        if op == "list_variables":
+            handlers.append("session_snapshot.list_variables")
+            items = list((snapshot.get("variable_preview") or []))
+            total_items = len(items)
+            if isinstance(max_items, int) and max_items > 0:
+                items = items[:max_items]
+            output_truncated = len(items) < total_items
+            result = self._payload_result(
+                "inspect_graph",
+                {"ok": True, "operation": op, "items": items},
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=output_truncated,
+            )
+        if op == "history_summary":
+            handlers.append("history_journal.list_records")
+            records = self._history_journal.list_records()
+            if isinstance(self._history_lineage_key, str):
+                records = [
+                    record
+                    for record in records
+                    if record.get("lineage_key") == self._history_lineage_key
+                ]
+            if isinstance(max_items, int) and max_items > 0:
+                records = records[-max_items:]
+            else:
+                records = records[-10:]
+            compact = [
+                {
+                    "id": record.get("id"),
+                    "kind": record.get("record_type"),
+                    "tool_name": record.get("tool_name"),
+                    "operation_type": record.get("operation_type"),
+                    "state_revision": record.get("state_revision"),
+                    "timestamp": record.get("timestamp"),
+                }
+                for record in records
+            ]
+            result = self._payload_result(
+                "inspect_graph",
+                {"ok": True, "operation": op, "items": compact},
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="inspect_graph",
+                wrapper_action=op,
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        result = self._tool_result(
+            "inspect_graph",
+            ok=False,
+            message=f"Unsupported inspect_graph operation: {operation!r}",
+            error_type=ErrorCode.INVALID_REQUEST,
+        )
+        return self._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="inspect_graph",
+            wrapper_action=op,
+            internal_handlers=["none"],
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=False,
+            output_truncated=False,
+        )
+
+    def _search_blocks_cache_key(self, *, query: str, k: int) -> tuple[str, int, str]:
+        return (
+            query,
+            k,
+            self._search_blocks_version_token(),
+        )
+
+    def _search_blocks_version_token(self) -> str:
+        catalog_token = _catalog_version_token(self.catalog_root)
+        vector_token = vector_index_version_token()
+        return f"catalog={catalog_token}|vector={vector_token}"
+
+    def _search_blocks_cache_get(
+        self, key: tuple[str, int, str]
+    ) -> dict[str, Any] | None:
+        hit = self._search_blocks_cache.get(key)
+        if hit is None:
+            return None
+        self._search_blocks_cache.move_to_end(key)
+        return copy.deepcopy(hit)
+
+    def _search_blocks_cache_put(
+        self, key: tuple[str, int, str], payload: dict[str, Any]
+    ) -> None:
+        self._search_blocks_cache[key] = copy.deepcopy(payload)
+        self._search_blocks_cache.move_to_end(key)
+        while len(self._search_blocks_cache) > _SEARCH_BLOCKS_CACHE_MAX_SIZE:
+            self._search_blocks_cache.popitem(last=False)
+
+    def _search_blocks(
+        self,
+        query: str,
+        k: int = 5,
+        debug: bool = False,
+        enrich: bool = False,
+    ) -> ToolResult:
+        started = time.monotonic()
+        before_revision = self.session.state_revision
+        before_dirty = self.session.is_dirty
+        handlers: list[str] = []
+        q = " ".join(str(query).split()) if isinstance(query, str) else ""
+        if not q:
+            result = self._tool_result(
+                "search_blocks",
+                ok=False,
+                message="query must be non-empty.",
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="search_blocks",
+                wrapper_action="query",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        session_ctx = self.session if self.session.flowgraph is not None else None
+        limit = max(1, min(int(k), 5))
+        cacheable = not debug and not enrich
+        lexical: dict[str, Any] = {"ok": True, "results": []}
+        retrieval_mode = "hybrid"
+        semantic: dict[str, Any] = {"ok": True, "results": []}
+
+        query_raw = " ".join(q.split()).strip().lower()
+        query_alias = _normalize_alias_key(q)
+        exact_block_id: str | None = None
+        exact_alias_hit = False
+        try:
+            alias_map = _catalog_alias_to_block_map(self.catalog_root)
+            if query_raw and query_raw in alias_map:
+                exact_block_id = alias_map[query_raw]
+                exact_alias_hit = True
+            elif query_alias and query_alias in alias_map:
+                exact_block_id = alias_map[query_alias]
+                exact_alias_hit = True
+        except Exception:
+            logger.exception("search_blocks_alias_map_failed")
+
+        cache_key: tuple[str, int, str] | None = None
+        if exact_block_id is None and cacheable:
+            cache_key = self._search_blocks_cache_key(query=q, k=limit)
+            cached_payload = self._search_blocks_cache_get(cache_key)
+            if cached_payload is not None:
+                handlers.append("search_blocks_cache(hit)")
+                result = self._payload_result(
+                    "search_blocks",
+                    {
+                        "ok": True,
+                        "query": q,
+                        "results": cached_payload["results"],
+                        "degraded_retrieval": bool(cached_payload["degraded_retrieval"]),
+                        "retrieval_mode": str(cached_payload["retrieval_mode"]),
+                        "message": "Block candidates returned.",
+                    },
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="search_blocks",
+                    wrapper_action="query",
+                    internal_handlers=handlers,
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=result,
+                    validation_run=False,
+                    output_truncated=bool(cached_payload.get("output_truncated", False)),
+                )
+
+        handlers.append("search_grc(lexical,catalog)")
+        lexical = _search_grc_with_context(
+            q,
+            scope="catalog",
+            k=limit,
+            session=session_ctx,
+            catalog_root=self.catalog_root,
+        )
+        lexical_rows = lexical.get("results", []) if lexical.get("ok") else []
+
+        if exact_block_id is None:
+            handlers.append("search_blocks_cache(miss)")
+            handlers.append("semantic_search_grc(catalog)")
+            semantic = semantic_search_grc(q, scope="catalog", k=limit)
+        else:
+            retrieval_mode = "exact"
+
+        merged: dict[str, dict[str, Any]] = {}
+        degraded_retrieval = False
+        if semantic.get("ok"):
+            for row in semantic.get("results", []):
+                if not isinstance(row, dict):
+                    continue
+                block_id = row.get("canonical_block_id")
+                if not isinstance(block_id, str) or not block_id:
+                    continue
+                name = row.get("title")
+                summary = row.get("excerpt")
+                merged[block_id] = {
+                    "block_id": block_id,
+                    "name": name if isinstance(name, str) and name else block_id,
+                    "summary": _compact_block_summary(summary),
+                }
+                if debug:
+                    merged[block_id]["debug"] = {
+                        "source": "semantic",
+                        "record_id": row.get("record_id"),
+                        "score": row.get("vector_score_raw"),
+                    }
+        else:
+            if semantic:
+                degraded_retrieval = semantic.get("error_type") in {
+                    "missing_index",
+                    ErrorCode.RETRIEVAL_NOT_READY,
+                }
+                if degraded_retrieval:
+                    retrieval_mode = "lexical_fallback"
+
+        if lexical.get("ok"):
+            for row in lexical_rows:
+                if not isinstance(row, dict):
+                    continue
+                block_id = row.get("block_id")
+                if not isinstance(block_id, str) or not block_id:
+                    continue
+                current = merged.get(block_id)
+                summary = row.get("summary")
+                label = row.get("label")
+                if current is None:
+                    merged[block_id] = {
+                        "block_id": block_id,
+                        "name": label if isinstance(label, str) and label else block_id,
+                        "summary": _compact_block_summary(summary),
+                    }
+                    if debug:
+                        merged[block_id]["debug"] = {
+                            "source": "lexical",
+                            "record_id": row.get("node_id"),
+                        }
+                else:
+                    if not current.get("summary") and isinstance(summary, str):
+                        current["summary"] = _compact_block_summary(summary)
+                    if current.get("name") == block_id and isinstance(label, str):
+                        current["name"] = label
+                    if debug and "debug" not in current:
+                        current["debug"] = {
+                            "source": "semantic+lexical",
+                            "record_id": row.get("node_id"),
+                        }
+
+        if enrich:
+            handlers.append("describe_block(enrichment)")
+            for item in merged.values():
+                if item.get("summary"):
+                    continue
+                details = describe_block(str(item.get("block_id", "")))
+                if details.get("ok"):
+                    summary = details.get("summary")
+                    if isinstance(summary, str) and summary:
+                        item["summary"] = _compact_block_summary(summary)
+
+        ordered = list(merged.values())
+        query_l = q.lower()
+        ordered.sort(
+            key=lambda item: (
+                0
+                if query_l in {item["block_id"].lower(), item["name"].lower()}
+                else 1,
+                item["block_id"],
+            )
+        )
+        if retrieval_mode == "exact" and exact_block_id:
+            limited = [item for item in ordered if item.get("block_id") == exact_block_id][:1]
+            if not limited and lexical_rows:
+                for row in lexical_rows:
+                    if row.get("block_id") == exact_block_id:
+                        label = row.get("label")
+                        summary = row.get("summary")
+                        fallback_row: dict[str, Any] = {
+                            "block_id": exact_block_id,
+                            "name": label if isinstance(label, str) and label else exact_block_id,
+                            "summary": _compact_block_summary(summary),
+                        }
+                        if debug:
+                            fallback_row["debug"] = {
+                                "source": "lexical_exact_fallback",
+                                "record_id": row.get("node_id"),
+                                "exact_alias": exact_alias_hit,
+                            }
+                        limited = [fallback_row]
+                        break
+        else:
+            limited = ordered[:limit]
+
+        output_truncated = len(ordered) > len(limited)
+        if not debug:
+            limited = [
+                {
+                    "block_id": str(item.get("block_id", "")),
+                    "name": str(item.get("name", "")),
+                    "summary": str(item.get("summary", "")),
+                }
+                for item in limited
+            ]
+        if cache_key is not None and cacheable:
+            self._search_blocks_cache_put(
+                cache_key,
+                {
+                    "results": limited,
+                    "degraded_retrieval": degraded_retrieval,
+                    "retrieval_mode": retrieval_mode,
+                    "output_truncated": output_truncated,
+                },
+            )
+        result = self._payload_result(
+            "search_blocks",
+            {
+                "ok": True,
+                "query": q,
+                "results": limited,
+                "degraded_retrieval": degraded_retrieval,
+                "retrieval_mode": retrieval_mode,
+                "message": "Block candidates returned.",
+            },
+        )
+        return self._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="search_blocks",
+            wrapper_action="query",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=False,
+            output_truncated=output_truncated,
+        )
+
+    def _search_help(self, query: str, k: int = 3, debug: bool = False) -> ToolResult:
+        started = time.monotonic()
+        before_revision = self.session.state_revision
+        before_dirty = self.session.is_dirty
+        handlers = ["search_manual"]
+        payload = search_manual(query, k=k)
+        if payload.get("ok") is not True:
+            result = self._payload_result("search_help", payload)
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="search_help",
+                wrapper_action="query",
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        compact_results: list[dict[str, Any]] = []
+        for row in payload.get("results", []):
+            if not isinstance(row, dict):
+                continue
+            citation = row.get("citation")
+            source = None
+            if isinstance(citation, dict):
+                source = citation.get("url") or citation.get("path")
+            compact_results.append(
+                {
+                    "title": row.get("title"),
+                    "excerpt": row.get("excerpt"),
+                    "source": source,
+                }
+            )
+        result = self._payload_result(
+            "search_help",
+            {
+                "ok": True,
+                "query": payload.get("query"),
+                "results": compact_results,
+                "message": "Explanation-only help results returned.",
+            },
+        )
+        output_truncated = isinstance(k, int) and len(compact_results) >= max(1, min(int(k), 8))
+        return self._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="search_help",
+            wrapper_action="query",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=False,
+            output_truncated=output_truncated,
+        )
+
+    def _change_graph(
+        self,
+        dry_run: bool,
+        user_goal: str,
+        target_ref: dict[str, Any] | None = None,
+        block_id: str | None = None,
+        instance_name: str | None = None,
+        connection_id: str | None = None,
+        src_block: str | None = None,
+        src_port: int | str | None = None,
+        dst_block: str | None = None,
+        dst_port: int | str | None = None,
+        new_src_block: str | None = None,
+        new_src_port: int | str | None = None,
+        new_dst_block: str | None = None,
+        new_dst_port: int | str | None = None,
+        param_key: str | None = None,
+        param_value: Any = None,
+        state: str | None = None,
+        variable_name: str | None = None,
+        variable_value: Any = None,
+        debug: bool = False,
+    ) -> ToolResult:
+        started = time.monotonic()
+        before_revision = self.session.state_revision
+        before_dirty = self.session.is_dirty
+        handlers: list[str] = []
+        missing_session = self._missing_session_result("change_graph")
+        if missing_session is not None:
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="missing_session",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=missing_session,
+                validation_run=False,
+                output_truncated=False,
+            )
+        if not isinstance(user_goal, str) or not user_goal.strip():
+            result = self._tool_result(
+                "change_graph",
+                ok=False,
+                message="user_goal must be non-empty.",
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="invalid_request",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        lower_goal = user_goal.lower()
+        if any(token in lower_goal for token in ("yaml", "undo", "redo", "export python", "source text")):
+            result = self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "error_type": ErrorCode.UNSUPPORTED_OP,
+                    "message": "Unsupported workflow for change_graph.",
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="unsupported",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        if "save" in lower_goal or "write out" in lower_goal:
+            result = self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "error_type": ErrorCode.UNSUPPORTED_OP,
+                    "message": "Saving is CLI/user-controlled and not model-facing in MVP.",
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="unsupported",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        tx_tool = self._propose_edit if dry_run else self._apply_edit
+        operation_summary = "clarification_required"
+        result: dict[str, Any]
+
+        if (
+            isinstance(connection_id, str)
+            and connection_id.strip()
+            and all(
+                isinstance(value, str) and value
+                for value in (new_src_block, new_dst_block)
+            )
+            and new_src_port is not None
+            and new_dst_port is not None
+        ):
+            operation_summary = "rewire_connection"
+            if dry_run:
+                handlers.append("propose_edit(rewire_transaction)")
+                result = tx_tool(
+                    [
+                        {"op_type": "remove_connection", "connection_id": connection_id.strip()},
+                        {
+                            "op_type": "add_connection",
+                            "src_block": new_src_block,
+                            "src_port": new_src_port,
+                            "dst_block": new_dst_block,
+                            "dst_port": new_dst_port,
+                        },
+                    ]
+                )
+            else:
+                handlers.append("rewire_connection")
+                result = self._rewire_connection(
+                    old_connection_id=connection_id.strip(),
+                    new_src_block=str(new_src_block),
+                    new_src_port=new_src_port,
+                    new_dst_block=str(new_dst_block),
+                    new_dst_port=new_dst_port,
+                )
+        elif (
+            isinstance(block_id, str)
+            and block_id.strip()
+            and isinstance(connection_id, str)
+            and connection_id.strip()
+        ):
+            operation_summary = "insert_block_on_connection"
+            if dry_run:
+                handlers.append("propose_edit(insert_block_on_connection)")
+                result = tx_tool(
+                    {
+                        "op_type": "insert_block_on_connection",
+                        "connection_id": connection_id.strip(),
+                        "block_type": block_id.strip(),
+                        "instance_name": instance_name or f"{block_id.strip()}_0",
+                    }
+                )
+            else:
+                handlers.append("insert_block_on_connection")
+                result = self._insert_block_on_connection(
+                    connection_id=connection_id.strip(),
+                    block_type=block_id.strip(),
+                    instance_name=instance_name or f"{block_id.strip()}_0",
+                    params={},
+                )
+        elif isinstance(connection_id, str) and connection_id.strip():
+            insertion_words = ("insert", "add", "compatible")
+            if any(word in lower_goal for word in insertion_words):
+                operation_summary = "auto_insert_block"
+                if dry_run:
+                    handlers.append("suggest_compatible_insertions")
+                    result = self._suggest_compatible_insertions(connection_id=connection_id.strip())
+                else:
+                    handlers.append("auto_insert_block")
+                    result = self._auto_insert_block(
+                        goal=user_goal,
+                        preferred_block_type=block_id,
+                        target_hint=connection_id.strip(),
+                    )
+            else:
+                operation_summary = "remove_connection"
+                if dry_run:
+                    handlers.append("propose_edit(remove_connection)")
+                    result = tx_tool(
+                        {
+                            "op_type": "remove_connection",
+                            "connection_id": connection_id.strip(),
+                        }
+                    )
+                else:
+                    handlers.append("remove_connection")
+                    result = self._remove_connection(connection_id=connection_id.strip())
+        elif isinstance(variable_name, str) and variable_name.strip() and variable_value is not None:
+            operation_summary = "add_variable"
+            handlers.append("propose_edit" if dry_run else "apply_edit")
+            result = tx_tool(
+                {
+                    "op_type": "add_block",
+                    "block_type": "variable",
+                    "instance_name": variable_name.strip(),
+                    "parameters": {"value": variable_value},
+                }
+            )
+        elif isinstance(param_key, str) and param_key.strip() and param_value is not None:
+            operation_summary = "update_params"
+            handlers.append("propose_edit" if dry_run else "apply_edit")
+            if isinstance(target_ref, dict):
+                result = tx_tool(
+                    {
+                        "op_type": "update_params",
+                        "target_ref": target_ref,
+                        "params": {param_key.strip(): param_value},
+                    }
+                )
+            elif isinstance(instance_name, str) and instance_name.strip():
+                result = tx_tool(
+                    {
+                        "op_type": "update_params",
+                        "instance_name": instance_name.strip(),
+                        "params": {param_key.strip(): param_value},
+                    }
+                )
+            else:
+                result = self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "error_type": "clarification_required",
+                        "message": "Missing target block for parameter update.",
+                        "clarification_options": [
+                            "Provide exact instance_name.",
+                            "Or provide guarded target_ref from a prior clarification.",
+                        ],
+                    },
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action=operation_summary,
+                    internal_handlers=handlers,
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=result,
+                    validation_run=False,
+                    output_truncated=False,
+                )
+        elif isinstance(state, str) and state in {"enabled", "disabled"}:
+            operation_summary = "update_states"
+            handlers.append("propose_edit" if dry_run else "apply_edit")
+            if isinstance(target_ref, dict):
+                result = tx_tool({"op_type": "update_states", "target_ref": target_ref, "state": state})
+            elif isinstance(instance_name, str) and instance_name.strip():
+                result = tx_tool(
+                    {
+                        "op_type": "update_states",
+                        "instance_name": instance_name.strip(),
+                        "state": state,
+                    }
+                )
+            else:
+                result = self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "error_type": "clarification_required",
+                        "message": "Missing target block for state update.",
+                        "clarification_options": ["Provide exact instance_name."],
+                    },
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action=operation_summary,
+                    internal_handlers=handlers,
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=result,
+                    validation_run=False,
+                    output_truncated=False,
+                )
+        else:
+            wrapper_result = self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "error_type": "clarification_required",
+                    "message": "Not enough exact change details to execute safely.",
+                    "clarification_options": [
+                        "Provide exact instance_name + param_key + param_value for param edits.",
+                        "Provide exact connection_id for disconnect/insert/rewire.",
+                        "Provide exact rewire endpoints for rewiring.",
+                    ],
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action=operation_summary,
+                internal_handlers=handlers or ["clarification"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=wrapper_result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        validation_result = None
+        if isinstance(result, dict):
+            validation_result = result.get("validation")
+        payload: dict[str, Any] = {
+            "ok": bool(result.get("ok")) if isinstance(result, dict) else False,
+            "dry_run": bool(dry_run),
+            "operation_summary": operation_summary,
+            "graph_delta": result.get("graph_delta") if isinstance(result, dict) else None,
+            "validation_result": validation_result,
+            "checkpoint_id": result.get("checkpoint_id") if isinstance(result, dict) else None,
+            "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
+        }
+        if isinstance(result, dict) and result.get("error_type"):
+            payload["error_type"] = result.get("error_type")
+        if isinstance(result, dict) and result.get("clarification_required"):
+            payload["clarification_options"] = result.get("options")
+        wrapper_result = self._payload_result("change_graph", payload)
+        validation_run = bool(validation_result) or operation_summary in {"update_params", "update_states", "rewire_connection", "insert_block_on_connection", "add_variable"}
+        return self._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="change_graph",
+            wrapper_action=operation_summary,
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=wrapper_result,
+            validation_run=validation_run,
+            output_truncated=False,
+        )
+
+    @staticmethod
+    def _compact_inspect_payload(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "ok": bool(payload.get("ok")),
+            "operation": operation,
+            "message": payload.get("message"),
+        }
+        for key in (
+            "summary",
+            "valid",
+            "errors",
+            "target",
+            "nodes",
+            "warnings",
+            "block_count",
+            "connection_count",
+            "variable_count",
+            "dirty",
+        ):
+            if key in payload:
+                out[key] = payload.get(key)
+        return out
+
+    def _attach_wrapper_dispatch_telemetry(
+        self,
+        *,
+        debug: bool,
+        wrapper_name: str,
+        wrapper_action: str,
+        internal_handlers: list[str],
+        started: float,
+        before_revision: int,
+        before_dirty: bool,
+        result: dict[str, Any],
+        validation_run: bool,
+        output_truncated: bool,
+    ) -> dict[str, Any]:
+        """Attach structured dispatch telemetry in debug/eval mode only."""
+        if not debug:
+            return result
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        graph_mutated = (
+            self.session.state_revision != before_revision
+            or self.session.is_dirty != before_dirty
+        )
+        clarification_returned = bool(result.get("clarification_options")) or bool(
+            result.get("clarification_required")
+        ) or result.get("error_type") in {
+            "clarification_required",
+            "ambiguous_connection",
+            "ambiguous_rewire_old_connection",
+            "ambiguous_rewire_new_endpoint",
+            "ambiguous_target",
+        }
+        checkpoint_created = isinstance(result.get("checkpoint_id"), str) and bool(
+            result.get("checkpoint_id")
+        )
+        telemetry = {
+            "wrapper_name": wrapper_name,
+            "wrapper_action": wrapper_action,
+            "internal_handler_called": list(dict.fromkeys(internal_handlers)) or ["none"],
+            "dry_run": bool(result.get("dry_run")),
+            "graph_mutated": graph_mutated,
+            "validation_run": bool(validation_run),
+            "checkpoint_created": checkpoint_created,
+            "clarification_returned": clarification_returned,
+            "output_truncated": bool(output_truncated),
+            "elapsed_ms": elapsed_ms,
+        }
+        result["dispatch_telemetry"] = telemetry
+        logger.info("wrapper_dispatch_telemetry %s", json.dumps(telemetry, sort_keys=True))
+        return result
+
     def _new_grc(self, profile: str = "minimal", graph_id: str | None = None) -> ToolResult:
         if profile != "minimal":
             return self._tool_result(
@@ -1339,7 +2598,7 @@ class GrcAgent:
             )
         resolved_id = graph_id if graph_id is not None else "new_flowgraph"
         new_session = FlowgraphSession.create(graph_id=resolved_id)
-        self._replace_session(new_session)
+        self._replace_session(new_session, reason="new_grc")
         result = self._tool_result(
             "new_grc",
             ok=True,
@@ -1357,7 +2616,7 @@ class GrcAgent:
                 message=loaded.get("message", "Failed to load .grc file."),
                 error_type=loaded.get("error_type", ErrorCode.FILE_LOAD_ERROR),
             )
-        self._replace_session(loaded)
+        self._replace_session(loaded, reason="load_grc")
         payload = summarize_graph(self.session)
         result = self._payload_result("load_grc", payload, default_message="Graph loaded.")
         result["provenance"] = self.session.session_provenance()
@@ -2398,15 +3657,29 @@ class GrcAgent:
             for candidate in candidates
             if isinstance(candidate, dict) and isinstance(candidate.get("block_type"), str)
         ]
-        if len(block_types) != len(candidates) or len(set(block_types)) != len(block_types):
+        if len(block_types) != len(candidates):
             return None
+        block_types_are_unique = len(set(block_types)) == len(block_types)
 
         revision = self.session.state_revision
         options: list[ClarificationOption] = []
         for label, candidate in zip(("A", "B", "C"), candidates, strict=False):
             block_type = candidate["block_type"]
             transaction = copy.deepcopy(operation)
-            transaction["block_type"] = block_type
+            if block_types_are_unique:
+                transaction["block_type"] = block_type
+            else:
+                block_uid = candidate.get("block_uid")
+                if not isinstance(block_uid, str) or not block_uid:
+                    return None
+                transaction.pop("instance_name", None)
+                transaction.pop("block_type", None)
+                transaction["target_ref"] = {
+                    "block_uid": block_uid,
+                    "expected_instance_name": instance_name,
+                    "expected_block_type": block_type,
+                    "base_state_revision": revision,
+                }
             options.append(
                 ClarificationOption(
                     label=label,

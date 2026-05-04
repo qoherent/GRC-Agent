@@ -484,6 +484,8 @@ def _run_case(
                 model=model,
                 agent=agent,
                 user_message=prompt,
+                # Compatibility mode for legacy Tier 1 expectations.
+                mvp_tool_profile=False,
             )
         except Exception as exc:
             error_message = str(exc)
