@@ -21,10 +21,14 @@ playground/
 benchmark_outputs/
 tmp/
 
-# Generated eval/report JSON artifacts
+# Generated eval/report JSON artifacts (markdown reports are commit-friendly)
+reports/*.json
+reports/*.jsonl
 reports/**/*.json
 reports/**/*.jsonl
-!reports/retrieval/vector_eval_governed_metadata.json
+
+# Frozen governed retrieval baseline artifact (tracked)
+!tests/data/retrieval/vector_eval_governed_metadata.json
 
 # Local copied/smoke graph artifacts
 *.saved.grc

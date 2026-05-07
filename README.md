@@ -10,9 +10,10 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 
 ## Status
 
+- Production-candidate under frozen local scope for bounded workflows on copied graphs.
 - One active `.grc` session per agent.
 - Default model-facing runtime surface is the MVP wrapper profile:
-  `inspect_graph`, `search_blocks`, `search_help`, `change_graph`.
+  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`.
 - Legacy low-level tools remain internal/compatibility-only and are not part of
   the default model-facing chat path.
 - `save_graph` is not model-facing in MVP default chat.
@@ -22,13 +23,28 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 - TurnPlan Advisor remains shadow-only. It does not affect default runtime
   routing or mutation authority.
 - Raw `.grc` YAML editing, undo/redo, and Python export/code-generation requests are refused.
+- `ask_grc_docs` is explanation-only: it retrieves local manual/tutorial snippets and
+  returns concise grounded answers with sources when evidence is strong. The
+  production-candidate default uses deterministic grounded extraction (including catalog-assisted
+  block definitions when allowed) and reports `insufficient_evidence` when local
+  evidence is weak. DocsAnswerAdvisor synthesis is optional research-only and is
+  not part of the critical runtime path.
 - `grcc` remains final graph-validity authority.
 - Default local backend is `unsloth/gemma-4-E2B-it-GGUF` through llama.cpp.
 - Current deterministic safety coverage is strong; live evals are routing/behavior evidence, not proof of production autonomy.
 
+## Context And Budget Policy
+
+- Target context window is `120000` tokens when the local llama.cpp model/server supports it.
+- Actual context can be checked with:
+  - `uv run grc-agent doctor --start-llama --json`
+  - `uv run grc-agent health`
+- Compression is not done by starving `max_tokens`; low `max_tokens` only caps generation and can truncate.
+- Compactness comes from bounded wrapper outputs, retrieval selection, snippet limits, and concise answer schemas.
+
 ## Reliability Truth
 
-The product is local alpha quality for daily manual use.
+The product is production-candidate quality for the frozen local scope.
 
 - Deterministic tests cover schema rejection, raw-YAML refusal, rollback, save gating, atomic save, insert safety, clarification handling, turn-guard behavior, and typed recovery classification.
 - Live evals check whether the local model routes representative prompts through the right tools and reaches selected semantic/end states.
@@ -56,9 +72,10 @@ Advisor remains shadow-only and is not used for default runtime routing.
 - `tests/data/random_bit_generator.grc`: canonical fixture graph.
 - `tests/llama_eval/`: live llama.cpp routing and behavior evals.
 - `docs/BLUEPRINT.md`: current architecture, safety contract, status, and roadmap.
+- `docs/PACKAGE_GUIDE.md`: tester-facing runtime harness flow, wrapper dispatch map, and safety boundaries.
 - `docs/QUICKSTART.md`: setup and common usage.
 - `docs/wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus for explanation-only retrieval and evals.
-- `reports/BETA_READY_STATUS.md`: current beta scope statement and operational status.
+- `tests/data/retrieval/vector_eval_governed_metadata.json`: frozen vector regression baseline artifact.
 
 ## Install
 
@@ -85,29 +102,29 @@ Open an existing graph:
 uv run grc-agent chat tests/data/random_bit_generator.grc
 ```
 
-Controlled beta rule: work on copied graphs only.
+Copied-graph rule: strongly prefer testing on copied graphs only.
 
 ```bash
-cp /path/to/original.grc /tmp/work.grc
-uv run grc-agent chat /tmp/work.grc
+cp /path/to/original.grc /tmp/grc-agent-test.grc
+uv run grc-agent chat /tmp/grc-agent-test.grc
 ```
 
-Recommended controlled-beta sequence:
+Recommended production-candidate sequence:
 1. `uv run grc-agent doctor`
 2. `uv run grc-agent health`
 3. inspect with `inspect_graph`
-4. search with `search_blocks` / `search_help`
+4. search with `search_blocks` / `ask_grc_docs`
 5. preview via `change_graph` dry-run behavior
 6. apply via `change_graph` committed behavior
 7. validate
 8. review history/checkpoints
 9. use `history` restore to explicit copy path if needed
 
-Safe first prompts for manual beta:
+Safe first prompts for manual testing:
 - `Summarize this graph.`
 - `Validate this graph.`
 - `Find a low-pass filter block.`
-- `Search help for stream tags.`
+- `Ask docs: what are stream tags?`
 - `Preview changing samp_rate to 48000. Do not apply.`
 - `Change samp_rate to 48000 and validate.`
 - `Show history/checkpoints.`
@@ -238,6 +255,10 @@ uv run python -m unittest
 uv run python -m tests.retrieval_eval.vector_regression
 ```
 
+Retrieval/vector eval note: run retrieval gates sequentially. Do not run
+`vector_regression` and `grc_docs_answer_eval` in parallel while using the same
+local index path.
+
 Live quick gate (only when runtime/model-facing behavior changes):
 
 ```bash
@@ -265,14 +286,7 @@ uv run python -m tests.llama_eval.release_dashboard \
 
 Advisor/model bakeoff scripts are research-only and are not part of default verification.
 
-Current tracked evidence in this checkout:
-
-- `reports/BETA_READY_STATUS.md`
-- `reports/BETA_PACKAGING_HARDENING_STATUS.md`
-- `reports/MAINTENANCE_STATUS_2026-05-03.md`
-- `reports/dogfood/MVP_WRAPPER_CONTROLLED_DOGFOOD_2026-05-03.md`
-- `reports/MVP_WRAPPER_EFFICIENCY_REPORT.md`
-- `reports/retrieval/vector_eval_governed_metadata.json`
+Operational reports are generated locally during eval/dogfood runs and are not required to be tracked in git for normal development.
 
 ## Safety Rules
 
@@ -284,7 +298,8 @@ Current tracked evidence in this checkout:
 - Failed edits must not mutate the live graph.
 - Clarification choices must come from real executable candidates.
 - Manual/tutorial retrieval is read-only explanation support with provenance; it is not mutation authority or runtime recipe material.
-- `search_blocks` and `search_help` are the default model-facing retrieval wrappers. Internal lexical/vector/manual handlers remain read-only.
+- `ask_grc_docs` remains explanation-only and never authorizes graph mutation.
+- `search_blocks` and `ask_grc_docs` are the default model-facing retrieval wrappers. Internal lexical/vector/manual handlers remain read-only.
 - Loaded blocks include a deterministic `block_uid` in graph context for
   duplicate identity evidence. Free-form UID mutation remains rejected; the
   only supported UID path is a checked `target_ref` object for block-local
@@ -309,7 +324,7 @@ Current tracked evidence in this checkout:
 - Live-eval pre-turn setup, where needed, must use public verified tools,
   record the setup calls, and validate the graph before the measured turn.
 - Retrieval eval currently covers 290 deterministic cases; vector search has 276 top-k hits versus 168 lexical hits with 0 exact-ID misses, 0 false-positive failures, and 0 source-type misses. A six-model FastEmbed bakeoff kept `BAAI/bge-small-en-v1.5` as the runtime default.
-- Vector retrieval baseline evidence is tracked in `reports/retrieval/vector_eval_governed_metadata.json`; the no-LLM regression gate is `uv run python -m tests.retrieval_eval.vector_regression`.
+- Vector retrieval baseline evidence is frozen in `tests/data/retrieval/vector_eval_governed_metadata.json`; the no-LLM regression gate is `uv run python -m tests.retrieval_eval.vector_regression`.
 - Any future catalog semantic metadata change must be evidence-backed and must rerun retrieval regression before acceptance.
 - The `numpy<2` dependency marker is GNU Radio ABI compatibility debt for the current supported local GNU Radio 3.10.x environment; remove it only after the supported GNU Radio target and deterministic gates pass with NumPy 2.x.
 

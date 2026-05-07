@@ -33,11 +33,11 @@ from tests.llama_eval.harness import (
 DATE = "2026-05-03"
 DEFAULT_INTAKE = Path(f"reports/dogfood/mvp_wrapper_controlled_{DATE}.jsonl")
 DEFAULT_REPORT = Path(f"reports/dogfood/MVP_WRAPPER_CONTROLLED_DOGFOOD_{DATE}.md")
-WRAPPER_TOOLS = {"inspect_graph", "search_blocks", "search_help", "change_graph"}
+WRAPPER_TOOLS = {"inspect_graph", "search_blocks", "ask_grc_docs", "change_graph"}
 TASK_TARGETS = {
     "inspect_graph": 25,
     "search_blocks": 25,
-    "search_help": 15,
+    "ask_grc_docs": 15,
     "preview_change": 25,
     "commit_change": 25,
     "clarification": 10,
@@ -193,7 +193,7 @@ def build_controlled_tasks(graphs: list[GraphInfo], *, max_observations: int) ->
     for graph in graphs:
         buckets["inspect_graph"].extend(_inspect_tasks(graph))
         buckets["search_blocks"].extend(_search_blocks_tasks(graph))
-        buckets["search_help"].extend(_search_help_tasks(graph))
+        buckets["ask_grc_docs"].extend(_ask_grc_docs_tasks(graph))
         buckets["preview_change"].extend(_preview_tasks(graph))
         buckets["commit_change"].extend(_commit_tasks(graph))
         buckets["clarification"].extend(_clarification_tasks(graph))
@@ -283,21 +283,21 @@ def _search_blocks_tasks(graph: GraphInfo) -> list[Task]:
     ]
 
 
-def _search_help_tasks(graph: GraphInfo) -> list[Task]:
+def _ask_grc_docs_tasks(graph: GraphInfo) -> list[Task]:
     return [
         Task(
             graph=graph,
-            task_group="search_help",
+            task_group="ask_grc_docs",
             task_type="retrieval",
             prompt="Explain GNU Radio stream tags briefly.",
-            expected="search_help explanation-only output",
+            expected="ask_grc_docs explanation-only output",
         ),
         Task(
             graph=graph,
-            task_group="search_help",
+            task_group="ask_grc_docs",
             task_type="retrieval",
             prompt="Find docs help for rate limiting in GNU Radio.",
-            expected="search_help explanation-only output",
+            expected="ask_grc_docs explanation-only output",
         ),
     ]
 
@@ -606,12 +606,34 @@ def run_task(
     notes = f"case {index}/{total}; clean or safe outcome"
     legacy_requested = [name for name in requested_names if name not in WRAPPER_TOOLS]
     legacy_executed = [name for name in executed_names if name not in WRAPPER_TOOLS]
-    if legacy_requested or legacy_executed:
+    legacy_executed_success: list[str] = []
+    legacy_rejected_attempts: list[str] = []
+    for call in executed:
+        name = str(call.get("name") or "")
+        if name in WRAPPER_TOOLS:
+            continue
+        payload = call.get("arguments")
+        if isinstance(payload, dict) and payload.get("ok") is True:
+            legacy_executed_success.append(name)
+            continue
+        error_type = str(payload.get("error_type") or "") if isinstance(payload, dict) else ""
+        if error_type in {"route_mismatch", "recovery_disallowed_tool"}:
+            legacy_rejected_attempts.append(name)
+
+    if legacy_executed_success:
         failure_category = "routing_failure"
         severity = "stop_the_line"
         notes = (
-            "STOP_THE_LINE: legacy tool exposed in MVP wrapper mode: "
-            f"requested={legacy_requested}, executed={legacy_executed}"
+            "STOP_THE_LINE: legacy tool executed in MVP wrapper mode: "
+            f"requested={legacy_requested}, executed_success={legacy_executed_success}"
+        )
+    elif legacy_requested or legacy_executed:
+        failure_category = "routing_failure"
+        severity = "medium"
+        notes = (
+            "Rejected legacy tool attempt in MVP wrapper mode: "
+            f"requested={legacy_requested}, executed={legacy_executed}, "
+            f"rejected={legacy_rejected_attempts}"
         )
     elif error:
         failure_category = "tool_error"
@@ -669,6 +691,10 @@ def run_task(
         cache_hits=cache_hits,
         cache_misses=cache_misses,
         internal_handlers=internal_handlers,
+        legacy_requested=legacy_requested,
+        legacy_executed=legacy_executed,
+        legacy_executed_success=legacy_executed_success,
+        legacy_rejected_attempts=legacy_rejected_attempts,
     )
 
 
@@ -690,6 +716,10 @@ def _record(
     cache_hits: int,
     cache_misses: int,
     internal_handlers: list[str],
+    legacy_requested: list[str],
+    legacy_executed: list[str],
+    legacy_executed_success: list[str],
+    legacy_rejected_attempts: list[str],
 ) -> dict[str, Any]:
     payload = record_dogfood_case(
         prompt=task.prompt,
@@ -721,6 +751,10 @@ def _record(
         "cache_hits": cache_hits,
         "cache_misses": cache_misses,
         "internal_handlers": sorted(set(str(item) for item in internal_handlers)),
+        "legacy_requested": sorted(set(legacy_requested)),
+        "legacy_executed": sorted(set(legacy_executed)),
+        "legacy_executed_success": sorted(set(legacy_executed_success)),
+        "legacy_rejected_attempts": sorted(set(legacy_rejected_attempts)),
         "checkpoint_state": checkpoint_state,
         "record_ok": bool(payload.get("ok")),
     }
@@ -756,8 +790,10 @@ def write_report(
     legacy_exposure = sum(
         1
         for row in rows
-        if row["failure_category"] == "routing_failure" and row["severity"] == "stop_the_line"
+        if row["failure_category"] == "routing_failure"
+        and bool(row.get("legacy_executed_success"))
     )
+    legacy_rejected = sum(1 for row in rows if bool(row.get("legacy_rejected_attempts")))
     wrong_handler_count = sum(1 for row in rows if bool(row.get("wrong_handler")))
     preview_mut = sum(
         1
@@ -821,6 +857,7 @@ def write_report(
         f"- Unsupported/refusal count: {task_group_counts.get('unsupported', 0)}",
         f"- STOP_THE_LINE count: {stop_count}",
         f"- Legacy tool exposure count: {legacy_exposure}",
+        f"- Rejected legacy tool attempts: {legacy_rejected}",
         f"- Wrong internal handler count: {wrong_handler_count}",
         f"- Preview mutation count: {preview_mut}",
         f"- Unsupported mutation count: {unsupported_mut}",

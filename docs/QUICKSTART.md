@@ -5,7 +5,7 @@ This guide is for using GRC Agent, not understanding its internals. Work on copi
 Default model-facing tools in chat are MVP wrappers only:
 - `inspect_graph`
 - `search_blocks`
-- `search_help`
+- `ask_grc_docs`
 - `change_graph`
 
 Advisor is shadow-only and does not control runtime routing by default.
@@ -19,7 +19,16 @@ uv run grc-agent doctor
 uv run grc-agent health
 ```
 
-Local beta smoke (no live-model requirement):
+To verify desired vs actual llama context, run:
+
+```bash
+uv run grc-agent doctor --start-llama --json
+```
+
+Target policy is `desired_context_tokens=120000` when the local model/server supports it.
+Output compactness is controlled by retrieval and schema budgets, not by forcing tiny `max_tokens`.
+
+Local production-candidate smoke (no live-model requirement):
 
 ```bash
 uv run grc-agent doctor
@@ -52,8 +61,8 @@ Not installed automatically:
 Use a copied graph:
 
 ```bash
-cp path/to/original.grc /tmp/work.grc
-uv run grc-agent chat /tmp/work.grc
+cp /path/to/original.grc /tmp/grc-agent-test.grc
+uv run grc-agent chat /tmp/grc-agent-test.grc
 ```
 
 Do not edit originals in place (for example under `/usr/share/gnuradio/examples`).
@@ -99,11 +108,8 @@ Apply and validate:
 Change samp_rate to 48000 and validate.
 ```
 
-Save a copy only after explicit request:
-
-```text
-Save a copy to /tmp/work_saved.grc.
-```
+Save/copy is explicit but not model-facing in MVP default chat. Use CLI/direct
+tooling (or compatibility mode) when you need a file save path.
 
 Disconnect an exact connection:
 
@@ -135,7 +141,7 @@ Broad topology repair stays clarification-first:
 Fix this topology automatically.
 ```
 
-## 3.1 Controlled Beta Flow (Copied Graphs Only)
+## 3.1 Production-Candidate Flow (Copied Graphs Only)
 
 1. Install dependencies.
 2. Verify environment with `doctor` and `health`.
@@ -143,7 +149,11 @@ Fix this topology automatically.
 4. Start `chat` on the copied graph.
 5. Inspect using `inspect_graph`.
 6. Search blocks with `search_blocks`.
-7. Search docs/help with `search_help`.
+7. Ask docs/help with `ask_grc_docs`.
+`ask_grc_docs` is explanation-only and returns grounded sources when evidence is
+strong; production-candidate default uses a deterministic grounded-answer builder and honest
+`insufficient_evidence` when local docs are weak. DocsAnswerAdvisor synthesis
+is optional/research-only and not required for the frozen runtime path.
 8. Preview a change (`change_graph` dry-run path).
 9. Apply a change (`change_graph` committed path).
 10. Validate the resulting graph.
@@ -166,7 +176,8 @@ The agent will:
 - remove exact connections
 - perform exact or clarification-backed rewires
 - validate with `grcc`
-- save only when explicitly requested
+- save only when explicitly requested (direct-tool/compatibility flows; not
+  model-facing in MVP default chat)
 
 For same-name duplicate blocks, choose the clarification option the agent shows.
 Do not type raw `block_uid` mutation commands; UID targeting is guarded
@@ -183,6 +194,7 @@ The agent will not:
 - use free-form `block_uid` text as a mutation handle
 - use vector/manual search results as mutation authority
 - perform broad "fix this graph" topology planning
+- force-save invalid graphs
 
 ## 5. Direct Tool Commands
 
@@ -362,6 +374,11 @@ uv run ruff check
 uv run python -m unittest
 uv run python -m tests.retrieval_eval.vector_regression
 ```
+
+Run retrieval/vector gates sequentially. Do not run
+`tests.retrieval_eval.vector_regression` and
+`tests.retrieval_eval.grc_docs_answer_eval` in parallel against the same local
+index path.
 
 Live model quick gates:
 

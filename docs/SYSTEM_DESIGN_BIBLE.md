@@ -1,12 +1,12 @@
 # System Design Bible
 
-Updated: 2026-04-30
+Updated: 2026-05-05
 
 This document is the compact system-design guide for GRC Agent. `docs/BLUEPRINT.md` remains the detailed engineering contract; this file explains the package shape, runtime flow, safety boundaries, and decisions that should not be rediscovered.
 
 ## Product Scope
 
-GRC Agent is a local-alpha assistant for bounded GNU Radio Companion `.grc` workflows:
+GRC Agent is production-candidate under frozen local scope for bounded GNU Radio Companion `.grc` workflows:
 
 - inspect, summarize, search, and explain loaded graphs
 - preview supported edits without mutation
@@ -57,15 +57,12 @@ User prompt
   -> explicit save only if requested
 ```
 
-`TurnPlan` is deterministic runtime policy. It narrows the model-visible tool list for clear requests and blocks unsafe uncertainty before the model sees mutation tools.
+`TurnPlan` is deterministic runtime policy. It narrows model-visible tools and
+blocks unsafe uncertainty before execution.
 
-Examples:
-
-- `disable block X` exposes only the state-edit path plus requested follow-up tools.
-- `remove connection C` exposes `remove_connection`.
-- `rewire C to A:0 -> B:0` exposes `rewire_connection`.
-- vague "fix/rewire/repair this graph" becomes `uncertain_mutation` and clarifies before any model call.
-- preview-only wording exposes `propose_edit`, not `apply_edit`.
+In MVP default chat, TurnPlan narrows to wrapper tools (`inspect_graph`,
+`search_blocks`, `ask_grc_docs`, `change_graph`). Wrapper dispatch handles
+verified low-level internals.
 
 Advisor-first direction: the local Advisor owns semantic intent classification.
 It uses the same llama.cpp server and returns exactly one structured mode:
@@ -77,6 +74,20 @@ schema validation, route gates, preflight, `grcc`, rollback, explicit save
 state, and UID target-ref validation.
 
 Advisor is shadow-only and runtime routing must not depend on it yet.
+
+## Context And Output Budgeting
+
+- Desired llama context target is `120000` tokens when backend/model support it.
+- Actual context is verified via `grc-agent doctor --start-llama --json` and `grc-agent health`.
+- Runtime budgets are centralized in config (`[llama]`, `[agent.docs_answer]`,
+  `[agent.retrieval]`, `[agent.history]`, `[agent.guardrails]`).
+- `max_tokens` is treated as generation ceiling only; it is not used as the
+  primary compression lever.
+- Primary compactness controls are:
+  - bounded wrapper payloads
+  - retrieval-stage snippet/source limits
+  - concise answer schemas
+  - explicit truncation telemetry in eval/debug paths
 
 ## Package Layers
 
@@ -100,8 +111,15 @@ Default model-facing chat surface is the MVP wrapper profile:
 
 1. `inspect_graph`
 2. `search_blocks`
-3. `search_help`
+3. `ask_grc_docs`
 4. `change_graph`
+
+`ask_grc_docs` retrieves local docs and returns a grounded answer with sources. 
+Docs answers are explanation-only and not mutation authority. 
+Beta default is deterministic grounded extraction with source evidence and
+honest `insufficient_evidence` on weak local support. DocsAnswerAdvisor helper
+synthesis is optional research-only best effort; safe fallback remains
+first-class.
 
 Low-level handlers remain internal/compatibility-only and are not deleted.
 They are still safety-tested and are called through wrapper dispatch.
@@ -111,7 +129,11 @@ evidence and full live-gate validation.
 
 ## Mutation Boundaries
 
-Supported mutation paths:
+Model-facing mutation entrypoint in MVP default chat:
+
+- `change_graph`
+
+Verified internal handlers behind `change_graph`:
 
 - `apply_edit(transaction)` for validated graph transactions
 - `propose_edit(transaction)` for preview only
@@ -119,7 +141,10 @@ Supported mutation paths:
 - `rewire_connection(...)` for atomic old-edge removal plus new-edge addition
 - `insert_block_on_connection(...)` for exact compatible insertion
 - `auto_insert_block(...)` for bounded insertion when enough placement context exists
-- `save_graph(path)` for explicit save after validation
+- `save_graph(path)` is compatibility/direct-tool only in MVP default chat
+
+These internal handlers are not directly selected by the model in MVP default
+chat.
 
 Mutation rules:
 
@@ -136,6 +161,18 @@ Mutation rules:
   rewire, add-block, and broad topology operations cannot use UID targeting.
 
 ## Retrieval
+
+Model-facing retrieval wrappers:
+
+- `search_blocks` for block discovery (compact results: `block_id`, `name`,
+  `summary`)
+- `ask_grc_docs` for concise grounded docs answers with sources
+
+Internal retrieval handlers:
+
+- `search_grc` (lexical graph/catalog)
+- `semantic_search_grc` (vector candidate discovery)
+- `search_manual` (manual/tutorial excerpts with citations)
 
 ### Lexical Graph/Catalog Search
 
@@ -174,7 +211,7 @@ Current frozen baseline:
 - false-positive failures: 0
 - source-type misses: 0
 
-See `docs/BLUEPRINT.md` and `reports/retrieval/vector_eval_governed_metadata.json`.
+See `docs/BLUEPRINT.md` and `tests/data/retrieval/vector_eval_governed_metadata.json`.
 
 ## Setup Automation Reality
 
@@ -220,16 +257,17 @@ The launcher verifies local host URLs, reuses healthy servers, checks model alia
 
 ## Evidence And Gates
 
-Current evidence in this checkout:
+Retrieval/vector eval gates are currently a sequential contract while the local
+index path is shared. Do not run retrieval eval gates in parallel unless index
+isolation is explicitly enabled.
 
-- `reports/BETA_READY_STATUS.md`
-- `reports/BETA_PACKAGING_HARDENING_STATUS.md`
-- `reports/MAINTENANCE_STATUS_2026-05-03.md`
-- `reports/MVP_WRAPPER_EFFICIENCY_REPORT.md`
-- `reports/dogfood/MVP_WRAPPER_CONTROLLED_DOGFOOD_2026-05-03.md`
-- `reports/retrieval/vector_eval_governed_metadata.json`
+Current deterministic evidence in this checkout:
 
-The evidence supports local alpha for bounded inspect/search/help/preview/change
+- `tests/data/retrieval/vector_eval_governed_metadata.json`
+
+Operational eval and dogfood reports are generated locally and may be untracked.
+
+The evidence supports production-candidate confidence for bounded inspect/search/help/preview/change
 workflows on copied `.grc` graphs. It does not prove arbitrary GNU Radio graph
 autonomy.
 
@@ -273,7 +311,8 @@ Advisor/model bakeoff scripts are research-only and must be run explicitly.
 - A self-dogfood run found repeated `block_uid` mutation wording reaching `apply_edit`; the accepted fix guarded UID mutation behind verified `target_ref`. Future advisor work should classify free-form UID language as `clarify`, not add runtime phrase dictionaries.
 - Assistant-text fallback parsing is frozen legacy compatibility. Do not expand it into routing or repair.
 - Superseded advisor prompt-version experiments are archived as report evidence.
-  Active research now uses the generic MVP-mode shadow runner and MVP v2 corpus.
+  Active advisor research remains explicit/offline only and is not part of the
+  default deterministic gate.
 
 ## Patch Policy
 
@@ -293,7 +332,7 @@ Patch normal failures only when the same generic issue repeats across at least t
 
 ## Known Limits
 
-- Local alpha only.
+- Production-candidate for the frozen local scope only.
 - Tier 4 is installed-example evidence, not arbitrary-graph proof.
 - Vague topology repair clarifies only.
 - Complex graph creation is still model-limited.

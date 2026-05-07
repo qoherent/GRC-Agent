@@ -25,7 +25,7 @@ PUBLIC_TOOL_NAMES: tuple[str, ...] = (
 MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
     "inspect_graph",
     "search_blocks",
-    "search_help",
+    "ask_grc_docs",
     "change_graph",
 )
 
@@ -472,24 +472,28 @@ def build_tool_schemas() -> list[dict[str, Any]]:
             required=["query"],
         ),
         _schema(
-            "search_help",
-            "Single model-facing help search over manual/tutorial docs. Explanation-only context with citations. "
-            "Must never authorize mutations.",
+            "ask_grc_docs",
+            "Single model-facing GNU Radio docs answer helper. Retrieves local docs/tutorial/manual snippets, "
+            "then returns a concise grounded answer with sources. Explanation-only and never mutation authority.",
             {
-                "query": {
+                "question": {
                     "type": "string",
                     "description": "GNU Radio concept or troubleshooting question.",
                 },
                 "k": {
                     "type": "integer",
-                    "description": "Optional maximum cited excerpts (default 3).",
+                    "description": "Optional maximum sources (default 3).",
+                },
+                "focus": {
+                    "type": "string",
+                    "description": "Optional short topic focus.",
                 },
                 "debug": {
                     "type": "boolean",
                     "description": "When true, include wrapper dispatch telemetry for eval/debug.",
                 },
             },
-            required=["query"],
+            required=["question"],
         ),
         _schema(
             "change_graph",

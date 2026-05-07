@@ -564,7 +564,9 @@ class _ScriptedClient:
         response: dict[str, object],
         *,
         fallback_transaction_checker: object = None,
+        allowed_tool_names: set[str] | None = None,
     ) -> tuple[str | None, list[object]]:
+        _ = (fallback_transaction_checker, allowed_tool_names)
         return response["assistant_text"], response["tool_calls"]  # type: ignore[return-value]
 
 

@@ -1,6 +1,6 @@
 # Project Blueprint
 
-Updated: 2026-04-28
+Updated: 2026-05-05
 
 ## Purpose
 
@@ -9,7 +9,11 @@ GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. 
 ## Safety Contract
 
 - The model must never edit raw `.grc` YAML directly.
-- All graph mutations go through `apply_edit`, `remove_connection`, `rewire_connection`, `insert_block_on_connection`, or `auto_insert_block`.
+- Default model-facing mutation entrypoint is `change_graph`.
+- `change_graph` dispatches internally to verified handlers (`apply_edit`,
+  `remove_connection`, `rewire_connection`, `insert_block_on_connection`,
+  `auto_insert_block`, preview path via `propose_edit`) under the same safety
+  contract.
 - Preview operations must never mutate the live graph.
 - Failed edits must roll back atomically.
 - `save_graph` is allowed only after the latest dirty state has validated successfully.
@@ -18,7 +22,7 @@ GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. 
   CLI-only and writes to an explicit new copy path; it is not a model-facing
   undo/restore tool.
 - MVP model-facing simplification is available through wrapper tools:
-  `inspect_graph`, `search_blocks`, `search_help`, `change_graph`. Legacy
+  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`. Legacy
   low-level tools remain internal safety handlers.
 - No hidden repairs, prompt-regex transaction rewriting, fixture-specific logic, block recipes, block blacklists, unbounded retries, or unbounded candidate search.
 - Clarification options must come from real validated graph/tool candidates and always include a custom/free-text option.
@@ -47,7 +51,7 @@ Default model-facing chat uses MVP wrappers only:
 
 1. `inspect_graph`
 2. `search_blocks`
-3. `search_help`
+3. `ask_grc_docs`
 4. `change_graph`
 
 Low-level handlers remain internal/compatibility-only and are still verified
@@ -62,9 +66,15 @@ route gates, preflight, `grcc`, rollback, and checkpoint journaling.
 
 `save_graph` is not model-facing in MVP mode.
 
+`ask_grc_docs` is explanation-only. Beta default uses deterministic grounded
+answer extraction over local manual/tutorial evidence (with catalog-assisted
+block definitions when allowed) and returns `insufficient_evidence` when local
+evidence is weak or indirect. DocsAnswerAdvisor synthesis remains optional
+research-only best effort and is not part of the frozen runtime path.
+
 Advisor-first contract: semantic intent classification belongs to the local
 Advisor, not to deterministic phrase dictionaries. The Advisor calls the same
-llama.cpp server and must return exactly one JSON object:
+llama.cpp server and currently validates this MVP shadow mode contract:
 `{"mode":"inspect|preview|change|clarify|unsupported"}`.
 The mode enum is the semantic routing interface. Runtime code may validate the
 schema, map the mode to a tool class, enforce allowed tools, validate
@@ -76,6 +86,10 @@ rewrites, or hidden remapping.
 Advisor is currently shadow-only and does not control default runtime routing.
 
 ## Supported Graph Work
+
+The list below describes verified internal capabilities and compatibility tool
+coverage. In default chat, the model uses MVP wrappers and does not directly
+select low-level mutation tools.
 
 - `new_grc` creates a minimal empty skeleton; construction uses `apply_edit`.
 - `load_grc` binds one `.grc` file as the active session.
@@ -116,17 +130,18 @@ Advisor is currently shadow-only and does not control default runtime routing.
 - History compaction keeps the latest active-session snapshot while trimming older large tool payloads.
 - Tool-call schemas reject unknown tools, missing fields, wrong types, enum mismatches, and extra fields before execution.
 - Each normal model turn is classified into a finite typed `TurnPlan` before the first completion. The plan records intent, required actions, allowed tools, expected transaction op types, clarification state, and evidence text.
-- For classified turns, llama.cpp receives only the schemas allowed by the plan. For example, explicit disable/enable requests expose `apply_edit`/`propose_edit` plus any requested follow-up tools, and expect `update_states`.
+- For classified turns, llama.cpp receives only schemas allowed by the active
+  tool profile. In MVP default chat this means wrapper tools, not low-level
+  mutation tools.
 - `uncertain_mutation` covers vague mutation wording such as swap/repair/rewire/fix/change topology when no finite safe intent is known. It clarifies before any model call and exposes no tools.
 - Natural insertion wording routes to `auto_insert_block` only when the user supplies placement context such as a connection, source/destination, or signal path. Missing placement context clarifies before any model call.
-- Exact disconnect wording routes to `remove_connection` without an `apply_edit`
-  fallback. Endpoint hints are normalized to `connection_id` first; vague
-  disconnect wording clarifies or stays in `uncertain_mutation`.
-- Exact or bounded rewire wording routes to `rewire_connection` when the old
-  connection is exact/resolvable and the new endpoint is exact or resolvable
-  from bounded endpoint hints. Ambiguous old edges or new endpoints clarify with
-  executable candidate options and `state_revision`; vague topology rewires
-  stay in `uncertain_mutation`.
+- Exact disconnect requests route through `change_graph`, which may dispatch to
+  internal `remove_connection` once endpoints/connection identity are verified.
+  Vague disconnect wording clarifies.
+- Exact or bounded rewire requests route through `change_graph`, which may
+  dispatch to internal `rewire_connection` once old/new endpoint constraints are
+  executable. Ambiguous old edges or new endpoints clarify with executable
+  options and `state_revision`.
 - Deterministic exact tool calls, such as exact add-variable and exact
   connection-id rewires, are built behind `GrcAgent` after `TurnPlan`
   classification. The llama.cpp adapter only transports the resulting
@@ -138,6 +153,11 @@ Advisor is currently shadow-only and does not control default runtime routing.
 - `grcc` is used for final validation and remains the authority over GNU behavior.
 - llama.cpp local startup uses file locking, model-alias verification, deterministic `temperature=0.0`, bounded generation defaults, and `--no-mmproj` when supported.
 - `doctor` is passive by default and does not start llama.cpp unless `--start-llama` is supplied.
+- Context policy is explicit:
+  - desired context target is `120000` tokens (`[llama].desired_context_tokens`)
+  - actual server context is reported by `doctor --start-llama --json` and `health`
+  - low `max_tokens` is a generation cap, not a compression strategy
+  - compactness comes from bounded wrapper outputs, retrieval selection, snippet limits, and schema-constrained answers
 - Live eval reports collect best-effort llama.cpp `/props` metadata so backend tool-template/parser capability is visible without failing older servers.
 - Live eval reports include repeat-run stability metadata and persisted release metadata: git commit, prompt hash/version, tool-schema hash, TurnPlan policy hash/version, model alias, backend metadata, chat-template hash, results schema version, and fixture identifiers. `--n-runs` controls repeated attempts and `--stability-threshold` controls the reported per-case release-stability threshold without changing majority pass/fail gating.
 - `tests.llama_eval.release_dashboard` aggregates persisted `--results-path` stores across live tiers and fails CI-style when required phases, minimum run counts, infra health, or per-case stability are not met.
@@ -145,7 +165,7 @@ Advisor is currently shadow-only and does not control default runtime routing.
 - Raw YAML direct-edit, undo/redo, and Python export/code-generation requests are refused as unsupported.
 - `search_grc` remains deterministic lexical graph search. It now has a finite alias layer for known misses such as audio smoother, automatic gain control, spectrum, rate limiter, scope, and trace.
 - `semantic_search_grc` is read-only vector search over a local Qdrant index built with FastEmbed `BAAI/bge-small-en-v1.5`. It is candidate discovery only and is not exposed for `uncertain_mutation`.
-- Vector retrieval v1 is frozen as local Qdrant + FastEmbed + `BAAI/bge-small-en-v1.5`, vector-only, read-only, no hybrid, no reranker, and no runtime multi-model selector. The current governed baseline artifact is `reports/retrieval/vector_eval_governed_metadata.json`.
+- Vector retrieval v1 is frozen as local Qdrant + FastEmbed + `BAAI/bge-small-en-v1.5`, vector-only, read-only, no hybrid, no reranker, and no runtime multi-model selector. The current governed baseline artifact is `tests/data/retrieval/vector_eval_governed_metadata.json`.
 - Catalog semantic metadata additions must describe stable block capability, not patch one eval query. Changes require repeated clustered evidence and a retrieval-regression rerun before acceptance.
 - `grc-agent vector miss` records sanitized real-user/eval/manual-review retrieval misses to JSONL evidence only. It redacts filesystem paths and `.grc` filenames from stored query, notes, expected IDs, and actual top IDs while preserving normal catalog IDs. `grc-agent vector misses` clusters and deduplicates those records conservatively; shared expected IDs alone do not merge unrelated wording. `grc-agent vector proposals` generates a human-review candidate report only. These commands must not update metadata, rebuild indexes, change rankings, call model tools, or authorize mutation.
 - `grc-agent vector gc` is explicit cleanup for old local Qdrant collections from this index family. It is dry-run by default, requires `--apply` to delete, preserves the active alias target plus one previous retired collection, and deletes older staging/retired collections only with `--apply`.
@@ -160,23 +180,22 @@ Advisor is currently shadow-only and does not control default runtime routing.
 
 ## Current Status
 
-Local alpha is stable for bounded inspect/search/help/preview/change workflows
-on copied `.grc` graphs.
+Production-candidate under frozen local scope for bounded
+inspect/search/help/preview/change workflows on copied `.grc` graphs.
 
 - Default model-facing runtime surface is MVP wrappers only:
-  `inspect_graph`, `search_blocks`, `search_help`, `change_graph`.
+  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`.
 - Legacy low-level tools remain internal/compatibility-only.
 - Advisor is shadow-only and does not control default runtime routing.
+  Current MVP shadow enum: `inspect`, `preview`, `change`, `clarify`, `unsupported`. Old enums are historical archived experiments only.
 - Vector retrieval is frozen/read-only and does not authorize mutation.
-- Scope statement: beta-ready for bounded workflows on copied graphs, not
-  production autonomy.
-- Current tracked evidence in this checkout:
-  - `reports/BETA_READY_STATUS.md`
-  - `reports/BETA_PACKAGING_HARDENING_STATUS.md`
-  - `reports/MAINTENANCE_STATUS_2026-05-03.md`
-  - `reports/MVP_WRAPPER_EFFICIENCY_REPORT.md`
-  - `reports/dogfood/MVP_WRAPPER_CONTROLLED_DOGFOOD_2026-05-03.md`
-  - `reports/retrieval/vector_eval_governed_metadata.json`
+- Scope statement: production-candidate for bounded copied-graph workflows, not
+  broad autonomous graph design.
+- Operational eval/dogfood reports are generated locally and may be untracked.
+- Frozen deterministic vector baseline remains in:
+  `tests/data/retrieval/vector_eval_governed_metadata.json`.
+- Retrieval/vector eval gates are a sequential verification contract while a
+  shared local index path is used.
 
 ## Known Limits
 
@@ -307,8 +326,8 @@ changes.
 
 ## Backlog
 
-- Continue copied private/user graph intake via the controlled beta workflow
-  in `reports/BETA_READY_STATUS.md`; patch only STOP_THE_LINE issues or repeated
+- Continue copied private/user graph intake via the controlled production-candidate workflow;
+  patch only STOP_THE_LINE issues or repeated
   generic failures across unrelated graphs.
 - Keep expanding Tier 4 only with installed-example cases that pass repeated live evidence; any future pre-turn setup must use public verified tools, persist setup calls in the report, and validate the graph before the measured turn.
 - Dogfood held-out installed examples and user graphs with structured intake before adding more synthetic eval cases. Classify failures as routing, argument-copying, preflight false reject, unsafe mutation risk, `grcc` failure, save/reload mismatch, confusing clarification, retrieval miss, tool error, or other.

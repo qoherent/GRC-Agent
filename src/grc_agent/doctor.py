@@ -76,6 +76,7 @@ def _check_config(config_path: str | None = None) -> dict[str, Any]:
         source=source,
         llama_server_url=config.llama.server_url,
         llama_model=config.llama.model,
+        llama_desired_context_tokens=config.llama.desired_context_tokens,
         llama_configured=llama_ok,
     )
 
@@ -102,6 +103,7 @@ def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
     try:
         from grc_agent.config import load_app_config as _load
         from grc_agent.llama_launcher import LlamaServerLauncher
+        from grc_agent.llama_server import extract_model_context_limit
 
         config = _load(config_path)
         launcher = LlamaServerLauncher(
@@ -110,10 +112,23 @@ def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
             model_alias=config.llama.model,
         )
         result = launcher.ensure_server_ready()
+        props = result.client.get_server_properties()
+        actual_context = extract_model_context_limit(props)
+        desired_context = config.llama.desired_context_tokens
+        context_ok = (
+            actual_context is None or actual_context >= desired_context
+        )
+        detail = f"{result.model_alias} at {result.server_url} ({result.status})"
+        if actual_context is not None:
+            detail = (
+                f"{detail}; context desired={desired_context}, actual={actual_context}"
+            )
         return _build_check(
             "llama.cpp server",
-            True,
-            f"{result.model_alias} at {result.server_url} ({result.status})",
+            context_ok,
+            detail,
+            desired_context_tokens=desired_context,
+            actual_context_tokens=actual_context,
         )
     except Exception as exc:
         return _build_check(

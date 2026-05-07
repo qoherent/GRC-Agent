@@ -32,7 +32,7 @@ from tests.llama_eval.harness import (
 DATE = "2026-05-02"
 DEFAULT_INTAKE = Path(f"reports/dogfood/mvp_wrapper_dogfood_{DATE}.jsonl")
 DEFAULT_REPORT = Path(f"reports/dogfood/MVP_WRAPPER_DISPATCH_DOGFOOD_{DATE}.md")
-WRAPPER_TOOLS = {"inspect_graph", "search_blocks", "search_help", "change_graph"}
+WRAPPER_TOOLS = {"inspect_graph", "search_blocks", "ask_grc_docs", "change_graph"}
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,7 @@ def build_tasks(graphs: list[GraphInfo], *, max_observations: int) -> list[Task]
                     graph=graph,
                     task_type="retrieval",
                     prompt="Explain stream tags in GNU Radio.",
-                    expected="Use search_help only.",
+                    expected="Use ask_grc_docs only.",
                 ),
                 Task(
                     graph=graph,

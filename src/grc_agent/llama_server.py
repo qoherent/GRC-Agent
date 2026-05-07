@@ -149,6 +149,7 @@ class LlamaServerClient:
         response: dict[str, Any],
         *,
         fallback_transaction_checker: Any = None,
+        allowed_tool_names: set[str] | None = None,
     ) -> tuple[str | None, list[LlamaToolCall]]:
         """Extract assistant text and normalized tool calls from one completion."""
         choices = response.get("choices")
@@ -177,6 +178,7 @@ class LlamaServerClient:
             fallback_tool_calls = self._parse_tool_calls_from_content(
                 content,
                 transaction_checker=fallback_transaction_checker,
+                allowed_tool_names=allowed_tool_names,
             )
             if fallback_tool_calls:
                 return None, fallback_tool_calls
@@ -293,6 +295,7 @@ class LlamaServerClient:
         content: str | None,
         *,
         transaction_checker: Any = None,
+        allowed_tool_names: set[str] | None = None,
     ) -> list[LlamaToolCall]:
         if not isinstance(content, str) or not content.strip():
             return []
@@ -302,7 +305,9 @@ class LlamaServerClient:
         json_prefix, remainder = LlamaServerClient._split_leading_json_value(normalized)
         if json_prefix is not None:
             parsed = LlamaServerClient._parse_transaction_json(
-                json_prefix, transaction_checker=transaction_checker,
+                json_prefix,
+                transaction_checker=transaction_checker,
+                allowed_tool_names=allowed_tool_names,
             )
             if parsed is not None:
                 calls.append(parsed)
@@ -310,7 +315,9 @@ class LlamaServerClient:
 
         if not calls:
             single_call = LlamaServerClient._parse_single_tool_call_from_content(
-                normalized, transaction_checker=transaction_checker,
+                normalized,
+                transaction_checker=transaction_checker,
+                allowed_tool_names=allowed_tool_names,
             )
             if single_call is not None:
                 return [single_call]
@@ -318,7 +325,9 @@ class LlamaServerClient:
         if normalized:
             for line in normalized.splitlines():
                 single_call = LlamaServerClient._parse_single_tool_call_from_content(
-                    line.strip(), transaction_checker=transaction_checker,
+                    line.strip(),
+                    transaction_checker=transaction_checker,
+                    allowed_tool_names=allowed_tool_names,
                 )
                 if single_call is not None:
                     calls.append(single_call)
@@ -330,6 +339,7 @@ class LlamaServerClient:
         content: str,
         *,
         transaction_checker: Any = None,
+        allowed_tool_names: set[str] | None = None,
     ) -> LlamaToolCall | None:
         try:
             parsed = json.loads(content)
@@ -344,12 +354,16 @@ class LlamaServerClient:
         if transaction_checker is not None and isinstance(parsed, dict) and transaction_checker(
             parsed.get("transaction")
         ):
+            if allowed_tool_names is not None and "apply_edit" not in allowed_tool_names:
+                return None
             return LlamaToolCall(
                 id="fallback_tool_call",
                 name="apply_edit",
                 arguments={"transaction": parsed["transaction"]},
             )
         if transaction_checker is not None and transaction_checker(parsed):
+            if allowed_tool_names is not None and "apply_edit" not in allowed_tool_names:
+                return None
             return LlamaToolCall(
                 id="fallback_tool_call",
                 name="apply_edit",
@@ -404,12 +418,15 @@ class LlamaServerClient:
         content: str | None,
         *,
         transaction_checker: Any = None,
+        allowed_tool_names: set[str] | None = None,
     ) -> LlamaToolCall | None:
         if not isinstance(content, str) or not content.strip():
             return None
         normalized = re.sub(r"<eos>\s*", " ", content).strip()
         transaction_call = LlamaServerClient._parse_transaction_json(
-            normalized, transaction_checker=transaction_checker,
+            normalized,
+            transaction_checker=transaction_checker,
+            allowed_tool_names=allowed_tool_names,
         )
         if transaction_call is not None:
             return transaction_call
@@ -428,6 +445,11 @@ class LlamaServerClient:
         if not isinstance(expression, ast.Call) or not isinstance(expression.func, ast.Name):
             return None
         if expression.func.id not in PUBLIC_TOOL_NAMES or expression.args:
+            return None
+        if (
+            allowed_tool_names is not None
+            and expression.func.id not in allowed_tool_names
+        ):
             return None
         arguments: dict[str, Any] = {}
         for keyword in expression.keywords:
@@ -625,20 +647,29 @@ def run_bounded_llama_turn(
     advisor_timeout_seconds: float = 4.0,
     mvp_tool_profile: bool = False,
     wrapper_eval_telemetry: bool = False,
+    max_tool_rounds: int | None = None,
 ) -> dict[str, Any]:
     """Run a bounded llama.cpp -> runtime loop against one loaded flowgraph."""
     if not isinstance(user_message, str) or not user_message.strip():
         raise ValueError("user_message must be a non-empty string.")
+    if max_tool_rounds is None:
+        max_tool_rounds = _SAFETY_MAX_TOOL_ROUNDS
 
     if model is None:
         resolved_model = client.get_model_id()
     else:
         client.require_model_alias(model)
         resolved_model = model
+    pre_compact_chars = sum(len(str(turn)) for turn in agent.history)
     agent.compact_history()
+    post_compact_chars = sum(len(str(turn)) for turn in agent.history)
+    history_truncated = post_compact_chars < pre_compact_chars
     if any(turn.get("role") == "user" for turn in agent.history):
         agent._record_active_session_history(reason="turn_refresh")
     agent.history.append({"role": "user", "content": user_message})
+    tool_context_chars = 0
+    truncated_tool_output = False
+    model_context_limit: int | None = None
 
     unsupported = agent.check_unsupported_request(user_message)
     if unsupported is not None:
@@ -908,9 +939,18 @@ def run_bounded_llama_turn(
         assistant_content, tool_calls = client.parse_assistant_message(
             response,
             fallback_transaction_checker=GrcAgent.looks_like_transaction_payload,
+            allowed_tool_names=(
+                set(active_allowed_tools) if mvp_tool_profile else None
+            ),
         )
 
         if tool_calls:
+            tool_calls = _normalize_compound_apply_edit_calls(
+                tool_calls,
+                allowed_tools=set(active_allowed_tools),
+                mvp_tool_profile=mvp_tool_profile,
+                coalesce_adjacent_apply_edit=correction_allowed_tools is None,
+            )
             tool_calls = [
                 LlamaToolCall(
                     id=tool_call.id,
@@ -927,7 +967,7 @@ def run_bounded_llama_turn(
                 for tool_call in tool_calls
             ]
 
-        if tool_calls and tool_rounds_used >= _SAFETY_MAX_TOOL_ROUNDS:
+        if tool_calls and tool_rounds_used >= max_tool_rounds:
                 return _with_advisor_shadow(
                     {
                     "ok": False,
@@ -1028,6 +1068,10 @@ def run_bounded_llama_turn(
                     continue
                 result = agent.execute_tool(tool_call.name, tool_call.arguments)
                 tool_calls_executed += 1
+                tool_context_chars += len(str(result))
+                truncated_tool_output = truncated_tool_output or bool(
+                    result.get("output_truncated")
+                )
                 agent.record_tool_completion(tool_call.name, result.get("ok") is True)
                 for alias in _mvp_completion_aliases(
                     tool_name=tool_call.name,
@@ -1132,7 +1176,8 @@ def run_bounded_llama_turn(
             assistant_turns, tool_rounds_used, tool_calls_executed,
         )
         return _with_advisor_shadow(
-            {
+            _attach_context_budget_telemetry(
+                {
             "ok": True,
             "model": resolved_model,
             "steps": assistant_turns,
@@ -1141,7 +1186,14 @@ def run_bounded_llama_turn(
             "correction_retries_used": correction_retries_used,
             "assistant_text": assistant_text,
             "turn_plan": turn_plan.as_dict() if turn_plan is not None else None,
-            },
+                },
+                enabled=wrapper_eval_telemetry,
+                model_context_limit=model_context_limit,
+                history_chars=post_compact_chars,
+                tool_context_chars=tool_context_chars,
+                truncated_history=history_truncated,
+                truncated_tool_output=truncated_tool_output,
+            ),
             advisor_shadow,
         )
 
@@ -1179,7 +1231,7 @@ def _mvp_completion_aliases(
         return ()
     if tool_name == "search_blocks":
         return ("search_grc",)
-    if tool_name == "search_help":
+    if tool_name == "ask_grc_docs":
         return ("search_manual",)
     if tool_name == "change_graph":
         if bool(arguments.get("dry_run")):
@@ -1202,13 +1254,197 @@ def _maybe_enable_wrapper_eval_telemetry(
     """Inject debug telemetry flag for MVP wrappers during eval-only runs."""
     if not enabled:
         return arguments
-    if tool_name not in {"inspect_graph", "search_blocks", "search_help", "change_graph"}:
+    if tool_name not in {"inspect_graph", "search_blocks", "ask_grc_docs", "change_graph"}:
         return arguments
     if bool(arguments.get("debug")):
         return arguments
     injected = dict(arguments)
     injected["debug"] = True
     return injected
+
+
+_APPLY_EDIT_MUTATION_OP_TYPES = {
+    "update_params",
+    "update_states",
+    "add_connection",
+    "remove_connection",
+    "remove_block",
+    "add_block",
+    "insert_block_on_connection",
+}
+
+_APPLY_EDIT_COALESCE_TRIGGER_OP_TYPES = {
+    "add_connection",
+    "remove_connection",
+    "add_block",
+    "remove_block",
+    "insert_block_on_connection",
+}
+
+
+def _normalize_compound_apply_edit_calls(
+    tool_calls: list[LlamaToolCall],
+    *,
+    allowed_tools: set[str],
+    mvp_tool_profile: bool,
+    coalesce_adjacent_apply_edit: bool = True,
+) -> list[LlamaToolCall]:
+    """Split malformed apply_edit compound calls into supported tool calls.
+
+    This only runs in compatibility/legacy mode. In MVP mode, low-level tool
+    attempts remain guarded by route validation and never execute directly.
+    """
+    if mvp_tool_profile:
+        return tool_calls
+    normalized: list[LlamaToolCall] = []
+    for tool_call in tool_calls:
+        if tool_call.name != "apply_edit":
+            normalized.append(tool_call)
+            continue
+        expanded = _expand_compound_apply_edit_call(tool_call, allowed_tools=allowed_tools)
+        if expanded is None:
+            normalized.append(tool_call)
+            continue
+        normalized.extend(expanded)
+    if not coalesce_adjacent_apply_edit:
+        return normalized
+    return _coalesce_adjacent_apply_edit_calls(normalized)
+
+
+def _coalesce_adjacent_apply_edit_calls(tool_calls: list[LlamaToolCall]) -> list[LlamaToolCall]:
+    """Merge adjacent apply_edit calls into one atomic transaction when possible."""
+
+    coalesced: list[LlamaToolCall] = []
+    index = 0
+    while index < len(tool_calls):
+        current = tool_calls[index]
+        if current.name != "apply_edit":
+            coalesced.append(current)
+            index += 1
+            continue
+
+        run_start = index
+        run: list[LlamaToolCall] = []
+        while index < len(tool_calls) and tool_calls[index].name == "apply_edit":
+            run.append(tool_calls[index])
+            index += 1
+
+        if len(run) == 1:
+            coalesced.append(run[0])
+            continue
+
+        merged_operations: list[dict[str, Any]] = []
+        mergeable = True
+        for call in run:
+            transaction = call.arguments.get("transaction")
+            if isinstance(transaction, dict):
+                merged_operations.append(transaction)
+                continue
+            if isinstance(transaction, list) and all(isinstance(item, dict) for item in transaction):
+                merged_operations.extend(transaction)
+                continue
+            mergeable = False
+            break
+
+        if not mergeable or len(merged_operations) <= 1:
+            coalesced.extend(run)
+            continue
+        op_types = {
+            str(operation.get("op_type", "")).strip()
+            for operation in merged_operations
+            if isinstance(operation, dict)
+        }
+        if not (op_types & _APPLY_EDIT_COALESCE_TRIGGER_OP_TYPES):
+            coalesced.extend(run)
+            continue
+
+        coalesced.append(
+            LlamaToolCall(
+                id=f"{run[0].id}_coalesced_{run_start+1}_{run_start+len(run)}",
+                name="apply_edit",
+                arguments={"transaction": merged_operations},
+            )
+        )
+
+    return coalesced
+
+
+def _expand_compound_apply_edit_call(
+    tool_call: LlamaToolCall,
+    *,
+    allowed_tools: set[str],
+) -> list[LlamaToolCall] | None:
+    transaction = tool_call.arguments.get("transaction")
+    operations = transaction if isinstance(transaction, list) else [transaction]
+    if not operations or not all(isinstance(item, dict) for item in operations):
+        return None
+
+    expanded: list[LlamaToolCall] = []
+    converted = False
+    for index, operation in enumerate(operations):
+        op_type = str(operation.get("op_type") or "").strip()
+        if not op_type:
+            return None
+        if op_type in _APPLY_EDIT_MUTATION_OP_TYPES:
+            if op_type == "remove_connection" and "remove_connection" in allowed_tools:
+                args: dict[str, Any] = {}
+                connection_id = operation.get("connection_id")
+                if isinstance(connection_id, str) and connection_id.strip():
+                    args["connection_id"] = connection_id.strip()
+                else:
+                    for key in ("src_block", "src_port", "dst_block", "dst_port"):
+                        if key in operation:
+                            args[key] = operation[key]
+                if not args:
+                    return None
+                expanded.append(
+                    LlamaToolCall(
+                        id=f"{tool_call.id}_op{index+1}",
+                        name="remove_connection",
+                        arguments=args,
+                    )
+                )
+                converted = True
+                continue
+            # Keep apply_edit fallback for mutation ops not covered by dedicated tools.
+            if "apply_edit" in allowed_tools:
+                expanded.append(
+                    LlamaToolCall(
+                        id=f"{tool_call.id}_op{index+1}",
+                        name="apply_edit",
+                        arguments={"transaction": operation},
+                    )
+                )
+                converted = True
+                continue
+            return None
+        if op_type == "validate_graph" and "validate_graph" in allowed_tools:
+            expanded.append(
+                LlamaToolCall(
+                    id=f"{tool_call.id}_op{index+1}",
+                    name="validate_graph",
+                    arguments={},
+                )
+            )
+            converted = True
+            continue
+        if op_type == "save_graph" and "save_graph" in allowed_tools:
+            args: dict[str, Any] = {}
+            path = operation.get("path")
+            if isinstance(path, str) and path.strip():
+                args["path"] = path.strip()
+            expanded.append(
+                LlamaToolCall(
+                    id=f"{tool_call.id}_op{index+1}",
+                    name="save_graph",
+                    arguments=args,
+                )
+            )
+            converted = True
+            continue
+        return None
+
+    return expanded if converted else None
 
 
 def _tool_failure_text(result: dict[str, Any]) -> str:
@@ -1219,6 +1455,59 @@ def _tool_failure_text(result: dict[str, Any]) -> str:
     if isinstance(error_type, str) and error_type.strip():
         return f"Tool call failed: {error_type}."
     return "I could not complete that request with the available tools."
+
+
+def extract_model_context_limit(props: dict[str, Any]) -> int | None:
+    """Extract server context window from `/props` payload when present."""
+    if not isinstance(props, dict):
+        return None
+    default_settings = props.get("default_generation_settings")
+    if isinstance(default_settings, dict):
+        n_ctx = default_settings.get("n_ctx")
+        if isinstance(n_ctx, int) and n_ctx > 0:
+            return n_ctx
+        params = default_settings.get("params")
+        if isinstance(params, dict):
+            n_ctx = params.get("n_ctx")
+            if isinstance(n_ctx, int) and n_ctx > 0:
+                return n_ctx
+    settings = props.get("settings")
+    if isinstance(settings, dict):
+        n_ctx = settings.get("n_ctx")
+        if isinstance(n_ctx, int) and n_ctx > 0:
+            return n_ctx
+    return None
+
+
+def _attach_context_budget_telemetry(
+    result: dict[str, Any],
+    *,
+    enabled: bool,
+    model_context_limit: int | None,
+    history_chars: int,
+    tool_context_chars: int,
+    truncated_history: bool,
+    truncated_tool_output: bool,
+) -> dict[str, Any]:
+    """Attach coarse budget telemetry in eval/debug flows only."""
+    if not enabled:
+        return result
+    telemetry = {
+        "model_context_limit": model_context_limit,
+        "history_tokens_estimated": _estimate_tokens(history_chars),
+        "tool_context_tokens_estimated": _estimate_tokens(tool_context_chars),
+        "prompt_tokens_estimated": _estimate_tokens(history_chars + tool_context_chars),
+        "truncated_history": bool(truncated_history),
+        "truncated_tool_output": bool(truncated_tool_output),
+    }
+    result["context_budget_telemetry"] = telemetry
+    return result
+
+
+def _estimate_tokens(chars: int) -> int:
+    if chars <= 0:
+        return 0
+    return max(1, chars // 4)
 
 
 def _resolve_final_assistant_text(

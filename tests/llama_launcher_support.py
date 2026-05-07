@@ -24,6 +24,7 @@ def _parser():
     parser.add_argument("--alias", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--ctx-size", type=int, default=0)
     parser.add_argument("--jinja", action="store_true")
     parser.add_argument("--no-mmproj", action="store_true")
     return parser

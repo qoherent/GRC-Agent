@@ -2,8 +2,10 @@
 server_url = "http://127.0.0.1:8080"
 model = "unsloth/gemma-4-E2B-it-GGUF"
 hf_model = "unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL"
+desired_context_tokens = 120000
 startup_timeout_seconds = 300.0
 max_tokens = 4096
+max_tool_rounds = 50
 temperature = 0.0
 enable_thinking = false
 request_timeout_seconds = 120.0
@@ -14,3 +16,44 @@ advisor_enabled = false
 advisor_limited_advisory = false
 advisor_shadow_telemetry = true
 legacy_model_tool_surface = false
+
+[agent.docs_answer]
+enabled = true
+# Production-candidate default: deterministic grounded-answer builder is the primary path.
+# Keep helper synthesis disabled unless running explicit research experiments.
+helper_mode = "never"
+helper_max_output_tokens = 320
+helper_timeout_seconds = 3.5
+helper_max_snippet_chars = 320
+helper_max_total_context_chars = 900
+max_sources = 3
+answer_target_chars = 320
+excerpt_target_chars = 180
+lexical_first = true
+semantic_manual_enabled = true
+semantic_tutorial_enabled = true
+probe_timeout_seconds = 0.5
+retry_interval_on_failure_seconds = 3.0
+retry_interval_on_success_seconds = 1.5
+fallback_enabled = true
+answer_cache_size = 64
+helper_prompt_version = "v3_compact"
+
+[agent.retrieval]
+search_blocks_default_k = 5
+search_blocks_max_k = 10
+ask_grc_docs_default_k = 3
+ask_grc_docs_max_k = 6
+conceptual_cache_size = 64
+exact_match_fast_path = true
+
+[agent.history]
+checkpoint_retention = 100
+
+[agent.guardrails]
+max_tool_output_bytes = 32768
+max_validation_errors = 8
+max_validation_stderr_chars = 1200
+max_compact_list_items = 3
+max_graph_summary_blocks = 50
+max_context_nodes = 20

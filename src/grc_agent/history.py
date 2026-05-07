@@ -156,8 +156,14 @@ def _dict_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]
 class GraphHistoryJournal:
     """Append-only JSONL history with retention for accepted checkpoints."""
 
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        accepted_retention: int = MAX_ACCEPTED_VERSIONS_PER_LINEAGE,
+    ) -> None:
         self.path = Path(path) if path is not None else default_history_path()
+        self.accepted_retention = max(1, int(accepted_retention))
 
     def record_checkpoint(
         self,
@@ -355,7 +361,7 @@ class GraphHistoryJournal:
             and record.get("record_type") == "checkpoint"
             and record.get("lineage_key") == lineage_key
         ]
-        excess = len(accepted_for_lineage) - MAX_ACCEPTED_VERSIONS_PER_LINEAGE
+        excess = len(accepted_for_lineage) - self.accepted_retention
         if excess <= 0:
             return
         drop_indexes = set(accepted_for_lineage[:excess])

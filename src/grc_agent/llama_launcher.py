@@ -198,6 +198,8 @@ class LlamaServerLauncher:
             host,
             "--port",
             str(port),
+            "--ctx-size",
+            str(self.config.desired_context_tokens),
             "--jinja",
         ]
         if _get_mmproj_support():

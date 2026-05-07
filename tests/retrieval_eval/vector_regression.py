@@ -96,7 +96,21 @@ def _int_value(value: Any) -> int:
 
 
 def main() -> int:
-    report = evaluate_vector_regression(run_eval())
+    try:
+        report = evaluate_vector_regression(run_eval())
+    except RuntimeError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error_type": "retrieval_eval_lock_busy",
+                    "message": str(exc),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["ok"] else 1
 

@@ -27,6 +27,10 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 - Full repo lint gate after cleanup/refactors: `uv run ruff check`.
 - Regression gate: `uv run python -m unittest`.
 - Canonical example fixture: `tests/data/random_bit_generator.grc`. Do not duplicate it at repo root.
+- Context budgeting rule: keep wrapper/tool outputs compact via retrieval and
+  schema limits; do not treat low `max_tokens` as compression.
+- Desired llama context target is `120000` tokens when server/model support it;
+  verify desired vs actual via doctor/health before claiming large-context behavior.
 
 ## Research And Accuracy
 
@@ -54,7 +58,7 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 ## Tool And Workflow Design
 
 - Default model-facing chat surface is MVP wrappers only:
-  `inspect_graph`, `search_blocks`, `search_help`, `change_graph`.
+  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`.
 - Legacy low-level tools remain internal/compatibility-only unless explicitly
   enabled for developer compatibility mode.
 - Tool order matters. Models prefer earlier tools.
@@ -73,6 +77,8 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
   advisor classifies user intent into a small structured mode, and runtime code
   maps that mode to a bounded tool class.
 - Advisor is currently shadow-only and does not control default runtime routing.
+- Current MVP advisor shadow vocabulary is:
+  `inspect`, `preview`, `change`, `clarify`, `unsupported`.
 - Do not solve intent routing with regexes, phrase dictionaries, or hardcoded
   natural-language branches. Intent routing belongs to the Advisor.
 - Runtime code enforces contracts and graph safety: enum/schema validation,
@@ -95,6 +101,8 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 - Keep deterministic safety tests separate from live/model evals.
 - Default development gate is deterministic (`ruff`, `unittest`,
   `tests.retrieval_eval.vector_regression`).
+- Retrieval/vector eval gates currently run sequentially when sharing the same
+  local index path.
 - Live quick tiers run only after runtime/model-facing behavior changes.
 - `--n-runs 3` + `release_dashboard` is release-only evidence, not routine.
 - Advisor/model bakeoff scripts are research-only and must be run explicitly.
@@ -111,6 +119,9 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 ## Tutorial Corpus And RAG
 
 - Keep `docs/wiki_gnuradio_org/` as explanation/retrieval/eval material.
+- `ask_grc_docs` production-candidate default is deterministic grounded answering with source
+  evidence and honest `insufficient_evidence`; helper synthesis is optional
+  research-only and not required for the frozen runtime path.
 - Tutorials are not mutation authority.
 - Do not turn tutorials into hidden runtime recipes, block allowlists, block blacklists, or parameter defaults.
 - Catalog metadata remains authority for block IDs, ports, params, defaults, and signatures.

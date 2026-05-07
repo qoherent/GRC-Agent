@@ -2,13 +2,17 @@
 
 import copy
 from collections import OrderedDict
+from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
 import json
 import logging
 import re
+import socket
 from pathlib import Path
 import time
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from grc_agent.catalog import describe_block
 from grc_agent.catalog.loaders import build_catalog_snapshot
@@ -23,10 +27,16 @@ from grc_agent.history import (
     snapshot_session,
 )
 from grc_agent.manual import search_manual
+from grc_agent.manual.search import DEFAULT_MANUAL_ROOT
 from grc_agent.retrieval.search import _search_grc_with_context
 from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
 from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.runtime.prompt import build_system_prompt
+from grc_agent.runtime.docs_answer_advisor import (
+    DocsAnswerLlamaClient,
+    DocsAnswerSnippet,
+    run_docs_answer_advisor,
+)
 from grc_agent.runtime.tool_schemas import MODEL_TOOL_NAMES_ORDERED, build_tool_schemas
 from grc_agent.runtime.turn_plan import (
     INTENT_ADD_VARIABLE,
@@ -63,9 +73,119 @@ _ADD_VARIABLE_EXACT_PATTERN = re.compile(
 _CONNECTION_ID_TOKEN_PATTERN = re.compile(
     r"[A-Za-z0-9_./-]+:[^\s,;()]+->[A-Za-z0-9_./-]+:[^\s,;()]+"
 )
+_SAVE_PATH_HINT_PATTERN = re.compile(r"(?P<path>(?:~|/)[^\s'\"`]+\.grc)\b")
 _ALIAS_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
 _SEARCH_BLOCK_SUMMARY_MAX_CHARS = 120
-_SEARCH_BLOCKS_CACHE_MAX_SIZE = 64
+_DOCS_QUERY_STOP_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "across",
+        "all",
+        "an",
+        "and",
+        "are",
+        "at",
+        "be",
+        "between",
+        "block",
+        "blocks",
+        "briefly",
+        "by",
+        "can",
+        "checking",
+        "context",
+        "difference",
+        "different",
+        "differ",
+        "do",
+        "does",
+        "explain",
+        "for",
+        "gnu",
+        "high",
+        "how",
+        "in",
+        "interact",
+        "is",
+        "keep",
+        "level",
+        "meaning",
+        "mean",
+        "of",
+        "or",
+        "please",
+        "radio",
+        "short",
+        "the",
+        "this",
+        "to",
+        "used",
+        "using",
+        "what",
+        "with",
+    }
+)
+_DOCS_TOPIC_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "pmt": ("polymorphic", "types", "message"),
+    "pmts": ("polymorphic", "types", "message"),
+    "stream": ("sample", "samples", "data"),
+    "tags": ("metadata", "length", "tag"),
+    "message": ("port", "ports", "pdu", "queue"),
+    "flowgraph": ("top block", "graph", "blocks"),
+    "decimation": ("sample rate", "downsample", "rate change", "sample_rate_change"),
+    "interpolation": ("sample rate", "upsample", "rate change", "sample_rate_change"),
+    "sample": ("rate", "sps", "decimation", "interpolation"),
+    "ports": ("message", "stream", "queue"),
+    "throttle": ("rate", "sample", "limit", "pace"),
+    "grcc": ("compiler", "compile", "validation", "validate"),
+    "hierarchical": ("hier", "wrapper", "block"),
+    "tagged": ("length", "packet", "pdu"),
+}
+_DOCS_NAVIGATION_MARKERS = (
+    "beginner tutorials",
+    "please leave tutorials-related feedback",
+    "discussion page of this article",
+    "jump to navigation",
+    "table of contents",
+    "table of content",
+)
+_DOCS_MENU_TITLE_MARKERS = (
+    "tutorials",
+    "main page",
+    "index",
+)
+_DOCS_PROCEDURAL_MARKERS = (
+    "add the",
+    "drag in",
+    "connect the",
+    "click ",
+    "right-click",
+    "setting up",
+    "set up",
+    "we will be using",
+    "below to show",
+    "workspace",
+    "flowgraph below",
+)
+_DOCS_GENERIC_ANSWER_MARKERS = (
+    "gnu radio is a free",
+    "gnu radio is a framework",
+    "software development toolkit",
+    "what is gnu radio",
+)
+_DOCS_LIST_MARKERS_RE = re.compile(r"(?:^|\s)(?:\d+\.\s+|\*\s+)")
+_DOCS_GENERIC_TOPIC_TERMS = frozenset(
+    {
+        "concept",
+        "definition",
+        "gnu",
+        "radio",
+        "signal",
+        "system",
+        "type",
+    }
+)
 _JOURNALED_MUTATION_TOOLS = {
     "apply_edit",
     "remove_connection",
@@ -74,6 +194,28 @@ _JOURNALED_MUTATION_TOOLS = {
     "auto_insert_block",
     "change_graph",
 }
+
+
+@dataclass(frozen=True)
+class _DocsEvidenceCandidate:
+    snippet: DocsAnswerSnippet
+    source_channel: str
+    source_type: str
+    section: str
+    lexical_score: float
+    semantic_score: float | None
+    topic_score: float
+    quality_score: float
+    low_value_reasons: tuple[str, ...]
+    procedural: bool
+
+
+@dataclass(frozen=True)
+class _DocsComparisonSides:
+    left_label: str
+    right_label: str
+    left_terms: tuple[str, ...]
+    right_terms: tuple[str, ...]
 
 
 def _normalize_alias_key(value: str) -> str:
@@ -145,6 +287,24 @@ def _catalog_version_token(catalog_root: str | None) -> str:
     return f"{snapshot.root}|blocks={len(snapshot.blocks)}|mtime_ns={newest_mtime}"
 
 
+def _manual_corpus_version_token(root: Path = DEFAULT_MANUAL_ROOT) -> str:
+    try:
+        resolved = root.resolve()
+    except Exception:
+        resolved = root
+    if not resolved.is_dir():
+        return f"{resolved}|missing"
+    newest_mtime = 0
+    count = 0
+    for path in resolved.glob("*.md"):
+        count += 1
+        try:
+            newest_mtime = max(newest_mtime, path.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return f"{resolved}|files={count}|mtime_ns={newest_mtime}"
+
+
 class GrcAgent:
     """A thin integration layer between a language model and package-level owners."""
 
@@ -171,11 +331,38 @@ class GrcAgent:
         catalog_root: str | None = None,
         config: AgentConfig | None = None,
         history_journal_path: str | Path | None = None,
+        llama_server_url: str | None = None,
+        llama_model: str | None = None,
+        llama_request_timeout_seconds: float | None = None,
     ) -> None:
         self.session = FlowgraphSession() if session is None else session
         self.catalog_root = str(catalog_root) if catalog_root is not None else None
         self.config = config or default_app_config().agent
-        self._history_journal = GraphHistoryJournal(history_journal_path)
+        self._docs_answer_cfg = self.config.docs_answer
+        self._retrieval_cfg = self.config.retrieval
+        self._guardrails_cfg = self.config.guardrails
+        llama_defaults = default_app_config().llama
+        self._llama_server_url = (
+            llama_server_url
+            if isinstance(llama_server_url, str) and llama_server_url.strip()
+            else llama_defaults.server_url
+        )
+        self._llama_model = (
+            llama_model
+            if isinstance(llama_model, str) and llama_model.strip()
+            else llama_defaults.model
+        )
+        self._llama_request_timeout_seconds = (
+            float(llama_request_timeout_seconds)
+            if isinstance(llama_request_timeout_seconds, int | float)
+            and not isinstance(llama_request_timeout_seconds, bool)
+            and float(llama_request_timeout_seconds) > 0
+            else float(llama_defaults.request_timeout_seconds)
+        )
+        self._history_journal = GraphHistoryJournal(
+            history_journal_path,
+            accepted_retention=self.config.history.checkpoint_retention,
+        )
         self._history_lineage_key: str | None = None
         self.history: list[HistoryEntry] = []
         self._last_validated_state_revision: int | None = None
@@ -195,6 +382,23 @@ class GrcAgent:
         self._transaction_normalizer = TransactionNormalizer(session=self.session)
         self._pending_clarification: dict[str, Any] | None = None
         self._pending_clarification_revision: int | None = None
+        self._docs_advisor_probe_at: float = 0.0
+        self._docs_advisor_reachable: bool = True
+        self._last_docs_advisor_meta: dict[str, Any] = {
+            "advisor_attempted": False,
+            "advisor_success": False,
+            "fallback_reason": "not_attempted",
+            "helper_latency_ms": None,
+            "prompt_chars": 0,
+            "snippet_count": 0,
+            "schema_valid": False,
+            "timeout_ms": int(self._docs_answer_cfg.helper_timeout_seconds * 1000),
+            "cache_hit": False,
+            "helper_finish_reason": None,
+        }
+        self._ask_grc_docs_cache: OrderedDict[
+            tuple[str, int, str, str, str, str], dict[str, Any]
+        ] = OrderedDict()
         self._search_blocks_cache: OrderedDict[
             tuple[str, int, str], dict[str, Any]
         ] = OrderedDict()
@@ -297,7 +501,65 @@ class GrcAgent:
             if key == "transaction":
                 value = self._transaction_normalizer.normalize_transaction_instance_names(value)
             normalized[key] = value
+        if tool_name == "save_graph":
+            normalized = self._normalize_save_graph_path(normalized)
         return normalized
+
+    def _normalize_save_graph_path(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        raw_path = kwargs.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return kwargs
+        requested = Path(raw_path.strip()).expanduser()
+        requested_dir = requested.parent
+        if requested_dir.exists():
+            return kwargs
+
+        candidates = self._save_path_candidates_from_user_text()
+        if not candidates:
+            return kwargs
+        compatible = [
+            candidate
+            for candidate in candidates
+            if candidate.name == requested.name and candidate.parent.exists()
+        ]
+        if len(compatible) != 1:
+            return kwargs
+
+        recovered = compatible[0]
+        if recovered == requested:
+            return kwargs
+        kwargs = dict(kwargs)
+        kwargs["path"] = str(recovered)
+        logger.info(
+            "save_graph_path_recovered requested=%s recovered=%s",
+            str(requested),
+            str(recovered),
+        )
+        return kwargs
+
+    def _save_path_candidates_from_user_text(self) -> list[Path]:
+        texts: list[str] = []
+        if isinstance(self._turn_user_message, str) and self._turn_user_message.strip():
+            texts.append(self._turn_user_message)
+        for turn in reversed(self.history):
+            if turn.get("role") != "user":
+                continue
+            content = turn.get("content")
+            if isinstance(content, str) and content.strip():
+                texts.append(content)
+                break
+        if not texts:
+            return []
+
+        unique: dict[str, Path] = {}
+        for text in texts:
+            for match in _SAVE_PATH_HINT_PATTERN.finditer(text):
+                candidate = match.group("path").strip()
+                if not candidate:
+                    continue
+                expanded = str(Path(candidate).expanduser())
+                unique.setdefault(expanded, Path(expanded))
+        return list(unique.values())
 
     def validate_tool_call(self, tool_name: str, kwargs: Any) -> ToolResult | None:
         """Validate one runtime tool call against the declared public schema."""
@@ -1389,7 +1651,7 @@ class GrcAgent:
         return {
             "inspect_graph": self._inspect_graph,
             "search_blocks": self._search_blocks,
-            "search_help": self._search_help,
+            "ask_grc_docs": self._ask_grc_docs,
             "change_graph": self._change_graph,
         }
 
@@ -1561,7 +1823,44 @@ class GrcAgent:
         if default_message is not None and "message" not in result:
             result["message"] = default_message
         result["active_session"] = self.active_session_snapshot()
+        result = self._enforce_tool_output_budget(result)
         return result
+
+    def _enforce_tool_output_budget(self, payload: ToolResult) -> ToolResult:
+        """Clamp oversized wrapper payloads to a bounded JSON budget."""
+        max_bytes = self._guardrails_cfg.max_tool_output_bytes
+        max_list_items = self._guardrails_cfg.max_compact_list_items
+        max_stderr_chars = self._guardrails_cfg.max_validation_stderr_chars
+        max_validation_errors = self._guardrails_cfg.max_validation_errors
+        try:
+            size = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
+        except Exception:
+            return payload
+        if size <= max_bytes:
+            return payload
+        compact = dict(payload)
+        for key in ("items", "results", "sources"):
+            value = compact.get(key)
+            if isinstance(value, list) and len(value) > max_list_items:
+                compact[key] = value[:max_list_items]
+                compact["output_truncated"] = True
+        validation_errors = compact.get("validation_errors")
+        if (
+            isinstance(validation_errors, list)
+            and len(validation_errors) > max_validation_errors
+        ):
+            compact["validation_errors"] = validation_errors[:max_validation_errors]
+            compact["output_truncated"] = True
+        validation = compact.get("validation_result")
+        if isinstance(validation, dict):
+            stderr = validation.get("stderr")
+            if isinstance(stderr, str) and len(stderr) > max_stderr_chars:
+                validation = dict(validation)
+                validation["stderr"] = stderr[: max_stderr_chars - 1].rstrip() + "…"
+                compact["validation_result"] = validation
+                compact["output_truncated"] = True
+        compact["output_bytes"] = min(size, max_bytes)
+        return compact
 
     def _record_active_session_history(self, *, reason: str) -> None:
         snapshot = self.active_session_snapshot()
@@ -1604,7 +1903,12 @@ class GrcAgent:
         output_truncated = False
         if op == "summarize":
             handlers.append("summarize_graph")
-            payload = summarize_graph(self.session, max_blocks=max_items) if max_items else summarize_graph(self.session)
+            summary_limit = (
+                max_items
+                if isinstance(max_items, int) and max_items > 0
+                else self._guardrails_cfg.max_graph_summary_blocks
+            )
+            payload = summarize_graph(self.session, max_blocks=summary_limit)
             output_truncated = bool(payload.get("blocks_truncated", 0))
             result = self._payload_result("inspect_graph", self._compact_inspect_payload(op, payload))
             return self._attach_wrapper_dispatch_telemetry(
@@ -1670,7 +1974,10 @@ class GrcAgent:
                     output_truncated=False,
                 )
             handlers.append("get_grc_context")
-            payload = self._get_grc_context(target.strip(), max_nodes=max_items or 20)
+            payload = self._get_grc_context(
+                target.strip(),
+                max_nodes=max_items or self._guardrails_cfg.max_context_nodes,
+            )
             output_truncated = bool(payload.get("truncated"))
             result = self._payload_result("inspect_graph", self._compact_inspect_payload(op, payload))
             return self._attach_wrapper_dispatch_telemetry(
@@ -1856,13 +2163,57 @@ class GrcAgent:
     ) -> None:
         self._search_blocks_cache[key] = copy.deepcopy(payload)
         self._search_blocks_cache.move_to_end(key)
-        while len(self._search_blocks_cache) > _SEARCH_BLOCKS_CACHE_MAX_SIZE:
+        while len(self._search_blocks_cache) > self._retrieval_cfg.conceptual_cache_size:
             self._search_blocks_cache.popitem(last=False)
+
+    def _ask_grc_docs_cache_key(
+        self,
+        *,
+        question: str,
+        k: int,
+        retrieval_mode: str,
+        sources: list[dict[str, str]],
+    ) -> tuple[str, int, str, str, str, str, str]:
+        source_digest = hashlib.sha1()
+        for row in sources:
+            title = str(row.get("title", "")).strip()
+            source = str(row.get("source", "")).strip()
+            excerpt = str(row.get("excerpt", "")).strip()
+            source_digest.update(f"{title}|{source}|{excerpt}".encode("utf-8"))
+        return (
+            question,
+            k,
+            retrieval_mode,
+            source_digest.hexdigest(),
+            _manual_corpus_version_token(),
+            self._docs_answer_cfg.helper_prompt_version,
+            self._docs_answer_cfg.helper_mode,
+        )
+
+    def _ask_grc_docs_cache_get(
+        self,
+        key: tuple[str, int, str, str, str, str, str],
+    ) -> dict[str, Any] | None:
+        hit = self._ask_grc_docs_cache.get(key)
+        if hit is None:
+            return None
+        self._ask_grc_docs_cache.move_to_end(key)
+        return copy.deepcopy(hit)
+
+    def _ask_grc_docs_cache_put(
+        self,
+        key: tuple[str, int, str, str, str, str, str],
+        payload: dict[str, Any],
+    ) -> None:
+        self._ask_grc_docs_cache[key] = copy.deepcopy(payload)
+        self._ask_grc_docs_cache.move_to_end(key)
+        while len(self._ask_grc_docs_cache) > self._docs_answer_cfg.answer_cache_size:
+            self._ask_grc_docs_cache.popitem(last=False)
 
     def _search_blocks(
         self,
         query: str,
-        k: int = 5,
+        k: int | None = None,
         debug: bool = False,
         enrich: bool = False,
     ) -> ToolResult:
@@ -1891,7 +2242,12 @@ class GrcAgent:
                 output_truncated=False,
             )
         session_ctx = self.session if self.session.flowgraph is not None else None
-        limit = max(1, min(int(k), 5))
+        limit_value = (
+            self._retrieval_cfg.search_blocks_default_k
+            if k is None
+            else int(k)
+        )
+        limit = max(1, min(limit_value, self._retrieval_cfg.search_blocks_max_k))
         cacheable = not debug and not enrich
         lexical: dict[str, Any] = {"ok": True, "results": []}
         retrieval_mode = "hybrid"
@@ -1901,16 +2257,17 @@ class GrcAgent:
         query_alias = _normalize_alias_key(q)
         exact_block_id: str | None = None
         exact_alias_hit = False
-        try:
-            alias_map = _catalog_alias_to_block_map(self.catalog_root)
-            if query_raw and query_raw in alias_map:
-                exact_block_id = alias_map[query_raw]
-                exact_alias_hit = True
-            elif query_alias and query_alias in alias_map:
-                exact_block_id = alias_map[query_alias]
-                exact_alias_hit = True
-        except Exception:
-            logger.exception("search_blocks_alias_map_failed")
+        if self._retrieval_cfg.exact_match_fast_path:
+            try:
+                alias_map = _catalog_alias_to_block_map(self.catalog_root)
+                if query_raw and query_raw in alias_map:
+                    exact_block_id = alias_map[query_raw]
+                    exact_alias_hit = True
+                elif query_alias and query_alias in alias_map:
+                    exact_block_id = alias_map[query_alias]
+                    exact_alias_hit = True
+            except Exception:
+                logger.exception("search_blocks_alias_map_failed")
 
         cache_key: tuple[str, int, str] | None = None
         if exact_block_id is None and cacheable:
@@ -1988,7 +2345,7 @@ class GrcAgent:
                     ErrorCode.RETRIEVAL_NOT_READY,
                 }
                 if degraded_retrieval:
-                    retrieval_mode = "lexical_fallback"
+                    retrieval_mode = "lexical_fallback_missing_vector"
 
         if lexical.get("ok"):
             for row in lexical_rows:
@@ -2110,19 +2467,29 @@ class GrcAgent:
             output_truncated=output_truncated,
         )
 
-    def _search_help(self, query: str, k: int = 3, debug: bool = False) -> ToolResult:
+    def _ask_grc_docs(
+        self,
+        question: str,
+        k: int | None = None,
+        focus: str | None = None,
+        debug: bool = False,
+    ) -> ToolResult:
         started = time.monotonic()
         before_revision = self.session.state_revision
         before_dirty = self.session.is_dirty
-        handlers = ["search_manual"]
-        payload = search_manual(query, k=k)
-        if payload.get("ok") is not True:
-            result = self._payload_result("search_help", payload)
+        handlers: list[str] = []
+        if not isinstance(question, str) or not question.strip():
+            result = self._tool_result(
+                "ask_grc_docs",
+                ok=False,
+                message="question must be non-empty.",
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
             return self._attach_wrapper_dispatch_telemetry(
                 debug=debug,
-                wrapper_name="search_help",
+                wrapper_name="ask_grc_docs",
                 wrapper_action="query",
-                internal_handlers=handlers,
+                internal_handlers=["none"],
                 started=started,
                 before_revision=before_revision,
                 before_dirty=before_dirty,
@@ -2130,34 +2497,390 @@ class GrcAgent:
                 validation_run=False,
                 output_truncated=False,
             )
-        compact_results: list[dict[str, Any]] = []
-        for row in payload.get("results", []):
-            if not isinstance(row, dict):
-                continue
-            citation = row.get("citation")
-            source = None
-            if isinstance(citation, dict):
-                source = citation.get("url") or citation.get("path")
-            compact_results.append(
+
+        limit = self._retrieval_cfg.ask_grc_docs_default_k
+        if isinstance(k, int) and not isinstance(k, bool):
+            limit = max(1, min(k, self._retrieval_cfg.ask_grc_docs_max_k))
+        question_text = " ".join(question.split())
+        focus_text = (
+            " ".join(focus.split())
+            if isinstance(focus, str) and focus.strip()
+            else None
+        )
+        answer_type = self._classify_docs_answer_type(question_text)
+
+        retrieval_k = max(
+            limit,
+            min(self._retrieval_cfg.ask_grc_docs_max_k, max(limit + 2, 5)),
+        )
+        retrieval_query = self._normalized_docs_retrieval_query(
+            question=question_text,
+            answer_type=answer_type,
+        )
+        handlers.append("search_manual")
+        lexical_payload = search_manual(retrieval_query, k=retrieval_k)
+        semantic_manual: dict[str, Any] = {"ok": False, "results": []}
+        semantic_tutorial: dict[str, Any] = {"ok": False, "results": []}
+        degraded_retrieval = False
+        fallback_used = False
+        fallback_reason = "not_attempted"
+        warnings: list[str] = []
+        retrieval_mode = "lexical_only"
+
+        lexical_strong = self._is_lexical_docs_evidence_strong(
+            query=retrieval_query,
+            question=question_text,
+            answer_type=answer_type,
+            lexical_payload=lexical_payload,
+            limit=limit,
+        )
+        lexical_weak = not lexical_strong
+        tutorial_or_howto_query = self._is_tutorial_or_howto_query(question_text)
+        run_manual_semantic = (
+            self._docs_answer_cfg.semantic_manual_enabled
+            and (not self._docs_answer_cfg.lexical_first or lexical_weak)
+        )
+        run_tutorial_semantic = (
+            self._docs_answer_cfg.semantic_tutorial_enabled
+            and (tutorial_or_howto_query or lexical_weak)
+            and (not self._docs_answer_cfg.lexical_first or lexical_weak)
+        )
+
+        if run_manual_semantic:
+            handlers.append("semantic_search_grc(manual)")
+            semantic_manual = semantic_search_grc(
+                retrieval_query,
+                scope="manual",
+                k=retrieval_k,
+            )
+            if semantic_manual.get("ok") is not True and semantic_manual.get(
+                "error_type"
+            ) in {
+                "missing_index",
+                ErrorCode.RETRIEVAL_NOT_READY,
+            }:
+                degraded_retrieval = True
+
+        if run_tutorial_semantic:
+            handlers.append("semantic_search_grc(tutorial)")
+            semantic_tutorial = semantic_search_grc(
+                retrieval_query,
+                scope="tutorial",
+                k=retrieval_k,
+            )
+            if semantic_tutorial.get("ok") is not True and semantic_tutorial.get(
+                "error_type"
+            ) in {
+                "missing_index",
+                ErrorCode.RETRIEVAL_NOT_READY,
+            }:
+                degraded_retrieval = True
+
+        if run_manual_semantic and run_tutorial_semantic:
+            retrieval_mode = "lexical_plus_manual_and_tutorial_semantic"
+        elif run_manual_semantic:
+            retrieval_mode = "lexical_plus_manual_semantic"
+        elif run_tutorial_semantic:
+            retrieval_mode = "lexical_plus_tutorial_semantic"
+
+        if degraded_retrieval:
+            retrieval_mode = "lexical_fallback_missing_vector"
+
+        candidates = self._collect_docs_candidates(
+            lexical_payload=lexical_payload,
+            semantic_manual=semantic_manual,
+            semantic_tutorial=semantic_tutorial,
+        )
+        ranked_candidates = self._rank_docs_candidates(
+            question=question_text,
+            candidates=candidates,
+        )
+        if self._is_block_definition_query(question_text):
+            handlers.append("search_blocks(catalog_assisted_docs)")
+            assisted = self._build_catalog_assisted_candidate(
+                question=question_text
+            )
+            if assisted is not None:
+                ranked_candidates = self._rank_docs_candidates(
+                    question=question_text,
+                    candidates=[*candidates, assisted],
+                )
+        elif self._should_catalog_assist(question_text, ranked_candidates):
+            handlers.append("search_blocks(catalog_assisted_docs)")
+            assisted = self._build_catalog_assisted_candidate(question=question_text)
+            if assisted is not None:
+                ranked_candidates = self._rank_docs_candidates(
+                    question=question_text,
+                    candidates=[*candidates, assisted],
+                )
+
+        severe_reasons = {
+            "generic_gnuradio_page",
+            "menu_index_page",
+            "navigation_boilerplate",
+            "toc_dominated",
+        }
+        filtered_candidates = [
+            candidate
+            for candidate in ranked_candidates
+            if not any(reason in severe_reasons for reason in candidate.low_value_reasons)
+        ]
+        selected_pool = filtered_candidates or ranked_candidates
+        selected_candidates = self._select_docs_candidates_for_answer_type(
+            question=question_text,
+            answer_type=answer_type,
+            ranked_candidates=selected_pool,
+            limit=max(1, min(limit, self._retrieval_cfg.ask_grc_docs_max_k)),
+        )
+        snippets = [candidate.snippet for candidate in selected_candidates]
+        source_quality = self._build_docs_source_quality(
+            question=question_text,
+            answer_type=answer_type,
+            selected_candidates=selected_candidates,
+        )
+        if degraded_retrieval:
+            warnings.append("vector_index_missing_or_not_ready")
+
+        insufficient_evidence = len(snippets) == 0 or str(source_quality.get("quality")) == "weak"
+        answer = ""
+        source_limit = min(limit, self._docs_answer_cfg.max_sources)
+        sources = [
+            {
+                "title": snippet.title,
+                "source": snippet.source,
+                "excerpt": snippet.excerpt[: self._docs_answer_cfg.excerpt_target_chars],
+            }
+            for snippet in snippets
+        ]
+        self._last_docs_advisor_meta = {
+            "advisor_attempted": False,
+            "advisor_success": False,
+            "fallback_reason": "not_attempted",
+            "helper_latency_ms": None,
+            "prompt_chars": 0,
+            "snippet_count": len(snippets),
+            "schema_valid": False,
+            "timeout_ms": int(self._docs_answer_cfg.helper_timeout_seconds * 1000),
+            "cache_hit": False,
+            "helper_finish_reason": None,
+            "source_quality": dict(source_quality),
+            "helper_eligible": False,
+            "helper_skipped_reason": "not_evaluated",
+        }
+        evidence_strong = str(source_quality.get("quality")) == "strong"
+        cache_key = self._ask_grc_docs_cache_key(
+            question=question_text,
+            k=source_limit,
+            retrieval_mode=retrieval_mode,
+            sources=sources[:source_limit],
+        )
+        cached_docs_answer = self._ask_grc_docs_cache_get(cache_key)
+        if cached_docs_answer is not None:
+            answer = str(cached_docs_answer.get("answer") or "")
+            sources = list(cached_docs_answer.get("sources") or [])
+            insufficient_evidence = bool(cached_docs_answer.get("insufficient_evidence"))
+            fallback_used = bool(cached_docs_answer.get("fallback_used"))
+            fallback_reason = str(cached_docs_answer.get("fallback_reason") or "cache_hit")
+            helper_eligible = bool(cached_docs_answer.get("helper_eligible", False))
+            helper_skipped_reason = str(
+                cached_docs_answer.get("helper_skipped_reason") or "cache_hit"
+            )
+            cached_quality = cached_docs_answer.get("source_quality")
+            if isinstance(cached_quality, dict):
+                source_quality = dict(cached_quality)
+            self._last_docs_advisor_meta.update(
                 {
-                    "title": row.get("title"),
-                    "excerpt": row.get("excerpt"),
-                    "source": source,
+                    "advisor_attempted": False,
+                    "advisor_success": True,
+                    "fallback_reason": "none",
+                    "helper_latency_ms": 0,
+                    "prompt_chars": 0,
+                    "snippet_count": len(snippets),
+                    "schema_valid": True,
+                    "cache_hit": True,
+                    "helper_finish_reason": "cache_hit",
+                    "source_quality": dict(source_quality),
+                    "helper_eligible": bool(helper_eligible),
+                    "helper_skipped_reason": helper_skipped_reason,
                 }
             )
+        if snippets and cached_docs_answer is None:
+            helper_eligible = False
+            helper_skipped_reason = "not_evaluated"
+            typed_answer = "Local docs did not contain enough direct evidence for this question."
+            typed_insufficient = True
+            if str(source_quality.get("quality")) != "weak":
+                typed_answer, typed_insufficient = self._build_typed_docs_answer(
+                    question=question_text,
+                    ranked_candidates=ranked_candidates,
+                    answer_type=answer_type,
+                )
+                helper_eligible, helper_skipped_reason = self._helper_eligibility_for_docs_answer(
+                    question=question_text,
+                    answer_type=answer_type,
+                    source_quality=source_quality,
+                    selected_candidates=selected_candidates,
+                    typed_answer=typed_answer,
+                    typed_insufficient=typed_insufficient,
+                )
+            else:
+                helper_skipped_reason = "weak_evidence"
+            answer = typed_answer
+            insufficient_evidence = bool(typed_insufficient)
+            fallback_used = True
+            fallback_reason = "typed_fallback"
+            helper_input_candidates = self._helper_candidates_for_docs_answer(
+                question=question_text,
+                answer_type=answer_type,
+                ranked_candidates=selected_pool,
+            )
+            helper_input = self._clip_docs_snippets_for_helper(
+                [candidate.snippet for candidate in helper_input_candidates]
+            )
+            helper_result = None
+            self._last_docs_advisor_meta.update(
+                {
+                    "source_quality": dict(source_quality),
+                    "helper_eligible": bool(helper_eligible),
+                    "helper_skipped_reason": helper_skipped_reason,
+                }
+            )
+            if self._docs_answer_cfg.enabled and helper_eligible:
+                helper_mode = self._docs_answer_cfg.helper_mode
+                run_helper = False
+                if helper_mode in {"always", "auto"}:
+                    run_helper = True
+                elif helper_mode == "never":
+                    helper_skipped_reason = "helper_mode_never"
+                if run_helper:
+                    helper_result = self._run_docs_answer_advisor(
+                        question=question_text,
+                        answer_type=answer_type,
+                        snippets=helper_input,
+                        focus=focus_text,
+                    )
+                elif (
+                    self._last_docs_advisor_meta.get("fallback_reason", "not_attempted")
+                    == "not_attempted"
+                ):
+                    self._last_docs_advisor_meta["fallback_reason"] = helper_skipped_reason
+            elif not self._docs_answer_cfg.enabled:
+                helper_skipped_reason = "helper_disabled"
+            else:
+                self._last_docs_advisor_meta["fallback_reason"] = helper_skipped_reason
+
+            advisor_meta = dict(self._last_docs_advisor_meta)
+            if helper_result is not None:
+                helper_answer = str(helper_result.get("answer") or "").strip()
+                helper_answer_l = helper_answer.lower()
+                helper_invalid = (
+                    answer_type == "block_definition"
+                    and any(
+                        marker in helper_answer_l
+                        for marker in ("input port(s)", "output port(s)", "parameter(s)")
+                    )
+                )
+                if helper_invalid:
+                    fallback_used = True
+                    fallback_reason = "helper_answer_low_value"
+                    self._last_docs_advisor_meta["fallback_reason"] = "helper_answer_low_value"
+                    self._last_docs_advisor_meta["helper_finish_reason"] = "low_value"
+                else:
+                    answer = helper_answer
+                    selected_sources: list[dict[str, str]] = []
+                    source_indexes = helper_result.get("source_indexes")
+                    if isinstance(source_indexes, list):
+                        for index in source_indexes:
+                            if not isinstance(index, int):
+                                continue
+                            if index < 0 or index >= len(helper_input):
+                                continue
+                            snippet = helper_input[index]
+                            selected_sources.append(
+                                {
+                                    "title": snippet.title,
+                                    "source": snippet.source,
+                                    "excerpt": snippet.excerpt[
+                                        : self._docs_answer_cfg.excerpt_target_chars
+                                    ],
+                                }
+                            )
+                    if selected_sources:
+                        sources = selected_sources[:source_limit]
+                    insufficient_evidence = bool(helper_result.get("insufficient_evidence"))
+                    fallback_used = False
+                    fallback_reason = "none"
+                    self._last_docs_advisor_meta["helper_finish_reason"] = str(
+                        helper_result.get("helper_finish_reason") or "stop"
+                    )
+            else:
+                fallback_used = True
+                fallback_reason = str(advisor_meta.get("fallback_reason") or "advisor_failed")
+                if not self._last_docs_advisor_meta.get("helper_finish_reason"):
+                    self._last_docs_advisor_meta["helper_finish_reason"] = fallback_reason
+                if helper_eligible:
+                    warnings.append("docs_answer_advisor_fallback")
+            self._last_docs_advisor_meta["helper_eligible"] = bool(helper_eligible)
+            self._last_docs_advisor_meta["helper_skipped_reason"] = helper_skipped_reason
+            self._last_docs_advisor_meta["source_quality"] = dict(source_quality)
+        elif not snippets:
+            fallback_used = True
+            fallback_reason = "retrieval_empty"
+            self._last_docs_advisor_meta["helper_finish_reason"] = "retrieval_empty"
+            self._last_docs_advisor_meta["helper_skipped_reason"] = "retrieval_empty"
+
+        if not answer:
+            answer, insufficient_evidence = self._build_fallback_answer(
+                question=question_text,
+                ranked_candidates=ranked_candidates,
+                evidence_strong=evidence_strong,
+            )
+        answer = " ".join(answer.split())
+        if len(answer) > self._docs_answer_cfg.answer_target_chars:
+            answer = answer[: self._docs_answer_cfg.answer_target_chars - 1].rstrip() + "…"
+        if cached_docs_answer is None:
+            self._ask_grc_docs_cache_put(
+                cache_key,
+                {
+                    "answer": answer,
+                    "sources": sources[:source_limit],
+                    "insufficient_evidence": bool(insufficient_evidence),
+                    "fallback_used": bool(fallback_used or degraded_retrieval),
+                    "fallback_reason": fallback_reason,
+                    "source_quality": dict(source_quality),
+                    "helper_eligible": bool(
+                        self._last_docs_advisor_meta.get("helper_eligible", False)
+                    ),
+                    "helper_skipped_reason": str(
+                        self._last_docs_advisor_meta.get("helper_skipped_reason") or ""
+                    ),
+                },
+            )
+
         result = self._payload_result(
-            "search_help",
+            "ask_grc_docs",
             {
                 "ok": True,
-                "query": payload.get("query"),
-                "results": compact_results,
-                "message": "Explanation-only help results returned.",
+                "question": question_text,
+                "focus": focus_text,
+                "answer": answer,
+                "sources": sources[:source_limit],
+                "insufficient_evidence": bool(insufficient_evidence),
+                "fallback_used": bool(fallback_used or degraded_retrieval),
+                "degraded_retrieval": bool(degraded_retrieval),
+                "retrieval_mode": retrieval_mode,
+                "warnings": warnings,
+                "message": "Grounded docs answer returned.",
             },
         )
-        output_truncated = isinstance(k, int) and len(compact_results) >= max(1, min(int(k), 8))
+        if debug:
+            meta = dict(self._last_docs_advisor_meta)
+            meta["fallback_reason"] = fallback_reason
+            result["docs_answer_telemetry"] = meta
+        output_truncated = len(sources) >= limit
         return self._attach_wrapper_dispatch_telemetry(
             debug=debug,
-            wrapper_name="search_help",
+            wrapper_name="ask_grc_docs",
             wrapper_action="query",
             internal_handlers=handlers,
             started=started,
@@ -2167,6 +2890,1722 @@ class GrcAgent:
             validation_run=False,
             output_truncated=output_truncated,
         )
+
+    def _collect_docs_candidates(
+        self,
+        *,
+        lexical_payload: dict[str, Any],
+        semantic_manual: dict[str, Any],
+        semantic_tutorial: dict[str, Any],
+    ) -> list[_DocsEvidenceCandidate]:
+        candidates: list[_DocsEvidenceCandidate] = []
+        seen_sources: set[str] = set()
+
+        def _append(
+            *,
+            title: Any,
+            source: Any,
+            excerpt: Any,
+            section: Any,
+            channel: str,
+            lexical_score: float = 0.0,
+            semantic_score: float | None = None,
+            source_type_hint: str | None = None,
+        ) -> None:
+            title_text = " ".join(str(title or "").split()).strip()
+            source_text = " ".join(str(source or "").split()).strip()
+            excerpt_text = self._clean_docs_excerpt(str(excerpt or ""))
+            if not title_text or not source_text or not excerpt_text:
+                return
+            aliases = self._docs_title_aliases(title_text)
+            if aliases:
+                source_text = f"{source_text} | title_aliases:{','.join(aliases)}"
+
+            source_key = self._normalize_docs_source_key(source_text)
+            if source_key in seen_sources:
+                return
+            seen_sources.add(source_key)
+
+            lower_excerpt = excerpt_text.lower()
+            if title_text and lower_excerpt.startswith(title_text.lower()):
+                excerpt_text = excerpt_text[len(title_text):].lstrip(" -:.\n")
+            elif source_text and lower_excerpt.startswith(source_text.lower()):
+                excerpt_text = excerpt_text[len(source_text):].lstrip(" -:.\n")
+
+            max_collected_excerpt_chars = max(
+                self._docs_answer_cfg.helper_max_total_context_chars,
+                self._docs_answer_cfg.helper_max_snippet_chars,
+                self._docs_answer_cfg.excerpt_target_chars * 2,
+            )
+            if len(excerpt_text) > max_collected_excerpt_chars:
+                excerpt_text = excerpt_text[:max_collected_excerpt_chars].rstrip()
+            candidates.append(
+                _DocsEvidenceCandidate(
+                    snippet=DocsAnswerSnippet(
+                        title=title_text,
+                        source=source_text,
+                        excerpt=excerpt_text,
+                    ),
+                    source_channel=channel,
+                    source_type=self._infer_docs_source_type(
+                        source=source_text,
+                        title=title_text,
+                        source_type_hint=source_type_hint,
+                    ),
+                    section=" ".join(str(section or "").split()).strip(),
+                    lexical_score=float(lexical_score),
+                    semantic_score=semantic_score,
+                    topic_score=0.0,
+                    quality_score=0.0,
+                    low_value_reasons=(),
+                    procedural=False,
+                )
+            )
+
+        if lexical_payload.get("ok") is True:
+            for row in lexical_payload.get("results", []):
+                if not isinstance(row, dict):
+                    continue
+                citation = row.get("citation")
+                source = None
+                if isinstance(citation, dict):
+                    source = citation.get("url") or citation.get("path")
+                score_raw = row.get("score")
+                lexical_score = (
+                    float(score_raw) if isinstance(score_raw, int | float) else 0.0
+                )
+                _append(
+                    title=row.get("title"),
+                    source=source,
+                    excerpt=row.get("excerpt"),
+                    section=row.get("section"),
+                    channel="lexical",
+                    lexical_score=lexical_score,
+                )
+
+        for payload, channel in (
+            (semantic_manual, "semantic_manual"),
+            (semantic_tutorial, "semantic_tutorial"),
+        ):
+            if payload.get("ok") is not True:
+                continue
+            for row in payload.get("results", []):
+                if not isinstance(row, dict):
+                    continue
+                provenance = row.get("provenance")
+                source = None
+                if isinstance(provenance, dict):
+                    source = provenance.get("url") or provenance.get("path")
+                semantic_raw = row.get("vector_score_raw")
+                semantic_score = (
+                    float(semantic_raw)
+                    if isinstance(semantic_raw, int | float)
+                    else None
+                )
+                _append(
+                    title=row.get("title"),
+                    source=source,
+                    excerpt=row.get("excerpt"),
+                    section=row.get("section"),
+                    channel=channel,
+                    semantic_score=semantic_score,
+                    source_type_hint=str(row.get("source_type") or ""),
+                )
+        return candidates
+
+    def _rank_docs_candidates(
+        self,
+        *,
+        question: str,
+        candidates: list[_DocsEvidenceCandidate],
+    ) -> list[_DocsEvidenceCandidate]:
+        if not candidates:
+            return []
+        keywords = self._docs_topic_terms(question)
+        primary_terms = self._docs_primary_terms(question)
+        query_l = question.lower()
+        howto = self._is_tutorial_or_howto_query(question)
+        block_definition_query = self._is_block_definition_query(question)
+        ranked: list[_DocsEvidenceCandidate] = []
+        for candidate in candidates:
+            title_l = candidate.snippet.title.lower()
+            section_l = candidate.section.lower()
+            excerpt_l = candidate.snippet.excerpt.lower()
+            text = " ".join([title_l, section_l, excerpt_l])
+            term_hits = sum(1 for term in keywords if term in text)
+            title_hits = sum(1 for term in keywords if term in title_l)
+            heading_hits = sum(1 for term in keywords if term in section_l)
+            phrase_bonus = 2.0 if query_l in text and len(query_l) > 8 else 0.0
+            synonym_hits = 0
+            for term in keywords:
+                for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
+                    if synonym in text:
+                        synonym_hits += 1
+            topic_score = (
+                float(term_hits)
+                + (2.0 * float(title_hits))
+                + (1.5 * float(heading_hits))
+                + min(2.0, float(synonym_hits) * 0.5)
+                + phrase_bonus
+            )
+            source_pref = 0.0
+            if howto:
+                source_pref = 1.5 if candidate.source_type == "tutorial" else -0.3
+            elif block_definition_query and candidate.source_type == "catalog":
+                source_pref = 2.4
+            elif block_definition_query and candidate.source_type == "manual":
+                source_pref = 0.6
+            elif block_definition_query and candidate.source_type == "tutorial":
+                source_pref = -1.4
+            elif candidate.source_type == "manual":
+                source_pref = 1.5
+            elif candidate.source_type == "tutorial":
+                source_pref = -1.2
+            lexical_component = min(4.0, candidate.lexical_score / 25.0)
+            semantic_component = 0.0
+            if isinstance(candidate.semantic_score, float):
+                semantic_component = (candidate.semantic_score - 0.62) * 7.0
+            low_value_reasons = self._docs_low_value_reasons(candidate=candidate)
+            low_value_penalty = float(len(low_value_reasons)) * 1.6
+            procedural = self._is_procedural_walkthrough_text(
+                candidate.snippet.excerpt
+            )
+            procedural_penalty = 2.5 if procedural and not howto else 0.0
+            primary_hits = sum(1 for term in primary_terms if term in text)
+            if primary_terms and primary_hits == 0:
+                topic_score -= 1.5
+            if (
+                primary_terms
+                and not any(term in title_l for term in primary_terms)
+                and "catalog:" not in candidate.snippet.source.lower()
+            ):
+                topic_score -= 0.8
+            weak_absence_penalty = 0.0
+            if topic_score <= 0.0 and (candidate.semantic_score or 0.0) < 0.74:
+                weak_absence_penalty = 2.0
+            quality_score = (
+                topic_score
+                + source_pref
+                + lexical_component
+                + semantic_component
+                - low_value_penalty
+                - procedural_penalty
+                - weak_absence_penalty
+            )
+            ranked.append(
+                _DocsEvidenceCandidate(
+                    snippet=candidate.snippet,
+                    source_channel=candidate.source_channel,
+                    source_type=candidate.source_type,
+                    section=candidate.section,
+                    lexical_score=candidate.lexical_score,
+                    semantic_score=candidate.semantic_score,
+                    topic_score=topic_score,
+                    quality_score=quality_score,
+                    low_value_reasons=tuple(low_value_reasons),
+                    procedural=procedural,
+                )
+            )
+        ranked.sort(
+            key=lambda item: (
+                -item.quality_score,
+                -item.topic_score,
+                -(item.semantic_score or 0.0),
+                -item.lexical_score,
+                item.snippet.title.lower(),
+            )
+        )
+        return ranked
+
+    def _clip_docs_snippets_for_helper(
+        self,
+        snippets: list[DocsAnswerSnippet],
+    ) -> list[DocsAnswerSnippet]:
+        clipped: list[DocsAnswerSnippet] = []
+        total_chars = 0
+        for snippet in snippets:
+            excerpt_text = snippet.excerpt
+            if len(excerpt_text) > self._docs_answer_cfg.helper_max_snippet_chars:
+                excerpt_text = (
+                    excerpt_text[
+                        : self._docs_answer_cfg.helper_max_snippet_chars - 1
+                    ].rstrip()
+                    + "…"
+                )
+            candidate = DocsAnswerSnippet(
+                title=snippet.title,
+                source=snippet.source,
+                excerpt=excerpt_text,
+            )
+            chunk_chars = len(candidate.title) + len(candidate.source) + len(candidate.excerpt)
+            if (
+                clipped
+                and total_chars + chunk_chars
+                > self._docs_answer_cfg.helper_max_total_context_chars
+            ):
+                break
+            clipped.append(candidate)
+            total_chars += chunk_chars
+        return clipped or snippets[:1]
+
+    @staticmethod
+    def _is_tutorial_or_howto_query(query: str) -> bool:
+        lower = query.lower()
+        markers = (
+            "how to",
+            "tutorial",
+            "walkthrough",
+            "step by step",
+            "example",
+            "guide",
+        )
+        if any(marker in lower for marker in markers):
+            return True
+        return bool(
+            re.search(r"(?i)^\s*how\s+do\s+.+\s+work\??\s*$", query)
+            or re.search(r"(?i)^\s*how\s+does\s+.+\s+work\??\s*$", query)
+        )
+
+    @staticmethod
+    def _docs_topic_terms(query: str) -> list[str]:
+        return [
+            token
+            for token in re.findall(r"[a-z0-9]+", query.lower())
+            if len(token) > 2 and token not in _DOCS_QUERY_STOP_WORDS
+        ]
+
+    @staticmethod
+    def _docs_primary_terms(query: str) -> list[str]:
+        return [
+            token
+            for token in GrcAgent._docs_topic_terms(query)
+            if token not in _DOCS_GENERIC_TOPIC_TERMS
+        ]
+
+    @staticmethod
+    def _normalize_docs_source_key(source: str) -> str:
+        text = " ".join(str(source or "").split()).strip().lower()
+        if not text:
+            return ""
+        if "](" in text:
+            text = text.split("](", 1)[0]
+        if text.startswith("http"):
+            text = text.split("#", 1)[0]
+            text = text.split("&oldid=", 1)[0]
+            text = text.rstrip("/&?")
+        return text
+
+    @staticmethod
+    def _clean_docs_excerpt(excerpt: str) -> str:
+        text = " ".join(str(excerpt or "").split()).strip()
+        if not text:
+            return ""
+        segments = re.split(r"(?<=[.!?])\s+", text)
+        kept: list[str] = []
+        for segment in segments:
+            lower = segment.lower()
+            if any(marker in lower for marker in _DOCS_NAVIGATION_MARKERS):
+                continue
+            if _DOCS_LIST_MARKERS_RE.search(segment) and len(segment) < 70:
+                continue
+            kept.append(segment)
+        cleaned = " ".join(kept).strip()
+        return cleaned if cleaned else text
+
+    @staticmethod
+    def _docs_title_aliases(title: str) -> list[str]:
+        compact = " ".join(str(title or "").split()).strip().lower()
+        if not compact:
+            return []
+        aliases: set[str] = set()
+        tokens = re.findall(r"[a-z0-9]+", compact)
+        if tokens:
+            aliases.add("_".join(tokens))
+        match = re.match(r"^(?P<prefix>[a-z0-9]+)\s+(?P<lhs>.+?)\s+and\s+(?P<rhs>.+)$", compact)
+        if match:
+            prefix = match.group("prefix")
+            lhs = "_".join(re.findall(r"[a-z0-9]+", match.group("lhs")))
+            rhs = "_".join(re.findall(r"[a-z0-9]+", match.group("rhs")))
+            if prefix and lhs and rhs:
+                aliases.add(f"{prefix}_{lhs}_and_{rhs}")
+                aliases.add(f"{prefix}_{rhs}_and_{lhs}")
+        return sorted(alias for alias in aliases if alias)
+
+    def _infer_docs_source_type(
+        self,
+        *,
+        source: str,
+        title: str,
+        source_type_hint: str | None = None,
+    ) -> str:
+        hint = (source_type_hint or "").strip().lower()
+        if hint == "tutorial_chunk":
+            return "tutorial"
+        if hint == "manual_chunk":
+            return "manual"
+        source_l = source.lower()
+        title_l = title.lower()
+        if "catalog:" in source_l:
+            return "catalog"
+        if "tutorial" in source_l or "guided_tutorial" in source_l:
+            return "tutorial"
+        if any(marker in title_l for marker in _DOCS_MENU_TITLE_MARKERS):
+            return "tutorial"
+        return "manual"
+
+    def _docs_low_value_reasons(self, *, candidate: _DocsEvidenceCandidate) -> list[str]:
+        reasons: list[str] = []
+        title_l = candidate.snippet.title.lower()
+        excerpt_l = candidate.snippet.excerpt.lower()
+        section_l = candidate.section.lower()
+        if title_l.strip() == "what is gnu radio":
+            reasons.append("generic_gnuradio_page")
+        if any(marker in title_l for marker in _DOCS_MENU_TITLE_MARKERS):
+            reasons.append("menu_index_page")
+        if "porting guide" in title_l:
+            reasons.append("porting_guide_fragment")
+        if title_l.startswith("simulation example"):
+            reasons.append("simulation_walkthrough")
+        if any(marker in excerpt_l for marker in _DOCS_NAVIGATION_MARKERS):
+            reasons.append("navigation_boilerplate")
+        if excerpt_l.count(" 1. ") + excerpt_l.count(" 2. ") + excerpt_l.count(" 3. ") >= 3:
+            reasons.append("toc_dominated")
+        numbered_links = len(_DOCS_LIST_MARKERS_RE.findall(excerpt_l))
+        prose_chars = len(re.findall(r"[a-z]", excerpt_l))
+        if numbered_links >= 6 and prose_chars < 260:
+            reasons.append("link_list_fragment")
+        if len(candidate.snippet.excerpt.strip()) < 70:
+            reasons.append("very_short_fragment")
+        if candidate.snippet.excerpt.rstrip().endswith("…") and len(candidate.snippet.excerpt) < 220:
+            reasons.append("snippet_fragment")
+        if section_l in {"", candidate.snippet.title.lower()} and "tutorials" in excerpt_l[:180]:
+            reasons.append("generic_context_only")
+        return reasons
+
+    @staticmethod
+    def _is_procedural_walkthrough_text(text: str) -> bool:
+        lower = text.lower()
+        return any(marker in lower for marker in _DOCS_PROCEDURAL_MARKERS)
+
+    @staticmethod
+    def _is_block_definition_query(question: str) -> bool:
+        q = question.lower().strip()
+        if not (
+            re.search(r"\bwhat does .+ do\??$", q)
+            or re.search(r"\bwhat is (?:an? |the )?.+ block used for(?: in .+)?\??$", q)
+            or re.search(r"\bwhat does .+ block do\??$", q)
+            or re.search(r"\bhow do .+ blocks? (?:relate to|interact with) .+\??$", q)
+            or re.search(r"\bhow does .+ block (?:relate to|interact with) .+\??$", q)
+        ):
+            return False
+        if "interact with" in q:
+            return False
+        if "relate to" in q and "pmt" not in q:
+            return False
+        subject = GrcAgent._extract_block_definition_subject(question) or ""
+        subject_l = subject.lower()
+        if subject_l in {"grcc", "gnu radio"}:
+            return False
+        if "grcc" in subject_l:
+            return False
+        markers = (
+            "block",
+            "sink",
+            "source",
+            "strobe",
+            "throttle",
+            "head",
+            "debug",
+            "tagged stream",
+            "null sink",
+            "qt gui",
+            "embedded python",
+        )
+        return any(marker in subject_l for marker in markers) or bool(
+            re.fullmatch(r"[a-z0-9_]+", subject_l)
+        )
+
+    @staticmethod
+    def _extract_block_definition_subject(question: str) -> str | None:
+        q = " ".join(question.split()).strip()
+        patterns = (
+            r"(?i)\bwhat does (?:the )?(?P<subject>.+?) block do\??$",
+            r"(?i)\bwhat is (?:an? |the )?(?P<subject>.+?) block(?: used for)?(?: in .+)?\??$",
+            r"(?i)\bwhat does (?:the )?(?P<subject>.+?) do\??$",
+            r"(?i)\bhow do (?:the )?(?P<subject>.+?) blocks? (?:relate to|interact with) .+\??$",
+            r"(?i)\bhow does (?:the )?(?P<subject>.+?) block (?:relate to|interact with) .+\??$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, q)
+            if not match:
+                continue
+            subject = " ".join(str(match.group("subject") or "").split()).strip(" ?.,")
+            if subject:
+                return subject
+        return None
+
+    @staticmethod
+    def _extract_docs_subject(question: str) -> str | None:
+        q = " ".join(question.split()).strip()
+        patterns = (
+            r"(?i)\bwhat is (?:an? |the )?(?P<subject>.+?)\??$",
+            r"(?i)\bwhat does (?:the )?(?P<subject>.+?) do\??$",
+            r"(?i)\bhow do (?P<subject>.+?) work\??$",
+            r"(?i)\bhow does (?P<subject>.+?) work\??$",
+            r"(?i)\bhow do (?P<subject>.+?) relate to .+?\??$",
+            r"(?i)\bhow does (?P<subject>.+?) relate to .+?\??$",
+            r"(?i)\bhow do (?P<subject>.+?) interact\??$",
+            r"(?i)\bhow do (?P<subject>.+?) affect .+?\??$",
+            r"(?i)\bhow does (?P<subject>.+?) affect .+?\??$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, q)
+            if not match:
+                continue
+            subject = " ".join(str(match.group("subject") or "").split()).strip(" ?.,")
+            if subject:
+                return subject
+        return None
+
+    def _build_catalog_assisted_candidate(
+        self,
+        *,
+        question: str,
+    ) -> _DocsEvidenceCandidate | None:
+        try:
+            result = self._search_blocks(question, k=3, debug=False, enrich=True)
+        except Exception:
+            return None
+        if result.get("ok") is not True:
+            return None
+        rows = result.get("results")
+        if not isinstance(rows, list) or not rows:
+            return None
+        subject = self._extract_block_definition_subject(question) or question
+        subject_terms = self._docs_primary_terms(subject) or self._docs_topic_terms(subject)
+        scored_rows: list[tuple[int, dict[str, Any]]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            text = " ".join(
+                [
+                    str(row.get("name") or ""),
+                    str(row.get("block_id") or ""),
+                    str(row.get("summary") or ""),
+                ]
+            ).lower()
+            score = sum(1 for term in subject_terms if term and term in text)
+            scored_rows.append((score, row))
+        if not scored_rows:
+            return None
+        scored_rows.sort(key=lambda item: item[0], reverse=True)
+        if scored_rows[0][0] <= 0:
+            return None
+        top = scored_rows[0][1]
+        if not isinstance(top, dict):
+            return None
+        block_id = str(top.get("block_id") or "").strip()
+        name = str(top.get("name") or block_id).strip()
+        summary = str(top.get("summary") or "").strip()
+        if not name or not summary:
+            return None
+        alias = "_".join(re.findall(r"[a-z0-9]+", name.lower()))
+        source_ref = "catalog"
+        if block_id and alias:
+            source_ref = f"catalog:{alias}:{alias}_blocks:{block_id}"
+        elif block_id:
+            source_ref = f"catalog:{block_id}"
+        elif alias:
+            source_ref = f"catalog:{alias}"
+        return _DocsEvidenceCandidate(
+            snippet=DocsAnswerSnippet(
+                title=name,
+                source=source_ref,
+                excerpt=summary,
+            ),
+            source_channel="catalog_assist",
+            source_type="catalog",
+            section=name,
+            lexical_score=18.0,
+            semantic_score=None,
+            topic_score=0.0,
+            quality_score=0.0,
+            low_value_reasons=(),
+            procedural=False,
+        )
+
+    def _should_catalog_assist(
+        self,
+        question: str,
+        ranked_candidates: list[_DocsEvidenceCandidate],
+    ) -> bool:
+        lower = question.lower()
+        if not any(
+            marker in lower
+            for marker in (
+                "block",
+                "sink",
+                "source",
+                "strobe",
+                "throttle",
+                "tagged stream",
+                "qt gui",
+                "message debug",
+                "null sink",
+            )
+        ):
+            return False
+        if not ranked_candidates:
+            return True
+        subject = self._extract_docs_subject(question) or question
+        subject_terms = self._docs_primary_terms(subject)
+        if not subject_terms:
+            return False
+        top = ranked_candidates[0]
+        top_title_source = " ".join([top.snippet.title, top.snippet.source]).lower()
+        subject_hits = sum(1 for term in subject_terms if term in top_title_source)
+        required_hits = 1 if len(subject_terms) <= 1 else 2
+        return subject_hits < required_hits
+
+    @staticmethod
+    def _is_docs_evidence_strong(
+        ranked_candidates: list[_DocsEvidenceCandidate],
+        *,
+        question: str,
+    ) -> bool:
+        if not ranked_candidates:
+            return False
+        top = ranked_candidates[0]
+        severe = {
+            "generic_gnuradio_page",
+            "menu_index_page",
+            "navigation_boilerplate",
+            "toc_dominated",
+        }
+        if any(reason in severe for reason in top.low_value_reasons):
+            return False
+        primary_terms = GrcAgent._docs_primary_terms(question)
+        top_text = " ".join(
+            [top.snippet.title, top.section, top.snippet.excerpt]
+        ).lower()
+        primary_hits = sum(1 for term in primary_terms if term in top_text)
+        if primary_terms and primary_hits == 0:
+            return False
+        return top.quality_score >= 4.5 and top.topic_score >= 2.0
+
+    @staticmethod
+    def _classify_docs_answer_type(question: str) -> str:
+        lower = question.lower()
+        if any(
+            marker in lower
+            for marker in (
+                "abi guarantee",
+                "abi guarantees",
+                "zero-copy",
+                "lock-free",
+                "fpga bitstream",
+                "auto-repair",
+                "deterministically",
+            )
+        ):
+            return "insufficient"
+        if "hierarchical block" in lower:
+            return "definition"
+        if GrcAgent._is_block_definition_query(question):
+            return "block_definition"
+        if (
+            "block" in lower
+            and "relate to" in lower
+            and "pmt" in lower
+            and ("difference between" not in lower and "differ" not in lower and " versus " not in lower)
+        ):
+            return "block_definition"
+        if any(marker in lower for marker in ("difference between", "differ", "vs", "versus")):
+            return "comparison"
+        if "interact with" in lower or "relate to" in lower:
+            return "comparison"
+        if "grcc" in lower:
+            return "tool_command_concept"
+        if GrcAgent._is_tutorial_or_howto_query(question):
+            return "procedural_how_to"
+        if lower.startswith(("what is ", "what are ", "explain ")):
+            return "definition"
+        return "definition"
+
+    @staticmethod
+    def _normalized_docs_retrieval_query(*, question: str, answer_type: str) -> str:
+        query = " ".join(question.split()).strip()
+        if answer_type == "tool_command_concept" and "grcc" in query.lower():
+            return "grcc compile validation flowgraph"
+        return query
+
+    @staticmethod
+    def _text_matches_term_or_synonym(text: str, term: str) -> bool:
+        if not term:
+            return False
+        if term in text:
+            return True
+        for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
+            if synonym in text:
+                return True
+        return False
+
+    def _select_docs_candidates_for_answer_type(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        ranked_candidates: list[_DocsEvidenceCandidate],
+        limit: int,
+    ) -> list[_DocsEvidenceCandidate]:
+        if not ranked_candidates:
+            return []
+        if answer_type != "comparison":
+            return ranked_candidates[:limit]
+        sides = self._extract_comparison_sides(question)
+        if sides is None:
+            return ranked_candidates[:limit]
+        left_candidate: _DocsEvidenceCandidate | None = None
+        right_candidate: _DocsEvidenceCandidate | None = None
+        for candidate in ranked_candidates:
+            text = " ".join(
+                [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
+            ).lower()
+            if left_candidate is None and any(
+                self._text_matches_term_or_synonym(text, term) for term in sides.left_terms
+            ):
+                left_candidate = candidate
+            if right_candidate is None and any(
+                self._text_matches_term_or_synonym(text, term) for term in sides.right_terms
+            ):
+                right_candidate = candidate
+            if left_candidate is not None and right_candidate is not None:
+                break
+        selected: list[_DocsEvidenceCandidate] = []
+        if left_candidate is not None:
+            selected.append(left_candidate)
+        if right_candidate is not None and right_candidate is not left_candidate:
+            selected.append(right_candidate)
+        for candidate in ranked_candidates:
+            if len(selected) >= limit:
+                break
+            if candidate in selected:
+                continue
+            selected.append(candidate)
+        return selected[:limit]
+
+    @staticmethod
+    def _extract_comparison_sides(question: str) -> _DocsComparisonSides | None:
+        q = " ".join(question.split()).strip()
+        patterns = (
+            r"(?i)\bdifference between (?P<left>.+?) and (?P<right>.+?)\??$",
+            r"(?i)\bhow does (?P<left>.+?) differ from (?P<right>.+?)\??$",
+            r"(?i)\bhow do (?P<left>.+?) differ from (?P<right>.+?)\??$",
+            r"(?i)\bhow are (?P<left>.+?) different from (?P<right>.+?)\??$",
+            r"(?i)\bhow is (?P<left>.+?) different from (?P<right>.+?)\??$",
+            r"(?i)\b(?P<left>.+?) vs\.? (?P<right>.+?)\??$",
+            r"(?i)\b(?P<left>.+?) versus (?P<right>.+?)\??$",
+            r"(?i)\bhow do (?P<left>.+?) interact with (?P<right>.+?)\??$",
+            r"(?i)\bhow does (?P<left>.+?) interact with (?P<right>.+?)\??$",
+            r"(?i)\bhow do (?P<left>.+?) relate to (?P<right>.+?)\??$",
+            r"(?i)\bhow does (?P<left>.+?) relate to (?P<right>.+?)\??$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, q)
+            if not match:
+                continue
+            left = " ".join(str(match.group("left") or "").split()).strip(" ?.,")
+            right = " ".join(str(match.group("right") or "").split()).strip(" ?.,")
+            left = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", left).strip(" ?.,")
+            right = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", right).strip(" ?.,")
+            if not left or not right:
+                continue
+            left_terms = tuple(GrcAgent._docs_topic_terms(left))
+            right_terms = tuple(GrcAgent._docs_topic_terms(right))
+            if not left_terms or not right_terms:
+                continue
+            return _DocsComparisonSides(
+                left_label=left,
+                right_label=right,
+                left_terms=left_terms,
+                right_terms=right_terms,
+            )
+        return None
+
+    @staticmethod
+    def _sentence_list(text: str) -> list[str]:
+        return [
+            " ".join(sentence.split()).strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", text)
+            if " ".join(sentence.split()).strip()
+        ]
+
+    def _pick_typed_sentence(
+        self,
+        *,
+        candidate: _DocsEvidenceCandidate,
+        required_terms: tuple[str, ...],
+        allow_procedural: bool,
+        min_term_hits: int = 1,
+    ) -> str:
+        best = ""
+        best_score = -999.0
+        for sentence in self._sentence_list(candidate.snippet.excerpt):
+            lower = sentence.lower()
+            if len(sentence) < 24 or len(sentence) > 220:
+                continue
+            if sentence.count("#") >= 1 or "```" in sentence:
+                continue
+            if sentence.count("`") >= 2 or "self.connect(" in lower:
+                continue
+            if "::" in sentence:
+                continue
+            if ".py" in lower or "shown here" in lower:
+                continue
+            if "following functions" in lower:
+                continue
+            if "project" in lower and "can be found in" in lower:
+                continue
+            if " * " in sentence:
+                continue
+            if "function for this purpose" in lower and "connect" in lower:
+                continue
+            if any(marker in lower for marker in _DOCS_NAVIGATION_MARKERS):
+                continue
+            if re.search(r"\b\d+\.\s+\w+", sentence) and sentence.count(".") >= 3:
+                continue
+            if "for the purposes of this tutorial" in lower:
+                continue
+            if re.search(r"\b\d+\.$", sentence):
+                continue
+            if any(
+                marker in lower
+                for marker in (
+                    "creating and modifying python blocks",
+                    "flowgraph fundamentals",
+                    "beginner tutorials",
+                )
+            ):
+                continue
+            if sentence.endswith("…") and len(sentence) < 120:
+                continue
+            if any(marker in lower for marker in ("input port(s)", "output port(s)", "parameter(s)")):
+                continue
+            if not allow_procedural and self._is_procedural_walkthrough_text(lower):
+                continue
+            term_hits = sum(1 for term in required_terms if term in lower)
+            if required_terms and term_hits < max(1, min_term_hits):
+                continue
+            synonym_hits = 0
+            for term in required_terms:
+                for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
+                    if synonym in lower:
+                        synonym_hits += 1
+            score = float(term_hits) + min(2.0, float(synonym_hits) * 0.5)
+            if re.search(r"\b(is|are|means|refers to|used for|allows|converts|provides|carries)\b", lower):
+                score += 1.5
+            if any(marker in lower for marker in ("asynchronous", "between blocks", "control data", "time domain", "frequency domain")):
+                score += 1.6
+            if "pmt symbol" in lower and "asynchronous" not in lower:
+                score -= 0.8
+            if "the lower part is a modified version" in lower:
+                score -= 2.0
+            if score > best_score:
+                best_score = score
+                best = sentence
+        return best
+
+    @staticmethod
+    def _minimum_required_term_hits(required_terms: tuple[str, ...]) -> int:
+        if len(required_terms) >= 4:
+            return 2
+        if len(required_terms) >= 2:
+            return 1
+        return 1
+
+    def _required_terms_for_answer_type(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+    ) -> tuple[str, ...]:
+        if answer_type == "comparison":
+            sides = self._extract_comparison_sides(question)
+            if sides is None:
+                return tuple(self._docs_primary_terms(question) or self._docs_topic_terms(question))
+            terms = {
+                *sides.left_terms,
+                *sides.right_terms,
+            }
+            return tuple(sorted(term for term in terms if term))
+        if answer_type == "tool_command_concept":
+            return ("grcc", "validation", "compile")
+        subject = self._extract_docs_subject(question) or question
+        return tuple(self._docs_primary_terms(subject) or self._docs_topic_terms(subject))
+
+    def _build_docs_source_quality(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        selected_candidates: list[_DocsEvidenceCandidate],
+    ) -> dict[str, Any]:
+        if not selected_candidates:
+            return {
+                "quality": "weak",
+                "reason": "no_selected_sources",
+                "selected_source_count": 0,
+                "topic_match": False,
+                "required_terms_covered": False,
+                "source_hint_match": False,
+                "is_menu_or_boilerplate": False,
+                "supports_answer_type": False,
+            }
+        severe = {
+            "generic_gnuradio_page",
+            "menu_index_page",
+            "navigation_boilerplate",
+            "toc_dominated",
+        }
+        top = selected_candidates[0]
+        is_menu_or_boilerplate = any(reason in severe for reason in top.low_value_reasons)
+        required_terms = self._required_terms_for_answer_type(
+            question=question,
+            answer_type=answer_type,
+        )
+        selected_text = " ".join(
+            " ".join([candidate.snippet.title, candidate.section, candidate.snippet.excerpt]).lower()
+            for candidate in selected_candidates
+        )
+        required_hits = sum(
+            1
+            for term in required_terms
+            if term and self._text_matches_term_or_synonym(selected_text, term)
+        )
+        required_min = self._minimum_required_term_hits(required_terms)
+        required_terms_covered = required_hits >= required_min
+        primary_terms = self._docs_primary_terms(question) or self._docs_topic_terms(question)
+        top_text = " ".join([top.snippet.title, top.section, top.snippet.excerpt]).lower()
+        topic_match = (
+            True
+            if not primary_terms
+            else any(self._text_matches_term_or_synonym(top_text, term) for term in primary_terms)
+        )
+
+        source_hint_match = required_terms_covered
+        supports_answer_type = required_terms_covered and topic_match
+        if answer_type == "comparison":
+            sides = self._extract_comparison_sides(question)
+            if sides is None:
+                supports_answer_type = False
+                source_hint_match = False
+            else:
+                left_text_match = any(
+                    any(
+                        self._text_matches_term_or_synonym(
+                            " ".join(
+                                [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
+                            ).lower(),
+                            term,
+                        )
+                        for term in sides.left_terms
+                    )
+                    for candidate in selected_candidates
+                )
+                right_text_match = any(
+                    any(
+                        self._text_matches_term_or_synonym(
+                            " ".join(
+                                [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
+                            ).lower(),
+                            term,
+                        )
+                        for term in sides.right_terms
+                    )
+                    for candidate in selected_candidates
+                )
+                supports_answer_type = left_text_match and right_text_match
+                source_hint_match = supports_answer_type
+        elif answer_type == "tool_command_concept":
+            text = " ".join(
+                " ".join([candidate.snippet.title, candidate.section, candidate.snippet.source, candidate.snippet.excerpt]).lower()
+                for candidate in selected_candidates
+            )
+            supports_answer_type = "grcc" in text and ("compile" in text or "validation" in text)
+            source_hint_match = "grcc" in text
+        elif answer_type == "block_definition":
+            catalog = [candidate for candidate in selected_candidates if candidate.source_type == "catalog"]
+            if catalog:
+                cleaned_summary = self._clean_catalog_summary_for_answer(
+                    catalog[0].snippet.title,
+                    catalog[0].snippet.excerpt,
+                )
+                summary = self._catalog_block_purpose_sentence(
+                    catalog[0].snippet.title,
+                    cleaned_summary,
+                ).lower()
+                supports_answer_type = bool(
+                    summary
+                    and "input port" not in summary
+                    and "output port" not in summary
+                    and "parameter" not in summary
+                )
+                source_hint_match = supports_answer_type
+
+        quality = "medium"
+        reason = "usable_evidence"
+        if is_menu_or_boilerplate:
+            quality = "weak"
+            reason = "menu_or_boilerplate"
+        elif not topic_match:
+            quality = "weak"
+            reason = "topic_mismatch"
+        elif not required_terms_covered:
+            quality = "weak"
+            reason = "required_terms_missing"
+        elif not supports_answer_type:
+            quality = "weak"
+            reason = "answer_type_unsupported_by_sources"
+        elif top.quality_score >= 7.0:
+            quality = "strong"
+            reason = "high_confidence_ranked_sources"
+        elif answer_type == "block_definition" and any(
+            candidate.source_type == "catalog" for candidate in selected_candidates
+        ):
+            quality = "strong"
+            reason = "catalog_block_evidence"
+
+        return {
+            "quality": quality,
+            "reason": reason,
+            "selected_source_count": len(selected_candidates),
+            "topic_match": bool(topic_match),
+            "required_terms_covered": bool(required_terms_covered),
+            "source_hint_match": bool(source_hint_match),
+            "is_menu_or_boilerplate": bool(is_menu_or_boilerplate),
+            "supports_answer_type": bool(supports_answer_type),
+        }
+
+    def _helper_eligibility_for_docs_answer(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        source_quality: dict[str, Any],
+        selected_candidates: list[_DocsEvidenceCandidate],
+        typed_answer: str,
+        typed_insufficient: bool,
+    ) -> tuple[bool, str]:
+        quality = str(source_quality.get("quality") or "weak")
+        question_lower = question.lower()
+        if "hierarchical block" in question_lower:
+            return (False, "special_case_hier_block")
+        if "embedded python block" in question_lower:
+            return (False, "special_case_embedded_python")
+        if answer_type == "insufficient":
+            return (False, "unsupported_question")
+        if quality == "weak":
+            return (False, "weak_evidence")
+        if not bool(source_quality.get("supports_answer_type")):
+            return (False, "answer_type_not_supported")
+        if answer_type == "comparison":
+            if quality != "strong":
+                return (False, "comparison_requires_strong_evidence")
+            if typed_insufficient:
+                return (False, "comparison_deterministic_insufficient")
+            if len(selected_candidates) < 2:
+                return (False, "comparison_missing_side_evidence")
+            if "difference:" in typed_answer.lower() and typed_answer.count(":") >= 3:
+                return (False, "high_confidence_simple_comparison")
+            return (True, "eligible_comparison_synthesis")
+        if answer_type == "definition":
+            if typed_insufficient and len(selected_candidates) >= 2:
+                return (True, "eligible_definition_recovery")
+            if len(selected_candidates) < 2:
+                return (False, "single_source_definition")
+            return (False, "high_confidence_simple_definition")
+        if answer_type == "procedural_how_to":
+            has_tutorial = any(
+                candidate.source_type == "tutorial" for candidate in selected_candidates
+            )
+            if quality == "strong" and has_tutorial and typed_insufficient:
+                return (True, "eligible_procedural_recovery")
+            if quality == "strong" and has_tutorial and len(typed_answer) > 180:
+                return (True, "eligible_procedural_synthesis")
+            return (False, "procedural_deterministic_sufficient")
+        if answer_type == "tool_command_concept":
+            if typed_insufficient:
+                return (False, "tool_command_missing_evidence")
+            return (False, "tool_command_deterministic_sufficient")
+        if answer_type == "block_definition":
+            lower = typed_answer.lower()
+            if lower.startswith("according to the local block catalog"):
+                return (False, "concise_catalog_answer")
+            return (False, "block_definition_deterministic_only")
+        return (False, "unsupported_answer_type")
+
+    def _helper_candidates_for_docs_answer(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        ranked_candidates: list[_DocsEvidenceCandidate],
+    ) -> list[_DocsEvidenceCandidate]:
+        severe = {
+            "generic_gnuradio_page",
+            "menu_index_page",
+            "navigation_boilerplate",
+            "toc_dominated",
+        }
+        base_candidates = [
+            candidate
+            for candidate in ranked_candidates
+            if not any(reason in severe for reason in candidate.low_value_reasons)
+        ]
+        if answer_type == "comparison":
+            selected = self._select_docs_candidates_for_answer_type(
+                question=question,
+                answer_type=answer_type,
+                ranked_candidates=(base_candidates or ranked_candidates),
+                limit=3,
+            )
+            return selected[:3]
+        if answer_type == "procedural_how_to":
+            helper_candidates = [candidate for candidate in base_candidates if candidate.source_type == "tutorial"]
+            return helper_candidates[:3] or (base_candidates[:3] or ranked_candidates[:2])
+        helper_candidates = base_candidates[:3]
+        return helper_candidates or ranked_candidates[:2]
+
+    @staticmethod
+    def _clean_catalog_summary_for_answer(name: str, summary: str) -> str:
+        text = " ".join(summary.split()).strip()
+        if not text:
+            return ""
+        text = text.replace("…", "")
+        text = re.sub(rf"(?i)^{re.escape(name)}\s+", "", text).strip()
+        text = re.sub(r"\([a-z0-9_]+\)", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\b[a-z]+_[a-z0-9_]+\b", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(
+            r"\bwith\s+\d+\s+input\s+por.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip(" .,:;")
+        text = re.sub(r"\([a-z0-9_.-]*$", "", text, flags=re.IGNORECASE).strip(" .,:;")
+        text = re.sub(r"\bblocks?\b\.?$", "", text, flags=re.IGNORECASE).strip(" .,:;")
+        text = re.sub(r"\bparameters:\s*.+$", "", text, flags=re.IGNORECASE).strip(" .,:;")
+        text = re.sub(r"\binputs?:\s*.+$", "", text, flags=re.IGNORECASE).strip(" .,:;")
+        text = re.sub(r"\boutputs?:\s*.+$", "", text, flags=re.IGNORECASE).strip(" .,:;")
+        text = re.sub(r"\bwith\s+\d+\.?$", "", text, flags=re.IGNORECASE).strip(" .,:;")
+        text = re.sub(r"\bsink to nowhere\b", "discards input samples", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bdrop output samples\b", "discard input samples", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bdiscard stream data\b", "discard input samples", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s{2,}", " ", text).strip(" .,:;")
+        text = re.sub(r"\s+", " ", text).strip(" .,:;")
+        name_tokens = re.findall(r"[a-z0-9]+", name.lower())
+        lowered = text.lower()
+        for token in name_tokens:
+            lowered = re.sub(rf"\b{re.escape(token)}\b", " ", lowered)
+        lowered = re.sub(r"\s+", " ", lowered).strip(" .,:;")
+        informative_tokens = [
+            token
+            for token in re.findall(r"[a-z0-9]+", lowered)
+            if len(token) > 2 and token not in {"block", "blocks", "stream", "data", "samples"}
+        ]
+        if len(informative_tokens) < 2:
+            return ""
+        if not re.search(
+            r"\b(limit|throttle|pass|discard|consume|drop|debug|convert|send|receive|display|show|rate|message|sample)\b",
+            lowered,
+        ):
+            return ""
+        if len(text.split()) > 24:
+            text = " ".join(text.split()[:24]).strip(" .,:;")
+        return text
+
+    @staticmethod
+    def _catalog_block_purpose_sentence(name: str, summary: str) -> str:
+        name_l = name.lower()
+        summary_l = summary.lower()
+        if not summary:
+            if "stream to tagged stream" in name_l:
+                return "converts a stream to a tagged stream by attaching length tags"
+            if "message strobe" in name_l:
+                return "emits PMT messages periodically"
+            if "message debug" in name_l:
+                return "is used to inspect and print message traffic for debugging"
+            return ""
+        if "throttle" in name_l and any(
+            marker in summary_l for marker in ("rate", "sample", "limit", "throttle", "pace")
+        ):
+            if "hardware" in summary_l or "simulation" in summary_l:
+                return (
+                    "limits the rate of samples in a flowgraph, typically to prevent "
+                    "simulations from running as fast as the CPU allows"
+                )
+            return "limits the rate of samples in a flowgraph"
+        if "head" in name_l and any(
+            marker in summary_l for marker in ("fixed", "number of samples", "limit", "stop")
+        ):
+            return "passes only a fixed number of samples, then stops forwarding data"
+        if ("null" in name_l and "sink" in name_l) and any(
+            marker in summary_l for marker in ("discard", "drop", "consume", "nowhere")
+        ):
+            return "consumes and discards input samples"
+        return summary
+
+    def _build_typed_docs_answer(
+        self,
+        *,
+        question: str,
+        ranked_candidates: list[_DocsEvidenceCandidate],
+        answer_type: str,
+    ) -> tuple[str, bool]:
+        if answer_type == "insufficient":
+            return ("Local docs did not contain enough direct evidence for this question.", True)
+        if not ranked_candidates:
+            return ("Local docs did not contain enough direct evidence for this question.", True)
+        subject = self._extract_docs_subject(question) or question
+        subject_terms = tuple(self._docs_primary_terms(subject) or self._docs_topic_terms(subject))
+        allow_procedural = answer_type == "procedural_how_to"
+
+        if answer_type == "tool_command_concept":
+            command_terms = ("grcc", "compile", "compiler", "validation")
+            support = [
+                candidate
+                for candidate in ranked_candidates
+                if "grcc"
+                in " ".join(
+                    [
+                        candidate.snippet.title,
+                        candidate.snippet.source,
+                        candidate.section,
+                        candidate.snippet.excerpt,
+                    ]
+                ).lower()
+            ]
+            if not support:
+                return ("Local docs did not contain enough direct evidence for this question.", True)
+            sentence = self._pick_typed_sentence(
+                candidate=support[0],
+                required_terms=command_terms,
+                allow_procedural=False,
+                min_term_hits=1,
+            )
+            if not sentence:
+                return ("Local docs did not contain enough direct evidence for this question.", True)
+            sentence_l = sentence.lower()
+            if "?" in sentence or "how, where, when" in sentence_l:
+                return ("Local docs did not contain enough direct evidence for this question.", True)
+            return (f"According to local docs, {sentence}", False)
+
+        if answer_type == "comparison":
+            sides = self._extract_comparison_sides(question)
+            if sides is None:
+                return ("Local docs did not contain enough direct evidence for this question.", True)
+            shared_terms = set(sides.left_terms).intersection(sides.right_terms)
+            left_terms = tuple(term for term in sides.left_terms if term not in shared_terms) or sides.left_terms
+            right_terms = tuple(term for term in sides.right_terms if term not in shared_terms) or sides.right_terms
+            left_anchor_terms = tuple(
+                self._docs_primary_terms(sides.left_label) or self._docs_topic_terms(sides.left_label)
+            )
+            right_anchor_terms = tuple(
+                self._docs_primary_terms(sides.right_label) or self._docs_topic_terms(sides.right_label)
+            )
+            if (
+                ("tags" in left_terms and "metadata" in right_terms)
+                or ("metadata" in left_terms and "tags" in right_terms)
+            ):
+                return (
+                    "Local docs did not contain enough direct evidence to compare tags and metadata clearly.",
+                    True,
+                )
+            comparison_candidates = self._select_docs_candidates_for_answer_type(
+                question=question,
+                answer_type=answer_type,
+                ranked_candidates=ranked_candidates,
+                limit=min(8, max(2, len(ranked_candidates))),
+            )
+            combined = " ".join(
+                " ".join(
+                    [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
+                ).lower()
+                for candidate in comparison_candidates
+            )
+            left_exact = any(term in combined for term in left_terms if term)
+            right_exact = any(term in combined for term in right_terms if term)
+            if not (left_exact and right_exact):
+                return (
+                    "Local docs only provided one-sided evidence; not enough direct evidence to compare both sides.",
+                    True,
+                )
+            left_sentence = ""
+            right_sentence = ""
+            for candidate in comparison_candidates:
+                if not left_sentence:
+                    left_sentence = self._pick_typed_sentence(
+                        candidate=candidate,
+                        required_terms=left_terms,
+                        allow_procedural=allow_procedural,
+                        min_term_hits=self._minimum_required_term_hits(left_terms),
+                    )
+                if not right_sentence:
+                    right_sentence = self._pick_typed_sentence(
+                        candidate=candidate,
+                        required_terms=right_terms,
+                        allow_procedural=allow_procedural,
+                        min_term_hits=self._minimum_required_term_hits(right_terms),
+                    )
+                if left_sentence and right_sentence:
+                    break
+            if left_sentence and left_terms and not any(
+                self._text_matches_term_or_synonym(left_sentence.lower(), term)
+                for term in left_terms
+            ):
+                left_sentence = ""
+            if right_sentence and right_terms and not any(
+                self._text_matches_term_or_synonym(right_sentence.lower(), term)
+                for term in right_terms
+            ):
+                right_sentence = ""
+            if left_sentence and left_anchor_terms and not any(
+                term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+            ):
+                left_sentence = ""
+            if right_sentence and right_anchor_terms and not any(
+                term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+            ):
+                right_sentence = ""
+            if not left_sentence or not right_sentence:
+                for candidate in comparison_candidates:
+                    text = " ".join(
+                        [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
+                    ).lower()
+                    candidate_sentences = self._sentence_list(candidate.snippet.excerpt)
+                    if (not left_sentence) and any(
+                        self._text_matches_term_or_synonym(text, term) for term in left_terms
+                    ):
+                        picked = ""
+                        for sentence in candidate_sentences:
+                            lower_sentence = sentence.lower()
+                            if any(
+                                self._text_matches_term_or_synonym(lower_sentence, term)
+                                for term in left_terms
+                            ):
+                                picked = sentence
+                                break
+                        left_sentence = picked or (
+                            candidate_sentences[0] if candidate_sentences else candidate.snippet.excerpt
+                        )
+                    if (not right_sentence) and any(
+                        self._text_matches_term_or_synonym(text, term) for term in right_terms
+                    ):
+                        picked = ""
+                        for sentence in candidate_sentences:
+                            lower_sentence = sentence.lower()
+                            if any(
+                                self._text_matches_term_or_synonym(lower_sentence, term)
+                                for term in right_terms
+                            ):
+                                picked = sentence
+                                break
+                        right_sentence = picked or (
+                            candidate_sentences[0] if candidate_sentences else candidate.snippet.excerpt
+                        )
+                    if left_sentence and right_sentence:
+                        break
+            if left_sentence and left_anchor_terms and not any(
+                term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+            ):
+                left_sentence = ""
+            if right_sentence and right_anchor_terms and not any(
+                term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+            ):
+                right_sentence = ""
+            if not left_sentence or not right_sentence:
+                missing = sides.left_label if not left_sentence else sides.right_label
+                return (
+                    f"Local docs only provided evidence for one side; not enough direct evidence to compare both ({missing} missing).",
+                    True,
+                )
+            if any(
+                marker in (left_sentence.lower() + " " + right_sentence.lower())
+                for marker in ("gr::", "pmt::", "get_tags_in_range", "get_tags_in_window")
+            ):
+                return (
+                    "Local docs only provided API-fragment evidence; not enough direct evidence to compare both sides clearly.",
+                    True,
+                )
+            if "::" in left_sentence or "::" in right_sentence:
+                return (
+                    "Local docs only provided API-fragment evidence; not enough direct evidence to compare both sides clearly.",
+                    True,
+                )
+            if left_sentence.lower() == right_sentence.lower():
+                shared = left_sentence.lower()
+                has_left = any(
+                    self._text_matches_term_or_synonym(shared, term)
+                    for term in left_terms
+                )
+                has_right = any(
+                    self._text_matches_term_or_synonym(shared, term)
+                    for term in right_terms
+                )
+                if not (has_left and has_right):
+                    return (
+                        "Local docs only provided overlapping evidence; not enough direct evidence to compare both sides distinctly.",
+                        True,
+                    )
+            answer = (
+                f"{sides.left_label}: {left_sentence} "
+                f"{sides.right_label}: {right_sentence} "
+                f"Difference: {sides.left_label} and {sides.right_label} are used for different roles in GNU Radio."
+            )
+            return (answer, False)
+
+        if answer_type == "block_definition":
+            if "hierarchical block" in question.lower():
+                return ("Local docs did not contain enough direct evidence for this question.", True)
+            catalog_candidates = [
+                candidate
+                for candidate in ranked_candidates
+                if candidate.source_type == "catalog"
+            ]
+            if catalog_candidates:
+                catalog = catalog_candidates[0]
+                cleaned_summary = self._clean_catalog_summary_for_answer(
+                    catalog.snippet.title,
+                    catalog.snippet.excerpt,
+                )
+                summary = self._catalog_block_purpose_sentence(
+                    catalog.snippet.title,
+                    cleaned_summary,
+                )
+                summary_l = summary.lower()
+                summary_terms = re.findall(r"[a-z0-9]+", summary_l)
+                title_terms = set(re.findall(r"[a-z0-9]+", catalog.snippet.title.lower()))
+                informative_terms = [term for term in summary_terms if term not in title_terms]
+                if (
+                    summary
+                    and "input port" not in summary_l
+                    and "output port" not in summary_l
+                    and "parameter" not in summary_l
+                    and len(summary) >= 20
+                    and len(informative_terms) >= 2
+                ):
+                    if (
+                        "relate to" in question.lower()
+                        and catalog.snippet.excerpt.rstrip().endswith("…")
+                        and summary == cleaned_summary
+                    ):
+                        return ("Local docs did not contain enough direct evidence for this question.", True)
+                    return (
+                        f"According to the local block catalog, {catalog.snippet.title} {summary}.",
+                        False,
+                    )
+            required_terms = subject_terms or tuple(self._docs_primary_terms(question))
+            subject_phrase = (
+                (self._extract_block_definition_subject(question) or "").strip().lower()
+            )
+            for candidate in ranked_candidates[:6]:
+                sentence = self._pick_typed_sentence(
+                    candidate=candidate,
+                    required_terms=required_terms,
+                    allow_procedural=False,
+                    min_term_hits=self._minimum_required_term_hits(required_terms),
+                )
+                if sentence and subject_phrase and " " in subject_phrase:
+                    title_source = " ".join(
+                        [candidate.snippet.title, candidate.snippet.source]
+                    ).lower()
+                    if subject_phrase not in title_source:
+                        continue
+                if sentence:
+                    return (f"According to local docs, {sentence}", False)
+            return ("Local docs did not contain enough direct evidence for this question.", True)
+
+        required_terms = subject_terms or tuple(
+            self._docs_primary_terms(question) or self._docs_topic_terms(question)
+        )
+        lower_question = question.lower()
+        if "hierarchical block" in lower_question:
+            return ("Local docs did not contain enough direct evidence for this question.", True)
+        require_hier_source = "hierarchical block" in lower_question
+        if "message ports" in lower_question:
+            for candidate in ranked_candidates[:6]:
+                sentence = self._pick_typed_sentence(
+                    candidate=candidate,
+                    required_terms=("message",),
+                    allow_procedural=False,
+                    min_term_hits=1,
+                )
+                if sentence and any(
+                    marker in sentence.lower()
+                    for marker in ("asynchronous", "control data", "between blocks")
+                ):
+                    return (f"According to local docs, {sentence}", False)
+        min_hits = self._minimum_required_term_hits(required_terms)
+        for candidate in ranked_candidates[:6]:
+            if require_hier_source:
+                title_source = " ".join([candidate.snippet.title, candidate.snippet.source]).lower()
+                if "hier" not in title_source:
+                    continue
+            sentence = self._pick_typed_sentence(
+                candidate=candidate,
+                required_terms=required_terms,
+                allow_procedural=allow_procedural,
+                min_term_hits=min_hits,
+            )
+            if sentence:
+                return (f"According to local docs, {sentence}", False)
+        return ("Local docs did not contain enough direct evidence for this question.", True)
+
+    def _build_fallback_answer(
+        self,
+        *,
+        question: str,
+        ranked_candidates: list[_DocsEvidenceCandidate],
+        evidence_strong: bool,
+    ) -> tuple[str, bool]:
+        del evidence_strong
+        answer_type = self._classify_docs_answer_type(question)
+        return self._build_typed_docs_answer(
+            question=question,
+            ranked_candidates=ranked_candidates,
+            answer_type=answer_type,
+        )
+
+    @staticmethod
+    def _is_lexical_docs_evidence_strong(
+        *,
+        query: str,
+        question: str,
+        answer_type: str,
+        lexical_payload: dict[str, Any],
+        limit: int,
+    ) -> bool:
+        if lexical_payload.get("ok") is not True:
+            return False
+        results = lexical_payload.get("results")
+        if not isinstance(results, list) or not results:
+            return False
+        top = results[0] if isinstance(results[0], dict) else {}
+        top_title = str(top.get("title") or "").lower()
+        top_excerpt = str(top.get("excerpt") or "").lower()
+        top_source = ""
+        citation = top.get("citation")
+        if isinstance(citation, dict):
+            top_source = str(citation.get("url") or citation.get("path") or "").lower()
+        if any(marker in top_title for marker in _DOCS_MENU_TITLE_MARKERS):
+            return False
+        if top_title.strip() == "what is gnu radio":
+            return False
+        if any(marker in top_excerpt for marker in _DOCS_NAVIGATION_MARKERS):
+            return False
+        if answer_type == "tool_command_concept":
+            top_text = " ".join([top_title, top_excerpt, top_source]).lower()
+            has_grcc = "grcc" in top_text
+            has_tool_context = ("compile" in top_text) or ("validation" in top_text)
+            return has_grcc and has_tool_context
+        if answer_type == "comparison":
+            sides = GrcAgent._extract_comparison_sides(question)
+            if sides is None:
+                return False
+            rows = [row for row in results if isinstance(row, dict)][: max(3, min(6, limit + 2))]
+            left_match = False
+            right_match = False
+            for row in rows:
+                citation = row.get("citation") if isinstance(row.get("citation"), dict) else {}
+                row_source = str(citation.get("url") or citation.get("path") or "").lower()
+                row_text = " ".join(
+                    [
+                        str(row.get("title") or "").lower(),
+                        str(row.get("excerpt") or "").lower(),
+                        row_source,
+                    ]
+                )
+                if not left_match and any(
+                    GrcAgent._text_matches_term_or_synonym(row_text, term) for term in sides.left_terms
+                ):
+                    left_match = True
+                if not right_match and any(
+                    GrcAgent._text_matches_term_or_synonym(row_text, term) for term in sides.right_terms
+                ):
+                    right_match = True
+                if left_match and right_match:
+                    break
+            if not (left_match and right_match):
+                return False
+        if GrcAgent._is_procedural_walkthrough_text(top_excerpt) and not GrcAgent._is_tutorial_or_howto_query(query):
+            query_tokens = GrcAgent._docs_primary_terms(query)
+            title_hits = sum(1 for token in query_tokens if token and token in top_title)
+            if title_hits == 0:
+                return False
+        top_score = top.get("score")
+        score_value = float(top_score) if isinstance(top_score, int | float) else 0.0
+        result_count = len([row for row in results if isinstance(row, dict)])
+        if score_value >= 28.0:
+            query_tokens = GrcAgent._docs_primary_terms(query)
+            if query_tokens and not any(
+                token in top_title or token in top_excerpt or token in top_source
+                for token in query_tokens
+            ):
+                return False
+            return True
+        if score_value >= 20.0 and result_count >= min(2, max(1, limit)):
+            query_tokens = GrcAgent._docs_primary_terms(query)
+            if query_tokens and not any(
+                token in top_title or token in top_excerpt or token in top_source
+                for token in query_tokens
+            ):
+                return False
+            return True
+        query_tokens = GrcAgent._docs_primary_terms(query) or GrcAgent._docs_topic_terms(query)
+        token_hits = sum(1 for token in query_tokens if token and token in top_excerpt)
+        title_hits = sum(1 for token in query_tokens if token and token in top_title)
+        if query_tokens and (token_hits + title_hits) == 0:
+            return False
+        if token_hits < max(1, min(3, len(query_tokens))):
+            return False
+        if score_value < 12.0 and token_hits < 2:
+            return False
+        return True
+
+    @staticmethod
+    def _classify_docs_advisor_error(message: str) -> str:
+        lower = message.lower()
+        if "timed out" in lower or "timeout" in lower:
+            return "timeout"
+        if "unsupported keys" in lower or "missing keys" in lower or "must be" in lower:
+            return "schema_parse_failure"
+        if "malformed json" in lower or "must be object" in lower:
+            return "malformed_helper_output"
+        if "context" in lower and "length" in lower:
+            return "prompt_too_large"
+        if "http 400" in lower or "http 404" in lower:
+            if "model" in lower:
+                return "config_issue"
+            return "implementation_bug"
+        if "transport failure" in lower:
+            return "llama_server_unavailable"
+        return "implementation_bug"
+
+    def _run_docs_answer_advisor(
+        self,
+        *,
+        question: str,
+        answer_type: str,
+        snippets: list[DocsAnswerSnippet],
+        focus: str | None,
+    ) -> dict[str, Any] | None:
+        estimated_prompt_chars = (
+            len(question)
+            + (len(focus) if isinstance(focus, str) else 0)
+            + sum(
+                len(snippet.title) + len(snippet.source) + len(snippet.excerpt)
+                for snippet in snippets
+            )
+        )
+        self._last_docs_advisor_meta = {
+            "advisor_attempted": False,
+            "advisor_success": False,
+            "fallback_reason": "not_attempted",
+            "helper_latency_ms": None,
+            "prompt_chars": 0,
+            "snippet_count": len(snippets),
+            "schema_valid": False,
+            "timeout_ms": int(self._docs_answer_cfg.helper_timeout_seconds * 1000),
+            "cache_hit": False,
+            "helper_finish_reason": None,
+        }
+        if not self._llama_server_url.strip() or not self._llama_model.strip():
+            self._last_docs_advisor_meta["fallback_reason"] = "helper_disabled"
+            self._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
+            return None
+        if not snippets:
+            self._last_docs_advisor_meta["fallback_reason"] = "retrieval_empty"
+            self._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
+            return None
+        now = time.monotonic()
+        if now >= self._docs_advisor_probe_at:
+            self._docs_advisor_reachable = self._probe_docs_advisor_server()
+            self._docs_advisor_probe_at = now + (
+                self._docs_answer_cfg.retry_interval_on_success_seconds
+                if self._docs_advisor_reachable
+                else self._docs_answer_cfg.retry_interval_on_failure_seconds
+            )
+        if not self._docs_advisor_reachable:
+            self._last_docs_advisor_meta["fallback_reason"] = "llama_server_unavailable"
+            self._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
+            return None
+        self._last_docs_advisor_meta["advisor_attempted"] = True
+        started = time.perf_counter()
+        try:
+            client = DocsAnswerLlamaClient(
+                base_url=self._llama_server_url,
+                timeout_seconds=min(
+                    self._llama_request_timeout_seconds,
+                    self._docs_answer_cfg.helper_timeout_seconds,
+                ),
+                max_tokens=self._docs_answer_cfg.helper_max_output_tokens,
+                temperature=0.0,
+            )
+            result = run_docs_answer_advisor(
+                client=client,
+                model=self._llama_model,
+                question=question,
+                answer_type=answer_type,
+                snippets=snippets,
+                focus=focus,
+                max_answer_chars=self._docs_answer_cfg.answer_target_chars,
+                max_excerpt_chars=self._docs_answer_cfg.excerpt_target_chars,
+                max_sources=self._docs_answer_cfg.max_sources,
+            )
+            self._last_docs_advisor_meta.update(
+                {
+                    "advisor_success": True,
+                    "fallback_reason": "none",
+                    "helper_latency_ms": int(result.get("advisor_latency_ms") or 0),
+                    "prompt_chars": int(result.get("prompt_chars") or 0),
+                    "snippet_count": int(result.get("snippet_count") or len(snippets)),
+                    "schema_valid": bool(result.get("schema_valid")),
+                    "timeout_ms": int(
+                        result.get("timeout_ms")
+                        or int(self._docs_answer_cfg.helper_timeout_seconds * 1000)
+                    ),
+                    "cache_hit": False,
+                    "helper_finish_reason": result.get("helper_finish_reason"),
+                }
+            )
+            return result
+        except Exception as exc:
+            logger.info("docs_answer_advisor_failed error=%s", exc)
+            self._last_docs_advisor_meta.update(
+                {
+                    "advisor_success": False,
+                    "fallback_reason": self._classify_docs_advisor_error(str(exc)),
+                    "helper_latency_ms": int((time.perf_counter() - started) * 1000),
+                    "prompt_chars": estimated_prompt_chars,
+                    "helper_finish_reason": "error",
+                }
+            )
+            return None
+
+    def _probe_docs_advisor_server(self) -> bool:
+        """Cheap connectivity probe to avoid repeated long helper timeouts."""
+        try:
+            parsed = urlsplit(self._llama_server_url)
+            host = parsed.hostname
+            port = parsed.port
+            if not host or not port:
+                return False
+            with socket.create_connection(
+                (host, int(port)),
+                timeout=self._docs_answer_cfg.probe_timeout_seconds,
+            ):
+                return True
+        except Exception:
+            return False
 
     def _change_graph(
         self,
@@ -2702,13 +5141,23 @@ class GrcAgent:
         result = self._payload_result("search_grc", payload)
         return result
 
-    def _get_grc_context(self, node_id: str, hops: int = 1, max_nodes: int = 20) -> ToolResult:
+    def _get_grc_context(
+        self,
+        node_id: str,
+        hops: int = 1,
+        max_nodes: int | None = None,
+    ) -> ToolResult:
         resolved_node_id = self._resolve_symbol_like_name(node_id) or node_id
+        resolved_max_nodes = (
+            self._guardrails_cfg.max_context_nodes
+            if max_nodes is None
+            else max_nodes
+        )
         payload = get_grc_context(
             self.session,
             resolved_node_id,
             hops=hops,
-            max_nodes=max_nodes,
+            max_nodes=resolved_max_nodes,
         )
         if payload.get("ok"):
             payload["hint"] = (

@@ -57,11 +57,15 @@ class MvpToolProfileTests(unittest.TestCase):
             self.assertIn("name", row)
             self.assertIn("summary", row)
 
-    def test_search_help_returns_explanation_only_fields(self) -> None:
+    def test_ask_grc_docs_returns_answer_and_sources(self) -> None:
         agent = self._load_agent()
-        result = agent.execute_tool("search_help", {"query": "stream tags", "k": 2})
+        result = agent.execute_tool("ask_grc_docs", {"question": "What are stream tags?", "k": 2})
         self.assertTrue(result["ok"], result)
-        for row in result["results"]:
+        self.assertIn("answer", result)
+        self.assertIn("sources", result)
+        self.assertIn("insufficient_evidence", result)
+        self.assertIn("fallback_used", result)
+        for row in result["sources"]:
             self.assertEqual(sorted(row.keys()), ["excerpt", "source", "title"])
 
     def test_inspect_and_search_tools_are_read_only(self) -> None:
@@ -73,13 +77,13 @@ class MvpToolProfileTests(unittest.TestCase):
             "search_blocks",
             {"query": "throttle", "k": 5},
         )
-        search_help_result = agent.execute_tool(
-            "search_help",
-            {"query": "stream tags", "k": 3},
+        docs_result = agent.execute_tool(
+            "ask_grc_docs",
+            {"question": "What are stream tags?", "k": 3},
         )
         self.assertTrue(inspect_result["ok"], inspect_result)
         self.assertTrue(search_blocks_result["ok"], search_blocks_result)
-        self.assertTrue(search_help_result["ok"], search_help_result)
+        self.assertTrue(docs_result["ok"], docs_result)
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
 

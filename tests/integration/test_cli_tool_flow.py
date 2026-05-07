@@ -236,6 +236,19 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["candidate_count"], 1)
         self.assertEqual(payload["candidates"][0]["proposed_block"], "qtgui_time_sink_x")
 
+    def test_fake_subcommand_rejects_installed_example_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "examples"
+            root.mkdir(parents=True, exist_ok=True)
+            graph_path = root / "sample.grc"
+            graph_path.write_text("not-used", encoding="utf-8")
+            with mock.patch("grc_agent.cli._INSTALLED_GRAPH_ROOTS", (root,)):
+                exit_code, output = self._run_cli("fake", str(graph_path))
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Refusing to open an installed GNU Radio example directly", output)
+        self.assertIn("copy the graph first", output.lower())
+
     def test_dogfood_record_subcommand_records_sanitized_jsonl_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             intake_path = Path(tmpdir) / "dogfood.jsonl"

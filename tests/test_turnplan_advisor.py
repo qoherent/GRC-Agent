@@ -70,7 +70,14 @@ class _FakeBoundedTurnClient:
             return {"choices": [{"message": {"content": content}}]}
         return {"choices": [{"message": {"content": "Handled safely."}}]}
 
-    def parse_assistant_message(self, response, *, fallback_transaction_checker=None):
+    def parse_assistant_message(
+        self,
+        response,
+        *,
+        fallback_transaction_checker=None,
+        allowed_tool_names=None,
+    ):
+        _ = (fallback_transaction_checker, allowed_tool_names)
         message = response["choices"][0]["message"]
         return message.get("content"), []
 

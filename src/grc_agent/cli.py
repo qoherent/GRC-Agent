@@ -27,6 +27,7 @@ from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_server import (
     LlamaServerClient,
     LlamaServerError,
+    extract_model_context_limit,
     run_bounded_llama_turn,
 )
 from grc_agent.manual import search_manual
@@ -661,24 +662,34 @@ def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
         print(hint)
 
 
-def _warn_if_original_graph_path(file_path: str | None) -> None:
-    """Emit a non-blocking warning when a known installed example path is used directly."""
+def _is_installed_example_path(file_path: str | None) -> bool:
+    """Return True when the path resolves under known installed GNU example roots."""
     if not file_path:
-        return
+        return False
     try:
         resolved = Path(file_path).expanduser().resolve(strict=False)
     except Exception:
-        return
+        return False
     for root in _INSTALLED_GRAPH_ROOTS:
         try:
             resolved.relative_to(root)
         except ValueError:
             continue
-        print(
-            "Warning: this path appears to be an installed GNU Radio example. "
-            "Copy it first and edit only the copy."
-        )
-        break
+        return True
+    return False
+
+
+def _reject_if_original_graph_path(file_path: str | None) -> bool:
+    """Reject direct edits on installed GNU Radio example paths."""
+    if not _is_installed_example_path(file_path):
+        return False
+    print("\n--- Error ---")
+    print("Refusing to open an installed GNU Radio example directly.")
+    print(
+        "Hint: copy the graph first, then run chat/fake on the copied path. "
+        "Example: cp /usr/share/gnuradio/examples/.../file.grc /tmp/work.grc"
+    )
+    return True
 
 
 def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
@@ -693,7 +704,8 @@ def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
 
 def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
     """Exercise the routed runtime contract with deterministic fake actions."""
-    _warn_if_original_graph_path(file_path)
+    if _reject_if_original_graph_path(file_path):
+        return 1
     print(f"Loading {file_path}...")
     try:
         session = _load_initial_session(file_path)
@@ -703,7 +715,14 @@ def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
     retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
-    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
+    agent = GrcAgent(
+        session,
+        catalog_root=catalog_root,
+        config=config.agent,
+        llama_server_url=config.llama.server_url,
+        llama_model=config.llama.model,
+        llama_request_timeout_seconds=config.llama.request_timeout_seconds,
+    )
     _print_active_session(agent, verbose=True)
 
     print("--- System Prompt ---")
@@ -729,7 +748,8 @@ def _run_llama_runtime(
 ) -> int:
     """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
     if file_path is not None:
-        _warn_if_original_graph_path(file_path)
+        if _reject_if_original_graph_path(file_path):
+            return 1
         print(f"Loading {file_path}...")
         try:
             session = _load_initial_session(file_path)
@@ -743,7 +763,14 @@ def _run_llama_runtime(
     retrieval_status, catalog_root = _prepare_retrieval()
     if retrieval_status != 0:
         return retrieval_status
-    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
+    agent = GrcAgent(
+        session,
+        catalog_root=catalog_root,
+        config=config.agent,
+        llama_server_url=config.llama.server_url,
+        llama_model=config.llama.model,
+        llama_request_timeout_seconds=config.llama.request_timeout_seconds,
+    )
     _print_active_session(agent, verbose=verbose)
     llama_config = config.llama
     launcher = LlamaServerLauncher(
@@ -813,6 +840,7 @@ def _run_single_turn(
             advisor_limited_advisory=config.agent.advisor_limited_advisory,
             advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
             mvp_tool_profile=not config.agent.legacy_model_tool_surface,
+            max_tool_rounds=config.llama.max_tool_rounds,
         )
     except LlamaServerError as exc:
         print("\n--- Runtime ---")
@@ -899,6 +927,7 @@ def _run_repl_loop(
                 advisor_limited_advisory=config.agent.advisor_limited_advisory,
                 advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
                 mvp_tool_profile=not config.agent.legacy_model_tool_surface,
+                max_tool_rounds=config.llama.max_tool_rounds,
             )
         except LlamaServerError as exc:
             print(f"\n--- Runtime Error ---\n{exc}")
@@ -933,7 +962,14 @@ def _run_tool_command(
         if retrieval_status != 0:
             return retrieval_status
 
-    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
+    agent = GrcAgent(
+        session,
+        catalog_root=catalog_root,
+        config=config.agent,
+        llama_server_url=config.llama.server_url,
+        llama_model=config.llama.model,
+        llama_request_timeout_seconds=config.llama.request_timeout_seconds,
+    )
     result = agent.execute_tool(tool_name, tool_kwargs)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("ok") else 1
@@ -944,10 +980,33 @@ def _run_health_command(config: AppConfig) -> int:
     readiness = initialize_retrieval()
     catalog_root = readiness.get("catalog_root") if readiness.get("ok") else None
     session = FlowgraphSession()
-    agent = GrcAgent(session, catalog_root=catalog_root, config=config.agent)
+    agent = GrcAgent(
+        session,
+        catalog_root=catalog_root,
+        config=config.agent,
+        llama_server_url=config.llama.server_url,
+        llama_model=config.llama.model,
+        llama_request_timeout_seconds=config.llama.request_timeout_seconds,
+    )
     report = agent.health_check()
     if not readiness.get("ok"):
         report["retrieval_message"] = readiness.get("message", "Retrieval not ready.")
+    report["llama_desired_context_tokens"] = config.llama.desired_context_tokens
+    report["llama_max_tokens"] = config.llama.max_tokens
+    report["llama_max_tool_rounds"] = config.llama.max_tool_rounds
+    try:
+        client = LlamaServerClient(
+            base_url=config.llama.server_url,
+            timeout_seconds=min(config.llama.request_timeout_seconds, 5.0),
+            max_tokens=32,
+            temperature=0.0,
+            enable_thinking=False,
+        )
+        props = client.get_server_properties()
+        report["llama_actual_context_tokens"] = extract_model_context_limit(props)
+    except Exception as exc:
+        report["llama_actual_context_tokens"] = None
+        report["llama_props_error"] = str(exc)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] == "ok" else 1
 

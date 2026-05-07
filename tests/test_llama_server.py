@@ -20,7 +20,9 @@ from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_server import (
     LlamaServerClient,
     LlamaServerError,
+    LlamaToolCall,
     _looks_like_tool_call_text,
+    _normalize_compound_apply_edit_calls,
     run_bounded_llama_turn,
 )
 from grc_agent.recovery import RECOVERABLE_MISSING_ARGUMENTS, RecoveryDecision
@@ -1673,6 +1675,41 @@ class LlamaServerAdapterTests(unittest.TestCase):
 
         self.assertEqual(normalized, {"node_id": "samp_rate"})
 
+    def test_normalize_tool_call_arguments_recovers_save_path_from_user_prompt(self) -> None:
+        agent, _session = self._load_agent()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            expected_path = Path(tmpdir) / "output.grc"
+            wrong_path = Path(f"{tmpdir}_typo") / "output.grc"
+            self.assertFalse(wrong_path.parent.exists())
+            agent.init_turn_requirements(
+                f"Validate the graph and save a copy to {expected_path}."
+            )
+
+            normalized = agent.normalize_tool_call_arguments(
+                "save_graph",
+                {"path": str(wrong_path)},
+            )
+
+            self.assertEqual(normalized["path"], str(expected_path))
+
+    def test_normalize_tool_call_arguments_does_not_recover_ambiguous_save_path(self) -> None:
+        agent, _session = self._load_agent()
+        with tempfile.TemporaryDirectory() as tmpdir_a, tempfile.TemporaryDirectory() as tmpdir_b:
+            path_a = Path(tmpdir_a) / "output.grc"
+            path_b = Path(tmpdir_b) / "output.grc"
+            wrong_path = Path(f"{tmpdir_a}_typo") / "output.grc"
+            self.assertFalse(wrong_path.parent.exists())
+            agent.init_turn_requirements(
+                f"Save a copy to {path_a} or {path_b}."
+            )
+
+            normalized = agent.normalize_tool_call_arguments(
+                "save_graph",
+                {"path": str(wrong_path)},
+            )
+
+            self.assertEqual(normalized["path"], str(wrong_path))
+
     def test_execute_tool_normalizes_control_token_parameter_keys(self) -> None:
         agent, _session = self._load_agent()
         result = agent.execute_tool(
@@ -2340,6 +2377,278 @@ class LlamaServerAdapterTests(unittest.TestCase):
             if request["path"] == "/v1/chat/completions"
         ]
         self.assertEqual(len(chat_requests), 1)
+
+    def test_mvp_fallback_text_parser_does_not_execute_apply_edit(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": (
+                                    'apply_edit(transaction={"op_type":"update_params",'
+                                    '"instance_name":"samp_rate","params":{"value":"48000"}})'
+                                ),
+                            }
+                        }
+                    ]
+                }
+            ],
+            model_id=llama_config.model,
+        )
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Set samp_rate to 48000.",
+            model=llama_config.model,
+            mvp_tool_profile=True,
+            track_turn_requirements=False,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(session.state_revision, before_revision)
+        tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
+        self.assertEqual(tool_entries, [])
+
+    def test_mvp_fallback_text_parser_does_not_execute_legacy_mutation_tools(self) -> None:
+        llama_config = self._llama_config()
+        server = self._start_server(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": (
+                                    "remove_connection(connection_id='a:0->b:0')\n"
+                                    "rewire_connection(old_connection_id='a:0->b:0', new_src_block='a', "
+                                    "new_src_port=0, new_dst_block='c', new_dst_port=0)\n"
+                                    "save_graph()"
+                                ),
+                            }
+                        }
+                    ]
+                }
+            ],
+            model_id=llama_config.model,
+        )
+        agent, session = self._load_agent()
+        before_revision = session.state_revision
+        client = self._client(self._server_url(server))
+        client.require_ready()
+
+        result = run_bounded_llama_turn(
+            agent,
+            client,
+            "Disconnect and save graph.",
+            model=llama_config.model,
+            mvp_tool_profile=True,
+            track_turn_requirements=False,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool_calls_executed"], 0)
+        self.assertEqual(session.state_revision, before_revision)
+        tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
+        self.assertEqual(tool_entries, [])
+
+    def test_normalize_compound_apply_edit_coalesces_adjacent_mutations(self) -> None:
+        tool_calls = [
+            LlamaToolCall(
+                id="call_1",
+                name="apply_edit",
+                arguments={
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "params": {"nconnections": "2"},
+                    }
+                },
+            ),
+            LlamaToolCall(
+                id="call_2",
+                name="apply_edit",
+                arguments={
+                    "transaction": {
+                        "op_type": "add_connection",
+                        "src_block": "blocks_char_to_float_0",
+                        "src_port": 0,
+                        "dst_block": "qtgui_time_sink_x_0",
+                        "dst_port": 1,
+                    }
+                },
+            ),
+        ]
+
+        normalized = _normalize_compound_apply_edit_calls(
+            tool_calls,
+            allowed_tools={"apply_edit", "validate_graph", "save_graph"},
+            mvp_tool_profile=False,
+        )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0].name, "apply_edit")
+        merged_tx = normalized[0].arguments.get("transaction")
+        self.assertIsInstance(merged_tx, list)
+        self.assertEqual(len(merged_tx), 2)
+        self.assertEqual(merged_tx[0]["op_type"], "update_params")
+        self.assertEqual(merged_tx[1]["op_type"], "add_connection")
+
+    def test_normalize_compound_apply_edit_keeps_validate_after_coalesced_mutations(self) -> None:
+        tool_calls = [
+            LlamaToolCall(
+                id="call_1",
+                name="apply_edit",
+                arguments={
+                    "transaction": [
+                        {
+                            "op_type": "update_params",
+                            "instance_name": "qtgui_time_sink_x_0",
+                            "params": {"nconnections": "2"},
+                        },
+                        {
+                            "op_type": "add_connection",
+                            "src_block": "blocks_char_to_float_0",
+                            "src_port": 0,
+                            "dst_block": "qtgui_time_sink_x_0",
+                            "dst_port": 1,
+                        },
+                        {"op_type": "validate_graph"},
+                    ]
+                },
+            ),
+        ]
+
+        normalized = _normalize_compound_apply_edit_calls(
+            tool_calls,
+            allowed_tools={"apply_edit", "validate_graph", "save_graph"},
+            mvp_tool_profile=False,
+        )
+
+        self.assertEqual([call.name for call in normalized], ["apply_edit", "validate_graph"])
+        merged_tx = normalized[0].arguments.get("transaction")
+        self.assertIsInstance(merged_tx, list)
+        self.assertEqual(len(merged_tx), 2)
+
+    def test_normalize_compound_apply_edit_can_disable_coalescing(self) -> None:
+        tool_calls = [
+            LlamaToolCall(
+                id="call_1",
+                name="apply_edit",
+                arguments={
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "samp_rate",
+                        "params": {"value": "48000"},
+                    }
+                },
+            ),
+            LlamaToolCall(
+                id="call_2",
+                name="apply_edit",
+                arguments={
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "samp_rate",
+                        "params": {"value": "96000"},
+                    }
+                },
+            ),
+        ]
+
+        normalized = _normalize_compound_apply_edit_calls(
+            tool_calls,
+            allowed_tools={"apply_edit"},
+            mvp_tool_profile=False,
+            coalesce_adjacent_apply_edit=False,
+        )
+
+        self.assertEqual([call.name for call in normalized], ["apply_edit", "apply_edit"])
+
+    def test_normalize_compound_apply_edit_skips_in_mvp_mode(self) -> None:
+        tool_calls = [
+            LlamaToolCall(
+                id="call_1",
+                name="apply_edit",
+                arguments={"transaction": [{"op_type": "validate_graph"}]},
+            ),
+            LlamaToolCall(
+                id="call_2",
+                name="save_graph",
+                arguments={},
+            ),
+        ]
+        normalized = _normalize_compound_apply_edit_calls(
+            tool_calls,
+            allowed_tools={"apply_edit", "validate_graph", "save_graph"},
+            mvp_tool_profile=True,
+        )
+        self.assertEqual([call.name for call in normalized], ["apply_edit", "save_graph"])
+
+    def test_normalize_compound_apply_edit_does_not_rewrite_unsupported_operations(self) -> None:
+        tool_calls = [
+            LlamaToolCall(
+                id="call_1",
+                name="apply_edit",
+                arguments={
+                    "transaction": [
+                        {
+                            "op_type": "unsupported_operation",
+                            "instance_name": "blocks_head_0",
+                        }
+                    ]
+                },
+            )
+        ]
+        normalized = _normalize_compound_apply_edit_calls(
+            tool_calls,
+            allowed_tools={"apply_edit", "remove_connection", "validate_graph"},
+            mvp_tool_profile=False,
+        )
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0].name, "apply_edit")
+        self.assertEqual(normalized[0].arguments, tool_calls[0].arguments)
+
+    def test_normalize_compound_apply_edit_preserves_param_only_retry_shape(self) -> None:
+        tool_calls = [
+            LlamaToolCall(
+                id="call_1",
+                name="apply_edit",
+                arguments={
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "samp_rate",
+                        "params": {"value": "48000"},
+                    }
+                },
+            ),
+            LlamaToolCall(
+                id="call_2",
+                name="apply_edit",
+                arguments={
+                    "transaction": {
+                        "op_type": "update_params",
+                        "instance_name": "samp_rate",
+                        "params": {"value": "96000"},
+                    }
+                },
+            ),
+        ]
+        normalized = _normalize_compound_apply_edit_calls(
+            tool_calls,
+            allowed_tools={"apply_edit"},
+            mvp_tool_profile=False,
+            coalesce_adjacent_apply_edit=True,
+        )
+        self.assertEqual([call.name for call in normalized], ["apply_edit", "apply_edit"])
 
 
 class LooksLikeToolCallTextTests(unittest.TestCase):

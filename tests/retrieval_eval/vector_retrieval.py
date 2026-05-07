@@ -18,6 +18,7 @@ from grc_agent.retrieval.vector import (
     build_vector_records,
     semantic_search_grc,
 )
+from tests.retrieval_eval._eval_gate_lock import acquire_retrieval_eval_lock
 
 EVAL_DIMENSIONS: tuple[str, ...] = (
     "lexical_top_k_hit",
@@ -33,6 +34,8 @@ EVAL_DIMENSIONS: tuple[str, ...] = (
     "latency_ms",
     "deterministic_rebuild_pass",
 )
+_INDEX_BUSY_RETRY_ATTEMPTS = 5
+_INDEX_BUSY_RETRY_SLEEP_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -478,110 +481,135 @@ def run_eval(
     eval_cases: tuple[RetrievalEvalCase, ...] = EVAL_CASES,
     vector_search_fn: Any = semantic_search_grc,
 ) -> dict[str, Any]:
-    started = time.perf_counter()
-    case_results: list[dict[str, Any]] = []
-    vector_hit_count = 0
-    lexical_hit_count = 0
-    safety_count = 0
-    provenance_count = 0
-    false_positive_count = 0
-    for case in eval_cases:
-        before = time.perf_counter()
-        vector_payload = vector_search_fn(case.query, scope=case.scope, k=5)
-        latency_ms = round((time.perf_counter() - before) * 1000, 3)
-        vector_results = vector_payload.get("results", []) if vector_payload.get("ok") else []
-        lexical_payload = (
-            search_grc(case.query, scope="catalog", k=5)
-            if case.expected_block_ids and case.scope == "catalog"
-            else {"ok": True, "results": []}
+    with acquire_retrieval_eval_lock("vector_regression"):
+        started = time.perf_counter()
+        case_results: list[dict[str, Any]] = []
+        vector_hit_count = 0
+        lexical_hit_count = 0
+        safety_count = 0
+        provenance_count = 0
+        false_positive_count = 0
+        effective_vector_search = (
+            _semantic_search_with_retry
+            if vector_search_fn is semantic_search_grc
+            else vector_search_fn
         )
-        lexical_results = lexical_payload.get("results", []) if lexical_payload.get("ok") else []
-        vector_block_ids = {
-            result.get("canonical_block_id")
-            for result in vector_results
-            if isinstance(result, dict)
-        }
-        lexical_block_ids = {
-            result.get("block_id")
-            for result in lexical_results
-            if isinstance(result, dict)
-        }
-        expected = set(case.expected_block_ids)
-        vector_hit = bool(expected & vector_block_ids) if expected else bool(vector_results)
-        lexical_hit = bool(expected & lexical_block_ids) if expected else bool(lexical_results)
-        expected_source_types = set(case.expected_source_types)
-        source_type_hit = (
-            any(result.get("source_type") in expected_source_types for result in vector_results)
-            if expected_source_types
-            else True
-        )
-        safety_pass = all(_result_is_safe(result) for result in vector_results)
-        provenance_pass = all(
-            isinstance(result.get("provenance"), dict)
-            and bool(result["provenance"].get("path"))
-            for result in vector_results
-            if isinstance(result, dict)
-        )
-        vector_hit_count += int(vector_hit and source_type_hit)
-        lexical_hit_count += int(lexical_hit)
-        safety_count += int(safety_pass)
-        provenance_count += int(provenance_pass)
-        false_positive_pass = case.case_type != "false_positive" or vector_hit
-        false_positive_count += int(false_positive_pass)
-        case_results.append(
-            {
-                "name": case.name,
-                "case_type": case.case_type,
-                "query": case.query,
-                "scope": case.scope,
-                "expected_block_ids": list(case.expected_block_ids),
-                "expected_source_types": list(case.expected_source_types),
-                "lexical_top_k_hit": lexical_hit,
-                "vector_top_k_hit": vector_hit,
-                "catalog_metadata_hit": case.case_type in {"semantic_paraphrase", "exact_id", "false_positive"} and vector_hit,
-                "manual_hit": case.case_type == "manual" and source_type_hit,
-                "tutorial_hit": any(result.get("source_type") == "tutorial_chunk" for result in vector_results),
-                "semantic_paraphrase_hit": case.case_type == "semantic_paraphrase" and vector_hit,
-                "exact_id_hit": case.case_type == "exact_id" and vector_hit,
-                "false_positive_pass": false_positive_pass,
-                "provenance_pass": provenance_pass,
-                "safety_pass": safety_pass,
-                "latency_ms": latency_ms,
-                "deterministic_rebuild_pass": None,
-                "top_vector_ids": [result.get("canonical_block_id") or result.get("record_id") for result in vector_results[:5]],
-                "top_vector_results": [_vector_result_summary(result) for result in vector_results[:5]],
-                "top_lexical_results": [_lexical_result_summary(result) for result in lexical_results[:5]],
+        for case in eval_cases:
+            before = time.perf_counter()
+            vector_payload = effective_vector_search(case.query, scope=case.scope, k=5)
+            latency_ms = round((time.perf_counter() - before) * 1000, 3)
+            vector_results = vector_payload.get("results", []) if vector_payload.get("ok") else []
+            lexical_payload = (
+                search_grc(case.query, scope="catalog", k=5)
+                if case.expected_block_ids and case.scope == "catalog"
+                else {"ok": True, "results": []}
+            )
+            lexical_results = lexical_payload.get("results", []) if lexical_payload.get("ok") else []
+            vector_block_ids = {
+                result.get("canonical_block_id")
+                for result in vector_results
+                if isinstance(result, dict)
             }
+            lexical_block_ids = {
+                result.get("block_id")
+                for result in lexical_results
+                if isinstance(result, dict)
+            }
+            expected = set(case.expected_block_ids)
+            vector_hit = bool(expected & vector_block_ids) if expected else bool(vector_results)
+            lexical_hit = bool(expected & lexical_block_ids) if expected else bool(lexical_results)
+            expected_source_types = set(case.expected_source_types)
+            source_type_hit = (
+                any(result.get("source_type") in expected_source_types for result in vector_results)
+                if expected_source_types
+                else True
+            )
+            safety_pass = all(_result_is_safe(result) for result in vector_results)
+            provenance_pass = all(
+                isinstance(result.get("provenance"), dict)
+                and bool(result["provenance"].get("path"))
+                for result in vector_results
+                if isinstance(result, dict)
+            )
+            vector_hit_count += int(vector_hit and source_type_hit)
+            lexical_hit_count += int(lexical_hit)
+            safety_count += int(safety_pass)
+            provenance_count += int(provenance_pass)
+            false_positive_pass = case.case_type != "false_positive" or vector_hit
+            false_positive_count += int(false_positive_pass)
+            case_results.append(
+                {
+                    "name": case.name,
+                    "case_type": case.case_type,
+                    "query": case.query,
+                    "scope": case.scope,
+                    "expected_block_ids": list(case.expected_block_ids),
+                    "expected_source_types": list(case.expected_source_types),
+                    "lexical_top_k_hit": lexical_hit,
+                    "vector_top_k_hit": vector_hit,
+                    "catalog_metadata_hit": case.case_type in {"semantic_paraphrase", "exact_id", "false_positive"} and vector_hit,
+                    "manual_hit": case.case_type == "manual" and source_type_hit,
+                    "tutorial_hit": any(result.get("source_type") == "tutorial_chunk" for result in vector_results),
+                    "semantic_paraphrase_hit": case.case_type == "semantic_paraphrase" and vector_hit,
+                    "exact_id_hit": case.case_type == "exact_id" and vector_hit,
+                    "false_positive_pass": false_positive_pass,
+                    "provenance_pass": provenance_pass,
+                    "safety_pass": safety_pass,
+                    "latency_ms": latency_ms,
+                    "deterministic_rebuild_pass": None,
+                    "top_vector_ids": [result.get("canonical_block_id") or result.get("record_id") for result in vector_results[:5]],
+                    "top_vector_results": [_vector_result_summary(result) for result in vector_results[:5]],
+                    "top_lexical_results": [_lexical_result_summary(result) for result in lexical_results[:5]],
+                }
+            )
+        miss_analysis = _build_miss_analysis(case_results)
+        deterministic_rebuild_pass = _deterministic_rebuild_pass()
+        for case_result in case_results:
+            case_result["deterministic_rebuild_pass"] = deterministic_rebuild_pass
+        total = len(case_results)
+        ok = (
+            total > 0
+            and vector_hit_count >= lexical_hit_count
+            and safety_count == total
+            and provenance_count == total
+            and false_positive_count == total
+            and deterministic_rebuild_pass
         )
-    miss_analysis = _build_miss_analysis(case_results)
-    deterministic_rebuild_pass = _deterministic_rebuild_pass()
-    for case_result in case_results:
-        case_result["deterministic_rebuild_pass"] = deterministic_rebuild_pass
-    total = len(case_results)
-    ok = (
-        total > 0
-        and vector_hit_count >= lexical_hit_count
-        and safety_count == total
-        and provenance_count == total
-        and false_positive_count == total
-        and deterministic_rebuild_pass
+        return {
+            "ok": ok,
+            "dimensions": list(EVAL_DIMENSIONS),
+            "cases": case_results,
+            "summary": {
+                "total_cases": total,
+                "lexical_top_k_hits": lexical_hit_count,
+                "vector_top_k_hits": vector_hit_count,
+                "safety_passes": safety_count,
+                "provenance_passes": provenance_count,
+                "false_positive_passes": false_positive_count,
+                "deterministic_rebuild_pass": deterministic_rebuild_pass,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            },
+            "miss_analysis": miss_analysis,
+        }
+
+
+def _semantic_search_with_retry(query: str, *, scope: str, k: int) -> dict[str, Any]:
+    """Retry semantic retrieval when local index lock contention is transient."""
+    last_payload: dict[str, Any] | None = None
+    for attempt in range(_INDEX_BUSY_RETRY_ATTEMPTS):
+        payload = semantic_search_grc(query, scope=scope, k=k)
+        if payload.get("ok") is True:
+            return payload
+        if payload.get("error_type") != "index_busy":
+            return payload
+        last_payload = payload
+        if attempt < (_INDEX_BUSY_RETRY_ATTEMPTS - 1):
+            time.sleep(_INDEX_BUSY_RETRY_SLEEP_SECONDS)
+    return (
+        last_payload
+        if isinstance(last_payload, dict)
+        else semantic_search_grc(query, scope=scope, k=k)
     )
-    return {
-        "ok": ok,
-        "dimensions": list(EVAL_DIMENSIONS),
-        "cases": case_results,
-        "summary": {
-            "total_cases": total,
-            "lexical_top_k_hits": lexical_hit_count,
-            "vector_top_k_hits": vector_hit_count,
-            "safety_passes": safety_count,
-            "provenance_passes": provenance_count,
-            "false_positive_passes": false_positive_count,
-            "deterministic_rebuild_pass": deterministic_rebuild_pass,
-            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
-        },
-        "miss_analysis": miss_analysis,
-    }
 
 
 def _result_is_safe(result: Any) -> bool:

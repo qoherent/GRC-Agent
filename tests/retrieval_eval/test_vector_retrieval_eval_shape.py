@@ -3,11 +3,15 @@
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
+from grc_agent.agent import GrcAgent
 from tests.retrieval_eval.vector_retrieval import (
     EVAL_CASES,
+    _semantic_search_with_retry,
     _build_miss_analysis,
     empty_eval_summary,
+    run_eval,
 )
 from tests.retrieval_eval.vector_regression import evaluate_vector_regression
 
@@ -87,7 +91,8 @@ class VectorRetrievalEvalShapeTests(unittest.TestCase):
     def test_governed_metadata_baseline_report_is_frozen(self) -> None:
         report_path = (
             Path(__file__).resolve().parents[2]
-            / "reports"
+            / "tests"
+            / "data"
             / "retrieval"
             / "vector_eval_governed_metadata.json"
         )
@@ -149,6 +154,37 @@ class VectorRetrievalEvalShapeTests(unittest.TestCase):
 
         self.assertFalse(report["ok"], report)
         self.assertGreaterEqual(len(report["failures"]), 2)
+
+    def test_semantic_search_retry_recovers_from_index_busy(self) -> None:
+        responses = [
+            {"ok": False, "error_type": "index_busy", "message": "busy"},
+            {"ok": False, "error_type": "index_busy", "message": "busy"},
+            {"ok": True, "results": [{"record_id": "catalog_block:blocks_head"}]},
+        ]
+        with mock.patch(
+            "tests.retrieval_eval.vector_retrieval.semantic_search_grc",
+            side_effect=responses,
+        ) as semantic_mock:
+            payload = _semantic_search_with_retry("limit stream length", scope="catalog", k=5)
+        self.assertTrue(payload.get("ok"), payload)
+        self.assertEqual(semantic_mock.call_count, 3)
+
+    def test_vector_eval_does_not_depend_on_ask_grc_docs_scoring_layer(self) -> None:
+        with (
+            mock.patch.object(
+                GrcAgent,
+                "_rank_docs_candidates",
+                side_effect=AssertionError("ask_grc_docs scoring leaked into vector eval"),
+            ),
+            mock.patch.object(
+                GrcAgent,
+                "_build_docs_source_quality",
+                side_effect=AssertionError("ask_grc_docs quality gate leaked into vector eval"),
+            ),
+        ):
+            payload = run_eval(eval_cases=tuple(EVAL_CASES[:3]))
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["summary"]["total_cases"], 3)
 
 
 if __name__ == "__main__":
