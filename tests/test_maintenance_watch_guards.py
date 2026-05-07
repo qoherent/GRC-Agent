@@ -47,6 +47,24 @@ def _parse_fallback(content: str):
     )
 
 
+def _parse_without_fallback(content: str):
+    client = LlamaServerClient("http://127.0.0.1:1")
+    return client.parse_assistant_message(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                    }
+                }
+            ]
+        },
+        fallback_transaction_checker=GrcAgent.looks_like_transaction_payload,
+        assistant_text_fallback_enabled=False,
+    )
+
+
 class AssistantTextFallbackGuardTests(unittest.TestCase):
     """Fallback parsing must never become hidden routing or direct mutation."""
 
@@ -75,6 +93,15 @@ class AssistantTextFallbackGuardTests(unittest.TestCase):
         )
         self.assertEqual(_raw_snapshot(session), before)
         self.assertEqual(agent.history, history_before)
+
+    def test_mvp_disabled_fallback_leaves_assistant_text_unparsed(self) -> None:
+        content, tool_calls = _parse_without_fallback(
+            '{"op_type": "update_params", "instance_name": "samp_rate", '
+            '"params": {"value": "44100"}}'
+        )
+
+        self.assertIn("update_params", content)
+        self.assertEqual(tool_calls, [])
 
     def test_fallback_transaction_is_route_rejected_for_preview_only_turn(self) -> None:
         agent, session = _load_agent()

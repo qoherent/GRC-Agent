@@ -14,7 +14,7 @@ from unittest import mock
 from urllib import error
 
 from grc_agent.agent import GrcAgent
-from grc_agent.cli import _run_llama_runtime
+from grc_agent.cli import _run_health_command, _run_llama_runtime
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_server import (
@@ -2064,6 +2064,65 @@ class LlamaServerAdapterTests(unittest.TestCase):
             for schema in chat_requests[0]["payload"]["tools"]
         }
         self.assertEqual(first_tools, set(MVP_MODEL_TOOL_NAMES))
+
+    def test_health_command_reports_not_ready_when_llama_unreachable(self) -> None:
+        config = load_app_config()
+        config = replace(
+            config,
+            llama=replace(config.llama, server_url="http://127.0.0.1:1"),
+        )
+        output = StringIO()
+
+        with mock.patch(
+            "grc_agent.cli.initialize_retrieval",
+            return_value={
+                "ok": True,
+                "catalog_root": "/tmp/catalog",
+                "catalog_files": 1,
+            },
+        ), redirect_stdout(output):
+            exit_code = _run_health_command(config)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "not_ready")
+        self.assertFalse(payload["llama_model_ready"])
+        self.assertFalse(payload["llama_context_verified"])
+        self.assertIn("llama_unreachable", payload["status_reasons"])
+
+    def test_health_command_reports_ok_when_llama_context_verified(self) -> None:
+        config = load_app_config()
+        server = self._start_server(
+            [],
+            model_id=config.llama.model,
+            props_payload={
+                "default_generation_settings": {
+                    "n_ctx": config.llama.desired_context_tokens
+                }
+            },
+        )
+        config = replace(
+            config,
+            llama=replace(config.llama, server_url=self._server_url(server)),
+        )
+        output = StringIO()
+
+        with mock.patch(
+            "grc_agent.cli.initialize_retrieval",
+            return_value={
+                "ok": True,
+                "catalog_root": "/tmp/catalog",
+                "catalog_files": 1,
+            },
+        ), redirect_stdout(output):
+            exit_code = _run_health_command(config)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["llama_model_ready"])
+        self.assertTrue(payload["llama_context_verified"])
+        self.assertEqual(payload["status_reasons"], [])
 
     def test_cli_llama_runtime_compatibility_mode_exposes_legacy_tools_only_when_enabled(
         self,

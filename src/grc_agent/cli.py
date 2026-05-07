@@ -1,9 +1,11 @@
 """Command-line entry point for GRC Agent."""
 
 import argparse
+import hashlib
 import json
 import logging
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 
@@ -43,6 +45,7 @@ from grc_agent.retrieval.vector import (
     summarize_vector_misses,
     vector_index_stats,
 )
+from grc_agent.runtime.tool_surface import tool_surface_for_legacy_flag
 from grc_agent.session.load import load_grc as load_grc_session
 
 logger = logging.getLogger(__name__)
@@ -109,6 +112,11 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
     subparsers.add_parser(
         "health",
         help="Print a structured agent health check and exit.",
+    )
+
+    subparsers.add_parser(
+        "release-manifest",
+        help="Print a JSON release evidence manifest for the active runtime profile.",
     )
 
     fake_parser = subparsers.add_parser(
@@ -975,8 +983,8 @@ def _run_tool_command(
     return 0 if result.get("ok") else 1
 
 
-def _run_health_command(config: AppConfig) -> int:
-    """Print a structured agent health check and return 0 when healthy."""
+def _build_health_report(config: AppConfig) -> dict[str, Any]:
+    """Return end-to-end runtime readiness for the active config."""
     readiness = initialize_retrieval()
     catalog_root = readiness.get("catalog_root") if readiness.get("ok") else None
     session = FlowgraphSession()
@@ -989,11 +997,15 @@ def _run_health_command(config: AppConfig) -> int:
         llama_request_timeout_seconds=config.llama.request_timeout_seconds,
     )
     report = agent.health_check()
+    status_reasons: list[str] = []
     if not readiness.get("ok"):
         report["retrieval_message"] = readiness.get("message", "Retrieval not ready.")
+        status_reasons.append("retrieval_not_ready")
     report["llama_desired_context_tokens"] = config.llama.desired_context_tokens
     report["llama_max_tokens"] = config.llama.max_tokens
     report["llama_max_tool_rounds"] = config.llama.max_tool_rounds
+    report["llama_model_ready"] = False
+    report["llama_context_verified"] = False
     try:
         client = LlamaServerClient(
             base_url=config.llama.server_url,
@@ -1003,12 +1015,119 @@ def _run_health_command(config: AppConfig) -> int:
             enable_thinking=False,
         )
         props = client.get_server_properties()
-        report["llama_actual_context_tokens"] = extract_model_context_limit(props)
+        actual_context = extract_model_context_limit(props)
+        report["llama_actual_context_tokens"] = actual_context
+        report["llama_model_ready"] = True
+        report["llama_context_verified"] = actual_context is not None
+        if actual_context is None:
+            status_reasons.append("llama_context_unknown")
+        elif actual_context < config.llama.desired_context_tokens:
+            status_reasons.append("llama_context_below_desired")
     except Exception as exc:
         report["llama_actual_context_tokens"] = None
         report["llama_props_error"] = str(exc)
+        status_reasons.append("llama_unreachable")
+
+    if not report.get("agent_core_ready"):
+        status_reasons.append("agent_core_not_ready")
+    if not report.get("retrieval_ready"):
+        status_reasons.append("retrieval_not_ready")
+
+    unique_reasons = list(dict.fromkeys(status_reasons))
+    if "llama_unreachable" in unique_reasons or "agent_core_not_ready" in unique_reasons:
+        report["status"] = "not_ready"
+    elif unique_reasons:
+        report["status"] = "degraded"
+    else:
+        report["status"] = "ok"
+    report["status_reasons"] = unique_reasons
+    return report
+
+
+def _run_health_command(config: AppConfig) -> int:
+    """Print a structured agent health check and return 0 when healthy."""
+    report = _build_health_report(config)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] == "ok" else 1
+
+
+def _sha256_payload(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _git_output(*args: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            check=True,
+            cwd=Path(__file__).resolve().parents[2],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return None
+    return completed.stdout.strip()
+
+
+def _build_release_manifest(config: AppConfig) -> dict[str, Any]:
+    """Build a reproducible release evidence manifest for the current runtime."""
+    session = FlowgraphSession()
+    agent = GrcAgent(session, config=config.agent)
+    surface = tool_surface_for_legacy_flag(
+        legacy_model_tool_surface=config.agent.legacy_model_tool_surface
+    )
+    model_schemas = agent.get_tool_schemas_for_turn(set(surface.model_tool_names))
+    policy_payload = {
+        "tool_surface": surface.name,
+        "model_tool_names": list(surface.model_tool_names),
+        "internal_tool_names": list(surface.internal_tool_names),
+        "assistant_text_fallback_enabled": surface.assistant_text_fallback_enabled,
+        "default_max_tool_rounds": surface.default_max_tool_rounds,
+    }
+    dirty_files = (_git_output("status", "--porcelain") or "").splitlines()
+    health_report = _build_health_report(config)
+    return {
+        "ok": True,
+        "git": {
+            "branch": _git_output("rev-parse", "--abbrev-ref", "HEAD"),
+            "commit": _git_output("rev-parse", "HEAD"),
+            "dirty": bool(dirty_files),
+            "dirty_files": dirty_files,
+        },
+        "runtime": {
+            "model_alias": config.llama.model,
+            "server_url": config.llama.server_url,
+            "desired_context_tokens": config.llama.desired_context_tokens,
+            "actual_context_tokens": health_report.get("llama_actual_context_tokens"),
+            "health_status": health_report.get("status"),
+            "health_status_reasons": health_report.get("status_reasons", []),
+        },
+        "hashes": {
+            "prompt_sha256": _sha256_payload(agent.get_system_prompt()),
+            "schema_sha256": _sha256_payload(model_schemas),
+            "policy_sha256": _sha256_payload(policy_payload),
+        },
+        "tool_surface": policy_payload,
+        "eval_gates": {
+            "lint_src_tests": "uv run ruff check src/ tests/",
+            "lint_repo": "uv run ruff check",
+            "unit": "uv run python -m unittest",
+            "vector_regression": "uv run python -m tests.retrieval_eval.vector_regression",
+            "docs_answer_eval": "uv run python -m tests.retrieval_eval.grc_docs_answer_eval",
+            "doctor": "uv run grc-agent doctor",
+            "health": "uv run grc-agent health",
+        },
+        "fixture_ids": ["tests/data/random_bit_generator.grc"],
+        "health": health_report,
+    }
+
+
+def _run_release_manifest_command(config: AppConfig) -> int:
+    """Print the current release evidence manifest."""
+    print(json.dumps(_build_release_manifest(config), indent=2, sort_keys=True))
+    return 0
 
 
 def _run_manual_search_command(query: str, k: int, *, json_output: bool) -> int:
@@ -1395,6 +1514,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "health":
         return _run_health_command(app_config)
+
+    if args.command == "release-manifest":
+        return _run_release_manifest_command(app_config)
 
     if args.command == "fake":
         return _run_fake_runtime(args.file, app_config)

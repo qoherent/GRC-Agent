@@ -173,7 +173,7 @@ def default_app_config() -> AppConfig:
             desired_context_tokens=120000,
             startup_timeout_seconds=300.0,
             max_tokens=4096,
-            max_tool_rounds=50,
+            max_tool_rounds=8,
             temperature=0.0,
             enable_thinking=False,
             request_timeout_seconds=60.0,

@@ -2,36 +2,10 @@
 
 from typing import Any
 
-PUBLIC_TOOL_NAMES: tuple[str, ...] = (
-    "new_grc",
-    "load_grc",
-    "summarize_graph",
-    "search_grc",
-    "get_grc_context",
-    "describe_block",
-    "search_manual",
-    "semantic_search_grc",
-    "suggest_compatible_insertions",
-    "insert_block_on_connection",
-    "auto_insert_block",
-    "remove_connection",
-    "rewire_connection",
-    "apply_edit",
-    "propose_edit",
-    "validate_graph",
-    "save_graph",
-)
-
-MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
-    "inspect_graph",
-    "search_blocks",
-    "ask_grc_docs",
-    "change_graph",
-)
-
-MODEL_TOOL_NAMES_ORDERED: tuple[str, ...] = (
-    *PUBLIC_TOOL_NAMES,
-    *MVP_MODEL_TOOL_NAMES,
+from grc_agent.runtime.tool_surface import (
+    MODEL_TOOL_NAMES_ORDERED as MODEL_TOOL_NAMES_ORDERED,
+    MVP_MODEL_TOOL_NAMES as MVP_MODEL_TOOL_NAMES,
+    PUBLIC_TOOL_NAMES as PUBLIC_TOOL_NAMES,
 )
 
 
@@ -507,7 +481,26 @@ def build_tool_schemas() -> list[dict[str, Any]]:
                 },
                 "user_goal": {
                     "type": "string",
-                    "description": "Bounded natural-language mutation goal.",
+                    "description": "Bounded natural-language mutation goal for human evidence only.",
+                },
+                "operation_kind": {
+                    "type": "string",
+                    "enum": [
+                        "set_param",
+                        "set_state",
+                        "add_variable",
+                        "disconnect",
+                        "rewire",
+                        "insert_block",
+                        "remove_block",
+                        "auto_insert",
+                        "clarify",
+                        "unsupported",
+                    ],
+                    "description": (
+                        "Structured operation selector. The runtime dispatches from this "
+                        "when present; user_goal does not override it."
+                    ),
                 },
                 "target_ref": {
                     "type": "object",

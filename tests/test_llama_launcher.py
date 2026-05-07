@@ -34,7 +34,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
             desired_context_tokens=120000,
             startup_timeout_seconds=5.0,
             max_tokens=256,
-            max_tool_rounds=50,
+            max_tool_rounds=8,
             temperature=0.0,
             enable_thinking=False,
             request_timeout_seconds=2.0,

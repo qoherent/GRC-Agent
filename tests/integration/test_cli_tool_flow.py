@@ -518,6 +518,25 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
         expected = 0 if payload["status"] == "ok" else 1
         self.assertEqual(exit_code, expected)
 
+    def test_release_manifest_reports_runtime_hashes_and_tool_surface(self) -> None:
+        with mock.patch(
+            "grc_agent.cli._build_health_report",
+            return_value={
+                "status": "ok",
+                "status_reasons": [],
+                "llama_actual_context_tokens": 120000,
+            },
+        ):
+            exit_code, output = self._run_cli("release-manifest")
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["tool_surface"]["tool_surface"], "mvp")
+        self.assertIn("prompt_sha256", payload["hashes"])
+        self.assertIn("schema_sha256", payload["hashes"])
+        self.assertIn("policy_sha256", payload["hashes"])
+        self.assertEqual(payload["runtime"]["health_status"], "ok")
+
     def test_vector_build_subcommand_reports_json(self) -> None:
         with mock.patch(
             "grc_agent.cli.build_vector_index",

@@ -38,6 +38,7 @@ from grc_agent.runtime.docs_answer_advisor import (
     run_docs_answer_advisor,
 )
 from grc_agent.runtime.tool_schemas import MODEL_TOOL_NAMES_ORDERED, build_tool_schemas
+from grc_agent.runtime.tool_surface import tool_surface_for_legacy_flag
 from grc_agent.runtime.turn_plan import (
     INTENT_ADD_VARIABLE,
     INTENT_PREVIEW,
@@ -405,7 +406,7 @@ class GrcAgent:
         self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
-        return build_system_prompt()
+        return build_system_prompt(legacy=self.config.legacy_model_tool_surface)
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Return the fixed tool schemas exposed to a chat-completions client."""
@@ -1160,14 +1161,25 @@ class GrcAgent:
         """Return a structured health payload describing agent readiness."""
         has_session = self.session.flowgraph is not None
         has_retrieval = self.catalog_root is not None
-        tool_count = len(self._tools)
-        status = "ok" if tool_count > 0 and has_retrieval else "not_ready"
+        surface = tool_surface_for_legacy_flag(
+            legacy_model_tool_surface=self.config.legacy_model_tool_surface
+        )
+        internal_tool_count = len(self._tools)
+        model_tool_count = len(surface.model_tool_names)
+        agent_core_ready = internal_tool_count > 0 and model_tool_count > 0
+        status = "ok" if agent_core_ready and has_retrieval else "not_ready"
         return {
             "status": status,
+            "agent_core_ready": agent_core_ready,
             "session_loaded": has_session,
             "retrieval_ready": has_retrieval,
             "history_length": len(self.history),
-            "tool_count": tool_count,
+            "active_tool_surface": surface.name,
+            "model_facing_tools": list(surface.model_tool_names),
+            "model_tool_count": model_tool_count,
+            "internal_tool_count": internal_tool_count,
+            "tool_count": model_tool_count,
+            "assistant_text_fallback_enabled": surface.assistant_text_fallback_enabled,
         }
 
     def active_session_snapshot(self) -> dict[str, Any] | None:
@@ -4611,6 +4623,7 @@ class GrcAgent:
         self,
         dry_run: bool,
         user_goal: str,
+        operation_kind: str | None = None,
         target_ref: dict[str, Any] | None = None,
         block_id: str | None = None,
         instance_name: str | None = None,
@@ -4667,8 +4680,49 @@ class GrcAgent:
                 validation_run=False,
                 output_truncated=False,
             )
+        allowed_operation_kinds = {
+            "set_param",
+            "set_state",
+            "add_variable",
+            "disconnect",
+            "rewire",
+            "insert_block",
+            "remove_block",
+            "auto_insert",
+            "clarify",
+            "unsupported",
+        }
+        resolved_operation_kind = (
+            operation_kind.strip() if isinstance(operation_kind, str) else None
+        )
+        if resolved_operation_kind == "":
+            resolved_operation_kind = None
+        if (
+            resolved_operation_kind is not None
+            and resolved_operation_kind not in allowed_operation_kinds
+        ):
+            result = self._tool_result(
+                "change_graph",
+                ok=False,
+                message=f"Unsupported change_graph operation_kind: {resolved_operation_kind!r}",
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="invalid_operation_kind",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
         lower_goal = user_goal.lower()
         if any(token in lower_goal for token in ("yaml", "undo", "redo", "export python", "source text")):
+            resolved_operation_kind = resolved_operation_kind or "unsupported"
+        if resolved_operation_kind == "unsupported":
             result = self._payload_result(
                 "change_graph",
                 {
@@ -4683,6 +4737,34 @@ class GrcAgent:
                 wrapper_name="change_graph",
                 wrapper_action="unsupported",
                 internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        if resolved_operation_kind == "clarify":
+            result = self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": resolved_operation_kind,
+                    "error_type": "clarification_required",
+                    "message": "Clarification required before changing the graph.",
+                    "clarification_options": [
+                        "Provide exact instance_name + param_key + param_value for param edits.",
+                        "Provide exact connection_id for disconnect/insert/rewire.",
+                        "Provide exact block_id and placement details for inserts.",
+                    ],
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="clarify",
+                internal_handlers=["clarification"],
                 started=started,
                 before_revision=before_revision,
                 before_dirty=before_dirty,
@@ -4717,6 +4799,26 @@ class GrcAgent:
         operation_summary = "clarification_required"
         result: dict[str, Any]
 
+        def _kind_allows(*allowed: str) -> bool:
+            return resolved_operation_kind is None or resolved_operation_kind in allowed
+
+        def _kind_mismatch_result(*allowed: str) -> ToolResult | None:
+            if _kind_allows(*allowed):
+                return None
+            return self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": resolved_operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": (
+                        f"operation_kind={resolved_operation_kind!r} does not match "
+                        f"the supplied arguments; expected one of {sorted(allowed)!r}."
+                    ),
+                },
+            )
+
         if (
             isinstance(connection_id, str)
             and connection_id.strip()
@@ -4728,6 +4830,20 @@ class GrcAgent:
             and new_dst_port is not None
         ):
             operation_summary = "rewire_connection"
+            mismatch = _kind_mismatch_result("rewire")
+            if mismatch is not None:
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="operation_kind_mismatch",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=mismatch,
+                    validation_run=False,
+                    output_truncated=False,
+                )
             if dry_run:
                 handlers.append("propose_edit(rewire_transaction)")
                 result = tx_tool(
@@ -4758,6 +4874,20 @@ class GrcAgent:
             and connection_id.strip()
         ):
             operation_summary = "insert_block_on_connection"
+            mismatch = _kind_mismatch_result("insert_block")
+            if mismatch is not None:
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="operation_kind_mismatch",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=mismatch,
+                    validation_run=False,
+                    output_truncated=False,
+                )
             if dry_run:
                 handlers.append("propose_edit(insert_block_on_connection)")
                 result = tx_tool(
@@ -4778,7 +4908,10 @@ class GrcAgent:
                 )
         elif isinstance(connection_id, str) and connection_id.strip():
             insertion_words = ("insert", "add", "compatible")
-            if any(word in lower_goal for word in insertion_words):
+            if resolved_operation_kind == "auto_insert" or (
+                resolved_operation_kind is None
+                and any(word in lower_goal for word in insertion_words)
+            ):
                 operation_summary = "auto_insert_block"
                 if dry_run:
                     handlers.append("suggest_compatible_insertions")
@@ -4792,6 +4925,20 @@ class GrcAgent:
                     )
             else:
                 operation_summary = "remove_connection"
+                mismatch = _kind_mismatch_result("disconnect")
+                if mismatch is not None:
+                    return self._attach_wrapper_dispatch_telemetry(
+                        debug=debug,
+                        wrapper_name="change_graph",
+                        wrapper_action="operation_kind_mismatch",
+                        internal_handlers=["none"],
+                        started=started,
+                        before_revision=before_revision,
+                        before_dirty=before_dirty,
+                        result=mismatch,
+                        validation_run=False,
+                        output_truncated=False,
+                    )
                 if dry_run:
                     handlers.append("propose_edit(remove_connection)")
                     result = tx_tool(
@@ -4805,6 +4952,20 @@ class GrcAgent:
                     result = self._remove_connection(connection_id=connection_id.strip())
         elif isinstance(variable_name, str) and variable_name.strip() and variable_value is not None:
             operation_summary = "add_variable"
+            mismatch = _kind_mismatch_result("add_variable")
+            if mismatch is not None:
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="operation_kind_mismatch",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=mismatch,
+                    validation_run=False,
+                    output_truncated=False,
+                )
             handlers.append("propose_edit" if dry_run else "apply_edit")
             result = tx_tool(
                 {
@@ -4816,6 +4977,20 @@ class GrcAgent:
             )
         elif isinstance(param_key, str) and param_key.strip() and param_value is not None:
             operation_summary = "update_params"
+            mismatch = _kind_mismatch_result("set_param")
+            if mismatch is not None:
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="operation_kind_mismatch",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=mismatch,
+                    validation_run=False,
+                    output_truncated=False,
+                )
             handlers.append("propose_edit" if dry_run else "apply_edit")
             if isinstance(target_ref, dict):
                 result = tx_tool(
@@ -4861,6 +5036,20 @@ class GrcAgent:
                 )
         elif isinstance(state, str) and state in {"enabled", "disabled"}:
             operation_summary = "update_states"
+            mismatch = _kind_mismatch_result("set_state")
+            if mismatch is not None:
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="operation_kind_mismatch",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=mismatch,
+                    validation_run=False,
+                    output_truncated=False,
+                )
             handlers.append("propose_edit" if dry_run else "apply_edit")
             if isinstance(target_ref, dict):
                 result = tx_tool({"op_type": "update_states", "target_ref": target_ref, "state": state})
@@ -4895,6 +5084,16 @@ class GrcAgent:
                     validation_run=False,
                     output_truncated=False,
                 )
+        elif (
+            resolved_operation_kind == "remove_block"
+            and isinstance(instance_name, str)
+            and instance_name.strip()
+        ):
+            operation_summary = "remove_block"
+            handlers.append("propose_edit" if dry_run else "apply_edit")
+            result = tx_tool(
+                {"op_type": "remove_block", "instance_name": instance_name.strip()}
+            )
         else:
             wrapper_result = self._payload_result(
                 "change_graph",
@@ -4929,6 +5128,7 @@ class GrcAgent:
         payload: dict[str, Any] = {
             "ok": bool(result.get("ok")) if isinstance(result, dict) else False,
             "dry_run": bool(dry_run),
+            "operation_kind": resolved_operation_kind,
             "operation_summary": operation_summary,
             "graph_delta": result.get("graph_delta") if isinstance(result, dict) else None,
             "validation_result": validation_result,

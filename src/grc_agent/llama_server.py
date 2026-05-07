@@ -12,7 +12,12 @@ from urllib import error, request
 from grc_agent._payload import ErrorCode
 from grc_agent.agent import GrcAgent
 from grc_agent.recovery import RECOVERABLE_MISSING_ARGUMENTS, classify_tool_result_for_recovery
-from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
+from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
+from grc_agent.runtime.tool_surface import (
+    LEGACY_TOOL_SURFACE,
+    MVP_TOOL_SURFACE,
+    tool_surface_for_legacy_flag,
+)
 from grc_agent.runtime.turnplan_advisor import (
     AdvisorModeObservation,
     AdvisorObservation,
@@ -150,6 +155,7 @@ class LlamaServerClient:
         *,
         fallback_transaction_checker: Any = None,
         allowed_tool_names: set[str] | None = None,
+        assistant_text_fallback_enabled: bool = True,
     ) -> tuple[str | None, list[LlamaToolCall]]:
         """Extract assistant text and normalized tool calls from one completion."""
         choices = response.get("choices")
@@ -174,7 +180,7 @@ class LlamaServerClient:
             self._normalize_content(message.get("content"))
         )
         tool_calls = self._parse_tool_calls(message.get("tool_calls"))
-        if not tool_calls:
+        if assistant_text_fallback_enabled and not tool_calls:
             fallback_tool_calls = self._parse_tool_calls_from_content(
                 content,
                 transaction_checker=fallback_transaction_checker,
@@ -630,8 +636,8 @@ class LlamaServerClient:
         return isinstance(reason, TimeoutError | socket.timeout)
 
 
-_SAFETY_MAX_TOOL_ROUNDS = 50
-_DEFAULT_MVP_ALLOWED_TOOLS: set[str] = set(MVP_MODEL_TOOL_NAMES)
+_SAFETY_MAX_TOOL_ROUNDS = LEGACY_TOOL_SURFACE.default_max_tool_rounds
+_DEFAULT_MVP_ALLOWED_TOOLS: set[str] = set(MVP_TOOL_SURFACE.model_tool_names)
 
 
 def run_bounded_llama_turn(
@@ -652,8 +658,15 @@ def run_bounded_llama_turn(
     """Run a bounded llama.cpp -> runtime loop against one loaded flowgraph."""
     if not isinstance(user_message, str) or not user_message.strip():
         raise ValueError("user_message must be a non-empty string.")
+    active_tool_surface = tool_surface_for_legacy_flag(
+        legacy_model_tool_surface=not mvp_tool_profile
+    )
     if max_tool_rounds is None:
-        max_tool_rounds = _SAFETY_MAX_TOOL_ROUNDS
+        max_tool_rounds = (
+            active_tool_surface.default_max_tool_rounds
+            if mvp_tool_profile
+            else _SAFETY_MAX_TOOL_ROUNDS
+        )
 
     if model is None:
         resolved_model = client.get_model_id()
@@ -941,6 +954,9 @@ def run_bounded_llama_turn(
             fallback_transaction_checker=GrcAgent.looks_like_transaction_payload,
             allowed_tool_names=(
                 set(active_allowed_tools) if mvp_tool_profile else None
+            ),
+            assistant_text_fallback_enabled=(
+                active_tool_surface.assistant_text_fallback_enabled
             ),
         )
 

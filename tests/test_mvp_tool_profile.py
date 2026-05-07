@@ -7,6 +7,7 @@ import unittest
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES
+from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
 
 
 class MvpToolProfileTests(unittest.TestCase):
@@ -29,6 +30,26 @@ class MvpToolProfileTests(unittest.TestCase):
         narrowed = agent.get_tool_schemas_for_turn(set(MVP_MODEL_TOOL_NAMES))
         names = [schema["function"]["name"] for schema in narrowed]
         self.assertEqual(names, list(MVP_MODEL_TOOL_NAMES))
+
+    def test_mvp_tool_surface_is_single_profile_authority(self) -> None:
+        self.assertEqual(MVP_TOOL_SURFACE.model_tool_names, MVP_MODEL_TOOL_NAMES)
+        self.assertFalse(MVP_TOOL_SURFACE.assistant_text_fallback_enabled)
+        self.assertEqual(MVP_TOOL_SURFACE.default_max_tool_rounds, 8)
+
+    def test_mvp_prompt_mentions_only_wrapper_tools(self) -> None:
+        prompt = self._load_agent().get_system_prompt()
+
+        for name in MVP_MODEL_TOOL_NAMES:
+            self.assertIn(name, prompt)
+        for legacy_name in (
+            "apply_edit",
+            "propose_edit",
+            "save_graph",
+            "semantic_search_grc",
+            "search_manual",
+            "validate_graph",
+        ):
+            self.assertNotIn(legacy_name, prompt)
 
     def test_inspect_graph_summarize_returns_compact_payload(self) -> None:
         agent = self._load_agent()
@@ -96,6 +117,7 @@ class MvpToolProfileTests(unittest.TestCase):
             {
                 "dry_run": True,
                 "user_goal": "Preview setting samp_rate to 48000.",
+                "operation_kind": "set_param",
                 "instance_name": "samp_rate",
                 "param_key": "value",
                 "param_value": "48000",
@@ -113,6 +135,7 @@ class MvpToolProfileTests(unittest.TestCase):
             {
                 "dry_run": False,
                 "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
                 "instance_name": "samp_rate",
                 "param_key": "value",
                 "param_value": "48000",
@@ -121,7 +144,41 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertFalse(result["dry_run"])
         self.assertEqual(result["operation_summary"], "update_params")
+        self.assertEqual(result["operation_kind"], "set_param")
         self.assertTrue(agent.session.is_dirty)
+
+    def test_change_graph_operation_kind_mismatch_is_rejected(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "disconnect",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "invalid_request")
+
+    def test_change_graph_operation_kind_clarify_is_non_mutating(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Fix this graph.",
+                "operation_kind": "clarify",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertEqual(agent.session.state_revision, before_revision)
 
     def test_change_graph_unsupported_workflow_is_rejected(self) -> None:
         agent = self._load_agent()
@@ -182,6 +239,7 @@ class MvpToolProfileTests(unittest.TestCase):
             {
                 "dry_run": True,
                 "user_goal": "Preview disconnect exact connection.",
+                "operation_kind": "disconnect",
                 "connection_id": connection_ids[0],
             },
         )
@@ -195,6 +253,7 @@ class MvpToolProfileTests(unittest.TestCase):
             {
                 "dry_run": False,
                 "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
                 "instance_name": "samp_rate",
                 "param_key": "value",
                 "param_value": "48000",
@@ -206,14 +265,20 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result.get("checkpoint_id"))
 
     def test_history_restore_remains_cli_copy_only(self) -> None:
-        agent = self._load_agent()
         with tempfile.TemporaryDirectory() as tmpdir:
+            session = FlowgraphSession()
+            session.load(self._fixture_path())
+            agent = GrcAgent(
+                session,
+                history_journal_path=Path(tmpdir) / "history.jsonl",
+            )
             out = Path(tmpdir) / "copy.grc"
             result = agent.execute_tool(
                 "change_graph",
                 {
                     "dry_run": False,
                     "user_goal": "Set samp_rate to 48000.",
+                    "operation_kind": "set_param",
                     "instance_name": "samp_rate",
                     "param_key": "value",
                     "param_value": "48000",

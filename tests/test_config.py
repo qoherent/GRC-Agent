@@ -31,7 +31,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.desired_context_tokens, 120000)
         self.assertEqual(config.llama.startup_timeout_seconds, 300.0)
         self.assertEqual(config.llama.max_tokens, 4096)
-        self.assertEqual(config.llama.max_tool_rounds, 50)
+        self.assertEqual(config.llama.max_tool_rounds, 8)
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)

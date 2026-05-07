@@ -76,8 +76,13 @@ class _FakeBoundedTurnClient:
         *,
         fallback_transaction_checker=None,
         allowed_tool_names=None,
+        assistant_text_fallback_enabled=True,
     ):
-        _ = (fallback_transaction_checker, allowed_tool_names)
+        _ = (
+            fallback_transaction_checker,
+            allowed_tool_names,
+            assistant_text_fallback_enabled,
+        )
         message = response["choices"][0]["message"]
         return message.get("content"), []
 

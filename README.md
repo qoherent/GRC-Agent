@@ -71,8 +71,9 @@ Advisor remains shadow-only and is not used for default runtime routing.
 - `tests/`: deterministic `unittest` regression coverage.
 - `tests/data/random_bit_generator.grc`: canonical fixture graph.
 - `tests/llama_eval/`: live llama.cpp routing and behavior evals.
-- `docs/BLUEPRINT.md`: current architecture, safety contract, status, and roadmap.
-- `docs/PACKAGE_GUIDE.md`: tester-facing runtime harness flow, wrapper dispatch map, and safety boundaries.
+- `docs/BLUEPRINT.md`: single source of truth for architecture, package flow, harness loop, tool surface, safety contract, retrieval, eval gates, status, and roadmap.
+- `docs/BLIND_HARNESS_AUDIT.md`: prompt for an independent online architecture reviewer.
+- `docs/ONLINE_REVIEW_EVIDENCE_PACKET.md`: ready-to-attach local evidence summary for reviewers without full repo access.
 - `docs/QUICKSTART.md`: setup and common usage.
 - `docs/wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus for explanation-only retrieval and evals.
 - `tests/data/retrieval/vector_eval_governed_metadata.json`: frozen vector regression baseline artifact.

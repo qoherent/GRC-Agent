@@ -418,88 +418,20 @@ class GrcAgentTests(unittest.TestCase):
 
         self.assertIsNone(agent.deterministic_turn_tool_call(agent._turn_user_message))
 
-    def test_system_prompt_mentions_read_and_edit_routes(self) -> None:
+    def test_system_prompt_mentions_mvp_wrapper_routes(self) -> None:
         agent, _session = self._load_agent()
 
         prompt = agent.get_system_prompt()
 
-        self.assertIn(
-            "The active session context tells you which `.grc` file is loaded",
-            prompt,
-        )
-        self.assertIn(
-            "If a tool result includes `suggested_next_tools` plus a hint that an explicit user-requested step is still pending",
-            prompt,
-        )
-        self.assertIn(
-            "Active-session previews, variable previews, block previews, and prior tool outputs are routing hints only",
-            prompt,
-        )
-        self.assertIn(
-            "`save_graph` only writes the current `.grc` file. Requests like `export as a standalone Python script`",
-            prompt,
-        )
-        self.assertIn("After `search_grc`, block results include `block_id`", prompt)
-        self.assertIn(
-            "If a later follow-up asks what that found block looks like",
-            prompt,
-        )
-        self.assertIn("ONLY use `propose_edit` when the user explicitly says", prompt)
-        self.assertIn("are real edit requests, not preview requests", prompt)
-        self.assertIn(
-            "Only call `save_graph` after successful validation",
-            prompt,
-        )
-        self.assertIn(
-            "For vague connection edits, inspect the graph before `apply_edit`",
-            prompt,
-        )
-        self.assertIn("prefer the `remove_connection(connection_id=...)` tool", prompt)
-        self.assertIn(
-            "You may emit multiple tool calls in one assistant message",
-            prompt,
-        )
-        self.assertIn(
-            "An explicit save request still requires `save_graph` even if the graph is already clean or unchanged.",
-            prompt,
-        )
-        self.assertIn(
-            "If the same user turn asks for an edit plus validation, summary, or save",
-            prompt,
-        )
-        self.assertIn(
-            "After other successful flows, return one short factual sentence.",
-            prompt,
-        )
-        self.assertIn(
-            "you MUST still call `summarize_graph` for a state question like `Is the graph dirty?`",
-            prompt,
-        )
-        self.assertIn(
-            "Do NOT use `summarize_graph` for `I want to see the spectrum`",
-            prompt,
-        )
-        self.assertIn(
-            "`Describe the variable block type.` => `describe_block(block_id=\"variable\")`",
-            prompt,
-        )
-        self.assertIn("carrier recovery / spectrum / frequency sink", prompt)
-        self.assertIn("prefer the `remove_connection(connection_id=...)` tool", prompt)
-        self.assertIn("Parameter values may stay as GNU/Python expressions", prompt)
-        self.assertIn("If the user explicitly names a loaded block or variable like `samp_rate`", prompt)
-        self.assertIn("Supported `op_type` values: `update_params`, `update_states`", prompt)
-        self.assertIn(
-            "then call `suggest_compatible_insertions(connection_id)`, then use `insert_block_on_connection`",
-            prompt,
-        )
-        self.assertNotIn("then use `apply_edit` with one suggested candidate", prompt)
-        self.assertIn("use `search_manual`", prompt)
-        self.assertIn("Manual excerpts are explanation-only", prompt)
-        self.assertIn("Cite the returned manual source", prompt)
-        self.assertNotIn("EXPERT RECIPES", prompt)
-        self.assertNotIn("3D vector indexing", prompt)
-        self.assertNotIn("answer directly from these expert recipes", prompt)
-        self.assertIn("copy the tool summary verbatim as your final answer", prompt)
+        for name in MVP_MODEL_TOOL_NAMES:
+            self.assertIn(name, prompt)
+        self.assertIn("`change_graph` is the only model-facing mutation surface", prompt)
+        self.assertIn("`dry_run=true` means preview only", prompt)
+        self.assertIn("`ask_grc_docs` is explanation-only evidence", prompt)
+        self.assertIn("`change_graph.operation_kind`", prompt)
+        self.assertIn("Do not guess graph targets, ports, params, or block IDs", prompt)
+        for legacy_name in ("apply_edit", "propose_edit", "save_graph"):
+            self.assertNotIn(legacy_name, prompt)
 
     def test_transaction_normalizer_supports_wrapped_insert_operation(self) -> None:
         normalizer = TransactionNormalizer()
@@ -1336,9 +1268,14 @@ class GrcAgentTests(unittest.TestCase):
         report = agent.health_check()
 
         self.assertEqual(report["status"], "ok")
+        self.assertTrue(report["agent_core_ready"])
         self.assertFalse(report["session_loaded"])
         self.assertTrue(report["retrieval_ready"])
-        self.assertGreater(report["tool_count"], 0)
+        self.assertEqual(report["active_tool_surface"], "mvp")
+        self.assertEqual(report["tool_count"], len(MVP_MODEL_TOOL_NAMES))
+        self.assertEqual(report["model_tool_count"], len(MVP_MODEL_TOOL_NAMES))
+        self.assertGreater(report["internal_tool_count"], 0)
+        self.assertFalse(report["assistant_text_fallback_enabled"])
 
     def test_health_check_not_ready_without_retrieval(self) -> None:
         agent = GrcAgent()
@@ -1348,6 +1285,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(report["status"], "not_ready")
         self.assertFalse(report["session_loaded"])
         self.assertFalse(report["retrieval_ready"])
+        self.assertTrue(report["agent_core_ready"])
 
     def test_health_check_session_loaded_not_required_for_ok(self) -> None:
         """Health check must return 'ok' even without a loaded file, when retrieval is ready."""
