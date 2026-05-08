@@ -537,12 +537,10 @@ Current classification (2026-05-08):
 
 - **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Viable.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R1_SET_PARAM_ONLY** (change_graph set_param): **Viable on tested fixtures.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R1_SET_STATE** (change_graph set_state): **Unvalidated.** Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). A valid set_state fixture/target must be added separately.
+- **R1_SET_STATE** (change_graph set_state): **Beta / unvalidated.** Not part of the scoped release-candidate. Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). A valid set_state fixture/target must be added separately before set_state can be claimed.
 - **BETA_COMPLEX_MUTATION** (add_variable, multi-step chains, external edits, vague queries): **Informational only.** Not release-gating.
 - **Out-of-scope** (rewire, disconnect, insert, remove, save, load, clarification-heavy flows): Not assessed.
-- **Overall**: **Not release-candidate** because:
-  - set_state is unvalidated.
-- **Not production-ready**.
+- **Overall scoped release-candidate (R0_READ_ONLY + R1_SET_PARAM_ONLY):** **Viable** if all deterministic gates pass on clean commit. Not production-ready.
 
 ## 17. Completed / Hardened Items
 
