@@ -30,6 +30,7 @@ def build_release_dashboard(
     required_phases: tuple[int, ...] = (20, 30, 40, 50),
     min_runs_per_case: int = 3,
     stability_threshold: float = 1.0,
+    scope: str = "all",
 ) -> dict[str, Any]:
     """Build one dashboard from one or more persisted live-eval result stores."""
     grouped: dict[int, dict[tuple[str, str], list[dict[str, Any]]]] = defaultdict(
@@ -37,6 +38,7 @@ def build_release_dashboard(
     )
     malformed_entries = 0
     mixed_profile_entries: list[str] = []
+    raw_legacy_tool_entries: list[str] = []
 
     for store in stores:
         runs = store.get("runs", [])
@@ -69,6 +71,13 @@ def build_release_dashboard(
                             mixed_profile_entries.append(
                                 f"{phase_name_for(phase)}/{category}/{case_name}#run{run.get('run_index', '?')}:tool_surface_mismatch"
                             )
+                    if metadata.get("mvp_tool_profile") is True:
+                        if _has_raw_legacy_tool_calls(run):
+                            raw_legacy_tool_entries.append(
+                                f"{phase_name_for(phase)}/{category}/{case_name}#run{run.get('run_index', '?')}:raw_legacy_tools"
+                            )
+                    if not _scope_matches(metadata, scope):
+                        continue
             grouped[phase][(category, case_name)].append(run)
 
     phase_reports: dict[str, Any] = {}
@@ -147,6 +156,7 @@ def build_release_dashboard(
     release_ready = (
         malformed_entries == 0
         and not mixed_profile_entries
+        and not raw_legacy_tool_entries
         and not missing_required_phases
         and not unstable_cases
         and not short_run_cases
@@ -169,8 +179,32 @@ def build_release_dashboard(
         "short_run_cases": short_run_cases,
         "malformed_entries": malformed_entries,
         "mixed_profile_entries": mixed_profile_entries,
+        "raw_legacy_tool_entries": raw_legacy_tool_entries,
         "phases": phase_reports,
     }
+
+
+def _has_raw_legacy_tool_calls(run: dict[str, Any]) -> bool:
+    """Return True if any raw requested or executed tool name is outside the MVP set."""
+    for turn in run.get("turn_results", []):
+        for call in turn.get("requested_tool_calls_raw", []):
+            if str(call.get("name")) not in MVP_RELEASE_MODEL_TOOLS:
+                return True
+        for call in turn.get("executed_tool_calls_raw", []):
+            if str(call.get("name")) not in MVP_RELEASE_MODEL_TOOLS:
+                return True
+    return False
+
+
+def _scope_matches(metadata: dict[str, Any] | None, scope: str) -> bool:
+    if scope == "all" or scope == "beta":
+        return True
+    profile = metadata.get("release_profile", "BETA_COMPLEX_MUTATION") if isinstance(metadata, dict) else "BETA_COMPLEX_MUTATION"
+    if scope == "r0":
+        return profile == "R0_READ_ONLY"
+    if scope == "r1":
+        return profile in {"R0_READ_ONLY", "R1_SET_PARAM_ONLY"}
+    return True
 
 
 def phase_name_for(phase: int) -> str:
@@ -247,6 +281,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Always exit 0 after printing the dashboard.",
     )
+    parser.add_argument(
+        "--scope",
+        choices=("r0", "r1", "beta", "all"),
+        default="all",
+        help="Release scope filter. r0=read-only, r1=R0+simple-edit, beta=all, all=no filter. Default: all.",
+    )
     args = parser.parse_args(argv)
 
     if args.min_runs_per_case < 1:
@@ -259,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         required_phases=tuple(args.required_phase or (20, 30, 40, 50)),
         min_runs_per_case=args.min_runs_per_case,
         stability_threshold=args.stability_threshold,
+        scope=args.scope,
     )
     print(json.dumps(dashboard, indent=2, sort_keys=False))
     if args.no_fail or dashboard["release_ready"]:

@@ -169,6 +169,47 @@ class ReleaseDashboardTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
 
+    def test_dashboard_rejects_raw_legacy_tool_calls_in_mvp_runs(self) -> None:
+        store = {
+            "runs": [
+                {
+                    **_entry(
+                        phase=20,
+                        category="edit",
+                        case_name="param",
+                        run_index=0,
+                        status="PASS",
+                    ),
+                    "run_result": {
+                        "status": "PASS",
+                        "turn_results": [
+                            {
+                                "requested_tool_calls_raw": [
+                                    {"name": "apply_edit", "arguments": {}},
+                                ],
+                                "executed_tool_calls_raw": [
+                                    {
+                                        "name": "apply_edit",
+                                        "arguments": {
+                                            "error_type": "tool_not_allowed_for_surface",
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                }
+            ]
+        }
+        dashboard = build_release_dashboard(
+            [store],
+            required_phases=(20,),
+            min_runs_per_case=1,
+            stability_threshold=1.0,
+        )
+        self.assertFalse(dashboard["release_ready"], dashboard)
+        self.assertTrue(dashboard["raw_legacy_tool_entries"], dashboard)
+
     def test_persisted_run_entry_includes_release_metadata(self) -> None:
         case = type(
             "Case",

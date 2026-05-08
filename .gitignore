@@ -21,11 +21,8 @@ playground/
 benchmark_outputs/
 tmp/
 
-# Generated eval/report JSON artifacts (markdown reports are commit-friendly)
-reports/*.json
-reports/*.jsonl
-reports/**/*.json
-reports/**/*.jsonl
+# Generated eval/report artifacts (not tracked)
+reports/
 
 # Frozen governed retrieval baseline artifact (tracked)
 !tests/data/retrieval/vector_eval_governed_metadata.json

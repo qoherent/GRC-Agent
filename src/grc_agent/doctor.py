@@ -116,12 +116,16 @@ def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
         actual_context = extract_model_context_limit(props)
         desired_context = config.llama.desired_context_tokens
         context_ok = (
-            actual_context is None or actual_context >= desired_context
+            actual_context is not None and actual_context >= desired_context
         )
         detail = f"{result.model_alias} at {result.server_url} ({result.status})"
         if actual_context is not None:
             detail = (
                 f"{detail}; context desired={desired_context}, actual={actual_context}"
+            )
+        else:
+            detail = (
+                f"{detail}; context desired={desired_context}, actual=unknown"
             )
         return _build_check(
             "llama.cpp server",

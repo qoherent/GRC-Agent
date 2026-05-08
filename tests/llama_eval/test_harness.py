@@ -667,6 +667,62 @@ class LiveScenarioRunnerTests(unittest.TestCase):
             "param_edit",
         )
 
+    def test_mvp_run_with_legacy_tool_call_fails_model_contract_and_passes_runtime_safety(self) -> None:
+        client = _ScriptedClient(
+            [
+                {
+                    "assistant_text": None,
+                    "tool_calls": [
+                        _ScriptedToolCall(
+                            "apply_edit",
+                            {
+                                "transaction": {
+                                    "op_type": "update_params",
+                                    "instance_name": "samp_rate",
+                                    "params": {"value": "48000"},
+                                }
+                            },
+                        )
+                    ],
+                },
+            ]
+        )
+        scenario = LiveScenario(
+            category="edit",
+            name="legacy_blocked",
+            turns=(
+                LiveTurnSpec(
+                    prompt="Change samp_rate to 48000.",
+                    expected_tool_calls=(
+                        ToolExpectation(
+                            "change_graph",
+                            arguments={"operation_kind": "set_param"},
+                        ),
+                    ),
+                    semantic_checks=(
+                        {"kind": "no_mutation"},
+                    ),
+                ),
+            ),
+        )
+
+        result = run_live_scenario_once(
+            client=client,
+            model="model",
+            scenario=scenario,
+            mvp_tool_profile=True,
+        )
+
+        turn = result["turn_results"][0]
+        self.assertFalse(result["passed"], result)
+        self.assertFalse(turn["model_contract_pass"], turn)
+        self.assertTrue(turn["runtime_safety_pass"], turn)
+        self.assertFalse(turn["routing_pass"], turn)
+        self.assertIn(
+            turn["executed_tool_calls_raw"][0]["arguments"]["error_type"],
+            {"route_mismatch", "tool_not_allowed_for_surface"},
+        )
+
     def test_persisted_entry_supports_live_turn_specs(self) -> None:
         scenario = LiveScenario(
             category="edit",
@@ -832,7 +888,7 @@ class LiveScenarioRunnerTests(unittest.TestCase):
         )
 
         self.assertFalse(result["matched"], result)
-        self.assertEqual(result["tools_called"], ["change_graph"])
+        self.assertEqual(result["tools_called"], ["rewire_connection"])
         self.assertEqual(
             [call["name"] for call in result["turn_results"][0]["requested_tool_calls_raw"]],
             ["rewire_connection"],
@@ -2442,6 +2498,8 @@ class SummaryTests(unittest.TestCase):
                 "tool_success_pass": {"passed": 1, "total": 1},
                 "semantic_pass": {"passed": 0, "total": 1},
                 "safety_pass": {"passed": 1, "total": 1},
+                "runtime_safety_pass": {"passed": 0, "total": 0},
+                "model_contract_pass": {"passed": 0, "total": 0},
                 "end_state_pass": {"passed": 0, "total": 1},
                 "recovery_pass": {"passed": 0, "total": 0},
             },

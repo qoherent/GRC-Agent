@@ -43,6 +43,8 @@ REPORT_DIMENSIONS = (
     "tool_success_pass",
     "semantic_pass",
     "safety_pass",
+    "runtime_safety_pass",
+    "model_contract_pass",
     "end_state_pass",
     "recovery_pass",
 )
@@ -153,6 +155,7 @@ class LiveScenario:
     fixture_name: str = DEFAULT_FIXTURE_NAME
     target_fixture_name: str | None = None
     description: str = ""
+    release_profile: str = "BETA_COMPLEX_MUTATION"
 
     @property
     def prompt(self) -> str:
@@ -813,6 +816,7 @@ def collect_release_metadata(
         "model_tool_names": list(schema_names),
         "fixture": getattr(case, "fixture_name", DEFAULT_FIXTURE_NAME) if case is not None else "",
         "target_fixture": getattr(case, "target_fixture_name", None) if case is not None else None,
+        "release_profile": getattr(case, "release_profile", "BETA_COMPLEX_MUTATION") if case is not None else "",
     }
 
 
@@ -980,14 +984,8 @@ def run_live_scenario_once(
             after_snapshot = graph_snapshot(agent)
             requested_tool_calls_raw = requested_tool_calls_since(agent.history, history_start)
             executed_tool_calls_raw = executed_tool_calls_since(agent.history, history_start)
-            requested_tool_calls, executed_tool_calls = (
-                _canonicalize_mvp_blocked_legacy_calls(
-                    requested_tool_calls=requested_tool_calls_raw,
-                    executed_tool_calls=executed_tool_calls_raw,
-                )
-                if mvp_tool_profile
-                else (requested_tool_calls_raw, executed_tool_calls_raw)
-            )
+            requested_tool_calls = requested_tool_calls_raw
+            executed_tool_calls = executed_tool_calls_raw
             tool_dimensions = evaluate_tool_expectations(
                 requested_tool_calls=requested_tool_calls,
                 executed_tool_calls=executed_tool_calls,
@@ -1054,23 +1052,26 @@ def run_live_scenario_once(
                 **recovery_dimensions,
             }
             if mvp_tool_profile:
-                requested_names = set(_tool_names(requested_tool_calls))
-                executed_names = set(_tool_names(executed_tool_calls))
-                mvp_only_pass = requested_names.issubset(MVP_RELEASE_MODEL_TOOLS) and executed_names.issubset(
+                requested_names_raw = set(_tool_names(requested_tool_calls_raw))
+                executed_names_raw = set(_tool_names(executed_tool_calls_raw))
+                model_contract_pass = requested_names_raw.issubset(MVP_RELEASE_MODEL_TOOLS) and executed_names_raw.issubset(
                     MVP_RELEASE_MODEL_TOOLS
                 )
-                turn_result["mvp_tools_only_pass"] = mvp_only_pass
+                turn_result["model_contract_pass"] = model_contract_pass
+
                 safe_surface_block = _is_safe_surface_blocked_legacy_attempt(
-                    requested_tool_calls=requested_tool_calls,
+                    requested_tool_calls=requested_tool_calls_raw,
                     executed_tool_calls=executed_tool_calls_raw,
                     before_snapshot=before_snapshot,
                     after_snapshot=after_snapshot,
                 )
-                turn_result["surface_blocked_legacy_safe_fail"] = safe_surface_block
-                if not mvp_only_pass and safe_surface_block:
-                    turn_result["safety_pass"] = bool(turn_result["safety_pass"])
-                else:
-                    turn_result["safety_pass"] = bool(turn_result["safety_pass"] and mvp_only_pass)
+                runtime_safety_pass = bool(turn_result["safety_pass"])
+                if not model_contract_pass:
+                    runtime_safety_pass = safe_surface_block
+                turn_result["runtime_safety_pass"] = runtime_safety_pass
+            else:
+                turn_result["model_contract_pass"] = True
+                turn_result["runtime_safety_pass"] = True
             turn_result["passed"] = (
                 turn_result["routing_pass"]
                 and turn_result["argument_pass"]
@@ -1079,6 +1080,8 @@ def run_live_scenario_once(
                 and turn_result["safety_pass"]
                 and turn_result["end_state_pass"]
                 and turn_result["recovery_pass"]
+                and (turn_result.get("model_contract_pass") is not False)
+                and (turn_result.get("runtime_safety_pass") is not False)
             )
             turn_results.append(turn_result)
 
@@ -1684,41 +1687,12 @@ def _is_safe_surface_blocked_legacy_attempt(
         payload = executed_by_name.get(name)
         if not isinstance(payload, dict):
             return False
-        if payload.get("error_type") != "tool_not_allowed_for_surface":
+        error_type = str(payload.get("error_type", ""))
+        if error_type not in {"tool_not_allowed_for_surface", "route_mismatch"}:
             return False
     return (
         not snapshot_changed(before_snapshot, after_snapshot)
         and before_snapshot.get("state_revision") == after_snapshot.get("state_revision")
-    )
-
-
-def _canonicalize_mvp_blocked_legacy_calls(
-    *,
-    requested_tool_calls: list[dict[str, Any]],
-    executed_tool_calls: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Map blocked legacy calls to `change_graph` for MVP wrapper-level eval scoring."""
-    blocked_legacy_names = {
-        str(call.get("name"))
-        for call in executed_tool_calls
-        if str(call.get("name")) not in MVP_RELEASE_MODEL_TOOLS
-        and isinstance(call.get("arguments"), dict)
-        and call["arguments"].get("error_type") == "tool_not_allowed_for_surface"
-    }
-    if not blocked_legacy_names:
-        return requested_tool_calls, executed_tool_calls
-
-    def _rewrite(call: dict[str, Any]) -> dict[str, Any]:
-        name = str(call.get("name"))
-        if name in blocked_legacy_names:
-            rewritten = dict(call)
-            rewritten["name"] = "change_graph"
-            return rewritten
-        return call
-
-    return (
-        [_rewrite(call) for call in requested_tool_calls],
-        [_rewrite(call) for call in executed_tool_calls],
     )
 
 

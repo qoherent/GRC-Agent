@@ -8,7 +8,7 @@ This is the single source-of-truth design document for GRC Agent. It merges the 
 
 GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. It should read, inspect, explain, preview edits, apply verified edits, validate with GNU Radio tooling, and save only when the user explicitly asks.
 
-The project is currently **production-candidate**, not production-ready. The deterministic mutation core is credible, but production readiness still depends on fixing health semantics, aligning the MVP prompt/tool profile, improving release evidence, and tightening docs-answer quality.
+Scoped **R0 read-only** and **R1 set_param** evidence is viable on tested fixtures. The overall project is **not release-candidate** and not production-ready. Production readiness depends on committed clean state, validated set_state, passing retrieval eval gates, and a full clean re-run of all deterministic gates.
 
 Supported local scope:
 
@@ -140,7 +140,7 @@ Default model-facing chat surface is exactly four MVP wrappers:
 
 Low-level tools remain internal or compatibility-only. They must not leak into normal model-backed chat unless `legacy_model_tool_surface=true` is explicitly configured for debugging or research.
 
-Current implementation caveat: the default CLI path narrows schemas to the four wrappers, but the codebase still builds legacy schemas and the current prompt still contains legacy tool instructions. This must be fixed before any production-ready claim.
+Current implementation caveat: the default CLI path narrows schemas to the four wrappers, but the codebase still builds legacy schemas for internal/compatibility use. The MVP prompt (`src/grc_agent/runtime/prompt.py`) correctly references only the four wrappers. Legacy tool instructions exist only in the legacy prompt branch (`legacy=true`), which is not the default model-facing path.
 
 ## 6. Wrapper Contracts
 
@@ -219,7 +219,7 @@ Required behavior:
 - Dispatch internally to verified handlers only.
 - Preserve preflight, `grcc`, rollback, checkpoint, and save-state semantics.
 
-Recommended improvement: add an enum such as `operation_kind` so `user_goal` becomes supporting evidence rather than a routing input.
+Implemented: `operation_kind` enum added to `change_graph` schema. `user_goal` is supporting evidence; routing is based on `operation_kind`.
 
 ## 7. Internal Tool And Handler Inventory
 
@@ -323,7 +323,7 @@ Recovery rules:
 
 Current concern:
 
-- Default `max_tool_rounds=50` is too high for a four-wrapper local agent. MVP mode should default to 6-10 rounds, with higher limits reserved for explicit compatibility or research modes.
+- Fixed: MVP mode defaults to `max_tool_rounds=8`. Higher limits reserved for explicit compatibility or research modes.
 
 ## 10. Fallback Parser Policy
 
@@ -406,9 +406,14 @@ Required health fields:
 - `internal_tool_count`
 - `status`: `ok`, `degraded`, or `not_ready`
 
-Current issue to fix:
+Fixed:
 
-- `grc-agent health` can return `status=ok` while llama.cpp is unreachable and actual context is unknown. That is not production-grade for a local model agent.
+- `doctor` and `health` now treat unknown actual context as a failure (`context_verified=false`).
+- `grc-agent health` already fails when llama.cpp is unreachable.
+
+Remaining concern:
+
+- Health should distinguish `ok`/`degraded`/`not_ready` rather than binary pass/fail when context is below desired but still functional.
 
 ## 13. Retrieval And RAG
 
@@ -510,72 +515,58 @@ Current test-harness caveat:
 
 - Full `unittest` took about 28 minutes in the audit run. Split fast inner-loop gates from full release gates.
 - Retrieval evals share local index state and should run sequentially unless isolated temp indexes are used.
+- Legacy-to-MVP eval canonicalization has been removed. Blocked legacy tool attempts remain visible in scoring and correctly fail `model_contract_pass` while passing `runtime_safety_pass` only when no mutation occurred.
 
 ## 16. Release Criteria
 
 Before claiming production-ready:
 
-- `health` must not return overall OK when configured llama runtime is unreachable or actual context is unknown.
-- MVP prompt must mention only MVP wrappers, not legacy low-level tools.
-- `ToolSurface` or equivalent must align schemas, prompt, fallback policy, health counts, and eval profile.
-- Default MVP tool-round ceiling must be reduced and tested.
-- Assistant-text fallback parser must be disabled/frozen for MVP mode.
-- Live evals must run against the default MVP wrapper profile.
-- Release manifest must include commit, dirty state, model alias, actual context, prompt hash, schema hash, policy hash, eval versions, and fixture identifiers.
-- Committed mutation evals must include save/reload/`grcc` semantic checks.
-- Docs-answer quality thresholds must be explicit.
-- No STOP_THE_LINE safety findings may be open.
+- `health` must not return overall OK when configured llama runtime is unreachable or actual context is unknown. **Fixed.**
+- MVP prompt must mention only MVP wrappers, not legacy low-level tools. **Verified.**
+- `ToolSurface` or equivalent must align schemas, prompt, fallback policy, health counts, and eval profile. **Verified for runtime; native MVP eval case catalogs created for R0/R1.**
+- Default MVP tool-round ceiling must be reduced and tested. **Verified (8 rounds).**
+- Assistant-text fallback parser must be disabled/frozen for MVP mode. **Verified (disabled in MVP).**
+- Live evals must run against the default MVP wrapper profile. **Verified.**
+- Release dashboard must inspect raw tool-call history, not just metadata. **Fixed.**
+- Release manifest must include commit, dirty state, model alias, actual context, prompt hash, schema hash, policy hash, eval versions, and fixture identifiers. **Fixed.**
+- Committed mutation evals must include save/reload/`grcc` semantic checks. **Not validated; save/load out-of-scope.**
+- Docs-answer quality thresholds must be explicit. **Not validated; Qdrant unavailable.**
+- No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
 
-Current classification:
+Current classification (2026-05-08):
 
-- **Production-candidate only**.
-- Not production-ready until the above criteria pass.
+- **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Viable.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R1_SET_PARAM_ONLY** (change_graph set_param): **Viable on tested fixtures.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R1_SET_STATE** (change_graph set_state): **Unvalidated.** Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). A valid set_state fixture/target must be added separately.
+- **BETA_COMPLEX_MUTATION** (add_variable, multi-step chains, external edits, vague queries): **Informational only.** Not release-gating.
+- **Out-of-scope** (rewire, disconnect, insert, remove, save, load, clarification-heavy flows): Not assessed.
+- **Overall**: **Not release-candidate** because:
+  - set_state is unvalidated.
+  - Retrieval eval gates blocked (Qdrant unavailable).
+- **Not production-ready**.
 
-## 17. Recommended Refactor Path
+## 17. Completed / Hardened Items
 
-Choose medium refactor, not minor cleanup and not wholesale replacement.
+- Health semantics fixed: fails closed when actual context is unknown.
+- Doctor fixed: context check requires actual >= desired, not unknown-pass.
+- Release dashboard validates raw tool-call history (`raw_legacy_tool_entries`).
+- Native MVP R0/R1 eval case catalogs created; legacy translation removed from release-gating paths.
+- `release_profile` persisted in run-store metadata and dashboard scope filtering implemented.
+- MVP tool-round ceiling = 8, fallback parser disabled in MVP mode.
 
-Stage 1: health and release evidence.
+## 18. Remaining Work (Not Release-Gating for R0/R1)
 
-- Fix health status semantics.
-- Add server-down and server-up health tests.
-- Add actual context verification checks.
-- Add release manifest generation.
-
-Stage 2: tool surface unification.
-
-- Introduce `ToolSurface` or equivalent profile object.
-- It should own model schemas, prompt profile, fallback-parser policy, health tool counts, telemetry labels, and eval mode.
-- Report model-facing and internal tools separately.
-
-Stage 3: MVP prompt.
-
-- Create MVP-only prompt with four wrappers.
-- Move legacy prompt to explicit compatibility mode.
-- Remove low-level transaction recipes from MVP prompt.
-
-Stage 4: loop simplification.
-
-- Lower MVP tool-round default to 6-10.
-- Disable fallback parser in MVP mode unless explicitly configured.
-- Keep one typed correction retry.
-- Keep transport code transport-oriented.
-
-Stage 5: RAG quality hardening.
-
-- Improve `grcc` and validation docs coverage.
-- Add comparison evidence requirements.
-- Keep helper synthesis disabled unless measured evidence proves benefit.
-
-Stage 6: release validation.
-
-- Run deterministic gates.
-- Run vector and docs-answer gates.
+- **set_state validation:** Add a fixture where disabling a block does not break graph validity, then validate.
+- **Retrieval eval gates:** Requires Qdrant available. Blocked in current env.
+- **Docs-answer eval gate:** Requires Qdrant + vector index. Blocked in current env.
+- **Clean commit:** No unstaged changes remain; intended changes are staged. Repository remains dirty until committed.
+- **Save/load semantic checks:** Out-of-scope for current R0/R1 scopes.
+- **Complex mutation evidence:** Beta only; not release-gating.
 - Run MVP wrapper dogfood.
 - Run Tier 1 and Tier 2 live evals against default MVP profile.
 - Generate release dashboard and manifest.
 
-## 18. STOP_THE_LINE Conditions
+## 19. STOP_THE_LINE Conditions
 
 Stop the release and report clearly if any of these are found:
 
@@ -592,7 +583,7 @@ Stop the release and report clearly if any of these are found:
 
 Do not patch STOP_THE_LINE issues silently inside release reports. Fix with explicit tests and review.
 
-## 19. External References
+## 20. External References
 
 - llama.cpp function calling: https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md
 - llama.cpp server: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
