@@ -841,6 +841,7 @@ def run_bounded_llama_turn(
             else agent.validate_tool_call(
                 deterministic_tool_call.name,
                 deterministic_tool_call.arguments,
+                model_tool_call=True,
             )
         )
         if validation_result is not None:
@@ -874,6 +875,7 @@ def run_bounded_llama_turn(
         result = agent.execute_tool(
             deterministic_tool_call.name,
             deterministic_tool_call.arguments,
+            model_tool_call=True,
         )
         tool_calls_executed += 1
         agent.record_tool_completion(
@@ -1066,7 +1068,9 @@ def run_bounded_llama_turn(
                 # are NOT counted in tool_calls_executed.  execute_tool also validates,
                 # but that path would increment the counter first.
                 validation_result = agent.validate_tool_call(
-                    tool_call.name, tool_call.arguments
+                    tool_call.name,
+                    tool_call.arguments,
+                    model_tool_call=True,
                 )
                 if validation_result is not None:
                     agent.record_tool_completion(tool_call.name, False)
@@ -1082,7 +1086,11 @@ def run_bounded_llama_turn(
                         stopping_failure = validation_result
                         break
                     continue
-                result = agent.execute_tool(tool_call.name, tool_call.arguments)
+                result = agent.execute_tool(
+                    tool_call.name,
+                    tool_call.arguments,
+                    model_tool_call=True,
+                )
                 tool_calls_executed += 1
                 tool_context_chars += len(str(result))
                 truncated_tool_output = truncated_tool_output or bool(

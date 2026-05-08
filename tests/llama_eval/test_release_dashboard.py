@@ -9,7 +9,10 @@ from tempfile import TemporaryDirectory
 import unittest
 from contextlib import redirect_stdout
 
-from tests.llama_eval.harness import build_persisted_run_entry
+from tests.llama_eval.harness import (
+    MVP_RELEASE_MODEL_TOOLS,
+    build_persisted_run_entry,
+)
 from tests.llama_eval.release_dashboard import build_release_dashboard, main
 
 
@@ -28,10 +31,41 @@ def _entry(
         "run_index": run_index,
         "status": status,
         "run_result": {"status": status},
+        "release_metadata": {
+            "mvp_tool_profile": True,
+            "model_tool_names": sorted(MVP_RELEASE_MODEL_TOOLS),
+        },
     }
 
 
 class ReleaseDashboardTests(unittest.TestCase):
+    def test_dashboard_rejects_non_mvp_profile_entries(self) -> None:
+        store = {
+            "runs": [
+                {
+                    **_entry(
+                        phase=20,
+                        category="edit",
+                        case_name="param",
+                        run_index=0,
+                        status="PASS",
+                    ),
+                    "release_metadata": {
+                        "mvp_tool_profile": False,
+                        "model_tool_names": ["apply_edit"],
+                    },
+                }
+            ]
+        }
+        dashboard = build_release_dashboard(
+            [store],
+            required_phases=(20,),
+            min_runs_per_case=1,
+            stability_threshold=1.0,
+        )
+        self.assertFalse(dashboard["release_ready"], dashboard)
+        self.assertTrue(dashboard["mixed_profile_entries"])
+
     def test_dashboard_marks_all_required_phases_ready(self) -> None:
         store = {
             "runs": [

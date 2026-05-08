@@ -1,6 +1,7 @@
 """Runtime-contract tests for the model-facing `GrcAgent` surface."""
 
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 import tempfile
@@ -13,6 +14,7 @@ from grc_agent.agent import GrcAgent
 from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
 from grc_agent.cli import _run_fake_runtime
+from grc_agent.config import default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.models import Connection
 
@@ -28,6 +30,16 @@ class GrcAgentTests(unittest.TestCase):
         session = FlowgraphSession()
         session.load(self._fixture_path())
         return GrcAgent(session), session
+
+    def _load_legacy_agent(self) -> tuple[GrcAgent, FlowgraphSession]:
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+        config = default_app_config()
+        legacy_config = replace(
+            config,
+            agent=replace(config.agent, legacy_model_tool_surface=True),
+        )
+        return GrcAgent(session, config=legacy_config.agent), session
 
     def _build_message_rewire_agent(self) -> tuple[GrcAgent, FlowgraphSession]:
         agent = GrcAgent()
@@ -166,7 +178,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertNotIn("set_param", agent._tools)
 
     def test_turn_plan_narrows_disable_request_to_apply_edit_and_validate(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
 
         plan = agent.init_turn_requirements("Disable blocks_throttle2_0 and validate.")
         schemas = agent.get_tool_schemas_for_turn()
@@ -178,7 +190,7 @@ class GrcAgentTests(unittest.TestCase):
         ])
 
     def test_turn_plan_narrows_state_edit_transaction_schema(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements("Disable blocks_throttle2_0.")
 
         schema = agent.get_tool_schemas_for_turn()[0]
@@ -189,7 +201,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertFalse(transaction["additionalProperties"])
 
     def test_turn_plan_narrows_exact_parameter_key_when_named(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements("Set blocks_throttle2_0 samples_per_second to 48000.")
 
         schema = next(
@@ -209,7 +221,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertFalse(params["additionalProperties"])
 
     def test_turn_plan_narrows_exact_preview_apply_validate_surface(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements("Preview setting samp_rate to 48000, apply it, and validate.")
 
         tool_names = [schema["function"]["name"] for schema in agent.get_tool_schemas_for_turn()]
@@ -217,7 +229,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(tool_names, ["propose_edit", "apply_edit", "validate_graph"])
 
     def test_preview_do_not_apply_does_not_expose_or_nudge_apply_edit(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements(
             "Preview changing samp_rate to 48000. Do not apply it."
         )
@@ -242,7 +254,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(agent.check_turn_continuation(), (False, ""))
 
     def test_turn_plan_narrows_context_node_when_target_known(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements(
             "Show me what uses the samp_rate block, then change its value to 22050."
         )
@@ -320,35 +332,43 @@ class GrcAgentTests(unittest.TestCase):
 
         self.assertEqual([connection.src_port for connection in ordered], [0, "msg"])
 
-    def test_tool_schemas_match_phase_six_surface(self) -> None:
+    def test_tool_schemas_match_active_mvp_surface(self) -> None:
         agent, _session = self._load_agent()
 
         schemas = agent.get_tool_schemas()
         schema_by_name = {schema["function"]["name"]: schema for schema in schemas}
 
         names = [schema["function"]["name"] for schema in schemas]
-        self.assertEqual(names[: len(PUBLIC_TOOL_NAMES)], list(PUBLIC_TOOL_NAMES))
-        for mvp_name in MVP_MODEL_TOOL_NAMES:
-            self.assertIn(mvp_name, names)
+        self.assertEqual(names, list(MVP_MODEL_TOOL_NAMES))
+        for legacy_name in PUBLIC_TOOL_NAMES:
+            self.assertNotIn(legacy_name, names)
         self.assertEqual(
-            schema_by_name["load_grc"]["function"]["parameters"]["required"],
-            ["file_path"],
+            schema_by_name["inspect_graph"]["function"]["parameters"]["required"],
+            ["operation"],
         )
         self.assertEqual(
-            schema_by_name["propose_edit"]["function"]["parameters"]["required"],
-            ["transaction"],
+            schema_by_name["search_blocks"]["function"]["parameters"]["required"],
+            ["query"],
         )
         self.assertEqual(
-            schema_by_name["apply_edit"]["function"]["parameters"]["required"],
-            ["transaction"],
+            schema_by_name["ask_grc_docs"]["function"]["parameters"]["required"],
+            ["question"],
         )
         self.assertEqual(
-            schema_by_name["remove_connection"]["function"]["parameters"]["required"],
-            [],
+            schema_by_name["change_graph"]["function"]["parameters"]["required"],
+            ["dry_run", "user_goal"],
         )
 
-    def test_exact_rewire_turn_schema_requires_exact_new_endpoints(self) -> None:
+    def test_all_tool_schemas_keep_internal_catalog_for_validation(self) -> None:
         agent, _session = self._load_agent()
+
+        all_names = [schema["function"]["name"] for schema in agent.get_all_tool_schemas()]
+        self.assertEqual(all_names[: len(PUBLIC_TOOL_NAMES)], list(PUBLIC_TOOL_NAMES))
+        for wrapper_name in MVP_MODEL_TOOL_NAMES:
+            self.assertIn(wrapper_name, all_names)
+
+    def test_exact_rewire_turn_schema_requires_exact_new_endpoints(self) -> None:
+        agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements(
             "Rewire connection_id blocks_throttle2_0:0->blocks_char_to_float_0:0 "
             "to analog_random_source_x_0:0->blocks_char_to_float_0:0, then validate."
@@ -368,7 +388,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertEqual(properties["new_dst_port"]["enum"], [0])
 
     def test_exact_message_rewire_turn_schema_preserves_string_ports(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements(
             "Rewire connection_id pdu_tagged_stream_to_pdu_0:pdus->qtgui_const_sink_x_0:in "
             "to pdu_tagged_stream_to_pdu_1:pdus->qtgui_const_sink_x_0:in."
@@ -948,10 +968,8 @@ class GrcAgentTests(unittest.TestCase):
         tool_entries = [turn for turn in agent.history if turn.get("role") == "tool"]
         self.assertEqual(len(tool_entries), 1)
         self.assertFalse(tool_entries[0]["content"]["ok"])
-        self.assertEqual(tool_entries[0]["content"]["error_type"], "tool_call_invalid")
         self.assertEqual(
-            tool_entries[0]["content"]["validation_errors"][0]["code"],
-            "unexpected_argument",
+            tool_entries[0]["content"]["error_type"], "tool_not_allowed_for_surface"
         )
 
     def test_execute_tool_rejects_unknown_tool_directly(self) -> None:
@@ -2929,6 +2947,36 @@ class GrcAgentTests(unittest.TestCase):
         }
         self.assertIn("blocks_throttle2_1:0->blocks_char_to_float_0:0", connections)
         self.assertNotIn("blocks_throttle2_0:0->blocks_char_to_float_0:0", connections)
+
+    def test_mvp_clarification_reply_rejects_legacy_tool_execution(self) -> None:
+        session = FlowgraphSession()
+        session.load(Path(__file__).resolve().parent / "data" / "rewire_stream_ambiguous.grc")
+        agent = GrcAgent(session)
+        before_revision = session.state_revision
+
+        result = agent.execute_tool(
+            "rewire_connection",
+            {
+                "old_connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                "new_src_port": 0,
+                "new_dst_block": "blocks_char_to_float_0",
+                "new_dst_port": 0,
+            },
+        )
+        self.assertTrue(result.get("clarification_required"), result)
+
+        resolved = agent.resolve_pending_clarification("C", model_tool_call=True)
+        self.assertEqual(resolved["mode"], "executed")
+        tool_result = resolved["tool_result"]
+        self.assertFalse(tool_result["ok"], tool_result)
+        self.assertEqual(tool_result["error_type"], "tool_not_allowed_for_surface")
+        self.assertEqual(session.state_revision, before_revision)
+        connections = {
+            f"{c.src_block}:{c.src_port}->{c.dst_block}:{c.dst_port}"
+            for c in session.flowgraph.connections
+        }
+        self.assertIn("blocks_throttle2_0:0->blocks_char_to_float_0:0", connections)
+        self.assertNotIn("blocks_throttle2_1:0->blocks_char_to_float_0:0", connections)
 
     def test_state_driven_suggested_next_tools_after_apply_edit(self) -> None:
         agent, _session = self._load_agent()

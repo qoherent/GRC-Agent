@@ -20,12 +20,15 @@ from tests.llama_eval.harness import (
     DEFAULT_FIXTURE_NAME,
     LiveScenario,
     LiveTurnSpec,
+    MVP_RELEASE_MODEL_TOOLS,
     ToolExpectation,
+    align_scenario_to_mvp_release,
     build_phase_parser,
     dimension_pass_counts,
     majority_passed,
     run_phase_eval,
     run_live_scenario_once,
+    scenario_expected_tools_only,
     select_cases,
     tool_expectations_from_names,
 )
@@ -521,15 +524,110 @@ TIER2_CASES: list[Tier2Case] = [
 ]
 
 
-def _run_case(client: Any, model: str, case: Tier2Case) -> dict[str, Any]:
+def _as_release_scenario(case: Tier2Case) -> LiveScenario:
+    scenario = align_scenario_to_mvp_release(case.to_live_scenario())
+    if case.name in {"write_it_out", "save_direct", "save_to_path"}:
+        # MVP wrapper profile keeps save non-model-facing; treat save asks as unsupported.
+        return LiveScenario(
+            category=scenario.category,
+            name=scenario.name,
+            fixture_name=scenario.fixture_name,
+            target_fixture_name=scenario.target_fixture_name,
+            description=scenario.description,
+            turns=(
+                LiveTurnSpec(
+                    prompt=scenario.turns[0].prompt,
+                    expected_tool_calls=(),
+                    allow_safe_text_only=True,
+                    semantic_checks=(
+                        {"kind": "no_mutation"},
+                        {"kind": "no_mutation_tools"},
+                        {
+                            "kind": "assistant_text_contains",
+                            "needles": ["unsupported", "save"],
+                        },
+                    ),
+                ),
+            ),
+        )
+    if case.name == "edit_then_validate":
+        # Wrapper-level contract: one committed mutation call with validation authority in runtime.
+        return LiveScenario(
+            category=scenario.category,
+            name=scenario.name,
+            fixture_name=scenario.fixture_name,
+            target_fixture_name=scenario.target_fixture_name,
+            description=scenario.description,
+            turns=(
+                LiveTurnSpec(
+                    prompt=scenario.turns[0].prompt,
+                    expected_tool_calls=(
+                        ToolExpectation(
+                            "change_graph",
+                            arguments={"operation_kind": "set_param"},
+                        ),
+                    ),
+                    semantic_checks=(
+                        {
+                            "kind": "exact_graph_delta",
+                            "delta": _samp_rate_delta("96000", validated=True),
+                        },
+                    ),
+                ),
+            ),
+        )
+    if case.name == "edit_validate_save":
+        # Save is non-model-facing in MVP; keep the committed edit expectation only.
+        return LiveScenario(
+            category=scenario.category,
+            name=scenario.name,
+            fixture_name=scenario.fixture_name,
+            target_fixture_name=scenario.target_fixture_name,
+            description=scenario.description,
+            turns=(
+                LiveTurnSpec(
+                    prompt=scenario.turns[0].prompt,
+                    expected_tool_calls=(
+                        ToolExpectation(
+                            "change_graph",
+                            arguments={"operation_kind": "set_param"},
+                        ),
+                    ),
+                    semantic_checks=(
+                        {
+                            "kind": "exact_graph_delta",
+                            "delta": _samp_rate_delta("16000"),
+                        },
+                    ),
+                ),
+            ),
+        )
+    return scenario
+
+
+def release_cases() -> list[LiveScenario]:
+    scenarios = [_as_release_scenario(case) for case in TIER2_CASES]
+    for scenario in scenarios:
+        if not scenario_expected_tools_only(
+            scenario,
+            allowed_tool_names=MVP_RELEASE_MODEL_TOOLS,
+        ):
+            raise RuntimeError(
+                f"Tier 2 MVP release case contains non-wrapper expected tools: {scenario.name}"
+            )
+    return scenarios
+
+
+def _run_case(client: Any, model: str, case: LiveScenario) -> dict[str, Any]:
     return run_live_scenario_once(
         client=client,
         model=model,
-        scenario=case.to_live_scenario(),
+        scenario=case,
+        mvp_tool_profile=True,
     )
 
 
-def _render_status(case: Tier2Case, run: dict) -> str:
+def _render_status(case: LiveScenario, run: dict) -> str:
     dimensions = (
         f"routing={run.get('routing_pass')}, "
         f"argument={run.get('argument_pass')}, "
@@ -545,7 +643,7 @@ def _render_status(case: Tier2Case, run: dict) -> str:
     )
 
 
-def _build_report(case: Tier2Case, runs: list, n_runs: int, threshold: float) -> dict:
+def _build_report(case: LiveScenario, runs: list, n_runs: int, threshold: float) -> dict:
     mc = sum(1 for r in runs if r["matched"])
     routing_pass_count = sum(1 for r in runs if r.get("routing_pass") is True)
     argument_pass_count = sum(1 for r in runs if r.get("argument_pass") is True)
@@ -576,7 +674,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     n_runs = 1 if args.quick else args.n_runs
-    cases = select_cases(TIER2_CASES, category=args.category, case_name=args.case)
+    cases = select_cases(release_cases(), category=args.category, case_name=args.case)
     if not cases:
         print("No matching cases.", file=sys.stderr)
         return 1
@@ -590,6 +688,7 @@ def main() -> int:
         rerun_failed=args.rerun_failed,
         max_tokens=args.max_tokens,
         stability_threshold=args.stability_threshold,
+        mvp_tool_profile=True,
     )
     print("\n" + json.dumps(report, indent=2, sort_keys=False))
     return 0

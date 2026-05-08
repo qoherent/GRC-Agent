@@ -15,12 +15,15 @@ from typing import Any
 from tests.llama_eval.harness import (
     LiveScenario,
     LiveTurnSpec,
+    MVP_RELEASE_MODEL_TOOLS,
     ToolExpectation,
+    align_scenario_to_mvp_release,
     build_phase_parser,
     dimension_pass_counts,
     majority_passed,
     run_live_scenario_once,
     run_phase_eval,
+    scenario_expected_tools_only,
     select_cases,
 )
 
@@ -208,7 +211,25 @@ TIER5_CASES: list[LiveScenario] = [
 
 
 def _run_case(client: Any, model: str, case: LiveScenario) -> dict[str, Any]:
-    return run_live_scenario_once(client=client, model=model, scenario=case)
+    return run_live_scenario_once(
+        client=client,
+        model=model,
+        scenario=case,
+        mvp_tool_profile=True,
+    )
+
+
+def release_cases() -> list[LiveScenario]:
+    scenarios = [align_scenario_to_mvp_release(case) for case in TIER5_CASES]
+    for scenario in scenarios:
+        if not scenario_expected_tools_only(
+            scenario,
+            allowed_tool_names=MVP_RELEASE_MODEL_TOOLS,
+        ):
+            raise RuntimeError(
+                f"Tier 5 MVP release case contains non-wrapper expected tools: {scenario.name}"
+            )
+    return scenarios
 
 
 def _render_status(case: LiveScenario, run: dict[str, Any]) -> str:
@@ -254,7 +275,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     n_runs = 1 if args.quick else args.n_runs
-    cases = select_cases(TIER5_CASES, category=args.category, case_name=args.case)
+    cases = select_cases(release_cases(), category=args.category, case_name=args.case)
     if not cases:
         print("No matching cases.", file=sys.stderr)
         return 1
@@ -275,6 +296,7 @@ def main() -> int:
         rerun_failed=args.rerun_failed,
         max_tokens=args.max_tokens,
         stability_threshold=args.stability_threshold,
+        mvp_tool_profile=True,
     )
     print("\n" + json.dumps(report, indent=2, sort_keys=False))
     return 0

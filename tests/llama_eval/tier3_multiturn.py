@@ -19,12 +19,15 @@ from grc_agent.recovery import (
 from tests.llama_eval.harness import (
     LiveScenario,
     LiveTurnSpec,
+    MVP_RELEASE_MODEL_TOOLS,
     ToolExpectation,
+    align_scenario_to_mvp_release,
     build_phase_parser,
     dimension_pass_counts,
     majority_passed,
     run_live_scenario_once,
     run_phase_eval,
+    scenario_expected_tools_only,
     select_cases,
 )
 
@@ -513,8 +516,65 @@ TIER3_CASES: list[LiveScenario] = [
 ]
 
 
+def release_cases() -> list[LiveScenario]:
+    scenarios = [align_scenario_to_mvp_release(case) for case in TIER3_CASES]
+    patched: list[LiveScenario] = []
+    for scenario in scenarios:
+        if scenario.name == "ambiguous_new_source_option_executes_stream":
+            patched.append(
+                LiveScenario(
+                    category=scenario.category,
+                    name=scenario.name,
+                    fixture_name=scenario.fixture_name,
+                    target_fixture_name=scenario.target_fixture_name,
+                    description=scenario.description,
+                    turns=(
+                        LiveTurnSpec(
+                            prompt=scenario.turns[0].prompt,
+                            clarification_response=True,
+                            pre_turn_tool_name=scenario.turns[0].pre_turn_tool_name,
+                            pre_turn_tool_args=dict(scenario.turns[0].pre_turn_tool_args),
+                            pre_turn_allow_clarification=scenario.turns[0].pre_turn_allow_clarification,
+                            expected_tool_calls=(
+                                ToolExpectation(
+                                    "change_graph",
+                                    require_result_ok=False,
+                                ),
+                            ),
+                            semantic_checks=(
+                                {"kind": "clarification_mode", "mode": "executed"},
+                                {"kind": "no_mutation"},
+                                {
+                                    "kind": "tool_result",
+                                    "tool": "change_graph",
+                                    "arguments": {"error_type": "tool_not_allowed_for_surface"},
+                                },
+                            ),
+                        ),
+                    ),
+                )
+            )
+            continue
+        patched.append(scenario)
+    scenarios = patched
+    for scenario in scenarios:
+        if not scenario_expected_tools_only(
+            scenario,
+            allowed_tool_names=MVP_RELEASE_MODEL_TOOLS,
+        ):
+            raise RuntimeError(
+                f"Tier 3 MVP release case contains non-wrapper expected tools: {scenario.name}"
+            )
+    return scenarios
+
+
 def _run_case(client: Any, model: str, case: LiveScenario) -> dict[str, Any]:
-    return run_live_scenario_once(client=client, model=model, scenario=case)
+    return run_live_scenario_once(
+        client=client,
+        model=model,
+        scenario=case,
+        mvp_tool_profile=True,
+    )
 
 
 def _render_status(case: LiveScenario, run: dict[str, Any]) -> str:
@@ -560,7 +620,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     n_runs = 1 if args.quick else args.n_runs
-    cases = select_cases(TIER3_CASES, category=args.category, case_name=args.case)
+    cases = select_cases(release_cases(), category=args.category, case_name=args.case)
     if not cases:
         print("No matching cases.", file=sys.stderr)
         return 1
@@ -581,6 +641,7 @@ def main() -> int:
         rerun_failed=args.rerun_failed,
         max_tokens=args.max_tokens,
         stability_threshold=args.stability_threshold,
+        mvp_tool_profile=True,
     )
     print("\n" + json.dumps(report, indent=2, sort_keys=False))
     return 0

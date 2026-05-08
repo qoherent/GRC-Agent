@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stdout
+from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -12,6 +15,7 @@ from unittest import mock
 import yaml
 
 from grc_agent.agent import GrcAgent
+from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.recovery import (
     NONRECOVERABLE_INVALID_END_STATE,
@@ -20,6 +24,7 @@ from grc_agent.recovery import (
 )
 
 from tests.llama_eval.harness import (
+    RUN_STATUS_INFRA_BANNER,
     RUN_STATUS_INFRA_FAIL,
     LiveScenario,
     LiveTurnSpec,
@@ -36,6 +41,7 @@ from tests.llama_eval.harness import (
     extract_executed_tool_calls,
     extract_requested_tool_calls,
     fixture_path,
+    format_run_status_for_cli,
     graph_delta,
     graph_block_param_value,
     graph_block_state,
@@ -780,7 +786,7 @@ class LiveScenarioRunnerTests(unittest.TestCase):
         )
         self.assertTrue(result["turn_results"][0]["pre_turn_setup"][1]["valid"])
 
-    def test_run_live_scenario_once_allows_pre_turn_clarification_setup(self) -> None:
+    def test_run_live_scenario_once_blocks_legacy_execution_for_clarification_reply_in_mvp(self) -> None:
         scenario = LiveScenario(
             category="setup",
             name="pre_turn_clarification",
@@ -799,14 +805,19 @@ class LiveScenarioRunnerTests(unittest.TestCase):
                         "new_dst_port": 0,
                     },
                     pre_turn_allow_clarification=True,
-                    expected_tool_calls=(ToolExpectation("rewire_connection"),),
+                    expected_tool_calls=(
+                        ToolExpectation("rewire_connection", require_result_ok=False),
+                    ),
                     semantic_checks=(
                         {"kind": "clarification_mode", "mode": "executed"},
+                        {"kind": "no_mutation"},
                         {
-                            "kind": "connection_present",
-                            "connection_id": (
-                                "blocks_throttle2_1:0->blocks_char_to_float_0:0"
-                            ),
+                            "kind": "tool_result",
+                            "tool": "rewire_connection",
+                            "arguments": {
+                                "ok": False,
+                                "error_type": "tool_not_allowed_for_surface",
+                            },
                         },
                     ),
                 ),
@@ -817,10 +828,15 @@ class LiveScenarioRunnerTests(unittest.TestCase):
             client=_ScriptedClient([]),
             model="model",
             scenario=scenario,
+            mvp_tool_profile=True,
         )
 
-        self.assertTrue(result["matched"], result)
-        self.assertEqual(result["tools_called"], ["rewire_connection"])
+        self.assertFalse(result["matched"], result)
+        self.assertEqual(result["tools_called"], ["change_graph"])
+        self.assertEqual(
+            [call["name"] for call in result["turn_results"][0]["requested_tool_calls_raw"]],
+            ["rewire_connection"],
+        )
         self.assertEqual(
             [entry["tool"] for entry in result["turn_results"][0]["pre_turn_setup"]],
             ["rewire_connection", "validate_graph"],
@@ -829,6 +845,8 @@ class LiveScenarioRunnerTests(unittest.TestCase):
             result["turn_results"][0]["pre_turn_setup"][0]["clarification_required"]
         )
         self.assertTrue(result["turn_results"][0]["pre_turn_setup"][1]["valid"])
+        tool_result = result["turn_results"][0]["executed_tool_calls"][0]["arguments"]
+        self.assertEqual(tool_result.get("error_type"), "tool_not_allowed_for_surface")
 
     def test_run_live_scenario_once_rejects_non_mutation_pre_turn_setup(self) -> None:
         scenario = LiveScenario(
@@ -853,6 +871,15 @@ class LiveScenarioRunnerTests(unittest.TestCase):
 
 
 class RecoveryHarnessTests(unittest.TestCase):
+    @staticmethod
+    def _legacy_agent() -> GrcAgent:
+        config = load_app_config()
+        legacy_config = replace(
+            config,
+            agent=replace(config.agent, legacy_model_tool_surface=True),
+        )
+        return GrcAgent(config=legacy_config.agent)
+
     def test_nonrecoverable_failure_is_classified_without_model_retry(self) -> None:
         client = _ScriptedClient([])
         agent = GrcAgent()
@@ -1024,7 +1051,7 @@ class RecoveryHarnessTests(unittest.TestCase):
                 {"assistant_text": "Retried.", "tool_calls": []},
             ]
         )
-        agent = GrcAgent()
+        agent = self._legacy_agent()
         agent.execute_tool("load_grc", {"file_path": str(fixture_path())})
         history_start = len(agent.history)
         executed_tool_calls = [
@@ -1073,7 +1100,7 @@ class RecoveryHarnessTests(unittest.TestCase):
                 {"assistant_text": "Recovered.", "tool_calls": []},
             ]
         )
-        agent = GrcAgent()
+        agent = self._legacy_agent()
         agent.execute_tool("load_grc", {"file_path": str(fixture_path())})
         history_start = len(agent.history)
         before = graph_snapshot(agent)
@@ -1119,7 +1146,7 @@ class RecoveryHarnessTests(unittest.TestCase):
                 {"assistant_text": "Tried to save.", "tool_calls": []},
             ]
         )
-        agent = GrcAgent()
+        agent = self._legacy_agent()
         agent.execute_tool("load_grc", {"file_path": str(fixture_path())})
 
         result = evaluate_turn_recovery(
@@ -1157,7 +1184,7 @@ class RecoveryHarnessTests(unittest.TestCase):
                 {"assistant_text": "Validated and saved.", "tool_calls": []},
             ]
         )
-        agent = GrcAgent()
+        agent = self._legacy_agent()
         agent.execute_tool("load_grc", {"file_path": str(fixture_path())})
 
         result = evaluate_turn_recovery(
@@ -2130,6 +2157,71 @@ class RunPhaseEvalTests(unittest.TestCase):
         self.assertEqual(run_result["backend_restart_count"], 1)
         self.assertEqual(report["summary"]["infra_failures"], 1)
         self.assertEqual(report["summary"]["model_attempts"], 0)
+
+    def test_run_phase_eval_prints_neutral_infra_banner(self) -> None:
+        case = SimpleNamespace(category="cat", name="case1", prompt="hello")
+        client = SimpleNamespace(temperature=0.7)
+        run_case = mock.Mock(
+            return_value={
+                "tools_called": [],
+                "requested_tool_calls": [],
+                "executed_tool_calls": [],
+                "error": "Timed out connecting to llama.cpp server at http://127.0.0.1:8080/v1/chat/completions.",
+            }
+        )
+
+        buffer = StringIO()
+        with (
+            mock.patch(
+                "tests.llama_eval.harness.ensure_llama_server",
+                return_value=("http://server", "model", client),
+            ),
+            mock.patch(
+                "tests.llama_eval.harness.restart_llama_server",
+                return_value=("http://server", "model", client),
+            ),
+            redirect_stdout(buffer),
+        ):
+            run_phase_eval(
+                phase=99,
+                server_url="http://server",
+                model="model",
+                cases=[case],
+                n_runs=1,
+                majority_threshold=0.5,
+                run_case=run_case,
+                build_case_report=self._build_case_report,
+                render_status=lambda _case, run: str(run.get("status")),
+            )
+
+        output = buffer.getvalue()
+        self.assertIn(RUN_STATUS_INFRA_BANNER, output)
+        self.assertNotIn(" -> INFRA_FAIL", output)
+
+
+class InfraBannerFormattingTests(unittest.TestCase):
+    def _build_case_report(
+        self,
+        case: SimpleNamespace,
+        runs: list[dict[str, object]],
+        _n_runs: int,
+        _majority_threshold: float,
+    ) -> dict[str, object]:
+        return {
+            "category": case.category,
+            "name": case.name,
+            "runs": runs,
+            "passed": False,
+        }
+
+    def test_format_run_status_for_cli_maps_infra_fail_to_neutral_label(self) -> None:
+        run_result = {
+            "status": RUN_STATUS_INFRA_FAIL,
+            "error": "connection refused to llama.cpp",
+        }
+        rendered = format_run_status_for_cli(run_result)
+        self.assertIn(RUN_STATUS_INFRA_BANNER, rendered)
+        self.assertNotIn(RUN_STATUS_INFRA_FAIL, rendered)
 
     def test_run_phase_eval_applies_live_generation_token_bound(self) -> None:
         case = SimpleNamespace(category="cat", name="case1", prompt="hello")

@@ -10,6 +10,7 @@ import sys
 from typing import Any, Iterable
 
 from tests.llama_eval.harness import (
+    MVP_RELEASE_MODEL_TOOLS,
     case_run_stability,
     load_run_store,
 )
@@ -35,6 +36,7 @@ def build_release_dashboard(
         lambda: defaultdict(list)
     )
     malformed_entries = 0
+    mixed_profile_entries: list[str] = []
 
     for store in stores:
         runs = store.get("runs", [])
@@ -49,7 +51,24 @@ def build_release_dashboard(
             if parsed is None:
                 malformed_entries += 1
                 continue
-            phase, category, case_name, run = parsed
+            phase, category, case_name, run, metadata = parsed
+            if phase in required_phases:
+                if not isinstance(metadata, dict):
+                    mixed_profile_entries.append(
+                        f"{phase_name_for(phase)}/{category}/{case_name}#run{run.get('run_index', '?')}:missing_metadata"
+                    )
+                else:
+                    if metadata.get("mvp_tool_profile") is not True:
+                        mixed_profile_entries.append(
+                            f"{phase_name_for(phase)}/{category}/{case_name}#run{run.get('run_index', '?')}:mvp_tool_profile=false"
+                        )
+                    declared_tools = metadata.get("model_tool_names")
+                    if isinstance(declared_tools, list):
+                        declared = {str(name) for name in declared_tools}
+                        if declared != MVP_RELEASE_MODEL_TOOLS:
+                            mixed_profile_entries.append(
+                                f"{phase_name_for(phase)}/{category}/{case_name}#run{run.get('run_index', '?')}:tool_surface_mismatch"
+                            )
             grouped[phase][(category, case_name)].append(run)
 
     phase_reports: dict[str, Any] = {}
@@ -127,6 +146,7 @@ def build_release_dashboard(
     ]
     release_ready = (
         malformed_entries == 0
+        and not mixed_profile_entries
         and not missing_required_phases
         and not unstable_cases
         and not short_run_cases
@@ -148,6 +168,7 @@ def build_release_dashboard(
         "unstable_cases": unstable_cases,
         "short_run_cases": short_run_cases,
         "malformed_entries": malformed_entries,
+        "mixed_profile_entries": mixed_profile_entries,
         "phases": phase_reports,
     }
 
@@ -158,7 +179,7 @@ def phase_name_for(phase: int) -> str:
 
 def _run_from_store_entry(
     entry: dict[str, Any],
-) -> tuple[int, str, str, dict[str, Any]] | None:
+) -> tuple[int, str, str, dict[str, Any], dict[str, Any] | None] | None:
     phase = entry.get("phase")
     category = entry.get("category")
     case_name = entry.get("case_name")
@@ -178,7 +199,8 @@ def _run_from_store_entry(
     if isinstance(status, str):
         run["status"] = status
     run["run_index"] = run_index
-    return phase, category, case_name, run
+    metadata = entry.get("release_metadata")
+    return phase, category, case_name, run, metadata if isinstance(metadata, dict) else None
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:

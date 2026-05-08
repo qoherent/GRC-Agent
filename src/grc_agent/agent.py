@@ -37,8 +37,12 @@ from grc_agent.runtime.docs_answer_advisor import (
     DocsAnswerSnippet,
     run_docs_answer_advisor,
 )
-from grc_agent.runtime.tool_schemas import MODEL_TOOL_NAMES_ORDERED, build_tool_schemas
-from grc_agent.runtime.tool_surface import tool_surface_for_legacy_flag
+from grc_agent.runtime.tool_schemas import build_tool_schemas
+from grc_agent.runtime.tool_surface import (
+    MVP_MODEL_TOOL_NAMES,
+    MODEL_TOOL_NAMES_ORDERED,
+    tool_surface_for_legacy_flag,
+)
 from grc_agent.runtime.turn_plan import (
     INTENT_ADD_VARIABLE,
     INTENT_PREVIEW,
@@ -371,8 +375,12 @@ class GrcAgent:
         self._reset_validation_tracking()
         self._tools = self._build_tool_registry()
         self._mvp_tools = self._build_mvp_tool_registry()
-        self._tool_schemas = build_tool_schemas()
-        self._tool_schema_map = build_tool_schema_map(self._tool_schemas)
+        self._active_tool_surface = tool_surface_for_legacy_flag(
+            legacy_model_tool_surface=self.config.legacy_model_tool_surface
+        )
+        self._tool_schemas = build_tool_schemas(self._active_tool_surface.model_tool_names)
+        self._all_tool_schemas = build_tool_schemas(MODEL_TOOL_NAMES_ORDERED)
+        self._tool_schema_map = build_tool_schema_map(self._all_tool_schemas)
         self._record_active_session_history(reason="initial_session")
         self._turn_required_actions: set[str] = set()
         self._turn_completed_actions: set[str] = set()
@@ -406,11 +414,17 @@ class GrcAgent:
         self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
-        return build_system_prompt(legacy=self.config.legacy_model_tool_surface)
+        return build_system_prompt(
+            legacy=self._active_tool_surface.name == "legacy"
+        )
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        """Return the fixed tool schemas exposed to a chat-completions client."""
+        """Return model-facing tool schemas for the active ToolSurface."""
         return self._tool_schemas
+
+    def get_all_tool_schemas(self) -> list[dict[str, Any]]:
+        """Return the full internal schema catalog used for validation."""
+        return self._all_tool_schemas
 
     def get_tool_schemas_for_turn(
         self,
@@ -425,21 +439,69 @@ class GrcAgent:
             )
         else:
             allowed_order = tuple(allowed_tool_names)
-        schemas_by_name = {
-            schema["function"]["name"]: schema
-            for schema in self._tool_schemas
-        }
+        schemas_by_name = {schema["function"]["name"]: schema for schema in self._tool_schemas}
         return [
             self._schema_narrowed_for_turn(schemas_by_name[name])
             for name in allowed_order
             if name in schemas_by_name
         ]
 
-    def execute_tool(self, tool_name: str, kwargs: dict[str, Any]) -> ToolResult:
+    def _surface_tool_gate_result(
+        self,
+        *,
+        tool_name: str,
+        model_tool_call: bool,
+    ) -> ToolResult | None:
+        """Reject disallowed model-driven tools for the active surface profile."""
+        if not model_tool_call:
+            return None
+        if self._active_tool_surface.name != "mvp":
+            return None
+        if tool_name in MVP_MODEL_TOOL_NAMES:
+            return None
+        return self._tool_result(
+            tool_name=tool_name,
+            ok=False,
+            message=(
+                "[TOOL_NOT_ALLOWED_FOR_SURFACE] "
+                f"Tool '{tool_name}' is not allowed for MVP model-facing execution."
+            ),
+            error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
+            active_tool_surface=self._active_tool_surface.name,
+            allowed_model_tools=list(MVP_MODEL_TOOL_NAMES),
+        )
+
+    def execute_tool(
+        self,
+        tool_name: str,
+        kwargs: dict[str, Any],
+        *,
+        model_tool_call: bool = False,
+    ) -> ToolResult:
         """Execute one runtime tool and return a structured result."""
         kwargs = self.normalize_tool_call_arguments(tool_name, kwargs)
         before_snapshot = self._checkpoint_before(tool_name)
-        validation_result = self.validate_tool_call(tool_name, kwargs)
+        surface_gate = self._surface_tool_gate_result(
+            tool_name=tool_name,
+            model_tool_call=model_tool_call,
+        )
+        if surface_gate is not None:
+            logger.info(
+                "tool_call_rejected tool=%s error_type=%s",
+                tool_name,
+                surface_gate.get("error_type"),
+            )
+            self._record_tool_journal(
+                tool_name=tool_name,
+                result=surface_gate,
+                before=before_snapshot,
+            )
+            return surface_gate
+        validation_result = self.validate_tool_call(
+            tool_name,
+            kwargs,
+            model_tool_call=model_tool_call,
+        )
         if validation_result is not None:
             logger.info("tool_call_rejected tool=%s error_type=%s", tool_name, validation_result.get("error_type"))
             self._record_tool_journal(
@@ -562,8 +624,20 @@ class GrcAgent:
                 unique.setdefault(expanded, Path(expanded))
         return list(unique.values())
 
-    def validate_tool_call(self, tool_name: str, kwargs: Any) -> ToolResult | None:
+    def validate_tool_call(
+        self,
+        tool_name: str,
+        kwargs: Any,
+        *,
+        model_tool_call: bool = False,
+    ) -> ToolResult | None:
         """Validate one runtime tool call against the declared public schema."""
+        surface_gate = self._surface_tool_gate_result(
+            tool_name=tool_name,
+            model_tool_call=model_tool_call,
+        )
+        if surface_gate is not None:
+            return surface_gate
         kwargs = self.normalize_tool_call_arguments(tool_name, kwargs)
         validation_error = validate_runtime_tool_call(
             tool_name, kwargs, self._tool_schema_map
@@ -587,7 +661,10 @@ class GrcAgent:
         }
 
     def resolve_pending_clarification(
-        self, user_message: str
+        self,
+        user_message: str,
+        *,
+        model_tool_call: bool = False,
     ) -> dict[str, Any]:
         """Resolve a pending clarification from a human user reply.
 
@@ -626,7 +703,11 @@ class GrcAgent:
             for opt in req.options:
                 if opt.label.upper() == selected_label:
                     tool_call_id = self._record_clarification_option_call(raw, opt)
-                    result = self.execute_tool(opt.tool_name, opt.tool_args)
+                    result = self.execute_tool(
+                        opt.tool_name,
+                        opt.tool_args,
+                        model_tool_call=model_tool_call,
+                    )
                     self._record_clarification_option_result(
                         tool_call_id,
                         opt.tool_name,
@@ -1161,9 +1242,7 @@ class GrcAgent:
         """Return a structured health payload describing agent readiness."""
         has_session = self.session.flowgraph is not None
         has_retrieval = self.catalog_root is not None
-        surface = tool_surface_for_legacy_flag(
-            legacy_model_tool_surface=self.config.legacy_model_tool_surface
-        )
+        surface = self._active_tool_surface
         internal_tool_count = len(self._tools)
         model_tool_count = len(surface.model_tool_names)
         agent_core_ready = internal_tool_count > 0 and model_tool_count > 0
@@ -1217,7 +1296,7 @@ class GrcAgent:
                     }
                 )
 
-                result = self.execute_tool(tool_name, kwargs)
+                result = self.execute_tool(tool_name, kwargs, model_tool_call=True)
 
                 self.history.append(
                     {
@@ -4720,6 +4799,58 @@ class GrcAgent:
                 output_truncated=False,
             )
         lower_goal = user_goal.lower()
+        if not dry_run and resolved_operation_kind is None:
+            has_structured_mutation_args = any(
+                (
+                    isinstance(target_ref, dict),
+                    isinstance(block_id, str) and bool(block_id.strip()),
+                    isinstance(instance_name, str) and bool(instance_name.strip()),
+                    isinstance(connection_id, str) and bool(connection_id.strip()),
+                    isinstance(src_block, str) and bool(src_block.strip()),
+                    src_port is not None,
+                    isinstance(dst_block, str) and bool(dst_block.strip()),
+                    dst_port is not None,
+                    isinstance(new_src_block, str) and bool(new_src_block.strip()),
+                    new_src_port is not None,
+                    isinstance(new_dst_block, str) and bool(new_dst_block.strip()),
+                    new_dst_port is not None,
+                    isinstance(param_key, str) and bool(param_key.strip()),
+                    param_value is not None,
+                    isinstance(state, str) and bool(state.strip()),
+                    isinstance(variable_name, str) and bool(variable_name.strip()),
+                    variable_value is not None,
+                )
+            )
+            if has_structured_mutation_args:
+                result = self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "error_type": "clarification_required",
+                        "message": (
+                            "Committed mutation requires operation_kind. "
+                            "Provide one of: set_param, set_state, add_variable, "
+                            "disconnect, rewire, insert_block, remove_block, auto_insert."
+                        ),
+                        "clarification_options": [
+                            "Retry with operation_kind set to the intended mutation class.",
+                            "Or set dry_run=true for a preview-only request.",
+                        ],
+                    },
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="missing_operation_kind",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=result,
+                    validation_run=False,
+                    output_truncated=False,
+                )
         if any(token in lower_goal for token in ("yaml", "undo", "redo", "export python", "source text")):
             resolved_operation_kind = resolved_operation_kind or "unsupported"
         if resolved_operation_kind == "unsupported":

@@ -898,7 +898,10 @@ def _run_repl_loop(
 
         # If pending clarification exists, resolve before model turn
         if agent._pending_clarification is not None:
-            resolved = agent.resolve_pending_clarification(user_input)
+            resolved = agent.resolve_pending_clarification(
+                user_input,
+                model_tool_call=True,
+            )
             mode = resolved.get("mode")
             if mode == "executed":
                 tool_result = resolved.get("tool_result", {})
@@ -1119,7 +1122,7 @@ def _build_release_manifest(config: AppConfig) -> dict[str, Any]:
             "doctor": "uv run grc-agent doctor",
             "health": "uv run grc-agent health",
         },
-        "fixture_ids": ["tests/data/random_bit_generator.grc"],
+        "fixture_ids": ["tests/data/<canonical_fixture>.grc"],
         "health": health_report,
     }
 

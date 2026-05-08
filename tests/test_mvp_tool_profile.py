@@ -1,13 +1,15 @@
 """MVP model-facing tool profile wrapper tests."""
 
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
 
 from grc_agent.agent import GrcAgent
+from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES
-from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
+from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE, PUBLIC_TOOL_NAMES
 
 
 class MvpToolProfileTests(unittest.TestCase):
@@ -19,11 +21,24 @@ class MvpToolProfileTests(unittest.TestCase):
         session.load(self._fixture_path())
         return GrcAgent(session)
 
+    def _load_legacy_agent(self) -> GrcAgent:
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+        config = load_app_config()
+        legacy_config = replace(
+            config,
+            agent=replace(config.agent, legacy_model_tool_surface=True),
+        )
+        return GrcAgent(session, config=legacy_config.agent)
+
     def test_mvp_tool_schemas_exist(self) -> None:
         agent = self._load_agent()
         names = [schema["function"]["name"] for schema in agent.get_tool_schemas()]
         for name in MVP_MODEL_TOOL_NAMES:
             self.assertIn(name, names)
+        self.assertEqual(names, list(MVP_MODEL_TOOL_NAMES))
+        for legacy_name in PUBLIC_TOOL_NAMES:
+            self.assertNotIn(legacy_name, names)
 
     def test_mvp_turn_schema_narrowing_exposes_only_wrappers(self) -> None:
         agent = self._load_agent()
@@ -164,6 +179,40 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["error_type"], "invalid_request")
 
+    def test_change_graph_committed_mutation_requires_operation_kind(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertIn("operation_kind", result.get("message", ""))
+
+    def test_change_graph_rejects_unsupported_operation_kind(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_frequency",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "tool_call_invalid")
+
     def test_change_graph_operation_kind_clarify_is_non_mutating(self) -> None:
         agent = self._load_agent()
         before_revision = agent.session.state_revision
@@ -263,6 +312,36 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["dry_run"])
         self.assertEqual(result["operation_summary"], "update_params")
         self.assertTrue(result.get("checkpoint_id"))
+
+    def test_mvp_model_driven_legacy_tool_calls_are_rejected(self) -> None:
+        agent = self._load_agent()
+        cases = (
+            ("rewire_connection", {"old_connection_id": "a:0->b:0"}),
+            ("apply_edit", {"transaction": {"op_type": "noop"}}),
+            ("propose_edit", {"transaction": {"op_type": "noop"}}),
+            ("remove_connection", {"connection_id": "a:0->b:0"}),
+            ("save_graph", {}),
+            ("validate_graph", {}),
+        )
+        for tool_name, kwargs in cases:
+            with self.subTest(tool=tool_name):
+                result = agent.execute_tool(
+                    tool_name,
+                    kwargs,
+                    model_tool_call=True,
+                )
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["error_type"], "tool_not_allowed_for_surface")
+                self.assertIn("TOOL_NOT_ALLOWED_FOR_SURFACE", result["message"])
+
+    def test_legacy_model_surface_allows_legacy_tool_validation_path(self) -> None:
+        agent = self._load_legacy_agent()
+        result = agent.validate_tool_call(
+            "validate_graph",
+            {},
+            model_tool_call=True,
+        )
+        self.assertIsNone(result)
 
     def test_history_restore_remains_cli_copy_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

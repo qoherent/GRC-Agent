@@ -19,7 +19,7 @@ class RuntimeToolValidationTests(unittest.TestCase):
         session = FlowgraphSession()
         session.load(self._fixture_path())
         agent = GrcAgent(session)
-        return build_tool_schema_map(agent.get_tool_schemas())
+        return build_tool_schema_map(agent.get_all_tool_schemas())
 
     def test_unknown_tool_is_rejected(self) -> None:
         result = validate_runtime_tool_call("set_variable", {}, self._schema_map())

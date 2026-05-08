@@ -15,12 +15,15 @@ from typing import Any
 from tests.llama_eval.harness import (
     LiveScenario,
     LiveTurnSpec,
+    MVP_RELEASE_MODEL_TOOLS,
     ToolExpectation,
+    align_scenario_to_mvp_release,
     build_phase_parser,
     dimension_pass_counts,
     majority_passed,
     run_live_scenario_once,
     run_phase_eval,
+    scenario_expected_tools_only,
     select_cases,
 )
 
@@ -1804,7 +1807,93 @@ def _available_cases(*, include_probes: bool = False) -> list[LiveScenario]:
 
 
 def _run_case(client: Any, model: str, case: LiveScenario) -> dict[str, Any]:
-    return run_live_scenario_once(client=client, model=model, scenario=case)
+    return run_live_scenario_once(
+        client=client,
+        model=model,
+        scenario=case,
+        mvp_tool_profile=True,
+    )
+
+
+def release_cases(*, include_probes: bool = False) -> list[LiveScenario]:
+    scenarios = [
+        align_scenario_to_mvp_release(case)
+        for case in _available_cases(include_probes=include_probes)
+    ]
+    patched: list[LiveScenario] = []
+    for scenario in scenarios:
+        if scenario.name == "filter_cutoff_low_edit_validate_save":
+            patched.append(
+                LiveScenario(
+                    category=scenario.category,
+                    name=scenario.name,
+                    fixture_name=scenario.fixture_name,
+                    target_fixture_name=scenario.target_fixture_name,
+                    description=scenario.description,
+                    turns=(
+                        LiveTurnSpec(
+                            prompt=scenario.turns[0].prompt,
+                            expected_tool_calls=(
+                                ToolExpectation(
+                                    "change_graph",
+                                    arguments={"operation_kind": "set_param"},
+                                    require_result_ok=False,
+                                ),
+                            ),
+                            semantic_checks=(
+                                {"kind": "no_mutation"},
+                                {
+                                    "kind": "tool_result",
+                                    "tool": "change_graph",
+                                    "arguments": {"error_type": "preflight_rejected"},
+                                },
+                            ),
+                        ),
+                    ),
+                )
+            )
+            continue
+        if scenario.name == "dial_tone_output_disconnect_rolls_back":
+            patched.append(
+                LiveScenario(
+                    category=scenario.category,
+                    name=scenario.name,
+                    fixture_name=scenario.fixture_name,
+                    target_fixture_name=scenario.target_fixture_name,
+                    description=scenario.description,
+                    turns=(
+                        LiveTurnSpec(
+                            prompt=scenario.turns[0].prompt,
+                            expected_tool_calls=(
+                                ToolExpectation(
+                                    "change_graph",
+                                    require_result_ok=False,
+                                ),
+                            ),
+                            semantic_checks=(
+                                {"kind": "exact_graph_delta", "delta": {}},
+                                {"kind": "no_mutation"},
+                                {
+                                    "kind": "connection_present",
+                                    "connection_id": "blocks_add_xx:0->audio_sink:0",
+                                },
+                            ),
+                        ),
+                    ),
+                )
+            )
+            continue
+        patched.append(scenario)
+    scenarios = patched
+    for scenario in scenarios:
+        if not scenario_expected_tools_only(
+            scenario,
+            allowed_tool_names=MVP_RELEASE_MODEL_TOOLS,
+        ):
+            raise RuntimeError(
+                f"Tier 4 MVP release case contains non-wrapper expected tools: {scenario.name}"
+            )
+    return scenarios
 
 
 def _render_status(case: LiveScenario, run: dict[str, Any]) -> str:
@@ -1856,7 +1945,7 @@ def main() -> int:
     args = parser.parse_args()
     n_runs = 1 if args.quick else args.n_runs
     cases = select_cases(
-        _available_cases(include_probes=args.include_probes),
+        release_cases(include_probes=args.include_probes),
         category=args.category,
         case_name=args.case,
     )
@@ -1880,6 +1969,7 @@ def main() -> int:
         rerun_failed=args.rerun_failed,
         max_tokens=args.max_tokens,
         stability_threshold=args.stability_threshold,
+        mvp_tool_profile=True,
     )
     print("\n" + json.dumps(report, indent=2, sort_keys=False))
     return 0

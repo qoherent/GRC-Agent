@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import os
@@ -21,6 +21,7 @@ from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_server import LlamaServerClient
 from grc_agent.runtime import prompt as runtime_prompt
 from grc_agent.runtime import tool_schemas as runtime_tool_schemas
+from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
 from grc_agent.runtime import turn_plan as runtime_turn_plan
 from grc_agent.recovery import (
     NO_RECOVERY_NEEDED,
@@ -35,6 +36,7 @@ RESULTS_SCHEMA_VERSION = "2026-04-28.intent-hardening"
 RUN_STATUS_PASS = "PASS"
 RUN_STATUS_FAIL = "FAIL"
 RUN_STATUS_INFRA_FAIL = "INFRA_FAIL"
+RUN_STATUS_INFRA_BANNER = "INFRA_UNAVAILABLE"
 REPORT_DIMENSIONS = (
     "routing_pass",
     "argument_pass",
@@ -44,6 +46,31 @@ REPORT_DIMENSIONS = (
     "end_state_pass",
     "recovery_pass",
 )
+MVP_RELEASE_MODEL_TOOLS = frozenset(MVP_MODEL_TOOL_NAMES)
+LEGACY_MODEL_TOOLS = frozenset(PUBLIC_TOOL_NAMES)
+LEGACY_TO_MVP_EXPECTED_TOOL = {
+    "summarize_graph": "inspect_graph",
+    "get_grc_context": "inspect_graph",
+    "validate_graph": "inspect_graph",
+    "search_grc": "search_blocks",
+    "describe_block": "search_blocks",
+    "search_manual": "ask_grc_docs",
+    "semantic_search_grc": "ask_grc_docs",
+    "apply_edit": "change_graph",
+    "propose_edit": "change_graph",
+    "remove_connection": "change_graph",
+    "rewire_connection": "change_graph",
+    "insert_block_on_connection": "change_graph",
+    "auto_insert_block": "change_graph",
+    "save_graph": "change_graph",
+    "load_grc": "change_graph",
+    "new_grc": "change_graph",
+}
+INSPECT_OPERATION_BY_LEGACY_TOOL = {
+    "summarize_graph": "summarize",
+    "get_grc_context": "context",
+    "validate_graph": "validate",
+}
 MUTATION_TOOL_NAMES = frozenset(
     {
         "new_grc",
@@ -130,6 +157,173 @@ class LiveScenario:
     @property
     def prompt(self) -> str:
         return self.turns[0].prompt if self.turns else ""
+
+
+def expected_tool_name_for_mvp_release(tool_name: str) -> str:
+    """Map one legacy expected tool name to its MVP wrapper equivalent."""
+    if tool_name in MVP_RELEASE_MODEL_TOOLS:
+        return tool_name
+    return LEGACY_TO_MVP_EXPECTED_TOOL.get(tool_name, tool_name)
+
+
+def align_tool_expectation_to_mvp_release(expectation: ToolExpectation) -> ToolExpectation:
+    """Rewrite one expected tool call to the MVP wrapper contract."""
+    legacy_name = expectation.name
+    mapped_name = expected_tool_name_for_mvp_release(legacy_name)
+    mapped_arguments = dict(expectation.arguments)
+    mapped_operations = expectation.transaction_operations
+
+    if mapped_name == "inspect_graph":
+        mapped_arguments = {"operation": INSPECT_OPERATION_BY_LEGACY_TOOL.get(legacy_name, "summarize")}
+    elif mapped_name == "search_blocks":
+        if "query" in mapped_arguments:
+            mapped_arguments = {"query": mapped_arguments["query"]}
+        else:
+            mapped_arguments = {}
+    elif mapped_name == "ask_grc_docs":
+        if "question" in mapped_arguments:
+            mapped_arguments = {"question": mapped_arguments["question"]}
+        else:
+            mapped_arguments = {}
+    elif mapped_name == "change_graph":
+        inferred_kind = infer_change_graph_operation_kind(expectation)
+        mapped_arguments = {"dry_run": legacy_name == "propose_edit"}
+        has_structured_expectation = bool(expectation.transaction_operations) or bool(
+            expectation.arguments
+        )
+        if has_structured_expectation or inferred_kind not in {"clarify", "unsupported"}:
+            mapped_arguments["operation_kind"] = inferred_kind
+        mapped_operations = ()
+
+    return ToolExpectation(
+        name=mapped_name,
+        arguments=mapped_arguments,
+        transaction_operations=mapped_operations,
+        ordered_transaction=expectation.ordered_transaction,
+        require_result_ok=expectation.require_result_ok,
+    )
+
+
+def infer_change_graph_operation_kind(expectation: ToolExpectation) -> str:
+    """Best-effort deterministic operation-kind inference from legacy expectations."""
+    tool_name = expectation.name
+    if tool_name == "remove_connection":
+        return "disconnect"
+    if tool_name == "rewire_connection":
+        return "rewire"
+    if tool_name == "insert_block_on_connection":
+        return "insert_block"
+    if tool_name == "auto_insert_block":
+        return "auto_insert"
+    if tool_name in {"save_graph", "load_grc", "new_grc"}:
+        return "unsupported"
+
+    op_types = [
+        str(operation.get("op_type", "")).strip()
+        for operation in expectation.transaction_operations
+        if isinstance(operation, dict)
+    ]
+    if "update_params" in op_types:
+        return "set_param"
+    if "update_states" in op_types:
+        return "set_state"
+    if "insert_block_on_connection" in op_types:
+        return "insert_block"
+    if "remove_block" in op_types:
+        return "remove_block"
+    if "remove_connection" in op_types and "add_connection" in op_types:
+        return "rewire"
+    if "remove_connection" in op_types:
+        return "disconnect"
+    if "add_block" in op_types:
+        for operation in expectation.transaction_operations:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("block_type", "")).strip() == "variable":
+                return "add_variable"
+        return "insert_block"
+    return "clarify"
+
+
+def align_semantic_checks_to_mvp_release(
+    checks: tuple[dict[str, Any], ...]
+) -> tuple[dict[str, Any], ...]:
+    """Rewrite tool_result semantic checks to wrapper-level references."""
+    mapped: list[dict[str, Any]] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            mapped.append(check)
+            continue
+        if check.get("kind") != "tool_result":
+            mapped.append(dict(check))
+            continue
+        legacy_tool = str(check.get("tool") or "")
+        mapped_tool = expected_tool_name_for_mvp_release(legacy_tool)
+        mapped_check = dict(check)
+        mapped_check["tool"] = mapped_tool
+        mapped_args = mapped_check.get("arguments")
+        if isinstance(mapped_args, dict):
+            converted = dict(mapped_args)
+            if mapped_tool == "change_graph" and legacy_tool in {
+                "remove_connection",
+                "rewire_connection",
+                "auto_insert_block",
+                "apply_edit",
+                "propose_edit",
+            }:
+                if "clarification_required" in converted:
+                    converted.pop("clarification_required", None)
+                    converted["error_type"] = "clarification_required"
+                converted.pop("kind", None)
+            mapped_check["arguments"] = converted
+        mapped.append(mapped_check)
+    return tuple(mapped)
+
+
+def align_scenario_to_mvp_release(scenario: LiveScenario) -> LiveScenario:
+    """Return one MVP-wrapper-aligned scenario for release tiers."""
+    mapped_turns: list[LiveTurnSpec] = []
+    for turn in scenario.turns:
+        mapped_turns.append(
+            LiveTurnSpec(
+                prompt=turn.prompt,
+                expected_tool_calls=tuple(
+                    align_tool_expectation_to_mvp_release(expectation)
+                    for expectation in turn.expected_tool_calls
+                ),
+                semantic_checks=align_semantic_checks_to_mvp_release(turn.semantic_checks),
+                pre_turn_tool_name=turn.pre_turn_tool_name,
+                pre_turn_tool_args=dict(turn.pre_turn_tool_args),
+                pre_turn_allow_clarification=turn.pre_turn_allow_clarification,
+                pre_turn_require_valid_graph=turn.pre_turn_require_valid_graph,
+                accept_any_tool=turn.accept_any_tool,
+                allow_safe_text_only=turn.allow_safe_text_only,
+                clarification_response=turn.clarification_response,
+                recovery_enabled=turn.recovery_enabled,
+                expected_recovery_class=turn.expected_recovery_class,
+            )
+        )
+    return LiveScenario(
+        category=scenario.category,
+        name=scenario.name,
+        turns=tuple(mapped_turns),
+        fixture_name=scenario.fixture_name,
+        target_fixture_name=scenario.target_fixture_name,
+        description=scenario.description,
+    )
+
+
+def scenario_expected_tools_only(
+    scenario: LiveScenario,
+    *,
+    allowed_tool_names: set[str] | frozenset[str],
+) -> bool:
+    """Return whether all expected tool calls stay within an allow-list."""
+    for turn in scenario.turns:
+        for expectation in turn.expected_tool_calls:
+            if expectation.name not in allowed_tool_names:
+                return False
+    return True
 
 
 def fixture_path(name: str = DEFAULT_FIXTURE_NAME) -> Path:
@@ -588,11 +782,13 @@ def collect_release_metadata(
     case: Any | None = None,
     model_alias: str | None = None,
     backend_metadata: dict[str, Any] | None = None,
+    mvp_tool_profile: bool = False,
 ) -> dict[str, Any]:
     """Return reproducibility metadata persisted with live eval rows."""
-    prompt_text = runtime_prompt.build_system_prompt()
+    prompt_text = runtime_prompt.build_system_prompt(legacy=not mvp_tool_profile)
+    schema_names = MVP_MODEL_TOOL_NAMES if mvp_tool_profile else PUBLIC_TOOL_NAMES
     tool_schema_text = json.dumps(
-        runtime_tool_schemas.build_tool_schemas(),
+        runtime_tool_schemas.build_tool_schemas(schema_names),
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -612,6 +808,9 @@ def collect_release_metadata(
         "chat_template_hash": backend.get("chat_template_sha256")
         or backend.get("chat_template_tool_use_sha256")
         or "",
+        "mvp_tool_profile": bool(mvp_tool_profile),
+        "tool_surface": "mvp" if mvp_tool_profile else "legacy",
+        "model_tool_names": list(schema_names),
         "fixture": getattr(case, "fixture_name", DEFAULT_FIXTURE_NAME) if case is not None else "",
         "target_fixture": getattr(case, "target_fixture_name", None) if case is not None else None,
     }
@@ -661,6 +860,7 @@ def run_live_scenario_once(
     client: LlamaServerClient,
     model: str,
     scenario: LiveScenario,
+    mvp_tool_profile: bool = False,
 ) -> dict[str, Any]:
     """Run one declarative live scenario in an isolated fixture workspace."""
     from grc_agent.agent import GrcAgent
@@ -680,7 +880,14 @@ def run_live_scenario_once(
         )
         save_path = str(workspace / "output.grc")
 
-        agent = GrcAgent()
+        if mvp_tool_profile:
+            agent = GrcAgent()
+        else:
+            legacy_config = replace(
+                app_config,
+                agent=replace(app_config.agent, legacy_model_tool_surface=True),
+            )
+            agent = GrcAgent(config=legacy_config.agent)
         agent.execute_tool("load_grc", {"file_path": str(fixture_path)})
 
         turn_results: list[dict[str, Any]] = []
@@ -745,7 +952,10 @@ def run_live_scenario_once(
             turn_started = datetime.now(timezone.utc)
             try:
                 if turn.clarification_response:
-                    clarification = agent.resolve_pending_clarification(prompt)
+                    clarification = agent.resolve_pending_clarification(
+                        prompt,
+                        model_tool_call=True,
+                    )
                     result = {
                         "ok": clarification.get("mode")
                         in {"executed", "reminder", "custom", "expired", "none"},
@@ -758,8 +968,7 @@ def run_live_scenario_once(
                         model=model,
                         agent=agent,
                         user_message=prompt,
-                        # Compatibility mode for legacy live tiers while MVP wrappers harden.
-                        mvp_tool_profile=False,
+                        mvp_tool_profile=mvp_tool_profile,
                         advisor_enabled=app_config.agent.advisor_enabled,
                         advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
                         advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
@@ -769,8 +978,16 @@ def run_live_scenario_once(
                 error_message = turn_error
 
             after_snapshot = graph_snapshot(agent)
-            requested_tool_calls = requested_tool_calls_since(agent.history, history_start)
-            executed_tool_calls = executed_tool_calls_since(agent.history, history_start)
+            requested_tool_calls_raw = requested_tool_calls_since(agent.history, history_start)
+            executed_tool_calls_raw = executed_tool_calls_since(agent.history, history_start)
+            requested_tool_calls, executed_tool_calls = (
+                _canonicalize_mvp_blocked_legacy_calls(
+                    requested_tool_calls=requested_tool_calls_raw,
+                    executed_tool_calls=executed_tool_calls_raw,
+                )
+                if mvp_tool_profile
+                else (requested_tool_calls_raw, executed_tool_calls_raw)
+            )
             tool_dimensions = evaluate_tool_expectations(
                 requested_tool_calls=requested_tool_calls,
                 executed_tool_calls=executed_tool_calls,
@@ -808,6 +1025,7 @@ def run_live_scenario_once(
                 executed_tool_calls=executed_tool_calls,
                 recovery_enabled=turn.recovery_enabled,
                 expected_recovery_class=turn.expected_recovery_class,
+                mvp_tool_profile=mvp_tool_profile,
             )
             turn_result = {
                 "turn_index": turn_index,
@@ -815,6 +1033,8 @@ def run_live_scenario_once(
                 "tools_called": _tool_names(requested_tool_calls),
                 "requested_tool_calls": requested_tool_calls,
                 "executed_tool_calls": executed_tool_calls,
+                "requested_tool_calls_raw": requested_tool_calls_raw,
+                "executed_tool_calls_raw": executed_tool_calls_raw,
                 "before_snapshot": before_snapshot,
                 "after_snapshot": after_snapshot,
                 "assistant_text": result.get("assistant_text", "") if result else "",
@@ -833,6 +1053,24 @@ def run_live_scenario_once(
                 **semantic_dimensions,
                 **recovery_dimensions,
             }
+            if mvp_tool_profile:
+                requested_names = set(_tool_names(requested_tool_calls))
+                executed_names = set(_tool_names(executed_tool_calls))
+                mvp_only_pass = requested_names.issubset(MVP_RELEASE_MODEL_TOOLS) and executed_names.issubset(
+                    MVP_RELEASE_MODEL_TOOLS
+                )
+                turn_result["mvp_tools_only_pass"] = mvp_only_pass
+                safe_surface_block = _is_safe_surface_blocked_legacy_attempt(
+                    requested_tool_calls=requested_tool_calls,
+                    executed_tool_calls=executed_tool_calls_raw,
+                    before_snapshot=before_snapshot,
+                    after_snapshot=after_snapshot,
+                )
+                turn_result["surface_blocked_legacy_safe_fail"] = safe_surface_block
+                if not mvp_only_pass and safe_surface_block:
+                    turn_result["safety_pass"] = bool(turn_result["safety_pass"])
+                else:
+                    turn_result["safety_pass"] = bool(turn_result["safety_pass"] and mvp_only_pass)
             turn_result["passed"] = (
                 turn_result["routing_pass"]
                 and turn_result["argument_pass"]
@@ -854,6 +1092,8 @@ def run_live_scenario_once(
             for dimension in REPORT_DIMENSIONS
         }
         return {
+            "mvp_tool_profile": bool(mvp_tool_profile),
+            "expected_model_tools": sorted(MVP_RELEASE_MODEL_TOOLS) if mvp_tool_profile else sorted(LEGACY_MODEL_TOOLS),
             "tools_called": [
                 name
                 for turn_result in turn_results
@@ -1248,6 +1488,7 @@ def evaluate_turn_recovery(
     executed_tool_calls: list[dict[str, Any]],
     recovery_enabled: bool = False,
     expected_recovery_class: str | None = None,
+    mvp_tool_profile: bool = False,
 ) -> dict[str, Any]:
     """Classify and optionally probe one bounded recovery follow-up.
 
@@ -1256,10 +1497,16 @@ def evaluate_turn_recovery(
     typed recovery policy exists and whether a model follow-up stays within it.
     """
     failed_call = latest_failed_executed_tool_call(executed_tool_calls)
+    failed_tool_name = str(failed_call.get("name")) if isinstance(failed_call, dict) else ""
+    failed_payload = failed_call.get("arguments", {}) if isinstance(failed_call, dict) else {}
+    recovery_tool_name, recovery_payload = _normalize_failed_call_for_recovery(
+        failed_tool_name,
+        failed_payload,
+    )
     decision = (
         classify_tool_result_for_recovery(
-            str(failed_call.get("name")),
-            failed_call.get("arguments", {}),
+            recovery_tool_name,
+            recovery_payload,
         )
         if failed_call is not None
         else RecoveryDecision(
@@ -1311,8 +1558,7 @@ def evaluate_turn_recovery(
             agent=agent,
             user_message=decision.prompt,
             track_turn_requirements=False,
-            # Compatibility mode for legacy live tiers while MVP wrappers harden.
-            mvp_tool_profile=False,
+            mvp_tool_profile=mvp_tool_profile,
             advisor_enabled=app_config.agent.advisor_enabled,
             advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
             advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
@@ -1383,6 +1629,97 @@ def latest_failed_executed_tool_call(
             return call
         return None
     return None
+
+
+def _normalize_failed_call_for_recovery(
+    tool_name: str,
+    payload: Any,
+) -> tuple[str, dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return tool_name, {}
+    normalized_payload = dict(payload)
+    if (
+        "validation" not in normalized_payload
+        and isinstance(normalized_payload.get("validation_result"), dict)
+    ):
+        normalized_payload["validation"] = normalized_payload["validation_result"]
+    if tool_name != "change_graph":
+        return tool_name, normalized_payload
+    operation_kind = str(normalized_payload.get("operation_kind") or "").strip()
+    if operation_kind == "disconnect":
+        return "remove_connection", normalized_payload
+    if operation_kind in {
+        "set_param",
+        "set_state",
+        "add_variable",
+        "insert_block",
+        "remove_block",
+        "rewire",
+        "auto_insert",
+    }:
+        return "apply_edit", normalized_payload
+    return tool_name, normalized_payload
+
+
+def _is_safe_surface_blocked_legacy_attempt(
+    *,
+    requested_tool_calls: list[dict[str, Any]],
+    executed_tool_calls: list[dict[str, Any]],
+    before_snapshot: dict[str, Any],
+    after_snapshot: dict[str, Any],
+) -> bool:
+    """Return true when MVP blocked a legacy/internal tool and state stayed unchanged."""
+    requested_names = _tool_names(requested_tool_calls)
+    if not requested_names:
+        return False
+    legacy_requested = [name for name in requested_names if name not in MVP_RELEASE_MODEL_TOOLS]
+    if not legacy_requested:
+        return False
+    executed_by_name = {
+        str(call.get("name")): call.get("arguments")
+        for call in executed_tool_calls
+        if isinstance(call, dict)
+    }
+    for name in legacy_requested:
+        payload = executed_by_name.get(name)
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("error_type") != "tool_not_allowed_for_surface":
+            return False
+    return (
+        not snapshot_changed(before_snapshot, after_snapshot)
+        and before_snapshot.get("state_revision") == after_snapshot.get("state_revision")
+    )
+
+
+def _canonicalize_mvp_blocked_legacy_calls(
+    *,
+    requested_tool_calls: list[dict[str, Any]],
+    executed_tool_calls: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map blocked legacy calls to `change_graph` for MVP wrapper-level eval scoring."""
+    blocked_legacy_names = {
+        str(call.get("name"))
+        for call in executed_tool_calls
+        if str(call.get("name")) not in MVP_RELEASE_MODEL_TOOLS
+        and isinstance(call.get("arguments"), dict)
+        and call["arguments"].get("error_type") == "tool_not_allowed_for_surface"
+    }
+    if not blocked_legacy_names:
+        return requested_tool_calls, executed_tool_calls
+
+    def _rewrite(call: dict[str, Any]) -> dict[str, Any]:
+        name = str(call.get("name"))
+        if name in blocked_legacy_names:
+            rewritten = dict(call)
+            rewritten["name"] = "change_graph"
+            return rewritten
+        return call
+
+    return (
+        [_rewrite(call) for call in requested_tool_calls],
+        [_rewrite(call) for call in executed_tool_calls],
+    )
 
 
 def any_mutation_tool_requested_or_executed(run_result: dict[str, Any]) -> bool:
@@ -1675,6 +2012,15 @@ def run_result_is_infra_failure(run_result: dict[str, Any]) -> bool:
     return False
 
 
+def format_run_status_for_cli(run_result: dict[str, Any]) -> str:
+    """Render run status for CLI without ambiguous failure banners."""
+    status = run_result.get("status") or derive_run_status(run_result)
+    if status == RUN_STATUS_INFRA_FAIL:
+        error_type = classify_infra_error(run_result.get("error")) or "infra_error"
+        return f"{RUN_STATUS_INFRA_BANNER} ({error_type})"
+    return str(status)
+
+
 def derive_run_status(run_result: dict[str, Any]) -> str:
     if run_result_is_infra_failure(run_result):
         return RUN_STATUS_INFRA_FAIL
@@ -1862,6 +2208,7 @@ def build_persisted_run_entry(
     backend_restart_count: int,
     model_alias: str | None = None,
     backend_metadata: dict[str, Any] | None = None,
+    mvp_tool_profile: bool = False,
 ) -> dict[str, Any]:
     status = run_result.get("status") or derive_run_status(run_result)
     prompt = getattr(case, "prompt", None)
@@ -1907,6 +2254,7 @@ def build_persisted_run_entry(
             case=case,
             model_alias=model_alias,
             backend_metadata=backend_metadata,
+            mvp_tool_profile=mvp_tool_profile,
         ),
         "run_result": run_result,
     }
@@ -1944,6 +2292,7 @@ def run_phase_eval(
     rerun_failed: bool = False,
     max_tokens: int | None = DEFAULT_LIVE_EVAL_MAX_TOKENS,
     stability_threshold: float = 1.0,
+    mvp_tool_profile: bool = False,
 ) -> dict[str, Any]:
     config = load_app_config()
     resolved_url = (server_url or config.llama.server_url).rstrip("/")
@@ -2042,9 +2391,10 @@ def run_phase_eval(
                                     run_result=run_result,
                                     backend_restart_count=1,
                                     model_alias=resolved_model,
+                                    mvp_tool_profile=mvp_tool_profile,
                                 ),
                             )
-                        print(" -> INFRA_FAIL")
+                        print(f" -> {format_run_status_for_cli(run_result)}")
                         runs.append(run_result)
                         continue
 
@@ -2097,11 +2447,12 @@ def run_phase_eval(
                             model=resolved_model,
                             temperature=temperature,
                         ),
+                        mvp_tool_profile=mvp_tool_profile,
                     ),
                 )
 
             if run_result.get("status") == RUN_STATUS_INFRA_FAIL:
-                print(" -> INFRA_FAIL")
+                print(f" -> {format_run_status_for_cli(run_result)}")
             else:
                 print(f" -> {render_status(case, run_result)}")
             runs.append(run_result)

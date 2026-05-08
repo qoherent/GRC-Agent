@@ -211,6 +211,16 @@ class LlamaServerAdapterTests(unittest.TestCase):
         session.load(self._fixture_path())
         return GrcAgent(session), session
 
+    def _load_legacy_agent(self) -> tuple[GrcAgent, FlowgraphSession]:
+        session = FlowgraphSession()
+        session.load(self._fixture_path())
+        config = load_app_config()
+        legacy_config = replace(
+            config,
+            agent=replace(config.agent, legacy_model_tool_surface=True),
+        )
+        return GrcAgent(session, config=legacy_config.agent), session
+
     def _write_alt_fixture(self, directory: Path) -> Path:
         alt_path = directory / "random_bit_generator_alt.grc"
         alt_path.write_text(
@@ -333,7 +343,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -398,7 +408,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
 
     def test_bounded_llama_turn_fails_when_alias_mismatches(self) -> None:
         server = self._start_server([], model_id="server-side-model")
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -457,7 +467,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -538,7 +548,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
                 ],
                 model_id=llama_config.model,
             )
-            agent, _session = self._load_agent()
+            agent, _session = self._load_legacy_agent()
             client = self._client(self._server_url(server))
             client.require_ready()
 
@@ -723,7 +733,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -980,7 +990,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1068,7 +1078,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1147,7 +1157,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1200,7 +1210,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         before_revision = session.state_revision
         client = self._client(self._server_url(server))
         client.require_ready()
@@ -1240,7 +1250,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     def test_bounded_llama_turn_clarifies_compound_state_and_remove_request(self) -> None:
         llama_config = self._llama_config()
         server = self._start_server([], model_id=llama_config.model)
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         before_revision = session.state_revision
         client = self._client(self._server_url(server))
         client.require_ready()
@@ -1266,7 +1276,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     def test_bounded_llama_turn_clarifies_missing_insertion_anchor(self) -> None:
         llama_config = self._llama_config()
         server = self._start_server([], model_id=llama_config.model)
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         before_revision = session.state_revision
         client = self._client(self._server_url(server))
         client.require_ready()
@@ -1297,7 +1307,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     def test_bounded_llama_turn_clarifies_vague_uncertain_mutation_without_model_call(self) -> None:
         llama_config = self._llama_config()
         server = self._start_server([], model_id=llama_config.model)
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         before_revision = session.state_revision
         client = self._client(self._server_url(server))
         client.require_ready()
@@ -1325,7 +1335,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     def test_bounded_llama_turn_executes_exact_add_variable_without_model_call(self) -> None:
         llama_config = self._llama_config()
         server = self._start_server([], model_id=llama_config.model)
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1358,7 +1368,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     def test_bounded_llama_turn_executes_exact_rewire_without_model_call(self) -> None:
         llama_config = self._llama_config()
         server = self._start_server([], model_id=llama_config.model)
-        agent, session = self._load_agent()
+        agent, session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1524,7 +1534,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1548,7 +1558,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     ) -> None:
         llama_config = self._llama_config()
         server = self._start_server([], model_id=llama_config.model)
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1572,7 +1582,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     def test_bounded_llama_turn_refuses_redo_without_model_call(self) -> None:
         llama_config = self._llama_config()
         server = self._start_server([], model_id=llama_config.model)
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1610,7 +1620,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         )
 
     def test_execute_tool_normalizes_missing_update_params_op_type(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         result = agent.execute_tool(
             "apply_edit",
             {
@@ -1636,7 +1646,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
     def test_execute_tool_normalizes_quoted_embedded_transaction_operations(
         self,
     ) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         result = agent.execute_tool(
             "propose_edit",
             {
@@ -1665,7 +1675,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         )
 
     def test_normalize_tool_call_arguments_recovers_inline_node_id(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         normalized = agent.normalize_tool_call_arguments(
             "get_grc_context",
             {
@@ -1676,7 +1686,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
         self.assertEqual(normalized, {"node_id": "samp_rate"})
 
     def test_normalize_tool_call_arguments_recovers_save_path_from_user_prompt(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         with tempfile.TemporaryDirectory() as tmpdir:
             expected_path = Path(tmpdir) / "output.grc"
             wrong_path = Path(f"{tmpdir}_typo") / "output.grc"
@@ -1693,7 +1703,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             self.assertEqual(normalized["path"], str(expected_path))
 
     def test_normalize_tool_call_arguments_does_not_recover_ambiguous_save_path(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         with tempfile.TemporaryDirectory() as tmpdir_a, tempfile.TemporaryDirectory() as tmpdir_b:
             path_a = Path(tmpdir_a) / "output.grc"
             path_b = Path(tmpdir_b) / "output.grc"
@@ -1711,7 +1721,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             self.assertEqual(normalized["path"], str(wrong_path))
 
     def test_execute_tool_normalizes_control_token_parameter_keys(self) -> None:
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         result = agent.execute_tool(
             "apply_edit",
             {
@@ -1781,7 +1791,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1829,7 +1839,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1886,7 +1896,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1944,7 +1954,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -1988,7 +1998,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             ],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 
@@ -2351,7 +2361,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
             [tool_call_response, tool_call_response, tool_call_response],
             model_id=llama_config.model,
         )
-        agent, _session = self._load_agent()
+        agent, _session = self._load_legacy_agent()
         client = self._client(self._server_url(server))
         client.require_ready()
 

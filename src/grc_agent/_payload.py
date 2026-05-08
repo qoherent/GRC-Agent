@@ -27,6 +27,7 @@ class ErrorCode:
     CATALOG_LOAD_ERROR = "catalog_load_error"
     INTERNAL_ERROR = "internal_error"
     SAFETY_CEILING = "safety_ceiling_reached"
+    TOOL_NOT_ALLOWED_FOR_SURFACE = "tool_not_allowed_for_surface"
 
 
 def build_error_payload(

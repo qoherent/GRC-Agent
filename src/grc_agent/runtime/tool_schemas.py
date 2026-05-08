@@ -3,10 +3,17 @@
 from typing import Any
 
 from grc_agent.runtime.tool_surface import (
-    MODEL_TOOL_NAMES_ORDERED as MODEL_TOOL_NAMES_ORDERED,
-    MVP_MODEL_TOOL_NAMES as MVP_MODEL_TOOL_NAMES,
-    PUBLIC_TOOL_NAMES as PUBLIC_TOOL_NAMES,
+    MODEL_TOOL_NAMES_ORDERED,
+    MVP_MODEL_TOOL_NAMES,
+    PUBLIC_TOOL_NAMES,
 )
+
+__all__ = [
+    "PUBLIC_TOOL_NAMES",
+    "MVP_MODEL_TOOL_NAMES",
+    "MODEL_TOOL_NAMES_ORDERED",
+    "build_tool_schemas",
+]
 
 
 def _schema(
@@ -31,7 +38,9 @@ def _schema(
     }
 
 
-def build_tool_schemas() -> list[dict[str, Any]]:
+def build_tool_schemas(
+    tool_names: tuple[str, ...] | list[str] | set[str] | None = None
+) -> list[dict[str, Any]]:
     """Return the fixed tool schemas exposed to a chat-completions client.
 
     Tool order matters — models prefer earlier tools.
@@ -481,7 +490,10 @@ def build_tool_schemas() -> list[dict[str, Any]]:
                 },
                 "user_goal": {
                     "type": "string",
-                    "description": "Bounded natural-language mutation goal for human evidence only.",
+                    "description": (
+                        "Required on every call: short natural-language restatement of "
+                        "the requested graph change. Evidence only; not routing authority."
+                    ),
                 },
                 "operation_kind": {
                     "type": "string",
@@ -525,11 +537,17 @@ def build_tool_schemas() -> list[dict[str, Any]]:
                 },
                 "instance_name": {
                     "type": "string",
-                    "description": "Optional exact loaded block/variable instance name.",
+                    "description": (
+                        "Exact loaded block/variable instance name. Required for "
+                        "set_param, set_state, and remove_block when target_ref is omitted."
+                    ),
                 },
                 "connection_id": {
                     "type": "string",
-                    "description": "Optional exact connection id.",
+                    "description": (
+                        "Exact connection id `src_block:src_port->dst_block:dst_port`. "
+                        "Required for disconnect and rewire."
+                    ),
                 },
                 "src_block": {"type": "string"},
                 "src_port": {"type": ["integer", "string"]},
@@ -539,7 +557,10 @@ def build_tool_schemas() -> list[dict[str, Any]]:
                 "new_src_port": {"type": ["integer", "string"]},
                 "new_dst_block": {"type": "string"},
                 "new_dst_port": {"type": ["integer", "string"]},
-                "param_key": {"type": "string"},
+                "param_key": {
+                    "type": "string",
+                    "description": "Parameter name for set_param (for example `value`). Not a block name.",
+                },
                 "param_value": {"type": ["string", "number", "integer", "boolean"]},
                 "state": {"type": "string", "enum": ["enabled", "disabled"]},
                 "variable_name": {"type": "string"},
@@ -554,4 +575,11 @@ def build_tool_schemas() -> list[dict[str, Any]]:
             required=["dry_run", "user_goal"],
         ),
     ]
-    return [*legacy_schemas, *mvp_schemas]
+    all_schemas = [*legacy_schemas, *mvp_schemas]
+    if tool_names is None:
+        return all_schemas
+
+    requested = set(tool_names)
+    schema_by_name = {schema["function"]["name"]: schema for schema in all_schemas}
+    ordered_names = [name for name in MODEL_TOOL_NAMES_ORDERED if name in requested]
+    return [schema_by_name[name] for name in ordered_names if name in schema_by_name]

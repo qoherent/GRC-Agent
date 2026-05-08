@@ -1204,6 +1204,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                 {
                     "dry_run": True,
                     "user_goal": "Preview setting samp_rate to 48000.",
+                    "operation_kind": "set_param",
                     "instance_name": "samp_rate",
                     "param_key": "value",
                     "param_value": "48000",
@@ -1237,6 +1238,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                 {
                     "dry_run": False,
                     "user_goal": "Remove exact connection.",
+                    "operation_kind": "disconnect",
                     "connection_id": connection_id,
                     "debug": True,
                 },
@@ -1265,6 +1267,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                 {
                     "dry_run": False,
                     "user_goal": "Rewire exact connection.",
+                    "operation_kind": "rewire",
                     "connection_id": connection_id,
                     "new_src_block": "analog_random_source_x_0",
                     "new_src_port": 0,
@@ -1300,6 +1303,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                 {
                     "dry_run": False,
                     "user_goal": "Insert a throttle on the exact connection.",
+                    "operation_kind": "insert_block",
                     "connection_id": connection_id,
                     "block_id": "blocks_throttle2",
                     "instance_name": "blocks_throttle2_tmp",
@@ -1331,6 +1335,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                 {
                     "dry_run": True,
                     "user_goal": "Insert a compatible block on this connection.",
+                    "operation_kind": "auto_insert",
                     "connection_id": connection_id,
                     "debug": True,
                 },
@@ -1340,6 +1345,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                 {
                     "dry_run": False,
                     "user_goal": "Insert a compatible block on this connection.",
+                    "operation_kind": "auto_insert",
                     "connection_id": connection_id,
                     "debug": True,
                 },
@@ -1373,6 +1379,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
             {
                 "dry_run": True,
                 "user_goal": "Preview setting samp_rate to 48000.",
+                "operation_kind": "set_param",
                 "instance_name": "samp_rate",
                 "param_key": "value",
                 "param_value": "48000",
@@ -1384,6 +1391,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
             {
                 "dry_run": False,
                 "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
                 "instance_name": "samp_rate",
                 "param_key": "value",
                 "param_value": "48000",
