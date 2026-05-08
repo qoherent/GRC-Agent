@@ -530,7 +530,7 @@ Before claiming production-ready:
 - Release dashboard must inspect raw tool-call history, not just metadata. **Fixed.**
 - Release manifest must include commit, dirty state, model alias, actual context, prompt hash, schema hash, policy hash, eval versions, and fixture identifiers. **Fixed.**
 - Committed mutation evals must include save/reload/`grcc` semantic checks. **Not validated; save/load out-of-scope.**
-- Docs-answer quality thresholds must be explicit. **Not validated; Qdrant unavailable.**
+- Docs-answer quality thresholds must be explicit. **Validated.** grc_docs_answer_eval passed (35/35 ok, 0 misleading, 0 mutation leakage).
 - No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
 
 Current classification (2026-05-08):
@@ -542,7 +542,6 @@ Current classification (2026-05-08):
 - **Out-of-scope** (rewire, disconnect, insert, remove, save, load, clarification-heavy flows): Not assessed.
 - **Overall**: **Not release-candidate** because:
   - set_state is unvalidated.
-  - Retrieval eval gates blocked (Qdrant unavailable).
 - **Not production-ready**.
 
 ## 17. Completed / Hardened Items
@@ -557,14 +556,14 @@ Current classification (2026-05-08):
 ## 18. Remaining Work (Not Release-Gating for R0/R1)
 
 - **set_state validation:** Add a fixture where disabling a block does not break graph validity, then validate.
-- **Retrieval eval gates:** Requires Qdrant available. Blocked in current env.
-- **Docs-answer eval gate:** Requires Qdrant + vector index. Blocked in current env.
-- **Clean commit:** No unstaged changes remain; intended changes are staged. Repository remains dirty until committed.
+- **Retrieval eval gates:** ~~Requires Qdrant available. Blocked in current env.~~ **Passed.** vector_regression=290/290 ok. grc_docs_answer_eval=35/35 ok (24 relevance, 19 groundedness, 0 misleading, 0 mutation leakage).
+- **Docs-answer eval gate:** ~~Requires Qdrant + vector index. Blocked in current env.~~ **Passed.** 35 questions answered; metrics in retrieval_eval output.
+- **Clean commit:** ~~No unstaged changes remain; intended changes are staged. Repository remains dirty until committed.~~ **Committed.** dirty=false, commit=6a2243c437e4.
 - **Save/load semantic checks:** Out-of-scope for current R0/R1 scopes.
 - **Complex mutation evidence:** Beta only; not release-gating.
-- Run MVP wrapper dogfood.
-- Run Tier 1 and Tier 2 live evals against default MVP profile.
-- Generate release dashboard and manifest.
+- **Run MVP wrapper dogfood.** Pending.
+- **Run Tier 1 and Tier 2 live evals against default MVP profile.** Pending.
+- **Generate release dashboard and manifest.** Passed. Manifest dirty=false.
 
 ## 19. STOP_THE_LINE Conditions
 
