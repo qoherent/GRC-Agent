@@ -832,6 +832,337 @@ class MvpToolProfileTests(unittest.TestCase):
         after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
         self.assertNotIn(target_connection, after_connections)
 
+    def test_change_graph_rewire_preview_exact_stream_does_not_mutate(self) -> None:
+        agent = self._load_agent()
+        old_connection = "blocks_throttle2_0:0->blocks_char_to_float_0:0"
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertIn(old_connection, before_connections)
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": True,
+                "user_goal": "Preview exact rewire.",
+                "operation_kind": "rewire",
+                "connection_id": old_connection,
+                "state_revision": before_revision,
+                "new_src_block": "analog_random_source_x_0",
+                "new_src_port": 0,
+                "new_dst_block": "blocks_char_to_float_0",
+                "new_dst_port": 0,
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["operation_summary"], "rewire_connection")
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_rewire_exact_stream_commit_has_one_removed_one_added(self) -> None:
+        agent = self._load_agent()
+        old_connection = "blocks_throttle2_0:0->blocks_char_to_float_0:0"
+        new_connection = "analog_random_source_x_0:0->blocks_char_to_float_0:0"
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertIn(old_connection, before_connections)
+        before_revision = agent.session.state_revision
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire exact connection.",
+                "operation_kind": "rewire",
+                "connection_id": old_connection,
+                "state_revision": before_revision,
+                "new_src_block": "analog_random_source_x_0",
+                "new_src_port": 0,
+                "new_dst_block": "blocks_char_to_float_0",
+                "new_dst_port": 0,
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["operation_summary"], "rewire_connection")
+        self.assertEqual(result["validation_result"]["status"], "valid")
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        removed = before_connections - after_connections
+        added = after_connections - before_connections
+        self.assertEqual(removed, {old_connection})
+        self.assertEqual(added, {new_connection})
+
+    def test_change_graph_rewire_exact_message_commit(self) -> None:
+        agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
+        old_connection = "strobe_0:strobe->debug_0:print"
+        new_connection = "strobe_0:strobe->debug_1:print"
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertIn(old_connection, before_connections)
+        before_revision = agent.session.state_revision
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire exact message connection.",
+                "operation_kind": "rewire",
+                "connection_id": old_connection,
+                "state_revision": before_revision,
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print",
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertNotIn(old_connection, after_connections)
+        self.assertIn(new_connection, after_connections)
+
+    def test_change_graph_rewire_invalid_new_endpoint_refused_without_mutation(self) -> None:
+        agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire to missing endpoint.",
+                "operation_kind": "rewire",
+                "connection_id": "strobe_0:strobe->debug_0:print",
+                "state_revision": before_revision,
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_block": "missing_debug",
+                "new_dst_port": "print",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "preflight_rejected")
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_rewire_stale_old_connection_rejected(self) -> None:
+        agent = self._load_agent()
+        old_connection = "blocks_throttle2_0:0->blocks_char_to_float_0:0"
+        first_revision = agent.session.state_revision
+        first = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire exact stream connection.",
+                "operation_kind": "rewire",
+                "connection_id": old_connection,
+                "state_revision": first_revision,
+                "new_src_block": "analog_random_source_x_0",
+                "new_src_port": 0,
+                "new_dst_block": "blocks_char_to_float_0",
+                "new_dst_port": 0,
+            },
+        )
+        self.assertTrue(first["ok"], first)
+        before_second_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_second_revision = agent.session.state_revision
+        second = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire the same old connection again.",
+                "operation_kind": "rewire",
+                "connection_id": old_connection,
+                "state_revision": before_second_revision,
+                "new_src_block": "analog_random_source_x_0",
+                "new_src_port": 0,
+                "new_dst_block": "qtgui_time_sink_x_0",
+                "new_dst_port": 0,
+            },
+        )
+        self.assertFalse(second["ok"], second)
+        self.assertEqual(second.get("error_type"), "connection_not_found")
+        after_second_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_second_connections, after_second_connections)
+        self.assertEqual(agent.session.state_revision, before_second_revision)
+
+    def test_change_graph_rewire_stale_state_revision_rejected(self) -> None:
+        agent = self._load_agent()
+        stale_revision = agent.session.state_revision
+        mutate = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+        self.assertTrue(mutate["ok"], mutate)
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire exact stream connection.",
+                "operation_kind": "rewire",
+                "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                "state_revision": stale_revision,
+                "new_src_block": "analog_random_source_x_0",
+                "new_src_port": 0,
+                "new_dst_block": "blocks_char_to_float_0",
+                "new_dst_port": 0,
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "stale_revision")
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+
+    def test_change_graph_rewire_requires_state_revision(self) -> None:
+        agent = self._load_agent()
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire exact stream connection.",
+                "operation_kind": "rewire",
+                "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+                "new_src_block": "analog_random_source_x_0",
+                "new_src_port": 0,
+                "new_dst_block": "blocks_char_to_float_0",
+                "new_dst_port": 0,
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+
+    def test_change_graph_rewire_ambiguous_old_edge_clarifies_without_mutation(self) -> None:
+        agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire one strobe output edge to debug_1.",
+                "operation_kind": "rewire",
+                "state_revision": before_revision,
+                "src_block": "strobe_0",
+                "src_port": "strobe",
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "ambiguous_connection")
+        self.assertIn("clarification_options", result)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_rewire_ambiguous_new_source_clarifies_without_mutation(self) -> None:
+        agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire message edge with bounded new source hints.",
+                "operation_kind": "rewire",
+                "connection_id": "strobe_0:strobe->debug_0:print",
+                "state_revision": before_revision,
+                "new_src_port": "strobe",
+                "new_dst_block": "debug_1",
+                "new_dst_port": "print",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "ambiguous_rewire_endpoint")
+        self.assertIn("clarification_options", result)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_rewire_ambiguous_new_destination_clarifies_without_mutation(self) -> None:
+        agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Rewire message edge with bounded new destination hints.",
+                "operation_kind": "rewire",
+                "connection_id": "strobe_0:strobe->debug_0:print",
+                "state_revision": before_revision,
+                "new_src_block": "strobe_0",
+                "new_src_port": "strobe",
+                "new_dst_port": "print",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "ambiguous_rewire_endpoint")
+        self.assertIn("clarification_options", result)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
     def test_change_graph_committed_edit_returns_checkpoint_id(self) -> None:
         agent = self._load_agent()
         result = agent.execute_tool(

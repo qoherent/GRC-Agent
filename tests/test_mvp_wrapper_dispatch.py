@@ -1320,6 +1320,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                     "user_goal": "Rewire exact connection.",
                     "operation_kind": "rewire",
                     "connection_id": connection_id,
+                    "state_revision": before_revision,
                     "new_src_block": "analog_random_source_x_0",
                     "new_src_port": 0,
                     "new_dst_block": "blocks_char_to_float_0",
@@ -1330,9 +1331,39 @@ class MvpWrapperDispatchTests(unittest.TestCase):
         self.assertEqual(result["operation_summary"], "rewire_connection")
         self.assertEqual(rewire_mock.call_count, 1)
         self.assertEqual(remove_mock.call_count, 0)
+        kwargs = rewire_mock.call_args.kwargs
+        self.assertEqual(kwargs.get("old_connection_id"), connection_id)
+        self.assertNotIn("state_revision", kwargs)
+        self.assertFalse(kwargs.get("dry_run"))
         if not result["ok"]:
             self.assertEqual(agent.session.state_revision, before_revision)
             self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_message_rewire_strips_wrapper_only_state_revision(self) -> None:
+        agent = self._load_agent("rewire_message_ambiguous.grc")
+        before_revision = agent.session.state_revision
+        with mock.patch.object(agent, "_rewire_connection", wraps=agent._rewire_connection) as rewire_mock:
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Rewire exact message connection.",
+                    "operation_kind": "rewire",
+                    "connection_id": "strobe_0:strobe->debug_0:print",
+                    "state_revision": before_revision,
+                    "new_src_block": "strobe_0",
+                    "new_src_port": "strobe",
+                    "new_dst_block": "debug_1",
+                    "new_dst_port": "print",
+                    "debug": True,
+                },
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(rewire_mock.call_count, 1)
+        kwargs = rewire_mock.call_args.kwargs
+        self.assertEqual(kwargs.get("old_connection_id"), "strobe_0:strobe->debug_0:print")
+        self.assertNotIn("state_revision", kwargs)
+        self.assertFalse(kwargs.get("dry_run"))
 
     def test_change_graph_exact_insert_routes_to_insert_handler(self) -> None:
         agent = self._load_agent()

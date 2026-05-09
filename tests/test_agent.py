@@ -2468,6 +2468,8 @@ class GrcAgentTests(unittest.TestCase):
                 "strobe_0:strobe->pdu_0:generate",
             ],
         )
+        for option in result["options"]:
+            self.assertNotIn("state_revision", option["tool_args"])
 
     def test_rewire_connection_stale_clarification_is_rejected(self) -> None:
         agent, session = self._build_message_rewire_agent()
@@ -2625,6 +2627,8 @@ class GrcAgentTests(unittest.TestCase):
                 "strobe_0:strobe->debug_0:print",
             ],
         )
+        for option in result["options"]:
+            self.assertNotIn("state_revision", option["tool_args"])
 
     def test_rewire_connection_ambiguous_new_destination_uses_selected_endpoint(self) -> None:
         agent, session = self._build_message_rewire_agent()

@@ -8,7 +8,7 @@ This is the single source-of-truth design document for GRC Agent. It merges the 
 
 GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. It should read, inspect, explain, preview edits, apply verified edits, validate with GNU Radio tooling, and save only when the user explicitly asks.
 
-The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset and lifecycle wrappers are beta-validated only. Operations `set_state`, `add_variable`, `rewire`, `disconnect`, `insert_block`, `remove_block` remain beta or unvalidated. Save/load are model-facing via explicit wrappers and are beta-validated (not release-validated). The overall project is **not production-ready**.
+The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset and lifecycle wrappers are beta-validated only. `set_state`, `disconnect`, `rewire`, and save/load are beta-validated; `add_variable`, `insert_block`, and `remove_block` remain beta or unvalidated. The overall project is **not production-ready**.
 
 Supported local scope:
 
@@ -291,7 +291,8 @@ The runtime must reject stale `target_ref` values after graph changes.
 - Disconnect preview must never mutate.
 - Failed `grcc` validation on disconnect must never commit.
 - `rewire_connection` is one ordered transaction: remove old resolved connection, add new resolved connection.
-- Partial endpoint hints may clarify only with executable candidate options.
+- `change_graph(operation_kind=\"rewire\")` requires `state_revision` and fails closed when stale.
+- Partial endpoint hints may clarify only with executable candidate options; no endpoint is synthesized from user_goal text.
 - Invalid message-port numeric hints must fail before becoming executable clarification choices.
 
 ### Insertions
@@ -546,8 +547,10 @@ Current classification (2026-05-09):
 - **R1_SET_PARAM_ONLY** (change_graph set_param): **Release-validated.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R1_SET_STATE** (change_graph set_state): **Beta-validated.** 3/3 cases stable at 3/3 (9/9 runs). model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00, end_state_pass=1.00. Not release-validated yet; evidence currently relies on one dual-sink fixture family plus one invalid-state refusal case.
 - **R5_SAVE_LOAD** (`save_graph_explicit`, `load_graph_explicit`): **Beta-validated only.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00. Not release-validated pending separate lifecycle safety audit decision.
+- **R2_DISCONNECT** (change_graph disconnect): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R3_REWIRE** (change_graph rewire): **Beta-validated.** 7/7 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **BETA_COMPLEX_MUTATION** (add_variable, multi-step chains, external edits, vague queries): **Informational only.** Not release-gating.
-- **Beta or unvalidated** (`set_state`, `add_variable`, `rewire`, `disconnect`, `insert_block`, `remove_block`): exposed in MVP schema/prompt but not release-validated.
+- **Beta or unvalidated** (`add_variable`, `insert_block`, `remove_block`): exposed in MVP schema/prompt but not release-validated.
 - **Release-validated subset (R0_READ_ONLY + R1_SET_PARAM_ONLY):** Supported on clean commit with passing deterministic gates. Default MVP runtime remains beta-capable. Not production-ready.
 
 ## 17. Completed / Hardened Items

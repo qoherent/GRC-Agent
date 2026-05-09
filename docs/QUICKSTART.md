@@ -138,6 +138,14 @@ Rewire an exact edge:
 Rewire connection_3 to connect source:0 to sink:0, then validate.
 ```
 
+Rewire safety contract:
+- Exact rewire path uses `connection_id` + full new endpoint.
+- `state_revision` is required for rewire calls.
+- Partial old/new endpoint hints are allowed only when they resolve to one executable candidate.
+- Ambiguous old-edge or new-endpoint hints clarify and do not mutate.
+- Preview rewire never mutates.
+- Failed preflight/`grcc` validation never commits a partial disconnect.
+
 Ambiguous requests should clarify:
 
 ```text

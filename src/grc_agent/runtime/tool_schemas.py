@@ -546,24 +546,43 @@ def build_tool_schemas(
                     "type": "string",
                     "description": (
                         "Exact connection id `src_block:src_port->dst_block:dst_port`. "
-                        "Primary path for disconnect and required for rewire."
+                        "Primary path for disconnect and required old edge for rewire."
                     ),
                 },
                 "state_revision": {
                     "type": "integer",
                     "description": (
                         "Optional optimistic revision guard. When provided, it must "
-                        "match the active graph state_revision or the call is refused."
+                        "match the active graph state_revision or the call is refused. "
+                        "Required for rewire operations."
                     ),
                 },
                 "src_block": {"type": "string"},
                 "src_port": {"type": ["integer", "string"]},
                 "dst_block": {"type": "string"},
                 "dst_port": {"type": ["integer", "string"]},
-                "new_src_block": {"type": "string"},
-                "new_src_port": {"type": ["integer", "string"]},
-                "new_dst_block": {"type": "string"},
-                "new_dst_port": {"type": ["integer", "string"]},
+                "new_src_block": {
+                    "type": "string",
+                    "description": (
+                        "Rewire new source block. Exact path provides all new_* fields; "
+                        "partial hints are allowed only when they resolve to one executable candidate."
+                    ),
+                },
+                "new_src_port": {
+                    "type": ["integer", "string"],
+                    "description": "Rewire new source port (stream index or message port id).",
+                },
+                "new_dst_block": {
+                    "type": "string",
+                    "description": (
+                        "Rewire new destination block. Exact path provides all new_* fields; "
+                        "partial hints are allowed only when they resolve to one executable candidate."
+                    ),
+                },
+                "new_dst_port": {
+                    "type": ["integer", "string"],
+                    "description": "Rewire new destination port (stream index or message port id).",
+                },
                 "param_key": {
                     "type": "string",
                     "description": "Parameter name for set_param (for example `value`). Not a block name.",

@@ -4920,18 +4920,28 @@ class GrcAgent:
                 ),
             )
         if operation_kind == "rewire":
+            has_old_endpoint_hint = any(
+                value is not None and (not isinstance(value, str) or value.strip())
+                for value in (src_block, src_port, dst_block, dst_port)
+            )
+            has_new_source_hint = any(
+                value is not None and (not isinstance(value, str) or value.strip())
+                for value in (new_src_block, new_src_port)
+            )
+            has_new_destination_hint = any(
+                value is not None and (not isinstance(value, str) or value.strip())
+                for value in (new_dst_block, new_dst_port)
+            )
             return _require(
-                isinstance(connection_id, str)
-                and connection_id.strip()
-                and isinstance(new_src_block, str)
-                and new_src_block.strip()
-                and new_src_port is not None
-                and isinstance(new_dst_block, str)
-                and new_dst_block.strip()
-                and new_dst_port is not None,
                 (
-                    "rewire requires connection_id plus "
-                    "new_src_block/new_src_port/new_dst_block/new_dst_port."
+                    (isinstance(connection_id, str) and connection_id.strip())
+                    or has_old_endpoint_hint
+                )
+                and has_new_source_hint
+                and has_new_destination_hint,
+                (
+                    "rewire requires connection_id or old endpoint hints plus "
+                    "exact new endpoints or bounded hints for both new source and new destination."
                 ),
             )
         if operation_kind == "insert_block":
@@ -5323,6 +5333,32 @@ class GrcAgent:
                     validation_run=False,
                     output_truncated=False,
                 )
+        if resolved_operation_kind == "rewire" and state_revision is None:
+            stale_result = self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": resolved_operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": (
+                        "rewire requires state_revision to guard against stale-edge execution. "
+                        "Provide the current active state_revision from inspect_graph."
+                    ),
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="invalid_operation_args",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=stale_result,
+                validation_run=False,
+                output_truncated=False,
+            )
         lower_goal = user_goal.lower()
         if not dry_run and resolved_operation_kind is None:
             has_structured_mutation_args = any(
@@ -5478,15 +5514,12 @@ class GrcAgent:
                 },
             )
 
-        if (
-            isinstance(connection_id, str)
-            and connection_id.strip()
-            and all(
-                isinstance(value, str) and value
-                for value in (new_src_block, new_dst_block)
-            )
-            and new_src_port is not None
-            and new_dst_port is not None
+        rewire_old_hint = any(
+            value is not None and (not isinstance(value, str) or value.strip())
+            for value in (src_block, src_port, dst_block, dst_port)
+        )
+        if resolved_operation_kind == "rewire" and (
+            (isinstance(connection_id, str) and connection_id.strip()) or rewire_old_hint
         ):
             operation_summary = "rewire_connection"
             mismatch = _kind_mismatch_result("rewire")
@@ -5503,29 +5536,21 @@ class GrcAgent:
                     validation_run=False,
                     output_truncated=False,
                 )
-            if dry_run:
-                handlers.append("propose_edit(rewire_transaction)")
-                result = tx_tool(
-                    [
-                        {"op_type": "remove_connection", "connection_id": connection_id.strip()},
-                        {
-                            "op_type": "add_connection",
-                            "src_block": new_src_block,
-                            "src_port": new_src_port,
-                            "dst_block": new_dst_block,
-                            "dst_port": new_dst_port,
-                        },
-                    ]
-                )
-            else:
-                handlers.append("rewire_connection")
-                result = self._rewire_connection(
-                    old_connection_id=connection_id.strip(),
-                    new_src_block=str(new_src_block),
-                    new_src_port=new_src_port,
-                    new_dst_block=str(new_dst_block),
-                    new_dst_port=new_dst_port,
-                )
+            handlers.append("rewire_connection")
+            result = self._rewire_connection(
+                old_connection_id=connection_id.strip()
+                if isinstance(connection_id, str) and connection_id.strip()
+                else None,
+                old_src_block=src_block,
+                old_src_port=src_port,
+                old_dst_block=dst_block,
+                old_dst_port=dst_port,
+                new_src_block=new_src_block,
+                new_src_port=new_src_port,
+                new_dst_block=new_dst_block,
+                new_dst_port=new_dst_port,
+                dry_run=bool(dry_run),
+            )
         elif (
             isinstance(block_id, str)
             and block_id.strip()
@@ -6349,6 +6374,7 @@ class GrcAgent:
         new_src_port: int | str | None = None,
         new_dst_block: str | None = None,
         new_dst_port: int | str | None = None,
+        dry_run: bool = False,
     ) -> ToolResult:
         """Resolve the old edge, then run one atomic remove+add transaction."""
         missing_session = self._missing_session_result("rewire_connection")
@@ -6386,7 +6412,8 @@ class GrcAgent:
         if not new_resolution.get("ok"):
             return self._payload_result("rewire_connection", new_resolution)
 
-        result = self._apply_edit(
+        tx_tool = self._propose_edit if dry_run else self._apply_edit
+        result = tx_tool(
             [
                 {
                     "op_type": "remove_connection",

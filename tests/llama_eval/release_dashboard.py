@@ -22,6 +22,7 @@ PHASE_NAMES = {
     40: "tier4_external_examples",
     50: "tier5_adversarial",
     55: "r5_save_load",
+    56: "r3_rewire",
 }
 
 
