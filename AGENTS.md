@@ -58,7 +58,11 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 ## Tool And Workflow Design
 
 - Default model-facing chat surface is MVP wrappers only:
-  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`.
+  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`,
+  `save_graph_explicit`, `load_graph_explicit`.
+- `change_graph` remains mutation-only. Save/load are explicit lifecycle wrappers
+  and require explicit user intent.
+- Save/load wrappers are beta-validated and not release-validated yet.
 - Legacy low-level tools remain internal/compatibility-only unless explicitly
   enabled for developer compatibility mode.
 - Tool order matters. Models prefer earlier tools.

@@ -4814,8 +4814,14 @@ class GrcAgent:
             normalized_target_ref = {
                 str(key): value for key, value in target_ref.items() if isinstance(key, str)
             }
+            # Accept both wrapper-era (`uid`, `instance_name`) and guarded
+            # transaction-era (`block_uid`, `expected_instance_name`) references.
             target_uid = normalized_target_ref.get("uid")
+            if not (isinstance(target_uid, str) and target_uid.strip()):
+                target_uid = normalized_target_ref.get("block_uid")
             target_instance = normalized_target_ref.get("instance_name")
+            if not (isinstance(target_instance, str) and target_instance.strip()):
+                target_instance = normalized_target_ref.get("expected_instance_name")
             if not (
                 isinstance(target_uid, str)
                 and target_uid.strip()

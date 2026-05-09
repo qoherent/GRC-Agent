@@ -18,9 +18,19 @@ class MvpToolProfileTests(unittest.TestCase):
     def _fixture_path(self) -> Path:
         return Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 
+    def _dual_sink_fixture_path(self) -> Path:
+        return (
+            Path(__file__).resolve().parent / "data" / "random_bit_generator_dual_sink.grc"
+        )
+
     def _load_agent(self) -> GrcAgent:
         session = FlowgraphSession()
         session.load(self._fixture_path())
+        return GrcAgent(session)
+
+    def _load_dual_sink_agent(self) -> GrcAgent:
+        session = FlowgraphSession()
+        session.load(self._dual_sink_fixture_path())
         return GrcAgent(session)
 
     def _load_legacy_agent(self) -> GrcAgent:
@@ -163,6 +173,170 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result["operation_summary"], "update_params")
         self.assertEqual(result["operation_kind"], "set_param")
         self.assertTrue(agent.session.is_dirty)
+
+    def test_change_graph_set_state_commit_valid_enable_disable(self) -> None:
+        agent = self._load_dual_sink_agent()
+
+        agent.init_turn_requirements("Disable qtgui_time_sink_x_1.")
+        disable = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Disable qtgui_time_sink_x_1.",
+                "operation_kind": "set_state",
+                "instance_name": "qtgui_time_sink_x_1",
+                "state": "disabled",
+            },
+        )
+        self.assertTrue(disable["ok"], disable)
+        self.assertEqual(disable["validation_result"]["status"], "valid")
+        self.assertEqual(disable["operation_summary"], "update_states")
+
+        agent.init_turn_requirements("Enable qtgui_time_sink_x_1.")
+        enable = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Enable qtgui_time_sink_x_1.",
+                "operation_kind": "set_state",
+                "instance_name": "qtgui_time_sink_x_1",
+                "state": "enabled",
+            },
+        )
+        self.assertTrue(enable["ok"], enable)
+        self.assertEqual(enable["validation_result"]["status"], "valid")
+        self.assertEqual(enable["operation_summary"], "update_states")
+
+    def test_change_graph_set_state_preview_does_not_mutate(self) -> None:
+        agent = self._load_dual_sink_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+
+        agent.init_turn_requirements("Preview disabling qtgui_time_sink_x_1.")
+        preview = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": True,
+                "user_goal": "Preview disabling qtgui_time_sink_x_1.",
+                "operation_kind": "set_state",
+                "instance_name": "qtgui_time_sink_x_1",
+                "state": "disabled",
+            },
+        )
+        self.assertTrue(preview["ok"], preview)
+        self.assertEqual(preview["operation_summary"], "update_states")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_set_state_invalid_change_is_refused(self) -> None:
+        agent = self._load_dual_sink_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+
+        agent.init_turn_requirements("Disable blocks_throttle2_0.")
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Disable blocks_throttle2_0.",
+                "operation_kind": "set_state",
+                "instance_name": "blocks_throttle2_0",
+                "state": "disabled",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "gnu_validation_failed")
+        self.assertEqual(result["validation_result"]["status"], "invalid")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_set_state_stale_target_ref_is_refused(self) -> None:
+        agent = self._load_dual_sink_agent()
+        assert agent.session.flowgraph is not None
+        block = next(
+            b
+            for b in agent.session.flowgraph.blocks
+            if b.instance_name == "qtgui_time_sink_x_1"
+        )
+        stale_target_ref = {
+            "block_uid": block.block_uid,
+            "expected_instance_name": block.instance_name,
+            "expected_block_type": block.block_type,
+            "base_state_revision": agent.session.state_revision,
+        }
+
+        # Mutate once so the guarded target_ref revision becomes stale.
+        agent.init_turn_requirements("Set samp_rate to 48000.")
+        applied = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+        self.assertTrue(applied["ok"], applied)
+
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        agent.init_turn_requirements("Disable qtgui_time_sink_x_1.")
+        stale = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Disable qtgui_time_sink_x_1.",
+                "operation_kind": "set_state",
+                "state": "disabled",
+                "target_ref": stale_target_ref,
+            },
+        )
+        self.assertFalse(stale["ok"], stale)
+        self.assertEqual(stale["error_type"], "preflight_rejected")
+        self.assertIn("preflight", stale.get("message", "").lower())
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_set_state_duplicate_target_requires_clarification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._dual_sink_fixture_path()
+            duplicate_fixture = Path(tmpdir) / "duplicate_sink_name.grc"
+            raw = yaml.safe_load(fixture.read_text(encoding="utf-8"))
+            blocks = raw.get("blocks")
+            self.assertIsInstance(blocks, list)
+            assert isinstance(blocks, list)
+            sink0 = next(block for block in blocks if block.get("name") == "qtgui_time_sink_x_0")
+            sink1 = next(block for block in blocks if block.get("name") == "qtgui_time_sink_x_1")
+            sink1["name"] = sink0["name"]
+            duplicate_fixture.write_text(
+                yaml.safe_dump(raw, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            session = FlowgraphSession()
+            session.load(duplicate_fixture)
+            agent = GrcAgent(session)
+            before_revision = agent.session.state_revision
+            before_dirty = agent.session.is_dirty
+
+            agent.init_turn_requirements("Disable qtgui_time_sink_x_0.")
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Disable qtgui_time_sink_x_0.",
+                    "operation_kind": "set_state",
+                    "instance_name": "qtgui_time_sink_x_0",
+                    "state": "disabled",
+                },
+            )
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["error_type"], "ambiguous_block")
+            self.assertTrue(result.get("clarification_options"), result)
+            self.assertEqual(agent.session.state_revision, before_revision)
+            self.assertEqual(agent.session.is_dirty, before_dirty)
 
     def test_change_graph_operation_kind_mismatch_is_rejected(self) -> None:
         agent = self._load_agent()

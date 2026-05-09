@@ -539,7 +539,7 @@ Current classification (2026-05-09):
 
 - **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Release-validated.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R1_SET_PARAM_ONLY** (change_graph set_param): **Release-validated.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R1_SET_STATE** (change_graph set_state): **Beta / unvalidated.** Not part of the release-validated subset. Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). A valid set_state fixture/target must be added separately before set_state can be claimed.
+- **R1_SET_STATE** (change_graph set_state): **Unvalidated (expansion in progress).** Not part of the release-validated subset. Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). Dedicated deterministic + live eval coverage is now in progress, but no release claim yet.
 - **R5_SAVE_LOAD** (`save_graph_explicit`, `load_graph_explicit`): **Beta-validated only.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00. Not release-validated pending separate lifecycle safety audit decision.
 - **BETA_COMPLEX_MUTATION** (add_variable, multi-step chains, external edits, vague queries): **Informational only.** Not release-gating.
 - **Beta or unvalidated** (`set_state`, `add_variable`, `rewire`, `disconnect`, `insert_block`, `remove_block`): exposed in MVP schema/prompt but not release-validated.
@@ -556,16 +556,16 @@ Current classification (2026-05-09):
 
 ## 18. Remaining Work (Not Release-Gating for R0/R1)
 
-- **set_state validation:** Add a fixture where disabling a block does not break graph validity, then validate.
+- **set_state validation:** Dual-sink fixture path is now the expansion candidate for valid enable/disable transitions; keep this track separate from release claims until its dedicated live suite stabilizes and is audited.
 - **Retrieval eval gates:** ~~Requires Qdrant available. Blocked in current env.~~ **Passed.** vector_regression=290/290 ok. grc_docs_answer_eval=safety baseline passed (0 misleading, 0 mutation leakage). Relevance/groundedness are reported metrics, not enforced thresholds.
 - **Docs-answer eval gate:** ~~Requires Qdrant + vector index. Blocked in current env.~~ **Safety baseline passed.** 35 questions answered, 0 misleading, 0 mutation leakage. This is a safety gate, not a docs-QA quality gate.
 - **Clean commit:** ~~No unstaged changes remain; intended changes are staged. Repository remains dirty until committed.~~ **Committed.** dirty=false, commit=6a2243c437e4.
-- **Save/load semantic checks:** Out-of-scope for current R0/R1 scopes.
+- **Save/load semantic checks:** Tracked in R5 lifecycle evals and beta-validated; still outside the release-validated R0/R1 subset until a separate lifecycle safety audit promotes them.
 - **Complex mutation evidence:** Beta only; not release-gating.
 - **Run MVP wrapper dogfood.** Pending.
 - **Run Tier 1 and Tier 2 live evals against default MVP profile.** Pending.
 - **Generate release dashboard and manifest.** Manifest dirty=false. Note: `release-manifest` is an evidence manifest for human review, not a readiness gate; it always reports `ok=true` and records degraded health as data.
-- **Stricter release profile (future):** A hardened release could expose only `inspect_graph`, `search_blocks`, `ask_grc_docs`, and `change_graph` with `operation_kind=set_param` only, narrowing the model's visible action space to match the release-validated subset.
+- **Stricter release profile (future):** Default MVP runtime surface remains six wrappers. A hardened release profile could temporarily restrict to `inspect_graph`, `search_blocks`, `ask_grc_docs`, and `change_graph` with `operation_kind=set_param` only, narrowing the visible action space to match the release-validated subset.
 
 ## 19. STOP_THE_LINE Conditions
 
