@@ -450,7 +450,7 @@ class GrcAgentTests(unittest.TestCase):
         self.assertIn("`ask_grc_docs` is explanation-only evidence", prompt)
         self.assertIn("`change_graph.operation_kind`", prompt)
         self.assertIn("Do not guess graph targets, ports, params, or block IDs", prompt)
-        for legacy_name in ("apply_edit", "propose_edit", "save_graph"):
+        for legacy_name in ("apply_edit", "propose_edit", "`save_graph`"):
             self.assertNotIn(legacy_name, prompt)
 
     def test_transaction_normalizer_supports_wrapped_insert_operation(self) -> None:

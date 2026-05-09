@@ -7,9 +7,14 @@ Default model-facing tools in chat are MVP wrappers only:
 - `search_blocks`
 - `ask_grc_docs`
 - `change_graph`
+- `save_graph_explicit`
+- `load_graph_explicit`
 
 Advisor is shadow-only and does not control runtime routing by default.
-`save_graph` is not model-facing in MVP default chat.
+Lifecycle save/load are explicit wrappers and require explicit user intent.
+`change_graph` remains mutation-only.
+Lifecycle wrappers are beta-validated via R5 save/load live evals and are not
+release-validated yet.
 
 ## 1. Install And Check
 
@@ -108,8 +113,10 @@ Apply and validate:
 Change samp_rate to 48000 and validate.
 ```
 
-Save/copy is explicit but not model-facing in MVP default chat. Use CLI/direct
-tooling (or compatibility mode) when you need a file save path.
+Save/copy is explicit via `save_graph_explicit`. Load/open is explicit via
+`load_graph_explicit`. Both wrappers require clear user intent.
+These lifecycle wrappers are model-facing beta-validated capabilities; do not
+promote them to release-validated without a separate lifecycle safety audit.
 
 Disconnect an exact connection:
 
@@ -176,8 +183,8 @@ The agent will:
 - remove exact connections
 - perform exact or clarification-backed rewires
 - validate with `grcc`
-- save only when explicitly requested (direct-tool/compatibility flows; not
-  model-facing in MVP default chat)
+- save only when explicitly requested (model-facing via
+  `save_graph_explicit`)
 
 For same-name duplicate blocks, choose the clarification option the agent shows.
 Do not type raw `block_uid` mutation commands; UID targeting is guarded

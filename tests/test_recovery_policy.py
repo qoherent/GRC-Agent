@@ -86,7 +86,10 @@ class RecoveryPolicyTests(unittest.TestCase):
 
         self.assertEqual(decision.recovery_class, RECOVERABLE_SAVE_REFUSED)
         self.assertTrue(decision.recoverable)
-        self.assertEqual(decision.allowed_tools, ("validate_graph", "save_graph"))
+        self.assertEqual(
+            decision.allowed_tools,
+            ("validate_graph", "save_graph", "save_graph_explicit"),
+        )
         self.assertEqual(decision.max_mutation_retries, 0)
 
     def test_clarification_payload_is_recoverable_without_model_mutation_retry(self) -> None:

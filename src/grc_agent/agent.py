@@ -81,6 +81,11 @@ _CONNECTION_ID_TOKEN_PATTERN = re.compile(
 _SAVE_PATH_HINT_PATTERN = re.compile(r"(?P<path>(?:~|/)[^\s'\"`]+\.grc)\b")
 _ALIAS_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
 _SEARCH_BLOCK_SUMMARY_MAX_CHARS = 120
+_INSTALLED_GRAPH_ROOTS = (
+    Path("/usr/share/gnuradio/examples"),
+    Path("/usr/local/share/gnuradio/examples"),
+)
+_CANONICAL_FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "tests" / "data"
 _DOCS_QUERY_STOP_WORDS = frozenset(
     {
         "a",
@@ -328,6 +333,23 @@ class GrcAgent:
         ("edit", "yaml", "remove"),
         ("edit", "yaml", "block"),
     )
+    _EXPLICIT_SAVE_INTENT_TOKENS: tuple[str, ...] = (
+        "save",
+        "persist",
+        "write out",
+        "write it out",
+        "write a copy",
+        "save a copy",
+        "copy to path",
+        "save to",
+    )
+    _EXPLICIT_LOAD_INTENT_TOKENS: tuple[str, ...] = (
+        "load",
+        "open",
+        "switch to",
+        "switch over to",
+        "reload",
+    )
 
     def __init__(
         self,
@@ -564,7 +586,7 @@ class GrcAgent:
             if key == "transaction":
                 value = self._transaction_normalizer.normalize_transaction_instance_names(value)
             normalized[key] = value
-        if tool_name == "save_graph":
+        if tool_name in {"save_graph", "save_graph_explicit"}:
             normalized = self._normalize_save_graph_path(normalized)
         return normalized
 
@@ -624,6 +646,48 @@ class GrcAgent:
                 unique.setdefault(expanded, Path(expanded))
         return list(unique.values())
 
+    def _current_user_text(self) -> str:
+        if isinstance(self._turn_user_message, str) and self._turn_user_message.strip():
+            return self._turn_user_message.strip()
+        for turn in reversed(self.history):
+            if turn.get("role") != "user":
+                continue
+            content = turn.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+        return ""
+
+    def _has_explicit_save_intent(self) -> bool:
+        text = self._current_user_text().lower()
+        return bool(text) and any(
+            token in text for token in self._EXPLICIT_SAVE_INTENT_TOKENS
+        )
+
+    def _has_explicit_load_intent(self) -> bool:
+        text = self._current_user_text().lower()
+        return bool(text) and any(
+            token in text for token in self._EXPLICIT_LOAD_INTENT_TOKENS
+        )
+
+    @staticmethod
+    def _resolved_path(path_value: str | Path) -> Path:
+        return Path(path_value).expanduser().resolve(strict=False)
+
+    def _unsafe_graph_root_for_path(self, path_value: str | Path) -> str | None:
+        candidate = self._resolved_path(path_value)
+        roots = (
+            *(_INSTALLED_GRAPH_ROOTS),
+            _CANONICAL_FIXTURE_ROOT,
+        )
+        for root in roots:
+            resolved_root = root.expanduser().resolve(strict=False)
+            try:
+                candidate.relative_to(resolved_root)
+            except ValueError:
+                continue
+            return str(resolved_root)
+        return None
+
     def validate_tool_call(
         self,
         tool_name: str,
@@ -654,10 +718,12 @@ class GrcAgent:
         return tool_name in {
             "new_grc",
             "load_grc",
+            "load_graph_explicit",
             "apply_edit",
             "remove_connection",
             "validate_graph",
             "save_graph",
+            "save_graph_explicit",
         }
 
     def resolve_pending_clarification(
@@ -1744,6 +1810,8 @@ class GrcAgent:
             "search_blocks": self._search_blocks,
             "ask_grc_docs": self._ask_grc_docs,
             "change_graph": self._change_graph,
+            "save_graph_explicit": self._save_graph_explicit,
+            "load_graph_explicit": self._load_graph_explicit,
         }
 
     # ------------------------------------------------------------------- #
@@ -1774,7 +1842,7 @@ class GrcAgent:
     def _checkpoint_before(self, tool_name: str) -> GraphSnapshot | None:
         if (
             tool_name not in _JOURNALED_MUTATION_TOOLS
-            and tool_name != "save_graph"
+            and tool_name not in {"save_graph", "save_graph_explicit"}
         ):
             return None
         if self.session.flowgraph is None:
@@ -1823,7 +1891,7 @@ class GrcAgent:
             elif not result.get("ok"):
                 self._record_failure_journal(tool_name, result, before)
             return
-        if tool_name == "save_graph":
+        if tool_name in {"save_graph", "save_graph_explicit"}:
             if result.get("ok"):
                 self._record_accepted_checkpoint(tool_name, result, before)
             return
@@ -1853,7 +1921,11 @@ class GrcAgent:
                     if isinstance(result.get("validation"), dict)
                     else self.session.validation_state()
                 ),
-                save_path=result.get("path") if tool_name == "save_graph" else None,
+                save_path=(
+                    result.get("path")
+                    if tool_name in {"save_graph", "save_graph_explicit"}
+                    else None
+                ),
             )
             checkpoint_id = checkpoint.get("id")
             if (
@@ -4698,6 +4770,190 @@ class GrcAgent:
         except Exception:
             return False
 
+    def _validate_change_graph_operation_args(
+        self,
+        *,
+        dry_run: bool,
+        operation_kind: str | None,
+        target_ref: dict[str, Any] | None,
+        block_id: str | None,
+        instance_name: str | None,
+        connection_id: str | None,
+        src_block: str | None,
+        src_port: int | str | None,
+        dst_block: str | None,
+        dst_port: int | str | None,
+        new_src_block: str | None,
+        new_src_port: int | str | None,
+        new_dst_block: str | None,
+        new_dst_port: int | str | None,
+        param_key: str | None,
+        param_value: Any,
+        state: str | None,
+        variable_name: str | None,
+        variable_value: Any,
+    ) -> ToolResult | None:
+        if operation_kind is None:
+            return None
+        if operation_kind in {"clarify", "unsupported"}:
+            return None
+
+        normalized_target_ref: dict[str, Any] | None = None
+        if target_ref is not None:
+            if not isinstance(target_ref, dict):
+                return self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": "target_ref must be an object when provided.",
+                    },
+                )
+            normalized_target_ref = {
+                str(key): value for key, value in target_ref.items() if isinstance(key, str)
+            }
+            target_uid = normalized_target_ref.get("uid")
+            target_instance = normalized_target_ref.get("instance_name")
+            if not (
+                isinstance(target_uid, str)
+                and target_uid.strip()
+                or isinstance(target_instance, str)
+                and target_instance.strip()
+            ):
+                return self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": (
+                            "target_ref must include at least one non-empty identifier: "
+                            "`uid` or `instance_name`."
+                        ),
+                    },
+                )
+
+        def _require(condition: bool, message: str) -> ToolResult | None:
+            if condition:
+                return None
+            return self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": message,
+                },
+            )
+
+        has_target = bool(
+            normalized_target_ref
+            or (isinstance(instance_name, str) and instance_name.strip())
+        )
+
+        if operation_kind == "set_param":
+            missing = _require(
+                has_target
+                and isinstance(param_key, str)
+                and param_key.strip()
+                and param_value is not None,
+                "set_param requires target_ref or instance_name plus param_key and param_value.",
+            )
+            return missing
+        if operation_kind == "set_state":
+            missing = _require(
+                has_target and isinstance(state, str) and state in {"enabled", "disabled"},
+                "set_state requires target_ref or instance_name plus state=enabled|disabled.",
+            )
+            return missing
+        if operation_kind == "add_variable":
+            missing = _require(
+                isinstance(variable_name, str)
+                and variable_name.strip()
+                and variable_value is not None,
+                "add_variable requires variable_name and variable_value.",
+            )
+            return missing
+        if operation_kind == "disconnect":
+            has_new_endpoints = any(
+                value is not None and (not isinstance(value, str) or value.strip())
+                for value in (
+                    new_src_block,
+                    new_src_port,
+                    new_dst_block,
+                    new_dst_port,
+                )
+            )
+            if has_new_endpoints:
+                return self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": (
+                            "disconnect does not accept rewire fields. "
+                            "Use operation_kind='rewire' for new endpoint arguments."
+                        ),
+                    },
+                )
+            return _require(
+                isinstance(connection_id, str) and connection_id.strip(),
+                "disconnect requires connection_id.",
+            )
+        if operation_kind == "rewire":
+            return _require(
+                isinstance(connection_id, str)
+                and connection_id.strip()
+                and isinstance(new_src_block, str)
+                and new_src_block.strip()
+                and new_src_port is not None
+                and isinstance(new_dst_block, str)
+                and new_dst_block.strip()
+                and new_dst_port is not None,
+                (
+                    "rewire requires connection_id plus "
+                    "new_src_block/new_src_port/new_dst_block/new_dst_port."
+                ),
+            )
+        if operation_kind == "insert_block":
+            return _require(
+                isinstance(connection_id, str)
+                and connection_id.strip()
+                and isinstance(block_id, str)
+                and block_id.strip(),
+                "insert_block requires connection_id and block_id.",
+            )
+        if operation_kind == "remove_block":
+            return _require(
+                isinstance(instance_name, str) and instance_name.strip(),
+                "remove_block requires instance_name.",
+            )
+        if operation_kind == "auto_insert":
+            return _require(
+                isinstance(connection_id, str) and connection_id.strip(),
+                "auto_insert requires connection_id.",
+            )
+        if operation_kind in {"new_grc", "load_grc", "save_graph"}:
+            return self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.UNSUPPORTED_OP,
+                    "message": "change_graph is mutation-only. Use explicit lifecycle wrappers for save/load.",
+                },
+            )
+        # Keep unused operation fields referenced so static checks do not regress silently.
+        _ = (src_block, src_port, dst_block, dst_port)
+        return None
+
     def _change_graph(
         self,
         dry_run: bool,
@@ -4795,6 +5051,40 @@ class GrcAgent:
                 before_revision=before_revision,
                 before_dirty=before_dirty,
                 result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        operation_args_error = self._validate_change_graph_operation_args(
+            dry_run=bool(dry_run),
+            operation_kind=resolved_operation_kind,
+            target_ref=target_ref,
+            block_id=block_id,
+            instance_name=instance_name,
+            connection_id=connection_id,
+            src_block=src_block,
+            src_port=src_port,
+            dst_block=dst_block,
+            dst_port=dst_port,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
+            param_key=param_key,
+            param_value=param_value,
+            state=state,
+            variable_name=variable_name,
+            variable_value=variable_value,
+        )
+        if operation_args_error is not None:
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="invalid_operation_args",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=operation_args_error,
                 validation_run=False,
                 output_truncated=False,
             )
@@ -4910,7 +5200,10 @@ class GrcAgent:
                     "ok": False,
                     "dry_run": bool(dry_run),
                     "error_type": ErrorCode.UNSUPPORTED_OP,
-                    "message": "Saving is CLI/user-controlled and not model-facing in MVP.",
+                    "message": (
+                        "change_graph is mutation-only. Use save_graph_explicit for "
+                        "explicit lifecycle save requests."
+                    ),
                 },
             )
             return self._attach_wrapper_dispatch_telemetry(
@@ -6588,6 +6881,369 @@ class GrcAgent:
             if suggested:
                 result["suggested_next_tools"] = suggested
         return result
+
+    def _save_graph_explicit(
+        self,
+        path: str | None = None,
+        overwrite: bool = False,
+        debug: bool = False,
+    ) -> ToolResult:
+        started = time.monotonic()
+        before_revision = self.session.state_revision
+        before_dirty = self.session.is_dirty
+        handlers: list[str] = []
+        missing_session = self._missing_session_result("save_graph_explicit")
+        if missing_session is not None:
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="save_graph_explicit",
+                wrapper_action="missing_session",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=missing_session,
+                validation_run=False,
+                output_truncated=False,
+            )
+        if not self._has_explicit_save_intent():
+            result = self._tool_result(
+                "save_graph_explicit",
+                ok=False,
+                message=(
+                    "Explicit save intent is required. Use clear save wording like "
+                    "'save', 'persist', or 'write a copy'."
+                ),
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="save_graph_explicit",
+                wrapper_action="intent_required",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        explicit_path = isinstance(path, str) and bool(path.strip())
+        target_path = (
+            Path(path).expanduser()
+            if explicit_path
+            else self.session.path
+        )
+        if target_path is None:
+            result = self._tool_result(
+                "save_graph_explicit",
+                ok=False,
+                message="This graph has no file path yet. Provide `path` for explicit save/copy.",
+                error_type="SAVE_PATH_REQUIRED",
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="save_graph_explicit",
+                wrapper_action="missing_path",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        resolved_target = target_path.resolve(strict=False)
+        unsafe_root = self._unsafe_graph_root_for_path(resolved_target)
+        if unsafe_root is not None:
+            result = self._tool_result(
+                "save_graph_explicit",
+                ok=False,
+                message=(
+                    "Refusing to write to protected canonical/example graph paths. "
+                    f"Choose a copied working path outside {unsafe_root}."
+                ),
+                error_type=ErrorCode.SAVE_REFUSED,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="save_graph_explicit",
+                wrapper_action="unsafe_path",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        current_path = (
+            self.session.path.resolve(strict=False)
+            if self.session.path is not None
+            else None
+        )
+        explicit_target_path = explicit_path and path is not None
+        target_exists = resolved_target.exists()
+        if (
+            explicit_target_path
+            and target_exists
+            and current_path is not None
+            and resolved_target != current_path
+            and not overwrite
+        ):
+            result = self._tool_result(
+                "save_graph_explicit",
+                ok=False,
+                message=(
+                    "Refusing to overwrite existing destination without explicit overwrite permission. "
+                    "Set overwrite=true for that destination."
+                ),
+                error_type=ErrorCode.SAVE_REFUSED,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="save_graph_explicit",
+                wrapper_action="overwrite_refused",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        handlers.append("validate_graph")
+        validation = self._validate_graph()
+        validation_result = {
+            "valid": bool(validation.get("valid")),
+            "returncode": validation.get("returncode"),
+            "stderr": validation.get("stderr"),
+        }
+        if validation.get("ok") is not True:
+            result = self._payload_result(
+                "save_graph_explicit",
+                {
+                    "ok": False,
+                    "message": validation.get(
+                        "message", "Graph validation failed before save."
+                    ),
+                    "error_type": validation.get("error_type", ErrorCode.VALIDATION_ERROR),
+                    "path": str(resolved_target),
+                    "dirty_before": bool(before_dirty),
+                    "dirty_after": bool(self.session.is_dirty),
+                    "validation_result": validation_result,
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="save_graph_explicit",
+                wrapper_action="validation_failed",
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=True,
+                output_truncated=False,
+            )
+        if not bool(validation.get("valid")):
+            result = self._payload_result(
+                "save_graph_explicit",
+                {
+                    "ok": False,
+                    "message": "Refusing to save invalid graph state.",
+                    "error_type": ErrorCode.SAVE_REFUSED,
+                    "path": str(resolved_target),
+                    "dirty_before": bool(before_dirty),
+                    "dirty_after": bool(self.session.is_dirty),
+                    "validation_result": validation_result,
+                },
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="save_graph_explicit",
+                wrapper_action="invalid_graph",
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=True,
+                output_truncated=False,
+            )
+
+        handlers.append("save_graph")
+        save_result = self._save_graph(str(resolved_target) if explicit_target_path else None)
+        payload = {
+            "ok": bool(save_result.get("ok")),
+            "message": save_result.get("message", "Save failed."),
+            "error_type": save_result.get("error_type"),
+            "path": save_result.get("path", str(resolved_target)),
+            "dirty_before": bool(before_dirty),
+            "dirty_after": bool(self.session.is_dirty),
+            "validation_result": validation_result,
+        }
+        wrapper_result = self._payload_result("save_graph_explicit", payload)
+        return self._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="save_graph_explicit",
+            wrapper_action="save",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=wrapper_result,
+            validation_run=True,
+            output_truncated=False,
+        )
+
+    def _load_graph_explicit(
+        self,
+        path: str,
+        debug: bool = False,
+    ) -> ToolResult:
+        started = time.monotonic()
+        before_revision = self.session.state_revision
+        before_dirty = self.session.is_dirty
+        handlers: list[str] = []
+        if not self._has_explicit_load_intent():
+            result = self._tool_result(
+                "load_graph_explicit",
+                ok=False,
+                message=(
+                    "Explicit load intent is required. Use clear load wording like "
+                    "'load', 'open', or 'switch to'."
+                ),
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="load_graph_explicit",
+                wrapper_action="intent_required",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+        if not isinstance(path, str) or not path.strip():
+            result = self._tool_result(
+                "load_graph_explicit",
+                ok=False,
+                message="load_graph_explicit requires non-empty `path`.",
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="load_graph_explicit",
+                wrapper_action="missing_path",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        resolved_path = Path(path).expanduser().resolve(strict=False)
+        unsafe_root = self._unsafe_graph_root_for_path(resolved_path)
+        if unsafe_root is not None:
+            result = self._tool_result(
+                "load_graph_explicit",
+                ok=False,
+                message=(
+                    "Refusing to load protected canonical/example graph directly for mutation. "
+                    f"Copy it to a working path outside {unsafe_root} and load the copy."
+                ),
+                error_type=ErrorCode.FILE_LOAD_ERROR,
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="load_graph_explicit",
+                wrapper_action="unsafe_path",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        handlers.append("load_grc")
+        loaded = load_grc(str(resolved_path))
+        if not isinstance(loaded, FlowgraphSession):
+            result = self._tool_result(
+                "load_graph_explicit",
+                ok=False,
+                message=loaded.get("message", "Failed to load .grc file."),
+                error_type=loaded.get("error_type", ErrorCode.FILE_LOAD_ERROR),
+            )
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="load_graph_explicit",
+                wrapper_action="load_failed",
+                internal_handlers=handlers,
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=result,
+                validation_run=False,
+                output_truncated=False,
+            )
+
+        self._replace_session(loaded, reason="load_graph_explicit")
+        handlers.append("validate_graph")
+        validation = self._validate_graph()
+        summary_payload = summarize_graph(self.session)
+        validation_result = {
+            "valid": bool(validation.get("valid")),
+            "returncode": validation.get("returncode"),
+            "stderr": validation.get("stderr"),
+        }
+        valid_graph = bool(validation.get("ok")) and bool(validation.get("valid"))
+        payload: dict[str, Any] = {
+            "ok": valid_graph,
+            "path": str(self.session.path) if self.session.path is not None else str(resolved_path),
+            "state_revision": self.session.state_revision,
+            "message": (
+                "Graph loaded and validated."
+                if valid_graph
+                else "Graph loaded, but validation failed for the loaded state."
+            ),
+            "valid": bool(validation.get("valid")),
+            "validation_result": validation_result,
+            "graph_summary": summary_payload.get("summary"),
+            "block_count": summary_payload.get("block_count"),
+            "connection_count": summary_payload.get("connection_count"),
+            "dirty": self.session.is_dirty,
+        }
+        if not valid_graph:
+            payload["error_type"] = (
+                validation.get("error_type")
+                if validation.get("ok") is False
+                else ErrorCode.GNU_VALIDATION_FAILED
+            )
+        result = self._payload_result("load_graph_explicit", payload)
+        return self._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="load_graph_explicit",
+            wrapper_action="load",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=True,
+            output_truncated=False,
+        )
 
     def _save_graph(self, path: str | None = None) -> ToolResult:
         missing_session = self._missing_session_result("save_graph")

@@ -64,8 +64,8 @@ LEGACY_TO_MVP_EXPECTED_TOOL = {
     "rewire_connection": "change_graph",
     "insert_block_on_connection": "change_graph",
     "auto_insert_block": "change_graph",
-    "save_graph": "change_graph",
-    "load_grc": "change_graph",
+    "save_graph": "save_graph_explicit",
+    "load_grc": "load_graph_explicit",
     "new_grc": "change_graph",
 }
 INSPECT_OPERATION_BY_LEGACY_TOOL = {
@@ -77,23 +77,27 @@ MUTATION_TOOL_NAMES = frozenset(
     {
         "new_grc",
         "load_grc",
+        "load_graph_explicit",
         "apply_edit",
         "insert_block_on_connection",
         "auto_insert_block",
         "remove_connection",
         "rewire_connection",
         "save_graph",
+        "save_graph_explicit",
     }
 )
 RECOVERY_MUTATION_RETRY_TOOL_NAMES = frozenset(
     {
         "new_grc",
         "load_grc",
+        "load_graph_explicit",
         "apply_edit",
         "insert_block_on_connection",
         "auto_insert_block",
         "remove_connection",
         "rewire_connection",
+        "save_graph_explicit",
     }
 )
 PRE_TURN_SETUP_TOOL_NAMES = frozenset(
@@ -197,6 +201,16 @@ def align_tool_expectation_to_mvp_release(expectation: ToolExpectation) -> ToolE
         if has_structured_expectation or inferred_kind not in {"clarify", "unsupported"}:
             mapped_arguments["operation_kind"] = inferred_kind
         mapped_operations = ()
+    elif mapped_name == "save_graph_explicit":
+        mapped_arguments = {}
+        if isinstance(expectation.arguments.get("path"), str):
+            mapped_arguments["path"] = expectation.arguments["path"]
+    elif mapped_name == "load_graph_explicit":
+        mapped_arguments = {}
+        if isinstance(expectation.arguments.get("file_path"), str):
+            mapped_arguments["path"] = expectation.arguments["file_path"]
+        elif isinstance(expectation.arguments.get("path"), str):
+            mapped_arguments["path"] = expectation.arguments["path"]
 
     return ToolExpectation(
         name=mapped_name,
@@ -218,7 +232,7 @@ def infer_change_graph_operation_kind(expectation: ToolExpectation) -> str:
         return "insert_block"
     if tool_name == "auto_insert_block":
         return "auto_insert"
-    if tool_name in {"save_graph", "load_grc", "new_grc"}:
+    if tool_name == "new_grc":
         return "unsupported"
 
     op_types = [
@@ -1057,6 +1071,14 @@ def run_live_scenario_once(
                 model_contract_pass = requested_names_raw.issubset(MVP_RELEASE_MODEL_TOOLS) and executed_names_raw.issubset(
                     MVP_RELEASE_MODEL_TOOLS
                 )
+                if scenario.release_profile in {"R0_READ_ONLY", "R1_SET_PARAM_ONLY"}:
+                    disallowed_lifecycle = {"save_graph_explicit", "load_graph_explicit"}
+                    lifecycle_used = bool(
+                        requested_names_raw & disallowed_lifecycle
+                        or executed_names_raw & disallowed_lifecycle
+                    )
+                    if lifecycle_used:
+                        model_contract_pass = False
                 turn_result["model_contract_pass"] = model_contract_pass
 
                 safe_surface_block = _is_safe_surface_blocked_legacy_attempt(

@@ -1266,6 +1266,10 @@ def _mvp_completion_aliases(
         if operation == "rewire_connection":
             return ("rewire_connection",)
         return ("apply_edit",)
+    if tool_name == "save_graph_explicit":
+        return ("save_graph",)
+    if tool_name == "load_graph_explicit":
+        return ("load_grc",)
     return ()
 
 
@@ -1278,7 +1282,14 @@ def _maybe_enable_wrapper_eval_telemetry(
     """Inject debug telemetry flag for MVP wrappers during eval-only runs."""
     if not enabled:
         return arguments
-    if tool_name not in {"inspect_graph", "search_blocks", "ask_grc_docs", "change_graph"}:
+    if tool_name not in {
+        "inspect_graph",
+        "search_blocks",
+        "ask_grc_docs",
+        "change_graph",
+        "save_graph_explicit",
+        "load_graph_explicit",
+    }:
         return arguments
     if bool(arguments.get("debug")):
         return arguments

@@ -13,10 +13,14 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 - Production-candidate under frozen local scope for bounded workflows on copied graphs.
 - One active `.grc` session per agent.
 - Default model-facing runtime surface is the MVP wrapper profile:
-  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`.
+  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`,
+  `save_graph_explicit`, `load_graph_explicit`.
 - Legacy low-level tools remain internal/compatibility-only and are not part of
   the default model-facing chat path.
-- `save_graph` is not model-facing in MVP default chat.
+- Save/load are model-facing only through explicit lifecycle wrappers:
+  `save_graph_explicit` and `load_graph_explicit`.
+- Lifecycle wrappers require explicit user intent and are currently
+  beta-validated by R5 save/load evals; not release-validated.
 - All meaningful mutations go through verified tools and validate before commit.
 - Classified turns use typed tool narrowing before llama.cpp sees schemas, so clear requests expose only relevant wrapper actions.
 - Vague or under-specified mutation requests clarify before execution.

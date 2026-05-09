@@ -1,6 +1,6 @@
 # GRC Agent System Blueprint
 
-Updated: 2026-05-08
+Updated: 2026-05-09
 
 This is the single source-of-truth design document for GRC Agent. It merges the former blueprint, system-design, and package-guide material into one operational contract: product scope, package shape, harness flow, model loop, tools, safety boundaries, retrieval, eval gates, and release criteria.
 
@@ -8,7 +8,7 @@ This is the single source-of-truth design document for GRC Agent. It merges the 
 
 GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. It should read, inspect, explain, preview edits, apply verified edits, validate with GNU Radio tooling, and save only when the user explicitly asks.
 
-The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset. Operations `set_state`, `add_variable`, `rewire`, `disconnect`, `insert_block`, `remove_block`, `save`, and `load` are beta or out-of-scope. The overall project is **not production-ready**.
+The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset and lifecycle wrappers are beta-validated only. Operations `set_state`, `add_variable`, `rewire`, `disconnect`, `insert_block`, `remove_block` remain beta or unvalidated. Save/load are model-facing via explicit wrappers and are beta-validated (not release-validated). The overall project is **not production-ready**.
 
 Supported local scope:
 
@@ -131,16 +131,18 @@ explicit user save request
 
 ## 5. Model Tool Surface
 
-Default model-facing chat surface is exactly four MVP wrappers:
+Default model-facing chat surface is MVP wrappers:
 
 1. `inspect_graph`
 2. `search_blocks`
 3. `ask_grc_docs`
 4. `change_graph`
+5. `save_graph_explicit`
+6. `load_graph_explicit`
 
 Low-level tools remain internal or compatibility-only. They must not leak into normal model-backed chat unless `legacy_model_tool_surface=true` is explicitly configured for debugging or research.
 
-Current implementation caveat: the default CLI path narrows schemas to the four wrappers, but the codebase still builds legacy schemas for internal/compatibility use. The MVP prompt (`src/grc_agent/runtime/prompt.py`) correctly references only the four wrappers. Legacy tool instructions exist only in the legacy prompt branch (`legacy=true`), which is not the default model-facing path.
+Current implementation caveat: the default CLI path narrows schemas to MVP wrappers, but the codebase still builds legacy schemas for internal/compatibility use. The MVP prompt (`src/grc_agent/runtime/prompt.py`) correctly references only wrappers. Legacy tool instructions exist only in the legacy prompt branch (`legacy=true`), which is not the default model-facing path.
 
 ## 6. Wrapper Contracts
 
@@ -529,17 +531,18 @@ Before claiming production-ready:
 - Live evals must run against the default MVP wrapper profile. **Verified.**
 - Release dashboard must inspect raw tool-call history, not just metadata. **Fixed.**
 - Release manifest must include commit, dirty state, model alias, actual context, prompt hash, schema hash, policy hash, eval versions, and fixture identifiers. **Fixed.**
-- Committed mutation evals must include save/reload/`grcc` semantic checks. **Not validated; save/load out-of-scope.**
+- Committed mutation evals must include save/reload/`grcc` semantic checks. **Validated at beta level (R5), not release-validated.**
 - Docs-answer quality thresholds must be explicit. **Validated.** grc_docs_answer_eval passed (35/35 ok, 0 misleading, 0 mutation leakage).
 - No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
 
-Current classification (2026-05-08):
+Current classification (2026-05-09):
 
 - **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Release-validated.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R1_SET_PARAM_ONLY** (change_graph set_param): **Release-validated.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R1_SET_STATE** (change_graph set_state): **Beta / unvalidated.** Not part of the release-validated subset. Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). A valid set_state fixture/target must be added separately before set_state can be claimed.
+- **R5_SAVE_LOAD** (`save_graph_explicit`, `load_graph_explicit`): **Beta-validated only.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00. Not release-validated pending separate lifecycle safety audit decision.
 - **BETA_COMPLEX_MUTATION** (add_variable, multi-step chains, external edits, vague queries): **Informational only.** Not release-gating.
-- **Beta or out-of-scope** (set_state, add_variable, rewire, disconnect, insert_block, remove_block, save, load): exposed in MVP schema/prompt but not release-validated.
+- **Beta or unvalidated** (`set_state`, `add_variable`, `rewire`, `disconnect`, `insert_block`, `remove_block`): exposed in MVP schema/prompt but not release-validated.
 - **Release-validated subset (R0_READ_ONLY + R1_SET_PARAM_ONLY):** Supported on clean commit with passing deterministic gates. Default MVP runtime remains beta-capable. Not production-ready.
 
 ## 17. Completed / Hardened Items

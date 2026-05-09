@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -10,6 +11,7 @@ from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE, PUBLIC_TOOL_NAMES
+import yaml
 
 
 class MvpToolProfileTests(unittest.TestCase):
@@ -59,7 +61,7 @@ class MvpToolProfileTests(unittest.TestCase):
         for legacy_name in (
             "apply_edit",
             "propose_edit",
-            "save_graph",
+            "`save_graph`",
             "semantic_search_grc",
             "search_manual",
             "validate_graph",
@@ -369,6 +371,103 @@ class MvpToolProfileTests(unittest.TestCase):
             restored = agent._history_journal.restore_record(records[-1]["id"], out)
             self.assertTrue(restored["ok"])
             self.assertTrue(out.exists())
+
+    def test_save_graph_explicit_requires_explicit_intent(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool("save_graph_explicit", {})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "invalid_request")
+
+    def test_save_graph_explicit_allows_save_after_explicit_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._load_agent()
+            target = Path(tmpdir) / "saved_copy.grc"
+            agent.init_turn_requirements(f"Save a copy to {target}.")
+            result = agent.execute_tool(
+                "save_graph_explicit",
+                {"path": str(target)},
+            )
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["path"], str(target))
+            self.assertTrue(target.exists())
+            self.assertTrue(result.get("checkpoint_id"))
+
+    def test_save_graph_explicit_refuses_overwrite_without_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._load_agent()
+            target = Path(tmpdir) / "existing.grc"
+            shutil.copy2(self._fixture_path(), target)
+            agent.init_turn_requirements(f"Save a copy to {target}.")
+            result = agent.execute_tool("save_graph_explicit", {"path": str(target)})
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["error_type"], "save_refused")
+
+    def test_save_graph_explicit_refuses_invalid_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._load_agent()
+            flowgraph = agent.session.flowgraph
+            assert flowgraph is not None
+            # Force an invalid dirty state outside verified mutation tools so save wrapper
+            # must refuse based on pre-save validation.
+            flowgraph.connections = flowgraph.connections[:-1]
+            raw_connections = flowgraph.raw_data.get("connections")
+            self.assertIsInstance(raw_connections, list)
+            assert isinstance(raw_connections, list)
+            raw_connections[:] = raw_connections[:-1]
+            agent.session.is_dirty = True
+            agent.session._bump_state_revision()
+            target = Path(tmpdir) / "invalid_copy.grc"
+            agent.init_turn_requirements(f"Save this graph to {target}.")
+            result = agent.execute_tool("save_graph_explicit", {"path": str(target)})
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["error_type"], "save_refused")
+            self.assertFalse(target.exists())
+
+    def test_load_graph_explicit_requires_path_and_intent(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool("load_graph_explicit", {"path": ""})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "invalid_request")
+
+    def test_load_graph_explicit_refuses_unsafe_canonical_path(self) -> None:
+        agent = self._load_agent()
+        fixture = self._fixture_path()
+        agent.init_turn_requirements(f"Load {fixture}.")
+        result = agent.execute_tool("load_graph_explicit", {"path": str(fixture)})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "file_load_error")
+
+    def test_load_graph_explicit_allows_safe_copied_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = self._fixture_path()
+            copied = Path(tmpdir) / "copied.grc"
+            shutil.copy2(source, copied)
+            agent = self._load_agent()
+            agent.init_turn_requirements(f"Load {copied}.")
+            result = agent.execute_tool("load_graph_explicit", {"path": str(copied)})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["path"], str(copied))
+            self.assertTrue(result["valid"])
+
+    def test_load_graph_explicit_keeps_invalid_loaded_session_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw = yaml.safe_load(self._fixture_path().read_text(encoding="utf-8"))
+            connections = raw.get("connections")
+            self.assertIsInstance(connections, list)
+            assert isinstance(connections, list)
+            self.assertGreaterEqual(len(connections), 1)
+            # Make one endpoint invalid so post-load validation fails deterministically.
+            connections[0][0] = "missing_source_block"
+            broken = Path(tmpdir) / "broken.grc"
+            broken.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+            agent = self._load_agent()
+            agent.init_turn_requirements(f"Load {broken}.")
+            result = agent.execute_tool("load_graph_explicit", {"path": str(broken)})
+            self.assertFalse(result["ok"], result)
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["path"], str(broken))
+            self.assertEqual(str(agent.session.path), str(broken))
 
 
 if __name__ == "__main__":

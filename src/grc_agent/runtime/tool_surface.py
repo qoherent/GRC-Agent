@@ -28,6 +28,8 @@ MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
     "search_blocks",
     "ask_grc_docs",
     "change_graph",
+    "save_graph_explicit",
+    "load_graph_explicit",
 )
 
 MODEL_TOOL_NAMES_ORDERED: tuple[str, ...] = (
@@ -75,4 +77,3 @@ LEGACY_TOOL_SURFACE = ToolSurface(
 def tool_surface_for_legacy_flag(*, legacy_model_tool_surface: bool) -> ToolSurface:
     """Return the active tool surface for CLI/runtime config."""
     return LEGACY_TOOL_SURFACE if legacy_model_tool_surface else MVP_TOOL_SURFACE
-

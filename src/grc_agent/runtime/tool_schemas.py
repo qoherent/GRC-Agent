@@ -574,6 +574,49 @@ def build_tool_schemas(
             },
             required=["dry_run", "user_goal"],
         ),
+        _schema(
+            "save_graph_explicit",
+            "Explicit lifecycle save wrapper for model-facing MVP chat. "
+            "Use only when the user explicitly asks to save, persist, or write a graph copy. "
+            "This wrapper always validates the current graph before writing and refuses unsafe writes.",
+            {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional destination .grc path. Omit only to save in-place to the "
+                        "currently loaded graph path."
+                    ),
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, allow overwrite of an existing explicit destination path. "
+                        "Ignored for in-place save to the active session path."
+                    ),
+                },
+                "debug": {
+                    "type": "boolean",
+                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
+                },
+            },
+        ),
+        _schema(
+            "load_graph_explicit",
+            "Explicit lifecycle load wrapper for model-facing MVP chat. "
+            "Use only when the user explicitly asks to load/open/switch to a graph file. "
+            "This wrapper enforces copied-graph safety policy and validates after load.",
+            {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .grc file to load into the active session.",
+                },
+                "debug": {
+                    "type": "boolean",
+                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
+                },
+            },
+            required=["path"],
+        ),
     ]
     all_schemas = [*legacy_schemas, *mvp_schemas]
     if tool_names is None:

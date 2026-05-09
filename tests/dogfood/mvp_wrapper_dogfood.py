@@ -32,7 +32,14 @@ from tests.llama_eval.harness import (
 DATE = "2026-05-02"
 DEFAULT_INTAKE = Path(f"reports/dogfood/mvp_wrapper_dogfood_{DATE}.jsonl")
 DEFAULT_REPORT = Path(f"reports/dogfood/MVP_WRAPPER_DISPATCH_DOGFOOD_{DATE}.md")
-WRAPPER_TOOLS = {"inspect_graph", "search_blocks", "ask_grc_docs", "change_graph"}
+WRAPPER_TOOLS = {
+    "inspect_graph",
+    "search_blocks",
+    "ask_grc_docs",
+    "change_graph",
+    "save_graph_explicit",
+    "load_graph_explicit",
+}
 
 
 @dataclass(frozen=True)

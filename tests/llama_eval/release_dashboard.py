@@ -21,6 +21,7 @@ PHASE_NAMES = {
     30: "tier3_multiturn",
     40: "tier4_external_examples",
     50: "tier5_adversarial",
+    55: "r5_save_load",
 }
 
 
@@ -204,6 +205,8 @@ def _scope_matches(metadata: dict[str, Any] | None, scope: str) -> bool:
         return profile == "R0_READ_ONLY"
     if scope == "r1":
         return profile in {"R0_READ_ONLY", "R1_SET_PARAM_ONLY"}
+    if scope == "r5":
+        return profile == "R5_SAVE_LOAD"
     return True
 
 
@@ -283,9 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--scope",
-        choices=("r0", "r1", "beta", "all"),
+        choices=("r0", "r1", "r5", "beta", "all"),
         default="all",
-        help="Release scope filter. r0=read-only, r1=R0+simple-edit, beta=all, all=no filter. Default: all.",
+        help="Release scope filter. r0=read-only, r1=R0+simple-edit, r5=save/load lifecycle, beta=all, all=no filter. Default: all.",
     )
     args = parser.parse_args(argv)
 
@@ -298,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         effective_required_phases = tuple(args.required_phase)
     elif args.scope in ("r0", "r1"):
         effective_required_phases = (20,)
+    elif args.scope == "r5":
+        effective_required_phases = (55,)
     else:
         effective_required_phases = (20, 30, 40, 50)
 

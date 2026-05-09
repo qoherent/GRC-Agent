@@ -60,17 +60,17 @@ def classify_tool_result_for_recovery(
             reason="unsupported request",
         )
 
-    if tool_name == "save_graph" and (
+    if tool_name in {"save_graph", "save_graph_explicit"} and (
         error_type == ErrorCode.SAVE_REFUSED or result.get("requires_validation") is True
     ):
         return RecoveryDecision(
             recovery_class=RECOVERABLE_SAVE_REFUSED,
             recoverable=True,
-            allowed_tools=("validate_graph", "save_graph"),
+            allowed_tools=("validate_graph", "save_graph", "save_graph_explicit"),
             max_mutation_retries=0,
             prompt=(
                 "The previous save was refused because the dirty graph needs validation. "
-                "If save was explicitly requested, call validate_graph and then save_graph. "
+                "If save was explicitly requested, call validate_graph and then save_graph_explicit. "
                 "Do not change graph structure or parameters."
             ),
             reason="dirty graph requires validation before save",
