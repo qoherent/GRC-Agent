@@ -15,6 +15,7 @@ class ErrorCode:
     TOOL_CALL_INVALID = "tool_call_invalid"
     UNKNOWN_TOOL = "unknown_tool"
     INVALID_REQUEST = "invalid_request"
+    STALE_REVISION = "stale_revision"
     RETRIEVAL_NOT_READY = "retrieval_not_ready"
     SAVE_REFUSED = "save_refused"
     BLOCK_NOT_FOUND = "block_not_found"

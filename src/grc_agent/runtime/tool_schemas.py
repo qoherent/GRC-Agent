@@ -546,7 +546,14 @@ def build_tool_schemas(
                     "type": "string",
                     "description": (
                         "Exact connection id `src_block:src_port->dst_block:dst_port`. "
-                        "Required for disconnect and rewire."
+                        "Primary path for disconnect and required for rewire."
+                    ),
+                },
+                "state_revision": {
+                    "type": "integer",
+                    "description": (
+                        "Optional optimistic revision guard. When provided, it must "
+                        "match the active graph state_revision or the call is refused."
                     ),
                 },
                 "src_block": {"type": "string"},

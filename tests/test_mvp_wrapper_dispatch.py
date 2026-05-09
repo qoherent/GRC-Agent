@@ -15,9 +15,12 @@ class MvpWrapperDispatchTests(unittest.TestCase):
     def _fixture_path(self) -> Path:
         return Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 
-    def _load_agent(self) -> GrcAgent:
+    def _fixture_named(self, name: str) -> Path:
+        return Path(__file__).resolve().parent / "data" / name
+
+    def _load_agent(self, fixture_name: str = "random_bit_generator.grc") -> GrcAgent:
         session = FlowgraphSession()
-        session.load(self._fixture_path())
+        session.load(self._fixture_named(fixture_name))
         agent = GrcAgent(session)
         object.__setattr__(agent._docs_answer_cfg, "helper_mode", "always")
         return agent
@@ -1250,6 +1253,54 @@ class MvpWrapperDispatchTests(unittest.TestCase):
         if not result["ok"]:
             self.assertEqual(agent.session.state_revision, before_revision)
             self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_endpoint_disconnect_routes_to_remove_handler(self) -> None:
+        agent = self._load_agent("random_bit_generator_dual_sink_sink1_disabled.grc")
+        before_revision = agent.session.state_revision
+        with (
+            mock.patch.object(agent, "_remove_connection", wraps=agent._remove_connection) as remove_mock,
+            mock.patch.object(agent, "_rewire_connection", wraps=agent._rewire_connection) as rewire_mock,
+            mock.patch.object(agent, "_insert_block_on_connection", wraps=agent._insert_block_on_connection) as insert_mock,
+        ):
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Disconnect secondary sink input.",
+                    "operation_kind": "disconnect",
+                    "src_block": "blocks_char_to_float_0",
+                    "src_port": 0,
+                    "dst_block": "qtgui_time_sink_x_1",
+                    "dst_port": 0,
+                    "debug": True,
+                },
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["operation_summary"], "remove_connection")
+        self.assertEqual(remove_mock.call_count, 1)
+        self.assertEqual(rewire_mock.call_count, 0)
+        self.assertEqual(insert_mock.call_count, 0)
+        self.assertGreater(agent.session.state_revision, before_revision)
+
+    def test_change_graph_ambiguous_endpoint_disconnect_clarifies(self) -> None:
+        agent = self._load_agent("rewire_stream_ambiguous.grc")
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Disconnect one sink input.",
+                "operation_kind": "disconnect",
+                "dst_block": "qtgui_time_sink_x_0",
+                "debug": True,
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("operation_summary"), "remove_connection")
+        self.assertEqual(result.get("error_type"), "ambiguous_connection")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
 
     def test_change_graph_exact_rewire_routes_to_rewire_handler(self) -> None:
         agent = self._load_agent()

@@ -4908,9 +4908,16 @@ class GrcAgent:
                         ),
                     },
                 )
+            has_endpoint_hint = any(
+                value is not None and (not isinstance(value, str) or value.strip())
+                for value in (src_block, src_port, dst_block, dst_port)
+            )
             return _require(
-                isinstance(connection_id, str) and connection_id.strip(),
-                "disconnect requires connection_id.",
+                (isinstance(connection_id, str) and connection_id.strip()) or has_endpoint_hint,
+                (
+                    "disconnect requires connection_id or endpoint hints "
+                    "(src_block/src_port/dst_block/dst_port)."
+                ),
             )
         if operation_kind == "rewire":
             return _require(
@@ -4960,6 +4967,157 @@ class GrcAgent:
         _ = (src_block, src_port, dst_block, dst_port)
         return None
 
+    def _canonicalize_change_graph_target_ref(
+        self,
+        *,
+        dry_run: bool,
+        operation_kind: str | None,
+        target_ref: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, ToolResult | None]:
+        if target_ref is None:
+            return None, None
+        if not isinstance(target_ref, dict):
+            return None, self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": "target_ref must be an object when provided.",
+                },
+            )
+
+        normalized = {str(key): value for key, value in target_ref.items() if isinstance(key, str)}
+        alias_map = {
+            "uid": "block_uid",
+            "instance_name": "expected_instance_name",
+            "block_type": "expected_block_type",
+            "state_revision": "base_state_revision",
+        }
+        canonical_fields = (
+            "block_uid",
+            "expected_instance_name",
+            "expected_block_type",
+            "base_state_revision",
+        )
+        allowed_fields = set(canonical_fields) | set(alias_map.keys())
+        unknown_fields = sorted(key for key in normalized if key not in allowed_fields)
+        if unknown_fields:
+            return None, self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": (
+                        "target_ref contains unsupported keys: "
+                        + ", ".join(unknown_fields)
+                        + ". Allowed keys are guarded "
+                        "(block_uid, expected_instance_name, expected_block_type, base_state_revision) "
+                        "or wrapper-era aliases (uid, instance_name, block_type, state_revision)."
+                    ),
+                },
+            )
+
+        canonical: dict[str, Any] = {}
+        for alias_key, canonical_key in alias_map.items():
+            canonical_value = normalized.get(canonical_key)
+            alias_value = normalized.get(alias_key)
+            if canonical_value is not None and alias_value is not None and canonical_value != alias_value:
+                return None, self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": (
+                            f"target_ref has conflicting values for {canonical_key!r} and its "
+                            f"alias {alias_key!r}."
+                        ),
+                    },
+                )
+            if canonical_value is not None:
+                canonical[canonical_key] = canonical_value
+            elif alias_value is not None:
+                canonical[canonical_key] = alias_value
+
+        missing_fields = [field for field in canonical_fields if field not in canonical]
+        if missing_fields:
+            return None, self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": (
+                        "target_ref must include guarded fields "
+                        "(block_uid, expected_instance_name, expected_block_type, base_state_revision). "
+                        "Missing: " + ", ".join(missing_fields)
+                    ),
+                },
+            )
+
+        if not isinstance(canonical["block_uid"], str) or not canonical["block_uid"].strip():
+            return None, self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": "target_ref.block_uid must be a non-empty string.",
+                },
+            )
+        if (
+            not isinstance(canonical["expected_instance_name"], str)
+            or not canonical["expected_instance_name"].strip()
+        ):
+            return None, self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": "target_ref.expected_instance_name must be a non-empty string.",
+                },
+            )
+        if (
+            not isinstance(canonical["expected_block_type"], str)
+            or not canonical["expected_block_type"].strip()
+        ):
+            return None, self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": "target_ref.expected_block_type must be a non-empty string.",
+                },
+            )
+        base_state_revision = canonical["base_state_revision"]
+        if not isinstance(base_state_revision, int) or isinstance(base_state_revision, bool):
+            return None, self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": "target_ref.base_state_revision must be an integer.",
+                },
+            )
+
+        canonical["block_uid"] = canonical["block_uid"].strip()
+        canonical["expected_instance_name"] = canonical["expected_instance_name"].strip()
+        canonical["expected_block_type"] = canonical["expected_block_type"].strip()
+        return canonical, None
+
     def _change_graph(
         self,
         dry_run: bool,
@@ -4973,6 +5131,7 @@ class GrcAgent:
         src_port: int | str | None = None,
         dst_block: str | None = None,
         dst_port: int | str | None = None,
+        state_revision: int | None = None,
         new_src_block: str | None = None,
         new_src_port: int | str | None = None,
         new_dst_block: str | None = None,
@@ -5060,6 +5219,25 @@ class GrcAgent:
                 validation_run=False,
                 output_truncated=False,
             )
+        canonical_target_ref, target_ref_error = self._canonicalize_change_graph_target_ref(
+            dry_run=bool(dry_run),
+            operation_kind=resolved_operation_kind,
+            target_ref=target_ref,
+        )
+        if target_ref_error is not None:
+            return self._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="invalid_operation_args",
+                internal_handlers=["none"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=target_ref_error,
+                validation_run=False,
+                output_truncated=False,
+            )
+        target_ref = canonical_target_ref
         operation_args_error = self._validate_change_graph_operation_args(
             dry_run=bool(dry_run),
             operation_kind=resolved_operation_kind,
@@ -5094,6 +5272,57 @@ class GrcAgent:
                 validation_run=False,
                 output_truncated=False,
             )
+        if state_revision is not None:
+            if not isinstance(state_revision, int) or isinstance(state_revision, bool):
+                stale_result = self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": resolved_operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": "state_revision must be an integer when provided.",
+                    },
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="invalid_operation_args",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=stale_result,
+                    validation_run=False,
+                    output_truncated=False,
+                )
+            if state_revision != self.session.state_revision:
+                stale_result = self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": resolved_operation_kind,
+                        "error_type": ErrorCode.STALE_REVISION,
+                        "message": (
+                            "state_revision is stale for the current graph. "
+                            f"Provided {state_revision}, current is {self.session.state_revision}."
+                        ),
+                        "state_revision": self.session.state_revision,
+                    },
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="stale_revision",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=stale_result,
+                    validation_run=False,
+                    output_truncated=False,
+                )
         lower_goal = user_goal.lower()
         if not dry_run and resolved_operation_kind is None:
             has_structured_mutation_args = any(
@@ -5182,7 +5411,7 @@ class GrcAgent:
                     "message": "Clarification required before changing the graph.",
                     "clarification_options": [
                         "Provide exact instance_name + param_key + param_value for param edits.",
-                        "Provide exact connection_id for disconnect/insert/rewire.",
+                        "Provide exact connection_id (preferred) or endpoint hints for disconnect.",
                         "Provide exact block_id and placement details for inserts.",
                     ],
                 },
@@ -5371,15 +5600,41 @@ class GrcAgent:
                     )
                 if dry_run:
                     handlers.append("propose_edit(remove_connection)")
-                    result = tx_tool(
-                        {
-                            "op_type": "remove_connection",
-                            "connection_id": connection_id.strip(),
-                        }
-                    )
+                    remove_operation: dict[str, Any] = {
+                        "op_type": "remove_connection",
+                        "connection_id": connection_id.strip(),
+                    }
+                    result = tx_tool(remove_operation)
                 else:
                     handlers.append("remove_connection")
                     result = self._remove_connection(connection_id=connection_id.strip())
+        elif (
+            resolved_operation_kind == "disconnect"
+            and any(
+                value is not None and (not isinstance(value, str) or value.strip())
+                for value in (src_block, src_port, dst_block, dst_port)
+            )
+        ):
+            operation_summary = "remove_connection"
+            if dry_run:
+                handlers.append("propose_edit(remove_connection)")
+                result = tx_tool(
+                    {
+                        "op_type": "remove_connection",
+                        "src_block": src_block,
+                        "src_port": src_port,
+                        "dst_block": dst_block,
+                        "dst_port": dst_port,
+                    }
+                )
+            else:
+                handlers.append("remove_connection")
+                result = self._remove_connection(
+                    src_block=src_block,
+                    src_port=src_port,
+                    dst_block=dst_block,
+                    dst_port=dst_port,
+                )
         elif isinstance(variable_name, str) and variable_name.strip() and variable_value is not None:
             operation_summary = "add_variable"
             mismatch = _kind_mismatch_result("add_variable")
@@ -5534,7 +5789,7 @@ class GrcAgent:
                     "message": "Not enough exact change details to execute safely.",
                     "clarification_options": [
                         "Provide exact instance_name + param_key + param_value for param edits.",
-                        "Provide exact connection_id for disconnect/insert/rewire.",
+                        "Provide exact connection_id (preferred) or endpoint hints for disconnect.",
                         "Provide exact rewire endpoints for rewiring.",
                     ],
                 },

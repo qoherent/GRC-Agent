@@ -124,6 +124,14 @@ Disconnect an exact connection:
 Remove connection connection_3 and validate.
 ```
 
+Disconnect safety contract:
+- Prefer exact `connection_id`.
+- Endpoint hints are allowed only when they resolve to one exact connection.
+- Ambiguous endpoint hints clarify and do not mutate.
+- Stale `connection_id` / stale `state_revision` requests fail closed.
+- Preview disconnect never mutates.
+- Failed `grcc` disconnect validation never commits.
+
 Rewire an exact edge:
 
 ```text
