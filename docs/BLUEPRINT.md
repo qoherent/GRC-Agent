@@ -1,6 +1,6 @@
 # GRC Agent System Blueprint
 
-Updated: 2026-05-07
+Updated: 2026-05-08
 
 This is the single source-of-truth design document for GRC Agent. It merges the former blueprint, system-design, and package-guide material into one operational contract: product scope, package shape, harness flow, model loop, tools, safety boundaries, retrieval, eval gates, and release criteria.
 
@@ -8,7 +8,7 @@ This is the single source-of-truth design document for GRC Agent. It merges the 
 
 GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. It should read, inspect, explain, preview edits, apply verified edits, validate with GNU Radio tooling, and save only when the user explicitly asks.
 
-Scoped **R0 read-only** and **R1 set_param** evidence is viable on tested fixtures. The overall project is **not release-candidate** and not production-ready. Production readiness depends on committed clean state, validated set_state, passing retrieval eval gates, and a full clean re-run of all deterministic gates.
+The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset. Operations `set_state`, `add_variable`, `rewire`, `disconnect`, `insert_block`, `remove_block`, `save`, and `load` are beta or out-of-scope. The overall project is **not production-ready**.
 
 Supported local scope:
 
@@ -535,12 +535,12 @@ Before claiming production-ready:
 
 Current classification (2026-05-08):
 
-- **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Viable.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R1_SET_PARAM_ONLY** (change_graph set_param): **Viable on tested fixtures.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R1_SET_STATE** (change_graph set_state): **Beta / unvalidated.** Not part of the scoped release-candidate. Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). A valid set_state fixture/target must be added separately before set_state can be claimed.
+- **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Release-validated.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R1_SET_PARAM_ONLY** (change_graph set_param): **Release-validated.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R1_SET_STATE** (change_graph set_state): **Beta / unvalidated.** Not part of the release-validated subset. Runtime correctly rejects state changes that break graph validity (e.g., disabling throttle in default fixture). A valid set_state fixture/target must be added separately before set_state can be claimed.
 - **BETA_COMPLEX_MUTATION** (add_variable, multi-step chains, external edits, vague queries): **Informational only.** Not release-gating.
-- **Out-of-scope** (rewire, disconnect, insert, remove, save, load, clarification-heavy flows): Not assessed.
-- **Overall scoped release-candidate (R0_READ_ONLY + R1_SET_PARAM_ONLY):** **Viable** if all deterministic gates pass on clean commit. Not production-ready.
+- **Beta or out-of-scope** (set_state, add_variable, rewire, disconnect, insert_block, remove_block, save, load): exposed in MVP schema/prompt but not release-validated.
+- **Release-validated subset (R0_READ_ONLY + R1_SET_PARAM_ONLY):** Supported on clean commit with passing deterministic gates. Default MVP runtime remains beta-capable. Not production-ready.
 
 ## 17. Completed / Hardened Items
 
@@ -554,14 +554,15 @@ Current classification (2026-05-08):
 ## 18. Remaining Work (Not Release-Gating for R0/R1)
 
 - **set_state validation:** Add a fixture where disabling a block does not break graph validity, then validate.
-- **Retrieval eval gates:** ~~Requires Qdrant available. Blocked in current env.~~ **Passed.** vector_regression=290/290 ok. grc_docs_answer_eval=35/35 ok (24 relevance, 19 groundedness, 0 misleading, 0 mutation leakage).
-- **Docs-answer eval gate:** ~~Requires Qdrant + vector index. Blocked in current env.~~ **Passed.** 35 questions answered; metrics in retrieval_eval output.
+- **Retrieval eval gates:** ~~Requires Qdrant available. Blocked in current env.~~ **Passed.** vector_regression=290/290 ok. grc_docs_answer_eval=safety baseline passed (0 misleading, 0 mutation leakage). Relevance/groundedness are reported metrics, not enforced thresholds.
+- **Docs-answer eval gate:** ~~Requires Qdrant + vector index. Blocked in current env.~~ **Safety baseline passed.** 35 questions answered, 0 misleading, 0 mutation leakage. This is a safety gate, not a docs-QA quality gate.
 - **Clean commit:** ~~No unstaged changes remain; intended changes are staged. Repository remains dirty until committed.~~ **Committed.** dirty=false, commit=6a2243c437e4.
 - **Save/load semantic checks:** Out-of-scope for current R0/R1 scopes.
 - **Complex mutation evidence:** Beta only; not release-gating.
 - **Run MVP wrapper dogfood.** Pending.
 - **Run Tier 1 and Tier 2 live evals against default MVP profile.** Pending.
-- **Generate release dashboard and manifest.** Passed. Manifest dirty=false.
+- **Generate release dashboard and manifest.** Manifest dirty=false. Note: `release-manifest` is an evidence manifest for human review, not a readiness gate; it always reports `ok=true` and records degraded health as data.
+- **Stricter release profile (future):** A hardened release could expose only `inspect_graph`, `search_blocks`, `ask_grc_docs`, and `change_graph` with `operation_kind=set_param` only, narrowing the model's visible action space to match the release-validated subset.
 
 ## 19. STOP_THE_LINE Conditions
 

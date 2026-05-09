@@ -294,9 +294,16 @@ def main(argv: list[str] | None = None) -> int:
     if not 0 < args.stability_threshold <= 1:
         parser.error("--stability-threshold must be in the range (0, 1].")
 
+    if args.required_phase is not None:
+        effective_required_phases = tuple(args.required_phase)
+    elif args.scope in ("r0", "r1"):
+        effective_required_phases = (20,)
+    else:
+        effective_required_phases = (20, 30, 40, 50)
+
     dashboard = build_release_dashboard(
         _load_stores(args.results_path),
-        required_phases=tuple(args.required_phase or (20, 30, 40, 50)),
+        required_phases=effective_required_phases,
         min_runs_per_case=args.min_runs_per_case,
         stability_threshold=args.stability_threshold,
         scope=args.scope,

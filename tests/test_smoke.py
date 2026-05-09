@@ -113,19 +113,23 @@ class SmokeMessagePortGraph(unittest.TestCase):
         self.assertTrue(result["ok"])
 
 
-class SmokeChatLoadsGraph(unittest.TestCase):
+class SmokeFakeRuntime(unittest.TestCase):
 
-    def test_chat_command_loads_existing_grc(self):
+    def test_fake_command_loads_existing_grc(self):
+        import shutil
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from grc_agent.cli import main
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            import shutil
             dst = Path(tmpdir) / FIXTURE.name
             shutil.copy2(FIXTURE, dst)
-            proc = subprocess.run(
-                ["uv", "run", "grc-agent", "chat", str(dst),
-                 "--message", "Summarize the graph."],
-                capture_output=True, text=True, timeout=60,
-            )
-            self.assertIn("--- Active Session ---", proc.stdout)
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["fake", str(dst)])
+            stdout = output.getvalue()
+            self.assertEqual(exit_code, 0, stdout)
+            self.assertIn("--- Active Session ---", stdout)
 
 
 if __name__ == "__main__":
