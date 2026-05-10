@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from grc_agent._payload import ErrorCode
+
 from .context import ChangeGraphOperationContext, ChangeGraphOperationResult, ToolResult
 
 
@@ -41,12 +43,49 @@ def handle_add_variable(
             terminal_result=terminal_result,
         )
 
+    normalized_name = variable_name.strip()
+    flowgraph = ctx.agent.session.flowgraph
+    if flowgraph is not None and any(
+        isinstance(block.instance_name, str) and block.instance_name == normalized_name
+        for block in flowgraph.blocks
+    ):
+        result = ctx.agent._payload_result(
+            "change_graph",
+            {
+                "ok": False,
+                "dry_run": bool(ctx.dry_run),
+                "operation_kind": "add_variable",
+                "error_type": ErrorCode.BLOCK_ALREADY_EXISTS,
+                "message": (
+                    f"Variable `{normalized_name}` already exists. add_variable only creates "
+                    "new variables; use set_param on the existing variable to change its value."
+                ),
+            },
+        )
+        terminal_result = ctx.agent._attach_wrapper_dispatch_telemetry(
+            debug=ctx.debug,
+            wrapper_name="change_graph",
+            wrapper_action=operation_summary,
+            internal_handlers=ctx.handlers or ["none"],
+            started=ctx.started,
+            before_revision=ctx.before_revision,
+            before_dirty=ctx.before_dirty,
+            result=result,
+            validation_run=False,
+            output_truncated=False,
+        )
+        return ChangeGraphOperationResult(
+            handled=True,
+            operation_summary=operation_summary,
+            terminal_result=terminal_result,
+        )
+
     ctx.handlers.append("propose_edit" if ctx.dry_run else "apply_edit")
     tool_result = tx_tool(
         {
             "op_type": "add_block",
             "block_type": "variable",
-            "instance_name": variable_name.strip(),
+            "instance_name": normalized_name,
             "parameters": {"value": variable_value},
         }
     )

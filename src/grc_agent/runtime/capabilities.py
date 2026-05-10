@@ -14,11 +14,7 @@ CapabilityStatus = Literal["release_validated", "beta_validated", "unvalidated"]
 
 @dataclass(frozen=True, slots=True)
 class CapabilitySpec:
-    """Declarative metadata for one change_graph capability.
-
-    This type is intentionally metadata-only. It is not used for planning,
-    execution, routing, or graph mutation.
-    """
+    """Declarative metadata for one mutable change_graph capability."""
 
     operation_kind: str
     status: CapabilityStatus
@@ -32,9 +28,18 @@ class CapabilitySpec:
     supports_commit: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ExperimentalOperationSpec:
+    """Metadata for non-release-gating operation kinds still exposed in schema."""
+
+    operation_kind: str
+    status: CapabilityStatus
+    release_gating: bool
+
+
 @lru_cache(maxsize=1)
 def change_graph_operation_kinds() -> tuple[str, ...]:
-    """Return the operation kinds declared by the model-facing schema."""
+    """Return operation kinds declared by the model-facing change_graph schema."""
 
     schemas = build_tool_schemas(MVP_MODEL_TOOL_NAMES)
     change_graph_schema = next(
@@ -52,6 +57,19 @@ def change_graph_operation_kinds() -> tuple[str, ...]:
     return tuple(str(value) for value in enum_values)
 
 
+# Control outcomes are explicit non-mutation responses from change_graph.
+CONTROL_OUTCOME_KINDS: frozenset[str] = frozenset({"clarify", "unsupported"})
+
+# Exposed but not part of release/beta capability gating.
+EXPERIMENTAL_OPERATION_SPECS: dict[str, ExperimentalOperationSpec] = {
+    "auto_insert": ExperimentalOperationSpec(
+        operation_kind="auto_insert",
+        status="unvalidated",
+        release_gating=False,
+    )
+}
+
+# Mutable operation capabilities tracked for validation progress.
 CAPABILITY_SPECS: dict[str, CapabilitySpec] = {
     "set_param": CapabilitySpec(
         operation_kind="set_param",
@@ -159,62 +177,46 @@ CAPABILITY_SPECS: dict[str, CapabilitySpec] = {
     ),
     "add_variable": CapabilitySpec(
         operation_kind="add_variable",
-        status="unvalidated",
+        status="beta_validated",
         required_args=("variable_name", "variable_value"),
         allowed_aliases=(),
         target_ref_policy="not_applicable",
         graph_delta_contract="add_one_variable_block",
-        eval_suite=None,
-        negative_tests=("duplicate_name_refused", "preview_no_mutation"),
+        eval_suite="R4C_ADD_VARIABLE",
+        negative_tests=(
+            "duplicate_name_refused",
+            "invalid_variable_name_refused",
+            "invalid_expression_refused",
+            "missing_value_refused",
+            "preview_no_mutation",
+        ),
         supports_preview=True,
         supports_commit=True,
-    ),
-    "auto_insert": CapabilitySpec(
-        operation_kind="auto_insert",
-        status="unvalidated",
-        required_args=("connection_id",),
-        allowed_aliases=(),
-        target_ref_policy="not_applicable",
-        graph_delta_contract="implementation_defined",
-        eval_suite=None,
-        negative_tests=("preview_no_mutation",),
-        supports_preview=True,
-        supports_commit=True,
-    ),
-    "clarify": CapabilitySpec(
-        operation_kind="clarify",
-        status="unvalidated",
-        required_args=(),
-        allowed_aliases=(),
-        target_ref_policy="not_applicable",
-        graph_delta_contract="none",
-        eval_suite=None,
-        negative_tests=("no_mutation",),
-        supports_preview=True,
-        supports_commit=False,
-    ),
-    "unsupported": CapabilitySpec(
-        operation_kind="unsupported",
-        status="unvalidated",
-        required_args=(),
-        allowed_aliases=(),
-        target_ref_policy="not_applicable",
-        graph_delta_contract="none",
-        eval_suite=None,
-        negative_tests=("no_mutation",),
-        supports_preview=True,
-        supports_commit=False,
     ),
 }
 
 
 def get_capability_spec(operation_kind: str) -> CapabilitySpec:
-    """Return the capability spec for a known change_graph operation kind."""
+    """Return the mutable capability spec for a known operation kind."""
 
     return CAPABILITY_SPECS[operation_kind]
 
 
-def capability_specs_for_change_graph() -> tuple[CapabilitySpec, ...]:
-    """Return specs in schema enum order for deterministic reporting/tests."""
+def get_experimental_operation_spec(operation_kind: str) -> ExperimentalOperationSpec:
+    """Return experimental non-gating operation metadata."""
 
-    return tuple(get_capability_spec(kind) for kind in change_graph_operation_kinds())
+    return EXPERIMENTAL_OPERATION_SPECS[operation_kind]
+
+
+def capability_specs() -> tuple[CapabilitySpec, ...]:
+    """Return mutable capability specs in stable declaration order."""
+
+    return tuple(CAPABILITY_SPECS[kind] for kind in CAPABILITY_SPECS)
+
+
+def non_capability_operation_kinds() -> tuple[str, ...]:
+    """Return schema operation kinds not tracked as mutable capabilities."""
+
+    kinds = set(change_graph_operation_kinds())
+    kinds -= set(CAPABILITY_SPECS)
+    return tuple(sorted(kinds))

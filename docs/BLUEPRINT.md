@@ -8,7 +8,7 @@ This is the single source-of-truth design document for GRC Agent. It merges the 
 
 GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. It should read, inspect, explain, preview edits, apply verified edits, validate with GNU Radio tooling, and save only when the user explicitly asks.
 
-The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset and lifecycle wrappers are beta-validated only. `set_state`, `disconnect`, `rewire`, and save/load are beta-validated; `add_variable`, `insert_block`, and `remove_block` remain beta or unvalidated. The overall project is **not production-ready**.
+The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset and lifecycle wrappers are beta-validated only. `set_state`, `disconnect`, `rewire`, `insert_block`, `remove_block`, `add_variable`, and save/load are beta-validated. The overall project is **not production-ready**.
 
 Supported local scope:
 
@@ -541,7 +541,7 @@ Before claiming production-ready:
 - Docs-answer quality thresholds must be explicit. **Validated.** grc_docs_answer_eval passed (35/35 ok, 0 misleading, 0 mutation leakage).
 - No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
 
-Current classification (2026-05-09):
+Current classification (2026-05-10):
 
 - **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Release-validated.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R1_SET_PARAM_ONLY** (change_graph set_param): **Release-validated.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
@@ -549,8 +549,9 @@ Current classification (2026-05-09):
 - **R5_SAVE_LOAD** (`save_graph_explicit`, `load_graph_explicit`): **Beta-validated only.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00. Not release-validated pending separate lifecycle safety audit decision.
 - **R2_DISCONNECT** (change_graph disconnect): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R3_REWIRE** (change_graph rewire): **Beta-validated.** 7/7 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **BETA_COMPLEX_MUTATION** (add_variable, multi-step chains, external edits, vague queries): **Informational only.** Not release-gating.
-- **Beta or unvalidated** (`add_variable`, `insert_block`, `remove_block`): exposed in MVP schema/prompt but not release-validated.
+- **R4A_INSERT** (change_graph insert_block on connection): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R4B_REMOVE** (change_graph remove_block): **Beta-validated.** 7/7 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R4C_ADD_VARIABLE** (change_graph add_variable): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **Release-validated subset (R0_READ_ONLY + R1_SET_PARAM_ONLY):** Supported on clean commit with passing deterministic gates. Default MVP runtime remains beta-capable. Not production-ready.
 
 ## 17. Completed / Hardened Items

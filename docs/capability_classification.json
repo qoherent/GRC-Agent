@@ -1,0 +1,49 @@
+{
+  "change_graph_capabilities": {
+    "set_param": {
+      "status": "release_validated",
+      "eval_suite": "R1_SET_PARAM_ONLY",
+      "release_gating": true
+    },
+    "set_state": {
+      "status": "beta_validated",
+      "eval_suite": "R1_SET_STATE",
+      "release_gating": false
+    },
+    "disconnect": {
+      "status": "beta_validated",
+      "eval_suite": "R2_DISCONNECT",
+      "release_gating": false
+    },
+    "rewire": {
+      "status": "beta_validated",
+      "eval_suite": "R3_REWIRE",
+      "release_gating": false
+    },
+    "insert_block": {
+      "status": "beta_validated",
+      "eval_suite": "R4A_INSERT",
+      "release_gating": false
+    },
+    "remove_block": {
+      "status": "beta_validated",
+      "eval_suite": "R4B_REMOVE",
+      "release_gating": false
+    },
+    "add_variable": {
+      "status": "beta_validated",
+      "eval_suite": "R4C_ADD_VARIABLE",
+      "release_gating": false
+    }
+  },
+  "control_outcomes": [
+    "clarify",
+    "unsupported"
+  ],
+  "experimental_non_gating": {
+    "auto_insert": {
+      "status": "unvalidated",
+      "release_gating": false
+    }
+  }
+}

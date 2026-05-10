@@ -18,6 +18,7 @@ class CapabilityManifestTests(unittest.TestCase):
             "R3_REWIRE",
             "R4A_INSERT",
             "R4B_REMOVE",
+            "R4C_ADD_VARIABLE",
             "R5_SAVE_LOAD",
         }
         self.assertTrue(expected.issubset(set(manifests.keys())), manifests)

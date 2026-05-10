@@ -8,6 +8,9 @@ from typing import Any
 
 from grc_agent._payload import ErrorCode
 from grc_agent.runtime.capabilities import (
+    CAPABILITY_SPECS,
+    EXPERIMENTAL_OPERATION_SPECS,
+    CONTROL_OUTCOME_KINDS,
     change_graph_operation_kinds,
     get_capability_spec,
 )
@@ -150,9 +153,16 @@ def dispatch_change_graph(
             validation_run=False,
             output_truncated=False,
         )
-    if resolved_operation_kind is not None:
-        # Capability lookup is metadata-only and intentionally side-effect free.
+    if resolved_operation_kind in CAPABILITY_SPECS:
+        # Mutable capability lookup is metadata-only and intentionally side-effect free.
         _ = get_capability_spec(resolved_operation_kind)
+    elif (
+        resolved_operation_kind is not None
+        and resolved_operation_kind not in CONTROL_OUTCOME_KINDS
+        and resolved_operation_kind in EXPERIMENTAL_OPERATION_SPECS
+    ):
+        # Exposed non-gating operation metadata path (currently auto_insert).
+        _ = EXPERIMENTAL_OPERATION_SPECS[resolved_operation_kind]
     if resolved_operation_kind == "insert_block":
         if isinstance(insert_params, dict):
             normalized_insert_params: dict[str, Any] = {}

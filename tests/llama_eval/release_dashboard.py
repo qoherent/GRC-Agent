@@ -26,6 +26,7 @@ PHASE_NAMES = {
     56: "r3_rewire",
     57: "r4a_insert",
     58: "r4b_remove",
+    59: "r4c_add_variable",
 }
 MANIFEST_DIR = Path(__file__).resolve().parent / "capability_manifests"
 

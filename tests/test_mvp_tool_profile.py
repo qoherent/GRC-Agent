@@ -672,6 +672,173 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["error_type"], "tool_call_invalid")
 
+    def test_change_graph_add_variable_preview_does_not_mutate(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        before_variables = {
+            block.instance_name
+            for block in agent.session.flowgraph.blocks
+            if block.block_type == "variable"
+        }
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": True,
+                "user_goal": "Preview adding noise_level.",
+                "operation_kind": "add_variable",
+                "variable_name": "noise_level",
+                "variable_value": "0.1",
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["operation_summary"], "add_variable")
+        self.assertIsNone(result.get("graph_delta"))
+        planned = result.get("planned_operations") or []
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0].get("op_type"), "add_block")
+        self.assertEqual(planned[0].get("block_type"), "variable")
+        self.assertEqual(planned[0].get("instance_name"), "noise_level")
+        after_variables = {
+            block.instance_name
+            for block in agent.session.flowgraph.blocks
+            if block.block_type == "variable"
+        }
+        self.assertEqual(before_variables, after_variables)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_add_variable_commit_has_expected_delta(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_variables = {
+            block.instance_name
+            for block in agent.session.flowgraph.blocks
+            if block.block_type == "variable"
+        }
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Add noise_level variable.",
+                "operation_kind": "add_variable",
+                "variable_name": "noise_level",
+                "variable_value": "0.1",
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        graph_delta = result.get("graph_delta") or {}
+        self.assertEqual(graph_delta.get("added_blocks"), ["noise_level"])
+        self.assertEqual(graph_delta.get("validation_status"), "valid")
+        self.assertEqual(graph_delta.get("validation_returncode"), 0)
+        after_variables = {
+            block.instance_name
+            for block in agent.session.flowgraph.blocks
+            if block.block_type == "variable"
+        }
+        self.assertIn("noise_level", after_variables)
+        self.assertEqual(after_variables - before_variables, {"noise_level"})
+        self.assertGreater(agent.session.state_revision, before_revision)
+
+    def test_change_graph_add_variable_duplicate_name_refused(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Add existing samp_rate variable.",
+                "operation_kind": "add_variable",
+                "variable_name": "samp_rate",
+                "variable_value": "123",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "block_already_exists")
+        self.assertIn("set_param", result.get("message", ""))
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_add_variable_invalid_name_refused(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Add invalid variable.",
+                "operation_kind": "add_variable",
+                "variable_name": "9bad",
+                "variable_value": "1",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+        self.assertIn("valid identifier", result.get("message", ""))
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_add_variable_invalid_expression_refused_no_commit(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Add broken expression variable.",
+                "operation_kind": "add_variable",
+                "variable_name": "broken_expr",
+                "variable_value": "(",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
+        self.assertIsNone(result.get("graph_delta"))
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_add_variable_missing_value_refused(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Add variable without value.",
+                "operation_kind": "add_variable",
+                "variable_name": "missing_value",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+        self.assertIn("variable_name and variable_value", result.get("message", ""))
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_add_variable_empty_value_refused(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Add variable with empty value.",
+                "operation_kind": "add_variable",
+                "variable_name": "empty_value",
+                "variable_value": "   ",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+        self.assertIn("variable_name and variable_value", result.get("message", ""))
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
     def test_change_graph_disconnect_by_exact_connection_id(self) -> None:
         agent = self._load_agent()
         listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})

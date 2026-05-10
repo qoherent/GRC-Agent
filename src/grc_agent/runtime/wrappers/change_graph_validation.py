@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from grc_agent._payload import ErrorCode
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
+
+_VALID_VARIABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def validate_change_graph_operation_args(
@@ -153,8 +156,27 @@ def validate_change_graph_operation_args(
         )
         return missing
     if operation_kind == "add_variable":
+        variable_value_present = (
+            variable_value is not None
+            and (not isinstance(variable_value, str) or bool(variable_value.strip()))
+        )
+        if isinstance(variable_name, str) and variable_name.strip():
+            if _VALID_VARIABLE_NAME_RE.fullmatch(variable_name.strip()) is None:
+                return agent._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": (
+                            "add_variable requires variable_name to be a valid identifier "
+                            "(letters/digits/underscore, not starting with a digit)."
+                        ),
+                    },
+                )
         missing = _require(
-            isinstance(variable_name, str) and variable_name.strip() and variable_value is not None,
+            isinstance(variable_name, str) and variable_name.strip() and variable_value_present,
             "add_variable requires variable_name and variable_value.",
         )
         return missing

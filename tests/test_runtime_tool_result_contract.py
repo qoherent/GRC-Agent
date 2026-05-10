@@ -69,6 +69,46 @@ class RuntimeToolResultContractTests(unittest.TestCase):
         self.assertNotIn("commit_success_missing_graph_delta", findings, result)
         self.assertTrue(result.get("ok"), result)
 
+    def test_add_variable_commit_reports_added_block_delta(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "operation_kind": "add_variable",
+                "user_goal": "add noise_level variable",
+                "variable_name": "noise_level",
+                "variable_value": "0.1",
+            },
+        )
+        findings = audit_change_graph_result_shape(result)
+        self.assertNotIn("commit_success_missing_graph_delta", findings, result)
+        graph_delta = result.get("graph_delta") or {}
+        self.assertEqual(graph_delta.get("added_blocks"), ["noise_level"])
+        self.assertEqual(graph_delta.get("validation_status"), "valid")
+        self.assertEqual(graph_delta.get("validation_returncode"), 0)
+
+    def test_add_variable_validation_failure_has_no_success_like_delta(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "operation_kind": "add_variable",
+                "user_goal": "add broken variable expression",
+                "variable_name": "broken_expr",
+                "variable_value": "(",
+            },
+        )
+        findings = audit_change_graph_result_shape(result)
+        self.assertNotIn(
+            "failed_or_refused_contains_success_like_graph_delta",
+            findings,
+            {"result": result, "findings": findings},
+        )
+        self.assertFalse(result.get("ok"), result)
+        self.assertIsNone(result.get("graph_delta"))
+
     def test_clarification_payload_is_explicit(self) -> None:
         agent = self._load_agent()
         result = agent.execute_tool(
