@@ -37,11 +37,23 @@ from grc_agent.runtime.docs_answer_advisor import (
     DocsAnswerSnippet,
     run_docs_answer_advisor,
 )
+from grc_agent.runtime.path_safety import (
+    resolved_path as resolve_runtime_path,
+    unsafe_graph_root_for_path,
+)
 from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime.tool_surface import (
     MVP_MODEL_TOOL_NAMES,
     MODEL_TOOL_NAMES_ORDERED,
     tool_surface_for_legacy_flag,
+)
+from grc_agent.runtime.wrappers.lifecycle import (
+    load_graph_explicit as load_graph_explicit_wrapper,
+    save_graph_explicit as save_graph_explicit_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph_validation import (
+    canonicalize_change_graph_target_ref,
+    validate_change_graph_operation_args,
 )
 from grc_agent.runtime.turn_plan import (
     INTENT_ADD_VARIABLE,
@@ -671,22 +683,14 @@ class GrcAgent:
 
     @staticmethod
     def _resolved_path(path_value: str | Path) -> Path:
-        return Path(path_value).expanduser().resolve(strict=False)
+        return resolve_runtime_path(path_value)
 
     def _unsafe_graph_root_for_path(self, path_value: str | Path) -> str | None:
-        candidate = self._resolved_path(path_value)
-        roots = (
-            *(_INSTALLED_GRAPH_ROOTS),
-            _CANONICAL_FIXTURE_ROOT,
+        return unsafe_graph_root_for_path(
+            path_value,
+            installed_graph_roots=_INSTALLED_GRAPH_ROOTS,
+            canonical_fixture_root=_CANONICAL_FIXTURE_ROOT,
         )
-        for root in roots:
-            resolved_root = root.expanduser().resolve(strict=False)
-            try:
-                candidate.relative_to(resolved_root)
-            except ValueError:
-                continue
-            return str(resolved_root)
-        return None
 
     def validate_tool_call(
         self,
@@ -4797,292 +4801,32 @@ class GrcAgent:
         variable_name: str | None,
         variable_value: Any,
     ) -> ToolResult | None:
-        if operation_kind is None:
-            return None
-        if operation_kind in {"clarify", "unsupported"}:
-            return None
-
-        if detach_connections is not None and not isinstance(detach_connections, bool):
-            return self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "detach_connections must be boolean when provided.",
-                },
-            )
-        if detach_connection_ids is not None:
-            if not isinstance(detach_connection_ids, list):
-                return self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": "detach_connection_ids must be an array of connection ids.",
-                    },
-                )
-            for connection_id in detach_connection_ids:
-                if not isinstance(connection_id, str) or not connection_id.strip():
-                    return self._payload_result(
-                        "change_graph",
-                        {
-                            "ok": False,
-                            "dry_run": bool(dry_run),
-                            "operation_kind": operation_kind,
-                            "error_type": ErrorCode.INVALID_REQUEST,
-                            "message": (
-                                "detach_connection_ids entries must be non-empty connection id strings."
-                            ),
-                        },
-                    )
-
-        normalized_target_ref: dict[str, Any] | None = None
-        if target_ref is not None:
-            if not isinstance(target_ref, dict):
-                return self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": "target_ref must be an object when provided.",
-                    },
-                )
-            normalized_target_ref = {
-                str(key): value for key, value in target_ref.items() if isinstance(key, str)
-            }
-            # Accept both wrapper-era (`uid`, `instance_name`) and guarded
-            # transaction-era (`block_uid`, `expected_instance_name`) references.
-            target_uid = normalized_target_ref.get("uid")
-            if not (isinstance(target_uid, str) and target_uid.strip()):
-                target_uid = normalized_target_ref.get("block_uid")
-            target_instance = normalized_target_ref.get("instance_name")
-            if not (isinstance(target_instance, str) and target_instance.strip()):
-                target_instance = normalized_target_ref.get("expected_instance_name")
-            if not (
-                isinstance(target_uid, str)
-                and target_uid.strip()
-                or isinstance(target_instance, str)
-                and target_instance.strip()
-            ):
-                return self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": (
-                            "target_ref must include at least one non-empty identifier: "
-                            "`uid` or `instance_name`."
-                        ),
-                    },
-                )
-
-        def _require(condition: bool, message: str) -> ToolResult | None:
-            if condition:
-                return None
-            return self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": message,
-                },
-            )
-
-        has_target = bool(
-            normalized_target_ref
-            or (isinstance(instance_name, str) and instance_name.strip())
+        return validate_change_graph_operation_args(
+            self,
+            dry_run=dry_run,
+            operation_kind=operation_kind,
+            target_ref=target_ref,
+            block_id=block_id,
+            candidate_id=candidate_id,
+            instance_name=instance_name,
+            connection_id=connection_id,
+            src_block=src_block,
+            src_port=src_port,
+            dst_block=dst_block,
+            dst_port=dst_port,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
+            insert_params=insert_params,
+            detach_connections=detach_connections,
+            detach_connection_ids=detach_connection_ids,
+            param_key=param_key,
+            param_value=param_value,
+            state=state,
+            variable_name=variable_name,
+            variable_value=variable_value,
         )
-
-        if operation_kind == "set_param":
-            missing = _require(
-                has_target
-                and isinstance(param_key, str)
-                and param_key.strip()
-                and param_value is not None,
-                "set_param requires target_ref or instance_name plus param_key and param_value.",
-            )
-            return missing
-        if operation_kind == "set_state":
-            missing = _require(
-                has_target and isinstance(state, str) and state in {"enabled", "disabled"},
-                "set_state requires target_ref or instance_name plus state=enabled|disabled.",
-            )
-            return missing
-        if operation_kind == "add_variable":
-            missing = _require(
-                isinstance(variable_name, str)
-                and variable_name.strip()
-                and variable_value is not None,
-                "add_variable requires variable_name and variable_value.",
-            )
-            return missing
-        if operation_kind == "disconnect":
-            has_new_endpoints = any(
-                value is not None and (not isinstance(value, str) or value.strip())
-                for value in (
-                    new_src_block,
-                    new_src_port,
-                    new_dst_block,
-                    new_dst_port,
-                )
-            )
-            if has_new_endpoints:
-                return self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": (
-                            "disconnect does not accept rewire fields. "
-                            "Use operation_kind='rewire' for new endpoint arguments."
-                        ),
-                    },
-                )
-            has_endpoint_hint = any(
-                value is not None and (not isinstance(value, str) or value.strip())
-                for value in (src_block, src_port, dst_block, dst_port)
-            )
-            return _require(
-                (isinstance(connection_id, str) and connection_id.strip()) or has_endpoint_hint,
-                (
-                    "disconnect requires connection_id or endpoint hints "
-                    "(src_block/src_port/dst_block/dst_port)."
-                ),
-            )
-        if operation_kind == "rewire":
-            has_old_endpoint_hint = any(
-                value is not None and (not isinstance(value, str) or value.strip())
-                for value in (src_block, src_port, dst_block, dst_port)
-            )
-            has_new_source_hint = any(
-                value is not None and (not isinstance(value, str) or value.strip())
-                for value in (new_src_block, new_src_port)
-            )
-            has_new_destination_hint = any(
-                value is not None and (not isinstance(value, str) or value.strip())
-                for value in (new_dst_block, new_dst_port)
-            )
-            return _require(
-                (
-                    (isinstance(connection_id, str) and connection_id.strip())
-                    or has_old_endpoint_hint
-                )
-                and has_new_source_hint
-                and has_new_destination_hint,
-                (
-                    "rewire requires connection_id or old endpoint hints plus "
-                    "exact new endpoints or bounded hints for both new source and new destination."
-                ),
-            )
-        if operation_kind == "insert_block":
-            normalized_block_id = (
-                block_id.strip()
-                if isinstance(block_id, str) and block_id.strip()
-                else None
-            )
-            normalized_candidate_id = (
-                candidate_id.strip()
-                if isinstance(candidate_id, str) and candidate_id.strip()
-                else None
-            )
-            if (
-                normalized_block_id is not None
-                and normalized_candidate_id is not None
-                and normalized_block_id != normalized_candidate_id
-            ):
-                return self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": (
-                            "insert_block received conflicting block_id and candidate_id. "
-                            "Provide one catalog id or matching values for both."
-                        ),
-                    },
-                )
-            if insert_params is not None and not isinstance(insert_params, dict):
-                return self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": "insert_params must be an object when provided.",
-                    },
-                )
-            return _require(
-                isinstance(connection_id, str)
-                and connection_id.strip()
-                and (
-                    normalized_block_id is not None
-                    or normalized_candidate_id is not None
-                ),
-                "insert_block requires connection_id and block_id (or candidate_id).",
-            )
-        if operation_kind == "remove_block":
-            if detach_connections is not None and not isinstance(detach_connections, bool):
-                return self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": "detach_connections must be boolean when provided.",
-                    },
-                )
-            return _require(
-                has_target,
-                "remove_block requires instance_name or guarded target_ref.",
-            )
-        if detach_connections is not None or detach_connection_ids is not None:
-            return self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": (
-                        "detach_connections and detach_connection_ids are only supported for remove_block."
-                    ),
-                },
-            )
-        if operation_kind == "auto_insert":
-            return _require(
-                isinstance(connection_id, str) and connection_id.strip(),
-                "auto_insert requires connection_id.",
-            )
-        if operation_kind in {"new_grc", "load_grc", "save_graph"}:
-            return self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.UNSUPPORTED_OP,
-                    "message": "change_graph is mutation-only. Use explicit lifecycle wrappers for save/load.",
-                },
-            )
-        # Keep unused operation fields referenced so static checks do not regress silently.
-        _ = (src_block, src_port, dst_block, dst_port)
-        return None
 
     def _canonicalize_change_graph_target_ref(
         self,
@@ -5091,149 +4835,12 @@ class GrcAgent:
         operation_kind: str | None,
         target_ref: dict[str, Any] | None,
     ) -> tuple[dict[str, Any] | None, ToolResult | None]:
-        if target_ref is None:
-            return None, None
-        if not isinstance(target_ref, dict):
-            return None, self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "target_ref must be an object when provided.",
-                },
-            )
-
-        normalized = {str(key): value for key, value in target_ref.items() if isinstance(key, str)}
-        alias_map = {
-            "uid": "block_uid",
-            "instance_name": "expected_instance_name",
-            "block_type": "expected_block_type",
-            "state_revision": "base_state_revision",
-        }
-        canonical_fields = (
-            "block_uid",
-            "expected_instance_name",
-            "expected_block_type",
-            "base_state_revision",
+        return canonicalize_change_graph_target_ref(
+            self,
+            dry_run=dry_run,
+            operation_kind=operation_kind,
+            target_ref=target_ref,
         )
-        allowed_fields = set(canonical_fields) | set(alias_map.keys())
-        unknown_fields = sorted(key for key in normalized if key not in allowed_fields)
-        if unknown_fields:
-            return None, self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": (
-                        "target_ref contains unsupported keys: "
-                        + ", ".join(unknown_fields)
-                        + ". Allowed keys are guarded "
-                        "(block_uid, expected_instance_name, expected_block_type, base_state_revision) "
-                        "or wrapper-era aliases (uid, instance_name, block_type, state_revision)."
-                    ),
-                },
-            )
-
-        canonical: dict[str, Any] = {}
-        for alias_key, canonical_key in alias_map.items():
-            canonical_value = normalized.get(canonical_key)
-            alias_value = normalized.get(alias_key)
-            if canonical_value is not None and alias_value is not None and canonical_value != alias_value:
-                return None, self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "operation_kind": operation_kind,
-                        "error_type": ErrorCode.INVALID_REQUEST,
-                        "message": (
-                            f"target_ref has conflicting values for {canonical_key!r} and its "
-                            f"alias {alias_key!r}."
-                        ),
-                    },
-                )
-            if canonical_value is not None:
-                canonical[canonical_key] = canonical_value
-            elif alias_value is not None:
-                canonical[canonical_key] = alias_value
-
-        missing_fields = [field for field in canonical_fields if field not in canonical]
-        if missing_fields:
-            return None, self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": (
-                        "target_ref must include guarded fields "
-                        "(block_uid, expected_instance_name, expected_block_type, base_state_revision). "
-                        "Missing: " + ", ".join(missing_fields)
-                    ),
-                },
-            )
-
-        if not isinstance(canonical["block_uid"], str) or not canonical["block_uid"].strip():
-            return None, self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "target_ref.block_uid must be a non-empty string.",
-                },
-            )
-        if (
-            not isinstance(canonical["expected_instance_name"], str)
-            or not canonical["expected_instance_name"].strip()
-        ):
-            return None, self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "target_ref.expected_instance_name must be a non-empty string.",
-                },
-            )
-        if (
-            not isinstance(canonical["expected_block_type"], str)
-            or not canonical["expected_block_type"].strip()
-        ):
-            return None, self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "target_ref.expected_block_type must be a non-empty string.",
-                },
-            )
-        base_state_revision = canonical["base_state_revision"]
-        if not isinstance(base_state_revision, int) or isinstance(base_state_revision, bool):
-            return None, self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "target_ref.base_state_revision must be an integer.",
-                },
-            )
-
-        canonical["block_uid"] = canonical["block_uid"].strip()
-        canonical["expected_instance_name"] = canonical["expected_instance_name"].strip()
-        canonical["expected_block_type"] = canonical["expected_block_type"].strip()
-        return canonical, None
 
     def _change_graph(
         self,
@@ -7640,217 +7247,11 @@ class GrcAgent:
         overwrite: bool = False,
         debug: bool = False,
     ) -> ToolResult:
-        started = time.monotonic()
-        before_revision = self.session.state_revision
-        before_dirty = self.session.is_dirty
-        handlers: list[str] = []
-        missing_session = self._missing_session_result("save_graph_explicit")
-        if missing_session is not None:
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="save_graph_explicit",
-                wrapper_action="missing_session",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=missing_session,
-                validation_run=False,
-                output_truncated=False,
-            )
-        if not self._has_explicit_save_intent():
-            result = self._tool_result(
-                "save_graph_explicit",
-                ok=False,
-                message=(
-                    "Explicit save intent is required. Use clear save wording like "
-                    "'save', 'persist', or 'write a copy'."
-                ),
-                error_type=ErrorCode.INVALID_REQUEST,
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="save_graph_explicit",
-                wrapper_action="intent_required",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-
-        explicit_path = isinstance(path, str) and bool(path.strip())
-        target_path = (
-            Path(path).expanduser()
-            if explicit_path
-            else self.session.path
-        )
-        if target_path is None:
-            result = self._tool_result(
-                "save_graph_explicit",
-                ok=False,
-                message="This graph has no file path yet. Provide `path` for explicit save/copy.",
-                error_type="SAVE_PATH_REQUIRED",
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="save_graph_explicit",
-                wrapper_action="missing_path",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-
-        resolved_target = target_path.resolve(strict=False)
-        unsafe_root = self._unsafe_graph_root_for_path(resolved_target)
-        if unsafe_root is not None:
-            result = self._tool_result(
-                "save_graph_explicit",
-                ok=False,
-                message=(
-                    "Refusing to write to protected canonical/example graph paths. "
-                    f"Choose a copied working path outside {unsafe_root}."
-                ),
-                error_type=ErrorCode.SAVE_REFUSED,
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="save_graph_explicit",
-                wrapper_action="unsafe_path",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-
-        current_path = (
-            self.session.path.resolve(strict=False)
-            if self.session.path is not None
-            else None
-        )
-        explicit_target_path = explicit_path and path is not None
-        target_exists = resolved_target.exists()
-        if (
-            explicit_target_path
-            and target_exists
-            and current_path is not None
-            and resolved_target != current_path
-            and not overwrite
-        ):
-            result = self._tool_result(
-                "save_graph_explicit",
-                ok=False,
-                message=(
-                    "Refusing to overwrite existing destination without explicit overwrite permission. "
-                    "Set overwrite=true for that destination."
-                ),
-                error_type=ErrorCode.SAVE_REFUSED,
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="save_graph_explicit",
-                wrapper_action="overwrite_refused",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-
-        handlers.append("validate_graph")
-        validation = self._validate_graph()
-        validation_result = {
-            "valid": bool(validation.get("valid")),
-            "returncode": validation.get("returncode"),
-            "stderr": validation.get("stderr"),
-        }
-        if validation.get("ok") is not True:
-            result = self._payload_result(
-                "save_graph_explicit",
-                {
-                    "ok": False,
-                    "message": validation.get(
-                        "message", "Graph validation failed before save."
-                    ),
-                    "error_type": validation.get("error_type", ErrorCode.VALIDATION_ERROR),
-                    "path": str(resolved_target),
-                    "dirty_before": bool(before_dirty),
-                    "dirty_after": bool(self.session.is_dirty),
-                    "validation_result": validation_result,
-                },
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="save_graph_explicit",
-                wrapper_action="validation_failed",
-                internal_handlers=handlers,
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=True,
-                output_truncated=False,
-            )
-        if not bool(validation.get("valid")):
-            result = self._payload_result(
-                "save_graph_explicit",
-                {
-                    "ok": False,
-                    "message": "Refusing to save invalid graph state.",
-                    "error_type": ErrorCode.SAVE_REFUSED,
-                    "path": str(resolved_target),
-                    "dirty_before": bool(before_dirty),
-                    "dirty_after": bool(self.session.is_dirty),
-                    "validation_result": validation_result,
-                },
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="save_graph_explicit",
-                wrapper_action="invalid_graph",
-                internal_handlers=handlers,
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=True,
-                output_truncated=False,
-            )
-
-        handlers.append("save_graph")
-        save_result = self._save_graph(str(resolved_target) if explicit_target_path else None)
-        payload = {
-            "ok": bool(save_result.get("ok")),
-            "message": save_result.get("message", "Save failed."),
-            "error_type": save_result.get("error_type"),
-            "path": save_result.get("path", str(resolved_target)),
-            "dirty_before": bool(before_dirty),
-            "dirty_after": bool(self.session.is_dirty),
-            "validation_result": validation_result,
-        }
-        wrapper_result = self._payload_result("save_graph_explicit", payload)
-        return self._attach_wrapper_dispatch_telemetry(
+        return save_graph_explicit_wrapper(
+            self,
+            path=path,
+            overwrite=overwrite,
             debug=debug,
-            wrapper_name="save_graph_explicit",
-            wrapper_action="save",
-            internal_handlers=handlers,
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=wrapper_result,
-            validation_run=True,
-            output_truncated=False,
         )
 
     def _load_graph_explicit(
@@ -7858,143 +7259,10 @@ class GrcAgent:
         path: str,
         debug: bool = False,
     ) -> ToolResult:
-        started = time.monotonic()
-        before_revision = self.session.state_revision
-        before_dirty = self.session.is_dirty
-        handlers: list[str] = []
-        if not self._has_explicit_load_intent():
-            result = self._tool_result(
-                "load_graph_explicit",
-                ok=False,
-                message=(
-                    "Explicit load intent is required. Use clear load wording like "
-                    "'load', 'open', or 'switch to'."
-                ),
-                error_type=ErrorCode.INVALID_REQUEST,
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="load_graph_explicit",
-                wrapper_action="intent_required",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-        if not isinstance(path, str) or not path.strip():
-            result = self._tool_result(
-                "load_graph_explicit",
-                ok=False,
-                message="load_graph_explicit requires non-empty `path`.",
-                error_type=ErrorCode.INVALID_REQUEST,
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="load_graph_explicit",
-                wrapper_action="missing_path",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-
-        resolved_path = Path(path).expanduser().resolve(strict=False)
-        unsafe_root = self._unsafe_graph_root_for_path(resolved_path)
-        if unsafe_root is not None:
-            result = self._tool_result(
-                "load_graph_explicit",
-                ok=False,
-                message=(
-                    "Refusing to load protected canonical/example graph directly for mutation. "
-                    f"Copy it to a working path outside {unsafe_root} and load the copy."
-                ),
-                error_type=ErrorCode.FILE_LOAD_ERROR,
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="load_graph_explicit",
-                wrapper_action="unsafe_path",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-
-        handlers.append("load_grc")
-        loaded = load_grc(str(resolved_path))
-        if not isinstance(loaded, FlowgraphSession):
-            result = self._tool_result(
-                "load_graph_explicit",
-                ok=False,
-                message=loaded.get("message", "Failed to load .grc file."),
-                error_type=loaded.get("error_type", ErrorCode.FILE_LOAD_ERROR),
-            )
-            return self._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="load_graph_explicit",
-                wrapper_action="load_failed",
-                internal_handlers=handlers,
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-
-        self._replace_session(loaded, reason="load_graph_explicit")
-        handlers.append("validate_graph")
-        validation = self._validate_graph()
-        summary_payload = summarize_graph(self.session)
-        validation_result = {
-            "valid": bool(validation.get("valid")),
-            "returncode": validation.get("returncode"),
-            "stderr": validation.get("stderr"),
-        }
-        valid_graph = bool(validation.get("ok")) and bool(validation.get("valid"))
-        payload: dict[str, Any] = {
-            "ok": valid_graph,
-            "path": str(self.session.path) if self.session.path is not None else str(resolved_path),
-            "state_revision": self.session.state_revision,
-            "message": (
-                "Graph loaded and validated."
-                if valid_graph
-                else "Graph loaded, but validation failed for the loaded state."
-            ),
-            "valid": bool(validation.get("valid")),
-            "validation_result": validation_result,
-            "graph_summary": summary_payload.get("summary"),
-            "block_count": summary_payload.get("block_count"),
-            "connection_count": summary_payload.get("connection_count"),
-            "dirty": self.session.is_dirty,
-        }
-        if not valid_graph:
-            payload["error_type"] = (
-                validation.get("error_type")
-                if validation.get("ok") is False
-                else ErrorCode.GNU_VALIDATION_FAILED
-            )
-        result = self._payload_result("load_graph_explicit", payload)
-        return self._attach_wrapper_dispatch_telemetry(
+        return load_graph_explicit_wrapper(
+            self,
+            path=path,
             debug=debug,
-            wrapper_name="load_graph_explicit",
-            wrapper_action="load",
-            internal_handlers=handlers,
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=True,
-            output_truncated=False,
         )
 
     def _save_graph(self, path: str | None = None) -> ToolResult:
