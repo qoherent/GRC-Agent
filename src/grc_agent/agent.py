@@ -51,6 +51,17 @@ from grc_agent.runtime.wrappers.lifecycle import (
     load_graph_explicit as load_graph_explicit_wrapper,
     save_graph_explicit as save_graph_explicit_wrapper,
 )
+from grc_agent.runtime.wrappers.change_graph.context import ChangeGraphOperationContext
+from grc_agent.runtime.wrappers.change_graph.disconnect import (
+    handle_disconnect_by_connection_id,
+    handle_disconnect_by_endpoints,
+)
+from grc_agent.runtime.wrappers.change_graph.insert import handle_insert_block_on_connection
+from grc_agent.runtime.wrappers.change_graph.param import handle_set_param
+from grc_agent.runtime.wrappers.change_graph.remove import handle_remove_block
+from grc_agent.runtime.wrappers.change_graph.rewire import handle_rewire
+from grc_agent.runtime.wrappers.change_graph.state import handle_set_state
+from grc_agent.runtime.wrappers.change_graph.variable import handle_add_variable
 from grc_agent.runtime.wrappers.change_graph_validation import (
     canonicalize_change_graph_target_ref,
     validate_change_graph_operation_args,
@@ -5330,6 +5341,16 @@ class GrcAgent:
         tx_tool = self._propose_edit if dry_run else self._apply_edit
         operation_summary = "clarification_required"
         result: dict[str, Any]
+        operation_ctx = ChangeGraphOperationContext(
+            agent=self,
+            debug=debug,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            dry_run=bool(dry_run),
+            resolved_operation_kind=resolved_operation_kind,
+            handlers=handlers,
+        )
 
         def _kind_allows(*allowed: str) -> bool:
             return resolved_operation_kind is None or resolved_operation_kind in allowed
@@ -5351,71 +5372,6 @@ class GrcAgent:
                 },
             )
 
-        def _build_remove_block_operation(*, resolved_instance_name: str) -> dict[str, Any]:
-            operation: dict[str, Any] = {
-                "op_type": "remove_block",
-                "instance_name": resolved_instance_name,
-            }
-            if isinstance(target_ref, dict):
-                operation["target_ref"] = target_ref
-            return operation
-
-        def _resolve_remove_block_target_name() -> str | None:
-            if isinstance(target_ref, dict):
-                resolved = self.session.resolve_block_reference(
-                    instance_name=target_ref.get("expected_instance_name"),
-                    block_uid=target_ref.get("block_uid"),
-                    block_type=target_ref.get("expected_block_type"),
-                )
-                candidates = resolved.get("candidates") if isinstance(resolved, dict) else None
-                if isinstance(candidates, list) and len(candidates) == 1:
-                    candidate = candidates[0]
-                    if isinstance(candidate, dict):
-                        name = candidate.get("name")
-                        if isinstance(name, str) and name.strip():
-                            return name.strip()
-                return None
-            if isinstance(instance_name, str) and instance_name.strip():
-                resolved = self.session.resolve_block_reference(instance_name=instance_name.strip())
-                candidates = resolved.get("candidates") if isinstance(resolved, dict) else None
-                if isinstance(candidates, list) and len(candidates) == 1:
-                    candidate = candidates[0]
-                    if isinstance(candidate, dict):
-                        name = candidate.get("name")
-                        if isinstance(name, str) and name.strip():
-                            return name.strip()
-            return None
-
-        def _attached_connection_ids_for_block(block_name: str) -> list[str]:
-            flowgraph = self.session.flowgraph
-            if flowgraph is None:
-                return []
-            attached: list[str] = []
-            for connection in flowgraph.connections:
-                if connection.src_block != block_name and connection.dst_block != block_name:
-                    continue
-                attached.append(
-                    render_connection_id(
-                        connection.src_block,
-                        connection.src_port,
-                        connection.dst_block,
-                        connection.dst_port,
-                    )
-                )
-            return sorted(attached)
-
-        def _normalize_connection_id_list(values: list[str] | None) -> list[str]:
-            if not isinstance(values, list):
-                return []
-            normalized: list[str] = []
-            for value in values:
-                if not isinstance(value, str):
-                    continue
-                token = value.strip()
-                if token:
-                    normalized.append(token)
-            return sorted(dict.fromkeys(normalized))
-
         resolved_insert_block_id: str | None = None
         if isinstance(block_id, str) and block_id.strip():
             resolved_insert_block_id = block_id.strip()
@@ -5429,75 +5385,41 @@ class GrcAgent:
         if resolved_operation_kind == "rewire" and (
             (isinstance(connection_id, str) and connection_id.strip()) or rewire_old_hint
         ):
-            operation_summary = "rewire_connection"
-            mismatch = _kind_mismatch_result("rewire")
-            if mismatch is not None:
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action="operation_kind_mismatch",
-                    internal_handlers=["none"],
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=mismatch,
-                    validation_run=False,
-                    output_truncated=False,
-                )
-            handlers.append("rewire_connection")
-            result = self._rewire_connection(
-                old_connection_id=connection_id.strip()
-                if isinstance(connection_id, str) and connection_id.strip()
-                else None,
-                old_src_block=src_block,
-                old_src_port=src_port,
-                old_dst_block=dst_block,
-                old_dst_port=dst_port,
+            rewire_dispatch = handle_rewire(
+                ctx=operation_ctx,
+                connection_id=connection_id,
+                src_block=src_block,
+                src_port=src_port,
+                dst_block=dst_block,
+                dst_port=dst_port,
                 new_src_block=new_src_block,
                 new_src_port=new_src_port,
                 new_dst_block=new_dst_block,
                 new_dst_port=new_dst_port,
-                dry_run=bool(dry_run),
+                kind_mismatch_result=_kind_mismatch_result,
             )
+            operation_summary = rewire_dispatch.operation_summary
+            if rewire_dispatch.terminal_result is not None:
+                return rewire_dispatch.terminal_result
+            result = rewire_dispatch.tool_result if rewire_dispatch.tool_result is not None else {}
         elif (
             resolved_insert_block_id is not None
             and isinstance(connection_id, str)
             and connection_id.strip()
         ):
-            operation_summary = "insert_block_on_connection"
-            mismatch = _kind_mismatch_result("insert_block")
-            if mismatch is not None:
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action="operation_kind_mismatch",
-                    internal_handlers=["none"],
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=mismatch,
-                    validation_run=False,
-                    output_truncated=False,
-                )
-            if dry_run:
-                handlers.append("propose_edit(insert_block_on_connection)")
-                result = tx_tool(
-                    {
-                        "op_type": "insert_block_on_connection",
-                        "connection_id": connection_id.strip(),
-                        "block_type": resolved_insert_block_id,
-                        "instance_name": instance_name or f"{resolved_insert_block_id}_0",
-                        "params": insert_params or {},
-                    }
-                )
-            else:
-                handlers.append("insert_block_on_connection")
-                result = self._insert_block_on_connection(
-                    connection_id=connection_id.strip(),
-                    block_type=resolved_insert_block_id,
-                    instance_name=instance_name or f"{resolved_insert_block_id}_0",
-                    params=insert_params or {},
-                )
+            insert_dispatch = handle_insert_block_on_connection(
+                ctx=operation_ctx,
+                resolved_insert_block_id=resolved_insert_block_id,
+                connection_id=connection_id.strip(),
+                instance_name=instance_name,
+                insert_params=insert_params,
+                tx_tool=tx_tool,
+                kind_mismatch_result=_kind_mismatch_result,
+            )
+            operation_summary = insert_dispatch.operation_summary
+            if insert_dispatch.terminal_result is not None:
+                return insert_dispatch.terminal_result
+            result = insert_dispatch.tool_result if insert_dispatch.tool_result is not None else {}
         elif isinstance(connection_id, str) and connection_id.strip():
             insertion_words = ("insert", "add", "compatible")
             if resolved_operation_kind == "auto_insert" or (
@@ -5516,31 +5438,20 @@ class GrcAgent:
                         target_hint=connection_id.strip(),
                     )
             else:
-                operation_summary = "remove_connection"
-                mismatch = _kind_mismatch_result("disconnect")
-                if mismatch is not None:
-                    return self._attach_wrapper_dispatch_telemetry(
-                        debug=debug,
-                        wrapper_name="change_graph",
-                        wrapper_action="operation_kind_mismatch",
-                        internal_handlers=["none"],
-                        started=started,
-                        before_revision=before_revision,
-                        before_dirty=before_dirty,
-                        result=mismatch,
-                        validation_run=False,
-                        output_truncated=False,
-                    )
-                if dry_run:
-                    handlers.append("propose_edit(remove_connection)")
-                    remove_operation: dict[str, Any] = {
-                        "op_type": "remove_connection",
-                        "connection_id": connection_id.strip(),
-                    }
-                    result = tx_tool(remove_operation)
-                else:
-                    handlers.append("remove_connection")
-                    result = self._remove_connection(connection_id=connection_id.strip())
+                disconnect_dispatch = handle_disconnect_by_connection_id(
+                    ctx=operation_ctx,
+                    connection_id=connection_id.strip(),
+                    tx_tool=tx_tool,
+                    kind_mismatch_result=_kind_mismatch_result,
+                )
+                operation_summary = disconnect_dispatch.operation_summary
+                if disconnect_dispatch.terminal_result is not None:
+                    return disconnect_dispatch.terminal_result
+                result = (
+                    disconnect_dispatch.tool_result
+                    if disconnect_dispatch.tool_result is not None
+                    else {}
+                )
         elif (
             resolved_operation_kind == "disconnect"
             and any(
@@ -5548,159 +5459,72 @@ class GrcAgent:
                 for value in (src_block, src_port, dst_block, dst_port)
             )
         ):
-            operation_summary = "remove_connection"
-            if dry_run:
-                handlers.append("propose_edit(remove_connection)")
-                result = tx_tool(
-                    {
-                        "op_type": "remove_connection",
-                        "src_block": src_block,
-                        "src_port": src_port,
-                        "dst_block": dst_block,
-                        "dst_port": dst_port,
-                    }
-                )
-            else:
-                handlers.append("remove_connection")
-                result = self._remove_connection(
-                    src_block=src_block,
-                    src_port=src_port,
-                    dst_block=dst_block,
-                    dst_port=dst_port,
-                )
+            disconnect_dispatch = handle_disconnect_by_endpoints(
+                ctx=operation_ctx,
+                src_block=src_block,
+                src_port=src_port,
+                dst_block=dst_block,
+                dst_port=dst_port,
+                tx_tool=tx_tool,
+            )
+            operation_summary = disconnect_dispatch.operation_summary
+            result = (
+                disconnect_dispatch.tool_result
+                if disconnect_dispatch.tool_result is not None
+                else {}
+            )
         elif isinstance(variable_name, str) and variable_name.strip() and variable_value is not None:
-            operation_summary = "add_variable"
-            mismatch = _kind_mismatch_result("add_variable")
-            if mismatch is not None:
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action="operation_kind_mismatch",
-                    internal_handlers=["none"],
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=mismatch,
-                    validation_run=False,
-                    output_truncated=False,
-                )
-            handlers.append("propose_edit" if dry_run else "apply_edit")
-            result = tx_tool(
-                {
-                    "op_type": "add_block",
-                    "block_type": "variable",
-                    "instance_name": variable_name.strip(),
-                    "parameters": {"value": variable_value},
-                }
+            add_variable_dispatch = handle_add_variable(
+                ctx=operation_ctx,
+                variable_name=variable_name,
+                variable_value=variable_value,
+                tx_tool=tx_tool,
+                kind_mismatch_result=_kind_mismatch_result,
+            )
+            operation_summary = add_variable_dispatch.operation_summary
+            if add_variable_dispatch.terminal_result is not None:
+                return add_variable_dispatch.terminal_result
+            result = (
+                add_variable_dispatch.tool_result
+                if add_variable_dispatch.tool_result is not None
+                else {}
             )
         elif isinstance(param_key, str) and param_key.strip() and param_value is not None:
-            operation_summary = "update_params"
-            mismatch = _kind_mismatch_result("set_param")
-            if mismatch is not None:
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action="operation_kind_mismatch",
-                    internal_handlers=["none"],
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=mismatch,
-                    validation_run=False,
-                    output_truncated=False,
-                )
-            handlers.append("propose_edit" if dry_run else "apply_edit")
-            if isinstance(target_ref, dict):
-                result = tx_tool(
-                    {
-                        "op_type": "update_params",
-                        "target_ref": target_ref,
-                        "params": {param_key.strip(): param_value},
-                    }
-                )
-            elif isinstance(instance_name, str) and instance_name.strip():
-                result = tx_tool(
-                    {
-                        "op_type": "update_params",
-                        "instance_name": instance_name.strip(),
-                        "params": {param_key.strip(): param_value},
-                    }
-                )
-            else:
-                result = self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "error_type": "clarification_required",
-                        "message": "Missing target block for parameter update.",
-                        "clarification_options": [
-                            "Provide exact instance_name.",
-                            "Or provide guarded target_ref from a prior clarification.",
-                        ],
-                    },
-                )
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action=operation_summary,
-                    internal_handlers=handlers,
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=result,
-                    validation_run=False,
-                    output_truncated=False,
+            set_param_dispatch = handle_set_param(
+                ctx=operation_ctx,
+                param_key=param_key,
+                param_value=param_value,
+                target_ref=target_ref,
+                instance_name=instance_name,
+                tx_tool=tx_tool,
+                kind_mismatch_result=_kind_mismatch_result,
+            )
+            if set_param_dispatch.handled:
+                operation_summary = set_param_dispatch.operation_summary
+                if set_param_dispatch.terminal_result is not None:
+                    return set_param_dispatch.terminal_result
+                result = (
+                    set_param_dispatch.tool_result
+                    if set_param_dispatch.tool_result is not None
+                    else {}
                 )
         elif isinstance(state, str) and state in {"enabled", "disabled"}:
-            operation_summary = "update_states"
-            mismatch = _kind_mismatch_result("set_state")
-            if mismatch is not None:
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action="operation_kind_mismatch",
-                    internal_handlers=["none"],
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=mismatch,
-                    validation_run=False,
-                    output_truncated=False,
-                )
-            handlers.append("propose_edit" if dry_run else "apply_edit")
-            if isinstance(target_ref, dict):
-                result = tx_tool({"op_type": "update_states", "target_ref": target_ref, "state": state})
-            elif isinstance(instance_name, str) and instance_name.strip():
-                result = tx_tool(
-                    {
-                        "op_type": "update_states",
-                        "instance_name": instance_name.strip(),
-                        "state": state,
-                    }
-                )
-            else:
-                result = self._payload_result(
-                    "change_graph",
-                    {
-                        "ok": False,
-                        "dry_run": bool(dry_run),
-                        "error_type": "clarification_required",
-                        "message": "Missing target block for state update.",
-                        "clarification_options": ["Provide exact instance_name."],
-                    },
-                )
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action=operation_summary,
-                    internal_handlers=handlers,
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=result,
-                    validation_run=False,
-                    output_truncated=False,
+            set_state_dispatch = handle_set_state(
+                ctx=operation_ctx,
+                state=state,
+                target_ref=target_ref,
+                instance_name=instance_name,
+                tx_tool=tx_tool,
+                kind_mismatch_result=_kind_mismatch_result,
+            )
+            if set_state_dispatch.handled:
+                operation_summary = set_state_dispatch.operation_summary
+                if set_state_dispatch.terminal_result is not None:
+                    return set_state_dispatch.terminal_result
+                result = (
+                    set_state_dispatch.tool_result
+                    if set_state_dispatch.tool_result is not None
+                    else {}
                 )
         elif (
             resolved_operation_kind == "remove_block"
@@ -5709,131 +5533,19 @@ class GrcAgent:
                 or isinstance(target_ref, dict)
             )
         ):
-            operation_summary = "remove_block"
-            mismatch = _kind_mismatch_result("remove_block")
-            if mismatch is not None:
-                return self._attach_wrapper_dispatch_telemetry(
-                    debug=debug,
-                    wrapper_name="change_graph",
-                    wrapper_action="operation_kind_mismatch",
-                    internal_handlers=["none"],
-                    started=started,
-                    before_revision=before_revision,
-                    before_dirty=before_dirty,
-                    result=mismatch,
-                    validation_run=False,
-                    output_truncated=False,
-                )
-            resolved_target_name = _resolve_remove_block_target_name()
-            fallback_target_name: str = ""
-            if isinstance(instance_name, str) and instance_name.strip():
-                fallback_target_name = instance_name.strip()
-            elif isinstance(target_ref, dict):
-                expected_name = target_ref.get("expected_instance_name")
-                if isinstance(expected_name, str) and expected_name.strip():
-                    fallback_target_name = expected_name.strip()
-            explicit_remove_operation = _build_remove_block_operation(
-                resolved_instance_name=resolved_target_name or fallback_target_name
+            remove_dispatch = handle_remove_block(
+                ctx=operation_ctx,
+                instance_name=instance_name,
+                target_ref=target_ref,
+                detach_connections=detach_connections,
+                detach_connection_ids=detach_connection_ids,
+                tx_tool=tx_tool,
+                kind_mismatch_result=_kind_mismatch_result,
             )
-            if resolved_target_name is not None:
-                attached_connection_ids = _attached_connection_ids_for_block(resolved_target_name)
-                if attached_connection_ids:
-                    provided_detach_ids = _normalize_connection_id_list(detach_connection_ids)
-                    explicit_detach_requested = bool(detach_connections) or (
-                        bool(provided_detach_ids)
-                        and provided_detach_ids == attached_connection_ids
-                    )
-                    if not explicit_detach_requested:
-                        clarification_options = [
-                            (
-                                "Preview exact detach+remove plan by retrying change_graph "
-                                "with operation_kind='remove_block', dry_run=true, "
-                                "detach_connections=true, and the same target."
-                            ),
-                            (
-                                "Commit exact detach+remove by retrying with "
-                                "dry_run=false and detach_connections=true."
-                            ),
-                        ]
-                        if attached_connection_ids:
-                            clarification_options.append(
-                                "Attached connections: " + ", ".join(attached_connection_ids)
-                            )
-                        result = self._payload_result(
-                            "change_graph",
-                            {
-                                "ok": False,
-                                "dry_run": bool(dry_run),
-                                "operation_kind": resolved_operation_kind,
-                                "error_type": "clarification_required",
-                                "message": (
-                                    f"Block '{resolved_target_name}' is connected. "
-                                    "Explicit detach confirmation is required before remove_block commit."
-                                ),
-                                "clarification_options": clarification_options,
-                                "attached_connection_ids": attached_connection_ids,
-                                "planned_operations": [
-                                    {"op_type": "remove_connection", "connection_id": connection_id}
-                                    for connection_id in attached_connection_ids
-                                ]
-                                + [explicit_remove_operation],
-                                "state_revision": self.session.state_revision,
-                            },
-                        )
-                        return self._attach_wrapper_dispatch_telemetry(
-                            debug=debug,
-                            wrapper_name="change_graph",
-                            wrapper_action=operation_summary,
-                            internal_handlers=["clarification"],
-                            started=started,
-                            before_revision=before_revision,
-                            before_dirty=before_dirty,
-                            result=result,
-                            validation_run=False,
-                            output_truncated=False,
-                        )
-
-                    if provided_detach_ids and provided_detach_ids != attached_connection_ids:
-                        result = self._payload_result(
-                            "change_graph",
-                            {
-                                "ok": False,
-                                "dry_run": bool(dry_run),
-                                "operation_kind": resolved_operation_kind,
-                                "error_type": ErrorCode.INVALID_REQUEST,
-                                "message": (
-                                    "detach_connection_ids do not match the current attached "
-                                    "connections for this block."
-                                ),
-                                "attached_connection_ids": attached_connection_ids,
-                            },
-                        )
-                        return self._attach_wrapper_dispatch_telemetry(
-                            debug=debug,
-                            wrapper_name="change_graph",
-                            wrapper_action="invalid_operation_args",
-                            internal_handlers=["none"],
-                            started=started,
-                            before_revision=before_revision,
-                            before_dirty=before_dirty,
-                            result=result,
-                            validation_run=False,
-                            output_truncated=False,
-                        )
-
-                    ordered_operations = [
-                        {"op_type": "remove_connection", "connection_id": connection_id}
-                        for connection_id in attached_connection_ids
-                    ]
-                    ordered_operations.append(explicit_remove_operation)
-                    handlers.append("propose_edit" if dry_run else "apply_edit")
-                    result = tx_tool(ordered_operations)
-                else:
-                    handlers.append("propose_edit" if dry_run else "apply_edit")
-                    result = tx_tool(explicit_remove_operation)
-            else:
-                handlers.append("propose_edit" if dry_run else "apply_edit")
-                result = tx_tool(explicit_remove_operation)
+            operation_summary = remove_dispatch.operation_summary
+            if remove_dispatch.terminal_result is not None:
+                return remove_dispatch.terminal_result
+            result = remove_dispatch.tool_result if remove_dispatch.tool_result is not None else {}
         else:
             wrapper_result = self._payload_result(
                 "change_graph",
