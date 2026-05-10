@@ -56,6 +56,26 @@ class MvpToolProfileTests(unittest.TestCase):
             agent.session.state_revision,
         )
 
+    def _block_target_ref(
+        self,
+        agent: GrcAgent,
+        *,
+        instance_name: str,
+        block_type: str,
+    ) -> dict[str, object]:
+        assert agent.session.flowgraph is not None
+        block = next(
+            b
+            for b in agent.session.flowgraph.blocks
+            if b.instance_name == instance_name and b.block_type == block_type
+        )
+        return {
+            "block_uid": block.block_uid,
+            "expected_instance_name": block.instance_name,
+            "expected_block_type": block.block_type,
+            "base_state_revision": agent.session.state_revision,
+        }
+
     def _load_legacy_agent(self) -> GrcAgent:
         session = FlowgraphSession()
         session.load(self._fixture_path())
@@ -312,8 +332,8 @@ class MvpToolProfileTests(unittest.TestCase):
             },
         )
         self.assertFalse(stale["ok"], stale)
-        self.assertEqual(stale["error_type"], "preflight_rejected")
-        self.assertIn("preflight", stale.get("message", "").lower())
+        self.assertEqual(stale["error_type"], "stale_revision")
+        self.assertIn("stale", stale.get("message", "").lower())
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
 
@@ -836,6 +856,247 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
         self.assertNotIn(target_connection, after_connections)
+
+    def test_change_graph_remove_block_detached_preview_does_not_mutate(self) -> None:
+        agent = self._load_agent_with_fixture("random_bit_generator_with_unused_var.grc")
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        before_blocks = {
+            block.instance_name for block in agent.session.flowgraph.blocks
+        }
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": True,
+                "user_goal": "Preview removing unused_var.",
+                "operation_kind": "remove_block",
+                "instance_name": "unused_var",
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["operation_summary"], "remove_block")
+        planned = result.get("planned_operations") or []
+        self.assertTrue(planned)
+        self.assertEqual(planned[-1]["op_type"], "remove_block")
+        self.assertEqual(planned[-1]["instance_name"], "unused_var")
+        after_blocks = {block.instance_name for block in agent.session.flowgraph.blocks}
+        self.assertEqual(before_blocks, after_blocks)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_remove_block_detached_commit_has_expected_delta(self) -> None:
+        agent = self._load_agent_with_fixture("random_bit_generator_with_unused_var.grc")
+        before_revision = agent.session.state_revision
+        before_blocks = {
+            block.instance_name for block in agent.session.flowgraph.blocks
+        }
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Remove detached unused_var.",
+                "operation_kind": "remove_block",
+                "instance_name": "unused_var",
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        graph_delta = result.get("graph_delta") or {}
+        self.assertEqual(graph_delta.get("removed_blocks"), ["unused_var"])
+        self.assertNotIn("removed_connections", graph_delta)
+        self.assertEqual(graph_delta.get("validation_status"), "valid")
+        self.assertEqual(graph_delta.get("validation_returncode"), 0)
+        after_blocks = {block.instance_name for block in agent.session.flowgraph.blocks}
+        self.assertNotIn("unused_var", after_blocks)
+        self.assertEqual(before_blocks - after_blocks, {"unused_var"})
+        self.assertGreater(agent.session.state_revision, before_revision)
+
+    def test_change_graph_remove_block_attached_without_explicit_detach_refuses(self) -> None:
+        agent = self._load_agent_with_fixture("random_bit_generator_dual_sink_sink1_disabled.grc")
+        target_connection = "blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"
+        before_revision = agent.session.state_revision
+        before_connections = list(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Remove qtgui_time_sink_x_1.",
+                "operation_kind": "remove_block",
+                "instance_name": "qtgui_time_sink_x_1",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "clarification_required")
+        self.assertIn(target_connection, result.get("attached_connection_ids") or [])
+        planned = result.get("planned_operations") or []
+        self.assertTrue(any(op.get("op_type") == "remove_connection" for op in planned))
+        self.assertTrue(any(op.get("op_type") == "remove_block" for op in planned))
+        after_connections = list(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+
+    def test_change_graph_remove_block_attached_with_explicit_detach_commits(self) -> None:
+        agent = self._load_agent_with_fixture("random_bit_generator_dual_sink_sink1_disabled.grc")
+        target_connection = "blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Remove qtgui_time_sink_x_1 and detach its attached connection.",
+                "operation_kind": "remove_block",
+                "instance_name": "qtgui_time_sink_x_1",
+                "detach_connections": True,
+                "detach_connection_ids": [target_connection],
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        graph_delta = result.get("graph_delta") or {}
+        self.assertEqual(graph_delta.get("removed_blocks"), ["qtgui_time_sink_x_1"])
+        self.assertEqual(graph_delta.get("removed_connections"), [target_connection])
+        connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        self.assertNotIn(target_connection, connections)
+        assert agent.session.flowgraph is not None
+        self.assertNotIn(
+            "qtgui_time_sink_x_1",
+            [block.instance_name for block in agent.session.flowgraph.blocks],
+        )
+
+    def test_change_graph_remove_block_dependency_refusal_no_mutation(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_connections = list(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Remove samp_rate.",
+                "operation_kind": "remove_block",
+                "instance_name": "samp_rate",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "preflight_rejected")
+        errors = result.get("errors") or []
+        self.assertTrue(errors, result)
+        self.assertEqual(errors[0].get("code"), "block_still_referenced")
+        after_connections = list(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+
+    def test_change_graph_remove_block_duplicate_target_clarifies(self) -> None:
+        agent = self._load_agent_with_fixture(
+            "random_bit_generator_dual_sink_duplicate_sink_name.grc"
+        )
+        before_revision = agent.session.state_revision
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Remove qtgui_time_sink_x_0.",
+                "operation_kind": "remove_block",
+                "instance_name": "qtgui_time_sink_x_0",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "ambiguous_block")
+        self.assertTrue(result.get("clarification_options"), result)
+        self.assertEqual(agent.session.state_revision, before_revision)
+
+    def test_change_graph_remove_block_accepts_valid_target_ref(self) -> None:
+        agent = self._load_agent_with_fixture("random_bit_generator_with_unused_var.grc")
+        target_ref = self._block_target_ref(
+            agent,
+            instance_name="unused_var",
+            block_type="variable",
+        )
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Remove detached unused_var by guarded target_ref.",
+                "operation_kind": "remove_block",
+                "target_ref": target_ref,
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        assert agent.session.flowgraph is not None
+        self.assertNotIn(
+            "unused_var",
+            [block.instance_name for block in agent.session.flowgraph.blocks],
+        )
+
+    def test_change_graph_remove_block_rejects_stale_target_ref(self) -> None:
+        agent = self._load_agent_with_fixture("random_bit_generator_with_unused_var.grc")
+        target_ref = self._block_target_ref(
+            agent,
+            instance_name="unused_var",
+            block_type="variable",
+        )
+        mutate = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+        self.assertTrue(mutate["ok"], mutate)
+        before_revision = agent.session.state_revision
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Remove stale target_ref.",
+                "operation_kind": "remove_block",
+                "target_ref": target_ref,
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "stale_revision")
+        self.assertEqual(agent.session.state_revision, before_revision)
+
+    def test_change_graph_remove_block_rejects_target_ref_identity_mismatch(self) -> None:
+        agent = self._load_agent_with_fixture("random_bit_generator_with_unused_var.grc")
+        target_ref = self._block_target_ref(
+            agent,
+            instance_name="unused_var",
+            block_type="variable",
+        )
+        before_revision = agent.session.state_revision
+        wrong_name = dict(target_ref)
+        wrong_name["expected_instance_name"] = "not_unused_var"
+        wrong_type = dict(target_ref)
+        wrong_type["expected_block_type"] = "import"
+        for bad_ref, expected_code in (
+            (wrong_name, "block_uid_instance_mismatch"),
+            (wrong_type, "block_uid_type_mismatch"),
+        ):
+            with self.subTest(expected_code=expected_code):
+                result = agent.execute_tool(
+                    "change_graph",
+                    {
+                        "dry_run": False,
+                        "user_goal": "Remove with wrong guarded identity.",
+                        "operation_kind": "remove_block",
+                        "target_ref": bad_ref,
+                    },
+                )
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result.get("error_type"), "preflight_rejected")
+                errors = result.get("errors") or []
+                self.assertTrue(errors, result)
+                self.assertEqual(errors[0].get("code"), expected_code)
+                self.assertEqual(agent.session.state_revision, before_revision)
 
     def test_change_graph_insert_exact_preview_does_not_mutate(self) -> None:
         agent = self._load_agent()

@@ -24,6 +24,7 @@ PHASE_NAMES = {
     55: "r5_save_load",
     56: "r3_rewire",
     57: "r4a_insert",
+    58: "r4b_remove",
 }
 
 

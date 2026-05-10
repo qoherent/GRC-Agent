@@ -556,7 +556,8 @@ def build_tool_schemas(
                     "type": "string",
                     "description": (
                         "Exact loaded block/variable instance name. Required for "
-                        "set_param, set_state, and remove_block when target_ref is omitted."
+                        "set_param and set_state. For remove_block, provide instance_name "
+                        "or guarded target_ref."
                     ),
                 },
                 "connection_id": {
@@ -607,6 +608,24 @@ def build_tool_schemas(
                         "Optional parameter overrides for insert_block candidates. "
                         "Used when the selected block needs explicit compatible params "
                         "(for example stream type or length parameters)."
+                    ),
+                },
+                "detach_connections": {
+                    "type": "boolean",
+                    "description": (
+                        "remove_block only. When true, explicitly allow removing all "
+                        "connections attached to the target block in the same ordered "
+                        "transaction before the remove_block step. When false or omitted, "
+                        "attached targets are refused with a clarification payload."
+                    ),
+                },
+                "detach_connection_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "remove_block only. Optional explicit connection ids expected to be "
+                        "removed before block removal. When provided, they must match the "
+                        "current attached connections exactly or the call is refused."
                     ),
                 },
                 "param_key": {

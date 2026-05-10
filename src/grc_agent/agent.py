@@ -4789,6 +4789,8 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
         insert_params: dict[str, Any] | None,
+        detach_connections: bool | None,
+        detach_connection_ids: list[str] | None,
         param_key: str | None,
         param_value: Any,
         state: str | None,
@@ -4799,6 +4801,44 @@ class GrcAgent:
             return None
         if operation_kind in {"clarify", "unsupported"}:
             return None
+
+        if detach_connections is not None and not isinstance(detach_connections, bool):
+            return self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": "detach_connections must be boolean when provided.",
+                },
+            )
+        if detach_connection_ids is not None:
+            if not isinstance(detach_connection_ids, list):
+                return self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": "detach_connection_ids must be an array of connection ids.",
+                    },
+                )
+            for connection_id in detach_connection_ids:
+                if not isinstance(connection_id, str) or not connection_id.strip():
+                    return self._payload_result(
+                        "change_graph",
+                        {
+                            "ok": False,
+                            "dry_run": bool(dry_run),
+                            "operation_kind": operation_kind,
+                            "error_type": ErrorCode.INVALID_REQUEST,
+                            "message": (
+                                "detach_connection_ids entries must be non-empty connection id strings."
+                            ),
+                        },
+                    )
 
         normalized_target_ref: dict[str, Any] | None = None
         if target_ref is not None:
@@ -4996,9 +5036,33 @@ class GrcAgent:
                 "insert_block requires connection_id and block_id (or candidate_id).",
             )
         if operation_kind == "remove_block":
+            if detach_connections is not None and not isinstance(detach_connections, bool):
+                return self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": "detach_connections must be boolean when provided.",
+                    },
+                )
             return _require(
-                isinstance(instance_name, str) and instance_name.strip(),
-                "remove_block requires instance_name.",
+                has_target,
+                "remove_block requires instance_name or guarded target_ref.",
+            )
+        if detach_connections is not None or detach_connection_ids is not None:
+            return self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": (
+                        "detach_connections and detach_connection_ids are only supported for remove_block."
+                    ),
+                },
             )
         if operation_kind == "auto_insert":
             return _require(
@@ -5192,6 +5256,8 @@ class GrcAgent:
         new_dst_block: str | None = None,
         new_dst_port: int | str | None = None,
         insert_params: dict[str, Any] | None = None,
+        detach_connections: bool | None = None,
+        detach_connection_ids: list[str] | None = None,
         param_key: str | None = None,
         param_value: Any = None,
         state: str | None = None,
@@ -5396,6 +5462,8 @@ class GrcAgent:
             new_dst_block=new_dst_block,
             new_dst_port=new_dst_port,
             insert_params=insert_params,
+            detach_connections=detach_connections,
+            detach_connection_ids=detach_connection_ids,
             param_key=param_key,
             param_value=param_value,
             state=state,
@@ -5450,6 +5518,35 @@ class GrcAgent:
                         "message": (
                             "state_revision is stale for the current graph. "
                             f"Provided {state_revision}, current is {self.session.state_revision}."
+                        ),
+                        "state_revision": self.session.state_revision,
+                    },
+                )
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="stale_revision",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=stale_result,
+                    validation_run=False,
+                    output_truncated=False,
+                )
+        if isinstance(target_ref, dict):
+            target_ref_revision = target_ref.get("base_state_revision")
+            if isinstance(target_ref_revision, int) and target_ref_revision != self.session.state_revision:
+                stale_result = self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": resolved_operation_kind,
+                        "error_type": ErrorCode.STALE_REVISION,
+                        "message": (
+                            "target_ref.base_state_revision is stale for the current graph. "
+                            f"Provided {target_ref_revision}, current is {self.session.state_revision}."
                         ),
                         "state_revision": self.session.state_revision,
                     },
@@ -5646,6 +5743,71 @@ class GrcAgent:
                     ),
                 },
             )
+
+        def _build_remove_block_operation(*, resolved_instance_name: str) -> dict[str, Any]:
+            operation: dict[str, Any] = {
+                "op_type": "remove_block",
+                "instance_name": resolved_instance_name,
+            }
+            if isinstance(target_ref, dict):
+                operation["target_ref"] = target_ref
+            return operation
+
+        def _resolve_remove_block_target_name() -> str | None:
+            if isinstance(target_ref, dict):
+                resolved = self.session.resolve_block_reference(
+                    instance_name=target_ref.get("expected_instance_name"),
+                    block_uid=target_ref.get("block_uid"),
+                    block_type=target_ref.get("expected_block_type"),
+                )
+                candidates = resolved.get("candidates") if isinstance(resolved, dict) else None
+                if isinstance(candidates, list) and len(candidates) == 1:
+                    candidate = candidates[0]
+                    if isinstance(candidate, dict):
+                        name = candidate.get("name")
+                        if isinstance(name, str) and name.strip():
+                            return name.strip()
+                return None
+            if isinstance(instance_name, str) and instance_name.strip():
+                resolved = self.session.resolve_block_reference(instance_name=instance_name.strip())
+                candidates = resolved.get("candidates") if isinstance(resolved, dict) else None
+                if isinstance(candidates, list) and len(candidates) == 1:
+                    candidate = candidates[0]
+                    if isinstance(candidate, dict):
+                        name = candidate.get("name")
+                        if isinstance(name, str) and name.strip():
+                            return name.strip()
+            return None
+
+        def _attached_connection_ids_for_block(block_name: str) -> list[str]:
+            flowgraph = self.session.flowgraph
+            if flowgraph is None:
+                return []
+            attached: list[str] = []
+            for connection in flowgraph.connections:
+                if connection.src_block != block_name and connection.dst_block != block_name:
+                    continue
+                attached.append(
+                    render_connection_id(
+                        connection.src_block,
+                        connection.src_port,
+                        connection.dst_block,
+                        connection.dst_port,
+                    )
+                )
+            return sorted(attached)
+
+        def _normalize_connection_id_list(values: list[str] | None) -> list[str]:
+            if not isinstance(values, list):
+                return []
+            normalized: list[str] = []
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                token = value.strip()
+                if token:
+                    normalized.append(token)
+            return sorted(dict.fromkeys(normalized))
 
         resolved_insert_block_id: str | None = None
         if isinstance(block_id, str) and block_id.strip():
@@ -5935,14 +6097,136 @@ class GrcAgent:
                 )
         elif (
             resolved_operation_kind == "remove_block"
-            and isinstance(instance_name, str)
-            and instance_name.strip()
+            and (
+                isinstance(instance_name, str) and instance_name.strip()
+                or isinstance(target_ref, dict)
+            )
         ):
             operation_summary = "remove_block"
-            handlers.append("propose_edit" if dry_run else "apply_edit")
-            result = tx_tool(
-                {"op_type": "remove_block", "instance_name": instance_name.strip()}
+            mismatch = _kind_mismatch_result("remove_block")
+            if mismatch is not None:
+                return self._attach_wrapper_dispatch_telemetry(
+                    debug=debug,
+                    wrapper_name="change_graph",
+                    wrapper_action="operation_kind_mismatch",
+                    internal_handlers=["none"],
+                    started=started,
+                    before_revision=before_revision,
+                    before_dirty=before_dirty,
+                    result=mismatch,
+                    validation_run=False,
+                    output_truncated=False,
+                )
+            resolved_target_name = _resolve_remove_block_target_name()
+            fallback_target_name: str = ""
+            if isinstance(instance_name, str) and instance_name.strip():
+                fallback_target_name = instance_name.strip()
+            elif isinstance(target_ref, dict):
+                expected_name = target_ref.get("expected_instance_name")
+                if isinstance(expected_name, str) and expected_name.strip():
+                    fallback_target_name = expected_name.strip()
+            explicit_remove_operation = _build_remove_block_operation(
+                resolved_instance_name=resolved_target_name or fallback_target_name
             )
+            if resolved_target_name is not None:
+                attached_connection_ids = _attached_connection_ids_for_block(resolved_target_name)
+                if attached_connection_ids:
+                    provided_detach_ids = _normalize_connection_id_list(detach_connection_ids)
+                    explicit_detach_requested = bool(detach_connections) or (
+                        bool(provided_detach_ids)
+                        and provided_detach_ids == attached_connection_ids
+                    )
+                    if not explicit_detach_requested:
+                        clarification_options = [
+                            (
+                                "Preview exact detach+remove plan by retrying change_graph "
+                                "with operation_kind='remove_block', dry_run=true, "
+                                "detach_connections=true, and the same target."
+                            ),
+                            (
+                                "Commit exact detach+remove by retrying with "
+                                "dry_run=false and detach_connections=true."
+                            ),
+                        ]
+                        if attached_connection_ids:
+                            clarification_options.append(
+                                "Attached connections: " + ", ".join(attached_connection_ids)
+                            )
+                        result = self._payload_result(
+                            "change_graph",
+                            {
+                                "ok": False,
+                                "dry_run": bool(dry_run),
+                                "operation_kind": resolved_operation_kind,
+                                "error_type": "clarification_required",
+                                "message": (
+                                    f"Block '{resolved_target_name}' is connected. "
+                                    "Explicit detach confirmation is required before remove_block commit."
+                                ),
+                                "clarification_options": clarification_options,
+                                "attached_connection_ids": attached_connection_ids,
+                                "planned_operations": [
+                                    {"op_type": "remove_connection", "connection_id": connection_id}
+                                    for connection_id in attached_connection_ids
+                                ]
+                                + [explicit_remove_operation],
+                                "state_revision": self.session.state_revision,
+                            },
+                        )
+                        return self._attach_wrapper_dispatch_telemetry(
+                            debug=debug,
+                            wrapper_name="change_graph",
+                            wrapper_action=operation_summary,
+                            internal_handlers=["clarification"],
+                            started=started,
+                            before_revision=before_revision,
+                            before_dirty=before_dirty,
+                            result=result,
+                            validation_run=False,
+                            output_truncated=False,
+                        )
+
+                    if provided_detach_ids and provided_detach_ids != attached_connection_ids:
+                        result = self._payload_result(
+                            "change_graph",
+                            {
+                                "ok": False,
+                                "dry_run": bool(dry_run),
+                                "operation_kind": resolved_operation_kind,
+                                "error_type": ErrorCode.INVALID_REQUEST,
+                                "message": (
+                                    "detach_connection_ids do not match the current attached "
+                                    "connections for this block."
+                                ),
+                                "attached_connection_ids": attached_connection_ids,
+                            },
+                        )
+                        return self._attach_wrapper_dispatch_telemetry(
+                            debug=debug,
+                            wrapper_name="change_graph",
+                            wrapper_action="invalid_operation_args",
+                            internal_handlers=["none"],
+                            started=started,
+                            before_revision=before_revision,
+                            before_dirty=before_dirty,
+                            result=result,
+                            validation_run=False,
+                            output_truncated=False,
+                        )
+
+                    ordered_operations = [
+                        {"op_type": "remove_connection", "connection_id": connection_id}
+                        for connection_id in attached_connection_ids
+                    ]
+                    ordered_operations.append(explicit_remove_operation)
+                    handlers.append("propose_edit" if dry_run else "apply_edit")
+                    result = tx_tool(ordered_operations)
+                else:
+                    handlers.append("propose_edit" if dry_run else "apply_edit")
+                    result = tx_tool(explicit_remove_operation)
+            else:
+                handlers.append("propose_edit" if dry_run else "apply_edit")
+                result = tx_tool(explicit_remove_operation)
         else:
             wrapper_result = self._payload_result(
                 "change_graph",
@@ -6019,6 +6303,16 @@ class GrcAgent:
             payload["error_type"] = result.get("error_type")
         if isinstance(result, dict) and result.get("clarification_required"):
             payload["clarification_options"] = result.get("options")
+        if isinstance(result, dict):
+            normalized_operations = result.get("normalized_operations")
+            if isinstance(normalized_operations, list):
+                payload["planned_operations"] = copy.deepcopy(normalized_operations)
+            errors = result.get("errors")
+            if isinstance(errors, list):
+                payload["errors"] = copy.deepcopy(errors)
+            hint = result.get("hint")
+            if isinstance(hint, str) and hint:
+                payload["hint"] = hint
         wrapper_result = self._payload_result("change_graph", payload)
         validation_run = bool(validation_result) or operation_summary in {"update_params", "update_states", "rewire_connection", "insert_block_on_connection", "add_variable"}
         return self._attach_wrapper_dispatch_telemetry(

@@ -1365,6 +1365,87 @@ class MvpWrapperDispatchTests(unittest.TestCase):
         self.assertNotIn("state_revision", kwargs)
         self.assertFalse(kwargs.get("dry_run"))
 
+    def test_change_graph_remove_block_attached_without_detach_returns_clarification(self) -> None:
+        agent = self._load_agent("random_bit_generator_dual_sink_sink1_disabled.grc")
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        with mock.patch.object(agent, "_apply_edit", wraps=agent._apply_edit) as apply_mock:
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Remove qtgui_time_sink_x_1.",
+                    "operation_kind": "remove_block",
+                    "instance_name": "qtgui_time_sink_x_1",
+                    "debug": True,
+                },
+            )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "clarification_required")
+        self.assertEqual(apply_mock.call_count, 0)
+        planned = result.get("planned_operations") or []
+        self.assertTrue(any(op.get("op_type") == "remove_connection" for op in planned))
+        self.assertTrue(any(op.get("op_type") == "remove_block" for op in planned))
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_remove_block_attached_with_detach_dispatches_ordered_transaction(self) -> None:
+        agent = self._load_agent("random_bit_generator_dual_sink_sink1_disabled.grc")
+        target_connection = "blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"
+        with mock.patch.object(agent, "_apply_edit", wraps=agent._apply_edit) as apply_mock:
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Remove qtgui_time_sink_x_1 and detach its connection.",
+                    "operation_kind": "remove_block",
+                    "instance_name": "qtgui_time_sink_x_1",
+                    "detach_connections": True,
+                    "detach_connection_ids": [target_connection],
+                    "debug": True,
+                },
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(apply_mock.call_count, 1)
+        operations = apply_mock.call_args.args[0]
+        self.assertIsInstance(operations, list)
+        self.assertEqual(operations[0]["op_type"], "remove_connection")
+        self.assertEqual(operations[0]["connection_id"], target_connection)
+        self.assertEqual(operations[1]["op_type"], "remove_block")
+        self.assertEqual(operations[1]["instance_name"], "qtgui_time_sink_x_1")
+
+    def test_change_graph_remove_block_forwards_guarded_target_ref(self) -> None:
+        agent = self._load_agent("random_bit_generator_with_unused_var.grc")
+        assert agent.session.flowgraph is not None
+        block = next(
+            b
+            for b in agent.session.flowgraph.blocks
+            if b.instance_name == "unused_var" and b.block_type == "variable"
+        )
+        target_ref = {
+            "block_uid": block.block_uid,
+            "expected_instance_name": block.instance_name,
+            "expected_block_type": block.block_type,
+            "base_state_revision": agent.session.state_revision,
+        }
+        with mock.patch.object(agent, "_apply_edit", wraps=agent._apply_edit) as apply_mock:
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Remove detached unused_var by target_ref.",
+                    "operation_kind": "remove_block",
+                    "target_ref": target_ref,
+                    "debug": True,
+                },
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(apply_mock.call_count, 1)
+        operation = apply_mock.call_args.args[0]
+        self.assertEqual(operation["op_type"], "remove_block")
+        self.assertEqual(operation["instance_name"], "unused_var")
+        self.assertEqual(operation["target_ref"], target_ref)
+
     def test_change_graph_exact_insert_routes_to_insert_handler(self) -> None:
         agent = self._load_agent()
         listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
