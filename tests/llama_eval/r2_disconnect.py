@@ -91,8 +91,8 @@ R2_DISCONNECT_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt=(
-                    "Disconnect exact connection_id "
-                    "blocks_char_to_float_0:0->qtgui_time_sink_x_0:0."
+                    "Call change_graph now with operation_kind disconnect, dry_run false, "
+                    "and connection_id blocks_char_to_float_0:0->qtgui_time_sink_x_0:0."
                 ),
                 expected_tool_calls=(
                     ToolExpectation(

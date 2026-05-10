@@ -533,7 +533,24 @@ def build_tool_schemas(
                 },
                 "block_id": {
                     "type": "string",
-                    "description": "Optional selected catalog block id.",
+                    "description": (
+                        "Catalog block id for insert_block operations (for example `blocks_head`). "
+                        "Use with a connection_id; runtime validates compatibility and refuses invalid candidates."
+                    ),
+                },
+                "candidate_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional alias for a previously selected insert candidate block id. "
+                        "For insert_block, provide block_id or candidate_id."
+                    ),
+                },
+                "insert_block": {
+                    "type": "string",
+                    "description": (
+                        "Legacy alias for insert candidate id used by some models. "
+                        "Equivalent to block_id for insert_block operations."
+                    ),
                 },
                 "instance_name": {
                     "type": "string",
@@ -546,7 +563,8 @@ def build_tool_schemas(
                     "type": "string",
                     "description": (
                         "Exact connection id `src_block:src_port->dst_block:dst_port`. "
-                        "Primary path for disconnect and required old edge for rewire."
+                        "Primary path for disconnect and required old edge for rewire. "
+                        "Required anchor for insert_block."
                     ),
                 },
                 "state_revision": {
@@ -582,6 +600,14 @@ def build_tool_schemas(
                 "new_dst_port": {
                     "type": ["integer", "string"],
                     "description": "Rewire new destination port (stream index or message port id).",
+                },
+                "insert_params": {
+                    "type": "object",
+                    "description": (
+                        "Optional parameter overrides for insert_block candidates. "
+                        "Used when the selected block needs explicit compatible params "
+                        "(for example stream type or length parameters)."
+                    ),
                 },
                 "param_key": {
                     "type": "string",

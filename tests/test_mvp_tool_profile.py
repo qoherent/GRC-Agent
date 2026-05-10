@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from grc_agent.agent import GrcAgent
 from grc_agent.config import load_app_config
@@ -750,6 +751,10 @@ class MvpToolProfileTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"], result)
         self.assertEqual(result.get("error_type"), "gnu_validation_failed")
+        self.assertIsNone(result.get("graph_delta"))
+        validation_result = result.get("validation_result")
+        self.assertIsInstance(validation_result, dict)
+        self.assertEqual(validation_result.get("status"), "invalid")
         after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -831,6 +836,283 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
         self.assertNotIn(target_connection, after_connections)
+
+    def test_change_graph_insert_exact_preview_does_not_mutate(self) -> None:
+        agent = self._load_agent()
+        target_connection = "analog_random_source_x_0:0->blocks_throttle2_0:0"
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": True,
+                "user_goal": "Preview exact insert on the selected connection.",
+                "operation_kind": "insert_block",
+                "connection_id": target_connection,
+                "block_id": "blocks_throttle2",
+                "instance_name": "preview_insert_block_0",
+                "insert_params": {"type": "byte", "samples_per_second": "32000"},
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["operation_summary"], "insert_block_on_connection")
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_insert_exact_commit_has_expected_delta(self) -> None:
+        agent = self._load_agent()
+        target_connection = "analog_random_source_x_0:0->blocks_throttle2_0:0"
+        inserted_name = "blocks_throttle2_inserted"
+        expected_added_a = f"analog_random_source_x_0:0->{inserted_name}:0"
+        expected_added_b = f"{inserted_name}:0->blocks_throttle2_0:0"
+        assert agent.session.flowgraph is not None
+        before_blocks = {block.instance_name for block in agent.session.flowgraph.blocks}
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert a compatible block on this exact connection.",
+                "operation_kind": "insert_block",
+                "connection_id": target_connection,
+                "block_id": "blocks_throttle2",
+                "instance_name": inserted_name,
+                "insert_params": {"type": "byte", "samples_per_second": "32000"},
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["operation_summary"], "insert_block_on_connection")
+        graph_delta = result.get("graph_delta") or {}
+        self.assertEqual(graph_delta.get("added_blocks"), [inserted_name])
+        self.assertEqual(graph_delta.get("removed_connections"), [target_connection])
+        self.assertEqual(
+            set(graph_delta.get("added_connections") or []),
+            {expected_added_a, expected_added_b},
+        )
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        assert agent.session.flowgraph is not None
+        after_blocks = {block.instance_name for block in agent.session.flowgraph.blocks}
+        self.assertEqual(len(after_blocks - before_blocks), 1)
+        self.assertEqual(after_blocks - before_blocks, {inserted_name})
+        self.assertIn(expected_added_a, after_connections)
+        self.assertIn(expected_added_b, after_connections)
+        self.assertNotIn(target_connection, after_connections)
+
+    def test_change_graph_insert_incompatible_block_refused_without_mutation(self) -> None:
+        agent = self._load_agent()
+        target_connection = "analog_random_source_x_0:0->blocks_throttle2_0:0"
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert an incompatible block on this connection.",
+                "operation_kind": "insert_block",
+                "connection_id": target_connection,
+                "block_id": "blocks_add_xx",
+                "instance_name": "add_incompatible_0",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "preflight_rejected")
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_change_graph_insert_requires_block_or_candidate_id(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert a block on this connection.",
+                "operation_kind": "insert_block",
+                "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+
+    def test_change_graph_insert_rejects_conflicting_block_and_candidate_id(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert a block on this connection.",
+                "operation_kind": "insert_block",
+                "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                "block_id": "blocks_head",
+                "candidate_id": "blocks_throttle2",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+
+    def test_change_graph_insert_stale_connection_id_rejected(self) -> None:
+        agent = self._load_agent()
+        target_connection = "analog_random_source_x_0:0->blocks_throttle2_0:0"
+        first = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert a compatible block on this connection.",
+                "operation_kind": "insert_block",
+                "connection_id": target_connection,
+                "block_id": "blocks_throttle2",
+                "instance_name": "insert_once_0",
+                "insert_params": {"type": "byte", "samples_per_second": "32000"},
+            },
+        )
+        self.assertTrue(first["ok"], first)
+        before_revision = agent.session.state_revision
+        second = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert again on the same stale connection.",
+                "operation_kind": "insert_block",
+                "connection_id": target_connection,
+                "block_id": "blocks_throttle2",
+                "instance_name": "insert_twice_0",
+            },
+        )
+        self.assertFalse(second["ok"], second)
+        self.assertEqual(second.get("error_type"), "preflight_rejected")
+        self.assertEqual(agent.session.state_revision, before_revision)
+
+    def test_change_graph_insert_stale_state_revision_rejected(self) -> None:
+        agent = self._load_agent()
+        stale_revision = agent.session.state_revision
+        mutate = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+        self.assertTrue(mutate["ok"], mutate)
+        before_revision = agent.session.state_revision
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert a compatible block on this connection.",
+                "operation_kind": "insert_block",
+                "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                "block_id": "blocks_throttle2",
+                "instance_name": "stale_insert_0",
+                "state_revision": stale_revision,
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "stale_revision")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+
+    def test_change_graph_insert_grcc_failure_rolls_back_without_mutation(self) -> None:
+        agent = self._load_agent()
+        target_connection = "analog_random_source_x_0:0->blocks_throttle2_0:0"
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+
+        def _fake_invalid_grcc(_raw_data: object) -> tuple[bool, str, str, int]:
+            return (False, "", "forced invalid for test", 1)
+
+        with mock.patch.object(
+            agent.session.__class__,
+            "_run_grcc_validation",
+            side_effect=_fake_invalid_grcc,
+        ):
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Insert a compatible block on this connection.",
+                    "operation_kind": "insert_block",
+                    "connection_id": target_connection,
+                    "block_id": "blocks_throttle2",
+                    "instance_name": "rollback_insert_0",
+                    "insert_params": {"type": "byte", "samples_per_second": "32000"},
+                },
+            )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+
+    def test_change_graph_insert_message_connection_refused(self) -> None:
+        agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
+        before_revision = agent.session.state_revision
+        before_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert on a message connection.",
+                "operation_kind": "insert_block",
+                "connection_id": "strobe_0:strobe->debug_0:print",
+                "block_id": "blocks_throttle2",
+                "instance_name": "msg_insert_0",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "preflight_rejected")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        after_connections = set(
+            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+        )
+        self.assertEqual(before_connections, after_connections)
+
+    def test_change_graph_insert_block_rejects_standalone_add_block(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Add a new throttle block.",
+                "operation_kind": "insert_block",
+                "block_id": "blocks_throttle2",
+                "instance_name": "standalone_insert_0",
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
 
     def test_change_graph_rewire_preview_exact_stream_does_not_mutate(self) -> None:
         agent = self._load_agent()

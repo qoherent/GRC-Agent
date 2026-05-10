@@ -4777,6 +4777,7 @@ class GrcAgent:
         operation_kind: str | None,
         target_ref: dict[str, Any] | None,
         block_id: str | None,
+        candidate_id: str | None,
         instance_name: str | None,
         connection_id: str | None,
         src_block: str | None,
@@ -4787,6 +4788,7 @@ class GrcAgent:
         new_src_port: int | str | None,
         new_dst_block: str | None,
         new_dst_port: int | str | None,
+        insert_params: dict[str, Any] | None,
         param_key: str | None,
         param_value: Any,
         state: str | None,
@@ -4945,12 +4947,53 @@ class GrcAgent:
                 ),
             )
         if operation_kind == "insert_block":
+            normalized_block_id = (
+                block_id.strip()
+                if isinstance(block_id, str) and block_id.strip()
+                else None
+            )
+            normalized_candidate_id = (
+                candidate_id.strip()
+                if isinstance(candidate_id, str) and candidate_id.strip()
+                else None
+            )
+            if (
+                normalized_block_id is not None
+                and normalized_candidate_id is not None
+                and normalized_block_id != normalized_candidate_id
+            ):
+                return self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": (
+                            "insert_block received conflicting block_id and candidate_id. "
+                            "Provide one catalog id or matching values for both."
+                        ),
+                    },
+                )
+            if insert_params is not None and not isinstance(insert_params, dict):
+                return self._payload_result(
+                    "change_graph",
+                    {
+                        "ok": False,
+                        "dry_run": bool(dry_run),
+                        "operation_kind": operation_kind,
+                        "error_type": ErrorCode.INVALID_REQUEST,
+                        "message": "insert_params must be an object when provided.",
+                    },
+                )
             return _require(
                 isinstance(connection_id, str)
                 and connection_id.strip()
-                and isinstance(block_id, str)
-                and block_id.strip(),
-                "insert_block requires connection_id and block_id.",
+                and (
+                    normalized_block_id is not None
+                    or normalized_candidate_id is not None
+                ),
+                "insert_block requires connection_id and block_id (or candidate_id).",
             )
         if operation_kind == "remove_block":
             return _require(
@@ -5135,6 +5178,8 @@ class GrcAgent:
         operation_kind: str | None = None,
         target_ref: dict[str, Any] | None = None,
         block_id: str | None = None,
+        candidate_id: str | None = None,
+        insert_block: str | None = None,
         instance_name: str | None = None,
         connection_id: str | None = None,
         src_block: str | None = None,
@@ -5146,6 +5191,7 @@ class GrcAgent:
         new_src_port: int | str | None = None,
         new_dst_block: str | None = None,
         new_dst_port: int | str | None = None,
+        insert_params: dict[str, Any] | None = None,
         param_key: str | None = None,
         param_value: Any = None,
         state: str | None = None,
@@ -5156,6 +5202,32 @@ class GrcAgent:
         started = time.monotonic()
         before_revision = self.session.state_revision
         before_dirty = self.session.is_dirty
+        def _block_names_snapshot() -> set[str]:
+            flowgraph = self.session.flowgraph
+            if flowgraph is None:
+                return set()
+            return {
+                block.instance_name
+                for block in flowgraph.blocks
+                if isinstance(block.instance_name, str)
+            }
+
+        def _connection_ids_snapshot() -> set[str]:
+            flowgraph = self.session.flowgraph
+            if flowgraph is None:
+                return set()
+            return {
+                render_connection_id(
+                    conn.src_block,
+                    conn.src_port,
+                    conn.dst_block,
+                    conn.dst_port,
+                )
+                for conn in flowgraph.connections
+            }
+
+        before_block_names = _block_names_snapshot()
+        before_connection_ids = _connection_ids_snapshot()
         handlers: list[str] = []
         missing_session = self._missing_session_result("change_graph")
         if missing_session is not None:
@@ -5229,6 +5301,65 @@ class GrcAgent:
                 validation_run=False,
                 output_truncated=False,
             )
+        if resolved_operation_kind == "insert_block":
+            if isinstance(insert_params, dict):
+                normalized_insert_params: dict[str, Any] = {}
+                for key, value in insert_params.items():
+                    key_text = str(key).strip()
+                    if not key_text:
+                        continue
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        normalized_insert_params[key_text] = str(value)
+                    else:
+                        normalized_insert_params[key_text] = value
+                insert_params = normalized_insert_params
+            if (
+                not (isinstance(block_id, str) and block_id.strip())
+                and not (isinstance(candidate_id, str) and candidate_id.strip())
+                and isinstance(insert_block, str)
+                and insert_block.strip()
+            ):
+                candidate_id = insert_block.strip()
+            if (
+                not (isinstance(block_id, str) and block_id.strip())
+                and not (isinstance(candidate_id, str) and candidate_id.strip())
+                and isinstance(new_dst_block, str)
+                and new_dst_block.strip()
+            ):
+                candidate_id = new_dst_block.strip()
+                new_dst_block = None
+
+            if isinstance(connection_id, str) and connection_id.strip():
+                normalized_connection_id = connection_id.strip()
+                if parse_connection_id(normalized_connection_id) is None and "->" in normalized_connection_id:
+                    left, right = normalized_connection_id.split("->", 1)
+                    src_block = ""
+                    src_port_value: int | str | None = None
+                    if ":" in left:
+                        src_block, src_port_token = left.split(":", 1)
+                        src_block = src_block.strip()
+                        src_port_token = src_port_token.strip()
+                        if src_port_token:
+                            if src_port_token.isdigit():
+                                src_port_value = int(src_port_token)
+                            else:
+                                src_port_value = src_port_token
+                    dst_block_hint = right.strip()
+                    if src_block and src_port_value is not None and dst_block_hint and ":" not in dst_block_hint:
+                        candidates = self.session.find_connection_candidates(
+                            src_block=src_block,
+                            src_port=src_port_value,
+                            dst_block=dst_block_hint,
+                            dst_port=None,
+                        )
+                        if len(candidates) == 1:
+                            candidate = candidates[0]
+                            connection_id = render_connection_id(
+                                candidate.src_block,
+                                candidate.src_port,
+                                candidate.dst_block,
+                                candidate.dst_port,
+                            )
         canonical_target_ref, target_ref_error = self._canonicalize_change_graph_target_ref(
             dry_run=bool(dry_run),
             operation_kind=resolved_operation_kind,
@@ -5253,6 +5384,7 @@ class GrcAgent:
             operation_kind=resolved_operation_kind,
             target_ref=target_ref,
             block_id=block_id,
+            candidate_id=candidate_id,
             instance_name=instance_name,
             connection_id=connection_id,
             src_block=src_block,
@@ -5263,6 +5395,7 @@ class GrcAgent:
             new_src_port=new_src_port,
             new_dst_block=new_dst_block,
             new_dst_port=new_dst_port,
+            insert_params=insert_params,
             param_key=param_key,
             param_value=param_value,
             state=state,
@@ -5514,6 +5647,12 @@ class GrcAgent:
                 },
             )
 
+        resolved_insert_block_id: str | None = None
+        if isinstance(block_id, str) and block_id.strip():
+            resolved_insert_block_id = block_id.strip()
+        elif isinstance(candidate_id, str) and candidate_id.strip():
+            resolved_insert_block_id = candidate_id.strip()
+
         rewire_old_hint = any(
             value is not None and (not isinstance(value, str) or value.strip())
             for value in (src_block, src_port, dst_block, dst_port)
@@ -5552,8 +5691,7 @@ class GrcAgent:
                 dry_run=bool(dry_run),
             )
         elif (
-            isinstance(block_id, str)
-            and block_id.strip()
+            resolved_insert_block_id is not None
             and isinstance(connection_id, str)
             and connection_id.strip()
         ):
@@ -5578,17 +5716,18 @@ class GrcAgent:
                     {
                         "op_type": "insert_block_on_connection",
                         "connection_id": connection_id.strip(),
-                        "block_type": block_id.strip(),
-                        "instance_name": instance_name or f"{block_id.strip()}_0",
+                        "block_type": resolved_insert_block_id,
+                        "instance_name": instance_name or f"{resolved_insert_block_id}_0",
+                        "params": insert_params or {},
                     }
                 )
             else:
                 handlers.append("insert_block_on_connection")
                 result = self._insert_block_on_connection(
                     connection_id=connection_id.strip(),
-                    block_type=block_id.strip(),
-                    instance_name=instance_name or f"{block_id.strip()}_0",
-                    params={},
+                    block_type=resolved_insert_block_id,
+                    instance_name=instance_name or f"{resolved_insert_block_id}_0",
+                    params=insert_params or {},
                 )
         elif isinstance(connection_id, str) and connection_id.strip():
             insertion_words = ("insert", "add", "compatible")
@@ -5835,12 +5974,43 @@ class GrcAgent:
         validation_result = None
         if isinstance(result, dict):
             validation_result = result.get("validation")
+        graph_delta = result.get("graph_delta") if isinstance(result, dict) else None
+        if (
+            graph_delta is None
+            and isinstance(result, dict)
+            and bool(result.get("ok"))
+            and not bool(dry_run)
+        ):
+            after_block_names = _block_names_snapshot()
+            after_connection_ids = _connection_ids_snapshot()
+            synthesized_delta: dict[str, Any] = {}
+            added_blocks = sorted(after_block_names - before_block_names)
+            removed_blocks = sorted(before_block_names - after_block_names)
+            added_connections = sorted(after_connection_ids - before_connection_ids)
+            removed_connections = sorted(before_connection_ids - after_connection_ids)
+            if added_blocks:
+                synthesized_delta["added_blocks"] = added_blocks
+            if removed_blocks:
+                synthesized_delta["removed_blocks"] = removed_blocks
+            if added_connections:
+                synthesized_delta["added_connections"] = added_connections
+            if removed_connections:
+                synthesized_delta["removed_connections"] = removed_connections
+            synthesized_delta["dirty"] = bool(self.session.is_dirty)
+            if isinstance(validation_result, dict):
+                status = validation_result.get("status")
+                returncode = validation_result.get("returncode")
+                if status is not None:
+                    synthesized_delta["validation_status"] = status
+                if returncode is not None:
+                    synthesized_delta["validation_returncode"] = returncode
+            graph_delta = synthesized_delta
         payload: dict[str, Any] = {
             "ok": bool(result.get("ok")) if isinstance(result, dict) else False,
             "dry_run": bool(dry_run),
             "operation_kind": resolved_operation_kind,
             "operation_summary": operation_summary,
-            "graph_delta": result.get("graph_delta") if isinstance(result, dict) else None,
+            "graph_delta": graph_delta,
             "validation_result": validation_result,
             "checkpoint_id": result.get("checkpoint_id") if isinstance(result, dict) else None,
             "message": result.get("message") if isinstance(result, dict) else "change_graph failed",

@@ -1452,11 +1452,19 @@ def evaluate_semantic_checks(
             )
             end_state_pass = end_state_pass and passed
         elif kind == "tool_result":
-            payload = first_executed_tool_result(run_result, str(check.get("tool")))
+            tool_name = str(check.get("tool"))
+            payloads: list[dict[str, Any]] = []
+            for call in run_result.get("executed_tool_calls", []):
+                if call.get("name") != tool_name:
+                    continue
+                payload = call.get("arguments")
+                if isinstance(payload, dict):
+                    payloads.append(payload)
             expected_arguments = check.get("arguments")
-            passed = isinstance(payload, dict)
-            if passed and isinstance(expected_arguments, dict):
-                passed = _partial_match(payload, expected_arguments)
+            if isinstance(expected_arguments, dict):
+                passed = any(_partial_match(payload, expected_arguments) for payload in payloads)
+            else:
+                passed = bool(payloads)
             end_state_pass = end_state_pass and passed
         elif kind == "assistant_text_contains":
             needles = check.get("needles")

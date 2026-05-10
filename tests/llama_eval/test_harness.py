@@ -2046,6 +2046,148 @@ class GraphSnapshotTests(unittest.TestCase):
 
         self.assertTrue(result["semantic_pass"], result)
 
+    def test_evaluate_semantic_checks_tool_result_matches_any_executed_payload(self) -> None:
+        session = self._loaded_session()
+        snapshot = graph_snapshot(session)
+
+        run_result = {
+            "requested_tool_calls": [],
+            "executed_tool_calls": [
+                {
+                    "name": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "clarification_required",
+                    },
+                },
+                {
+                    "name": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "gnu_validation_failed",
+                        "validation_result": {"status": "invalid"},
+                    },
+                },
+            ],
+        }
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "tool_result",
+                    "tool": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "gnu_validation_failed",
+                        "validation_result": {"status": "invalid"},
+                    },
+                },
+            ),
+            before_snapshot=snapshot,
+            after_snapshot=snapshot,
+            run_result=run_result,
+            save_path="",
+        )
+
+        self.assertTrue(result["semantic_pass"], result)
+        self.assertTrue(result["end_state_pass"], result)
+
+    def test_evaluate_semantic_checks_tool_result_fails_when_no_payload_matches(self) -> None:
+        session = self._loaded_session()
+        snapshot = graph_snapshot(session)
+
+        run_result = {
+            "requested_tool_calls": [],
+            "executed_tool_calls": [
+                {
+                    "name": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "clarification_required",
+                    },
+                },
+                {
+                    "name": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "preflight_rejected",
+                    },
+                },
+            ],
+        }
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "tool_result",
+                    "tool": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "gnu_validation_failed",
+                    },
+                },
+            ),
+            before_snapshot=snapshot,
+            after_snapshot=snapshot,
+            run_result=run_result,
+            save_path="",
+        )
+
+        self.assertFalse(result["semantic_pass"], result)
+        self.assertFalse(result["end_state_pass"], result)
+
+    def test_evaluate_semantic_checks_tool_result_match_does_not_hide_safety_violation(self) -> None:
+        session = self._loaded_session()
+        before = graph_snapshot(session)
+        session.set_param("samp_rate", "value", "48000")
+        after = graph_snapshot(session)
+
+        run_result = {
+            "requested_tool_calls": [],
+            "executed_tool_calls": [
+                {
+                    "name": "change_graph",
+                    "arguments": {
+                        "ok": True,
+                        "operation_kind": "set_param",
+                    },
+                },
+                {
+                    "name": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "gnu_validation_failed",
+                        "validation_result": {"status": "invalid"},
+                    },
+                },
+            ],
+        }
+        result = evaluate_semantic_checks(
+            checks=(
+                {"kind": "no_mutation"},
+                {
+                    "kind": "tool_result",
+                    "tool": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "gnu_validation_failed",
+                        "validation_result": {"status": "invalid"},
+                    },
+                },
+            ),
+            before_snapshot=before,
+            after_snapshot=after,
+            run_result=run_result,
+            save_path="",
+        )
+
+        self.assertFalse(result["semantic_pass"], result)
+        self.assertFalse(result["safety_pass"], result)
+        self.assertFalse(result["end_state_pass"], result)
+        details = result.get("semantic_details", [])
+        no_mutation = next(d for d in details if d.get("kind") == "no_mutation")
+        tool_result = next(d for d in details if d.get("kind") == "tool_result")
+        self.assertFalse(no_mutation.get("passed"))
+        self.assertTrue(tool_result.get("passed"))
+
     def test_evaluate_semantic_checks_exact_graph_delta_treats_numeric_scalars_semantically(self) -> None:
         before = {
             "raw_hash": "before",

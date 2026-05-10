@@ -178,6 +178,7 @@ def build_turn_plan(user_message: str) -> TurnPlan:
     preview = _contains_any(text, _PREVIEW_PHRASES)
     explicit_apply_after_preview = preview and _explicit_apply_after_preview(text)
     explicit_insertion_tool = _explicit_insertion_tool(text)
+    explicit_change_graph_insert = _looks_like_change_graph_insert_request(text)
     if _looks_like_block_uid_mutation(text):
         return TurnPlan(
             intent=INTENT_UNCERTAIN_MUTATION,
@@ -194,6 +195,14 @@ def build_turn_plan(user_message: str) -> TurnPlan:
             allowed_tools=(explicit_insertion_tool,),
             required_actions=(explicit_insertion_tool,),
             evidence_span=explicit_insertion_tool,
+        )
+    if explicit_change_graph_insert:
+        return TurnPlan(
+            intent=INTENT_INSERTION,
+            allowed_tools=("change_graph",),
+            required_actions=("change_graph",),
+            expected_op_types=("insert_block_on_connection",),
+            evidence_span="change_graph insert_block",
         )
     if "summarize" in text and not preview:
         required_actions.add("summarize_graph")
@@ -509,6 +518,16 @@ def _explicit_insertion_tool(text: str) -> str:
         if _phrase_matches(text, tool_name):
             return tool_name
     return ""
+
+
+def _looks_like_change_graph_insert_request(text: str) -> bool:
+    if not _phrase_matches(text, "change_graph"):
+        return False
+    return (
+        _phrase_matches(text, "insert_block")
+        or _phrase_matches(text, "operation_kind insert_block")
+        or _phrase_matches(text, '"operation_kind": "insert_block"')
+    )
 
 
 def _natural_insertion_phrase(text: str) -> str:

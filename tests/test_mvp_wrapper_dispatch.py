@@ -1399,6 +1399,61 @@ class MvpWrapperDispatchTests(unittest.TestCase):
             self.assertEqual(agent.session.state_revision, before_revision)
             self.assertEqual(agent.session.is_dirty, before_dirty)
 
+    def test_change_graph_insert_accepts_candidate_id_alias(self) -> None:
+        agent = self._load_agent()
+        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
+        self.assertTrue(listed["ok"], listed)
+        connection_id = listed["items"][0]
+        with mock.patch.object(
+            agent,
+            "_insert_block_on_connection",
+            wraps=agent._insert_block_on_connection,
+        ) as insert_mock:
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Insert a block on this exact connection.",
+                    "operation_kind": "insert_block",
+                    "connection_id": connection_id,
+                    "candidate_id": "blocks_throttle2",
+                    "instance_name": "blocks_throttle2_alias",
+                    "debug": True,
+                },
+            )
+        self.assertIn("operation_summary", result)
+        self.assertEqual(result["operation_summary"], "insert_block_on_connection")
+        self.assertEqual(insert_mock.call_count, 1)
+        kwargs = insert_mock.call_args.kwargs
+        self.assertEqual(kwargs.get("connection_id"), connection_id)
+        self.assertEqual(kwargs.get("block_type"), "blocks_throttle2")
+
+    def test_change_graph_insert_rejects_conflicting_block_and_candidate_ids(self) -> None:
+        agent = self._load_agent()
+        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
+        self.assertTrue(listed["ok"], listed)
+        connection_id = listed["items"][0]
+        with mock.patch.object(
+            agent,
+            "_insert_block_on_connection",
+            wraps=agent._insert_block_on_connection,
+        ) as insert_mock:
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Insert a block on this exact connection.",
+                    "operation_kind": "insert_block",
+                    "connection_id": connection_id,
+                    "block_id": "blocks_throttle2",
+                    "candidate_id": "blocks_head",
+                    "debug": True,
+                },
+            )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+        self.assertEqual(insert_mock.call_count, 0)
+
     def test_change_graph_compatible_insertion_dispatches_by_dry_run(self) -> None:
         agent = self._load_agent()
         listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
