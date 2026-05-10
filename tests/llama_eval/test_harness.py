@@ -925,6 +925,161 @@ class LiveScenarioRunnerTests(unittest.TestCase):
                 scenario=scenario,
             )
 
+    def test_turn_trace_is_present_and_preserves_raw_calls(self) -> None:
+        client = _ScriptedClient(
+            [
+                {
+                    "assistant_text": None,
+                    "tool_calls": [
+                        _ScriptedToolCall(
+                            "change_graph",
+                            {
+                                "dry_run": True,
+                                "operation_kind": "set_param",
+                                "user_goal": "preview samp_rate edit",
+                                "instance_name": "samp_rate",
+                                "param_key": "value",
+                                "param_value": "48000",
+                            },
+                        )
+                    ],
+                },
+                {"assistant_text": "Preview complete.", "tool_calls": []},
+            ]
+        )
+        scenario = LiveScenario(
+            category="trace",
+            name="trace_preserves_raw",
+            turns=(
+                LiveTurnSpec(
+                    prompt="Preview setting samp_rate to 48000.",
+                    expected_tool_calls=(
+                        ToolExpectation(
+                            "change_graph",
+                            arguments={"operation_kind": "set_param", "dry_run": True},
+                        ),
+                    ),
+                    semantic_checks=(
+                        {"kind": "no_mutation"},
+                    ),
+                ),
+            ),
+        )
+
+        result = run_live_scenario_once(
+            client=client,
+            model="model",
+            scenario=scenario,
+            mvp_tool_profile=True,
+        )
+
+        turn = result["turn_results"][0]
+        trace = turn.get("trace")
+        self.assertIsInstance(trace, dict, turn)
+        self.assertEqual(trace.get("prompt"), scenario.turns[0].prompt)
+        self.assertEqual(trace.get("active_tool_surface"), "mvp")
+        self.assertEqual(
+            trace.get("raw_requested_tool_calls"),
+            turn.get("requested_tool_calls_raw"),
+        )
+        self.assertIn("failure_category", trace)
+
+    def test_trace_captures_model_contract_failure_for_raw_legacy_call(self) -> None:
+        client = _ScriptedClient(
+            [
+                {
+                    "assistant_text": None,
+                    "tool_calls": [
+                        _ScriptedToolCall(
+                            "apply_edit",
+                            {
+                                "transaction": {
+                                    "op_type": "update_params",
+                                    "instance_name": "samp_rate",
+                                    "params": {"value": "48000"},
+                                }
+                            },
+                        )
+                    ],
+                },
+            ]
+        )
+        scenario = LiveScenario(
+            category="trace",
+            name="trace_model_contract_failure",
+            turns=(
+                LiveTurnSpec(
+                    prompt="Change samp_rate to 48000.",
+                    expected_tool_calls=(ToolExpectation("change_graph"),),
+                    semantic_checks=({"kind": "no_mutation"},),
+                ),
+            ),
+        )
+
+        result = run_live_scenario_once(
+            client=client,
+            model="model",
+            scenario=scenario,
+            mvp_tool_profile=True,
+        )
+
+        turn = result["turn_results"][0]
+        trace = turn["trace"]
+        self.assertFalse(turn["model_contract_pass"], turn)
+        self.assertEqual(trace["failure_category"], "model_contract", trace)
+
+    def test_later_tool_result_match_does_not_hide_earlier_mutation(self) -> None:
+        before_snapshot = {
+            "raw_hash": "before",
+            "state_revision": 1,
+            "connection_ids": [],
+            "block_names": [],
+            "variable_values": {},
+            "blocks_by_name": {},
+            "blocks_by_uid": {},
+            "duplicate_block_groups": {},
+            "dirty": False,
+            "validation_status": "valid",
+            "validation_returncode": 0,
+        }
+        after_snapshot = {
+            **before_snapshot,
+            "raw_hash": "after",
+            "state_revision": 2,
+            "dirty": True,
+        }
+        run_result = {
+            "executed_tool_calls": [
+                {
+                    "name": "change_graph",
+                    "arguments": {"ok": False, "error_type": "invalid_request"},
+                },
+                {
+                    "name": "change_graph",
+                    "arguments": {"ok": True, "message": "later payload"},
+                },
+            ],
+            "requested_tool_calls": [],
+            "assistant_text": "",
+            "clarification_result": None,
+        }
+        result = evaluate_semantic_checks(
+            checks=(
+                {"kind": "tool_result", "tool": "change_graph", "arguments": {"ok": True}},
+                {"kind": "no_mutation"},
+            ),
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            run_result=run_result,
+            save_path="",
+        )
+
+        self.assertTrue(result["semantic_details"][0]["passed"], result["semantic_details"])
+        self.assertFalse(result["semantic_details"][1]["passed"], result["semantic_details"])
+        self.assertFalse(result["safety_pass"], result)
+        self.assertFalse(result["end_state_pass"], result)
+        self.assertFalse(result["semantic_pass"], result)
+
 
 class RecoveryHarnessTests(unittest.TestCase):
     @staticmethod

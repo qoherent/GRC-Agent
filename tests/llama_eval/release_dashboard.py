@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import json
+from pathlib import Path
 import sys
 from typing import Any, Iterable
 
@@ -26,6 +27,25 @@ PHASE_NAMES = {
     57: "r4a_insert",
     58: "r4b_remove",
 }
+MANIFEST_DIR = Path(__file__).resolve().parent / "capability_manifests"
+
+
+def load_capability_manifests() -> dict[str, dict[str, Any]]:
+    """Load capability manifests keyed by release_profile/suite name."""
+    manifests: dict[str, dict[str, Any]] = {}
+    if not MANIFEST_DIR.exists():
+        return manifests
+    for path in sorted(MANIFEST_DIR.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        suite = payload.get("suite")
+        if isinstance(suite, str) and suite:
+            manifests[suite] = payload
+    return manifests
 
 
 def build_release_dashboard(
@@ -43,6 +63,11 @@ def build_release_dashboard(
     malformed_entries = 0
     mixed_profile_entries: list[str] = []
     raw_legacy_tool_entries: list[str] = []
+    manifest_missing_entries: list[str] = []
+    manifest_dimension_entries: list[str] = []
+    manifest_forbidden_tool_entries: list[str] = []
+    manifests = load_capability_manifests()
+    observed_profile_statuses: dict[str, set[str]] = defaultdict(set)
 
     for store in stores:
         runs = store.get("runs", [])
@@ -80,6 +105,41 @@ def build_release_dashboard(
                             raw_legacy_tool_entries.append(
                                 f"{phase_name_for(phase)}/{category}/{case_name}#run{run.get('run_index', '?')}:raw_legacy_tools"
                             )
+                    release_profile = str(
+                        metadata.get("release_profile", "BETA_COMPLEX_MUTATION")
+                    )
+                    manifest = manifests.get(release_profile)
+                    qualified = (
+                        f"{phase_name_for(phase)}/{category}/{case_name}"
+                        f"#run{run.get('run_index', '?')}"
+                    )
+                    if manifest is None and release_profile.startswith("R"):
+                        manifest_missing_entries.append(f"{qualified}:missing_manifest")
+                    elif manifest is not None:
+                        status = manifest.get("status")
+                        if isinstance(status, str) and status:
+                            observed_profile_statuses[status].add(release_profile)
+                        required_dims = manifest.get("required_dimensions", [])
+                        if isinstance(required_dims, list):
+                            for dim in required_dims:
+                                if not isinstance(run.get(str(dim)), bool):
+                                    manifest_dimension_entries.append(
+                                        f"{qualified}:missing_dimension:{dim}"
+                                    )
+                        forbidden_raw_tools = manifest.get("forbidden_raw_tools", [])
+                        if isinstance(forbidden_raw_tools, list) and forbidden_raw_tools:
+                            forbidden = {str(tool) for tool in forbidden_raw_tools}
+                            raw_tools = set()
+                            for turn in run.get("turn_results", []):
+                                for call in turn.get("requested_tool_calls_raw", []):
+                                    raw_tools.add(str(call.get("name")))
+                                for call in turn.get("executed_tool_calls_raw", []):
+                                    raw_tools.add(str(call.get("name")))
+                            overlap = sorted(raw_tools & forbidden)
+                            if overlap:
+                                manifest_forbidden_tool_entries.append(
+                                    f"{qualified}:forbidden_raw_tools:{','.join(overlap)}"
+                                )
                     if not _scope_matches(metadata, scope):
                         continue
             grouped[phase][(category, case_name)].append(run)
@@ -161,6 +221,9 @@ def build_release_dashboard(
         malformed_entries == 0
         and not mixed_profile_entries
         and not raw_legacy_tool_entries
+        and not manifest_missing_entries
+        and not manifest_dimension_entries
+        and not manifest_forbidden_tool_entries
         and not missing_required_phases
         and not unstable_cases
         and not short_run_cases
@@ -184,6 +247,13 @@ def build_release_dashboard(
         "malformed_entries": malformed_entries,
         "mixed_profile_entries": mixed_profile_entries,
         "raw_legacy_tool_entries": raw_legacy_tool_entries,
+        "manifest_missing_entries": manifest_missing_entries,
+        "manifest_dimension_entries": manifest_dimension_entries,
+        "manifest_forbidden_tool_entries": manifest_forbidden_tool_entries,
+        "capability_statuses": {
+            status: sorted(profiles)
+            for status, profiles in sorted(observed_profile_statuses.items())
+        },
         "phases": phase_reports,
     }
 

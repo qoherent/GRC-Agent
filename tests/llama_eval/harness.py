@@ -28,6 +28,7 @@ from grc_agent.recovery import (
     RecoveryDecision,
     classify_tool_result_for_recovery,
 )
+from grc_agent.trace import build_live_eval_turn_trace
 from grc_agent.session_ops import parse_connection_id
 
 DEFAULT_FIXTURE_NAME = "random_bit_generator.grc"
@@ -1104,6 +1105,20 @@ def run_live_scenario_once(
                 and turn_result["recovery_pass"]
                 and (turn_result.get("model_contract_pass") is not False)
                 and (turn_result.get("runtime_safety_pass") is not False)
+            )
+            turn_result["trace"] = build_live_eval_turn_trace(
+                prompt=prompt,
+                active_tool_surface="mvp" if mvp_tool_profile else "legacy",
+                raw_requested_tool_calls=requested_tool_calls_raw,
+                requested_tool_calls=requested_tool_calls,
+                executed_tool_calls=executed_tool_calls,
+                state_revision_before=before_snapshot.get("state_revision"),
+                state_revision_after=after_snapshot.get("state_revision"),
+                graph_delta=graph_delta(before_snapshot, after_snapshot),
+                model_contract_pass=turn_result.get("model_contract_pass"),
+                runtime_safety_pass=turn_result.get("runtime_safety_pass"),
+                semantic_pass=turn_result.get("semantic_pass"),
+                passed=turn_result.get("passed"),
             )
             turn_results.append(turn_result)
 

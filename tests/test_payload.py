@@ -65,7 +65,14 @@ class PayloadModuleContractTests(unittest.TestCase):
             for name, value in inspect.getmembers(payload_module, inspect.isfunction)
             if value.__module__ == payload_module.__name__
         }
-        self.assertEqual(function_names, {"build_error_payload", "join_non_empty"})
+        self.assertEqual(
+            function_names,
+            {
+                "audit_change_graph_result_shape",
+                "build_error_payload",
+                "join_non_empty",
+            },
+        )
 
 
 if __name__ == "__main__":
