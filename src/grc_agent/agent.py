@@ -7,11 +7,9 @@ import hashlib
 import json
 import logging
 import re
-import socket
 from pathlib import Path
 import time
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 from grc_agent.catalog import describe_block
 from grc_agent.catalog.loaders import build_catalog_snapshot
@@ -31,11 +29,7 @@ from grc_agent.retrieval.search import _search_grc_with_context
 from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
 from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.runtime.prompt import build_system_prompt
-from grc_agent.runtime.docs_answer_advisor import (
-    DocsAnswerLlamaClient,
-    DocsAnswerSnippet,
-    run_docs_answer_advisor,
-)
+from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
 from grc_agent.runtime.path_safety import (
     resolved_path as resolve_runtime_path,
     unsafe_graph_root_for_path,
@@ -47,7 +41,6 @@ from grc_agent.runtime.tool_surface import (
     tool_surface_for_legacy_flag,
 )
 from grc_agent.runtime.docs_answer import (
-    _DOCS_TOPIC_SYNONYMS,
     _DocsComparisonSides,
     _DocsEvidenceCandidate,
     ask_grc_docs as ask_grc_docs_wrapper,
@@ -55,6 +48,46 @@ from grc_agent.runtime.docs_answer import (
     build_typed_docs_answer as build_typed_docs_answer_wrapper,
     collect_docs_candidates as collect_docs_candidates_wrapper,
     rank_docs_candidates as rank_docs_candidates_wrapper,
+)
+from grc_agent.runtime.docs_answer.advisor import (
+    classify_docs_advisor_error,
+    probe_docs_advisor_server,
+    run_docs_answer_advisor as run_docs_answer_advisor_wrapper,
+)
+from grc_agent.runtime.docs_answer.formatting import (
+    catalog_block_purpose_sentence,
+    clean_catalog_summary_for_answer,
+    clean_docs_excerpt,
+    clip_docs_snippets_for_helper,
+    docs_low_value_reasons,
+    docs_primary_terms,
+    docs_title_aliases,
+    docs_topic_terms,
+    extract_block_definition_subject,
+    extract_docs_subject,
+    infer_docs_source_type,
+    is_block_definition_query,
+    is_procedural_walkthrough_text,
+    is_tutorial_or_howto_query,
+    normalize_docs_source_key,
+)
+from grc_agent.runtime.docs_answer.selection import (
+    build_catalog_assisted_candidate,
+    build_fallback_answer,
+    classify_docs_answer_type,
+    extract_comparison_sides,
+    helper_candidates_for_docs_answer,
+    helper_eligibility_for_docs_answer,
+    is_docs_evidence_strong,
+    is_lexical_docs_evidence_strong,
+    minimum_required_term_hits,
+    normalized_docs_retrieval_query,
+    pick_typed_sentence,
+    required_terms_for_answer_type,
+    select_docs_candidates_for_answer_type,
+    sentence_list,
+    should_catalog_assist,
+    text_matches_term_or_synonym,
 )
 from grc_agent.runtime.wrappers.inspect_graph import inspect_graph as inspect_graph_wrapper
 from grc_agent.runtime.wrappers.lifecycle import (
@@ -112,100 +145,6 @@ _INSTALLED_GRAPH_ROOTS = (
     Path("/usr/local/share/gnuradio/examples"),
 )
 _CANONICAL_FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "tests" / "data"
-_DOCS_QUERY_STOP_WORDS = frozenset(
-    {
-        "a",
-        "about",
-        "across",
-        "all",
-        "an",
-        "and",
-        "are",
-        "at",
-        "be",
-        "between",
-        "block",
-        "blocks",
-        "briefly",
-        "by",
-        "can",
-        "checking",
-        "context",
-        "difference",
-        "different",
-        "differ",
-        "do",
-        "does",
-        "explain",
-        "for",
-        "gnu",
-        "high",
-        "how",
-        "in",
-        "interact",
-        "is",
-        "keep",
-        "level",
-        "meaning",
-        "mean",
-        "of",
-        "or",
-        "please",
-        "radio",
-        "short",
-        "the",
-        "this",
-        "to",
-        "used",
-        "using",
-        "what",
-        "with",
-    }
-)
-_DOCS_NAVIGATION_MARKERS = (
-    "beginner tutorials",
-    "please leave tutorials-related feedback",
-    "discussion page of this article",
-    "jump to navigation",
-    "table of contents",
-    "table of content",
-)
-_DOCS_MENU_TITLE_MARKERS = (
-    "tutorials",
-    "main page",
-    "index",
-)
-_DOCS_PROCEDURAL_MARKERS = (
-    "add the",
-    "drag in",
-    "connect the",
-    "click ",
-    "right-click",
-    "setting up",
-    "set up",
-    "we will be using",
-    "below to show",
-    "workspace",
-    "flowgraph below",
-)
-_DOCS_GENERIC_ANSWER_MARKERS = (
-    "gnu radio is a free",
-    "gnu radio is a framework",
-    "software development toolkit",
-    "what is gnu radio",
-)
-_DOCS_LIST_MARKERS_RE = re.compile(r"(?:^|\s)(?:\d+\.\s+|\*\s+)")
-_DOCS_GENERIC_TOPIC_TERMS = frozenset(
-    {
-        "concept",
-        "definition",
-        "gnu",
-        "radio",
-        "signal",
-        "system",
-        "type",
-    }
-)
 _JOURNALED_MUTATION_TOOLS = {
     "apply_edit",
     "remove_connection",
@@ -2179,115 +2118,31 @@ class GrcAgent:
         self,
         snippets: list[DocsAnswerSnippet],
     ) -> list[DocsAnswerSnippet]:
-        clipped: list[DocsAnswerSnippet] = []
-        total_chars = 0
-        for snippet in snippets:
-            excerpt_text = snippet.excerpt
-            if len(excerpt_text) > self._docs_answer_cfg.helper_max_snippet_chars:
-                excerpt_text = (
-                    excerpt_text[
-                        : self._docs_answer_cfg.helper_max_snippet_chars - 1
-                    ].rstrip()
-                    + "…"
-                )
-            candidate = DocsAnswerSnippet(
-                title=snippet.title,
-                source=snippet.source,
-                excerpt=excerpt_text,
-            )
-            chunk_chars = len(candidate.title) + len(candidate.source) + len(candidate.excerpt)
-            if (
-                clipped
-                and total_chars + chunk_chars
-                > self._docs_answer_cfg.helper_max_total_context_chars
-            ):
-                break
-            clipped.append(candidate)
-            total_chars += chunk_chars
-        return clipped or snippets[:1]
+        return clip_docs_snippets_for_helper(self, snippets)
 
     @staticmethod
     def _is_tutorial_or_howto_query(query: str) -> bool:
-        lower = query.lower()
-        markers = (
-            "how to",
-            "tutorial",
-            "walkthrough",
-            "step by step",
-            "example",
-            "guide",
-        )
-        if any(marker in lower for marker in markers):
-            return True
-        return bool(
-            re.search(r"(?i)^\s*how\s+do\s+.+\s+work\??\s*$", query)
-            or re.search(r"(?i)^\s*how\s+does\s+.+\s+work\??\s*$", query)
-        )
+        return is_tutorial_or_howto_query(query)
 
     @staticmethod
     def _docs_topic_terms(query: str) -> list[str]:
-        return [
-            token
-            for token in re.findall(r"[a-z0-9]+", query.lower())
-            if len(token) > 2 and token not in _DOCS_QUERY_STOP_WORDS
-        ]
+        return docs_topic_terms(query)
 
     @staticmethod
     def _docs_primary_terms(query: str) -> list[str]:
-        return [
-            token
-            for token in GrcAgent._docs_topic_terms(query)
-            if token not in _DOCS_GENERIC_TOPIC_TERMS
-        ]
+        return docs_primary_terms(query)
 
     @staticmethod
     def _normalize_docs_source_key(source: str) -> str:
-        text = " ".join(str(source or "").split()).strip().lower()
-        if not text:
-            return ""
-        if "](" in text:
-            text = text.split("](", 1)[0]
-        if text.startswith("http"):
-            text = text.split("#", 1)[0]
-            text = text.split("&oldid=", 1)[0]
-            text = text.rstrip("/&?")
-        return text
+        return normalize_docs_source_key(source)
 
     @staticmethod
     def _clean_docs_excerpt(excerpt: str) -> str:
-        text = " ".join(str(excerpt or "").split()).strip()
-        if not text:
-            return ""
-        segments = re.split(r"(?<=[.!?])\s+", text)
-        kept: list[str] = []
-        for segment in segments:
-            lower = segment.lower()
-            if any(marker in lower for marker in _DOCS_NAVIGATION_MARKERS):
-                continue
-            if _DOCS_LIST_MARKERS_RE.search(segment) and len(segment) < 70:
-                continue
-            kept.append(segment)
-        cleaned = " ".join(kept).strip()
-        return cleaned if cleaned else text
+        return clean_docs_excerpt(excerpt)
 
     @staticmethod
     def _docs_title_aliases(title: str) -> list[str]:
-        compact = " ".join(str(title or "").split()).strip().lower()
-        if not compact:
-            return []
-        aliases: set[str] = set()
-        tokens = re.findall(r"[a-z0-9]+", compact)
-        if tokens:
-            aliases.add("_".join(tokens))
-        match = re.match(r"^(?P<prefix>[a-z0-9]+)\s+(?P<lhs>.+?)\s+and\s+(?P<rhs>.+)$", compact)
-        if match:
-            prefix = match.group("prefix")
-            lhs = "_".join(re.findall(r"[a-z0-9]+", match.group("lhs")))
-            rhs = "_".join(re.findall(r"[a-z0-9]+", match.group("rhs")))
-            if prefix and lhs and rhs:
-                aliases.add(f"{prefix}_{lhs}_and_{rhs}")
-                aliases.add(f"{prefix}_{rhs}_and_{lhs}")
-        return sorted(alias for alias in aliases if alias)
+        return docs_title_aliases(title)
 
     def _infer_docs_source_type(
         self,
@@ -2296,234 +2151,44 @@ class GrcAgent:
         title: str,
         source_type_hint: str | None = None,
     ) -> str:
-        hint = (source_type_hint or "").strip().lower()
-        if hint == "tutorial_chunk":
-            return "tutorial"
-        if hint == "manual_chunk":
-            return "manual"
-        source_l = source.lower()
-        title_l = title.lower()
-        if "catalog:" in source_l:
-            return "catalog"
-        if "tutorial" in source_l or "guided_tutorial" in source_l:
-            return "tutorial"
-        if any(marker in title_l for marker in _DOCS_MENU_TITLE_MARKERS):
-            return "tutorial"
-        return "manual"
+        return infer_docs_source_type(
+            source=source,
+            title=title,
+            source_type_hint=source_type_hint,
+        )
 
     def _docs_low_value_reasons(self, *, candidate: _DocsEvidenceCandidate) -> list[str]:
-        reasons: list[str] = []
-        title_l = candidate.snippet.title.lower()
-        excerpt_l = candidate.snippet.excerpt.lower()
-        section_l = candidate.section.lower()
-        if title_l.strip() == "what is gnu radio":
-            reasons.append("generic_gnuradio_page")
-        if any(marker in title_l for marker in _DOCS_MENU_TITLE_MARKERS):
-            reasons.append("menu_index_page")
-        if "porting guide" in title_l:
-            reasons.append("porting_guide_fragment")
-        if title_l.startswith("simulation example"):
-            reasons.append("simulation_walkthrough")
-        if any(marker in excerpt_l for marker in _DOCS_NAVIGATION_MARKERS):
-            reasons.append("navigation_boilerplate")
-        if excerpt_l.count(" 1. ") + excerpt_l.count(" 2. ") + excerpt_l.count(" 3. ") >= 3:
-            reasons.append("toc_dominated")
-        numbered_links = len(_DOCS_LIST_MARKERS_RE.findall(excerpt_l))
-        prose_chars = len(re.findall(r"[a-z]", excerpt_l))
-        if numbered_links >= 6 and prose_chars < 260:
-            reasons.append("link_list_fragment")
-        if len(candidate.snippet.excerpt.strip()) < 70:
-            reasons.append("very_short_fragment")
-        if candidate.snippet.excerpt.rstrip().endswith("…") and len(candidate.snippet.excerpt) < 220:
-            reasons.append("snippet_fragment")
-        if section_l in {"", candidate.snippet.title.lower()} and "tutorials" in excerpt_l[:180]:
-            reasons.append("generic_context_only")
-        return reasons
+        return docs_low_value_reasons(candidate=candidate)
 
     @staticmethod
     def _is_procedural_walkthrough_text(text: str) -> bool:
-        lower = text.lower()
-        return any(marker in lower for marker in _DOCS_PROCEDURAL_MARKERS)
+        return is_procedural_walkthrough_text(text)
 
     @staticmethod
     def _is_block_definition_query(question: str) -> bool:
-        q = question.lower().strip()
-        if not (
-            re.search(r"\bwhat does .+ do\??$", q)
-            or re.search(r"\bwhat is (?:an? |the )?.+ block used for(?: in .+)?\??$", q)
-            or re.search(r"\bwhat does .+ block do\??$", q)
-            or re.search(r"\bhow do .+ blocks? (?:relate to|interact with) .+\??$", q)
-            or re.search(r"\bhow does .+ block (?:relate to|interact with) .+\??$", q)
-        ):
-            return False
-        if "interact with" in q:
-            return False
-        if "relate to" in q and "pmt" not in q:
-            return False
-        subject = GrcAgent._extract_block_definition_subject(question) or ""
-        subject_l = subject.lower()
-        if subject_l in {"grcc", "gnu radio"}:
-            return False
-        if "grcc" in subject_l:
-            return False
-        markers = (
-            "block",
-            "sink",
-            "source",
-            "strobe",
-            "throttle",
-            "head",
-            "debug",
-            "tagged stream",
-            "null sink",
-            "qt gui",
-            "embedded python",
-        )
-        return any(marker in subject_l for marker in markers) or bool(
-            re.fullmatch(r"[a-z0-9_]+", subject_l)
-        )
+        return is_block_definition_query(question)
 
     @staticmethod
     def _extract_block_definition_subject(question: str) -> str | None:
-        q = " ".join(question.split()).strip()
-        patterns = (
-            r"(?i)\bwhat does (?:the )?(?P<subject>.+?) block do\??$",
-            r"(?i)\bwhat is (?:an? |the )?(?P<subject>.+?) block(?: used for)?(?: in .+)?\??$",
-            r"(?i)\bwhat does (?:the )?(?P<subject>.+?) do\??$",
-            r"(?i)\bhow do (?:the )?(?P<subject>.+?) blocks? (?:relate to|interact with) .+\??$",
-            r"(?i)\bhow does (?:the )?(?P<subject>.+?) block (?:relate to|interact with) .+\??$",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, q)
-            if not match:
-                continue
-            subject = " ".join(str(match.group("subject") or "").split()).strip(" ?.,")
-            if subject:
-                return subject
-        return None
+        return extract_block_definition_subject(question)
 
     @staticmethod
     def _extract_docs_subject(question: str) -> str | None:
-        q = " ".join(question.split()).strip()
-        patterns = (
-            r"(?i)\bwhat is (?:an? |the )?(?P<subject>.+?)\??$",
-            r"(?i)\bwhat does (?:the )?(?P<subject>.+?) do\??$",
-            r"(?i)\bhow do (?P<subject>.+?) work\??$",
-            r"(?i)\bhow does (?P<subject>.+?) work\??$",
-            r"(?i)\bhow do (?P<subject>.+?) relate to .+?\??$",
-            r"(?i)\bhow does (?P<subject>.+?) relate to .+?\??$",
-            r"(?i)\bhow do (?P<subject>.+?) interact\??$",
-            r"(?i)\bhow do (?P<subject>.+?) affect .+?\??$",
-            r"(?i)\bhow does (?P<subject>.+?) affect .+?\??$",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, q)
-            if not match:
-                continue
-            subject = " ".join(str(match.group("subject") or "").split()).strip(" ?.,")
-            if subject:
-                return subject
-        return None
+        return extract_docs_subject(question)
 
     def _build_catalog_assisted_candidate(
         self,
         *,
         question: str,
     ) -> _DocsEvidenceCandidate | None:
-        try:
-            result = self._search_blocks(question, k=3, debug=False, enrich=True)
-        except Exception:
-            return None
-        if result.get("ok") is not True:
-            return None
-        rows = result.get("results")
-        if not isinstance(rows, list) or not rows:
-            return None
-        subject = self._extract_block_definition_subject(question) or question
-        subject_terms = self._docs_primary_terms(subject) or self._docs_topic_terms(subject)
-        scored_rows: list[tuple[int, dict[str, Any]]] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            text = " ".join(
-                [
-                    str(row.get("name") or ""),
-                    str(row.get("block_id") or ""),
-                    str(row.get("summary") or ""),
-                ]
-            ).lower()
-            score = sum(1 for term in subject_terms if term and term in text)
-            scored_rows.append((score, row))
-        if not scored_rows:
-            return None
-        scored_rows.sort(key=lambda item: item[0], reverse=True)
-        if scored_rows[0][0] <= 0:
-            return None
-        top = scored_rows[0][1]
-        if not isinstance(top, dict):
-            return None
-        block_id = str(top.get("block_id") or "").strip()
-        name = str(top.get("name") or block_id).strip()
-        summary = str(top.get("summary") or "").strip()
-        if not name or not summary:
-            return None
-        alias = "_".join(re.findall(r"[a-z0-9]+", name.lower()))
-        source_ref = "catalog"
-        if block_id and alias:
-            source_ref = f"catalog:{alias}:{alias}_blocks:{block_id}"
-        elif block_id:
-            source_ref = f"catalog:{block_id}"
-        elif alias:
-            source_ref = f"catalog:{alias}"
-        return _DocsEvidenceCandidate(
-            snippet=DocsAnswerSnippet(
-                title=name,
-                source=source_ref,
-                excerpt=summary,
-            ),
-            source_channel="catalog_assist",
-            source_type="catalog",
-            section=name,
-            lexical_score=18.0,
-            semantic_score=None,
-            topic_score=0.0,
-            quality_score=0.0,
-            low_value_reasons=(),
-            procedural=False,
-        )
+        return build_catalog_assisted_candidate(self, question=question)
 
     def _should_catalog_assist(
         self,
         question: str,
         ranked_candidates: list[_DocsEvidenceCandidate],
     ) -> bool:
-        lower = question.lower()
-        if not any(
-            marker in lower
-            for marker in (
-                "block",
-                "sink",
-                "source",
-                "strobe",
-                "throttle",
-                "tagged stream",
-                "qt gui",
-                "message debug",
-                "null sink",
-            )
-        ):
-            return False
-        if not ranked_candidates:
-            return True
-        subject = self._extract_docs_subject(question) or question
-        subject_terms = self._docs_primary_terms(subject)
-        if not subject_terms:
-            return False
-        top = ranked_candidates[0]
-        top_title_source = " ".join([top.snippet.title, top.snippet.source]).lower()
-        subject_hits = sum(1 for term in subject_terms if term in top_title_source)
-        required_hits = 1 if len(subject_terms) <= 1 else 2
-        return subject_hits < required_hits
+        return should_catalog_assist(question, ranked_candidates)
 
     @staticmethod
     def _is_docs_evidence_strong(
@@ -2531,82 +2196,19 @@ class GrcAgent:
         *,
         question: str,
     ) -> bool:
-        if not ranked_candidates:
-            return False
-        top = ranked_candidates[0]
-        severe = {
-            "generic_gnuradio_page",
-            "menu_index_page",
-            "navigation_boilerplate",
-            "toc_dominated",
-        }
-        if any(reason in severe for reason in top.low_value_reasons):
-            return False
-        primary_terms = GrcAgent._docs_primary_terms(question)
-        top_text = " ".join(
-            [top.snippet.title, top.section, top.snippet.excerpt]
-        ).lower()
-        primary_hits = sum(1 for term in primary_terms if term in top_text)
-        if primary_terms and primary_hits == 0:
-            return False
-        return top.quality_score >= 4.5 and top.topic_score >= 2.0
+        return is_docs_evidence_strong(ranked_candidates, question=question)
 
     @staticmethod
     def _classify_docs_answer_type(question: str) -> str:
-        lower = question.lower()
-        if any(
-            marker in lower
-            for marker in (
-                "abi guarantee",
-                "abi guarantees",
-                "zero-copy",
-                "lock-free",
-                "fpga bitstream",
-                "auto-repair",
-                "deterministically",
-            )
-        ):
-            return "insufficient"
-        if "hierarchical block" in lower:
-            return "definition"
-        if GrcAgent._is_block_definition_query(question):
-            return "block_definition"
-        if (
-            "block" in lower
-            and "relate to" in lower
-            and "pmt" in lower
-            and ("difference between" not in lower and "differ" not in lower and " versus " not in lower)
-        ):
-            return "block_definition"
-        if any(marker in lower for marker in ("difference between", "differ", "vs", "versus")):
-            return "comparison"
-        if "interact with" in lower or "relate to" in lower:
-            return "comparison"
-        if "grcc" in lower:
-            return "tool_command_concept"
-        if GrcAgent._is_tutorial_or_howto_query(question):
-            return "procedural_how_to"
-        if lower.startswith(("what is ", "what are ", "explain ")):
-            return "definition"
-        return "definition"
+        return classify_docs_answer_type(question)
 
     @staticmethod
     def _normalized_docs_retrieval_query(*, question: str, answer_type: str) -> str:
-        query = " ".join(question.split()).strip()
-        if answer_type == "tool_command_concept" and "grcc" in query.lower():
-            return "grcc compile validation flowgraph"
-        return query
+        return normalized_docs_retrieval_query(question=question, answer_type=answer_type)
 
     @staticmethod
     def _text_matches_term_or_synonym(text: str, term: str) -> bool:
-        if not term:
-            return False
-        if term in text:
-            return True
-        for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
-            if synonym in text:
-                return True
-        return False
+        return text_matches_term_or_synonym(text, term)
 
     def _select_docs_candidates_for_answer_type(
         self,
@@ -2616,87 +2218,20 @@ class GrcAgent:
         ranked_candidates: list[_DocsEvidenceCandidate],
         limit: int,
     ) -> list[_DocsEvidenceCandidate]:
-        if not ranked_candidates:
-            return []
-        if answer_type != "comparison":
-            return ranked_candidates[:limit]
-        sides = self._extract_comparison_sides(question)
-        if sides is None:
-            return ranked_candidates[:limit]
-        left_candidate: _DocsEvidenceCandidate | None = None
-        right_candidate: _DocsEvidenceCandidate | None = None
-        for candidate in ranked_candidates:
-            text = " ".join(
-                [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
-            ).lower()
-            if left_candidate is None and any(
-                self._text_matches_term_or_synonym(text, term) for term in sides.left_terms
-            ):
-                left_candidate = candidate
-            if right_candidate is None and any(
-                self._text_matches_term_or_synonym(text, term) for term in sides.right_terms
-            ):
-                right_candidate = candidate
-            if left_candidate is not None and right_candidate is not None:
-                break
-        selected: list[_DocsEvidenceCandidate] = []
-        if left_candidate is not None:
-            selected.append(left_candidate)
-        if right_candidate is not None and right_candidate is not left_candidate:
-            selected.append(right_candidate)
-        for candidate in ranked_candidates:
-            if len(selected) >= limit:
-                break
-            if candidate in selected:
-                continue
-            selected.append(candidate)
-        return selected[:limit]
+        return select_docs_candidates_for_answer_type(
+            question=question,
+            answer_type=answer_type,
+            ranked_candidates=ranked_candidates,
+            limit=limit,
+        )
 
     @staticmethod
     def _extract_comparison_sides(question: str) -> _DocsComparisonSides | None:
-        q = " ".join(question.split()).strip()
-        patterns = (
-            r"(?i)\bdifference between (?P<left>.+?) and (?P<right>.+?)\??$",
-            r"(?i)\bhow does (?P<left>.+?) differ from (?P<right>.+?)\??$",
-            r"(?i)\bhow do (?P<left>.+?) differ from (?P<right>.+?)\??$",
-            r"(?i)\bhow are (?P<left>.+?) different from (?P<right>.+?)\??$",
-            r"(?i)\bhow is (?P<left>.+?) different from (?P<right>.+?)\??$",
-            r"(?i)\b(?P<left>.+?) vs\.? (?P<right>.+?)\??$",
-            r"(?i)\b(?P<left>.+?) versus (?P<right>.+?)\??$",
-            r"(?i)\bhow do (?P<left>.+?) interact with (?P<right>.+?)\??$",
-            r"(?i)\bhow does (?P<left>.+?) interact with (?P<right>.+?)\??$",
-            r"(?i)\bhow do (?P<left>.+?) relate to (?P<right>.+?)\??$",
-            r"(?i)\bhow does (?P<left>.+?) relate to (?P<right>.+?)\??$",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, q)
-            if not match:
-                continue
-            left = " ".join(str(match.group("left") or "").split()).strip(" ?.,")
-            right = " ".join(str(match.group("right") or "").split()).strip(" ?.,")
-            left = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", left).strip(" ?.,")
-            right = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", right).strip(" ?.,")
-            if not left or not right:
-                continue
-            left_terms = tuple(GrcAgent._docs_topic_terms(left))
-            right_terms = tuple(GrcAgent._docs_topic_terms(right))
-            if not left_terms or not right_terms:
-                continue
-            return _DocsComparisonSides(
-                left_label=left,
-                right_label=right,
-                left_terms=left_terms,
-                right_terms=right_terms,
-            )
-        return None
+        return extract_comparison_sides(question)
 
     @staticmethod
     def _sentence_list(text: str) -> list[str]:
-        return [
-            " ".join(sentence.split()).strip()
-            for sentence in re.split(r"(?<=[.!?])\s+", text)
-            if " ".join(sentence.split()).strip()
-        ]
+        return sentence_list(text)
 
     def _pick_typed_sentence(
         self,
@@ -2706,80 +2241,16 @@ class GrcAgent:
         allow_procedural: bool,
         min_term_hits: int = 1,
     ) -> str:
-        best = ""
-        best_score = -999.0
-        for sentence in self._sentence_list(candidate.snippet.excerpt):
-            lower = sentence.lower()
-            if len(sentence) < 24 or len(sentence) > 220:
-                continue
-            if sentence.count("#") >= 1 or "```" in sentence:
-                continue
-            if sentence.count("`") >= 2 or "self.connect(" in lower:
-                continue
-            if "::" in sentence:
-                continue
-            if ".py" in lower or "shown here" in lower:
-                continue
-            if "following functions" in lower:
-                continue
-            if "project" in lower and "can be found in" in lower:
-                continue
-            if " * " in sentence:
-                continue
-            if "function for this purpose" in lower and "connect" in lower:
-                continue
-            if any(marker in lower for marker in _DOCS_NAVIGATION_MARKERS):
-                continue
-            if re.search(r"\b\d+\.\s+\w+", sentence) and sentence.count(".") >= 3:
-                continue
-            if "for the purposes of this tutorial" in lower:
-                continue
-            if re.search(r"\b\d+\.$", sentence):
-                continue
-            if any(
-                marker in lower
-                for marker in (
-                    "creating and modifying python blocks",
-                    "flowgraph fundamentals",
-                    "beginner tutorials",
-                )
-            ):
-                continue
-            if sentence.endswith("…") and len(sentence) < 120:
-                continue
-            if any(marker in lower for marker in ("input port(s)", "output port(s)", "parameter(s)")):
-                continue
-            if not allow_procedural and self._is_procedural_walkthrough_text(lower):
-                continue
-            term_hits = sum(1 for term in required_terms if term in lower)
-            if required_terms and term_hits < max(1, min_term_hits):
-                continue
-            synonym_hits = 0
-            for term in required_terms:
-                for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
-                    if synonym in lower:
-                        synonym_hits += 1
-            score = float(term_hits) + min(2.0, float(synonym_hits) * 0.5)
-            if re.search(r"\b(is|are|means|refers to|used for|allows|converts|provides|carries)\b", lower):
-                score += 1.5
-            if any(marker in lower for marker in ("asynchronous", "between blocks", "control data", "time domain", "frequency domain")):
-                score += 1.6
-            if "pmt symbol" in lower and "asynchronous" not in lower:
-                score -= 0.8
-            if "the lower part is a modified version" in lower:
-                score -= 2.0
-            if score > best_score:
-                best_score = score
-                best = sentence
-        return best
+        return pick_typed_sentence(
+            candidate=candidate,
+            required_terms=required_terms,
+            allow_procedural=allow_procedural,
+            min_term_hits=min_term_hits,
+        )
 
     @staticmethod
     def _minimum_required_term_hits(required_terms: tuple[str, ...]) -> int:
-        if len(required_terms) >= 4:
-            return 2
-        if len(required_terms) >= 2:
-            return 1
-        return 1
+        return minimum_required_term_hits(required_terms)
 
     def _required_terms_for_answer_type(
         self,
@@ -2787,19 +2258,7 @@ class GrcAgent:
         question: str,
         answer_type: str,
     ) -> tuple[str, ...]:
-        if answer_type == "comparison":
-            sides = self._extract_comparison_sides(question)
-            if sides is None:
-                return tuple(self._docs_primary_terms(question) or self._docs_topic_terms(question))
-            terms = {
-                *sides.left_terms,
-                *sides.right_terms,
-            }
-            return tuple(sorted(term for term in terms if term))
-        if answer_type == "tool_command_concept":
-            return ("grcc", "validation", "compile")
-        subject = self._extract_docs_subject(question) or question
-        return tuple(self._docs_primary_terms(subject) or self._docs_topic_terms(subject))
+        return required_terms_for_answer_type(question=question, answer_type=answer_type)
 
     def _build_docs_source_quality(
         self,
@@ -2825,53 +2284,14 @@ class GrcAgent:
         typed_answer: str,
         typed_insufficient: bool,
     ) -> tuple[bool, str]:
-        quality = str(source_quality.get("quality") or "weak")
-        question_lower = question.lower()
-        if "hierarchical block" in question_lower:
-            return (False, "special_case_hier_block")
-        if "embedded python block" in question_lower:
-            return (False, "special_case_embedded_python")
-        if answer_type == "insufficient":
-            return (False, "unsupported_question")
-        if quality == "weak":
-            return (False, "weak_evidence")
-        if not bool(source_quality.get("supports_answer_type")):
-            return (False, "answer_type_not_supported")
-        if answer_type == "comparison":
-            if quality != "strong":
-                return (False, "comparison_requires_strong_evidence")
-            if typed_insufficient:
-                return (False, "comparison_deterministic_insufficient")
-            if len(selected_candidates) < 2:
-                return (False, "comparison_missing_side_evidence")
-            if "difference:" in typed_answer.lower() and typed_answer.count(":") >= 3:
-                return (False, "high_confidence_simple_comparison")
-            return (True, "eligible_comparison_synthesis")
-        if answer_type == "definition":
-            if typed_insufficient and len(selected_candidates) >= 2:
-                return (True, "eligible_definition_recovery")
-            if len(selected_candidates) < 2:
-                return (False, "single_source_definition")
-            return (False, "high_confidence_simple_definition")
-        if answer_type == "procedural_how_to":
-            has_tutorial = any(
-                candidate.source_type == "tutorial" for candidate in selected_candidates
-            )
-            if quality == "strong" and has_tutorial and typed_insufficient:
-                return (True, "eligible_procedural_recovery")
-            if quality == "strong" and has_tutorial and len(typed_answer) > 180:
-                return (True, "eligible_procedural_synthesis")
-            return (False, "procedural_deterministic_sufficient")
-        if answer_type == "tool_command_concept":
-            if typed_insufficient:
-                return (False, "tool_command_missing_evidence")
-            return (False, "tool_command_deterministic_sufficient")
-        if answer_type == "block_definition":
-            lower = typed_answer.lower()
-            if lower.startswith("according to the local block catalog"):
-                return (False, "concise_catalog_answer")
-            return (False, "block_definition_deterministic_only")
-        return (False, "unsupported_answer_type")
+        return helper_eligibility_for_docs_answer(
+            question=question,
+            answer_type=answer_type,
+            source_quality=source_quality,
+            selected_candidates=selected_candidates,
+            typed_answer=typed_answer,
+            typed_insufficient=typed_insufficient,
+        )
 
     def _helper_candidates_for_docs_answer(
         self,
@@ -2880,108 +2300,19 @@ class GrcAgent:
         answer_type: str,
         ranked_candidates: list[_DocsEvidenceCandidate],
     ) -> list[_DocsEvidenceCandidate]:
-        severe = {
-            "generic_gnuradio_page",
-            "menu_index_page",
-            "navigation_boilerplate",
-            "toc_dominated",
-        }
-        base_candidates = [
-            candidate
-            for candidate in ranked_candidates
-            if not any(reason in severe for reason in candidate.low_value_reasons)
-        ]
-        if answer_type == "comparison":
-            selected = self._select_docs_candidates_for_answer_type(
-                question=question,
-                answer_type=answer_type,
-                ranked_candidates=(base_candidates or ranked_candidates),
-                limit=3,
-            )
-            return selected[:3]
-        if answer_type == "procedural_how_to":
-            helper_candidates = [candidate for candidate in base_candidates if candidate.source_type == "tutorial"]
-            return helper_candidates[:3] or (base_candidates[:3] or ranked_candidates[:2])
-        helper_candidates = base_candidates[:3]
-        return helper_candidates or ranked_candidates[:2]
+        return helper_candidates_for_docs_answer(
+            question=question,
+            answer_type=answer_type,
+            ranked_candidates=ranked_candidates,
+        )
 
     @staticmethod
     def _clean_catalog_summary_for_answer(name: str, summary: str) -> str:
-        text = " ".join(summary.split()).strip()
-        if not text:
-            return ""
-        text = text.replace("…", "")
-        text = re.sub(rf"(?i)^{re.escape(name)}\s+", "", text).strip()
-        text = re.sub(r"\([a-z0-9_]+\)", "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(r"\b[a-z]+_[a-z0-9_]+\b", "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(
-            r"\bwith\s+\d+\s+input\s+por.*$",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        ).strip(" .,:;")
-        text = re.sub(r"\([a-z0-9_.-]*$", "", text, flags=re.IGNORECASE).strip(" .,:;")
-        text = re.sub(r"\bblocks?\b\.?$", "", text, flags=re.IGNORECASE).strip(" .,:;")
-        text = re.sub(r"\bparameters:\s*.+$", "", text, flags=re.IGNORECASE).strip(" .,:;")
-        text = re.sub(r"\binputs?:\s*.+$", "", text, flags=re.IGNORECASE).strip(" .,:;")
-        text = re.sub(r"\boutputs?:\s*.+$", "", text, flags=re.IGNORECASE).strip(" .,:;")
-        text = re.sub(r"\bwith\s+\d+\.?$", "", text, flags=re.IGNORECASE).strip(" .,:;")
-        text = re.sub(r"\bsink to nowhere\b", "discards input samples", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bdrop output samples\b", "discard input samples", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bdiscard stream data\b", "discard input samples", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s{2,}", " ", text).strip(" .,:;")
-        text = re.sub(r"\s+", " ", text).strip(" .,:;")
-        name_tokens = re.findall(r"[a-z0-9]+", name.lower())
-        lowered = text.lower()
-        for token in name_tokens:
-            lowered = re.sub(rf"\b{re.escape(token)}\b", " ", lowered)
-        lowered = re.sub(r"\s+", " ", lowered).strip(" .,:;")
-        informative_tokens = [
-            token
-            for token in re.findall(r"[a-z0-9]+", lowered)
-            if len(token) > 2 and token not in {"block", "blocks", "stream", "data", "samples"}
-        ]
-        if len(informative_tokens) < 2:
-            return ""
-        if not re.search(
-            r"\b(limit|throttle|pass|discard|consume|drop|debug|convert|send|receive|display|show|rate|message|sample)\b",
-            lowered,
-        ):
-            return ""
-        if len(text.split()) > 24:
-            text = " ".join(text.split()[:24]).strip(" .,:;")
-        return text
+        return clean_catalog_summary_for_answer(name, summary)
 
     @staticmethod
     def _catalog_block_purpose_sentence(name: str, summary: str) -> str:
-        name_l = name.lower()
-        summary_l = summary.lower()
-        if not summary:
-            if "stream to tagged stream" in name_l:
-                return "converts a stream to a tagged stream by attaching length tags"
-            if "message strobe" in name_l:
-                return "emits PMT messages periodically"
-            if "message debug" in name_l:
-                return "is used to inspect and print message traffic for debugging"
-            return ""
-        if "throttle" in name_l and any(
-            marker in summary_l for marker in ("rate", "sample", "limit", "throttle", "pace")
-        ):
-            if "hardware" in summary_l or "simulation" in summary_l:
-                return (
-                    "limits the rate of samples in a flowgraph, typically to prevent "
-                    "simulations from running as fast as the CPU allows"
-                )
-            return "limits the rate of samples in a flowgraph"
-        if "head" in name_l and any(
-            marker in summary_l for marker in ("fixed", "number of samples", "limit", "stop")
-        ):
-            return "passes only a fixed number of samples, then stops forwarding data"
-        if ("null" in name_l and "sink" in name_l) and any(
-            marker in summary_l for marker in ("discard", "drop", "consume", "nowhere")
-        ):
-            return "consumes and discards input samples"
-        return summary
+        return catalog_block_purpose_sentence(name, summary)
 
     def _build_typed_docs_answer(
         self,
@@ -3004,12 +2335,11 @@ class GrcAgent:
         ranked_candidates: list[_DocsEvidenceCandidate],
         evidence_strong: bool,
     ) -> tuple[str, bool]:
-        del evidence_strong
-        answer_type = self._classify_docs_answer_type(question)
-        return self._build_typed_docs_answer(
+        return build_fallback_answer(
+            self,
             question=question,
             ranked_candidates=ranked_candidates,
-            answer_type=answer_type,
+            evidence_strong=evidence_strong,
         )
 
     @staticmethod
@@ -3021,111 +2351,17 @@ class GrcAgent:
         lexical_payload: dict[str, Any],
         limit: int,
     ) -> bool:
-        if lexical_payload.get("ok") is not True:
-            return False
-        results = lexical_payload.get("results")
-        if not isinstance(results, list) or not results:
-            return False
-        top = results[0] if isinstance(results[0], dict) else {}
-        top_title = str(top.get("title") or "").lower()
-        top_excerpt = str(top.get("excerpt") or "").lower()
-        top_source = ""
-        citation = top.get("citation")
-        if isinstance(citation, dict):
-            top_source = str(citation.get("url") or citation.get("path") or "").lower()
-        if any(marker in top_title for marker in _DOCS_MENU_TITLE_MARKERS):
-            return False
-        if top_title.strip() == "what is gnu radio":
-            return False
-        if any(marker in top_excerpt for marker in _DOCS_NAVIGATION_MARKERS):
-            return False
-        if answer_type == "tool_command_concept":
-            top_text = " ".join([top_title, top_excerpt, top_source]).lower()
-            has_grcc = "grcc" in top_text
-            has_tool_context = ("compile" in top_text) or ("validation" in top_text)
-            return has_grcc and has_tool_context
-        if answer_type == "comparison":
-            sides = GrcAgent._extract_comparison_sides(question)
-            if sides is None:
-                return False
-            rows = [row for row in results if isinstance(row, dict)][: max(3, min(6, limit + 2))]
-            left_match = False
-            right_match = False
-            for row in rows:
-                citation = row.get("citation") if isinstance(row.get("citation"), dict) else {}
-                row_source = str(citation.get("url") or citation.get("path") or "").lower()
-                row_text = " ".join(
-                    [
-                        str(row.get("title") or "").lower(),
-                        str(row.get("excerpt") or "").lower(),
-                        row_source,
-                    ]
-                )
-                if not left_match and any(
-                    GrcAgent._text_matches_term_or_synonym(row_text, term) for term in sides.left_terms
-                ):
-                    left_match = True
-                if not right_match and any(
-                    GrcAgent._text_matches_term_or_synonym(row_text, term) for term in sides.right_terms
-                ):
-                    right_match = True
-                if left_match and right_match:
-                    break
-            if not (left_match and right_match):
-                return False
-        if GrcAgent._is_procedural_walkthrough_text(top_excerpt) and not GrcAgent._is_tutorial_or_howto_query(query):
-            query_tokens = GrcAgent._docs_primary_terms(query)
-            title_hits = sum(1 for token in query_tokens if token and token in top_title)
-            if title_hits == 0:
-                return False
-        top_score = top.get("score")
-        score_value = float(top_score) if isinstance(top_score, int | float) else 0.0
-        result_count = len([row for row in results if isinstance(row, dict)])
-        if score_value >= 28.0:
-            query_tokens = GrcAgent._docs_primary_terms(query)
-            if query_tokens and not any(
-                token in top_title or token in top_excerpt or token in top_source
-                for token in query_tokens
-            ):
-                return False
-            return True
-        if score_value >= 20.0 and result_count >= min(2, max(1, limit)):
-            query_tokens = GrcAgent._docs_primary_terms(query)
-            if query_tokens and not any(
-                token in top_title or token in top_excerpt or token in top_source
-                for token in query_tokens
-            ):
-                return False
-            return True
-        query_tokens = GrcAgent._docs_primary_terms(query) or GrcAgent._docs_topic_terms(query)
-        token_hits = sum(1 for token in query_tokens if token and token in top_excerpt)
-        title_hits = sum(1 for token in query_tokens if token and token in top_title)
-        if query_tokens and (token_hits + title_hits) == 0:
-            return False
-        if token_hits < max(1, min(3, len(query_tokens))):
-            return False
-        if score_value < 12.0 and token_hits < 2:
-            return False
-        return True
+        return is_lexical_docs_evidence_strong(
+            query=query,
+            question=question,
+            answer_type=answer_type,
+            lexical_payload=lexical_payload,
+            limit=limit,
+        )
 
     @staticmethod
     def _classify_docs_advisor_error(message: str) -> str:
-        lower = message.lower()
-        if "timed out" in lower or "timeout" in lower:
-            return "timeout"
-        if "unsupported keys" in lower or "missing keys" in lower or "must be" in lower:
-            return "schema_parse_failure"
-        if "malformed json" in lower or "must be object" in lower:
-            return "malformed_helper_output"
-        if "context" in lower and "length" in lower:
-            return "prompt_too_large"
-        if "http 400" in lower or "http 404" in lower:
-            if "model" in lower:
-                return "config_issue"
-            return "implementation_bug"
-        if "transport failure" in lower:
-            return "llama_server_unavailable"
-        return "implementation_bug"
+        return classify_docs_advisor_error(message)
 
     def _run_docs_answer_advisor(
         self,
@@ -3135,114 +2371,16 @@ class GrcAgent:
         snippets: list[DocsAnswerSnippet],
         focus: str | None,
     ) -> dict[str, Any] | None:
-        estimated_prompt_chars = (
-            len(question)
-            + (len(focus) if isinstance(focus, str) else 0)
-            + sum(
-                len(snippet.title) + len(snippet.source) + len(snippet.excerpt)
-                for snippet in snippets
-            )
+        return run_docs_answer_advisor_wrapper(
+            self,
+            question=question,
+            answer_type=answer_type,
+            snippets=snippets,
+            focus=focus,
         )
-        self._last_docs_advisor_meta = {
-            "advisor_attempted": False,
-            "advisor_success": False,
-            "fallback_reason": "not_attempted",
-            "helper_latency_ms": None,
-            "prompt_chars": 0,
-            "snippet_count": len(snippets),
-            "schema_valid": False,
-            "timeout_ms": int(self._docs_answer_cfg.helper_timeout_seconds * 1000),
-            "cache_hit": False,
-            "helper_finish_reason": None,
-        }
-        if not self._llama_server_url.strip() or not self._llama_model.strip():
-            self._last_docs_advisor_meta["fallback_reason"] = "helper_disabled"
-            self._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
-            return None
-        if not snippets:
-            self._last_docs_advisor_meta["fallback_reason"] = "retrieval_empty"
-            self._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
-            return None
-        now = time.monotonic()
-        if now >= self._docs_advisor_probe_at:
-            self._docs_advisor_reachable = self._probe_docs_advisor_server()
-            self._docs_advisor_probe_at = now + (
-                self._docs_answer_cfg.retry_interval_on_success_seconds
-                if self._docs_advisor_reachable
-                else self._docs_answer_cfg.retry_interval_on_failure_seconds
-            )
-        if not self._docs_advisor_reachable:
-            self._last_docs_advisor_meta["fallback_reason"] = "llama_server_unavailable"
-            self._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
-            return None
-        self._last_docs_advisor_meta["advisor_attempted"] = True
-        started = time.perf_counter()
-        try:
-            client = DocsAnswerLlamaClient(
-                base_url=self._llama_server_url,
-                timeout_seconds=min(
-                    self._llama_request_timeout_seconds,
-                    self._docs_answer_cfg.helper_timeout_seconds,
-                ),
-                max_tokens=self._docs_answer_cfg.helper_max_output_tokens,
-                temperature=0.0,
-            )
-            result = run_docs_answer_advisor(
-                client=client,
-                model=self._llama_model,
-                question=question,
-                answer_type=answer_type,
-                snippets=snippets,
-                focus=focus,
-                max_answer_chars=self._docs_answer_cfg.answer_target_chars,
-                max_excerpt_chars=self._docs_answer_cfg.excerpt_target_chars,
-                max_sources=self._docs_answer_cfg.max_sources,
-            )
-            self._last_docs_advisor_meta.update(
-                {
-                    "advisor_success": True,
-                    "fallback_reason": "none",
-                    "helper_latency_ms": int(result.get("advisor_latency_ms") or 0),
-                    "prompt_chars": int(result.get("prompt_chars") or 0),
-                    "snippet_count": int(result.get("snippet_count") or len(snippets)),
-                    "schema_valid": bool(result.get("schema_valid")),
-                    "timeout_ms": int(
-                        result.get("timeout_ms")
-                        or int(self._docs_answer_cfg.helper_timeout_seconds * 1000)
-                    ),
-                    "cache_hit": False,
-                    "helper_finish_reason": result.get("helper_finish_reason"),
-                }
-            )
-            return result
-        except Exception as exc:
-            logger.info("docs_answer_advisor_failed error=%s", exc)
-            self._last_docs_advisor_meta.update(
-                {
-                    "advisor_success": False,
-                    "fallback_reason": self._classify_docs_advisor_error(str(exc)),
-                    "helper_latency_ms": int((time.perf_counter() - started) * 1000),
-                    "prompt_chars": estimated_prompt_chars,
-                    "helper_finish_reason": "error",
-                }
-            )
-            return None
 
     def _probe_docs_advisor_server(self) -> bool:
-        """Cheap connectivity probe to avoid repeated long helper timeouts."""
-        try:
-            parsed = urlsplit(self._llama_server_url)
-            host = parsed.hostname
-            port = parsed.port
-            if not host or not port:
-                return False
-            with socket.create_connection(
-                (host, int(port)),
-                timeout=self._docs_answer_cfg.probe_timeout_seconds,
-            ):
-                return True
-        except Exception:
-            return False
+        return probe_docs_advisor_server(self)
 
     def _validate_change_graph_operation_args(
         self,
