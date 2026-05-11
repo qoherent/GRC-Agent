@@ -2,7 +2,6 @@
 
 import copy
 from collections import OrderedDict
-from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
 import json
@@ -48,7 +47,14 @@ from grc_agent.runtime.tool_surface import (
     tool_surface_for_legacy_flag,
 )
 from grc_agent.runtime.docs_answer import (
+    _DOCS_TOPIC_SYNONYMS,
+    _DocsComparisonSides,
+    _DocsEvidenceCandidate,
     ask_grc_docs as ask_grc_docs_wrapper,
+    build_docs_source_quality as build_docs_source_quality_wrapper,
+    build_typed_docs_answer as build_typed_docs_answer_wrapper,
+    collect_docs_candidates as collect_docs_candidates_wrapper,
+    rank_docs_candidates as rank_docs_candidates_wrapper,
 )
 from grc_agent.runtime.wrappers.inspect_graph import inspect_graph as inspect_graph_wrapper
 from grc_agent.runtime.wrappers.lifecycle import (
@@ -156,22 +162,6 @@ _DOCS_QUERY_STOP_WORDS = frozenset(
         "with",
     }
 )
-_DOCS_TOPIC_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "pmt": ("polymorphic", "types", "message"),
-    "pmts": ("polymorphic", "types", "message"),
-    "stream": ("sample", "samples", "data"),
-    "tags": ("metadata", "length", "tag"),
-    "message": ("port", "ports", "pdu", "queue"),
-    "flowgraph": ("top block", "graph", "blocks"),
-    "decimation": ("sample rate", "downsample", "rate change", "sample_rate_change"),
-    "interpolation": ("sample rate", "upsample", "rate change", "sample_rate_change"),
-    "sample": ("rate", "sps", "decimation", "interpolation"),
-    "ports": ("message", "stream", "queue"),
-    "throttle": ("rate", "sample", "limit", "pace"),
-    "grcc": ("compiler", "compile", "validation", "validate"),
-    "hierarchical": ("hier", "wrapper", "block"),
-    "tagged": ("length", "packet", "pdu"),
-}
 _DOCS_NAVIGATION_MARKERS = (
     "beginner tutorials",
     "please leave tutorials-related feedback",
@@ -224,28 +214,6 @@ _JOURNALED_MUTATION_TOOLS = {
     "auto_insert_block",
     "change_graph",
 }
-
-
-@dataclass(frozen=True)
-class _DocsEvidenceCandidate:
-    snippet: DocsAnswerSnippet
-    source_channel: str
-    source_type: str
-    section: str
-    lexical_score: float
-    semantic_score: float | None
-    topic_score: float
-    quality_score: float
-    low_value_reasons: tuple[str, ...]
-    procedural: bool
-
-
-@dataclass(frozen=True)
-class _DocsComparisonSides:
-    left_label: str
-    right_label: str
-    left_terms: tuple[str, ...]
-    right_terms: tuple[str, ...]
 
 
 def _normalize_alias_key(value: str) -> str:
@@ -2188,120 +2156,12 @@ class GrcAgent:
         semantic_manual: dict[str, Any],
         semantic_tutorial: dict[str, Any],
     ) -> list[_DocsEvidenceCandidate]:
-        candidates: list[_DocsEvidenceCandidate] = []
-        seen_sources: set[str] = set()
-
-        def _append(
-            *,
-            title: Any,
-            source: Any,
-            excerpt: Any,
-            section: Any,
-            channel: str,
-            lexical_score: float = 0.0,
-            semantic_score: float | None = None,
-            source_type_hint: str | None = None,
-        ) -> None:
-            title_text = " ".join(str(title or "").split()).strip()
-            source_text = " ".join(str(source or "").split()).strip()
-            excerpt_text = self._clean_docs_excerpt(str(excerpt or ""))
-            if not title_text or not source_text or not excerpt_text:
-                return
-            aliases = self._docs_title_aliases(title_text)
-            if aliases:
-                source_text = f"{source_text} | title_aliases:{','.join(aliases)}"
-
-            source_key = self._normalize_docs_source_key(source_text)
-            if source_key in seen_sources:
-                return
-            seen_sources.add(source_key)
-
-            lower_excerpt = excerpt_text.lower()
-            if title_text and lower_excerpt.startswith(title_text.lower()):
-                excerpt_text = excerpt_text[len(title_text):].lstrip(" -:.\n")
-            elif source_text and lower_excerpt.startswith(source_text.lower()):
-                excerpt_text = excerpt_text[len(source_text):].lstrip(" -:.\n")
-
-            max_collected_excerpt_chars = max(
-                self._docs_answer_cfg.helper_max_total_context_chars,
-                self._docs_answer_cfg.helper_max_snippet_chars,
-                self._docs_answer_cfg.excerpt_target_chars * 2,
-            )
-            if len(excerpt_text) > max_collected_excerpt_chars:
-                excerpt_text = excerpt_text[:max_collected_excerpt_chars].rstrip()
-            candidates.append(
-                _DocsEvidenceCandidate(
-                    snippet=DocsAnswerSnippet(
-                        title=title_text,
-                        source=source_text,
-                        excerpt=excerpt_text,
-                    ),
-                    source_channel=channel,
-                    source_type=self._infer_docs_source_type(
-                        source=source_text,
-                        title=title_text,
-                        source_type_hint=source_type_hint,
-                    ),
-                    section=" ".join(str(section or "").split()).strip(),
-                    lexical_score=float(lexical_score),
-                    semantic_score=semantic_score,
-                    topic_score=0.0,
-                    quality_score=0.0,
-                    low_value_reasons=(),
-                    procedural=False,
-                )
-            )
-
-        if lexical_payload.get("ok") is True:
-            for row in lexical_payload.get("results", []):
-                if not isinstance(row, dict):
-                    continue
-                citation = row.get("citation")
-                source = None
-                if isinstance(citation, dict):
-                    source = citation.get("url") or citation.get("path")
-                score_raw = row.get("score")
-                lexical_score = (
-                    float(score_raw) if isinstance(score_raw, int | float) else 0.0
-                )
-                _append(
-                    title=row.get("title"),
-                    source=source,
-                    excerpt=row.get("excerpt"),
-                    section=row.get("section"),
-                    channel="lexical",
-                    lexical_score=lexical_score,
-                )
-
-        for payload, channel in (
-            (semantic_manual, "semantic_manual"),
-            (semantic_tutorial, "semantic_tutorial"),
-        ):
-            if payload.get("ok") is not True:
-                continue
-            for row in payload.get("results", []):
-                if not isinstance(row, dict):
-                    continue
-                provenance = row.get("provenance")
-                source = None
-                if isinstance(provenance, dict):
-                    source = provenance.get("url") or provenance.get("path")
-                semantic_raw = row.get("vector_score_raw")
-                semantic_score = (
-                    float(semantic_raw)
-                    if isinstance(semantic_raw, int | float)
-                    else None
-                )
-                _append(
-                    title=row.get("title"),
-                    source=source,
-                    excerpt=row.get("excerpt"),
-                    section=row.get("section"),
-                    channel=channel,
-                    semantic_score=semantic_score,
-                    source_type_hint=str(row.get("source_type") or ""),
-                )
-        return candidates
+        return collect_docs_candidates_wrapper(
+            self,
+            lexical_payload=lexical_payload,
+            semantic_manual=semantic_manual,
+            semantic_tutorial=semantic_tutorial,
+        )
 
     def _rank_docs_candidates(
         self,
@@ -2309,103 +2169,11 @@ class GrcAgent:
         question: str,
         candidates: list[_DocsEvidenceCandidate],
     ) -> list[_DocsEvidenceCandidate]:
-        if not candidates:
-            return []
-        keywords = self._docs_topic_terms(question)
-        primary_terms = self._docs_primary_terms(question)
-        query_l = question.lower()
-        howto = self._is_tutorial_or_howto_query(question)
-        block_definition_query = self._is_block_definition_query(question)
-        ranked: list[_DocsEvidenceCandidate] = []
-        for candidate in candidates:
-            title_l = candidate.snippet.title.lower()
-            section_l = candidate.section.lower()
-            excerpt_l = candidate.snippet.excerpt.lower()
-            text = " ".join([title_l, section_l, excerpt_l])
-            term_hits = sum(1 for term in keywords if term in text)
-            title_hits = sum(1 for term in keywords if term in title_l)
-            heading_hits = sum(1 for term in keywords if term in section_l)
-            phrase_bonus = 2.0 if query_l in text and len(query_l) > 8 else 0.0
-            synonym_hits = 0
-            for term in keywords:
-                for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
-                    if synonym in text:
-                        synonym_hits += 1
-            topic_score = (
-                float(term_hits)
-                + (2.0 * float(title_hits))
-                + (1.5 * float(heading_hits))
-                + min(2.0, float(synonym_hits) * 0.5)
-                + phrase_bonus
-            )
-            source_pref = 0.0
-            if howto:
-                source_pref = 1.5 if candidate.source_type == "tutorial" else -0.3
-            elif block_definition_query and candidate.source_type == "catalog":
-                source_pref = 2.4
-            elif block_definition_query and candidate.source_type == "manual":
-                source_pref = 0.6
-            elif block_definition_query and candidate.source_type == "tutorial":
-                source_pref = -1.4
-            elif candidate.source_type == "manual":
-                source_pref = 1.5
-            elif candidate.source_type == "tutorial":
-                source_pref = -1.2
-            lexical_component = min(4.0, candidate.lexical_score / 25.0)
-            semantic_component = 0.0
-            if isinstance(candidate.semantic_score, float):
-                semantic_component = (candidate.semantic_score - 0.62) * 7.0
-            low_value_reasons = self._docs_low_value_reasons(candidate=candidate)
-            low_value_penalty = float(len(low_value_reasons)) * 1.6
-            procedural = self._is_procedural_walkthrough_text(
-                candidate.snippet.excerpt
-            )
-            procedural_penalty = 2.5 if procedural and not howto else 0.0
-            primary_hits = sum(1 for term in primary_terms if term in text)
-            if primary_terms and primary_hits == 0:
-                topic_score -= 1.5
-            if (
-                primary_terms
-                and not any(term in title_l for term in primary_terms)
-                and "catalog:" not in candidate.snippet.source.lower()
-            ):
-                topic_score -= 0.8
-            weak_absence_penalty = 0.0
-            if topic_score <= 0.0 and (candidate.semantic_score or 0.0) < 0.74:
-                weak_absence_penalty = 2.0
-            quality_score = (
-                topic_score
-                + source_pref
-                + lexical_component
-                + semantic_component
-                - low_value_penalty
-                - procedural_penalty
-                - weak_absence_penalty
-            )
-            ranked.append(
-                _DocsEvidenceCandidate(
-                    snippet=candidate.snippet,
-                    source_channel=candidate.source_channel,
-                    source_type=candidate.source_type,
-                    section=candidate.section,
-                    lexical_score=candidate.lexical_score,
-                    semantic_score=candidate.semantic_score,
-                    topic_score=topic_score,
-                    quality_score=quality_score,
-                    low_value_reasons=tuple(low_value_reasons),
-                    procedural=procedural,
-                )
-            )
-        ranked.sort(
-            key=lambda item: (
-                -item.quality_score,
-                -item.topic_score,
-                -(item.semantic_score or 0.0),
-                -item.lexical_score,
-                item.snippet.title.lower(),
-            )
+        return rank_docs_candidates_wrapper(
+            self,
+            question=question,
+            candidates=candidates,
         )
-        return ranked
 
     def _clip_docs_snippets_for_helper(
         self,
@@ -3040,141 +2808,12 @@ class GrcAgent:
         answer_type: str,
         selected_candidates: list[_DocsEvidenceCandidate],
     ) -> dict[str, Any]:
-        if not selected_candidates:
-            return {
-                "quality": "weak",
-                "reason": "no_selected_sources",
-                "selected_source_count": 0,
-                "topic_match": False,
-                "required_terms_covered": False,
-                "source_hint_match": False,
-                "is_menu_or_boilerplate": False,
-                "supports_answer_type": False,
-            }
-        severe = {
-            "generic_gnuradio_page",
-            "menu_index_page",
-            "navigation_boilerplate",
-            "toc_dominated",
-        }
-        top = selected_candidates[0]
-        is_menu_or_boilerplate = any(reason in severe for reason in top.low_value_reasons)
-        required_terms = self._required_terms_for_answer_type(
+        return build_docs_source_quality_wrapper(
+            self,
             question=question,
             answer_type=answer_type,
+            selected_candidates=selected_candidates,
         )
-        selected_text = " ".join(
-            " ".join([candidate.snippet.title, candidate.section, candidate.snippet.excerpt]).lower()
-            for candidate in selected_candidates
-        )
-        required_hits = sum(
-            1
-            for term in required_terms
-            if term and self._text_matches_term_or_synonym(selected_text, term)
-        )
-        required_min = self._minimum_required_term_hits(required_terms)
-        required_terms_covered = required_hits >= required_min
-        primary_terms = self._docs_primary_terms(question) or self._docs_topic_terms(question)
-        top_text = " ".join([top.snippet.title, top.section, top.snippet.excerpt]).lower()
-        topic_match = (
-            True
-            if not primary_terms
-            else any(self._text_matches_term_or_synonym(top_text, term) for term in primary_terms)
-        )
-
-        source_hint_match = required_terms_covered
-        supports_answer_type = required_terms_covered and topic_match
-        if answer_type == "comparison":
-            sides = self._extract_comparison_sides(question)
-            if sides is None:
-                supports_answer_type = False
-                source_hint_match = False
-            else:
-                left_text_match = any(
-                    any(
-                        self._text_matches_term_or_synonym(
-                            " ".join(
-                                [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
-                            ).lower(),
-                            term,
-                        )
-                        for term in sides.left_terms
-                    )
-                    for candidate in selected_candidates
-                )
-                right_text_match = any(
-                    any(
-                        self._text_matches_term_or_synonym(
-                            " ".join(
-                                [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
-                            ).lower(),
-                            term,
-                        )
-                        for term in sides.right_terms
-                    )
-                    for candidate in selected_candidates
-                )
-                supports_answer_type = left_text_match and right_text_match
-                source_hint_match = supports_answer_type
-        elif answer_type == "tool_command_concept":
-            text = " ".join(
-                " ".join([candidate.snippet.title, candidate.section, candidate.snippet.source, candidate.snippet.excerpt]).lower()
-                for candidate in selected_candidates
-            )
-            supports_answer_type = "grcc" in text and ("compile" in text or "validation" in text)
-            source_hint_match = "grcc" in text
-        elif answer_type == "block_definition":
-            catalog = [candidate for candidate in selected_candidates if candidate.source_type == "catalog"]
-            if catalog:
-                cleaned_summary = self._clean_catalog_summary_for_answer(
-                    catalog[0].snippet.title,
-                    catalog[0].snippet.excerpt,
-                )
-                summary = self._catalog_block_purpose_sentence(
-                    catalog[0].snippet.title,
-                    cleaned_summary,
-                ).lower()
-                supports_answer_type = bool(
-                    summary
-                    and "input port" not in summary
-                    and "output port" not in summary
-                    and "parameter" not in summary
-                )
-                source_hint_match = supports_answer_type
-
-        quality = "medium"
-        reason = "usable_evidence"
-        if is_menu_or_boilerplate:
-            quality = "weak"
-            reason = "menu_or_boilerplate"
-        elif not topic_match:
-            quality = "weak"
-            reason = "topic_mismatch"
-        elif not required_terms_covered:
-            quality = "weak"
-            reason = "required_terms_missing"
-        elif not supports_answer_type:
-            quality = "weak"
-            reason = "answer_type_unsupported_by_sources"
-        elif top.quality_score >= 7.0:
-            quality = "strong"
-            reason = "high_confidence_ranked_sources"
-        elif answer_type == "block_definition" and any(
-            candidate.source_type == "catalog" for candidate in selected_candidates
-        ):
-            quality = "strong"
-            reason = "catalog_block_evidence"
-
-        return {
-            "quality": quality,
-            "reason": reason,
-            "selected_source_count": len(selected_candidates),
-            "topic_match": bool(topic_match),
-            "required_terms_covered": bool(required_terms_covered),
-            "source_hint_match": bool(source_hint_match),
-            "is_menu_or_boilerplate": bool(is_menu_or_boilerplate),
-            "supports_answer_type": bool(supports_answer_type),
-        }
 
     def _helper_eligibility_for_docs_answer(
         self,
@@ -3351,304 +2990,12 @@ class GrcAgent:
         ranked_candidates: list[_DocsEvidenceCandidate],
         answer_type: str,
     ) -> tuple[str, bool]:
-        if answer_type == "insufficient":
-            return ("Local docs did not contain enough direct evidence for this question.", True)
-        if not ranked_candidates:
-            return ("Local docs did not contain enough direct evidence for this question.", True)
-        subject = self._extract_docs_subject(question) or question
-        subject_terms = tuple(self._docs_primary_terms(subject) or self._docs_topic_terms(subject))
-        allow_procedural = answer_type == "procedural_how_to"
-
-        if answer_type == "tool_command_concept":
-            command_terms = ("grcc", "compile", "compiler", "validation")
-            support = [
-                candidate
-                for candidate in ranked_candidates
-                if "grcc"
-                in " ".join(
-                    [
-                        candidate.snippet.title,
-                        candidate.snippet.source,
-                        candidate.section,
-                        candidate.snippet.excerpt,
-                    ]
-                ).lower()
-            ]
-            if not support:
-                return ("Local docs did not contain enough direct evidence for this question.", True)
-            sentence = self._pick_typed_sentence(
-                candidate=support[0],
-                required_terms=command_terms,
-                allow_procedural=False,
-                min_term_hits=1,
-            )
-            if not sentence:
-                return ("Local docs did not contain enough direct evidence for this question.", True)
-            sentence_l = sentence.lower()
-            if "?" in sentence or "how, where, when" in sentence_l:
-                return ("Local docs did not contain enough direct evidence for this question.", True)
-            return (f"According to local docs, {sentence}", False)
-
-        if answer_type == "comparison":
-            sides = self._extract_comparison_sides(question)
-            if sides is None:
-                return ("Local docs did not contain enough direct evidence for this question.", True)
-            shared_terms = set(sides.left_terms).intersection(sides.right_terms)
-            left_terms = tuple(term for term in sides.left_terms if term not in shared_terms) or sides.left_terms
-            right_terms = tuple(term for term in sides.right_terms if term not in shared_terms) or sides.right_terms
-            left_anchor_terms = tuple(
-                self._docs_primary_terms(sides.left_label) or self._docs_topic_terms(sides.left_label)
-            )
-            right_anchor_terms = tuple(
-                self._docs_primary_terms(sides.right_label) or self._docs_topic_terms(sides.right_label)
-            )
-            if (
-                ("tags" in left_terms and "metadata" in right_terms)
-                or ("metadata" in left_terms and "tags" in right_terms)
-            ):
-                return (
-                    "Local docs did not contain enough direct evidence to compare tags and metadata clearly.",
-                    True,
-                )
-            comparison_candidates = self._select_docs_candidates_for_answer_type(
-                question=question,
-                answer_type=answer_type,
-                ranked_candidates=ranked_candidates,
-                limit=min(8, max(2, len(ranked_candidates))),
-            )
-            combined = " ".join(
-                " ".join(
-                    [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
-                ).lower()
-                for candidate in comparison_candidates
-            )
-            left_exact = any(term in combined for term in left_terms if term)
-            right_exact = any(term in combined for term in right_terms if term)
-            if not (left_exact and right_exact):
-                return (
-                    "Local docs only provided one-sided evidence; not enough direct evidence to compare both sides.",
-                    True,
-                )
-            left_sentence = ""
-            right_sentence = ""
-            for candidate in comparison_candidates:
-                if not left_sentence:
-                    left_sentence = self._pick_typed_sentence(
-                        candidate=candidate,
-                        required_terms=left_terms,
-                        allow_procedural=allow_procedural,
-                        min_term_hits=self._minimum_required_term_hits(left_terms),
-                    )
-                if not right_sentence:
-                    right_sentence = self._pick_typed_sentence(
-                        candidate=candidate,
-                        required_terms=right_terms,
-                        allow_procedural=allow_procedural,
-                        min_term_hits=self._minimum_required_term_hits(right_terms),
-                    )
-                if left_sentence and right_sentence:
-                    break
-            if left_sentence and left_terms and not any(
-                self._text_matches_term_or_synonym(left_sentence.lower(), term)
-                for term in left_terms
-            ):
-                left_sentence = ""
-            if right_sentence and right_terms and not any(
-                self._text_matches_term_or_synonym(right_sentence.lower(), term)
-                for term in right_terms
-            ):
-                right_sentence = ""
-            if left_sentence and left_anchor_terms and not any(
-                term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
-            ):
-                left_sentence = ""
-            if right_sentence and right_anchor_terms and not any(
-                term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
-            ):
-                right_sentence = ""
-            if not left_sentence or not right_sentence:
-                for candidate in comparison_candidates:
-                    text = " ".join(
-                        [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
-                    ).lower()
-                    candidate_sentences = self._sentence_list(candidate.snippet.excerpt)
-                    if (not left_sentence) and any(
-                        self._text_matches_term_or_synonym(text, term) for term in left_terms
-                    ):
-                        picked = ""
-                        for sentence in candidate_sentences:
-                            lower_sentence = sentence.lower()
-                            if any(
-                                self._text_matches_term_or_synonym(lower_sentence, term)
-                                for term in left_terms
-                            ):
-                                picked = sentence
-                                break
-                        left_sentence = picked or (
-                            candidate_sentences[0] if candidate_sentences else candidate.snippet.excerpt
-                        )
-                    if (not right_sentence) and any(
-                        self._text_matches_term_or_synonym(text, term) for term in right_terms
-                    ):
-                        picked = ""
-                        for sentence in candidate_sentences:
-                            lower_sentence = sentence.lower()
-                            if any(
-                                self._text_matches_term_or_synonym(lower_sentence, term)
-                                for term in right_terms
-                            ):
-                                picked = sentence
-                                break
-                        right_sentence = picked or (
-                            candidate_sentences[0] if candidate_sentences else candidate.snippet.excerpt
-                        )
-                    if left_sentence and right_sentence:
-                        break
-            if left_sentence and left_anchor_terms and not any(
-                term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
-            ):
-                left_sentence = ""
-            if right_sentence and right_anchor_terms and not any(
-                term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
-            ):
-                right_sentence = ""
-            if not left_sentence or not right_sentence:
-                missing = sides.left_label if not left_sentence else sides.right_label
-                return (
-                    f"Local docs only provided evidence for one side; not enough direct evidence to compare both ({missing} missing).",
-                    True,
-                )
-            if any(
-                marker in (left_sentence.lower() + " " + right_sentence.lower())
-                for marker in ("gr::", "pmt::", "get_tags_in_range", "get_tags_in_window")
-            ):
-                return (
-                    "Local docs only provided API-fragment evidence; not enough direct evidence to compare both sides clearly.",
-                    True,
-                )
-            if "::" in left_sentence or "::" in right_sentence:
-                return (
-                    "Local docs only provided API-fragment evidence; not enough direct evidence to compare both sides clearly.",
-                    True,
-                )
-            if left_sentence.lower() == right_sentence.lower():
-                shared = left_sentence.lower()
-                has_left = any(
-                    self._text_matches_term_or_synonym(shared, term)
-                    for term in left_terms
-                )
-                has_right = any(
-                    self._text_matches_term_or_synonym(shared, term)
-                    for term in right_terms
-                )
-                if not (has_left and has_right):
-                    return (
-                        "Local docs only provided overlapping evidence; not enough direct evidence to compare both sides distinctly.",
-                        True,
-                    )
-            answer = (
-                f"{sides.left_label}: {left_sentence} "
-                f"{sides.right_label}: {right_sentence} "
-                f"Difference: {sides.left_label} and {sides.right_label} are used for different roles in GNU Radio."
-            )
-            return (answer, False)
-
-        if answer_type == "block_definition":
-            if "hierarchical block" in question.lower():
-                return ("Local docs did not contain enough direct evidence for this question.", True)
-            catalog_candidates = [
-                candidate
-                for candidate in ranked_candidates
-                if candidate.source_type == "catalog"
-            ]
-            if catalog_candidates:
-                catalog = catalog_candidates[0]
-                cleaned_summary = self._clean_catalog_summary_for_answer(
-                    catalog.snippet.title,
-                    catalog.snippet.excerpt,
-                )
-                summary = self._catalog_block_purpose_sentence(
-                    catalog.snippet.title,
-                    cleaned_summary,
-                )
-                summary_l = summary.lower()
-                summary_terms = re.findall(r"[a-z0-9]+", summary_l)
-                title_terms = set(re.findall(r"[a-z0-9]+", catalog.snippet.title.lower()))
-                informative_terms = [term for term in summary_terms if term not in title_terms]
-                if (
-                    summary
-                    and "input port" not in summary_l
-                    and "output port" not in summary_l
-                    and "parameter" not in summary_l
-                    and len(summary) >= 20
-                    and len(informative_terms) >= 2
-                ):
-                    if (
-                        "relate to" in question.lower()
-                        and catalog.snippet.excerpt.rstrip().endswith("…")
-                        and summary == cleaned_summary
-                    ):
-                        return ("Local docs did not contain enough direct evidence for this question.", True)
-                    return (
-                        f"According to the local block catalog, {catalog.snippet.title} {summary}.",
-                        False,
-                    )
-            required_terms = subject_terms or tuple(self._docs_primary_terms(question))
-            subject_phrase = (
-                (self._extract_block_definition_subject(question) or "").strip().lower()
-            )
-            for candidate in ranked_candidates[:6]:
-                sentence = self._pick_typed_sentence(
-                    candidate=candidate,
-                    required_terms=required_terms,
-                    allow_procedural=False,
-                    min_term_hits=self._minimum_required_term_hits(required_terms),
-                )
-                if sentence and subject_phrase and " " in subject_phrase:
-                    title_source = " ".join(
-                        [candidate.snippet.title, candidate.snippet.source]
-                    ).lower()
-                    if subject_phrase not in title_source:
-                        continue
-                if sentence:
-                    return (f"According to local docs, {sentence}", False)
-            return ("Local docs did not contain enough direct evidence for this question.", True)
-
-        required_terms = subject_terms or tuple(
-            self._docs_primary_terms(question) or self._docs_topic_terms(question)
+        return build_typed_docs_answer_wrapper(
+            self,
+            question=question,
+            ranked_candidates=ranked_candidates,
+            answer_type=answer_type,
         )
-        lower_question = question.lower()
-        if "hierarchical block" in lower_question:
-            return ("Local docs did not contain enough direct evidence for this question.", True)
-        require_hier_source = "hierarchical block" in lower_question
-        if "message ports" in lower_question:
-            for candidate in ranked_candidates[:6]:
-                sentence = self._pick_typed_sentence(
-                    candidate=candidate,
-                    required_terms=("message",),
-                    allow_procedural=False,
-                    min_term_hits=1,
-                )
-                if sentence and any(
-                    marker in sentence.lower()
-                    for marker in ("asynchronous", "control data", "between blocks")
-                ):
-                    return (f"According to local docs, {sentence}", False)
-        min_hits = self._minimum_required_term_hits(required_terms)
-        for candidate in ranked_candidates[:6]:
-            if require_hier_source:
-                title_source = " ".join([candidate.snippet.title, candidate.snippet.source]).lower()
-                if "hier" not in title_source:
-                    continue
-            sentence = self._pick_typed_sentence(
-                candidate=candidate,
-                required_terms=required_terms,
-                allow_procedural=allow_procedural,
-                min_term_hits=min_hits,
-            )
-            if sentence:
-                return (f"According to local docs, {sentence}", False)
-        return ("Local docs did not contain enough direct evidence for this question.", True)
 
     def _build_fallback_answer(
         self,

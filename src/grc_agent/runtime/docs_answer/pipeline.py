@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from grc_agent._payload import ErrorCode
+from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
+
+from .evidence import _DOCS_TOPIC_SYNONYMS, _DocsEvidenceCandidate
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
@@ -439,12 +443,238 @@ def ask_grc_docs(
     )
 
 
+def collect_docs_candidates(
+    agent,
+    *,
+    lexical_payload: dict[str, Any],
+    semantic_manual: dict[str, Any],
+    semantic_tutorial: dict[str, Any],
+) -> list[_DocsEvidenceCandidate]:
+    candidates: list[_DocsEvidenceCandidate] = []
+    seen_sources: set[str] = set()
+
+    def _append(
+        *,
+        title: Any,
+        source: Any,
+        excerpt: Any,
+        section: Any,
+        channel: str,
+        lexical_score: float = 0.0,
+        semantic_score: float | None = None,
+        source_type_hint: str | None = None,
+    ) -> None:
+        title_text = " ".join(str(title or "").split()).strip()
+        source_text = " ".join(str(source or "").split()).strip()
+        excerpt_text = agent._clean_docs_excerpt(str(excerpt or ""))
+        if not title_text or not source_text or not excerpt_text:
+            return
+        aliases = agent._docs_title_aliases(title_text)
+        if aliases:
+            source_text = f"{source_text} | title_aliases:{','.join(aliases)}"
+
+        source_key = agent._normalize_docs_source_key(source_text)
+        if source_key in seen_sources:
+            return
+        seen_sources.add(source_key)
+
+        lower_excerpt = excerpt_text.lower()
+        if title_text and lower_excerpt.startswith(title_text.lower()):
+            excerpt_text = excerpt_text[len(title_text):].lstrip(" -:.\n")
+        elif source_text and lower_excerpt.startswith(source_text.lower()):
+            excerpt_text = excerpt_text[len(source_text):].lstrip(" -:.\n")
+
+        max_collected_excerpt_chars = max(
+            agent._docs_answer_cfg.helper_max_total_context_chars,
+            agent._docs_answer_cfg.helper_max_snippet_chars,
+            agent._docs_answer_cfg.excerpt_target_chars * 2,
+        )
+        if len(excerpt_text) > max_collected_excerpt_chars:
+            excerpt_text = excerpt_text[:max_collected_excerpt_chars].rstrip()
+        candidates.append(
+            _DocsEvidenceCandidate(
+                snippet=DocsAnswerSnippet(
+                    title=title_text,
+                    source=source_text,
+                    excerpt=excerpt_text,
+                ),
+                source_channel=channel,
+                source_type=agent._infer_docs_source_type(
+                    source=source_text,
+                    title=title_text,
+                    source_type_hint=source_type_hint,
+                ),
+                section=" ".join(str(section or "").split()).strip(),
+                lexical_score=float(lexical_score),
+                semantic_score=semantic_score,
+                topic_score=0.0,
+                quality_score=0.0,
+                low_value_reasons=(),
+                procedural=False,
+            )
+        )
+
+    if lexical_payload.get("ok") is True:
+        for row in lexical_payload.get("results", []):
+            if not isinstance(row, dict):
+                continue
+            citation = row.get("citation")
+            source = None
+            if isinstance(citation, dict):
+                source = citation.get("url") or citation.get("path")
+            score_raw = row.get("score")
+            lexical_score = (
+                float(score_raw) if isinstance(score_raw, int | float) else 0.0
+            )
+            _append(
+                title=row.get("title"),
+                source=source,
+                excerpt=row.get("excerpt"),
+                section=row.get("section"),
+                channel="lexical",
+                lexical_score=lexical_score,
+            )
+
+    for payload, channel in (
+        (semantic_manual, "semantic_manual"),
+        (semantic_tutorial, "semantic_tutorial"),
+    ):
+        if payload.get("ok") is not True:
+            continue
+        for row in payload.get("results", []):
+            if not isinstance(row, dict):
+                continue
+            provenance = row.get("provenance")
+            source = None
+            if isinstance(provenance, dict):
+                source = provenance.get("url") or provenance.get("path")
+            semantic_raw = row.get("vector_score_raw")
+            semantic_score = (
+                float(semantic_raw)
+                if isinstance(semantic_raw, int | float)
+                else None
+            )
+            _append(
+                title=row.get("title"),
+                source=source,
+                excerpt=row.get("excerpt"),
+                section=row.get("section"),
+                channel=channel,
+                semantic_score=semantic_score,
+                source_type_hint=str(row.get("source_type") or ""),
+            )
+    return candidates
+
+def rank_docs_candidates(
+    agent,
+    *,
+    question: str,
+    candidates: list[_DocsEvidenceCandidate],
+) -> list[_DocsEvidenceCandidate]:
+    if not candidates:
+        return []
+    keywords = agent._docs_topic_terms(question)
+    primary_terms = agent._docs_primary_terms(question)
+    query_l = question.lower()
+    howto = agent._is_tutorial_or_howto_query(question)
+    block_definition_query = agent._is_block_definition_query(question)
+    ranked: list[_DocsEvidenceCandidate] = []
+    for candidate in candidates:
+        title_l = candidate.snippet.title.lower()
+        section_l = candidate.section.lower()
+        excerpt_l = candidate.snippet.excerpt.lower()
+        text = " ".join([title_l, section_l, excerpt_l])
+        term_hits = sum(1 for term in keywords if term in text)
+        title_hits = sum(1 for term in keywords if term in title_l)
+        heading_hits = sum(1 for term in keywords if term in section_l)
+        phrase_bonus = 2.0 if query_l in text and len(query_l) > 8 else 0.0
+        synonym_hits = 0
+        for term in keywords:
+            for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
+                if synonym in text:
+                    synonym_hits += 1
+        topic_score = (
+            float(term_hits)
+            + (2.0 * float(title_hits))
+            + (1.5 * float(heading_hits))
+            + min(2.0, float(synonym_hits) * 0.5)
+            + phrase_bonus
+        )
+        source_pref = 0.0
+        if howto:
+            source_pref = 1.5 if candidate.source_type == "tutorial" else -0.3
+        elif block_definition_query and candidate.source_type == "catalog":
+            source_pref = 2.4
+        elif block_definition_query and candidate.source_type == "manual":
+            source_pref = 0.6
+        elif block_definition_query and candidate.source_type == "tutorial":
+            source_pref = -1.4
+        elif candidate.source_type == "manual":
+            source_pref = 1.5
+        elif candidate.source_type == "tutorial":
+            source_pref = -1.2
+        lexical_component = min(4.0, candidate.lexical_score / 25.0)
+        semantic_component = 0.0
+        if isinstance(candidate.semantic_score, float):
+            semantic_component = (candidate.semantic_score - 0.62) * 7.0
+        low_value_reasons = agent._docs_low_value_reasons(candidate=candidate)
+        low_value_penalty = float(len(low_value_reasons)) * 1.6
+        procedural = agent._is_procedural_walkthrough_text(
+            candidate.snippet.excerpt
+        )
+        procedural_penalty = 2.5 if procedural and not howto else 0.0
+        primary_hits = sum(1 for term in primary_terms if term in text)
+        if primary_terms and primary_hits == 0:
+            topic_score -= 1.5
+        if (
+            primary_terms
+            and not any(term in title_l for term in primary_terms)
+            and "catalog:" not in candidate.snippet.source.lower()
+        ):
+            topic_score -= 0.8
+        weak_absence_penalty = 0.0
+        if topic_score <= 0.0 and (candidate.semantic_score or 0.0) < 0.74:
+            weak_absence_penalty = 2.0
+        quality_score = (
+            topic_score
+            + source_pref
+            + lexical_component
+            + semantic_component
+            - low_value_penalty
+            - procedural_penalty
+            - weak_absence_penalty
+        )
+        ranked.append(
+            _DocsEvidenceCandidate(
+                snippet=candidate.snippet,
+                source_channel=candidate.source_channel,
+                source_type=candidate.source_type,
+                section=candidate.section,
+                lexical_score=candidate.lexical_score,
+                semantic_score=candidate.semantic_score,
+                topic_score=topic_score,
+                quality_score=quality_score,
+                low_value_reasons=tuple(low_value_reasons),
+                procedural=procedural,
+            )
+        )
+    ranked.sort(
+        key=lambda item: (
+            -item.quality_score,
+            -item.topic_score,
+            -(item.semantic_score or 0.0),
+            -item.lexical_score,
+            item.snippet.title.lower(),
+        )
+    )
+    return ranked
+
 def build_docs_source_quality(
-    agent: "GrcAgent",
+    agent,
     *,
     question: str,
     answer_type: str,
-    selected_candidates: list[Any],
+    selected_candidates: list[_DocsEvidenceCandidate],
 ) -> dict[str, Any]:
     if not selected_candidates:
         return {
@@ -582,12 +812,11 @@ def build_docs_source_quality(
         "supports_answer_type": bool(supports_answer_type),
     }
 
-
 def build_typed_docs_answer(
-    agent: "GrcAgent",
+    agent,
     *,
     question: str,
-    ranked_candidates: list[Any],
+    ranked_candidates: list[_DocsEvidenceCandidate],
     answer_type: str,
 ) -> tuple[str, bool]:
     if answer_type == "insufficient":
@@ -685,31 +914,84 @@ def build_typed_docs_answer(
                     allow_procedural=allow_procedural,
                     min_term_hits=agent._minimum_required_term_hits(right_terms),
                 )
-        if not left_sentence:
-            for candidate in comparison_candidates:
-                sentence = agent._pick_typed_sentence(
-                    candidate=candidate,
-                    required_terms=left_anchor_terms,
-                    allow_procedural=allow_procedural,
-                    min_term_hits=agent._minimum_required_term_hits(left_anchor_terms),
-                )
-                if sentence:
-                    left_sentence = sentence
-                    break
-        if not right_sentence:
-            for candidate in comparison_candidates:
-                sentence = agent._pick_typed_sentence(
-                    candidate=candidate,
-                    required_terms=right_anchor_terms,
-                    allow_procedural=allow_procedural,
-                    min_term_hits=agent._minimum_required_term_hits(right_anchor_terms),
-                )
-                if sentence:
-                    right_sentence = sentence
-                    break
+            if left_sentence and right_sentence:
+                break
+        if left_sentence and left_terms and not any(
+            agent._text_matches_term_or_synonym(left_sentence.lower(), term)
+            for term in left_terms
+        ):
+            left_sentence = ""
+        if right_sentence and right_terms and not any(
+            agent._text_matches_term_or_synonym(right_sentence.lower(), term)
+            for term in right_terms
+        ):
+            right_sentence = ""
+        if left_sentence and left_anchor_terms and not any(
+            term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+        ):
+            left_sentence = ""
+        if right_sentence and right_anchor_terms and not any(
+            term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+        ):
+            right_sentence = ""
         if not left_sentence or not right_sentence:
+            for candidate in comparison_candidates:
+                text = " ".join(
+                    [candidate.snippet.title, candidate.section, candidate.snippet.excerpt]
+                ).lower()
+                candidate_sentences = agent._sentence_list(candidate.snippet.excerpt)
+                if (not left_sentence) and any(
+                    agent._text_matches_term_or_synonym(text, term) for term in left_terms
+                ):
+                    picked = ""
+                    for sentence in candidate_sentences:
+                        lower_sentence = sentence.lower()
+                        if any(
+                            agent._text_matches_term_or_synonym(lower_sentence, term)
+                            for term in left_terms
+                        ):
+                            picked = sentence
+                            break
+                    left_sentence = picked or (
+                        candidate_sentences[0] if candidate_sentences else candidate.snippet.excerpt
+                    )
+                if (not right_sentence) and any(
+                    agent._text_matches_term_or_synonym(text, term) for term in right_terms
+                ):
+                    picked = ""
+                    for sentence in candidate_sentences:
+                        lower_sentence = sentence.lower()
+                        if any(
+                            agent._text_matches_term_or_synonym(lower_sentence, term)
+                            for term in right_terms
+                        ):
+                            picked = sentence
+                            break
+                    right_sentence = picked or (
+                        candidate_sentences[0] if candidate_sentences else candidate.snippet.excerpt
+                    )
+                if left_sentence and right_sentence:
+                    break
+        if left_sentence and left_anchor_terms and not any(
+            term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+        ):
+            left_sentence = ""
+        if right_sentence and right_anchor_terms and not any(
+            term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+        ):
+            right_sentence = ""
+        if not left_sentence or not right_sentence:
+            missing = sides.left_label if not left_sentence else sides.right_label
             return (
-                "Local docs only provided one-sided evidence; not enough direct evidence to compare both sides.",
+                f"Local docs only provided evidence for one side; not enough direct evidence to compare both ({missing} missing).",
+                True,
+            )
+        if any(
+            marker in (left_sentence.lower() + " " + right_sentence.lower())
+            for marker in ("gr::", "pmt::", "get_tags_in_range", "get_tags_in_window")
+        ):
+            return (
+                "Local docs only provided API-fragment evidence; not enough direct evidence to compare both sides clearly.",
                 True,
             )
         if "::" in left_sentence or "::" in right_sentence:
@@ -758,7 +1040,6 @@ def build_typed_docs_answer(
                 cleaned_summary,
             )
             summary_l = summary.lower()
-            import re
             summary_terms = re.findall(r"[a-z0-9]+", summary_l)
             title_terms = set(re.findall(r"[a-z0-9]+", catalog.snippet.title.lower()))
             informative_terms = [term for term in summary_terms if term not in title_terms]
