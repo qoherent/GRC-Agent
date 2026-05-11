@@ -27,7 +27,12 @@ from grc_agent.manual import search_manual
 from grc_agent.manual.search import DEFAULT_MANUAL_ROOT
 from grc_agent.retrieval.search import _search_grc_with_context
 from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
-from grc_agent.runtime.clarification import ClarificationRequest
+from grc_agent.runtime.clarification_state import (
+    normalize_pending_clarification,
+    parse_clarification_option_label,
+    pending_clarification_reminder,
+    resolve_pending_clarification_state,
+)
 from grc_agent.runtime.prompt import build_system_prompt
 from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
 from grc_agent.runtime.path_safety import (
@@ -687,74 +692,44 @@ class GrcAgent:
         if self._pending_clarification is None:
             return {"mode": "none"}
 
-        # Expire if session revision changed since clarification was created
-        if (
-            self._pending_clarification_revision is not None
-            and self.session.state_revision != self._pending_clarification_revision
-        ):
+        resolution = resolve_pending_clarification_state(
+            pending_clarification=self._pending_clarification,
+            pending_revision=self._pending_clarification_revision,
+            current_state_revision=self.session.state_revision,
+            user_message=user_message,
+        )
+        mode = resolution.get("mode")
+        if mode == "expired":
             self._clear_pending_clarification()
             return {
                 "mode": "expired",
-                "text": "The pending question is no longer valid because the graph has changed.",
+                "text": resolution["text"],
             }
-
-        raw = user_message.strip()
-        if not raw:
-            return {"mode": "reminder", "text": self._pending_clarification_reminder()}
-
-        req = ClarificationRequest.from_dict(self._pending_clarification)
-        selected_label = self._parse_clarification_option_label(
-            raw,
-            labels={opt.label for opt in req.options},
-        )
-
-        if selected_label is not None:
-            for opt in req.options:
-                if opt.label.upper() == selected_label:
-                    tool_call_id = self._record_clarification_option_call(raw, opt)
-                    result = self.execute_tool(
-                        opt.tool_name,
-                        opt.tool_args,
-                        model_tool_call=model_tool_call,
-                    )
-                    self._record_clarification_option_result(
-                        tool_call_id,
-                        opt.tool_name,
-                        result,
-                    )
-                    self._clear_pending_clarification()
-                    return {"mode": "executed", "tool_result": result}
-
-        label_reply = self._parse_clarification_option_label(
-            raw,
-            labels={"A", "B", "C"},
-        )
-        if label_reply is not None:
-            # Label in message but not matching any stored option
-            return {
-                "mode": "reminder",
-                "text": (
-                    f"'{label_reply}' is not a valid option. "
-                    f"Choose one of: {', '.join(o.label for o in req.options)}. "
-                    f"Or use D / free text to describe what you want instead."
-                ),
-            }
-
-        # D or custom / free text
-        custom_label = req.custom_option.label.upper()
-        custom_selected = self._parse_clarification_option_label(
-            raw,
-            labels={custom_label},
-        )
-        if custom_selected == custom_label or len(raw) > 1:
+        if mode == "selected":
+            opt = resolution["option"]
+            tool_call_id = self._record_clarification_option_call(
+                resolution["raw_reply"], opt
+            )
+            result = self.execute_tool(
+                opt.tool_name,
+                opt.tool_args,
+                model_tool_call=model_tool_call,
+            )
+            self._record_clarification_option_result(
+                tool_call_id,
+                opt.tool_name,
+                result,
+            )
+            self._clear_pending_clarification()
+            return {"mode": "executed", "tool_result": result}
+        if mode == "custom":
             self._clear_pending_clarification()
             return {
                 "mode": "custom",
-                "text": "Continuing with custom request.",
-                "custom_hint": raw,
+                "text": resolution["text"],
+                "custom_hint": resolution["custom_hint"],
             }
-
-        return {"mode": "reminder", "text": self._pending_clarification_reminder()}
+        return resolution
 
     @staticmethod
     def _parse_clarification_option_label(
@@ -762,14 +737,7 @@ class GrcAgent:
         *,
         labels: set[str],
     ) -> str | None:
-        token = raw.strip().upper()
-        if not token:
-            return None
-        if len(token) == 2 and token[1] in ").":
-            token = token[0]
-        if len(token) == 1 and token in {label.upper() for label in labels}:
-            return token
-        return None
+        return parse_clarification_option_label(raw, labels=labels)
 
     def _record_clarification_option_call(
         self,
@@ -821,30 +789,14 @@ class GrcAgent:
         )
 
     def _pending_clarification_reminder(self) -> str:
-        if self._pending_clarification is None:
-            return ""
-        opts = self._pending_clarification.get("options", [])
-        lines = ["A pending choice requires your response:"]
-        for o in opts:
-            lines.append(f"  {o['label']}) {o['title']}: {o['description']}")
-        lines.append("  D) Other / custom (free text)")
-        return "\n".join(lines)
+        return pending_clarification_reminder(self._pending_clarification)
 
     def _store_pending_clarification(self, payload: dict[str, Any]) -> None:
         """Store a clarification produced by a tool for user resolution."""
-        stored = copy.deepcopy(payload)
-        revision = stored.get("state_revision")
-        if not isinstance(revision, int):
-            revision = self.session.state_revision
-            stored["state_revision"] = revision
-        for option in stored.get("options", []):
-            if not isinstance(option, dict):
-                continue
-            metadata = option.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-                option["metadata"] = metadata
-            metadata.setdefault("state_revision", revision)
+        stored, revision = normalize_pending_clarification(
+            payload,
+            current_state_revision=self.session.state_revision,
+        )
         self._pending_clarification = stored
         self._pending_clarification_revision = revision
 
