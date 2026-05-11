@@ -27,7 +27,7 @@ from grc_agent.manual import search_manual
 from grc_agent.manual.search import DEFAULT_MANUAL_ROOT
 from grc_agent.retrieval.search import _search_grc_with_context
 from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
-from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
+from grc_agent.runtime.clarification import ClarificationRequest
 from grc_agent.runtime.prompt import build_system_prompt
 from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
 from grc_agent.runtime.path_safety import (
@@ -89,6 +89,12 @@ from grc_agent.runtime.docs_answer.selection import (
     should_catalog_assist,
     text_matches_term_or_synonym,
 )
+from grc_agent.runtime.clarification_payloads import (
+    connection_clarification_payload as connection_clarification_payload_wrapper,
+    duplicate_block_clarification_payload as duplicate_block_clarification_payload_wrapper,
+    rewire_clarification_payload as rewire_clarification_payload_wrapper,
+    rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
+)
 from grc_agent.runtime.wrappers.inspect_graph import inspect_graph as inspect_graph_wrapper
 from grc_agent.runtime.wrappers.lifecycle import (
     load_graph_explicit as load_graph_explicit_wrapper,
@@ -98,6 +104,17 @@ from grc_agent.runtime.wrappers.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
 from grc_agent.runtime.wrappers.change_graph.dispatcher import dispatch_change_graph
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    connection_endpoint_candidates as connection_endpoint_candidates_wrapper,
+    has_endpoint_value,
+    loaded_block_by_name as loaded_block_by_name_wrapper,
+    loaded_block_has_port as loaded_block_has_port_wrapper,
+    resolve_old_rewire_connection_id as resolve_old_rewire_connection_id_wrapper,
+    resolve_rewire_new_endpoint_args as resolve_rewire_new_endpoint_args_wrapper,
+    rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
+    rewire_new_endpoint_candidates as rewire_new_endpoint_candidates_wrapper,
+    rewire_new_endpoint_is_exact as rewire_new_endpoint_is_exact_wrapper,
+)
 from grc_agent.runtime.wrappers.change_graph_validation import (
     canonicalize_change_graph_target_ref,
     validate_change_graph_operation_args,
@@ -2973,42 +2990,7 @@ class GrcAgent:
         self,
         candidates: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        labels = ("A", "B", "C")
-        options: list[ClarificationOption] = []
-        revision = self.session.state_revision
-        for label, candidate in zip(labels, candidates, strict=False):
-            connection_id = candidate["connection_id"]
-            options.append(
-                ClarificationOption(
-                    label=label,
-                    title=connection_id,
-                    description=(
-                        f"{candidate['src_block']}:{candidate['src_port']} -> "
-                        f"{candidate['dst_block']}:{candidate['dst_port']}"
-                    ),
-                    tool_name="remove_connection",
-                    tool_args={"connection_id": connection_id},
-                    metadata={
-                        "state_revision": revision,
-                        "connection_id": connection_id,
-                    },
-                )
-            )
-        request = ClarificationRequest(
-            kind="connection_disambiguation",
-            question="Multiple existing connections match. Choose the one to remove.",
-            options=options,
-            state_revision=revision,
-        )
-        payload = request.to_dict()
-        payload.update(
-            {
-                "ok": False,
-                "message": "Multiple existing connections match the provided endpoints.",
-                "error_type": "ambiguous_connection",
-            }
-        )
-        return payload
+        return connection_clarification_payload_wrapper(self, candidates)
 
     def _rewire_connection(
         self,
@@ -3080,7 +3062,7 @@ class GrcAgent:
 
     @staticmethod
     def _has_endpoint_value(value: Any) -> bool:
-        return value is not None and not (isinstance(value, str) and not value.strip())
+        return has_endpoint_value(value)
 
     def _rewire_new_endpoint_is_exact(
         self,
@@ -3090,9 +3072,11 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
     ) -> bool:
-        return all(
-            self._has_endpoint_value(value)
-            for value in (new_src_block, new_src_port, new_dst_block, new_dst_port)
+        return rewire_new_endpoint_is_exact_wrapper(
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
         )
 
     def _resolve_rewire_new_endpoint_args(
@@ -3104,98 +3088,13 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
     ) -> dict[str, Any]:
-        if self._rewire_new_endpoint_is_exact(
-            new_src_block=new_src_block,
-            new_src_port=new_src_port,
-            new_dst_block=new_dst_block,
-            new_dst_port=new_dst_port,
-        ):
-            return {
-                "ok": True,
-                "new_src_block": str(new_src_block),
-                "new_src_port": new_src_port,
-                "new_dst_block": str(new_dst_block),
-                "new_dst_port": new_dst_port,
-            }
-
-        missing_fields = [
-            field
-            for field, value in (
-                ("new_src_block", new_src_block),
-                ("new_src_port", new_src_port),
-                ("new_dst_block", new_dst_block),
-                ("new_dst_port", new_dst_port),
-            )
-            if not self._has_endpoint_value(value)
-        ]
-        has_source_hint = self._has_endpoint_value(new_src_block) or self._has_endpoint_value(new_src_port)
-        has_destination_hint = self._has_endpoint_value(new_dst_block) or self._has_endpoint_value(new_dst_port)
-        if not has_source_hint or not has_destination_hint:
-            missing_side = "new_source" if not has_source_hint else "new_destination"
-            return {
-                "ok": False,
-                "message": (
-                    "rewire_connection requires at least one hint for both the "
-                    "new source and new destination; it will not infer an entire endpoint side."
-                ),
-                "error_type": ErrorCode.TOOL_CALL_INVALID,
-                "state_revision": self.session.state_revision,
-                "validation_errors": [
-                    {
-                        "code": "missing_required",
-                        "field": missing_side,
-                        "message": (
-                            "Provide exact fields or at least one bounded hint for "
-                            "this new endpoint side."
-                        ),
-                    }
-                ],
-            }
-        candidates = self._rewire_new_endpoint_candidates(
+        return resolve_rewire_new_endpoint_args_wrapper(
+            self,
             old_connection_id=old_connection_id,
             new_src_block=new_src_block,
             new_src_port=new_src_port,
             new_dst_block=new_dst_block,
             new_dst_port=new_dst_port,
-        )
-        if not candidates:
-            return {
-                "ok": False,
-                "message": (
-                    "rewire_connection requires exact new endpoints or endpoint hints "
-                    "that resolve to existing executable candidates."
-                ),
-                "error_type": ErrorCode.TOOL_CALL_INVALID,
-                "state_revision": self.session.state_revision,
-                "validation_errors": [
-                    {
-                        "code": "missing_required",
-                        "field": field,
-                        "message": (
-                            "Provide an exact new endpoint field or enough endpoint "
-                            "hints to resolve executable candidates."
-                        ),
-                    }
-                    for field in missing_fields
-                ],
-            }
-        if len(candidates) == 1:
-            candidate = candidates[0]
-            return {"ok": True, **candidate}
-        if len(candidates) > 3:
-            return {
-                "ok": False,
-                "message": (
-                    "Too many executable new endpoint candidates match. "
-                    "Provide exact new source and destination endpoints."
-                ),
-                "error_type": "ambiguous_rewire_endpoint",
-                "state_revision": self.session.state_revision,
-                "candidate_count": len(candidates),
-            }
-        return self._rewire_new_endpoint_clarification_payload(
-            old_connection_id=old_connection_id,
-            candidates=candidates,
         )
 
     def _rewire_new_endpoint_candidates(
@@ -3207,36 +3106,14 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
     ) -> list[dict[str, Any]]:
-        parsed_old = parse_connection_id(old_connection_id)
-        if parsed_old is None:
-            return []
-        source_candidates = self._connection_endpoint_candidates(
-            side="source",
-            block=new_src_block,
-            port=new_src_port,
+        return rewire_new_endpoint_candidates_wrapper(
+            self,
+            old_connection_id=old_connection_id,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
         )
-        destination_candidates = self._connection_endpoint_candidates(
-            side="destination",
-            block=new_dst_block,
-            port=new_dst_port,
-        )
-        candidates: list[dict[str, Any]] = []
-        seen: set[tuple[str, int | str, str, int | str]] = set()
-        for source_block, source_port in source_candidates:
-            for destination_block, destination_port in destination_candidates:
-                connection = (source_block, source_port, destination_block, destination_port)
-                if connection == parsed_old or connection in seen:
-                    continue
-                seen.add(connection)
-                candidate = {
-                    "new_src_block": source_block,
-                    "new_src_port": source_port,
-                    "new_dst_block": destination_block,
-                    "new_dst_port": destination_port,
-                }
-                if self._rewire_candidate_passes_preflight(old_connection_id, candidate):
-                    candidates.append(candidate)
-        return candidates
 
     def _connection_endpoint_candidates(
         self,
@@ -3245,58 +3122,15 @@ class GrcAgent:
         block: str | None,
         port: int | str | None,
     ) -> list[tuple[str, int | str]]:
-        if self._has_endpoint_value(block) and self._has_endpoint_value(port):
-            loaded_block = self._loaded_block_by_name(str(block))
-            if loaded_block is None:
-                return []
-            if not self._loaded_block_has_port(
-                block_type=loaded_block.block_type,
-                port=port,
-                side=side,
-            ):
-                return []
-            return [(str(block), port)]
-        flowgraph = self.session.flowgraph
-        if flowgraph is None:
-            return []
-        candidates: set[tuple[str, int | str]] = set()
-        if self._has_endpoint_value(port):
-            if self._has_endpoint_value(block):
-                candidates.add((str(block), port))
-            else:
-                for loaded_block in flowgraph.blocks:
-                    if self._loaded_block_has_port(
-                        block_type=loaded_block.block_type,
-                        port=port,
-                        side=side,
-                    ):
-                        candidates.add((loaded_block.instance_name, port))
-        for connection in flowgraph.connections:
-            if side == "source":
-                endpoint_block = connection.src_block
-                endpoint_port = connection.src_port
-            else:
-                endpoint_block = connection.dst_block
-                endpoint_port = connection.dst_port
-            if self._has_endpoint_value(block) and endpoint_block != block:
-                continue
-            if self._has_endpoint_value(port) and not FlowgraphSession._port_matches(endpoint_port, port):
-                continue
-            candidates.add((endpoint_block, endpoint_port))
-        return sorted(candidates, key=lambda item: (item[0], str(item[1])))
+        return connection_endpoint_candidates_wrapper(
+            self,
+            side=side,
+            block=block,
+            port=port,
+        )
 
     def _loaded_block_by_name(self, instance_name: str) -> Any | None:
-        flowgraph = self.session.flowgraph
-        if flowgraph is None:
-            return None
-        return next(
-            (
-                loaded_block
-                for loaded_block in flowgraph.blocks
-                if loaded_block.instance_name == instance_name
-            ),
-            None,
-        )
+        return loaded_block_by_name_wrapper(self, instance_name)
 
     def _loaded_block_has_port(
         self,
@@ -3305,23 +3139,10 @@ class GrcAgent:
         port: int | str,
         side: str,
     ) -> bool:
-        description = describe_block(block_type)
-        if not description.get("ok"):
-            return False
-        field_name = "outputs" if side == "source" else "inputs"
-        ports = description.get(field_name)
-        if not isinstance(ports, list):
-            return False
-        if not isinstance(port, str):
-            return any(
-                isinstance(candidate, dict)
-                and candidate.get("domain") != "message"
-                and not candidate.get("id")
-                for candidate in ports
-            )
-        return any(
-            isinstance(candidate, dict) and candidate.get("id") == port
-            for candidate in ports
+        return loaded_block_has_port_wrapper(
+            block_type=block_type,
+            port=port,
+            side=side,
         )
 
     def _rewire_candidate_passes_preflight(
@@ -3329,24 +3150,11 @@ class GrcAgent:
         old_connection_id: str,
         candidate: dict[str, Any],
     ) -> bool:
-        proposal = propose_edit(
-            self.session,
-            [
-                {
-                    "op_type": "remove_connection",
-                    "connection_id": old_connection_id,
-                },
-                {
-                    "op_type": "add_connection",
-                    "src_block": candidate["new_src_block"],
-                    "src_port": candidate["new_src_port"],
-                    "dst_block": candidate["new_dst_block"],
-                    "dst_port": candidate["new_dst_port"],
-                },
-            ],
-            self.catalog_root,
+        return rewire_candidate_passes_preflight_wrapper(
+            self,
+            old_connection_id,
+            candidate,
         )
-        return bool(proposal.get("ok"))
 
     def _rewire_new_endpoint_clarification_payload(
         self,
@@ -3354,50 +3162,11 @@ class GrcAgent:
         old_connection_id: str,
         candidates: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        revision = self.session.state_revision
-        options: list[ClarificationOption] = []
-        for label, candidate in zip(("A", "B", "C"), candidates, strict=False):
-            new_connection_id = render_connection_id(
-                candidate["new_src_block"],
-                candidate["new_src_port"],
-                candidate["new_dst_block"],
-                candidate["new_dst_port"],
-            )
-            options.append(
-                ClarificationOption(
-                    label=label,
-                    title=new_connection_id,
-                    description=f"replace {old_connection_id} with {new_connection_id}",
-                    tool_name="rewire_connection",
-                    tool_args={
-                        "old_connection_id": old_connection_id,
-                        "new_src_block": candidate["new_src_block"],
-                        "new_src_port": candidate["new_src_port"],
-                        "new_dst_block": candidate["new_dst_block"],
-                        "new_dst_port": candidate["new_dst_port"],
-                    },
-                    metadata={
-                        "state_revision": revision,
-                        "old_connection_id": old_connection_id,
-                        "new_connection_id": new_connection_id,
-                    },
-                )
-            )
-        request = ClarificationRequest(
-            kind="rewire_new_endpoint_disambiguation",
-            question="Multiple executable new endpoints match. Choose the exact rewire target.",
-            options=options,
-            state_revision=revision,
+        return rewire_new_endpoint_clarification_payload_wrapper(
+            self,
+            old_connection_id=old_connection_id,
+            candidates=candidates,
         )
-        payload = request.to_dict()
-        payload.update(
-            {
-                "ok": False,
-                "message": "Multiple executable new endpoints match the provided hints.",
-                "error_type": "ambiguous_rewire_endpoint",
-            }
-        )
-        return payload
 
     def _resolve_old_rewire_connection_id(
         self,
@@ -3412,125 +3181,18 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
     ) -> dict[str, Any]:
-        old_endpoint_args = {
-            "src_block": old_src_block,
-            "src_port": old_src_port,
-            "dst_block": old_dst_block,
-            "dst_port": old_dst_port,
-        }
-        has_old_hint = any(value is not None for value in old_endpoint_args.values())
-
-        if has_old_hint:
-            resolved = self.session.find_connection_candidates(**old_endpoint_args)
-            candidates = resolved["candidates"]
-            if not candidates:
-                return {
-                    "ok": False,
-                    "message": "No existing old connection matches the provided endpoint fields.",
-                    "error_type": "connection_not_found",
-                    "state_revision": self.session.state_revision,
-                }
-            if len(candidates) > 1:
-                if not self._rewire_new_endpoint_is_exact(
-                    new_src_block=new_src_block,
-                    new_src_port=new_src_port,
-                    new_dst_block=new_dst_block,
-                    new_dst_port=new_dst_port,
-                ):
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Multiple old connections match. Provide an exact old "
-                            "connection before resolving partial new endpoint hints."
-                        ),
-                        "error_type": "ambiguous_connection",
-                        "state_revision": self.session.state_revision,
-                    }
-                return self._rewire_clarification_payload(
-                    candidates,
-                    new_src_block=str(new_src_block),
-                    new_src_port=new_src_port,
-                    new_dst_block=str(new_dst_block),
-                    new_dst_port=new_dst_port,
-                )
-            resolved_connection_id = candidates[0]["connection_id"]
-            if old_connection_id is not None and old_connection_id != resolved_connection_id:
-                return {
-                    "ok": False,
-                    "message": (
-                        "old_connection_id does not match the provided old endpoint fields: "
-                        f"{old_connection_id}"
-                    ),
-                    "error_type": "connection_endpoint_mismatch",
-                    "state_revision": self.session.state_revision,
-                }
-            return {"ok": True, "old_connection_id": resolved_connection_id}
-
-        if not isinstance(old_connection_id, str) or not old_connection_id.strip():
-            return {
-                "ok": False,
-                "message": (
-                    "rewire_connection requires old_connection_id or enough old "
-                    "endpoint fields to resolve one existing connection."
-                ),
-                "error_type": ErrorCode.TOOL_CALL_INVALID,
-                "state_revision": self.session.state_revision,
-                "validation_errors": [
-                    {
-                        "code": "missing_required",
-                        "field": "old_connection_id",
-                        "message": "Provide old_connection_id or old endpoint fields.",
-                    }
-                ],
-            }
-
-        parsed = parse_connection_id(old_connection_id.strip())
-        if parsed is None:
-            return {
-                "ok": False,
-                "message": "old_connection_id must be in form src_block:src_port->dst_block:dst_port.",
-                "error_type": ErrorCode.TOOL_CALL_INVALID,
-                "state_revision": self.session.state_revision,
-            }
-        src_block, src_port, dst_block, dst_port = parsed
-        resolved = self.session.find_connection_candidates(
-            src_block=src_block,
-            src_port=src_port,
-            dst_block=dst_block,
-            dst_port=dst_port,
+        return resolve_old_rewire_connection_id_wrapper(
+            self,
+            old_connection_id=old_connection_id,
+            old_src_block=old_src_block,
+            old_src_port=old_src_port,
+            old_dst_block=old_dst_block,
+            old_dst_port=old_dst_port,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
         )
-        candidates = resolved["candidates"]
-        if not candidates:
-            return {
-                "ok": False,
-                "message": f"Old connection not found: {old_connection_id.strip()}",
-                "error_type": "connection_not_found",
-                "state_revision": self.session.state_revision,
-            }
-        if len(candidates) > 1:
-            if not self._rewire_new_endpoint_is_exact(
-                new_src_block=new_src_block,
-                new_src_port=new_src_port,
-                new_dst_block=new_dst_block,
-                new_dst_port=new_dst_port,
-            ):
-                return {
-                    "ok": False,
-                    "message": (
-                        "Multiple old connections match. Provide an exact old "
-                        "connection before resolving partial new endpoint hints."
-                    ),
-                    "error_type": "ambiguous_connection",
-                    "state_revision": self.session.state_revision,
-                }
-            return self._rewire_clarification_payload(
-                candidates,
-                new_src_block=str(new_src_block),
-                new_src_port=new_src_port,
-                new_dst_block=str(new_dst_block),
-                new_dst_port=new_dst_port,
-            )
-        return {"ok": True, "old_connection_id": candidates[0]["connection_id"]}
 
     def _rewire_clarification_payload(
         self,
@@ -3541,48 +3203,14 @@ class GrcAgent:
         new_dst_block: str,
         new_dst_port: int | str | None,
     ) -> dict[str, Any]:
-        revision = self.session.state_revision
-        options: list[ClarificationOption] = []
-        for label, candidate in zip(("A", "B", "C"), candidates, strict=False):
-            old_connection_id = candidate["connection_id"]
-            options.append(
-                ClarificationOption(
-                    label=label,
-                    title=old_connection_id,
-                    description=(
-                        f"replace {candidate['src_block']}:{candidate['src_port']} -> "
-                        f"{candidate['dst_block']}:{candidate['dst_port']} with "
-                        f"{new_src_block}:{new_src_port} -> {new_dst_block}:{new_dst_port}"
-                    ),
-                    tool_name="rewire_connection",
-                    tool_args={
-                        "old_connection_id": old_connection_id,
-                        "new_src_block": new_src_block,
-                        "new_src_port": new_src_port,
-                        "new_dst_block": new_dst_block,
-                        "new_dst_port": new_dst_port,
-                    },
-                    metadata={
-                        "state_revision": revision,
-                        "old_connection_id": old_connection_id,
-                    },
-                )
-            )
-        request = ClarificationRequest(
-            kind="rewire_connection_disambiguation",
-            question="Multiple old connections match. Choose the exact edge to rewire.",
-            options=options,
-            state_revision=revision,
+        return rewire_clarification_payload_wrapper(
+            self,
+            candidates,
+            new_src_block=new_src_block,
+            new_src_port=new_src_port,
+            new_dst_block=new_dst_block,
+            new_dst_port=new_dst_port,
         )
-        payload = request.to_dict()
-        payload.update(
-            {
-                "ok": False,
-                "message": "Multiple old connections match the provided endpoint hints.",
-                "error_type": "ambiguous_connection",
-            }
-        )
-        return payload
 
     def _propose_edit(self, transaction: Any) -> ToolResult:
         missing_session = self._missing_session_result("propose_edit")
@@ -3624,108 +3252,7 @@ class GrcAgent:
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Build executable clarification for duplicate names only when safe."""
-        errors = payload.get("errors")
-        operations = payload.get("normalized_operations")
-        if not isinstance(errors, list) or not isinstance(operations, list):
-            return None
-
-        duplicate_errors = [
-            error
-            for error in errors
-            if isinstance(error, dict)
-            and error.get("code") == "block_name_not_unique"
-            and isinstance(error.get("op_index"), int)
-        ]
-        if len(duplicate_errors) != 1 or len(operations) != 1:
-            return None
-
-        op_index = duplicate_errors[0]["op_index"]
-        if op_index < 0 or op_index >= len(operations):
-            return None
-        operation = operations[op_index]
-        if not isinstance(operation, dict):
-            return None
-        if operation.get("op_type") not in {"update_params", "update_states", "remove_block"}:
-            return None
-        if "block_type" in operation:
-            # Same-name same-type duplicates are not executable without a UID-based schema.
-            return None
-        instance_name = operation.get("instance_name")
-        if not isinstance(instance_name, str) or not instance_name:
-            return None
-
-        resolved = self.session.resolve_block_reference(instance_name)
-        candidates = resolved.get("candidates", [])
-        if not isinstance(candidates, list) or len(candidates) < 2 or len(candidates) > 3:
-            return None
-
-        block_types = [
-            candidate.get("block_type")
-            for candidate in candidates
-            if isinstance(candidate, dict) and isinstance(candidate.get("block_type"), str)
-        ]
-        if len(block_types) != len(candidates):
-            return None
-        block_types_are_unique = len(set(block_types)) == len(block_types)
-
-        revision = self.session.state_revision
-        options: list[ClarificationOption] = []
-        for label, candidate in zip(("A", "B", "C"), candidates, strict=False):
-            block_type = candidate["block_type"]
-            transaction = copy.deepcopy(operation)
-            if block_types_are_unique:
-                transaction["block_type"] = block_type
-            else:
-                block_uid = candidate.get("block_uid")
-                if not isinstance(block_uid, str) or not block_uid:
-                    return None
-                transaction.pop("instance_name", None)
-                transaction.pop("block_type", None)
-                transaction["target_ref"] = {
-                    "block_uid": block_uid,
-                    "expected_instance_name": instance_name,
-                    "expected_block_type": block_type,
-                    "base_state_revision": revision,
-                }
-            options.append(
-                ClarificationOption(
-                    label=label,
-                    title=f"{instance_name} ({block_type})",
-                    description=(
-                        f"state={candidate.get('state')}; "
-                        f"coordinate={candidate.get('coordinate')}"
-                    ),
-                    tool_name="apply_edit",
-                    tool_args={"transaction": transaction},
-                    metadata={
-                        "state_revision": revision,
-                        "block_uid": candidate.get("block_uid"),
-                        "block_type": block_type,
-                    },
-                )
-            )
-
-        request = ClarificationRequest(
-            kind="block_disambiguation",
-            question=f"Multiple blocks are named `{instance_name}`. Choose the exact target.",
-            options=options,
-            state_revision=revision,
-        )
-        clarification = request.to_dict()
-        clarification.update(
-            {
-                "ok": False,
-                "message": (
-                    "Multiple blocks match the requested instance_name. "
-                    "Choose one candidate before mutating."
-                ),
-                "error_type": "ambiguous_block",
-                "errors": copy.deepcopy(errors),
-                "normalized_operations": copy.deepcopy(operations),
-            }
-        )
-        return clarification
+        return duplicate_block_clarification_payload_wrapper(self, payload)
 
     def _apply_edit(self, transaction: Any) -> ToolResult:
         missing_session = self._missing_session_result("apply_edit")
