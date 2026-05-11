@@ -1,6 +1,7 @@
 """MVP model-facing tool profile wrapper tests."""
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -100,6 +101,74 @@ class MvpToolProfileTests(unittest.TestCase):
         narrowed = agent.get_tool_schemas_for_turn(set(MVP_MODEL_TOOL_NAMES))
         names = [schema["function"]["name"] for schema in narrowed]
         self.assertEqual(names, list(MVP_MODEL_TOOL_NAMES))
+
+    def test_release_and_beta_profiles_keep_mvp_tool_surface(self) -> None:
+        agent = self._load_agent()
+        names = [schema["function"]["name"] for schema in agent.get_tool_schemas()]
+        self.assertEqual(
+            names,
+            [
+                "inspect_graph",
+                "search_blocks",
+                "ask_grc_docs",
+                "change_graph",
+                "save_graph_explicit",
+                "load_graph_explicit",
+            ],
+        )
+
+        manifest_dir = Path(__file__).resolve().parent / "llama_eval" / "capability_manifests"
+        expected = {
+            "R0_READ_ONLY": "read_only_wrappers",
+            "R1_SET_PARAM_ONLY": "set_param",
+            "R1_SET_STATE": "set_state",
+            "R2_DISCONNECT": "disconnect",
+            "R3_REWIRE": "rewire",
+            "R4A_INSERT": "insert_block",
+            "R4B_REMOVE": "remove_block",
+            "R4C_ADD_VARIABLE": "add_variable",
+            "R5_SAVE_LOAD": "save_load_lifecycle",
+        }
+        forbidden_raw = {
+            "apply_edit",
+            "propose_edit",
+            "remove_connection",
+            "rewire_connection",
+            "insert_block_on_connection",
+            "auto_insert_block",
+            "save_graph",
+            "load_grc",
+        }
+        for suite, capability in expected.items():
+            manifest = json.loads((manifest_dir / f"{suite}.json").read_text())
+            self.assertEqual(manifest["suite"], suite)
+            self.assertEqual(manifest["capability"], capability)
+            self.assertGreaterEqual(manifest["min_runs_per_case"], 3)
+            self.assertTrue(forbidden_raw.issubset(set(manifest["forbidden_raw_tools"])))
+
+    def test_change_graph_schema_exposes_validated_operation_kinds(self) -> None:
+        agent = self._load_agent()
+        schema = next(
+            schema
+            for schema in agent.get_tool_schemas()
+            if schema["function"]["name"] == "change_graph"
+        )
+        operation_kind = schema["function"]["parameters"]["properties"]["operation_kind"]
+        self.assertEqual(
+            operation_kind["enum"],
+            [
+                "set_param",
+                "set_state",
+                "add_variable",
+                "disconnect",
+                "rewire",
+                "insert_block",
+                "remove_block",
+                "auto_insert",
+                "clarify",
+                "unsupported",
+            ],
+        )
 
     def test_mvp_tool_surface_is_single_profile_authority(self) -> None:
         self.assertEqual(MVP_TOOL_SURFACE.model_tool_names, MVP_MODEL_TOOL_NAMES)

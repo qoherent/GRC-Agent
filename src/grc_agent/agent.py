@@ -35,6 +35,13 @@ from grc_agent.runtime.path_safety import (
     unsafe_graph_root_for_path,
 )
 from grc_agent.runtime.tool_schemas import build_tool_schemas
+from grc_agent.runtime.tool_context import (
+    compact_tool_entry as compact_tool_entry_wrapper,
+    tool_history_content_as_text as tool_history_content_as_text_wrapper,
+)
+from grc_agent.runtime.schema_narrowing import (
+    schema_narrowed_for_turn as schema_narrowed_for_turn_wrapper,
+)
 from grc_agent.runtime.tool_surface import (
     MVP_MODEL_TOOL_NAMES,
     MODEL_TOOL_NAMES_ORDERED,
@@ -1134,107 +1141,11 @@ class GrcAgent:
         return None
 
     def _schema_narrowed_for_turn(self, schema: dict[str, Any]) -> dict[str, Any]:
-        name = schema["function"]["name"]
-        if name == "get_grc_context" and self._turn_plan.target_ref:
-            narrowed = copy.deepcopy(schema)
-            parameters = narrowed["function"]["parameters"]
-            node_id = parameters["properties"]["node_id"]
-            node_id["enum"] = [self._turn_plan.target_ref]
-            node_id["description"] = (
-                "Exact loaded session node selected by the typed turn policy."
-            )
-            return narrowed
-        if (
-            name == "rewire_connection"
-            and self._turn_plan.intent == "rewire"
-            and (exact_new_endpoint := self._turn_exact_new_rewire_endpoint()) is not None
-        ):
-            narrowed = copy.deepcopy(schema)
-            parameters = narrowed["function"]["parameters"]
-            parameters["required"] = [
-                "new_src_block",
-                "new_src_port",
-                "new_dst_block",
-                "new_dst_port",
-            ]
-            src_block, src_port, dst_block, dst_port = exact_new_endpoint
-            properties = parameters["properties"]
-            properties["new_src_block"]["enum"] = [src_block]
-            properties["new_src_port"]["enum"] = [src_port]
-            properties["new_dst_block"]["enum"] = [dst_block]
-            properties["new_dst_port"]["enum"] = [dst_port]
-            return narrowed
-        if (
-            name not in {"apply_edit", "propose_edit"}
-            or self._turn_plan.expected_op_types
-            not in {("update_states",), ("update_params",)}
-        ):
-            return schema
-
-        narrowed = copy.deepcopy(schema)
-        parameters = narrowed["function"]["parameters"]
-        transaction = parameters["properties"]["transaction"]
-        if self._turn_plan.expected_op_types == ("update_params",):
-            if not self._turn_plan.target_ref or not self._turn_plan.parameter_name:
-                return schema
-            transaction.clear()
-            transaction.update(
-                {
-                    "type": "object",
-                    "description": "One update_params operation for an exact loaded block parameter.",
-                    "properties": {
-                        "op_type": {
-                            "type": "string",
-                            "enum": ["update_params"],
-                        },
-                        "instance_name": {
-                            "type": "string",
-                            "enum": [self._turn_plan.target_ref],
-                        },
-                        "params": {
-                            "type": "object",
-                            "properties": {
-                                self._turn_plan.parameter_name: {
-                                    "type": ["string", "number", "integer", "boolean"],
-                                }
-                            },
-                            "required": [self._turn_plan.parameter_name],
-                            "additionalProperties": False,
-                        },
-                    },
-                    "required": ["op_type", "instance_name", "params"],
-                    "additionalProperties": False,
-                }
-            )
-            return narrowed
-
-        transaction.clear()
-        transaction.update(
-            {
-                "type": "object",
-                "description": (
-                    "One update_states operation. Use this only to enable or disable "
-                    "one loaded block instance."
-                ),
-                "properties": {
-                    "op_type": {
-                        "type": "string",
-                        "enum": ["update_states"],
-                    },
-                    "instance_name": {
-                        "type": "string",
-                        "description": "Loaded block instance name.",
-                    },
-                    "state": {
-                        "type": "string",
-                        "enum": ["enabled", "disabled"],
-                    },
-                },
-                "required": ["op_type", "instance_name", "state"],
-                "additionalProperties": False,
-            }
+        return schema_narrowed_for_turn_wrapper(
+            schema,
+            turn_plan=self._turn_plan,
+            exact_new_rewire_endpoint=self._turn_exact_new_rewire_endpoint,
         )
-        return narrowed
 
     @staticmethod
     def looks_like_transaction_payload(payload: Any) -> bool:
@@ -1441,57 +1352,11 @@ class GrcAgent:
 
     @staticmethod
     def _compact_tool_entry(turn: HistoryEntry) -> HistoryEntry:
-        content = turn.get("content")
-        if not isinstance(content, dict):
-            return turn
-        compact: dict[str, Any] = {}
-        for key in (
-            "ok",
-            "message",
-            "error_type",
-            "active_session",
-            "tool",
-            "valid",
-            "hint",
-            "suggested_next_tools",
-        ):
-            if key in content:
-                compact[key] = content[key]
-        tool_name = turn.get("name")
-        if tool_name == "summarize_graph":
-            summary = content.get("summary")
-            if isinstance(summary, str) and summary:
-                compact["summary"] = summary
-        if tool_name == "search_grc":
-            for key in ("query", "scope"):
-                value = content.get(key)
-                if isinstance(value, str) and value:
-                    compact[key] = value
-            results_preview = GrcAgent._search_result_preview(content.get("results"))
-            if results_preview:
-                compact["results_preview"] = results_preview
-            fallback_preview = GrcAgent._search_result_preview(
-                content.get("catalog_fallback_preview")
-            )
-            if fallback_preview:
-                compact["catalog_fallback_preview"] = fallback_preview
-        if tool_name == "semantic_search_grc":
-            for key in ("query", "scope"):
-                value = content.get(key)
-                if isinstance(value, str) and value:
-                    compact[key] = value
-            results_preview = GrcAgent._semantic_search_result_preview(content.get("results"))
-            if results_preview:
-                compact["results_preview"] = results_preview
-        if not compact:
-            compact["ok"] = content.get("ok", False)
-            compact["message"] = "result truncated"
-        return {
-            "role": turn.get("role"),
-            "tool_call_id": turn.get("tool_call_id"),
-            "name": turn.get("name"),
-            "content": compact,
-        }
+        return compact_tool_entry_wrapper(
+            turn,
+            search_result_preview=GrcAgent._search_result_preview,
+            semantic_search_result_preview=GrcAgent._semantic_search_result_preview,
+        )
 
     # ------------------------------------------------------------------- #
     # History content formatting
@@ -1523,96 +1388,12 @@ class GrcAgent:
         *,
         tool_name: str,
     ) -> str:
-        """Render one tool result with the next-step hint made prominent for the model."""
-        compact = dict(content)
-        validation = compact.get("validation")
-        if isinstance(validation, dict):
-            compact["validation"] = {
-                "status": validation.get("status"),
-                "returncode": validation.get("returncode"),
-            }
-
-        active_session = compact.get("active_session")
-        if isinstance(active_session, dict):
-            active_validation = active_session.get("validation")
-            compact["active_session"] = {
-                "path": active_session.get("path"),
-                "graph_id": active_session.get("graph_id"),
-                "state_revision": active_session.get("state_revision"),
-                "dirty": active_session.get("dirty"),
-                "validation": {
-                    "status": active_validation.get("status"),
-                    "returncode": active_validation.get("returncode"),
-                }
-                if isinstance(active_validation, dict)
-                else active_validation,
-                "block_count": active_session.get("block_count"),
-                "connection_count": active_session.get("connection_count"),
-                "variable_count": active_session.get("variable_count"),
-                "variable_preview": active_session.get("variable_preview"),
-                "block_preview": active_session.get("block_preview"),
-                "connection_preview": active_session.get("connection_preview"),
-            }
-
-        if tool_name == "search_grc":
-            compact.pop("results", None)
-            history_preview = self._search_result_preview(
-                content.get("results"),
-                include_summary=False,
-            )
-            if history_preview:
-                compact["results_preview"] = history_preview
-            fallback_preview = self._search_result_preview(
-                content.get("catalog_fallback_preview"),
-                include_summary=False,
-            )
-            if fallback_preview:
-                compact["catalog_fallback_preview"] = fallback_preview
-        if tool_name == "semantic_search_grc":
-            compact.pop("results", None)
-            history_preview = self._semantic_search_result_preview(content.get("results"))
-            if history_preview:
-                compact["results_preview"] = history_preview
-
-        if tool_name == "get_grc_context":
-            compact.pop("nodes", None)
-            target = compact.get("target")
-            if isinstance(target, dict):
-                compact["target"] = {
-                    key: target.get(key)
-                    for key in ("node_id", "label", "block_type", "incoming", "outgoing")
-                    if key in target
-                }
-
-        if tool_name == "apply_edit" and compact.get("ok") is True:
-            compact["message"] = "Edit applied. Internal compile check passed."
-
-        lines = [f"{tool_name} result"]
-        ok = compact.get("ok")
-        if isinstance(ok, bool):
-            lines[0] = f"{lines[0]}: ok={ok}"
-        message = compact.get("message")
-        if isinstance(message, str) and message:
-            lines.append(f"message: {message}")
-        hint = compact.get("hint")
-        if isinstance(hint, str) and hint:
-            lines.append(f"hint: {hint}")
-        if tool_name == "search_grc" and (
-            compact.get("results_preview") or compact.get("catalog_fallback_preview")
-        ):
-            lines.append(
-                "next_step_note: search previews are routing only; for later follow-ups like `what does that block look like?`, call describe_block with the stored block_id, not get_grc_context."
-            )
-        if tool_name == "get_grc_context":
-            lines.append(
-                "next_step_note: inspection data is routing only; do not answer later edit or preview requests from it."
-            )
-        if tool_name == "semantic_search_grc":
-            lines.append(
-                "next_step_note: semantic search is read-only candidate discovery; it cannot authorize apply_edit, save_graph, insertions, removals, or repairs."
-            )
-        lines.append(json.dumps(compact, sort_keys=True))
-        return "\n".join(lines)
+        return tool_history_content_as_text_wrapper(
+            content,
+            tool_name=tool_name,
+            search_result_preview=self._search_result_preview,
+            semantic_search_result_preview=self._semantic_search_result_preview,
+        )
 
     def _session_history_content_as_text(
         self, content: Any, *, reason: Any = None
