@@ -44,6 +44,11 @@ from grc_agent.runtime.tool_context import (
     compact_tool_entry as compact_tool_entry_wrapper,
     tool_history_content_as_text as tool_history_content_as_text_wrapper,
 )
+from grc_agent.runtime.model_context import (
+    history_content_as_text as history_content_as_text_wrapper,
+    render_model_messages,
+    session_history_content_as_text as session_history_content_as_text_wrapper,
+)
 from grc_agent.runtime.schema_narrowing import (
     schema_narrowed_for_turn as schema_narrowed_for_turn_wrapper,
 )
@@ -1182,58 +1187,12 @@ class GrcAgent:
                 )
 
     def get_model_messages(self) -> list[HistoryEntry]:
-        """Render the current runtime history into chat-completions messages."""
-        messages: list[HistoryEntry] = [
-            {
-                "role": "system",
-                "content": self.get_system_prompt(),
-            }
-        ]
-
-        for index, turn in enumerate(self.history):
-            role = turn.get("role")
-
-            if role == "session":
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": self._session_history_content_as_text(
-                            turn.get("content"),
-                            reason=turn.get("reason"),
-                        ),
-                    }
-                )
-                continue
-
-            if role == "tool":
-                tool_name = turn.get("name")
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": str(
-                            turn.get("tool_call_id") or f"tool_call_{index}"
-                        ),
-                        "name": tool_name,
-                        "content": self._history_content_as_text(
-                            turn.get("content"),
-                            tool_name=tool_name,
-                        ),
-                    }
-                )
-                continue
-
-            if role not in {"user", "assistant"}:
-                continue
-
-            message: HistoryEntry = {
-                "role": role,
-                "content": turn.get("content"),
-            }
-            if role == "assistant" and "tool_calls" in turn:
-                message["tool_calls"] = turn["tool_calls"]
-            messages.append(message)
-
-        return messages
+        return render_model_messages(
+            self.history,
+            system_prompt_provider=self.get_system_prompt,
+            search_result_preview=search_result_preview_wrapper,
+            semantic_search_result_preview=self._semantic_search_result_preview,
+        )
 
     # ------------------------------------------------------------------- #
     # Compact history helpers
@@ -1327,22 +1286,12 @@ class GrcAgent:
     def _history_content_as_text(
         self, content: Any, *, tool_name: str | None = None
     ) -> str:
-        """Normalize stored history content into the string form chat APIs expect."""
-        if (
-            tool_name == "summarize_graph"
-            and isinstance(content, dict)
-            and isinstance(content.get("summary"), str)
-        ):
-            return content["summary"]
-        if isinstance(content, str):
-            return content
-        if content is None:
-            return ""
-        if isinstance(content, dict) and tool_name is not None:
-            return self._tool_history_content_as_text(content, tool_name=tool_name)
-        if isinstance(content, (dict, list)):
-            return json.dumps(content, sort_keys=True)
-        return str(content)
+        return history_content_as_text_wrapper(
+            content,
+            tool_name=tool_name,
+            search_result_preview=search_result_preview_wrapper,
+            semantic_search_result_preview=self._semantic_search_result_preview,
+        )
 
     def _tool_history_content_as_text(
         self,
@@ -1360,49 +1309,7 @@ class GrcAgent:
     def _session_history_content_as_text(
         self, content: Any, *, reason: Any = None
     ) -> str:
-        """Render bound active-session state into a deterministic model-visible message."""
-        if not isinstance(content, dict):
-            return "No active session context is available."
-        action = "Switched active session" if reason == "load_grc" else "Active session"
-        validation = content.get("validation")
-        validation_status = (
-            validation.get("status")
-            if isinstance(validation, dict)
-            and isinstance(validation.get("status"), str)
-            else "unknown"
-        )
-        variables_hint = ""
-        blocks_hint = ""
-        connections_hint = ""
-        count_parts = []
-        if isinstance(content.get("block_count"), int):
-            count_parts.append(f"blocks={content.get('block_count')}")
-        if isinstance(content.get("connection_count"), int):
-            count_parts.append(f"connections={content.get('connection_count')}")
-        if isinstance(content.get("variable_count"), int):
-            count_parts.append(f"variables={content.get('variable_count')}")
-        counts_hint = f" {', '.join(count_parts)};" if count_parts else ""
-        if reason != "turn_refresh":
-            variable_preview = content.get("variable_preview")
-            if isinstance(variable_preview, list) and variable_preview:
-                variables_hint = f" variables=[{', '.join(str(item) for item in variable_preview)}];"
-            block_preview = content.get("block_preview")
-            if isinstance(block_preview, list) and block_preview:
-                blocks_hint = f" blocks=[{', '.join(str(item) for item in block_preview[:6])}];"
-            connection_preview = content.get("connection_preview")
-            if isinstance(connection_preview, list) and connection_preview:
-                connections_hint = (
-                    " connections_preview=["
-                    f"{', '.join(str(item) for item in connection_preview[:8])}];"
-                )
-        return (
-            f"{action}: path={content.get('path')}, "
-            f"graph_id={content.get('graph_id')}, "
-            f"state_revision={content.get('state_revision')}, "
-            f"dirty={content.get('dirty')}, "
-            f"validation={validation_status};"
-            f"{counts_hint}{variables_hint}{blocks_hint}{connections_hint}"
-        )
+        return session_history_content_as_text_wrapper(content, reason=reason)
 
     @staticmethod
     def _semantic_search_result_preview(

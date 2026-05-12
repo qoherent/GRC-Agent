@@ -622,6 +622,57 @@ class GrcAgentTests(unittest.TestCase):
             session_messages[0]["content"],
         )
 
+    def test_model_messages_preserve_order_and_context_packaging(self) -> None:
+        empty_agent = GrcAgent()
+
+        empty_messages = empty_agent.get_model_messages()
+
+        self.assertEqual(len(empty_messages), 1)
+        self.assertEqual(empty_messages[0]["role"], "system")
+        self.assertEqual(empty_messages[0]["content"], empty_agent.get_system_prompt())
+
+        agent, _session = self._load_agent()
+        summary_result = agent.execute_tool("summarize_graph", {})
+        agent.history.extend(
+            [
+                {"role": "user", "content": "Summarize it."},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "summarize_graph",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "summarize_graph",
+                    "content": summary_result,
+                },
+            ]
+        )
+
+        messages = agent.get_model_messages()
+
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["system", "system", "user", "assistant", "tool"],
+        )
+        self.assertEqual(messages[0]["content"], agent.get_system_prompt())
+        self.assertTrue(str(messages[1]["content"]).startswith("Active session:"))
+        self.assertEqual(messages[2]["content"], "Summarize it.")
+        self.assertEqual(messages[3]["tool_calls"], agent.history[-2]["tool_calls"])
+        self.assertEqual(messages[4]["tool_call_id"], "call_1")
+        self.assertEqual(messages[4]["name"], "summarize_graph")
+        self.assertEqual(messages[4]["content"], summary_result["summary"])
+
     def test_session_history_messages_render_recorded_snapshot_not_live_session(
         self,
     ) -> None:
