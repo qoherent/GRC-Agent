@@ -115,6 +115,10 @@ from grc_agent.runtime.wrappers.lifecycle import (
 from grc_agent.runtime.wrappers.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
+from grc_agent.runtime.wrappers.search_grc_internal import (
+    search_grc_internal as search_grc_internal_wrapper,
+    search_result_preview as search_result_preview_wrapper,
+)
 from grc_agent.runtime.wrappers.change_graph.dispatcher import dispatch_change_graph
 from grc_agent.runtime.wrappers.change_graph.disconnect_resolution import (
     resolve_disconnect_connection_id,
@@ -1309,7 +1313,7 @@ class GrcAgent:
     def _compact_tool_entry(turn: HistoryEntry) -> HistoryEntry:
         return compact_tool_entry_wrapper(
             turn,
-            search_result_preview=GrcAgent._search_result_preview,
+            search_result_preview=search_result_preview_wrapper,
             semantic_search_result_preview=GrcAgent._semantic_search_result_preview,
         )
 
@@ -1346,7 +1350,7 @@ class GrcAgent:
         return tool_history_content_as_text_wrapper(
             content,
             tool_name=tool_name,
-            search_result_preview=self._search_result_preview,
+            search_result_preview=search_result_preview_wrapper,
             semantic_search_result_preview=self._semantic_search_result_preview,
         )
 
@@ -1396,35 +1400,6 @@ class GrcAgent:
             f"validation={validation_status};"
             f"{counts_hint}{variables_hint}{blocks_hint}{connections_hint}"
         )
-
-    # ------------------------------------------------------------------- #
-    # Search result compacting helper
-    # ------------------------------------------------------------------- #
-
-    @staticmethod
-    def _search_result_preview(
-        results: Any,
-        *,
-        max_items: int = 3,
-        include_summary: bool = True,
-    ) -> list[dict[str, str]]:
-        if not isinstance(results, list):
-            return []
-        preview: list[dict[str, str]] = []
-        for item in results[:max_items]:
-            if not isinstance(item, dict):
-                continue
-            compact: dict[str, str] = {}
-            keys = ["block_id", "node_id", "label"]
-            if include_summary:
-                keys.append("summary")
-            for key in keys:
-                value = item.get(key)
-                if isinstance(value, str) and value:
-                    compact[key] = value
-            if compact:
-                preview.append(compact)
-        return preview
 
     @staticmethod
     def _semantic_search_result_preview(
@@ -2384,70 +2359,14 @@ class GrcAgent:
 
     def _search_grc(self, query: str, scope: str = "catalog", k: int | None = None) -> ToolResult:
         session_ctx = self.session if self.session.flowgraph is not None else None
-        if k is None:
-            payload = _search_grc_with_context(
-                query,
-                scope=scope,
-                session=session_ctx,
-                catalog_root=self.catalog_root,
-            )
-        else:
-            payload = _search_grc_with_context(
-                query,
-                scope=scope,
-                k=k,
-                session=session_ctx,
-                catalog_root=self.catalog_root,
-            )
-        if payload.get("ok") and payload.get("results"):
-            payload["hint"] = (
-                "Use `block_id` from block results with `describe_block`, including later follow-ups like `what does that block look like?` or requests for ports and parameters. "
-                "Use `node_id` with `get_grc_context` only for loaded session blocks."
-            )
-        elif payload.get("ok") and scope == "session" and not payload.get("results"):
-            if k is None:
-                fallback = _search_grc_with_context(
-                    query,
-                    scope="catalog",
-                    session=session_ctx,
-                    catalog_root=self.catalog_root,
-                )
-            else:
-                fallback = _search_grc_with_context(
-                    query,
-                    scope="catalog",
-                    k=k,
-                    session=session_ctx,
-                    catalog_root=self.catalog_root,
-                )
-            fallback_preview = self._search_result_preview(fallback.get("results"))
-            if fallback.get("ok") and fallback_preview:
-                payload["catalog_fallback_preview"] = fallback_preview
-                first_block_id = next(
-                    (
-                        item.get("block_id")
-                        for item in fallback_preview
-                        if isinstance(item.get("block_id"), str)
-                    ),
-                    None,
-                )
-                if isinstance(first_block_id, str) and first_block_id:
-                    payload["hint"] = (
-                        "No matches in the session. Catalog fallback preview is included. "
-                        f"If the user refers to the first result, call `describe_block(block_id=\"{first_block_id}\")`. "
-                        'If the user still wants the search itself, rerun the same query with `scope="catalog"`.'
-                    )
-                else:
-                    payload["hint"] = (
-                        "No matches in the session. Catalog fallback preview is included. "
-                        'Retry the same query with `scope="catalog"` before you answer or validate anything else, then use the returned `block_id`.'
-                    )
-            else:
-                payload["hint"] = (
-                    "No matches in the session. "
-                    'Do NOT call `describe_block` with the raw query text. Retry the same query with `scope="catalog"` '
-                    "before you answer or validate anything else, then use the returned `block_id`."
-                )
+        payload = search_grc_internal_wrapper(
+            query,
+            scope=scope,
+            k=k,
+            session=session_ctx,
+            catalog_root=self.catalog_root,
+            search_fn=_search_grc_with_context,
+        )
         result = self._payload_result("search_grc", payload)
         return result
 
