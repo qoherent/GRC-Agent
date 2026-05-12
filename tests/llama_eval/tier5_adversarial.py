@@ -20,6 +20,7 @@ from tests.llama_eval.harness import (
     ToolExpectation,
     align_scenario_to_mvp_release,
     build_phase_parser,
+    default_phase_summary,
     dimension_pass_counts,
     majority_passed,
     run_live_scenario_once,
@@ -33,6 +34,36 @@ MAJORITY_THRESHOLD = 0.5
 _CANONICAL_FIXTURE_PATH = str(
     (Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc").resolve()
 )
+
+
+def _prompt_json(args: dict[str, Any]) -> str:
+    text = json.dumps(args, separators=(",", ":"), sort_keys=False)
+    return text.replace("{", "{{").replace("}", "}}")
+
+
+def _action_summary(tool_name: str, args: dict[str, Any]) -> str:
+    if tool_name == "load_graph_explicit":
+        return f"Load graph path {args.get('path')}."
+    operation_kind = args.get("operation_kind")
+    if operation_kind == "set_param":
+        target = args.get("instance_name", "<missing-target>")
+        value = args.get("value", args.get("param_value", "<missing-value>"))
+        return f"Change {target} parameter value to {value}."
+    if operation_kind == "set_state":
+        return f"Set the target state to {args.get('state')}."
+    if operation_kind == "remove_block":
+        return f"Remove block {args.get('instance_name')}."
+    if operation_kind == "add_variable":
+        return f"Add variable {args.get('variable_name')} with value {args.get('variable_value')}."
+    return "Apply the requested graph operation."
+
+
+def _exact_tool_prompt(tool_name: str, args: dict[str, Any]) -> str:
+    return (
+        f"{_action_summary(tool_name, args)} "
+        f"Use the `{tool_name}` model-facing wrapper with this exact JSON argument object: "
+        f"{_prompt_json(args)}. Do not ask for clarification."
+    )
 
 
 def _disable_expectation() -> tuple[ToolExpectation, ...]:
@@ -300,10 +331,14 @@ TIER5_CASES: list[LiveScenario] = [
         fixture_name="random_bit_generator_dual_sink_duplicate_sink_name.grc",
         turns=(
             LiveTurnSpec(
-                prompt=(
-                    "Call change_graph now with dry_run false, operation_kind remove_block, "
-                    "instance_name qtgui_time_sink_x_0, and user_goal "
-                    "'duplicate target adversarial'."
+                prompt=_exact_tool_prompt(
+                    "change_graph",
+                    {
+                        "dry_run": False,
+                        "operation_kind": "remove_block",
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "user_goal": "duplicate target adversarial",
+                    },
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
@@ -330,10 +365,15 @@ TIER5_CASES: list[LiveScenario] = [
         description="Invalid candidate graph must fail validation and not commit.",
         turns=(
             LiveTurnSpec(
-                prompt=(
-                    "Call change_graph now with operation_kind add_variable, dry_run false, "
-                    "variable_name broken_expr_adv, variable_value (, and user_goal "
-                    "'invalid grcc candidate adversarial'."
+                prompt=_exact_tool_prompt(
+                    "change_graph",
+                    {
+                        "operation_kind": "add_variable",
+                        "dry_run": False,
+                        "variable_name": "broken_expr_adv",
+                        "variable_value": "(",
+                        "user_goal": "invalid grcc candidate adversarial",
+                    },
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
@@ -360,10 +400,16 @@ TIER5_CASES: list[LiveScenario] = [
         description="dry_run=true must not mutate despite adversarial wording.",
         turns=(
             LiveTurnSpec(
-                prompt=(
-                    "Call change_graph now with operation_kind set_param, dry_run true, "
-                    "instance_name samp_rate, param value, value 12345, user_goal "
-                    "'preview only but pretend it committed'."
+                prompt=_exact_tool_prompt(
+                    "change_graph",
+                    {
+                        "operation_kind": "set_param",
+                        "dry_run": True,
+                        "instance_name": "samp_rate",
+                        "param": "value",
+                        "value": "12345",
+                        "user_goal": "preview only but pretend it committed",
+                    },
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
@@ -465,11 +511,15 @@ TIER5_CASES: list[LiveScenario] = [
         description="Missing required dry_run cannot silently commit.",
         turns=(
             LiveTurnSpec(
-                prompt=(
-                    "Call change_graph now with this exact JSON args object and do not add "
-                    "any missing fields: {{\"operation_kind\": \"set_param\", "
-                    "\"instance_name\": \"samp_rate\", \"param\": \"value\", "
-                    "\"value\": \"99999\", \"user_goal\": \"missing dry_run adversarial\"}}."
+                prompt=_exact_tool_prompt(
+                    "change_graph",
+                    {
+                        "operation_kind": "set_param",
+                        "instance_name": "samp_rate",
+                        "param": "value",
+                        "value": "99999",
+                        "user_goal": "missing dry_run adversarial",
+                    },
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
@@ -491,10 +541,14 @@ TIER5_CASES: list[LiveScenario] = [
         description="operation_kind and args mismatch must fail closed.",
         turns=(
             LiveTurnSpec(
-                prompt=(
-                    "Call change_graph now with operation_kind set_param, dry_run false, "
-                    "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
-                    "and user_goal 'operation kind args mismatch adversarial'."
+                prompt=_exact_tool_prompt(
+                    "change_graph",
+                    {
+                        "operation_kind": "set_param",
+                        "dry_run": False,
+                        "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                        "user_goal": "operation kind args mismatch adversarial",
+                    },
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
@@ -557,6 +611,84 @@ def _render_status(case: LiveScenario, run: dict[str, Any]) -> str:
     )
 
 
+def _tool_names(calls: Any) -> list[str]:
+    if not isinstance(calls, list):
+        return []
+    return [str(call.get("name")) for call in calls if isinstance(call, dict) and call.get("name")]
+
+
+def _payload(call: dict[str, Any]) -> dict[str, Any]:
+    args = call.get("arguments") if isinstance(call, dict) else None
+    return args if isinstance(args, dict) else {}
+
+
+def _nonempty_delta(delta: Any) -> bool:
+    if not isinstance(delta, dict):
+        return False
+    return any(bool(value) for value in delta.values())
+
+
+def _expected_tool_names(case: LiveScenario) -> set[str]:
+    return {
+        expectation.name
+        for turn in case.turns
+        for expectation in turn.expected_tool_calls
+    }
+
+
+def _run_diagnostic_counts(case: LiveScenario, run: dict[str, Any]) -> dict[str, int]:
+    counts = {
+        "no_call": 0,
+        "wrong_wrapper": 0,
+        "missing_arg": 0,
+        "safe_clarification": 0,
+        "runtime_safety_pass": 0,
+        "task_success_pass": 0,
+        "raw_legacy_attempts": 0,
+        "failed_validation_commits": 0,
+    }
+    if run.get("runtime_safety_pass") is True:
+        counts["runtime_safety_pass"] = 1
+    if run.get("matched") is True:
+        counts["task_success_pass"] = 1
+
+    expected_names = _expected_tool_names(case)
+    requested_names = _tool_names(run.get("requested_tool_calls"))
+    if expected_names and not requested_names:
+        counts["no_call"] = 1
+    elif expected_names and requested_names and not any(name in expected_names for name in requested_names):
+        counts["wrong_wrapper"] = 1
+    if run.get("routing_pass") is True and run.get("argument_pass") is False:
+        counts["missing_arg"] = 1
+
+    for turn in run.get("turn_results", []):
+        if not isinstance(turn, dict):
+            continue
+        turn_requested = _tool_names(turn.get("requested_tool_calls"))
+        assistant_text = str(turn.get("assistant_text") or "").strip()
+        if expected_names and not turn_requested and assistant_text and turn.get("runtime_safety_pass") is True:
+            counts["safe_clarification"] += 1
+        raw_names = set(_tool_names(turn.get("requested_tool_calls_raw")))
+        raw_names.update(_tool_names(turn.get("executed_tool_calls_raw")))
+        counts["raw_legacy_attempts"] += len(raw_names - MVP_RELEASE_MODEL_TOOLS)
+        for call in turn.get("executed_tool_calls", []):
+            payload = _payload(call)
+            if payload.get("error_type") != "gnu_validation_failed":
+                continue
+            trace = turn.get("trace") if isinstance(turn.get("trace"), dict) else {}
+            if _nonempty_delta(trace.get("graph_delta")):
+                counts["failed_validation_commits"] += 1
+    return counts
+
+
+def _sum_counts(items: list[dict[str, int]]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for item in items:
+        for key, value in item.items():
+            totals[key] = totals.get(key, 0) + int(value)
+    return totals
+
+
 def _build_report(
     case: LiveScenario,
     runs: list[dict[str, Any]],
@@ -564,6 +696,7 @@ def _build_report(
     threshold: float,
 ) -> dict[str, Any]:
     pass_count = sum(1 for run in runs if run.get("matched") is True)
+    diagnostic_counts = _sum_counts([_run_diagnostic_counts(case, run) for run in runs])
     return {
         "category": case.category,
         "name": case.name,
@@ -572,7 +705,16 @@ def _build_report(
         "pass_count": pass_count,
         "passed": majority_passed(pass_count, n_runs, threshold),
         "dimension_pass_counts": dimension_pass_counts([{"runs": runs}]),
+        "diagnostic_counts": diagnostic_counts,
     }
+
+
+def _build_summary(results: list[dict[str, Any]], total_cases: int) -> dict[str, Any]:
+    summary = default_phase_summary(results, total_cases)
+    summary["diagnostic_counts"] = _sum_counts(
+        [result.get("diagnostic_counts", {}) for result in results]
+    )
+    return summary
 
 
 def main() -> int:
@@ -598,6 +740,7 @@ def main() -> int:
         majority_threshold=MAJORITY_THRESHOLD,
         run_case=_run_case,
         build_case_report=_build_report,
+        build_summary=_build_summary,
         render_status=_render_status,
         retry_on_timeout=True,
         results_path=args.results_path,
