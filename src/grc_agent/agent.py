@@ -115,6 +115,9 @@ from grc_agent.runtime.wrappers.lifecycle import (
 from grc_agent.runtime.wrappers.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
+from grc_agent.runtime.wrappers.get_grc_context_internal import (
+    get_grc_context_internal as get_grc_context_internal_wrapper,
+)
 from grc_agent.runtime.wrappers.search_grc_internal import (
     search_grc_internal as search_grc_internal_wrapper,
     search_result_preview as search_result_preview_wrapper,
@@ -2376,53 +2379,17 @@ class GrcAgent:
         hops: int = 1,
         max_nodes: int | None = None,
     ) -> ToolResult:
-        resolved_node_id = self._resolve_symbol_like_name(node_id) or node_id
-        resolved_max_nodes = (
-            self._guardrails_cfg.max_context_nodes
-            if max_nodes is None
-            else max_nodes
-        )
-        payload = get_grc_context(
-            self.session,
-            resolved_node_id,
+        payload = get_grc_context_internal_wrapper(
+            node_id,
             hops=hops,
-            max_nodes=resolved_max_nodes,
+            max_nodes=max_nodes,
+            session=self.session,
+            catalog_root=self.catalog_root,
+            default_max_nodes=self._guardrails_cfg.max_context_nodes,
+            symbol_resolver=self._resolve_symbol_like_name,
+            context_fn=get_grc_context,
+            search_fn=_search_grc_with_context,
         )
-        if payload.get("ok"):
-            payload["hint"] = (
-                "This is inspection data only. "
-                "If the user also asked for a real change after inspecting, call `apply_edit` next."
-            )
-        if payload.get("ok") is False and payload.get("error_type") == ErrorCode.BLOCK_NOT_FOUND:
-            candidate_nodes: list[str] = []
-            candidate_result = _search_grc_with_context(
-                node_id,
-                scope="session",
-                k=3,
-                session=self.session if self.session.flowgraph is not None else None,
-                catalog_root=self.catalog_root,
-            )
-            if candidate_result.get("ok") and candidate_result.get("results"):
-                candidate_nodes = [
-                    str(result.get("node_id")).removeprefix("session:block:")
-                    for result in candidate_result["results"]
-                    if isinstance(result, dict)
-                    and isinstance(result.get("node_id"), str)
-                    and str(result.get("node_id")).startswith("session:block:")
-                ]
-            if candidate_nodes:
-                payload["candidate_nodes"] = candidate_nodes
-                payload["hint"] = f"Closest session matches: {', '.join(candidate_nodes)}."
-            elif self.session.flowgraph is not None:
-                fallback_candidates = [
-                    b.instance_name for b in self.session.flowgraph.blocks[: min(5, max_nodes)]
-                ]
-                if fallback_candidates:
-                    payload["candidate_nodes"] = fallback_candidates
-                    payload["hint"] = (
-                        "Use an exact loaded session name. "
-                        f"Examples: {', '.join(fallback_candidates)}."
-                    )
         result = self._payload_result("get_grc_context", payload)
         return result
 
