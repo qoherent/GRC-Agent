@@ -116,6 +116,9 @@ from grc_agent.runtime.wrappers.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
 from grc_agent.runtime.wrappers.change_graph.dispatcher import dispatch_change_graph
+from grc_agent.runtime.wrappers.change_graph.disconnect_resolution import (
+    resolve_disconnect_connection_id,
+)
 from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     connection_endpoint_candidates as connection_endpoint_candidates_wrapper,
     has_endpoint_value,
@@ -2647,66 +2650,35 @@ class GrcAgent:
         if missing_session is not None:
             return missing_session
 
-        endpoint_args = {
-            "src_block": src_block,
-            "src_port": src_port,
-            "dst_block": dst_block,
-            "dst_port": dst_port,
-        }
-        has_endpoint_hint = any(value is not None for value in endpoint_args.values())
-        if has_endpoint_hint:
-            resolved = self.session.find_connection_candidates(
-                src_block=src_block,
-                src_port=src_port,
-                dst_block=dst_block,
-                dst_port=dst_port,
+        resolution = resolve_disconnect_connection_id(
+            session=self.session,
+            connection_id=connection_id,
+            src_block=src_block,
+            src_port=src_port,
+            dst_block=dst_block,
+            dst_port=dst_port,
+        )
+        if resolution.ambiguous_candidates is not None:
+            payload = self._connection_clarification_payload(
+                resolution.ambiguous_candidates
             )
-            candidates = resolved["candidates"]
-            if not candidates:
-                return self._tool_result(
-                    tool_name="remove_connection",
-                    ok=False,
-                    message="No existing connection matches the provided endpoint fields.",
-                    error_type="connection_not_found",
-                    state_revision=self.session.state_revision,
-                )
-            if len(candidates) > 1:
-                payload = self._connection_clarification_payload(candidates)
-                self._store_pending_clarification(payload)
-                return self._payload_result("remove_connection", payload)
-
-            resolved_connection_id = candidates[0]["connection_id"]
-            if connection_id is not None and connection_id != resolved_connection_id:
-                return self._tool_result(
-                    tool_name="remove_connection",
-                    ok=False,
-                    message=(
-                        "connection_id does not match the provided endpoint fields: "
-                        f"{connection_id}"
-                    ),
-                    error_type="connection_endpoint_mismatch",
-                    state_revision=self.session.state_revision,
-                )
-            connection_id = resolved_connection_id
-
-        if not isinstance(connection_id, str) or not connection_id.strip():
+            self._store_pending_clarification(payload)
+            return self._payload_result("remove_connection", payload)
+        if not resolution.ok:
+            extra: dict[str, Any] = {}
+            if resolution.error_type is not None:
+                extra["error_type"] = resolution.error_type
+            if resolution.state_revision is not None:
+                extra["state_revision"] = resolution.state_revision
+            if resolution.validation_errors is not None:
+                extra["validation_errors"] = resolution.validation_errors
             return self._tool_result(
                 tool_name="remove_connection",
                 ok=False,
-                message=(
-                    "remove_connection requires either connection_id or enough "
-                    "endpoint fields to resolve one existing connection."
-                ),
-                error_type=ErrorCode.TOOL_CALL_INVALID,
-                validation_errors=[
-                    {
-                        "code": "missing_required",
-                        "field": "connection_id",
-                        "message": "Provide connection_id or endpoint fields.",
-                    }
-                ],
+                message=resolution.message or "Could not resolve connection.",
+                **extra,
             )
-        return self._remove_connection_by_id(connection_id.strip())
+        return self._remove_connection_by_id(resolution.connection_id or "")
 
     def _remove_connection_by_id(self, connection_id: str) -> ToolResult:
         """Thin wrapper: delegates to apply_edit with op_type=remove_connection."""
