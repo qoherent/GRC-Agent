@@ -715,6 +715,33 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "clarification_required")
         self.assertIn("clarification_options", result)
 
+    def test_change_graph_missing_dry_run_is_rejected_without_mutation(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+            model_tool_call=True,
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertEqual(
+            result["validation_errors"][0]["field"],
+            "dry_run",
+            result,
+        )
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
     def test_change_graph_save_is_not_model_facing(self) -> None:
         agent = self._load_agent()
         result = agent.execute_tool(
@@ -1444,6 +1471,23 @@ class MvpToolProfileTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"], result)
         self.assertEqual(result.get("error_type"), "invalid_request")
+
+    def test_change_graph_insert_requires_explicit_instance_name(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Insert a block on this connection.",
+                "operation_kind": "insert_block",
+                "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+                "block_id": "blocks_throttle2",
+                "insert_params": {"type": "byte", "samples_per_second": "32000"},
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "invalid_request")
+        self.assertIn("instance_name", result.get("message", ""))
 
     def test_change_graph_insert_rejects_conflicting_block_and_candidate_id(self) -> None:
         agent = self._load_agent()

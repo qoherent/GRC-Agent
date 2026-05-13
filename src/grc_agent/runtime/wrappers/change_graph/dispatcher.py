@@ -421,7 +421,12 @@ def dispatch_change_graph(
                         "disconnect, rewire, insert_block, remove_block, auto_insert."
                     ),
                     "clarification_options": [
-                        "Retry with operation_kind set to the intended mutation class.",
+                        (
+                            "Retry with operation_kind set to the intended mutation class "
+                            "and preserve all exact fields from this call, including "
+                            "connection_id, block_id, instance_name, and insert_params "
+                            "when they were supplied."
+                        ),
                         "Or set dry_run=true for a preview-only request.",
                     ],
                 },

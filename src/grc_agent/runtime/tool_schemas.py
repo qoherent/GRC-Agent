@@ -482,7 +482,13 @@ def build_tool_schemas(
             "change_graph",
             "Single model-facing graph change surface. "
             "Set dry_run=true for preview and dry_run=false for committed mutation. "
-            "Internally routes through verified mutation handlers with preflight, grcc validation, and rollback.",
+            "Internally routes through verified mutation handlers with preflight, grcc validation, and rollback. "
+            "Every mutation call must include dry_run, user_goal, and operation_kind. "
+            "Example rewire commit: dry_run=false, operation_kind='rewire', user_goal='rewire tag debug input', "
+            "connection_id='old_src:0->dst:0', new_src_block='new_src', new_src_port=0, new_dst_block='dst', new_dst_port=0. "
+            "Example insert commit: dry_run=false, operation_kind='insert_block', user_goal='insert throttle', "
+            "connection_id='src:0->dst:0', block_id='blocks_throttle2', instance_name='blocks_throttle2_0', "
+            "insert_params={'type':'float','samples_per_second':'samp_rate'}.",
             {
                 "dry_run": {
                     "type": "boolean",
@@ -534,7 +540,8 @@ def build_tool_schemas(
                 "block_id": {
                     "type": "string",
                     "description": (
-                        "Catalog block id for insert_block operations (for example `blocks_head`). "
+                        "Catalog block id for insert_block operations (for example "
+                        "`blocks_throttle2` or `blocks_head`), not the new instance name. "
                         "Use with a connection_id; runtime validates compatibility and refuses invalid candidates."
                     ),
                 },
@@ -549,7 +556,8 @@ def build_tool_schemas(
                     "type": "string",
                     "description": (
                         "Legacy alias for insert candidate id used by some models. "
-                        "Equivalent to block_id for insert_block operations."
+                        "Equivalent to block_id for insert_block operations; pass a catalog "
+                        "block id here, not the new instance name."
                     ),
                 },
                 "instance_name": {
@@ -565,7 +573,8 @@ def build_tool_schemas(
                     "description": (
                         "Exact connection id `src_block:src_port->dst_block:dst_port`. "
                         "Primary path for disconnect and required old edge for rewire. "
-                        "Required anchor for insert_block."
+                        "Required anchor for insert_block. If the user says between source "
+                        "output N and destination input M, construct `source:N->destination:M`."
                     ),
                 },
                 "state_revision": {
@@ -604,10 +613,26 @@ def build_tool_schemas(
                 },
                 "insert_params": {
                     "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "description": (
+                                "GNU item type for type-polymorphic inserted blocks. "
+                                "If the user says 'with type float', pass 'float'."
+                            ),
+                        },
+                        "samples_per_second": {
+                            "type": ["string", "number", "integer"],
+                            "description": (
+                                "Sample rate expression for throttle-like inserted blocks."
+                            ),
+                        },
+                    },
                     "description": (
                         "Optional parameter overrides for insert_block candidates. "
                         "Used when the selected block needs explicit compatible params "
-                        "(for example stream type or length parameters)."
+                        "(for example stream type or length parameters). If the prompt "
+                        "says 'with type float', include {'type': 'float'}."
                     ),
                 },
                 "detach_connections": {
@@ -634,9 +659,13 @@ def build_tool_schemas(
                 },
                 "param_value": {"type": ["string", "number", "integer", "boolean"]},
                 "state": {"type": "string", "enum": ["enabled", "disabled"]},
-                "variable_name": {"type": "string"},
+                "variable_name": {
+                    "type": "string",
+                    "description": "New variable instance name for operation_kind=add_variable.",
+                },
                 "variable_value": {
-                    "type": ["string", "number", "integer", "boolean"]
+                    "type": ["string", "number", "integer", "boolean"],
+                    "description": "Initial value/expression for operation_kind=add_variable.",
                 },
                 "debug": {
                     "type": "boolean",

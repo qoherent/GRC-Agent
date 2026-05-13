@@ -228,6 +228,174 @@ class GrcAgentTests(unittest.TestCase):
 
         self.assertEqual(tool_names, ["propose_edit", "apply_edit", "validate_graph"])
 
+    def test_turn_plan_treats_message_connection_remove_as_disconnect(self) -> None:
+        agent, _session = self._load_agent()
+        plan = agent.init_turn_requirements(
+            "Remove the message connection from pdu_random_pdu_0 pdus "
+            "to blocks_message_debug_0 print_pdu."
+        )
+
+        self.assertEqual(plan.intent, "disconnect")
+        self.assertFalse(plan.requires_clarification)
+
+    def test_turn_plan_allows_natural_receive_from_rewire(self) -> None:
+        agent, _session = self._load_agent()
+        plan = agent.init_turn_requirements(
+            "Rewire blocks_tag_debug_0 input 0 so it receives samples from "
+            "blocks_vector_source_x_0_0 instead of blocks_throttle_0."
+        )
+
+        self.assertEqual(plan.intent, "rewire")
+        self.assertFalse(plan.requires_clarification)
+
+    def test_turn_plan_allows_new_variable_wording(self) -> None:
+        agent, _session = self._load_agent()
+        plan = agent.init_turn_requirements("Add a new variable named r7_gain with value 0.25.")
+
+        self.assertEqual(plan.intent, "add_variable")
+        self.assertFalse(plan.requires_clarification)
+
+    def test_mvp_change_graph_schema_narrows_disconnect_operation_kind(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Remove the message connection from pdu_random_pdu_0 pdus "
+            "to blocks_message_debug_0 print_pdu."
+        )
+
+        schema = next(
+            item
+            for item in agent.get_tool_schemas_for_turn({"change_graph"})
+            if item["function"]["name"] == "change_graph"
+        )
+        params = schema["function"]["parameters"]
+
+        self.assertIn("operation_kind", params["required"])
+        self.assertIn("connection_id", params["required"])
+        self.assertEqual(params["properties"]["operation_kind"]["enum"], ["disconnect"])
+
+    def test_mvp_change_graph_schema_pins_explicit_connection_id(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Call change_graph now with operation_kind disconnect, dry_run false, "
+            "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0."
+        )
+
+        schema = next(
+            item
+            for item in agent.get_tool_schemas_for_turn({"change_graph"})
+            if item["function"]["name"] == "change_graph"
+        )
+        params = schema["function"]["parameters"]
+
+        self.assertEqual(
+            params["properties"]["connection_id"]["enum"],
+            ["analog_random_source_x_0:0->blocks_throttle2_0:0"],
+        )
+
+    def test_mvp_change_graph_schema_pins_preview_dry_run(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Preview disconnecting connection_id "
+            "blocks_char_to_float_0:0->qtgui_time_sink_x_1:0."
+        )
+
+        schema = next(
+            item
+            for item in agent.get_tool_schemas_for_turn({"change_graph"})
+            if item["function"]["name"] == "change_graph"
+        )
+        params = schema["function"]["parameters"]
+
+        self.assertEqual(params["properties"]["operation_kind"]["enum"], ["disconnect"])
+        self.assertEqual(params["properties"]["dry_run"]["enum"], [True])
+
+    def test_mvp_change_graph_schema_pins_commit_dry_run(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Disconnect connection_id blocks_char_to_float_0:0->qtgui_time_sink_x_1:0."
+        )
+
+        schema = next(
+            item
+            for item in agent.get_tool_schemas_for_turn({"change_graph"})
+            if item["function"]["name"] == "change_graph"
+        )
+        params = schema["function"]["parameters"]
+
+        self.assertEqual(params["properties"]["operation_kind"]["enum"], ["disconnect"])
+        self.assertEqual(params["properties"]["dry_run"]["enum"], [False])
+
+    def test_mvp_change_graph_schema_narrows_insert_required_args(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Insert a blocks_throttle2 block named blocks_throttle2_r7 between "
+            "analog_sig_source_x_0 output 0 and blocks_add_xx input 0."
+        )
+
+        schema = next(
+            item
+            for item in agent.get_tool_schemas_for_turn({"change_graph"})
+            if item["function"]["name"] == "change_graph"
+        )
+        params = schema["function"]["parameters"]
+
+        self.assertEqual(params["properties"]["operation_kind"]["enum"], ["insert_block"])
+        self.assertIn("connection_id", params["required"])
+        self.assertIn("block_id", params["required"])
+        self.assertIn("instance_name", params["required"])
+        self.assertEqual(
+            params["properties"]["instance_name"]["enum"],
+            ["blocks_throttle2_r7"],
+        )
+
+    def test_mvp_change_graph_schema_pins_insert_connection_id(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Call change_graph now with operation_kind insert_block, dry_run true, "
+            "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
+            "block_id blocks_abs_xx, and instance_name blocks_abs_preview."
+        )
+
+        schema = next(
+            item
+            for item in agent.get_tool_schemas_for_turn({"change_graph"})
+            if item["function"]["name"] == "change_graph"
+        )
+        params = schema["function"]["parameters"]
+
+        self.assertEqual(params["properties"]["operation_kind"]["enum"], ["insert_block"])
+        self.assertEqual(params["properties"]["dry_run"]["enum"], [True])
+        self.assertEqual(
+            params["properties"]["connection_id"]["enum"],
+            ["analog_random_source_x_0:0->blocks_throttle2_0:0"],
+        )
+        self.assertEqual(params["properties"]["insert_params"]["required"], ["type"])
+
+    def test_mvp_change_graph_schema_pins_explicit_insert_params(self) -> None:
+        agent, _session = self._load_agent()
+        agent.init_turn_requirements(
+            "Call change_graph now with operation_kind insert_block, dry_run false, "
+            "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
+            "block_id blocks_throttle2, instance_name blocks_throttle2_r4a, "
+            "and insert_params {type: byte, samples_per_second: 32000}."
+        )
+
+        schema = next(
+            item
+            for item in agent.get_tool_schemas_for_turn({"change_graph"})
+            if item["function"]["name"] == "change_graph"
+        )
+        params = schema["function"]["parameters"]
+
+        self.assertIn("insert_params", params["required"])
+        insert_params = params["properties"]["insert_params"]
+        self.assertEqual(insert_params["required"], ["type"])
+        self.assertEqual(insert_params["properties"]["type"]["enum"], ["byte"])
+        self.assertEqual(
+            insert_params["properties"]["samples_per_second"]["enum"],
+            ["32000"],
+        )
+
     def test_preview_do_not_apply_does_not_expose_or_nudge_apply_edit(self) -> None:
         agent, _session = self._load_legacy_agent()
         agent.init_turn_requirements(

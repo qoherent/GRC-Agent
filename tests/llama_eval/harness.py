@@ -1307,7 +1307,8 @@ def evaluate_semantic_checks(
             passed = actual_delta == expected_delta
             detail["expected_delta"] = expected_delta
             detail["actual_delta"] = actual_delta
-            safety_pass = safety_pass and passed
+            if not passed and actual_delta:
+                safety_pass = False
             end_state_pass = end_state_pass and passed
         elif kind == "uid_exact_graph_delta":
             actual_delta = _normalize_graph_delta(uid_graph_delta(before_snapshot, after_snapshot))
@@ -1315,7 +1316,8 @@ def evaluate_semantic_checks(
             passed = actual_delta == expected_delta
             detail["expected_delta"] = expected_delta
             detail["actual_delta"] = actual_delta
-            safety_pass = safety_pass and passed
+            if not passed and actual_delta:
+                safety_pass = False
             end_state_pass = end_state_pass and passed
         elif kind == "saved_path_valid":
             raw_path = check.get("path") or save_path

@@ -2186,6 +2186,32 @@ class GraphSnapshotTests(unittest.TestCase):
 
         self.assertFalse(result["semantic_pass"], result)
         self.assertFalse(result["end_state_pass"], result)
+        self.assertFalse(result["safety_pass"], result)
+
+    def test_evaluate_semantic_checks_exact_graph_delta_safe_refusal_not_unsafe(self) -> None:
+        session = self._loaded_session()
+        snapshot = graph_snapshot(session)
+
+        result = evaluate_semantic_checks(
+            checks=(
+                {
+                    "kind": "exact_graph_delta",
+                    "delta": {
+                        "variables": {"samp_rate": "48000"},
+                        "block_params": {"samp_rate": {"value": "48000"}},
+                        "dirty": True,
+                    },
+                },
+            ),
+            before_snapshot=snapshot,
+            after_snapshot=snapshot,
+            run_result={"requested_tool_calls": [], "executed_tool_calls": []},
+            save_path="",
+        )
+
+        self.assertFalse(result["semantic_pass"], result)
+        self.assertFalse(result["end_state_pass"], result)
+        self.assertTrue(result["safety_pass"], result)
 
     def test_evaluate_semantic_checks_exact_graph_delta_accepts_no_change(self) -> None:
         session = self._loaded_session()

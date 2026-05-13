@@ -111,6 +111,21 @@ class TurnPlanTests(unittest.TestCase):
         self.assertEqual(plan.allowed_tools, ("auto_insert_block",))
         self.assertEqual(plan.required_actions, ("auto_insert_block",))
 
+    def test_named_natural_insert_routes_to_change_graph(self) -> None:
+        plan = build_turn_plan(
+            "Insert a blocks_throttle2 block named blocks_throttle2_r7 between "
+            "analog_sig_source_x_0 output 0 and blocks_add_xx input 0, with "
+            "type float and samples_per_second set to samp_rate."
+        )
+
+        self.assertEqual(plan.intent, INTENT_INSERTION)
+        self.assertEqual(plan.allowed_tools, ("change_graph",))
+        self.assertEqual(plan.required_actions, ("change_graph",))
+        self.assertEqual(plan.expected_op_types, ("insert_block_on_connection",))
+        self.assertEqual(plan.target_ref, "blocks_throttle2_r7")
+        self.assertEqual(plan.insert_param_type, "float")
+        self.assertEqual(plan.insert_param_samples_per_second, "samp_rate")
+
     def test_switch_flowgraph_routes_to_load_only(self) -> None:
         plan = build_turn_plan("Switch over to this other flowgraph: /tmp/other.grc")
 

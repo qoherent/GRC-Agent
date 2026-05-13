@@ -43,6 +43,8 @@ _PREVIEW_PHRASES = (
     "preview",
     "dry run",
     "dry-run",
+    "dry_run true",
+    "dry_run=true",
     "what would happen",
     "would it work",
     "before changing",
@@ -166,6 +168,8 @@ class TurnPlan:
     evidence_span: str = ""
     target_ref: str = ""
     parameter_name: str = ""
+    insert_param_type: str = ""
+    insert_param_samples_per_second: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -197,12 +201,18 @@ def build_turn_plan(user_message: str) -> TurnPlan:
             evidence_span=explicit_insertion_tool,
         )
     if explicit_change_graph_insert:
+        insert_instance_name = _insert_instance_name(text) or _explicit_instance_name(text)
+        explicit_connection_id = _explicit_connection_id(text)
         return TurnPlan(
             intent=INTENT_INSERTION,
             allowed_tools=("change_graph",),
-            required_actions=("change_graph",),
+            required_actions=("propose_edit",) if preview else ("change_graph",),
             expected_op_types=("insert_block_on_connection",),
             evidence_span="change_graph insert_block",
+            target_ref=insert_instance_name,
+            parameter_name=explicit_connection_id,
+            insert_param_type=_explicit_insert_param_type(text),
+            insert_param_samples_per_second=_explicit_insert_param_samples_per_second(text),
         )
     if "summarize" in text and not preview:
         required_actions.add("summarize_graph")
@@ -236,6 +246,7 @@ def build_turn_plan(user_message: str) -> TurnPlan:
             evidence_span="rewire",
         )
     if _looks_like_connection_disconnect(text):
+        explicit_connection_id = _explicit_connection_id(text)
         mutation_tool = MUTATION_TOOL_BY_PREVIEW[preview]
         required_actions.discard("apply_edit")
         required_actions.discard("propose_edit")
@@ -247,6 +258,7 @@ def build_turn_plan(user_message: str) -> TurnPlan:
             expected_op_types=("remove_connection",),
             required_actions=required_actions,
             evidence_span="disconnect",
+            target_ref=explicit_connection_id,
         )
 
     if state_phrase and block_removal and state_phrase not in {"disabled", "enabled"}:
@@ -305,12 +317,30 @@ def build_turn_plan(user_message: str) -> TurnPlan:
 
     natural_insertion_phrase = _natural_insertion_phrase(text)
     if natural_insertion_phrase:
+        insert_instance_name = _insert_instance_name(text)
+        explicit_connection_id = _explicit_connection_id(text)
         if _has_insertion_anchor_hint(text):
+            if insert_instance_name:
+                return TurnPlan(
+                    intent=INTENT_INSERTION,
+                    allowed_tools=("change_graph",),
+                    required_actions=("propose_edit",) if preview else ("change_graph",),
+                    expected_op_types=("insert_block_on_connection",),
+                    evidence_span=natural_insertion_phrase,
+                    target_ref=insert_instance_name,
+                    parameter_name=explicit_connection_id,
+                    insert_param_type=_explicit_insert_param_type(text),
+                    insert_param_samples_per_second=_explicit_insert_param_samples_per_second(text),
+                )
             return TurnPlan(
                 intent=INTENT_INSERTION,
                 allowed_tools=("auto_insert_block",),
                 required_actions=("auto_insert_block",),
                 evidence_span=natural_insertion_phrase,
+                target_ref=insert_instance_name,
+                parameter_name=explicit_connection_id,
+                insert_param_type=_explicit_insert_param_type(text),
+                insert_param_samples_per_second=_explicit_insert_param_samples_per_second(text),
             )
         return TurnPlan(
             intent=INTENT_UNCERTAIN_MUTATION,
@@ -420,6 +450,7 @@ def _plan(
     expected_op_types: tuple[str, ...],
     required_actions: set[str],
     evidence_span: str,
+    target_ref: str = "",
 ) -> TurnPlan:
     return TurnPlan(
         intent=intent,
@@ -427,6 +458,7 @@ def _plan(
         expected_op_types=expected_op_types,
         required_actions=_ordered_tools(required_actions),
         evidence_span=evidence_span,
+        target_ref=target_ref,
     )
 
 
@@ -496,16 +528,9 @@ def _looks_like_block_removal(text: str) -> bool:
 
 
 def _add_variable_phrase(text: str) -> str:
-    for phrase in (
-        "add variable",
-        "add a variable",
-        "add the variable",
-        "create variable",
-        "create a variable",
-        "create the variable",
-    ):
-        if phrase in text:
-            return phrase
+    match = re.search(r"\b(add|create)\b(?:\W+\w+){0,3}\W+variable\b", text)
+    if match is not None:
+        return match.group(0)
     return ""
 
 
@@ -537,6 +562,49 @@ def _natural_insertion_phrase(text: str) -> str:
         for target in _INSERTION_TARGET_WORDS:
             if _phrase_matches(text, target):
                 return f"{verb} {target}"
+    return ""
+
+
+def _insert_instance_name(text: str) -> str:
+    match = re.search(r"\bnamed\s+([a-zA-Z_][a-zA-Z0-9_]*)\b", text)
+    return match.group(1) if match is not None else ""
+
+
+def _explicit_instance_name(text: str) -> str:
+    match = re.search(r"\binstance_name\s+([a-zA-Z_][a-zA-Z0-9_]*)\b", text)
+    return match.group(1) if match is not None else ""
+
+
+def _explicit_connection_id(text: str) -> str:
+    match = re.search(
+        r"\bconnection_id\s+([a-zA-Z_][\w.]*:[\w-]+->[a-zA-Z_][\w.]*:[\w-]+)",
+        text,
+    )
+    return match.group(1) if match is not None else ""
+
+
+def _explicit_insert_param_type(text: str) -> str:
+    patterns = (
+        r"\binsert_params\s*\{[^}]*\btype\s*[:=]\s*['\"]?([a-zA-Z_][a-zA-Z0-9_]*)",
+        r"\bwith\s+type\s+['\"]?([a-zA-Z_][a-zA-Z0-9_]*)",
+        r"\btype\s*[:=]\s*['\"]?([a-zA-Z_][a-zA-Z0-9_]*)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match is not None:
+            return match.group(1)
+    return ""
+
+
+def _explicit_insert_param_samples_per_second(text: str) -> str:
+    patterns = (
+        r"\bsamples_per_second\s*[:=]\s*['\"]?([a-zA-Z_][a-zA-Z0-9_]*|\d+(?:\.\d+)?)",
+        r"\bsamples_per_second\s+set\s+to\s+['\"]?([a-zA-Z_][a-zA-Z0-9_]*|\d+(?:\.\d+)?)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match is not None:
+            return match.group(1)
     return ""
 
 
@@ -576,6 +644,10 @@ def _looks_like_connection_disconnect(text: str) -> bool:
         or "unwire" in text
         or "remove connection" in text
         or "delete connection" in text
+        or (
+            ("remove" in text or "delete" in text)
+            and "connection" in text
+        )
         or "remove the exact connection_id" in text
         or "delete the exact connection_id" in text
     )
@@ -603,7 +675,7 @@ def _looks_like_exact_rewire(text: str) -> bool:
     ):
         return True
     if " to " not in text:
-        return False
+        return "instead of" in text and " from " in text and "input" in text
     # Exact connection_id rewires may provide either a full new edge or bounded
     # endpoint hints; the rewire wrapper resolves/clarifies, never first-picks.
     if "connection_id" in text and "->" in text:

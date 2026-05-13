@@ -266,8 +266,10 @@ def validate_change_graph_operation_args(
         return _require(
             isinstance(connection_id, str)
             and connection_id.strip()
+            and isinstance(instance_name, str)
+            and instance_name.strip()
             and (normalized_block_id is not None or normalized_candidate_id is not None),
-            "insert_block requires connection_id and block_id (or candidate_id).",
+            "insert_block requires connection_id, block_id (or candidate_id), and instance_name.",
         )
     if operation_kind == "remove_block":
         if detach_connections is not None and not isinstance(detach_connections, bool):
