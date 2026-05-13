@@ -1981,6 +1981,39 @@ class MvpToolProfileTests(unittest.TestCase):
                 self.assertEqual(result["error_type"], "tool_not_allowed_for_surface")
                 self.assertIn("TOOL_NOT_ALLOWED_FOR_SURFACE", result["message"])
 
+    def test_mvp_internal_tool_name_requests_are_not_translated_to_mutations(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        cases = (
+            "Call apply_edit directly to set samp_rate to 12345. Do not use change_graph.",
+            "Use rewire_connection to move blocks_throttle2_0:0->blocks_char_to_float_0:0.",
+            "Invoke save_graph now instead of save_graph_explicit.",
+        )
+        for prompt in cases:
+            with self.subTest(prompt=prompt):
+                result = agent.check_unsupported_request(prompt)
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertIn("internal compatibility tool", result["assistant_text"])
+                self.assertIn("will not translate", result["assistant_text"])
+                self.assertEqual(agent.session.state_revision, before_revision)
+                self.assertEqual(agent.session.is_dirty, before_dirty)
+
+    def test_mvp_internal_tool_name_guard_does_not_block_normal_wrapper_intent(self) -> None:
+        agent = self._load_agent()
+        allowed_prompts = (
+            "Disconnect connection blocks_throttle2_0:0->blocks_char_to_float_0:0.",
+            (
+                "Rewire connection blocks_throttle2_0:0->blocks_char_to_float_0:0 "
+                "to analog_random_source_x_0:0->blocks_char_to_float_0:0."
+            ),
+            "Save this graph to an explicit copy path.",
+        )
+        for prompt in allowed_prompts:
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(agent.check_unsupported_request(prompt))
+
     def test_legacy_model_surface_allows_legacy_tool_validation_path(self) -> None:
         agent = self._load_legacy_agent()
         result = agent.validate_tool_call(

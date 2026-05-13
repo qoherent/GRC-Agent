@@ -304,6 +304,23 @@ class GrcAgent:
         ("edit", "yaml", "remove"),
         ("edit", "yaml", "block"),
     )
+    _INTERNAL_TOOL_NAME_REQUEST_VERBS: tuple[str, ...] = (
+        "call",
+        "use",
+        "invoke",
+        "run",
+        "execute",
+    )
+    _INTERNAL_TOOL_NAMES_BLOCKED_IN_MVP: tuple[str, ...] = (
+        "apply_edit",
+        "remove_connection",
+        "rewire_connection",
+        "save_graph",
+        "validate_graph",
+        "propose_edit",
+        "insert_block_on_connection",
+        "auto_insert_block",
+    )
     _EXPLICIT_SAVE_INTENT_TOKENS: tuple[str, ...] = (
         "save",
         "persist",
@@ -822,6 +839,30 @@ class GrcAgent:
     def check_unsupported_request(self, user_message: str) -> dict[str, Any] | None:
         """Return a refusal response for unsupported runtime actions."""
         lowered = user_message.lower()
+        if self._active_tool_surface.name == "mvp":
+            for tool_name in self._INTERNAL_TOOL_NAMES_BLOCKED_IN_MVP:
+                if not re.search(rf"\b{re.escape(tool_name)}\b", lowered):
+                    continue
+                for verb in self._INTERNAL_TOOL_NAME_REQUEST_VERBS:
+                    if re.search(
+                        rf"\b{re.escape(verb)}\b(?:\W+\w+){{0,4}}\W+{re.escape(tool_name)}\b",
+                        lowered,
+                    ):
+                        return {
+                            "ok": True,
+                            "model": "guard",
+                            "steps": 0,
+                            "tool_rounds_used": 0,
+                            "tool_calls_executed": 0,
+                            "assistant_text": (
+                                f"`{tool_name}` is an internal compatibility tool and is not "
+                                "available through the default model-facing surface. Use the "
+                                "approved wrappers only: inspect_graph, search_blocks, "
+                                "ask_grc_docs, change_graph, save_graph_explicit, and "
+                                "load_graph_explicit. I will not translate an internal tool "
+                                "request into a graph mutation."
+                            ),
+                        }
         for keywords in self._RAW_YAML_EDIT_PATTERNS:
             if all(kw in lowered for kw in keywords):
                 return {

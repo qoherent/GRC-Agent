@@ -507,27 +507,20 @@ TIER5_CASES: list[LiveScenario] = [
     ),
     LiveScenario(
         category="schema",
-        name="missing_dry_run_fails_closed",
-        description="Missing required dry_run cannot silently commit.",
+        name="missing_apply_preview_intent_clarifies",
+        description="Missing apply-vs-preview intent must not be converted into a commit.",
         turns=(
             LiveTurnSpec(
-                prompt=_exact_tool_prompt(
-                    "change_graph",
-                    {
-                        "operation_kind": "set_param",
-                        "instance_name": "samp_rate",
-                        "param": "value",
-                        "value": "99999",
-                        "user_goal": "missing dry_run adversarial",
-                    },
+                prompt=(
+                    "I have this incomplete change_graph argument object: "
+                    "{{\"operation_kind\":\"set_param\",\"instance_name\":\"samp_rate\","
+                    "\"param\":\"value\",\"value\":\"99999\","
+                    "\"user_goal\":\"missing dry_run adversarial\"}}. It omits dry_run, "
+                    "so apply-vs-preview intent is unspecified. Do not apply it and do not "
+                    "preview it; ask which mode to use."
                 ),
-                expected_tool_calls=(
-                    ToolExpectation(
-                        "change_graph",
-                        arguments={"operation_kind": "set_param"},
-                        require_result_ok=False,
-                    ),
-                ),
+                expected_tool_calls=(),
+                allow_safe_text_only=True,
                 semantic_checks=(
                     {"kind": "exact_graph_delta", "delta": {}},
                     {"kind": "no_mutation"},
