@@ -10,7 +10,9 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 
 ## Status
 
-- Production-candidate under frozen local scope for bounded workflows on copied graphs.
+- Scoped release evidence exists for `R0_READ_ONLY` and `R1_SET_PARAM_ONLY`.
+  Broader graph mutation capabilities are beta-validated. The runtime is not
+  production-ready.
 - One active `.grc` session per agent.
 - Default model-facing runtime surface is the MVP wrapper profile:
   `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`,
@@ -29,7 +31,7 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 - Raw `.grc` YAML editing, undo/redo, and Python export/code-generation requests are refused.
 - `ask_grc_docs` is explanation-only: it retrieves local manual/tutorial snippets and
   returns concise grounded answers with sources when evidence is strong. The
-  production-candidate default uses deterministic grounded extraction (including catalog-assisted
+  default path uses deterministic grounded extraction (including catalog-assisted
   block definitions when allowed) and reports `insufficient_evidence` when local
   evidence is weak. DocsAnswerAdvisor synthesis is optional research-only and is
   not part of the critical runtime path.
@@ -48,7 +50,9 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 
 ## Reliability Truth
 
-The product is production-candidate quality for the frozen local scope.
+The validated subset is intentionally scoped: `R0_READ_ONLY` and
+`R1_SET_PARAM_ONLY` are release-validated, broader graph mutations are
+beta-validated, and the runtime is not production-ready.
 
 - Deterministic tests cover schema rejection, raw-YAML refusal, rollback, save gating, atomic save, insert safety, clarification handling, turn-guard behavior, and typed recovery classification.
 - Live evals check whether the local model routes representative prompts through the right tools and reaches selected semantic/end states.
@@ -114,7 +118,7 @@ cp /path/to/original.grc /tmp/grc-agent-test.grc
 uv run grc-agent chat /tmp/grc-agent-test.grc
 ```
 
-Recommended production-candidate sequence:
+Recommended local validation sequence:
 1. `uv run grc-agent doctor`
 2. `uv run grc-agent health`
 3. inspect with `inspect_graph`

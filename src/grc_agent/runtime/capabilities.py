@@ -144,7 +144,7 @@ CAPABILITY_SPECS: dict[str, CapabilitySpec] = {
     "insert_block": CapabilitySpec(
         operation_kind="insert_block",
         status="beta_validated",
-        required_args=("connection_id", "block_id|candidate_id"),
+        required_args=("connection_id", "block_id|candidate_id", "instance_name"),
         allowed_aliases=("insert_block",),
         target_ref_policy="not_applicable",
         graph_delta_contract="one_added_block_one_removed_connection_two_added_connections",

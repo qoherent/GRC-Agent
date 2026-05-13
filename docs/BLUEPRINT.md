@@ -538,7 +538,10 @@ Before claiming production-ready:
 - Release dashboard must inspect raw tool-call history, not just metadata. **Fixed.**
 - Release manifest must include commit, dirty state, model alias, actual context, prompt hash, schema hash, policy hash, eval versions, and fixture identifiers. **Fixed.**
 - Committed mutation evals must include save/reload/`grcc` semantic checks. **Validated at beta level (R5), not release-validated.**
-- Docs-answer quality thresholds must be explicit. **Validated.** grc_docs_answer_eval passed (35/35 ok, 0 misleading, 0 mutation leakage).
+- Docs-answer quality thresholds must be explicit. **Safety baseline passed.**
+  `grc_docs_answer_eval` checks for misleading answers and mutation leakage, but
+  it does not validate production-grade docs QA. Current relevance and
+  groundedness gaps remain below production quality.
 - No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
 
 Current classification (2026-05-10):
