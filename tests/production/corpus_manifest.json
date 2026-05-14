@@ -1,0 +1,75 @@
+{
+  "schema_version": "2026-05-14.phase2-corpus-v1",
+  "entries": [
+    {
+      "id": "fixture_random_bit_generator",
+      "source_path": "tests/data/random_bit_generator.grc",
+      "copied_work_path_policy": "copy_to_temp_before_load_or_edit",
+      "graph_type_tags": ["fixture", "stream", "qt_gui", "variable"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 5,
+      "connection_count": 3,
+      "stream_message_tags": {"stream_connections": 3, "message_connections": 0},
+      "variables_present": ["samp_rate"],
+      "safe_candidate_operations": ["inspect_graph", "set_param:samp_rate.value", "validate_after_change"],
+      "expected_delta_categories": ["no_mutation", "variable_param_delta", "validation_status"],
+      "portability_notes": "Repo-local fixture; deterministic and portable in this repository."
+    },
+    {
+      "id": "fixture_random_bit_generator_with_unused_var",
+      "source_path": "tests/data/random_bit_generator_with_unused_var.grc",
+      "copied_work_path_policy": "copy_to_temp_before_load_or_edit",
+      "graph_type_tags": ["fixture", "stream", "unused_variable"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 6,
+      "connection_count": 3,
+      "stream_message_tags": {"stream_connections": 3, "message_connections": 0},
+      "variables_present": ["samp_rate", "unused_var"],
+      "safe_candidate_operations": ["inspect_graph", "add_variable", "remove_unused_variable_candidate"],
+      "expected_delta_categories": ["no_mutation", "variable_delta"],
+      "portability_notes": "Repo-local fixture; useful for variable accounting without installed examples."
+    },
+    {
+      "id": "fixture_rewire_message_ambiguous",
+      "source_path": "tests/data/rewire_message_ambiguous.grc",
+      "copied_work_path_policy": "copy_to_temp_before_load_or_edit",
+      "graph_type_tags": ["fixture", "message_ports", "ambiguous_rewire"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 6,
+      "connection_count": 2,
+      "stream_message_tags": {"stream_connections": 0, "message_connections": 2},
+      "variables_present": [],
+      "safe_candidate_operations": ["inspect_graph", "clarify_ambiguous_rewire", "exact_message_disconnect"],
+      "expected_delta_categories": ["no_mutation", "message_connection_delta"],
+      "portability_notes": "Repo-local fixture; does not depend on installed GNU Radio examples."
+    },
+    {
+      "id": "installed_audio_dial_tone",
+      "source_path": "/usr/share/gnuradio/examples/audio/dial_tone.grc",
+      "copied_work_path_policy": "installed_examples_must_be_copied_to_temp_before_load_or_edit",
+      "graph_type_tags": ["installed_example", "audio", "stream", "variables"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 8,
+      "connection_count": 4,
+      "stream_message_tags": {"stream_connections": 4, "message_connections": 0},
+      "variables_present": ["ampl", "noise", "samp_rate"],
+      "safe_candidate_operations": ["inspect_graph", "set_param:samp_rate.value", "add_variable", "insert_block_on_connection"],
+      "expected_delta_categories": ["no_mutation", "variable_param_delta", "block_insertion_delta"],
+      "portability_notes": "Requires GNU Radio examples installed at the distro default path; skip or re-map if absent."
+    },
+    {
+      "id": "installed_blocks_selector",
+      "source_path": "/usr/share/gnuradio/examples/blocks/selector.grc",
+      "copied_work_path_policy": "installed_examples_must_be_copied_to_temp_before_load_or_edit",
+      "graph_type_tags": ["installed_example", "stream", "selector", "save_load_candidate"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 10,
+      "connection_count": 5,
+      "stream_message_tags": {"stream_connections": 5, "message_connections": 0},
+      "variables_present": ["freq", "input_index", "output_index", "samp_rate"],
+      "safe_candidate_operations": ["inspect_graph", "connected_remove_refusal", "save_graph_explicit", "load_graph_explicit"],
+      "expected_delta_categories": ["no_mutation", "safe_refusal", "save_load_lifecycle"],
+      "portability_notes": "Requires GNU Radio examples installed at the distro default path; original must remain read-only."
+    }
+  ]
+}
