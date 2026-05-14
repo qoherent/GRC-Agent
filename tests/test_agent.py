@@ -1,7 +1,6 @@
 """Runtime-contract tests for the model-facing `GrcAgent` surface."""
 
 from contextlib import redirect_stdout
-from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 import tempfile
@@ -31,15 +30,6 @@ class GrcAgentTests(unittest.TestCase):
         session.load(self._fixture_path())
         return GrcAgent(session), session
 
-    def _load_legacy_agent(self) -> tuple[GrcAgent, FlowgraphSession]:
-        session = FlowgraphSession()
-        session.load(self._fixture_path())
-        config = default_app_config()
-        legacy_config = replace(
-            config,
-            agent=replace(config.agent, legacy_model_tool_surface=True),
-        )
-        return GrcAgent(session, config=legacy_config.agent), session
 
     def _build_message_rewire_agent(self) -> tuple[GrcAgent, FlowgraphSession]:
         agent = GrcAgent()
@@ -177,56 +167,9 @@ class GrcAgentTests(unittest.TestCase):
         self.assertNotIn("set_variable", agent._tools)
         self.assertNotIn("set_param", agent._tools)
 
-    def test_turn_plan_narrows_disable_request_to_apply_edit_and_validate(self) -> None:
-        agent, _session = self._load_legacy_agent()
 
-        plan = agent.init_turn_requirements("Disable blocks_throttle2_0 and validate.")
-        schemas = agent.get_tool_schemas_for_turn()
 
-        self.assertEqual(plan.intent, "state_edit")
-        self.assertEqual([schema["function"]["name"] for schema in schemas], [
-            "apply_edit",
-            "validate_graph",
-        ])
 
-    def test_turn_plan_narrows_state_edit_transaction_schema(self) -> None:
-        agent, _session = self._load_legacy_agent()
-        agent.init_turn_requirements("Disable blocks_throttle2_0.")
-
-        schema = agent.get_tool_schemas_for_turn()[0]
-        transaction = schema["function"]["parameters"]["properties"]["transaction"]
-
-        self.assertEqual(transaction["properties"]["op_type"]["enum"], ["update_states"])
-        self.assertEqual(transaction["properties"]["state"]["enum"], ["enabled", "disabled"])
-        self.assertFalse(transaction["additionalProperties"])
-
-    def test_turn_plan_narrows_exact_parameter_key_when_named(self) -> None:
-        agent, _session = self._load_legacy_agent()
-        agent.init_turn_requirements("Set blocks_throttle2_0 samples_per_second to 48000.")
-
-        schema = next(
-            schema
-            for schema in agent.get_tool_schemas_for_turn()
-            if schema["function"]["name"] == "apply_edit"
-        )
-        transaction = schema["function"]["parameters"]["properties"]["transaction"]
-        params = transaction["properties"]["params"]
-
-        self.assertEqual(transaction["properties"]["op_type"]["enum"], ["update_params"])
-        self.assertEqual(
-            transaction["properties"]["instance_name"]["enum"],
-            ["blocks_throttle2_0"],
-        )
-        self.assertEqual(list(params["properties"]), ["samples_per_second"])
-        self.assertFalse(params["additionalProperties"])
-
-    def test_turn_plan_narrows_exact_preview_apply_validate_surface(self) -> None:
-        agent, _session = self._load_legacy_agent()
-        agent.init_turn_requirements("Preview setting samp_rate to 48000, apply it, and validate.")
-
-        tool_names = [schema["function"]["name"] for schema in agent.get_tool_schemas_for_turn()]
-
-        self.assertEqual(tool_names, ["propose_edit", "apply_edit", "validate_graph"])
 
     def test_turn_plan_treats_message_connection_remove_as_disconnect(self) -> None:
         agent, _session = self._load_agent()
@@ -396,42 +339,7 @@ class GrcAgentTests(unittest.TestCase):
             ["32000"],
         )
 
-    def test_preview_do_not_apply_does_not_expose_or_nudge_apply_edit(self) -> None:
-        agent, _session = self._load_legacy_agent()
-        agent.init_turn_requirements(
-            "Preview changing samp_rate to 48000. Do not apply it."
-        )
 
-        tool_names = [schema["function"]["name"] for schema in agent.get_tool_schemas_for_turn()]
-        self.assertEqual(tool_names, ["propose_edit"])
-
-        route_error = agent.validate_turn_route(
-            "apply_edit",
-            {
-                "transaction": {
-                    "op_type": "update_params",
-                    "instance_name": "samp_rate",
-                    "params": {"value": "48000"},
-                }
-            },
-        )
-        self.assertIsNotNone(route_error)
-        self.assertEqual(route_error["error_type"], "route_mismatch")
-
-        agent.record_tool_completion("propose_edit", ok=True)
-        self.assertEqual(agent.check_turn_continuation(), (False, ""))
-
-    def test_turn_plan_narrows_context_node_when_target_known(self) -> None:
-        agent, _session = self._load_legacy_agent()
-        agent.init_turn_requirements(
-            "Show me what uses the samp_rate block, then change its value to 22050."
-        )
-
-        schema = agent.get_tool_schemas_for_turn()[0]
-        node_id = schema["function"]["parameters"]["properties"]["node_id"]
-
-        self.assertEqual(schema["function"]["name"], "get_grc_context")
-        self.assertEqual(node_id["enum"], ["samp_rate"])
 
     def test_route_policy_rejects_remove_block_for_disable_request(self) -> None:
         agent, session = self._load_agent()
@@ -535,41 +443,7 @@ class GrcAgentTests(unittest.TestCase):
         for wrapper_name in MVP_MODEL_TOOL_NAMES:
             self.assertIn(wrapper_name, all_names)
 
-    def test_exact_rewire_turn_schema_requires_exact_new_endpoints(self) -> None:
-        agent, _session = self._load_legacy_agent()
-        agent.init_turn_requirements(
-            "Rewire connection_id blocks_throttle2_0:0->blocks_char_to_float_0:0 "
-            "to analog_random_source_x_0:0->blocks_char_to_float_0:0, then validate."
-        )
 
-        schemas = agent.get_tool_schemas_for_turn()
-        schema_by_name = {schema["function"]["name"]: schema for schema in schemas}
-
-        self.assertEqual(
-            schema_by_name["rewire_connection"]["function"]["parameters"]["required"],
-            ["new_src_block", "new_src_port", "new_dst_block", "new_dst_port"],
-        )
-        properties = schema_by_name["rewire_connection"]["function"]["parameters"]["properties"]
-        self.assertEqual(properties["new_src_block"]["enum"], ["analog_random_source_x_0"])
-        self.assertEqual(properties["new_src_port"]["enum"], [0])
-        self.assertEqual(properties["new_dst_block"]["enum"], ["blocks_char_to_float_0"])
-        self.assertEqual(properties["new_dst_port"]["enum"], [0])
-
-    def test_exact_message_rewire_turn_schema_preserves_string_ports(self) -> None:
-        agent, _session = self._load_legacy_agent()
-        agent.init_turn_requirements(
-            "Rewire connection_id pdu_tagged_stream_to_pdu_0:pdus->qtgui_const_sink_x_0:in "
-            "to pdu_tagged_stream_to_pdu_1:pdus->qtgui_const_sink_x_0:in."
-        )
-
-        schemas = agent.get_tool_schemas_for_turn()
-        schema_by_name = {schema["function"]["name"]: schema for schema in schemas}
-        properties = schema_by_name["rewire_connection"]["function"]["parameters"]["properties"]
-
-        self.assertEqual(properties["new_src_block"]["enum"], ["pdu_tagged_stream_to_pdu_1"])
-        self.assertEqual(properties["new_src_port"]["enum"], ["pdus"])
-        self.assertEqual(properties["new_dst_block"]["enum"], ["qtgui_const_sink_x_0"])
-        self.assertEqual(properties["new_dst_port"]["enum"], ["in"])
 
     def test_deterministic_exact_rewire_is_runtime_owned_and_validated(self) -> None:
         agent, session = self._load_agent()
@@ -1536,7 +1410,6 @@ class GrcAgentTests(unittest.TestCase):
         self.assertTrue(report["session_loaded"])
 
     def test_fake_cli_runtime_uses_phase_six_tool_names(self) -> None:
-        from grc_agent.config import default_app_config
         output = StringIO()
 
         with redirect_stdout(output):

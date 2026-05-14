@@ -1,4 +1,4 @@
-"""Single source of truth for model-facing tool surface policy."""
+"""Single source of truth for runtime tool surface policy."""
 
 from dataclasses import dataclass
 
@@ -64,16 +64,3 @@ MVP_TOOL_SURFACE = ToolSurface(
     assistant_text_fallback_enabled=False,
     default_max_tool_rounds=8,
 )
-
-LEGACY_TOOL_SURFACE = ToolSurface(
-    name="legacy",
-    model_tool_names=PUBLIC_TOOL_NAMES,
-    internal_tool_names=MVP_MODEL_TOOL_NAMES,
-    assistant_text_fallback_enabled=True,
-    default_max_tool_rounds=50,
-)
-
-
-def tool_surface_for_legacy_flag(*, legacy_model_tool_surface: bool) -> ToolSurface:
-    """Return the active tool surface for CLI/runtime config."""
-    return LEGACY_TOOL_SURFACE if legacy_model_tool_surface else MVP_TOOL_SURFACE

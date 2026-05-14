@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 import unittest
 
 from grc_agent.agent import GrcAgent
-from grc_agent.config import default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_server import run_bounded_llama_turn
+from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
 from grc_agent.runtime.turn_plan import build_turn_plan
 from grc_agent.runtime.turnplan_advisor import (
     AdvisorValidationError,
@@ -177,13 +176,8 @@ class AdvisorModeRuntimeTests(unittest.TestCase):
 
 class AdvisorShadowIntegrationTests(unittest.TestCase):
     @staticmethod
-    def _legacy_agent() -> GrcAgent:
-        config = default_app_config()
-        legacy_config = replace(
-            config,
-            agent=replace(config.agent, legacy_model_tool_surface=True),
-        )
-        return GrcAgent(config=legacy_config.agent)
+    def _mvp_agent() -> GrcAgent:
+        return GrcAgent()
 
     def test_disabled_advisor_keeps_deterministic_path(self):
         agent = GrcAgent()
@@ -201,7 +195,7 @@ class AdvisorShadowIntegrationTests(unittest.TestCase):
         self.assertNotIn("turnplan_advisor_permission_shadow", result)
 
     def test_limited_advisory_is_shadow_only_for_read_only_prompt(self):
-        agent = self._legacy_agent()
+        agent = self._mvp_agent()
         client = _FakeBoundedTurnClient({"mode": "unsupported"})
         result = run_bounded_llama_turn(
             agent,
@@ -213,10 +207,10 @@ class AdvisorShadowIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertEqual(_request_tool_names(client.requests[0]), [])
-        self.assertIn("search_grc", _request_tool_names(client.requests[1]))
+        self.assertEqual(_request_tool_names(client.requests[1]), list(MVP_MODEL_TOOL_NAMES))
 
     def test_limited_advisory_keeps_preview_tool_exposure_safe(self):
-        agent = self._legacy_agent()
+        agent = self._mvp_agent()
         client = _FakeBoundedTurnClient({"mode": "edit"})
         result = run_bounded_llama_turn(
             agent,
@@ -227,10 +221,10 @@ class AdvisorShadowIntegrationTests(unittest.TestCase):
             advisor_limited_advisory=True,
         )
         self.assertTrue(result["ok"])
-        self.assertEqual(_request_tool_names(client.requests[1]), ["propose_edit"])
+        self.assertEqual(_request_tool_names(client.requests[1]), list(MVP_MODEL_TOOL_NAMES))
 
     def test_malformed_advisor_output_falls_back_to_deterministic(self):
-        agent = self._legacy_agent()
+        agent = self._mvp_agent()
         client = _FakeBoundedTurnClient({"mode": "read_only"}, malformed=True)
         result = run_bounded_llama_turn(
             agent,
@@ -244,7 +238,7 @@ class AdvisorShadowIntegrationTests(unittest.TestCase):
         self.assertNotIn("turnplan_advisor_permission_shadow", result)
 
     def test_advisor_timeout_falls_back_to_deterministic(self):
-        agent = self._legacy_agent()
+        agent = self._mvp_agent()
         client = _FakeBoundedTurnClient({"mode": "read_only"}, raise_error=TimeoutError("timeout"))
         result = run_bounded_llama_turn(
             agent,

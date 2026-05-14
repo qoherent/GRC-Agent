@@ -17,8 +17,8 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 - Default model-facing runtime surface is the MVP wrapper profile:
   `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`,
   `save_graph_explicit`, `load_graph_explicit`.
-- Legacy low-level tools remain internal/compatibility-only and are not part of
-  the default model-facing chat path.
+- Low-level tools remain internal implementation primitives and are not
+  model-facing.
 - Save/load are model-facing only through explicit lifecycle wrappers:
   `save_graph_explicit` and `load_graph_explicit`.
 - Lifecycle wrappers require explicit user intent and are currently
@@ -80,8 +80,7 @@ Advisor remains shadow-only and is not used for default runtime routing.
 - `tests/data/random_bit_generator.grc`: canonical fixture graph.
 - `tests/llama_eval/`: live llama.cpp routing and behavior evals.
 - `docs/BLUEPRINT.md`: single source of truth for architecture, package flow, harness loop, tool surface, safety contract, retrieval, eval gates, status, and roadmap.
-- `docs/BLIND_HARNESS_AUDIT.md`: prompt for an independent online architecture reviewer.
-- `docs/ONLINE_REVIEW_EVIDENCE_PACKET.md`: ready-to-attach local evidence summary for reviewers without full repo access.
+- `docs/CURRENT_RELEASE_EVIDENCE.md`: concise current evidence bundle.
 - `docs/QUICKSTART.md`: setup and common usage.
 - `docs/wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus for explanation-only retrieval and evals.
 - `tests/data/retrieval/vector_eval_governed_metadata.json`: frozen vector regression baseline artifact.
@@ -271,26 +270,32 @@ local index path.
 Live quick gate (only when runtime/model-facing behavior changes):
 
 ```bash
-uv run python -m tests.llama_eval.tier1_live --quick
-uv run python -m tests.llama_eval.tier2_release
-uv run python -m tests.llama_eval.tier3_multiturn --quick
-uv run python -m tests.llama_eval.tier4_external_examples --quick
-uv run python -m tests.llama_eval.tier5_adversarial --quick
+uv run python -m tests.llama_eval.run_r0_release --n-runs 1 --results-path /tmp/r0.json
+uv run python -m tests.llama_eval.run_r1_release --n-runs 1 --results-path /tmp/r1_param.json
+uv run python -m tests.llama_eval.run_r1_set_state --n-runs 1 --results-path /tmp/r1_state.json
+uv run python -m tests.llama_eval.run_r2_disconnect --n-runs 1 --results-path /tmp/r2.json
+uv run python -m tests.llama_eval.run_r3_rewire --n-runs 1 --results-path /tmp/r3.json
+uv run python -m tests.llama_eval.run_r4a_insert --n-runs 1 --results-path /tmp/r4a.json
+uv run python -m tests.llama_eval.run_r4b_remove --n-runs 1 --results-path /tmp/r4b.json
+uv run python -m tests.llama_eval.run_r4c_add_variable --n-runs 1 --results-path /tmp/r4c.json
+uv run python -m tests.llama_eval.run_r5_save_load --n-runs 1 --results-path /tmp/r5.json
 ```
 
-Release gate (release claims/default-routing changes only):
+Release/default-routing evidence sweep:
 
 ```bash
-uv run python -m tests.llama_eval.tier2_release --n-runs 3 --results-path /tmp/tier2_n3.json
-uv run python -m tests.llama_eval.tier3_multiturn --n-runs 3 --results-path /tmp/tier3_n3.json
-uv run python -m tests.llama_eval.tier4_external_examples --n-runs 3 --results-path /tmp/tier4_n3.json
+uv run python -m tests.llama_eval.run_r0_release --n-runs 3 --results-path /tmp/r0_n3.json
+uv run python -m tests.llama_eval.run_r1_release --n-runs 3 --results-path /tmp/r1_param_n3.json
+uv run python -m tests.llama_eval.run_r1_set_state --n-runs 3 --results-path /tmp/r1_state_n3.json
+uv run python -m tests.llama_eval.run_r2_disconnect --n-runs 3 --results-path /tmp/r2_n3.json
+uv run python -m tests.llama_eval.run_r3_rewire --n-runs 3 --results-path /tmp/r3_n3.json
+uv run python -m tests.llama_eval.run_r4a_insert --n-runs 3 --results-path /tmp/r4a_n3.json
+uv run python -m tests.llama_eval.run_r4b_remove --n-runs 3 --results-path /tmp/r4b_n3.json
+uv run python -m tests.llama_eval.run_r4c_add_variable --n-runs 3 --results-path /tmp/r4c_n3.json
+uv run python -m tests.llama_eval.run_r5_save_load --n-runs 3 --results-path /tmp/r5_n3.json
+uv run python -m tests.llama_eval.run_r7_exact_external --n-runs 3 --results-path /tmp/r7_exact_n3.json
+uv run python -m tests.llama_eval.run_r7_natural_external --n-runs 3 --results-path /tmp/r7_natural_n3.json
 uv run python -m tests.llama_eval.tier5_adversarial --n-runs 3 --results-path /tmp/tier5_n3.json
-uv run python -m tests.llama_eval.release_dashboard \
-  --results-path /tmp/tier2_n3.json \
-  --results-path /tmp/tier3_n3.json \
-  --results-path /tmp/tier4_n3.json \
-  --results-path /tmp/tier5_n3.json \
-  --min-runs-per-case 3
 ```
 
 Advisor/model bakeoff scripts are research-only and are not part of default verification.

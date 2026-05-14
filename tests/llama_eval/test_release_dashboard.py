@@ -71,10 +71,10 @@ class ReleaseDashboardTests(unittest.TestCase):
             "runs": [
                 _entry(phase=20, category="edit", case_name="param", run_index=0, status="PASS"),
                 _entry(phase=20, category="edit", case_name="param", run_index=1, status="PASS"),
-                _entry(phase=30, category="followup", case_name="save", run_index=0, status="PASS"),
-                _entry(phase=30, category="followup", case_name="save", run_index=1, status="PASS"),
-                _entry(phase=40, category="external", case_name="dial", run_index=0, status="PASS"),
-                _entry(phase=40, category="external", case_name="dial", run_index=1, status="PASS"),
+                _entry(phase=25, category="state", case_name="toggle", run_index=0, status="PASS"),
+                _entry(phase=25, category="state", case_name="toggle", run_index=1, status="PASS"),
+                _entry(phase=71, category="external", case_name="dial", run_index=0, status="PASS"),
+                _entry(phase=71, category="external", case_name="dial", run_index=1, status="PASS"),
                 _entry(phase=50, category="uncertain", case_name="vague", run_index=0, status="PASS"),
                 _entry(phase=50, category="uncertain", case_name="vague", run_index=1, status="PASS"),
             ]
@@ -82,7 +82,7 @@ class ReleaseDashboardTests(unittest.TestCase):
 
         dashboard = build_release_dashboard(
             [store],
-            required_phases=(20, 30, 40, 50),
+            required_phases=(20, 25, 71, 50),
             min_runs_per_case=2,
             stability_threshold=1.0,
         )
@@ -100,40 +100,40 @@ class ReleaseDashboardTests(unittest.TestCase):
                 _entry(phase=20, category="edit", case_name="param", run_index=0, status="PASS"),
                 _entry(phase=20, category="edit", case_name="param", run_index=1, status="PASS"),
                 _entry(phase=20, category="edit", case_name="param", run_index=2, status="PASS"),
-                _entry(phase=30, category="followup", case_name="save", run_index=0, status="PASS"),
-                _entry(phase=30, category="followup", case_name="save", run_index=1, status="PASS"),
-                _entry(phase=30, category="followup", case_name="save", run_index=2, status="PASS"),
-                _entry(phase=40, category="external", case_name="dial", run_index=0, status="PASS"),
-                _entry(phase=40, category="external", case_name="dial", run_index=1, status="PASS"),
-                _entry(phase=40, category="external", case_name="dial", run_index=2, status="PASS"),
+                _entry(phase=25, category="state", case_name="toggle", run_index=0, status="PASS"),
+                _entry(phase=25, category="state", case_name="toggle", run_index=1, status="PASS"),
+                _entry(phase=25, category="state", case_name="toggle", run_index=2, status="PASS"),
+                _entry(phase=71, category="external", case_name="dial", run_index=0, status="PASS"),
+                _entry(phase=71, category="external", case_name="dial", run_index=1, status="PASS"),
+                _entry(phase=71, category="external", case_name="dial", run_index=2, status="PASS"),
             ]
         }
 
         dashboard = build_release_dashboard([store])
 
         self.assertFalse(dashboard["release_ready"], dashboard)
-        self.assertEqual(dashboard["missing_required_phases"], [50])
+        self.assertIn(50, dashboard["missing_required_phases"])
 
     def test_dashboard_reports_missing_short_and_unstable_cases(self) -> None:
         store = {
             "runs": [
                 _entry(phase=20, category="edit", case_name="param", run_index=0, status="PASS"),
                 _entry(phase=20, category="edit", case_name="param", run_index=1, status="FAIL"),
-                _entry(phase=40, category="external", case_name="dial", run_index=0, status="PASS"),
+                _entry(phase=71, category="external", case_name="dial", run_index=0, status="PASS"),
             ]
         }
 
         dashboard = build_release_dashboard(
             [store],
-            required_phases=(20, 30, 40),
+            required_phases=(20, 25, 71),
             min_runs_per_case=2,
             stability_threshold=1.0,
         )
 
         self.assertFalse(dashboard["release_ready"], dashboard)
-        self.assertEqual(dashboard["missing_required_phases"], [30])
-        self.assertIn("tier2_release/edit/param", dashboard["unstable_cases"])
-        self.assertIn("tier4_external_examples/external/dial", dashboard["short_run_cases"])
+        self.assertEqual(dashboard["missing_required_phases"], [25])
+        self.assertIn("r0_r1_release/edit/param", dashboard["unstable_cases"])
+        self.assertIn("r7_exact_external/external/dial", dashboard["short_run_cases"])
 
     def test_cli_returns_nonzero_when_dashboard_not_ready(self) -> None:
         with TemporaryDirectory() as tmpdir:

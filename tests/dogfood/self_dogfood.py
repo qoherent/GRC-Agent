@@ -179,10 +179,9 @@ def select_graphs(
 ) -> SelectionResult:
     """Select diverse installed examples and inspect them from copied files."""
     candidates = [path for path in GNU_EXAMPLES.rglob("*.grc") if path.is_file()]
-    tier4_paths = _tier4_relative_paths()
     scored = sorted(
         candidates,
-        key=lambda path: (_score_candidate(path, tier4_paths, include_families), str(path)),
+        key=lambda path: (_score_candidate(path, include_families), str(path)),
     )
 
     selected: list[GraphInfo] = []
@@ -859,12 +858,10 @@ def _coverage_gap_rows(rows: list[dict[str, Any]]) -> list[str]:
 
 def _score_candidate(
     path: Path,
-    tier4_paths: set[str],
     include_families: tuple[str, ...] = (),
-) -> tuple[int, int, str]:
+) -> tuple[int, str]:
     relative = str(path.relative_to(GNU_EXAMPLES))
     family = relative.split("/", 1)[0]
-    tier4_penalty = 2 if relative in tier4_paths else 0
     family_filter_priority = (
         include_families.index(family)
         if family in include_families
@@ -890,15 +887,7 @@ def _score_candidate(
         "analog": 16,
         "audio": 17,
     }.get(family, 10)
-    return (tier4_penalty, family_filter_priority, f"{preferred:03d}:{relative}")
-
-
-def _tier4_relative_paths() -> set[str]:
-    source = Path("tests/llama_eval/tier4_external_examples.py")
-    if not source.exists():
-        return set()
-    text = source.read_text(encoding="utf-8")
-    return set(re.findall(r'relative_path="([^"]+)"', text))
+    return (family_filter_priority, f"{preferred:03d}:{relative}")
 
 
 def _preferred_variable(graph: GraphInfo) -> str:

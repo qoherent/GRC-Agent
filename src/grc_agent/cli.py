@@ -45,7 +45,7 @@ from grc_agent.retrieval.vector import (
     summarize_vector_misses,
     vector_index_stats,
 )
-from grc_agent.runtime.tool_surface import tool_surface_for_legacy_flag
+from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
 from grc_agent.session.load import load_grc as load_grc_session
 
 logger = logging.getLogger(__name__)
@@ -847,7 +847,7 @@ def _run_single_turn(
             advisor_enabled=config.agent.advisor_enabled,
             advisor_limited_advisory=config.agent.advisor_limited_advisory,
             advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
-            mvp_tool_profile=not config.agent.legacy_model_tool_surface,
+            mvp_tool_profile=True,
             max_tool_rounds=config.llama.max_tool_rounds,
         )
     except LlamaServerError as exc:
@@ -937,7 +937,7 @@ def _run_repl_loop(
                 advisor_enabled=config.agent.advisor_enabled,
                 advisor_limited_advisory=config.agent.advisor_limited_advisory,
                 advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
-                mvp_tool_profile=not config.agent.legacy_model_tool_surface,
+                mvp_tool_profile=True,
                 max_tool_rounds=config.llama.max_tool_rounds,
             )
         except LlamaServerError as exc:
@@ -1078,9 +1078,7 @@ def _build_release_manifest(config: AppConfig) -> dict[str, Any]:
     """Build a reproducible release evidence manifest for the current runtime."""
     session = FlowgraphSession()
     agent = GrcAgent(session, config=config.agent)
-    surface = tool_surface_for_legacy_flag(
-        legacy_model_tool_surface=config.agent.legacy_model_tool_surface
-    )
+    surface = MVP_TOOL_SURFACE
     model_schemas = agent.get_tool_schemas_for_turn(set(surface.model_tool_names))
     policy_payload = {
         "tool_surface": surface.name,

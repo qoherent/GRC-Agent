@@ -18,7 +18,6 @@ from tests.llama_eval.harness import (
     LiveTurnSpec,
     MVP_RELEASE_MODEL_TOOLS,
     ToolExpectation,
-    align_scenario_to_mvp_release,
     build_phase_parser,
     default_phase_summary,
     dimension_pass_counts,
@@ -69,14 +68,13 @@ def _exact_tool_prompt(tool_name: str, args: dict[str, Any]) -> str:
 def _disable_expectation() -> tuple[ToolExpectation, ...]:
     return (
         ToolExpectation(
-            "apply_edit",
-            transaction_operations=(
-                {
-                    "op_type": "update_states",
-                    "instance_name": "blocks_throttle2_0",
-                    "state": "disabled",
-                },
-            ),
+            "change_graph",
+            arguments={
+                "operation_kind": "set_state",
+                "dry_run": False,
+                "instance_name": "blocks_throttle2_0",
+                "state": "disabled",
+            },
         ),
     )
 
@@ -118,13 +116,11 @@ TIER5_CASES: list[LiveScenario] = [
                 prompt="Remove the blocks_throttle2_0 block.",
                 expected_tool_calls=(
                     ToolExpectation(
-                        "apply_edit",
-                        transaction_operations=(
-                            {
-                                "op_type": "remove_block",
-                                "instance_name": "blocks_throttle2_0",
-                            },
-                        ),
+                        "change_graph",
+                        arguments={
+                            "operation_kind": "remove_block",
+                            "dry_run": False,
+                        },
                         require_result_ok=False,
                     ),
                 ),
@@ -234,7 +230,9 @@ TIER5_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt="Validate the graph.",
-                expected_tool_calls=(ToolExpectation("validate_graph"),),
+                expected_tool_calls=(
+                    ToolExpectation("inspect_graph", arguments={"operation": "validate"}),
+                ),
                 semantic_checks=(
                     {
                         "kind": "exact_graph_delta",
@@ -243,7 +241,7 @@ TIER5_CASES: list[LiveScenario] = [
                             "validation_returncode": 0,
                         },
                     },
-                    {"kind": "tool_result", "tool": "validate_graph", "arguments": {"valid": True}},
+                    {"kind": "tool_result", "tool": "inspect_graph", "arguments": {"valid": True}},
                 ),
             ),
         ),
@@ -571,12 +569,7 @@ def _run_case(client: Any, model: str, case: LiveScenario) -> dict[str, Any]:
 
 
 def release_cases() -> list[LiveScenario]:
-    scenarios = [
-        case
-        if scenario_expected_tools_only(case, allowed_tool_names=MVP_RELEASE_MODEL_TOOLS)
-        else align_scenario_to_mvp_release(case)
-        for case in TIER5_CASES
-    ]
+    scenarios = list(TIER5_CASES)
     for scenario in scenarios:
         if not scenario_expected_tools_only(
             scenario,

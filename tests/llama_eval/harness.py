@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import os
@@ -21,7 +21,7 @@ from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_server import LlamaServerClient
 from grc_agent.runtime import prompt as runtime_prompt
 from grc_agent.runtime import tool_schemas as runtime_tool_schemas
-from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
+from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
 from grc_agent.runtime import turn_plan as runtime_turn_plan
 from grc_agent.recovery import (
     NO_RECOVERY_NEEDED,
@@ -50,30 +50,6 @@ REPORT_DIMENSIONS = (
     "recovery_pass",
 )
 MVP_RELEASE_MODEL_TOOLS = frozenset(MVP_MODEL_TOOL_NAMES)
-LEGACY_MODEL_TOOLS = frozenset(PUBLIC_TOOL_NAMES)
-LEGACY_TO_MVP_EXPECTED_TOOL = {
-    "summarize_graph": "inspect_graph",
-    "get_grc_context": "inspect_graph",
-    "validate_graph": "inspect_graph",
-    "search_grc": "search_blocks",
-    "describe_block": "search_blocks",
-    "search_manual": "ask_grc_docs",
-    "semantic_search_grc": "ask_grc_docs",
-    "apply_edit": "change_graph",
-    "propose_edit": "change_graph",
-    "remove_connection": "change_graph",
-    "rewire_connection": "change_graph",
-    "insert_block_on_connection": "change_graph",
-    "auto_insert_block": "change_graph",
-    "save_graph": "save_graph_explicit",
-    "load_grc": "load_graph_explicit",
-    "new_grc": "change_graph",
-}
-INSPECT_OPERATION_BY_LEGACY_TOOL = {
-    "summarize_graph": "summarize",
-    "get_grc_context": "context",
-    "validate_graph": "validate",
-}
 MUTATION_TOOL_NAMES = frozenset(
     {
         "new_grc",
@@ -152,7 +128,7 @@ class LiveTurnSpec:
 
 @dataclass(frozen=True)
 class LiveScenario:
-    """Declarative live eval scenario shared by Tier 1/2/3 runners."""
+    """Declarative live eval scenario shared by current dashboard runners."""
 
     category: str
     name: str
@@ -166,169 +142,6 @@ class LiveScenario:
     def prompt(self) -> str:
         return self.turns[0].prompt if self.turns else ""
 
-
-def expected_tool_name_for_mvp_release(tool_name: str) -> str:
-    """Map one legacy expected tool name to its MVP wrapper equivalent."""
-    if tool_name in MVP_RELEASE_MODEL_TOOLS:
-        return tool_name
-    return LEGACY_TO_MVP_EXPECTED_TOOL.get(tool_name, tool_name)
-
-
-def align_tool_expectation_to_mvp_release(expectation: ToolExpectation) -> ToolExpectation:
-    """Rewrite one expected tool call to the MVP wrapper contract."""
-    legacy_name = expectation.name
-    mapped_name = expected_tool_name_for_mvp_release(legacy_name)
-    mapped_arguments = dict(expectation.arguments)
-    mapped_operations = expectation.transaction_operations
-
-    if mapped_name == "inspect_graph":
-        mapped_arguments = {"operation": INSPECT_OPERATION_BY_LEGACY_TOOL.get(legacy_name, "summarize")}
-    elif mapped_name == "search_blocks":
-        if "query" in mapped_arguments:
-            mapped_arguments = {"query": mapped_arguments["query"]}
-        else:
-            mapped_arguments = {}
-    elif mapped_name == "ask_grc_docs":
-        if "question" in mapped_arguments:
-            mapped_arguments = {"question": mapped_arguments["question"]}
-        else:
-            mapped_arguments = {}
-    elif mapped_name == "change_graph":
-        inferred_kind = infer_change_graph_operation_kind(expectation)
-        mapped_arguments = {"dry_run": legacy_name == "propose_edit"}
-        has_structured_expectation = bool(expectation.transaction_operations) or bool(
-            expectation.arguments
-        )
-        if has_structured_expectation or inferred_kind not in {"clarify", "unsupported"}:
-            mapped_arguments["operation_kind"] = inferred_kind
-        mapped_operations = ()
-    elif mapped_name == "save_graph_explicit":
-        mapped_arguments = {}
-        if isinstance(expectation.arguments.get("path"), str):
-            mapped_arguments["path"] = expectation.arguments["path"]
-    elif mapped_name == "load_graph_explicit":
-        mapped_arguments = {}
-        if isinstance(expectation.arguments.get("file_path"), str):
-            mapped_arguments["path"] = expectation.arguments["file_path"]
-        elif isinstance(expectation.arguments.get("path"), str):
-            mapped_arguments["path"] = expectation.arguments["path"]
-
-    return ToolExpectation(
-        name=mapped_name,
-        arguments=mapped_arguments,
-        transaction_operations=mapped_operations,
-        ordered_transaction=expectation.ordered_transaction,
-        require_result_ok=expectation.require_result_ok,
-    )
-
-
-def infer_change_graph_operation_kind(expectation: ToolExpectation) -> str:
-    """Best-effort deterministic operation-kind inference from legacy expectations."""
-    tool_name = expectation.name
-    if tool_name == "remove_connection":
-        return "disconnect"
-    if tool_name == "rewire_connection":
-        return "rewire"
-    if tool_name == "insert_block_on_connection":
-        return "insert_block"
-    if tool_name == "auto_insert_block":
-        return "auto_insert"
-    if tool_name == "new_grc":
-        return "unsupported"
-
-    op_types = [
-        str(operation.get("op_type", "")).strip()
-        for operation in expectation.transaction_operations
-        if isinstance(operation, dict)
-    ]
-    if "update_params" in op_types:
-        return "set_param"
-    if "update_states" in op_types:
-        return "set_state"
-    if "insert_block_on_connection" in op_types:
-        return "insert_block"
-    if "remove_block" in op_types:
-        return "remove_block"
-    if "remove_connection" in op_types and "add_connection" in op_types:
-        return "rewire"
-    if "remove_connection" in op_types:
-        return "disconnect"
-    if "add_block" in op_types:
-        for operation in expectation.transaction_operations:
-            if not isinstance(operation, dict):
-                continue
-            if str(operation.get("block_type", "")).strip() == "variable":
-                return "add_variable"
-        return "insert_block"
-    return "clarify"
-
-
-def align_semantic_checks_to_mvp_release(
-    checks: tuple[dict[str, Any], ...]
-) -> tuple[dict[str, Any], ...]:
-    """Rewrite tool_result semantic checks to wrapper-level references."""
-    mapped: list[dict[str, Any]] = []
-    for check in checks:
-        if not isinstance(check, dict):
-            mapped.append(check)
-            continue
-        if check.get("kind") != "tool_result":
-            mapped.append(dict(check))
-            continue
-        legacy_tool = str(check.get("tool") or "")
-        mapped_tool = expected_tool_name_for_mvp_release(legacy_tool)
-        mapped_check = dict(check)
-        mapped_check["tool"] = mapped_tool
-        mapped_args = mapped_check.get("arguments")
-        if isinstance(mapped_args, dict):
-            converted = dict(mapped_args)
-            if mapped_tool == "change_graph" and legacy_tool in {
-                "remove_connection",
-                "rewire_connection",
-                "auto_insert_block",
-                "apply_edit",
-                "propose_edit",
-            }:
-                if "clarification_required" in converted:
-                    converted.pop("clarification_required", None)
-                    converted["error_type"] = "clarification_required"
-                converted.pop("kind", None)
-            mapped_check["arguments"] = converted
-        mapped.append(mapped_check)
-    return tuple(mapped)
-
-
-def align_scenario_to_mvp_release(scenario: LiveScenario) -> LiveScenario:
-    """Return one MVP-wrapper-aligned scenario for release tiers."""
-    mapped_turns: list[LiveTurnSpec] = []
-    for turn in scenario.turns:
-        mapped_turns.append(
-            LiveTurnSpec(
-                prompt=turn.prompt,
-                expected_tool_calls=tuple(
-                    align_tool_expectation_to_mvp_release(expectation)
-                    for expectation in turn.expected_tool_calls
-                ),
-                semantic_checks=align_semantic_checks_to_mvp_release(turn.semantic_checks),
-                pre_turn_tool_name=turn.pre_turn_tool_name,
-                pre_turn_tool_args=dict(turn.pre_turn_tool_args),
-                pre_turn_allow_clarification=turn.pre_turn_allow_clarification,
-                pre_turn_require_valid_graph=turn.pre_turn_require_valid_graph,
-                accept_any_tool=turn.accept_any_tool,
-                allow_safe_text_only=turn.allow_safe_text_only,
-                clarification_response=turn.clarification_response,
-                recovery_enabled=turn.recovery_enabled,
-                expected_recovery_class=turn.expected_recovery_class,
-            )
-        )
-    return LiveScenario(
-        category=scenario.category,
-        name=scenario.name,
-        turns=tuple(mapped_turns),
-        fixture_name=scenario.fixture_name,
-        target_fixture_name=scenario.target_fixture_name,
-        description=scenario.description,
-    )
 
 
 def scenario_expected_tools_only(
@@ -800,11 +613,11 @@ def collect_release_metadata(
     case: Any | None = None,
     model_alias: str | None = None,
     backend_metadata: dict[str, Any] | None = None,
-    mvp_tool_profile: bool = False,
+    mvp_tool_profile: bool = True,
 ) -> dict[str, Any]:
     """Return reproducibility metadata persisted with live eval rows."""
-    prompt_text = runtime_prompt.build_system_prompt(legacy=not mvp_tool_profile)
-    schema_names = MVP_MODEL_TOOL_NAMES if mvp_tool_profile else PUBLIC_TOOL_NAMES
+    prompt_text = runtime_prompt.build_system_prompt()
+    schema_names = MVP_MODEL_TOOL_NAMES
     tool_schema_text = json.dumps(
         runtime_tool_schemas.build_tool_schemas(schema_names),
         sort_keys=True,
@@ -826,8 +639,8 @@ def collect_release_metadata(
         "chat_template_hash": backend.get("chat_template_sha256")
         or backend.get("chat_template_tool_use_sha256")
         or "",
-        "mvp_tool_profile": bool(mvp_tool_profile),
-        "tool_surface": "mvp" if mvp_tool_profile else "legacy",
+        "mvp_tool_profile": True,
+        "tool_surface": "mvp",
         "model_tool_names": list(schema_names),
         "fixture": getattr(case, "fixture_name", DEFAULT_FIXTURE_NAME) if case is not None else "",
         "target_fixture": getattr(case, "target_fixture_name", None) if case is not None else None,
@@ -879,7 +692,7 @@ def run_live_scenario_once(
     client: LlamaServerClient,
     model: str,
     scenario: LiveScenario,
-    mvp_tool_profile: bool = False,
+    mvp_tool_profile: bool = True,
 ) -> dict[str, Any]:
     """Run one declarative live scenario in an isolated fixture workspace."""
     from grc_agent.agent import GrcAgent
@@ -899,14 +712,8 @@ def run_live_scenario_once(
         )
         save_path = str(workspace / "output.grc")
 
-        if mvp_tool_profile:
-            agent = GrcAgent()
-        else:
-            legacy_config = replace(
-                app_config,
-                agent=replace(app_config.agent, legacy_model_tool_surface=True),
-            )
-            agent = GrcAgent(config=legacy_config.agent)
+        mvp_tool_profile = True
+        agent = GrcAgent()
         agent.execute_tool("load_grc", {"file_path": str(fixture_path)})
 
         turn_results: list[dict[str, Any]] = []
@@ -1108,7 +915,7 @@ def run_live_scenario_once(
             )
             turn_result["trace"] = build_live_eval_turn_trace(
                 prompt=prompt,
-                active_tool_surface="mvp" if mvp_tool_profile else "legacy",
+                active_tool_surface="mvp",
                 raw_requested_tool_calls=requested_tool_calls_raw,
                 requested_tool_calls=requested_tool_calls,
                 executed_tool_calls=executed_tool_calls,
@@ -1132,8 +939,8 @@ def run_live_scenario_once(
             for dimension in REPORT_DIMENSIONS
         }
         return {
-            "mvp_tool_profile": bool(mvp_tool_profile),
-            "expected_model_tools": sorted(MVP_RELEASE_MODEL_TOOLS) if mvp_tool_profile else sorted(LEGACY_MODEL_TOOLS),
+            "mvp_tool_profile": True,
+            "expected_model_tools": sorted(MVP_RELEASE_MODEL_TOOLS),
             "tools_called": [
                 name
                 for turn_result in turn_results
@@ -1184,9 +991,6 @@ def dimension_pass_counts(results: list[dict[str, Any]]) -> dict[str, dict[str, 
     return counts
 
 
-def tool_expectations_from_names(tool_names: list[str]) -> tuple[ToolExpectation, ...]:
-    """Build name-only tool expectations for legacy case definitions."""
-    return tuple(ToolExpectation(name=tool_name) for tool_name in tool_names)
 
 
 def evaluate_tool_expectations(

@@ -55,7 +55,7 @@ from grc_agent.runtime.schema_narrowing import (
 from grc_agent.runtime.tool_surface import (
     MVP_MODEL_TOOL_NAMES,
     MODEL_TOOL_NAMES_ORDERED,
-    tool_surface_for_legacy_flag,
+    MVP_TOOL_SURFACE,
 )
 from grc_agent.runtime.docs_answer import (
     _DocsComparisonSides,
@@ -385,9 +385,7 @@ class GrcAgent:
         self._reset_validation_tracking()
         self._tools = self._build_tool_registry()
         self._mvp_tools = self._build_mvp_tool_registry()
-        self._active_tool_surface = tool_surface_for_legacy_flag(
-            legacy_model_tool_surface=self.config.legacy_model_tool_surface
-        )
+        self._active_tool_surface = MVP_TOOL_SURFACE
         self._tool_schemas = build_tool_schemas(self._active_tool_surface.model_tool_names)
         self._all_tool_schemas = build_tool_schemas(MODEL_TOOL_NAMES_ORDERED)
         self._tool_schema_map = build_tool_schema_map(self._all_tool_schemas)
@@ -424,9 +422,7 @@ class GrcAgent:
         self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
-        return build_system_prompt(
-            legacy=self._active_tool_surface.name == "legacy"
-        )
+        return build_system_prompt()
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Return model-facing tool schemas for the active ToolSurface."""
@@ -464,8 +460,6 @@ class GrcAgent:
     ) -> ToolResult | None:
         """Reject disallowed model-driven tools for the active surface profile."""
         if not model_tool_call:
-            return None
-        if self._active_tool_surface.name != "mvp":
             return None
         if tool_name in MVP_MODEL_TOOL_NAMES:
             return None

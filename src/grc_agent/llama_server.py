@@ -13,11 +13,7 @@ from grc_agent._payload import ErrorCode
 from grc_agent.agent import GrcAgent
 from grc_agent.recovery import RECOVERABLE_MISSING_ARGUMENTS, classify_tool_result_for_recovery
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
-from grc_agent.runtime.tool_surface import (
-    LEGACY_TOOL_SURFACE,
-    MVP_TOOL_SURFACE,
-    tool_surface_for_legacy_flag,
-)
+from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
 from grc_agent.runtime.turnplan_advisor import (
     AdvisorModeObservation,
     AdvisorObservation,
@@ -636,7 +632,6 @@ class LlamaServerClient:
         return isinstance(reason, TimeoutError | socket.timeout)
 
 
-_SAFETY_MAX_TOOL_ROUNDS = LEGACY_TOOL_SURFACE.default_max_tool_rounds
 _DEFAULT_MVP_ALLOWED_TOOLS: set[str] = set(MVP_TOOL_SURFACE.model_tool_names)
 
 
@@ -651,22 +646,17 @@ def run_bounded_llama_turn(
     advisor_limited_advisory: bool = False,
     advisor_shadow_telemetry: bool = True,
     advisor_timeout_seconds: float = 4.0,
-    mvp_tool_profile: bool = False,
+    mvp_tool_profile: bool = True,
     wrapper_eval_telemetry: bool = False,
     max_tool_rounds: int | None = None,
 ) -> dict[str, Any]:
     """Run a bounded llama.cpp -> runtime loop against one loaded flowgraph."""
     if not isinstance(user_message, str) or not user_message.strip():
         raise ValueError("user_message must be a non-empty string.")
-    active_tool_surface = tool_surface_for_legacy_flag(
-        legacy_model_tool_surface=not mvp_tool_profile
-    )
+    mvp_tool_profile = True
+    active_tool_surface = MVP_TOOL_SURFACE
     if max_tool_rounds is None:
-        max_tool_rounds = (
-            active_tool_surface.default_max_tool_rounds
-            if mvp_tool_profile
-            else _SAFETY_MAX_TOOL_ROUNDS
-        )
+        max_tool_rounds = active_tool_surface.default_max_tool_rounds
 
     if model is None:
         resolved_model = client.get_model_id()
@@ -715,7 +705,7 @@ def run_bounded_llama_turn(
     if (
         advisor_enabled
         and advisor_limited_advisory
-        and not mvp_tool_profile
+        and False
         and turn_plan is not None
         and agent._pending_clarification is None
     ):
@@ -796,15 +786,7 @@ def run_bounded_llama_turn(
         )
 
     deterministic_tool_call = None
-    base_allowed_tools = (
-        set(_DEFAULT_MVP_ALLOWED_TOOLS)
-        if mvp_tool_profile
-        else (
-            set(turn_plan.allowed_tools)
-            if turn_plan is not None
-            else set(PUBLIC_TOOL_NAMES)
-        )
-    )
+    base_allowed_tools = set(_DEFAULT_MVP_ALLOWED_TOOLS)
     if turn_plan is not None:
         deterministic_tool_call_payload = agent.deterministic_turn_tool_call(user_message)
         if (
@@ -954,21 +936,13 @@ def run_bounded_llama_turn(
         assistant_content, tool_calls = client.parse_assistant_message(
             response,
             fallback_transaction_checker=GrcAgent.looks_like_transaction_payload,
-            allowed_tool_names=(
-                set(active_allowed_tools) if mvp_tool_profile else None
-            ),
+            allowed_tool_names=set(active_allowed_tools),
             assistant_text_fallback_enabled=(
                 active_tool_surface.assistant_text_fallback_enabled
             ),
         )
 
         if tool_calls:
-            tool_calls = _normalize_compound_apply_edit_calls(
-                tool_calls,
-                allowed_tools=set(active_allowed_tools),
-                mvp_tool_profile=mvp_tool_profile,
-                coalesce_adjacent_apply_edit=correction_allowed_tools is None,
-            )
             tool_calls = [
                 LlamaToolCall(
                     id=tool_call.id,
@@ -1243,7 +1217,7 @@ def _mvp_completion_aliases(
     arguments: dict[str, Any],
     result: dict[str, Any],
 ) -> tuple[str, ...]:
-    """Map MVP wrapper calls onto legacy required-action names for turn completion."""
+    """Map MVP wrapper calls onto internal required-action aliases for turn completion."""
     if tool_name == "inspect_graph":
         operation = str(arguments.get("operation") or "").strip().lower()
         if operation == "summarize":
@@ -1296,190 +1270,6 @@ def _maybe_enable_wrapper_eval_telemetry(
     injected = dict(arguments)
     injected["debug"] = True
     return injected
-
-
-_APPLY_EDIT_MUTATION_OP_TYPES = {
-    "update_params",
-    "update_states",
-    "add_connection",
-    "remove_connection",
-    "remove_block",
-    "add_block",
-    "insert_block_on_connection",
-}
-
-_APPLY_EDIT_COALESCE_TRIGGER_OP_TYPES = {
-    "add_connection",
-    "remove_connection",
-    "add_block",
-    "remove_block",
-    "insert_block_on_connection",
-}
-
-
-def _normalize_compound_apply_edit_calls(
-    tool_calls: list[LlamaToolCall],
-    *,
-    allowed_tools: set[str],
-    mvp_tool_profile: bool,
-    coalesce_adjacent_apply_edit: bool = True,
-) -> list[LlamaToolCall]:
-    """Split malformed apply_edit compound calls into supported tool calls.
-
-    This only runs in compatibility/legacy mode. In MVP mode, low-level tool
-    attempts remain guarded by route validation and never execute directly.
-    """
-    if mvp_tool_profile:
-        return tool_calls
-    normalized: list[LlamaToolCall] = []
-    for tool_call in tool_calls:
-        if tool_call.name != "apply_edit":
-            normalized.append(tool_call)
-            continue
-        expanded = _expand_compound_apply_edit_call(tool_call, allowed_tools=allowed_tools)
-        if expanded is None:
-            normalized.append(tool_call)
-            continue
-        normalized.extend(expanded)
-    if not coalesce_adjacent_apply_edit:
-        return normalized
-    return _coalesce_adjacent_apply_edit_calls(normalized)
-
-
-def _coalesce_adjacent_apply_edit_calls(tool_calls: list[LlamaToolCall]) -> list[LlamaToolCall]:
-    """Merge adjacent apply_edit calls into one atomic transaction when possible."""
-
-    coalesced: list[LlamaToolCall] = []
-    index = 0
-    while index < len(tool_calls):
-        current = tool_calls[index]
-        if current.name != "apply_edit":
-            coalesced.append(current)
-            index += 1
-            continue
-
-        run_start = index
-        run: list[LlamaToolCall] = []
-        while index < len(tool_calls) and tool_calls[index].name == "apply_edit":
-            run.append(tool_calls[index])
-            index += 1
-
-        if len(run) == 1:
-            coalesced.append(run[0])
-            continue
-
-        merged_operations: list[dict[str, Any]] = []
-        mergeable = True
-        for call in run:
-            transaction = call.arguments.get("transaction")
-            if isinstance(transaction, dict):
-                merged_operations.append(transaction)
-                continue
-            if isinstance(transaction, list) and all(isinstance(item, dict) for item in transaction):
-                merged_operations.extend(transaction)
-                continue
-            mergeable = False
-            break
-
-        if not mergeable or len(merged_operations) <= 1:
-            coalesced.extend(run)
-            continue
-        op_types = {
-            str(operation.get("op_type", "")).strip()
-            for operation in merged_operations
-            if isinstance(operation, dict)
-        }
-        if not (op_types & _APPLY_EDIT_COALESCE_TRIGGER_OP_TYPES):
-            coalesced.extend(run)
-            continue
-
-        coalesced.append(
-            LlamaToolCall(
-                id=f"{run[0].id}_coalesced_{run_start+1}_{run_start+len(run)}",
-                name="apply_edit",
-                arguments={"transaction": merged_operations},
-            )
-        )
-
-    return coalesced
-
-
-def _expand_compound_apply_edit_call(
-    tool_call: LlamaToolCall,
-    *,
-    allowed_tools: set[str],
-) -> list[LlamaToolCall] | None:
-    transaction = tool_call.arguments.get("transaction")
-    operations = transaction if isinstance(transaction, list) else [transaction]
-    if not operations or not all(isinstance(item, dict) for item in operations):
-        return None
-
-    expanded: list[LlamaToolCall] = []
-    converted = False
-    for index, operation in enumerate(operations):
-        op_type = str(operation.get("op_type") or "").strip()
-        if not op_type:
-            return None
-        if op_type in _APPLY_EDIT_MUTATION_OP_TYPES:
-            if op_type == "remove_connection" and "remove_connection" in allowed_tools:
-                args: dict[str, Any] = {}
-                connection_id = operation.get("connection_id")
-                if isinstance(connection_id, str) and connection_id.strip():
-                    args["connection_id"] = connection_id.strip()
-                else:
-                    for key in ("src_block", "src_port", "dst_block", "dst_port"):
-                        if key in operation:
-                            args[key] = operation[key]
-                if not args:
-                    return None
-                expanded.append(
-                    LlamaToolCall(
-                        id=f"{tool_call.id}_op{index+1}",
-                        name="remove_connection",
-                        arguments=args,
-                    )
-                )
-                converted = True
-                continue
-            # Keep apply_edit fallback for mutation ops not covered by dedicated tools.
-            if "apply_edit" in allowed_tools:
-                expanded.append(
-                    LlamaToolCall(
-                        id=f"{tool_call.id}_op{index+1}",
-                        name="apply_edit",
-                        arguments={"transaction": operation},
-                    )
-                )
-                converted = True
-                continue
-            return None
-        if op_type == "validate_graph" and "validate_graph" in allowed_tools:
-            expanded.append(
-                LlamaToolCall(
-                    id=f"{tool_call.id}_op{index+1}",
-                    name="validate_graph",
-                    arguments={},
-                )
-            )
-            converted = True
-            continue
-        if op_type == "save_graph" and "save_graph" in allowed_tools:
-            args: dict[str, Any] = {}
-            path = operation.get("path")
-            if isinstance(path, str) and path.strip():
-                args["path"] = path.strip()
-            expanded.append(
-                LlamaToolCall(
-                    id=f"{tool_call.id}_op{index+1}",
-                    name="save_graph",
-                    arguments=args,
-                )
-            )
-            converted = True
-            continue
-        return None
-
-    return expanded if converted else None
 
 
 def _tool_failure_text(result: dict[str, Any]) -> str:

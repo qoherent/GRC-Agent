@@ -138,7 +138,6 @@ class AgentConfig:
     advisor_enabled: bool = False
     advisor_limited_advisory: bool = False
     advisor_shadow_telemetry: bool = True
-    legacy_model_tool_surface: bool = False
     docs_answer: DocsAnswerConfig = DEFAULT_DOCS_ANSWER_CONFIG
     retrieval: RetrievalConfig = DEFAULT_RETRIEVAL_CONFIG
     history: HistoryConfig = DEFAULT_HISTORY_CONFIG
@@ -183,7 +182,6 @@ def default_app_config() -> AppConfig:
             advisor_enabled=False,
             advisor_limited_advisory=False,
             advisor_shadow_telemetry=True,
-            legacy_model_tool_surface=False,
             docs_answer=DEFAULT_DOCS_ANSWER_CONFIG,
             retrieval=DEFAULT_RETRIEVAL_CONFIG,
             history=DEFAULT_HISTORY_CONFIG,
@@ -253,9 +251,6 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
             ),
             advisor_shadow_telemetry=_optional_bool(
                 agent_table, "advisor_shadow_telemetry", default=True, context="[agent]"
-            ),
-            legacy_model_tool_surface=_optional_bool(
-                agent_table, "legacy_model_tool_surface", default=False, context="[agent]"
             ),
             docs_answer=_docs_answer_config(
                 docs_table if isinstance(docs_table, dict) else {},

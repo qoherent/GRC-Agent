@@ -63,10 +63,10 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 - `change_graph` remains mutation-only. Save/load are explicit lifecycle wrappers
   and require explicit user intent.
 - Save/load wrappers are beta-validated and not release-validated yet.
-- Legacy low-level tools remain internal/compatibility-only unless explicitly
-  enabled for developer compatibility mode.
+- Low-level tools remain internal implementation primitives; they are not part
+  of the model-facing chat surface.
 - Tool order matters. Models prefer earlier tools.
-- Keep `apply_edit` before `propose_edit` unless a separate live eval proves a safer alternative.
+- Keep internal verified-workflow ordering stable unless a separate live eval proves a safer alternative.
 - Keep tool descriptions concise and non-contradictory; put durable routing policy in one place.
 - Avoid overlapping tools unless each has a tested, distinct job.
 - Add new tools only when repeated evidence proves the current surface is insufficient.
@@ -123,7 +123,7 @@ Autonomy must come from typed state, explicit tools, deterministic validation, a
 ## Tutorial Corpus And RAG
 
 - Keep `docs/wiki_gnuradio_org/` as explanation/retrieval/eval material.
-- `ask_grc_docs` production-candidate default is deterministic grounded answering with source
+- `ask_grc_docs` default is deterministic grounded answering with source
   evidence and honest `insufficient_evidence`; helper synthesis is optional
   research-only and not required for the frozen runtime path.
 - Tutorials are not mutation authority.

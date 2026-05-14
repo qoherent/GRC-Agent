@@ -140,9 +140,9 @@ Default model-facing chat surface is MVP wrappers:
 5. `save_graph_explicit`
 6. `load_graph_explicit`
 
-Low-level tools remain internal or compatibility-only. They must not leak into normal model-backed chat unless `legacy_model_tool_surface=true` is explicitly configured for debugging or research.
+Low-level tools remain internal implementation primitives. They must not leak into model-backed chat; the legacy model-facing tool surface and prompt branch have been removed from the runtime path.
 
-Current implementation caveat: the default CLI path narrows schemas to MVP wrappers, but the codebase still builds legacy schemas for internal/compatibility use. The MVP prompt (`src/grc_agent/runtime/prompt.py`) correctly references only wrappers. Legacy tool instructions exist only in the legacy prompt branch (`legacy=true`), which is not the default model-facing path.
+Current implementation caveat: the codebase still builds internal primitive schemas for direct runtime tests, CLI developer inspection, and wrapper implementation support. Model-backed chat receives only the six MVP wrappers.
 
 ## 6. Wrapper Contracts
 
@@ -370,7 +370,7 @@ Current deterministic TurnPlan status:
 
 - It provides finite policy and allowed-tool narrowing today.
 - It still contains phrase/regex-based routing assumptions.
-- That is acceptable only as current production-candidate scaffolding, not as the desired long-term semantic architecture.
+- That is acceptable only as current safety scaffolding, not as the desired long-term semantic architecture.
 
 Promotion criteria for advisor control:
 

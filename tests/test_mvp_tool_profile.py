@@ -1,6 +1,5 @@
 """MVP model-facing tool profile wrapper tests."""
 
-from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
@@ -9,7 +8,6 @@ import unittest
 from unittest import mock
 
 from grc_agent.agent import GrcAgent
-from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE, PUBLIC_TOOL_NAMES
@@ -77,15 +75,6 @@ class MvpToolProfileTests(unittest.TestCase):
             "base_state_revision": agent.session.state_revision,
         }
 
-    def _load_legacy_agent(self) -> GrcAgent:
-        session = FlowgraphSession()
-        session.load(self._fixture_path())
-        config = load_app_config()
-        legacy_config = replace(
-            config,
-            agent=replace(config.agent, legacy_model_tool_surface=True),
-        )
-        return GrcAgent(session, config=legacy_config.agent)
 
     def test_mvp_tool_schemas_exist(self) -> None:
         agent = self._load_agent()
@@ -2058,14 +2047,6 @@ class MvpToolProfileTests(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 self.assertIsNone(agent.check_unsupported_request(prompt))
 
-    def test_legacy_model_surface_allows_legacy_tool_validation_path(self) -> None:
-        agent = self._load_legacy_agent()
-        result = agent.validate_tool_call(
-            "validate_graph",
-            {},
-            model_tool_call=True,
-        )
-        self.assertIsNone(result)
 
     def test_history_restore_remains_cli_copy_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

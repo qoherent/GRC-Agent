@@ -38,7 +38,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertFalse(config.agent.advisor_enabled)
         self.assertFalse(config.agent.advisor_limited_advisory)
         self.assertTrue(config.agent.advisor_shadow_telemetry)
-        self.assertFalse(config.agent.legacy_model_tool_surface)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 320)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 64)
         self.assertEqual(config.agent.docs_answer.helper_prompt_version, "v3_compact")
@@ -89,7 +88,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "advisor_enabled = true\n"
                     "advisor_limited_advisory = true\n"
                     "advisor_shadow_telemetry = false\n"
-                    "legacy_model_tool_surface = true\n"
                     "\n[agent.docs_answer]\n"
                     "helper_max_output_tokens = 512\n"
                     "answer_cache_size = 32\n"
@@ -110,7 +108,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(config.agent.advisor_enabled)
         self.assertTrue(config.agent.advisor_limited_advisory)
         self.assertFalse(config.agent.advisor_shadow_telemetry)
-        self.assertTrue(config.agent.legacy_model_tool_surface)
         self.assertEqual(config.llama.max_tool_rounds, 42)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 512)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 32)

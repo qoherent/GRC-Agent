@@ -1,4 +1,4 @@
-"""Model-facing tool schemas for the GRC Agent runtime."""
+"""Tool schemas for MVP wrappers and internal runtime primitives."""
 
 from typing import Any
 
@@ -41,12 +41,12 @@ def _schema(
 def build_tool_schemas(
     tool_names: tuple[str, ...] | list[str] | set[str] | None = None
 ) -> list[dict[str, Any]]:
-    """Return the fixed tool schemas exposed to a chat-completions client.
+    """Return fixed tool schemas for the requested runtime surface.
 
     Tool order matters — models prefer earlier tools.
-    `suggest_compatible_insertions` must appear before `apply_edit`.
+    Model-backed chat must request the MVP wrapper names explicitly.
     """
-    legacy_schemas = [
+    internal_schemas = [
         _schema(
             "new_grc",
             "Create a new empty GRC flowgraph session. "
@@ -718,7 +718,7 @@ def build_tool_schemas(
             required=["path"],
         ),
     ]
-    all_schemas = [*legacy_schemas, *mvp_schemas]
+    all_schemas = [*internal_schemas, *mvp_schemas]
     if tool_names is None:
         return all_schemas
 

@@ -17,16 +17,17 @@ from tests.llama_eval.harness import (
 )
 
 PHASE_NAMES = {
-    10: "tier1_live",
-    20: "tier2_release",
-    30: "tier3_multiturn",
-    40: "tier4_external_examples",
+    20: "r0_r1_release",
+    25: "r1_set_state",
+    35: "r2_disconnect",
     50: "tier5_adversarial",
     55: "r5_save_load",
     56: "r3_rewire",
     57: "r4a_insert",
     58: "r4b_remove",
     59: "r4c_add_variable",
+    71: "r7_exact_external",
+    72: "r7_natural_external",
 }
 MANIFEST_DIR = Path(__file__).resolve().parent / "capability_manifests"
 
@@ -52,7 +53,7 @@ def load_capability_manifests() -> dict[str, dict[str, Any]]:
 def build_release_dashboard(
     stores: Iterable[dict[str, Any]],
     *,
-    required_phases: tuple[int, ...] = (20, 30, 40, 50),
+    required_phases: tuple[int, ...] = (20, 25, 35, 56, 57, 58, 59, 55, 71, 72, 50),
     min_runs_per_case: int = 3,
     stability_threshold: float = 1.0,
     scope: str = "all",
@@ -378,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.scope == "r5":
         effective_required_phases = (55,)
     else:
-        effective_required_phases = (20, 30, 40, 50)
+        effective_required_phases = (20, 25, 35, 56, 57, 58, 59, 55, 71, 72, 50)
 
     dashboard = build_release_dashboard(
         _load_stores(args.results_path),

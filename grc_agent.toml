@@ -15,11 +15,10 @@ history_compact_budget = 100000
 advisor_enabled = false
 advisor_limited_advisory = false
 advisor_shadow_telemetry = true
-legacy_model_tool_surface = false
 
 [agent.docs_answer]
 enabled = true
-# Production-candidate default: deterministic grounded-answer builder is the primary path.
+# Deterministic grounded-answer builder is the primary safety-baseline path.
 # Keep helper synthesis disabled unless running explicit research experiments.
 helper_mode = "never"
 helper_max_output_tokens = 320

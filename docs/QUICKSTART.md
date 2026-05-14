@@ -33,7 +33,7 @@ uv run grc-agent doctor --start-llama --json
 Target policy is `desired_context_tokens=120000` when the local model/server supports it.
 Output compactness is controlled by retrieval and schema budgets, not by forcing tiny `max_tokens`.
 
-Local production-candidate smoke (no live-model requirement):
+Local smoke (no live-model requirement):
 
 ```bash
 uv run grc-agent doctor
@@ -174,7 +174,7 @@ Fix this topology automatically.
 6. Search blocks with `search_blocks`.
 7. Ask docs/help with `ask_grc_docs`.
 `ask_grc_docs` is explanation-only and returns grounded sources when evidence is
-strong; production-candidate default uses a deterministic grounded-answer builder and honest
+strong; the default path uses a deterministic grounded-answer builder and honest
 `insufficient_evidence` when local docs are weak. DocsAnswerAdvisor synthesis
 is optional/research-only and not required for the frozen runtime path.
 8. Preview a change (`change_graph` dry-run path).
@@ -406,11 +406,18 @@ index path.
 Live model quick gates:
 
 ```bash
-uv run python -m tests.llama_eval.tier1_live --quick
-uv run python -m tests.llama_eval.tier2_release
-uv run python -m tests.llama_eval.tier3_multiturn --quick
-uv run python -m tests.llama_eval.tier4_external_examples --quick
-uv run python -m tests.llama_eval.tier5_adversarial --quick
+uv run python -m tests.llama_eval.run_r0_release --n-runs 3 --results-path /tmp/r0.json
+uv run python -m tests.llama_eval.run_r1_release --n-runs 3 --results-path /tmp/r1_param.json
+uv run python -m tests.llama_eval.run_r1_set_state --n-runs 3 --results-path /tmp/r1_state.json
+uv run python -m tests.llama_eval.run_r2_disconnect --n-runs 3 --results-path /tmp/r2_disconnect.json
+uv run python -m tests.llama_eval.run_r3_rewire --n-runs 3 --results-path /tmp/r3_rewire.json
+uv run python -m tests.llama_eval.run_r4a_insert --n-runs 3 --results-path /tmp/r4a_insert.json
+uv run python -m tests.llama_eval.run_r4b_remove --n-runs 3 --results-path /tmp/r4b_remove.json
+uv run python -m tests.llama_eval.run_r4c_add_variable --n-runs 3 --results-path /tmp/r4c_add_variable.json
+uv run python -m tests.llama_eval.run_r5_save_load --n-runs 3 --results-path /tmp/r5_save_load.json
+uv run python -m tests.llama_eval.run_r7_exact_external --n-runs 3 --results-path /tmp/r7_exact.json
+uv run python -m tests.llama_eval.run_r7_natural_external --n-runs 3 --results-path /tmp/r7_natural.json
+uv run python -m tests.llama_eval.tier5_adversarial --n-runs 3 --results-path /tmp/tier5.json
 ```
 
 ## 11. Local Beta Smoke (No Live Model Required)
