@@ -71,6 +71,7 @@ def build_release_dashboard(
     manifest_forbidden_tool_entries: list[str] = []
     manifests = load_capability_manifests()
     observed_profile_statuses: dict[str, set[str]] = defaultdict(set)
+    diagnostic_case_keys: set[str] = set()
 
     for store in stores:
         runs = store.get("runs", [])
@@ -130,6 +131,10 @@ def build_release_dashboard(
                         status = manifest.get("status")
                         if isinstance(status, str) and status:
                             observed_profile_statuses[status].add(release_profile)
+                            if status.startswith("diagnostic-"):
+                                diagnostic_case_keys.add(
+                                    f"{phase_name_for(phase)}/{category}/{case_name}"
+                                )
                         if manifest.get("release_gating") is False:
                             observed_profile_statuses["not release-gating"].add(
                                 release_profile
@@ -155,20 +160,30 @@ def build_release_dashboard(
     phase_reports: dict[str, Any] = {}
     unstable_cases: list[str] = []
     short_run_cases: list[str] = []
+    diagnostic_unstable_cases: list[str] = []
+    diagnostic_short_run_cases: list[str] = []
     total_model_attempts = 0
     total_model_passes = 0
     total_infra_failures = 0
     total_scheduled_runs = 0
+    release_gating_infra_failures = 0
+    release_gating_total_scheduled_runs = 0
 
     for phase in sorted(grouped):
         phase_name = phase_name_for(phase)
         case_reports: dict[str, Any] = {}
         phase_unstable_cases: list[str] = []
         phase_short_run_cases: list[str] = []
+        phase_release_gating_unstable_cases: list[str] = []
+        phase_release_gating_short_run_cases: list[str] = []
+        phase_diagnostic_unstable_cases: list[str] = []
+        phase_diagnostic_short_run_cases: list[str] = []
         phase_model_attempts = 0
         phase_model_passes = 0
         phase_infra_failures = 0
         phase_total_scheduled = 0
+        phase_release_gating_infra_failures = 0
+        phase_release_gating_total_scheduled = 0
 
         for (category, case_name), runs in sorted(grouped[phase].items()):
             runs = sorted(runs, key=lambda run: int(run.get("run_index", 0)))
@@ -186,22 +201,38 @@ def build_release_dashboard(
                 "stable": stable,
             }
             case_reports[case_key] = report
+            diagnostic_case = qualified_key in diagnostic_case_keys
 
             phase_model_attempts += int(stability["model_attempts"])
             phase_model_passes += int(stability["model_passes"])
             phase_infra_failures += int(stability["infra_failures"])
             phase_total_scheduled += int(stability["total_scheduled_runs"])
+            if not diagnostic_case:
+                phase_release_gating_infra_failures += int(stability["infra_failures"])
+                phase_release_gating_total_scheduled += int(
+                    stability["total_scheduled_runs"]
+                )
             if not stability["stable"]:
                 phase_unstable_cases.append(case_key)
-                unstable_cases.append(qualified_key)
+                if diagnostic_case:
+                    phase_diagnostic_unstable_cases.append(case_key)
+                    diagnostic_unstable_cases.append(qualified_key)
+                else:
+                    phase_release_gating_unstable_cases.append(case_key)
+                    unstable_cases.append(qualified_key)
             if not run_count_ok:
                 phase_short_run_cases.append(case_key)
-                short_run_cases.append(qualified_key)
+                if diagnostic_case:
+                    phase_diagnostic_short_run_cases.append(case_key)
+                    diagnostic_short_run_cases.append(qualified_key)
+                else:
+                    phase_release_gating_short_run_cases.append(case_key)
+                    short_run_cases.append(qualified_key)
 
         phase_release_ready = (
             bool(case_reports)
-            and not phase_unstable_cases
-            and not phase_short_run_cases
+            and not phase_release_gating_unstable_cases
+            and not phase_release_gating_short_run_cases
         )
         phase_reports[str(phase)] = {
             "phase": phase,
@@ -215,12 +246,18 @@ def build_release_dashboard(
             "model_pass_rate": _ratio(phase_model_passes, phase_model_attempts),
             "unstable_cases": phase_unstable_cases,
             "short_run_cases": phase_short_run_cases,
+            "release_gating_unstable_cases": phase_release_gating_unstable_cases,
+            "release_gating_short_run_cases": phase_release_gating_short_run_cases,
+            "diagnostic_unstable_cases": phase_diagnostic_unstable_cases,
+            "diagnostic_short_run_cases": phase_diagnostic_short_run_cases,
             "cases": case_reports,
         }
         total_model_attempts += phase_model_attempts
         total_model_passes += phase_model_passes
         total_infra_failures += phase_infra_failures
         total_scheduled_runs += phase_total_scheduled
+        release_gating_infra_failures += phase_release_gating_infra_failures
+        release_gating_total_scheduled_runs += phase_release_gating_total_scheduled
 
     missing_required_phases = [
         phase for phase in required_phases if phase not in grouped
@@ -236,8 +273,11 @@ def build_release_dashboard(
         and not missing_required_phases
         and not unstable_cases
         and not short_run_cases
-        and total_infra_failures == 0
-        and total_scheduled_runs > 0
+        and release_gating_infra_failures == 0
+        and (
+            release_gating_total_scheduled_runs > 0
+            or total_scheduled_runs > 0
+        )
     )
 
     return {
@@ -250,9 +290,13 @@ def build_release_dashboard(
         "model_passes": total_model_passes,
         "infra_failures": total_infra_failures,
         "total_scheduled_runs": total_scheduled_runs,
+        "release_gating_infra_failures": release_gating_infra_failures,
+        "release_gating_total_scheduled_runs": release_gating_total_scheduled_runs,
         "model_pass_rate": _ratio(total_model_passes, total_model_attempts),
         "unstable_cases": unstable_cases,
         "short_run_cases": short_run_cases,
+        "diagnostic_unstable_cases": diagnostic_unstable_cases,
+        "diagnostic_short_run_cases": diagnostic_short_run_cases,
         "malformed_entries": malformed_entries,
         "mixed_profile_entries": mixed_profile_entries,
         "raw_legacy_tool_entries": raw_legacy_tool_entries,

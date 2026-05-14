@@ -165,6 +165,58 @@ class ReleaseDashboardTests(unittest.TestCase):
             ["R7_EXACT_EXTERNAL", "R7_NATURAL_EXTERNAL"],
         )
 
+    def test_dashboard_reports_diagnostic_instability_without_release_failure(self) -> None:
+        store = {
+            "runs": [
+                {
+                    **_entry(
+                        phase=72,
+                        category="external",
+                        case_name="natural",
+                        run_index=0,
+                        status="PASS",
+                    ),
+                    "release_metadata": {
+                        "mvp_tool_profile": True,
+                        "model_tool_names": sorted(MVP_RELEASE_MODEL_TOOLS),
+                        "release_profile": "R7_NATURAL_EXTERNAL",
+                    },
+                },
+                {
+                    **_entry(
+                        phase=72,
+                        category="external",
+                        case_name="natural",
+                        run_index=1,
+                        status="FAIL",
+                    ),
+                    "release_metadata": {
+                        "mvp_tool_profile": True,
+                        "model_tool_names": sorted(MVP_RELEASE_MODEL_TOOLS),
+                        "release_profile": "R7_NATURAL_EXTERNAL",
+                    },
+                },
+            ]
+        }
+
+        dashboard = build_release_dashboard(
+            [store],
+            required_phases=(72,),
+            min_runs_per_case=2,
+            stability_threshold=1.0,
+        )
+
+        self.assertTrue(dashboard["release_ready"], dashboard)
+        self.assertEqual(dashboard["unstable_cases"], [])
+        self.assertEqual(
+            dashboard["diagnostic_unstable_cases"],
+            ["r7_natural_external/external/natural"],
+        )
+        phase = dashboard["phases"]["72"]
+        self.assertEqual(phase["unstable_cases"], ["external/natural"])
+        self.assertEqual(phase["release_gating_unstable_cases"], [])
+        self.assertEqual(phase["diagnostic_unstable_cases"], ["external/natural"])
+
     def test_dashboard_defaults_require_tier5(self) -> None:
         store = {
             "runs": [
