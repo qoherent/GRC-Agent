@@ -17,7 +17,7 @@ Evidence bundle for the current MVP wrapper runtime. This file is the concise tr
 | R5_SAVE_LOAD | Beta-validated | Local dashboard n=3 passes | Explicit lifecycle wrappers only; not release-validated |
 | R7_EXACT_EXTERNAL | Diagnostic-clean | External exact dashboard n=3 passes | Diagnostic, not release-gating |
 | Tier5_ADVERSARIAL | Diagnostic-clean | Adversarial dashboard n=3 passes | Diagnostic, not release-gating |
-| R7_NATURAL_EXTERNAL | Diagnostic-partial | Natural external dashboard n=3 partial pass | Natural-language ergonomics remains incomplete |
+| R7_NATURAL_EXTERNAL | Diagnostic-partial | Natural external dashboard n=3 is tracked as diagnostic evidence | Natural-language ergonomics remains incomplete |
 
 ## Gate Summary
 

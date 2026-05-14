@@ -38,6 +38,27 @@ def _schema(
     }
 
 
+def _strip_debug_properties(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a model-facing copy without dev-only debug parameters."""
+    copied = {
+        **schema,
+        "function": {
+            **schema["function"],
+            "parameters": {
+                **schema["function"]["parameters"],
+                "properties": dict(schema["function"]["parameters"]["properties"]),
+            },
+        },
+    }
+    copied["function"]["parameters"]["properties"].pop("debug", None)
+    required = copied["function"]["parameters"].get("required")
+    if isinstance(required, list):
+        copied["function"]["parameters"]["required"] = [
+            item for item in required if item != "debug"
+        ]
+    return copied
+
+
 def build_tool_schemas(
     tool_names: tuple[str, ...] | list[str] | set[str] | None = None
 ) -> list[dict[str, Any]]:
@@ -672,7 +693,7 @@ def build_tool_schemas(
                     "description": "When true, include wrapper dispatch telemetry for eval/debug.",
                 },
             },
-            required=["dry_run", "user_goal"],
+            required=["dry_run", "user_goal", "operation_kind"],
         ),
         _schema(
             "save_graph_explicit",
@@ -725,4 +746,7 @@ def build_tool_schemas(
     requested = set(tool_names)
     schema_by_name = {schema["function"]["name"]: schema for schema in all_schemas}
     ordered_names = [name for name in MODEL_TOOL_NAMES_ORDERED if name in requested]
-    return [schema_by_name[name] for name in ordered_names if name in schema_by_name]
+    selected = [schema_by_name[name] for name in ordered_names if name in schema_by_name]
+    if requested and requested.issubset(set(MVP_MODEL_TOOL_NAMES)):
+        return [_strip_debug_properties(schema) for schema in selected]
+    return selected

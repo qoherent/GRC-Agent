@@ -117,6 +117,9 @@ class MvpToolProfileTests(unittest.TestCase):
             "R4B_REMOVE": "remove_block",
             "R4C_ADD_VARIABLE": "add_variable",
             "R5_SAVE_LOAD": "save_load_lifecycle",
+            "R7_EXACT_EXTERNAL": "external_exact_examples",
+            "R7_NATURAL_EXTERNAL": "external_natural_examples",
+            "Tier5_ADVERSARIAL": "adversarial_safety",
         }
         forbidden_raw = {
             "apply_edit",
@@ -143,6 +146,7 @@ class MvpToolProfileTests(unittest.TestCase):
             if schema["function"]["name"] == "change_graph"
         )
         operation_kind = schema["function"]["parameters"]["properties"]["operation_kind"]
+        self.assertIn("operation_kind", schema["function"]["parameters"]["required"])
         self.assertEqual(
             operation_kind["enum"],
             [
@@ -158,6 +162,13 @@ class MvpToolProfileTests(unittest.TestCase):
                 "unsupported",
             ],
         )
+
+    def test_model_facing_schemas_do_not_expose_debug_parameters(self) -> None:
+        agent = self._load_agent()
+        for schema in agent.get_tool_schemas():
+            with self.subTest(tool=schema["function"]["name"]):
+                properties = schema["function"]["parameters"]["properties"]
+                self.assertNotIn("debug", properties)
 
     def test_mvp_tool_surface_is_single_profile_authority(self) -> None:
         self.assertEqual(MVP_TOOL_SURFACE.model_tool_names, MVP_MODEL_TOOL_NAMES)
@@ -195,10 +206,12 @@ class MvpToolProfileTests(unittest.TestCase):
         for row in result["results"]:
             self.assertEqual(sorted(row.keys()), ["block_id", "name", "summary"])
 
-    def test_search_blocks_debug_can_include_internal_ranking_metadata(self) -> None:
+    def test_search_blocks_dev_debug_can_include_internal_ranking_metadata(self) -> None:
         agent = self._load_agent()
-        result = agent.execute_tool(
-            "search_blocks", {"query": "throttle", "k": 3, "debug": True}
+        result = agent._search_blocks(
+            query="throttle",
+            k=3,
+            debug=True,
         )
         self.assertTrue(result["ok"], result)
         for row in result["results"]:
@@ -646,7 +659,7 @@ class MvpToolProfileTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"], result)
-        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertIn("operation_kind", result.get("message", ""))
 
     def test_change_graph_rejects_unsupported_operation_kind(self) -> None:
@@ -689,6 +702,7 @@ class MvpToolProfileTests(unittest.TestCase):
             {
                 "dry_run": False,
                 "user_goal": "Edit raw YAML source text.",
+                "operation_kind": "unsupported",
             },
         )
         self.assertFalse(result["ok"])
@@ -698,7 +712,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         result = agent.execute_tool(
             "change_graph",
-            {"dry_run": False, "user_goal": "Fix this graph."},
+            {"dry_run": False, "user_goal": "Fix this graph.", "operation_kind": "clarify"},
         )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_type"], "clarification_required")
@@ -735,7 +749,11 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         result = agent.execute_tool(
             "change_graph",
-            {"dry_run": False, "user_goal": "Save a copy to /tmp/example.grc"},
+            {
+                "dry_run": False,
+                "user_goal": "Save a copy to /tmp/example.grc",
+                "operation_kind": "unsupported",
+            },
         )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_type"], "unsupported_op")
@@ -2014,6 +2032,60 @@ class MvpToolProfileTests(unittest.TestCase):
                 self.assertEqual(result["error_type"], "tool_not_allowed_for_surface")
                 self.assertIn("TOOL_NOT_ALLOWED_FOR_SURFACE", result["message"])
 
+    def test_mvp_model_driven_debug_argument_is_rejected(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {"operation": "summarize", "debug": True},
+            model_tool_call=True,
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "invalid_request")
+
+    def test_model_facing_results_do_not_expose_internal_dispatch_names(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+            model_tool_call=True,
+        )
+        self.assertTrue(result["ok"], result)
+        text = json.dumps(result, sort_keys=True)
+        for internal_name in (
+            "internal_handler_called",
+            "apply_edit",
+            "propose_edit",
+            "validate_graph",
+            "save_graph\"",
+        ):
+            self.assertNotIn(internal_name, text)
+
+    def test_change_graph_missing_operation_kind_fails_without_mutation(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set samp_rate to 48000.",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+            model_tool_call=True,
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+
     def test_mvp_internal_tool_name_requests_are_not_translated_to_mutations(self) -> None:
         agent = self._load_agent()
         before_revision = agent.session.state_revision
@@ -2028,8 +2100,10 @@ class MvpToolProfileTests(unittest.TestCase):
                 result = agent.check_unsupported_request(prompt)
                 self.assertIsNotNone(result)
                 assert result is not None
-                self.assertIn("internal compatibility tool", result["assistant_text"])
+                self.assertIn("compatibility tool", result["assistant_text"])
                 self.assertIn("will not translate", result["assistant_text"])
+                for internal_name in ("apply_edit", "rewire_connection", "`save_graph`"):
+                    self.assertNotIn(internal_name, result["assistant_text"])
                 self.assertEqual(agent.session.state_revision, before_revision)
                 self.assertEqual(agent.session.is_dirty, before_dirty)
 

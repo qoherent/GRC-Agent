@@ -111,8 +111,10 @@ class TestRawYamlRefusalGuard(unittest.TestCase):
         result = agent.check_unsupported_request(
             "Edit the raw .grc YAML directly to remove a block."
         )
-        self.assertIn("apply_edit", result["assistant_text"])
-        self.assertIn("propose_edit", result["assistant_text"])
+        self.assertIn("change_graph", result["assistant_text"])
+        self.assertIn("save_graph_explicit", result["assistant_text"])
+        self.assertNotIn("apply_edit", result["assistant_text"])
+        self.assertNotIn("propose_edit", result["assistant_text"])
 
 
 class TestSavePathRequired(unittest.TestCase):
@@ -155,6 +157,17 @@ class TestSavePathRequired(unittest.TestCase):
             agent._tools["save_graph"] = agent._save_graph
             save_result = agent.execute_tool("save_graph", {})
             self.assertTrue(save_result["ok"])
+
+    def test_internal_save_graph_refuses_unsafe_canonical_path(self):
+        session = FlowgraphSession()
+        session.load(str(FIXTURE))
+        agent = GrcAgent(session, catalog_root="/usr/share/gnuradio/grc/blocks")
+        agent._tools["save_graph"] = agent._save_graph
+
+        save_result = agent.execute_tool("save_graph", {})
+
+        self.assertFalse(save_result["ok"])
+        self.assertEqual(save_result["error_type"], "save_refused")
 
 
 if __name__ == "__main__":

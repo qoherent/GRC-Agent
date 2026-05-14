@@ -676,6 +676,18 @@ class GrcAgent:
         )
         if surface_gate is not None:
             return surface_gate
+        if (
+            model_tool_call
+            and tool_name in MVP_MODEL_TOOL_NAMES
+            and isinstance(kwargs, dict)
+            and "debug" in kwargs
+        ):
+            return self._tool_result(
+                tool_name=tool_name,
+                ok=False,
+                message="Debug telemetry is not available through the model-facing tool surface.",
+                error_type=ErrorCode.INVALID_REQUEST,
+            )
         kwargs = self.normalize_tool_call_arguments(tool_name, kwargs)
         validation_error = validate_runtime_tool_call(
             tool_name, kwargs, self._tool_schema_map
@@ -849,12 +861,11 @@ class GrcAgent:
                             "tool_rounds_used": 0,
                             "tool_calls_executed": 0,
                             "assistant_text": (
-                                f"`{tool_name}` is an internal compatibility tool and is not "
-                                "available through the default model-facing surface. Use the "
-                                "approved wrappers only: inspect_graph, search_blocks, "
-                                "ask_grc_docs, change_graph, save_graph_explicit, and "
-                                "load_graph_explicit. I will not translate an internal tool "
-                                "request into a graph mutation."
+                                "That requested compatibility tool is not available through "
+                                "the default model-facing surface. Use the approved wrappers "
+                                "only: inspect_graph, search_blocks, ask_grc_docs, change_graph, "
+                                "save_graph_explicit, and load_graph_explicit. I will not "
+                                "translate an internal tool request into a graph mutation."
                             ),
                         }
         for keywords in self._RAW_YAML_EDIT_PATTERNS:
@@ -867,8 +878,9 @@ class GrcAgent:
                     "tool_calls_executed": 0,
                     "assistant_text": (
                         "Raw .grc YAML editing is unsupported. "
-                        "Use validated GRC tools instead: apply_edit for mutations, "
-                        "propose_edit for previews, save_graph to persist changes."
+                        "Use the approved model-facing wrappers instead: change_graph for "
+                        "validated graph changes, dry_run previews, and save_graph_explicit "
+                        "for explicit saves."
                     ),
                 }
         unsupported_operations: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -2758,12 +2770,12 @@ class GrcAgent:
         if result.get("ok") and result.get("error_count", 0) == 0:
             result["hint"] = (
                 "This was only a preview and did NOT modify the graph. "
-                "If the user asked for the actual change, call `apply_edit` next with the same or fuller transaction."
+                "If the user asks to apply it, use a committed change_graph call with the same executable details."
             )
         elif result.get("ok") is False:
             result["hint"] = (
                 "Preview failed. Explain the preflight errors to the user. "
-                "If the user asked only for a preview, stop after explaining; do not call validate_graph. "
+                "If the user asked only for a preview, stop after explaining. "
                 + TransactionNormalizer.transaction_hint()
             )
         return result
@@ -2805,10 +2817,9 @@ class GrcAgent:
         if result.get("ok"):
             suggested = self._state_driven_suggested_next_tools(completed_tool="apply_edit")
             result["hint"] = (
-                "Edit applied. Do NOT call apply_edit again for this same change. "
-                "apply_edit already ran an internal compile check; that does NOT satisfy an explicit `validate_graph` request. "
-                "If the user explicitly asked to validate or confirm it works, call `validate_graph` next. "
-                "Otherwise, if the user asked to save, call `save_graph`."
+                "Edit applied and the graph was validated. Do not repeat the same change. "
+                "If the user explicitly asked for a separate validation or save, use the "
+                "appropriate model-facing wrapper next."
             )
             if suggested:
                 result["suggested_next_tools"] = suggested
@@ -2870,8 +2881,8 @@ class GrcAgent:
         if is_valid:
             suggested = self._state_driven_suggested_next_tools(completed_tool="validate_graph")
             result["hint"] = (
-                "Validation passed. If the user also asked to save, call `save_graph`. "
-                "If the user also asked for a summary, call `summarize_graph`."
+                "Validation passed. If the user also asked to save or summarize, use the "
+                "appropriate model-facing wrapper."
             )
             if suggested:
                 result["suggested_next_tools"] = suggested
@@ -2912,6 +2923,19 @@ class GrcAgent:
                 message="This new graph has no file path yet. Call save_graph(path=\"...\").",
                 error_type="SAVE_PATH_REQUIRED",
             )
+        target_path = Path(path).expanduser() if isinstance(path, str) and path.strip() else self.session.path
+        if target_path is not None:
+            unsafe_root = self._unsafe_graph_root_for_path(target_path.resolve(strict=False))
+            if unsafe_root is not None:
+                return self._tool_result(
+                    tool_name="save_graph",
+                    ok=False,
+                    message=(
+                        "Refusing to write to protected canonical/example graph paths. "
+                        f"Choose a copied working path outside {unsafe_root}."
+                    ),
+                    error_type=ErrorCode.SAVE_REFUSED,
+                )
         if self.session.is_dirty and (
             not self._last_validation_ok
             or self._last_validated_state_revision != self.session.state_revision

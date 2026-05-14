@@ -20,6 +20,9 @@ class CapabilityManifestTests(unittest.TestCase):
             "R4B_REMOVE",
             "R4C_ADD_VARIABLE",
             "R5_SAVE_LOAD",
+            "R7_EXACT_EXTERNAL",
+            "R7_NATURAL_EXTERNAL",
+            "Tier5_ADVERSARIAL",
         }
         self.assertTrue(expected.issubset(set(manifests.keys())), manifests)
 
@@ -32,6 +35,7 @@ class CapabilityManifestTests(unittest.TestCase):
                 self.assertIn("model_contract_pass", dims)
                 self.assertIn("runtime_safety_pass", dims)
                 self.assertIn("semantic_pass", dims)
+                self.assertIn("release_gating", manifest)
 
     def test_dashboard_reports_manifest_dimension_gaps(self) -> None:
         store = {

@@ -1578,11 +1578,21 @@ class MvpWrapperDispatchTests(unittest.TestCase):
         agent = self._load_agent()
         clarify = agent.execute_tool(
             "change_graph",
-            {"dry_run": False, "user_goal": "Fix this graph.", "debug": True},
+            {
+                "dry_run": False,
+                "user_goal": "Fix this graph.",
+                "operation_kind": "clarify",
+                "debug": True,
+            },
         )
         unsupported = agent.execute_tool(
             "change_graph",
-            {"dry_run": False, "user_goal": "Edit raw .grc YAML source text.", "debug": True},
+            {
+                "dry_run": False,
+                "user_goal": "Edit raw .grc YAML source text.",
+                "operation_kind": "unsupported",
+                "debug": True,
+            },
         )
         self.assertFalse(clarify["ok"], clarify)
         self.assertEqual(clarify["error_type"], "clarification_required")

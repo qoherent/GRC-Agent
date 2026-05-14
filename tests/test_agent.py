@@ -432,7 +432,7 @@ class GrcAgentTests(unittest.TestCase):
         )
         self.assertEqual(
             schema_by_name["change_graph"]["function"]["parameters"]["required"],
-            ["dry_run", "user_goal"],
+            ["dry_run", "user_goal", "operation_kind"],
         )
 
     def test_all_tool_schemas_keep_internal_catalog_for_validation(self) -> None:
@@ -1522,13 +1522,18 @@ class GrcAgentTests(unittest.TestCase):
         self.assertIn("full_data", tool_entries[0]["content"])
 
     def test_save_graph_exception_returns_internal_error(self) -> None:
-        agent, session = self._load_agent()
-        # Mark clean and validated so the save gate passes.
-        agent._last_validation_ok = True
-        agent._last_validated_state_revision = session.state_revision
+        with tempfile.TemporaryDirectory() as tmpdir:
+            copied = Path(tmpdir) / "working.grc"
+            copied.write_bytes(self._fixture_path().read_bytes())
+            session = FlowgraphSession()
+            session.load(copied)
+            agent = GrcAgent(session)
+            # Mark clean and validated so the save gate passes.
+            agent._last_validation_ok = True
+            agent._last_validated_state_revision = session.state_revision
 
-        with mock.patch.object(session, "save", side_effect=OSError("disk full")):
-            result = agent.execute_tool("save_graph", {})
+            with mock.patch.object(session, "save", side_effect=OSError("disk full")):
+                result = agent.execute_tool("save_graph", {})
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_type"], "internal_error")

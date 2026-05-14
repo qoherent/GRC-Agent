@@ -221,7 +221,7 @@ Required behavior:
 - Dispatch internally to verified handlers only.
 - Preserve preflight, `grcc`, rollback, checkpoint, and save-state semantics.
 
-Implemented: `operation_kind` enum added to `change_graph` schema. `user_goal` is supporting evidence; routing is based on `operation_kind`.
+Implemented: `operation_kind` enum added to `change_graph` schema and required for model-facing `change_graph` calls. `user_goal` is supporting evidence; routing is based on `operation_kind`.
 
 ## 7. Internal Tool And Handler Inventory
 
@@ -561,7 +561,8 @@ Current classification (2026-05-10):
 
 - Health semantics fixed: fails closed when actual context is unknown.
 - Doctor fixed: context check requires actual >= desired, not unknown-pass.
-- Release dashboard validates raw tool-call history (`raw_legacy_tool_entries`).
+- Release dashboard validates raw tool-call history (`raw_legacy_tool_entries`) and fails closed when raw requested/executed history is missing or malformed.
+- Diagnostic manifests exist for R7 exact/natural and Tier5; they report diagnostic status and are explicitly not release-gating.
 - Native MVP R0/R1 eval case catalogs created; legacy translation removed from release-gating paths.
 - `release_profile` persisted in run-store metadata and dashboard scope filtering implemented.
 - MVP tool-round ceiling = 8, fallback parser disabled in MVP mode.

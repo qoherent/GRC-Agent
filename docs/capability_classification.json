@@ -45,5 +45,19 @@
       "status": "unvalidated",
       "release_gating": false
     }
+  },
+  "diagnostic_suites": {
+    "R7_EXACT_EXTERNAL": {
+      "status": "diagnostic-clean",
+      "release_gating": false
+    },
+    "Tier5_ADVERSARIAL": {
+      "status": "diagnostic-clean",
+      "release_gating": false
+    },
+    "R7_NATURAL_EXTERNAL": {
+      "status": "diagnostic-partial",
+      "release_gating": false
+    }
   }
 }

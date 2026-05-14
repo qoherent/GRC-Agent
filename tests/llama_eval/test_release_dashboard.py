@@ -24,18 +24,34 @@ def _entry(
     run_index: int,
     status: str,
 ) -> dict:
-    return {
-        "phase": phase,
-        "category": category,
-        "case_name": case_name,
-        "run_index": run_index,
-        "status": status,
-        "run_result": {"status": status},
-        "release_metadata": {
-            "mvp_tool_profile": True,
-            "model_tool_names": sorted(MVP_RELEASE_MODEL_TOOLS),
-        },
-    }
+        return {
+            "phase": phase,
+            "category": category,
+            "case_name": case_name,
+            "run_index": run_index,
+            "status": status,
+            "run_result": {
+                "status": status,
+                "routing_pass": True,
+                "argument_pass": True,
+                "tool_success_pass": True,
+                "semantic_pass": True,
+                "runtime_safety_pass": True,
+                "model_contract_pass": True,
+                "end_state_pass": True,
+                "turn_results": [
+                    {
+                        "requested_tool_calls_raw": [],
+                        "executed_tool_calls_raw": [],
+                    }
+                ],
+            },
+            "release_metadata": {
+                "mvp_tool_profile": True,
+                "model_tool_names": sorted(MVP_RELEASE_MODEL_TOOLS),
+                "release_profile": "R0_READ_ONLY" if phase == 20 else "BETA_COMPLEX_MUTATION",
+            },
+        }
 
 
 class ReleaseDashboardTests(unittest.TestCase):
@@ -93,6 +109,61 @@ class ReleaseDashboardTests(unittest.TestCase):
         self.assertEqual(dashboard["unstable_cases"], [])
         self.assertIn("50", dashboard["phases"])
         self.assertEqual(dashboard["phases"]["50"]["name"], "tier5_adversarial")
+
+    def test_dashboard_reports_diagnostic_statuses_as_not_release_gating(self) -> None:
+        store = {
+            "runs": [
+                {
+                    **_entry(
+                        phase=71,
+                        category="external",
+                        case_name="exact",
+                        run_index=0,
+                        status="PASS",
+                    ),
+                    "release_metadata": {
+                        "mvp_tool_profile": True,
+                        "model_tool_names": sorted(MVP_RELEASE_MODEL_TOOLS),
+                        "release_profile": "R7_EXACT_EXTERNAL",
+                    },
+                },
+                {
+                    **_entry(
+                        phase=72,
+                        category="external",
+                        case_name="natural",
+                        run_index=0,
+                        status="PASS",
+                    ),
+                    "release_metadata": {
+                        "mvp_tool_profile": True,
+                        "model_tool_names": sorted(MVP_RELEASE_MODEL_TOOLS),
+                        "release_profile": "R7_NATURAL_EXTERNAL",
+                    },
+                },
+            ]
+        }
+
+        dashboard = build_release_dashboard(
+            [store],
+            required_phases=(71, 72),
+            min_runs_per_case=1,
+            stability_threshold=1.0,
+        )
+
+        self.assertTrue(dashboard["release_ready"], dashboard)
+        self.assertEqual(
+            dashboard["capability_statuses"]["diagnostic-clean"],
+            ["R7_EXACT_EXTERNAL"],
+        )
+        self.assertEqual(
+            dashboard["capability_statuses"]["diagnostic-partial"],
+            ["R7_NATURAL_EXTERNAL"],
+        )
+        self.assertEqual(
+            dashboard["capability_statuses"]["not release-gating"],
+            ["R7_EXACT_EXTERNAL", "R7_NATURAL_EXTERNAL"],
+        )
 
     def test_dashboard_defaults_require_tier5(self) -> None:
         store = {
@@ -196,6 +267,68 @@ class ReleaseDashboardTests(unittest.TestCase):
                                     },
                                 ],
                             },
+                        ],
+                    },
+                }
+            ]
+        }
+        dashboard = build_release_dashboard(
+            [store],
+            required_phases=(20,),
+            min_runs_per_case=1,
+            stability_threshold=1.0,
+        )
+        self.assertFalse(dashboard["release_ready"], dashboard)
+        self.assertTrue(dashboard["raw_legacy_tool_entries"], dashboard)
+
+    def test_dashboard_fails_closed_on_missing_raw_tool_history(self) -> None:
+        store = {
+            "runs": [
+                {
+                    **_entry(
+                        phase=20,
+                        category="edit",
+                        case_name="param",
+                        run_index=0,
+                        status="PASS",
+                    ),
+                    "run_result": {"status": "PASS"},
+                }
+            ]
+        }
+        dashboard = build_release_dashboard(
+            [store],
+            required_phases=(20,),
+            min_runs_per_case=1,
+            stability_threshold=1.0,
+        )
+        self.assertFalse(dashboard["release_ready"], dashboard)
+        self.assertTrue(dashboard["raw_tool_history_entries"], dashboard)
+
+    def test_dashboard_scans_trace_for_hidden_legacy_tool_calls(self) -> None:
+        store = {
+            "runs": [
+                {
+                    **_entry(
+                        phase=20,
+                        category="edit",
+                        case_name="param",
+                        run_index=0,
+                        status="PASS",
+                    ),
+                    "run_result": {
+                        "status": "PASS",
+                        "turn_results": [
+                            {
+                                "requested_tool_calls_raw": [],
+                                "executed_tool_calls_raw": [],
+                                "trace": {
+                                    "raw_requested_tool_calls": [
+                                        {"name": "apply_edit", "arguments": {}}
+                                    ],
+                                    "executed_tools": [],
+                                },
+                            }
                         ],
                     },
                 }

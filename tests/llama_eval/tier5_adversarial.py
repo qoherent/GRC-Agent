@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import sys
 from typing import Any
+from dataclasses import replace
 
 from tests.llama_eval.harness import (
     LiveScenario,
@@ -569,7 +570,10 @@ def _run_case(client: Any, model: str, case: LiveScenario) -> dict[str, Any]:
 
 
 def release_cases() -> list[LiveScenario]:
-    scenarios = list(TIER5_CASES)
+    scenarios = [
+        replace(scenario, release_profile="Tier5_ADVERSARIAL")
+        for scenario in TIER5_CASES
+    ]
     for scenario in scenarios:
         if not scenario_expected_tools_only(
             scenario,
