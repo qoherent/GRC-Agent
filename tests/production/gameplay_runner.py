@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = Path(__file__).resolve().parent / "corpus_manifest.json"
 DEFAULT_ARTIFACT_DIR = Path("/tmp/grc_agent_gameplay")
 DEFAULT_OLLAMA_SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios_ollama"
+DEFAULT_PHASE6_SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios_ollama_phase6"
 SECRET_MARKERS = ("ollama_key", "OLLAMA_API_KEY")
 
 
@@ -394,6 +395,12 @@ def _run_ollama_user_turns(
 FAILURE_CATEGORIES = {
     "dummy_user_invalid_request",
     "dummy_user_underspecified",
+    "dummy_user_missing_value",
+    "dummy_user_missing_target",
+    "graph_context_missing",
+    "grc_agent_should_have_resolved_samp_rate",
+    "grc_agent_correct_clarification",
+    "judge_too_strict",
     "grc_agent_no_tool_call",
     "grc_agent_wrong_tool",
     "grc_agent_missing_arg",
@@ -440,8 +447,10 @@ def classify_failure(artifact: dict[str, Any]) -> str:
         if isinstance(turn, dict)
         for tool in turn.get("executed_tools", [])
     ]
-    if isinstance(expected, dict) and _dummy_user_underspecified(artifact, expected):
-        return "dummy_user_underspecified"
+    if isinstance(expected, dict):
+        set_param_label = _classify_set_param_prompt_failure(artifact, expected)
+        if set_param_label:
+            return set_param_label
     if expected_tools and not actual_tools:
         return "grc_agent_no_tool_call"
     if expected_tools and not set(actual_tools).issubset(expected_tools):
@@ -457,19 +466,40 @@ def classify_failure(artifact: dict[str, Any]) -> str:
     return "judge_bug"
 
 
-def _dummy_user_underspecified(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
+def _classify_set_param_prompt_failure(
+    artifact: dict[str, Any],
+    scenario: dict[str, Any],
+) -> str:
     expected_state = scenario.get("expected_final_state")
     if not isinstance(expected_state, dict):
-        return False
+        return ""
     variables = expected_state.get("variables")
     if not isinstance(variables, dict) or not variables:
-        return False
+        return ""
     prompt_text = "\n".join(
         str(turn.get("user_prompt", ""))
         for turn in artifact.get("turns", [])
         if isinstance(turn, dict)
     ).lower()
-    return not any(str(name).lower() in prompt_text for name in variables)
+    expected_values = {str(value).lower() for value in variables.values()}
+    value_present = any(value in prompt_text for value in expected_values)
+    target_present = any(str(name).lower() in prompt_text for name in variables)
+    sample_rate_present = "sample rate" in prompt_text
+    graph_variables = artifact.get("initial_graph_snapshot", {}).get("variable_values")
+    graph_has_samp_rate = isinstance(graph_variables, dict) and "samp_rate" in graph_variables
+    graph_delta = artifact.get("graph_delta")
+    wrong_mutation = isinstance(graph_delta, dict) and (
+        graph_delta.get("variables") or graph_delta.get("block_params")
+    )
+    if not value_present:
+        return "dummy_user_missing_value"
+    if not graph_has_samp_rate:
+        return "graph_context_missing"
+    if sample_rate_present and value_present and graph_has_samp_rate and not target_present:
+        return "grc_agent_should_have_resolved_samp_rate"
+    if not target_present and not wrong_mutation:
+        return "dummy_user_missing_target"
+    return ""
 
 
 def _artifact_has_secret_marker(artifact: dict[str, Any]) -> bool:
@@ -708,6 +738,7 @@ def run_repeated_ollama_config(
     n_runs_override: int | None = None,
     seed_override: int | None = None,
     max_turns_override: int | None = None,
+    scenario_dir: Path = DEFAULT_OLLAMA_SCENARIO_DIR,
 ) -> dict[str, Any]:
     config = load_json(config_path)
     provider = provider_override or str(config.get("provider", "cloud"))
@@ -736,7 +767,7 @@ def run_repeated_ollama_config(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[dict[str, Any]] = []
     for scenario_id in scenarios:
-        scenario_path = DEFAULT_OLLAMA_SCENARIO_DIR / f"{scenario_id}.json"
+        scenario_path = scenario_dir / f"{scenario_id}.json"
         if not scenario_path.exists():
             raise FileNotFoundError(scenario_path)
         for run_index in range(1, n_runs + 1):
@@ -761,6 +792,7 @@ def run_repeated_ollama_config(
         artifacts,
         config={
             "config_path": str(config_path),
+            "scenario_dir": str(scenario_dir),
             "model": model,
             "provider": provider,
             "temperature": temperature,
@@ -886,6 +918,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--artifact-dir", type=Path)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--scenario-dir", type=Path, default=DEFAULT_OLLAMA_SCENARIO_DIR)
     parser.add_argument("--n-runs", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--temperature", type=float)
@@ -918,6 +951,7 @@ def main(argv: list[str] | None = None) -> int:
             n_runs_override=args.n_runs,
             seed_override=args.seed,
             max_turns_override=args.max_turns,
+            scenario_dir=args.scenario_dir,
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if report["overall_pass_rate"] == 1.0 else 1

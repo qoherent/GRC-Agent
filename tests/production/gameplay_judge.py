@@ -187,6 +187,9 @@ def _clarification_quality_pass(artifact: dict[str, Any], scenario: dict[str, An
     expected = scenario.get("expected_clarification")
     if not isinstance(expected, dict) or not expected.get("required"):
         return True
+    fragments = [str(item).lower() for item in expected.get("assistant_text_contains", [])]
+    if fragments and _assistant_text_contains_all(artifact, fragments):
+        return True
     for result in _tool_result_payloads(artifact):
         if isinstance(result.get("clarification_options"), list):
             return True

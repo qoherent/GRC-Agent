@@ -27,7 +27,9 @@ PRODUCTION_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = PRODUCTION_DIR / "corpus_manifest.json"
 SCENARIO_DIR = PRODUCTION_DIR / "scenarios"
 OLLAMA_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama"
+PHASE6_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama_phase6"
 OLLAMA_GAMEPLAY_CONFIG = PRODUCTION_DIR / "ollama_gameplay_config.json"
+OLLAMA_PHASE6_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase6_config.json"
 EXPECTED_SCENARIOS = {
     "add_variable",
     "clarification_required",
@@ -49,6 +51,11 @@ EXPECTED_OLLAMA_SCENARIOS = {
     "natural_read_only_explain",
     "natural_save_load",
     "natural_set_param",
+}
+EXPECTED_PHASE6_SCENARIOS = {
+    "set_param_exact_actionable",
+    "set_param_natural_actionable",
+    "set_param_underspecified",
 }
 
 
@@ -138,6 +145,34 @@ class ProductionHarnessTests(unittest.TestCase):
         self.assertEqual(config["temperature"], 0.0)
         self.assertEqual(config["n_runs"], 5)
         self.assertEqual(set(config["scenarios"]), EXPECTED_OLLAMA_SCENARIOS)
+
+    def test_phase6_scenarios_and_config_validate(self) -> None:
+        scenario_ids = set()
+        manifest_ids = {
+            entry["id"]
+            for entry in json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["entries"]
+        }
+        for path in sorted(PHASE6_SCENARIO_DIR.glob("*.json")):
+            scenario = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                scenario["schema_version"],
+                "2026-05-15.phase6-ollama-scenario-v1",
+            )
+            self.assertEqual(scenario["user_mode"], "ollama_user")
+            self.assertNotIn(scenario["scenario_id"], scenario_ids)
+            scenario_ids.add(scenario["scenario_id"])
+            self.assertIn(scenario["graph_id"], manifest_ids)
+            self.assertIsInstance(scenario.get("scenario_goal"), str)
+            self.assertIsInstance(scenario.get("allowed_user_behavior"), list)
+            self.assertIsInstance(scenario.get("forbidden_user_behavior"), list)
+        self.assertEqual(scenario_ids, EXPECTED_PHASE6_SCENARIOS)
+        config = json.loads(OLLAMA_PHASE6_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["schema_version"],
+            "2026-05-15.phase6-ollama-gameplay-config-v1",
+        )
+        self.assertEqual(set(config["scenarios"]), EXPECTED_PHASE6_SCENARIOS)
+        self.assertEqual(config["n_runs"], 5)
 
     def test_runner_copies_graph_and_never_mutates_source(self) -> None:
         source = ROOT / "tests/data/random_bit_generator.grc"
@@ -420,6 +455,33 @@ class ProductionHarnessTests(unittest.TestCase):
             self.assertNotIn("OLLAMA_API_KEY", text)
             self.assertNotIn("ollama_key", text)
 
+    def test_repeated_ollama_config_accepts_custom_scenario_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "2026-05-15.phase6-ollama-gameplay-config-v1",
+                        "model": "gemma3:4b",
+                        "provider": "cloud",
+                        "temperature": 0.0,
+                        "seed": 200,
+                        "n_runs": 1,
+                        "max_turns": 1,
+                        "scenarios": ["set_param_underspecified"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = run_repeated_ollama_config(
+                config_path=config_path,
+                artifact_dir=Path(tmpdir) / "artifacts",
+                enable_ollama_network=False,
+                scenario_dir=PHASE6_SCENARIO_DIR,
+            )
+            self.assertEqual(report["total_runs"], 1)
+            self.assertEqual(report["config"]["scenario_dir"], str(PHASE6_SCENARIO_DIR))
+
     def test_aggregate_report_schema_and_failure_categories(self) -> None:
         passing = _minimal_artifact(requested=[], executed=[], before_hash="a", after_hash="a")
         passing["judge"] = judge_artifact(passing)
@@ -476,10 +538,27 @@ class ProductionHarnessTests(unittest.TestCase):
         artifact["scenario"]["expected_final_state"] = {
             "variables": {"samp_rate": "48000"}
         }
+        artifact["initial_graph_snapshot"] = {"variable_values": {"samp_rate": "32000"}}
         artifact["turns"][0]["user_prompt"] = "Please set the sample rate to 48000."
         artifact["dummy_user"] = {"mode": "ollama_user", "turns": [{"turn_index": 0}]}
         artifact["judge"] = judge_artifact(artifact)
-        self.assertEqual(classify_failure(artifact), "dummy_user_underspecified")
+        self.assertEqual(
+            classify_failure(artifact),
+            "grc_agent_should_have_resolved_samp_rate",
+        )
+
+    def test_missing_value_failure_is_attributed(self) -> None:
+        artifact = _minimal_artifact(requested=[], executed=[], before_hash="a", after_hash="a")
+        artifact["scenario"]["user_mode"] = "ollama_user"
+        artifact["scenario"]["allowed_capabilities"] = ["R1_SET_PARAM_ONLY"]
+        artifact["scenario"]["expected_final_state"] = {
+            "variables": {"samp_rate": "48000"}
+        }
+        artifact["initial_graph_snapshot"] = {"variable_values": {"samp_rate": "32000"}}
+        artifact["turns"][0]["user_prompt"] = "Change the sample rate."
+        artifact["dummy_user"] = {"mode": "ollama_user", "turns": [{"turn_index": 0}]}
+        artifact["judge"] = judge_artifact(artifact)
+        self.assertEqual(classify_failure(artifact), "dummy_user_missing_value")
 
     def test_infra_failure_does_not_count_as_grc_agent_failure(self) -> None:
         artifact = _minimal_artifact(requested=[], executed=[], before_hash="a", after_hash="a")
