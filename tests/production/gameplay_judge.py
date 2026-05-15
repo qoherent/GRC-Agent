@@ -28,6 +28,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
         "graph_delta_pass": _graph_delta_pass(artifact, expected),
         "validation_pass": _validation_pass(artifact, expected),
         "clarification_quality_pass": _clarification_quality_pass(artifact, expected),
+        "refusal_pass": _refusal_pass(artifact, expected),
         "save_load_safety_pass": _save_load_safety_pass(artifact, expected, forbidden_events),
         "forbidden_events_count": len(forbidden_events),
         "final_state_pass": _final_state_pass(artifact, expected),
@@ -40,6 +41,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
             "graph_delta_pass",
             "validation_pass",
             "clarification_quality_pass",
+            "refusal_pass",
             "save_load_safety_pass",
             "final_state_pass",
         )
@@ -125,6 +127,9 @@ def _graph_delta_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> boo
         return False
     if expected.get("no_content_change") is True:
         return _content_delta_empty(actual)
+    exact = expected.get("exact")
+    if isinstance(exact, dict) and not _partial_dict_match(actual, exact):
+        return False
     must_include = expected.get("must_include")
     if isinstance(must_include, dict):
         return _partial_dict_match(actual, must_include)
@@ -143,10 +148,43 @@ def _validation_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool
 
 def _clarification_quality_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
     expected = scenario.get("expected_clarification")
-    if not expected:
+    if not isinstance(expected, dict) or not expected.get("required"):
         return True
-    conversation = artifact.get("conversation")
-    return isinstance(conversation, list) and bool(conversation)
+    for result in _tool_result_payloads(artifact):
+        if isinstance(result.get("clarification_options"), list):
+            return True
+        if result.get("error_type") in {
+            "ambiguous_connection",
+            "ambiguous_target",
+            "clarification_required",
+        }:
+            return True
+    return False
+
+
+def _refusal_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
+    expected = scenario.get("expected_refusal")
+    if not isinstance(expected, dict) or not expected.get("required"):
+        return True
+    if expected.get("no_content_change") is True:
+        actual = artifact.get("graph_delta")
+        if not isinstance(actual, dict) or not _content_delta_empty(actual):
+            return False
+    fragments = [str(item).lower() for item in expected.get("assistant_text_contains", [])]
+    if fragments and not _assistant_text_contains_all(artifact, fragments):
+        return False
+    error_types = {str(item) for item in expected.get("error_types", [])}
+    if error_types:
+        actual_error_types = {
+            str(result.get("error_type"))
+            for result in _tool_result_payloads(artifact)
+            if result.get("error_type") is not None
+        }
+        if not error_types & actual_error_types:
+            return False
+    if not fragments and not error_types:
+        return any(result.get("ok") is False for result in _tool_result_payloads(artifact))
+    return True
 
 
 def _save_load_safety_pass(
@@ -188,6 +226,20 @@ def _final_state_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> boo
         for key, value in variables.items():
             if str(actual_vars.get(key)) != str(value):
                 return False
+    blocks = expected.get("blocks")
+    if isinstance(blocks, dict):
+        names = set(_string_list(snapshot.get("block_names")))
+        if any(name not in names for name in _string_list(blocks.get("present"))):
+            return False
+        if any(name in names for name in _string_list(blocks.get("absent"))):
+            return False
+    connections = expected.get("connections")
+    if isinstance(connections, dict):
+        ids = set(_string_list(snapshot.get("connection_ids")))
+        if any(item not in ids for item in _string_list(connections.get("present"))):
+            return False
+        if any(item in ids for item in _string_list(connections.get("absent"))):
+            return False
     return True
 
 
@@ -308,6 +360,40 @@ def _partial_dict_match(actual: Any, expected: Any) -> bool:
                 return False
         return True
     return str(actual) == str(expected)
+
+
+def _tool_result_payloads(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    turns = artifact.get("turns")
+    if not isinstance(turns, list):
+        return payloads
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        for call in turn.get("executed_tool_calls_raw", []):
+            args = _call_arguments(call)
+            if isinstance(args, dict):
+                payloads.append(args)
+    return payloads
+
+
+def _assistant_text_contains_all(artifact: dict[str, Any], fragments: list[str]) -> bool:
+    texts: list[str] = []
+    conversation = artifact.get("conversation")
+    if isinstance(conversation, list):
+        for entry in conversation:
+            if isinstance(entry, dict) and entry.get("role") == "assistant":
+                content = entry.get("content")
+                if isinstance(content, str):
+                    texts.append(content.lower())
+    joined = "\n".join(texts)
+    return all(fragment in joined for fragment in fragments)
+
+
+def _string_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item) for item in value)
 
 
 def main(argv: list[str] | None = None) -> int:

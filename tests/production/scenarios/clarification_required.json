@@ -1,0 +1,33 @@
+{
+  "schema_version": "2026-05-14.phase2-scenario-v1",
+  "scenario_id": "clarification_required",
+  "graph_id": "fixture_rewire_stream_ambiguous",
+  "initial_user_prompt": "Disconnect one input to qtgui_time_sink_x_0.",
+  "scripted_user_turns": [
+    {
+      "assistant_actions": [
+        {
+          "tool": "change_graph",
+          "kwargs": {
+            "dry_run": false,
+            "user_goal": "Disconnect one input to qtgui_time_sink_x_0.",
+            "operation_kind": "disconnect",
+            "dst_block": "qtgui_time_sink_x_0"
+          }
+        },
+        {
+          "text": "There are multiple matching sink inputs. I need the exact connection before changing the copied graph."
+        }
+      ]
+    }
+  ],
+  "max_turns": 1,
+  "allowed_capabilities": ["Tier5_ADVERSARIAL"],
+  "expected_final_state": {"dirty": false},
+  "expected_graph_delta": {"no_content_change": true},
+  "expected_validation_status": "any",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "expected_clarification": {"required": true},
+  "expected_refusal": {"required": true, "no_content_change": true, "error_types": ["ambiguous_connection"]},
+  "forbidden_events": ["raw_legacy_tool_call", "raw_yaml_mutation", "preview_mutation", "failed_validation_commit", "unsafe_save", "unsafe_load", "original_graph_mutation"]
+}

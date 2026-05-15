@@ -1,0 +1,34 @@
+{
+  "schema_version": "2026-05-14.phase2-scenario-v1",
+  "scenario_id": "disconnect_exact",
+  "graph_id": "fixture_random_bit_generator_dual_sink_sink1_disabled",
+  "initial_user_prompt": "Disconnect the exact secondary sink connection on the copied graph.",
+  "scripted_user_turns": [
+    {
+      "assistant_actions": [
+        {
+          "tool": "change_graph",
+          "kwargs": {
+            "dry_run": false,
+            "user_goal": "Disconnect the secondary sink input.",
+            "operation_kind": "disconnect",
+            "connection_id": "blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"
+          }
+        },
+        {
+          "text": "The exact copied-graph connection was removed and validation passed."
+        }
+      ]
+    }
+  ],
+  "max_turns": 1,
+  "allowed_capabilities": ["R2_DISCONNECT"],
+  "expected_final_state": {
+    "dirty": true,
+    "connections": {"absent": ["blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"]}
+  },
+  "expected_graph_delta": {"must_include": {"removed_connections": ["blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"]}},
+  "expected_validation_status": "valid",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "forbidden_events": ["raw_legacy_tool_call", "raw_yaml_mutation", "preview_mutation", "failed_validation_commit", "unsafe_save", "unsafe_load", "original_graph_mutation"]
+}

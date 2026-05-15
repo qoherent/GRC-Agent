@@ -1,0 +1,47 @@
+{
+  "schema_version": "2026-05-14.phase2-scenario-v1",
+  "scenario_id": "rewire_exact",
+  "graph_id": "fixture_random_bit_generator",
+  "initial_user_prompt": "Rewire the exact throttle-to-converter connection on the copied graph.",
+  "scripted_user_turns": [
+    {
+      "assistant_actions": [
+        {
+          "tool": "change_graph",
+          "kwargs": {
+            "dry_run": false,
+            "user_goal": "Rewire exact connection.",
+            "operation_kind": "rewire",
+            "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
+            "state_revision": 1,
+            "new_src_block": "analog_random_source_x_0",
+            "new_src_port": 0,
+            "new_dst_block": "blocks_char_to_float_0",
+            "new_dst_port": 0
+          }
+        },
+        {
+          "text": "The copied graph was rewired with one exact connection removed and one added."
+        }
+      ]
+    }
+  ],
+  "max_turns": 1,
+  "allowed_capabilities": ["R3_REWIRE"],
+  "expected_final_state": {
+    "dirty": true,
+    "connections": {
+      "present": ["analog_random_source_x_0:0->blocks_char_to_float_0:0"],
+      "absent": ["blocks_throttle2_0:0->blocks_char_to_float_0:0"]
+    }
+  },
+  "expected_graph_delta": {
+    "must_include": {
+      "added_connections": ["analog_random_source_x_0:0->blocks_char_to_float_0:0"],
+      "removed_connections": ["blocks_throttle2_0:0->blocks_char_to_float_0:0"]
+    }
+  },
+  "expected_validation_status": "valid",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "forbidden_events": ["raw_legacy_tool_call", "raw_yaml_mutation", "preview_mutation", "failed_validation_commit", "unsafe_save", "unsafe_load", "original_graph_mutation"]
+}

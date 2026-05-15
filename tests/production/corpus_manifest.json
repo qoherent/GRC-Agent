@@ -30,6 +30,34 @@
       "portability_notes": "Repo-local fixture; useful for variable accounting without installed examples."
     },
     {
+      "id": "fixture_random_bit_generator_dual_sink",
+      "source_path": "tests/data/random_bit_generator_dual_sink.grc",
+      "copied_work_path_policy": "copy_to_temp_before_load_or_edit",
+      "graph_type_tags": ["fixture", "stream", "dual_sink", "set_state"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 6,
+      "connection_count": 4,
+      "stream_message_tags": {"stream_connections": 4, "message_connections": 0},
+      "variables_present": ["samp_rate"],
+      "safe_candidate_operations": ["inspect_graph", "set_state:qtgui_time_sink_x_1"],
+      "expected_delta_categories": ["state_delta", "validation_status"],
+      "portability_notes": "Repo-local fixture; second sink allows disabling without invalidating the graph."
+    },
+    {
+      "id": "fixture_random_bit_generator_dual_sink_sink1_disabled",
+      "source_path": "tests/data/random_bit_generator_dual_sink_sink1_disabled.grc",
+      "copied_work_path_policy": "copy_to_temp_before_load_or_edit",
+      "graph_type_tags": ["fixture", "stream", "dual_sink", "disconnect"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 6,
+      "connection_count": 4,
+      "stream_message_tags": {"stream_connections": 4, "message_connections": 0},
+      "variables_present": ["samp_rate"],
+      "safe_candidate_operations": ["inspect_graph", "disconnect:blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"],
+      "expected_delta_categories": ["connection_delta", "validation_status"],
+      "portability_notes": "Repo-local fixture; disabled secondary sink lets exact disconnect validate."
+    },
+    {
       "id": "fixture_rewire_message_ambiguous",
       "source_path": "tests/data/rewire_message_ambiguous.grc",
       "copied_work_path_policy": "copy_to_temp_before_load_or_edit",
@@ -42,6 +70,20 @@
       "safe_candidate_operations": ["inspect_graph", "clarify_ambiguous_rewire", "exact_message_disconnect"],
       "expected_delta_categories": ["no_mutation", "message_connection_delta"],
       "portability_notes": "Repo-local fixture; does not depend on installed GNU Radio examples."
+    },
+    {
+      "id": "fixture_rewire_stream_ambiguous",
+      "source_path": "tests/data/rewire_stream_ambiguous.grc",
+      "copied_work_path_policy": "copy_to_temp_before_load_or_edit",
+      "graph_type_tags": ["fixture", "stream", "ambiguous_connection", "clarification"],
+      "gnu_radio_version": "3.10.9.2",
+      "block_count": 8,
+      "connection_count": 6,
+      "stream_message_tags": {"stream_connections": 6, "message_connections": 0},
+      "variables_present": ["samp_rate"],
+      "safe_candidate_operations": ["inspect_graph", "clarify_ambiguous_disconnect"],
+      "expected_delta_categories": ["no_mutation", "clarification"],
+      "portability_notes": "Repo-local fixture; two sink inputs support deterministic clarification-required checks."
     },
     {
       "id": "installed_audio_dial_tone",

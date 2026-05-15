@@ -1,0 +1,46 @@
+{
+  "schema_version": "2026-05-14.phase2-scenario-v1",
+  "scenario_id": "insert_block_on_connection",
+  "graph_id": "fixture_random_bit_generator",
+  "initial_user_prompt": "Insert a compatible throttle block on the exact source-to-throttle connection.",
+  "scripted_user_turns": [
+    {
+      "assistant_actions": [
+        {
+          "tool": "change_graph",
+          "kwargs": {
+            "dry_run": false,
+            "user_goal": "Insert a compatible block on this exact connection.",
+            "operation_kind": "insert_block",
+            "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
+            "block_id": "blocks_throttle2",
+            "instance_name": "blocks_throttle2_inserted",
+            "insert_params": {"type": "byte", "samples_per_second": "32000"}
+          }
+        },
+        {
+          "text": "A compatible block was inserted on the copied graph connection and validation passed."
+        }
+      ]
+    }
+  ],
+  "max_turns": 1,
+  "allowed_capabilities": ["R4A_INSERT_BLOCK_ON_CONNECTION"],
+  "expected_final_state": {
+    "dirty": true,
+    "blocks": {"present": ["blocks_throttle2_inserted"]},
+    "connections": {
+      "present": ["analog_random_source_x_0:0->blocks_throttle2_inserted:0", "blocks_throttle2_inserted:0->blocks_throttle2_0:0"],
+      "absent": ["analog_random_source_x_0:0->blocks_throttle2_0:0"]
+    }
+  },
+  "expected_graph_delta": {
+    "must_include": {
+      "added_blocks": ["blocks_throttle2_inserted"],
+      "removed_connections": ["analog_random_source_x_0:0->blocks_throttle2_0:0"]
+    }
+  },
+  "expected_validation_status": "valid",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "forbidden_events": ["raw_legacy_tool_call", "raw_yaml_mutation", "preview_mutation", "failed_validation_commit", "unsafe_save", "unsafe_load", "original_graph_mutation"]
+}

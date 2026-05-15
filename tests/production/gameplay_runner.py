@@ -79,6 +79,7 @@ def run_scenario(
         prompt = _render_templates(
             prompt_template,
             work_graph_path=work_graph_path,
+            source_path=source_path,
             save_path=save_path,
         )
         actions = turn_spec.get("assistant_actions") if isinstance(turn_spec, dict) else None
@@ -103,6 +104,7 @@ def run_scenario(
             kwargs = _render_templates(
                 action.get("kwargs", {}),
                 work_graph_path=work_graph_path,
+                source_path=source_path,
                 save_path=save_path,
             )
             if not tool_name or not isinstance(kwargs, dict):
@@ -135,15 +137,33 @@ def run_scenario(
         after = graph_snapshot(agent)
         requested = requested_tool_calls_since(agent.history, history_start)
         executed = executed_tool_calls_since(agent.history, history_start)
+        turn_delta = graph_delta(before, after)
         turns.append(
             {
                 "turn_index": index,
                 "user_prompt": prompt,
                 "requested_tool_calls_raw": requested,
+                "normalized_args": [
+                    {
+                        "name": call.get("name"),
+                        "arguments": call.get("arguments"),
+                    }
+                    for call in requested
+                ],
                 "executed_tool_calls_raw": executed,
+                "executed_tools": [call.get("name") for call in executed],
+                "tool_results": [
+                    {
+                        "name": call.get("name"),
+                        "result": call.get("arguments"),
+                    }
+                    for call in executed
+                ],
                 "graph_snapshot_before": before,
                 "graph_snapshot_after": after,
-                "graph_delta": graph_delta(before, after),
+                "graph_revision_before": before.get("state_revision"),
+                "graph_revision_after": after.get("state_revision"),
+                "graph_delta": turn_delta,
                 "validation_results": _validation_results(executed),
             }
         )
@@ -151,7 +171,7 @@ def run_scenario(
     final_snapshot = graph_snapshot(agent)
     source_after = _sha256_file(source_path)
     artifact = {
-        "schema_version": "2026-05-14.phase2-gameplay-artifact-v1",
+        "schema_version": "2026-05-14.phase3-gameplay-artifact-v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "scenario": scenario,
         "corpus_entry": corpus_entry,
@@ -175,8 +195,17 @@ def run_scenario(
             "after_sha256": source_after,
             "unchanged": source_before == source_after,
         },
+        "final_state_summary": {
+            "dirty": final_snapshot.get("dirty"),
+            "validation_status": final_snapshot.get("validation_status"),
+            "state_revision": final_snapshot.get("state_revision"),
+            "block_count": final_snapshot.get("block_count"),
+            "connection_count": final_snapshot.get("connection_count"),
+            "variables": final_snapshot.get("variable_values"),
+        },
     }
     artifact["judge"] = judge_artifact(artifact)
+    artifact["forbidden_events"] = artifact["judge"].get("forbidden_events", [])
     sanitized = _redact(artifact)
     artifact_text = json.dumps(sanitized, indent=2, sort_keys=True)
     for marker in SECRET_MARKERS:
@@ -227,20 +256,37 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _render_templates(value: Any, *, work_graph_path: Path, save_path: Path) -> Any:
+def _render_templates(
+    value: Any,
+    *,
+    work_graph_path: Path,
+    source_path: Path,
+    save_path: Path,
+) -> Any:
     if isinstance(value, str):
         return value.format(
             work_graph_path=str(work_graph_path),
+            source_path=str(source_path),
             save_path=str(save_path),
         )
     if isinstance(value, list):
         return [
-            _render_templates(item, work_graph_path=work_graph_path, save_path=save_path)
+            _render_templates(
+                item,
+                work_graph_path=work_graph_path,
+                source_path=source_path,
+                save_path=save_path,
+            )
             for item in value
         ]
     if isinstance(value, dict):
         return {
-            key: _render_templates(item, work_graph_path=work_graph_path, save_path=save_path)
+            key: _render_templates(
+                item,
+                work_graph_path=work_graph_path,
+                source_path=source_path,
+                save_path=save_path,
+            )
             for key, item in value.items()
         }
     return value
@@ -273,6 +319,13 @@ def _summary(artifact: dict[str, Any]) -> dict[str, Any]:
             if isinstance(turn, dict)
         ),
         "graph_delta": artifact.get("graph_delta"),
+        "mutation_count": sum(
+            1
+            for turn in artifact.get("turns", [])
+            if isinstance(turn, dict)
+            and turn.get("graph_snapshot_before", {}).get("raw_hash")
+            != turn.get("graph_snapshot_after", {}).get("raw_hash")
+        ),
         "validation_status": artifact.get("final_graph_snapshot", {}).get("validation_status"),
         "forbidden_events": judge.get("forbidden_events", []),
         "artifact_path": artifact.get("paths", {}).get("artifact_path"),

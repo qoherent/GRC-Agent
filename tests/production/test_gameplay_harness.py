@@ -14,6 +14,23 @@ ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = PRODUCTION_DIR / "corpus_manifest.json"
 SCENARIO_DIR = PRODUCTION_DIR / "scenarios"
+EXPECTED_SCENARIOS = {
+    "add_variable",
+    "clarification_required",
+    "disconnect_exact",
+    "failed_validation_rollback",
+    "insert_block_on_connection",
+    "internal_tool_name_refused",
+    "raw_yaml_refused",
+    "read_only_explain",
+    "remove_detached_block",
+    "rewire_exact",
+    "save_load_lifecycle",
+    "set_param_validate",
+    "set_state_toggle",
+    "unsafe_load_refused",
+    "unsafe_save_refused",
+}
 
 
 class ProductionHarnessTests(unittest.TestCase):
@@ -66,7 +83,7 @@ class ProductionHarnessTests(unittest.TestCase):
             self.assertIsInstance(scenario.get("forbidden_events"), list)
         self.assertEqual(
             scenario_ids,
-            {"read_only_explain", "set_param_validate", "save_load_lifecycle"},
+            EXPECTED_SCENARIOS,
         )
 
     def test_runner_copies_graph_and_never_mutates_source(self) -> None:
@@ -109,9 +126,38 @@ class ProductionHarnessTests(unittest.TestCase):
             self.assertIn(key, loaded)
         turn = loaded["turns"][0]
         self.assertIsInstance(turn["requested_tool_calls_raw"], list)
+        self.assertIsInstance(turn["normalized_args"], list)
         self.assertIsInstance(turn["executed_tool_calls_raw"], list)
+        self.assertIsInstance(turn["executed_tools"], list)
+        self.assertIsInstance(turn["tool_results"], list)
         self.assertIn("graph_snapshot_before", turn)
         self.assertIn("graph_snapshot_after", turn)
+        self.assertIn("graph_revision_before", turn)
+        self.assertIn("graph_revision_after", turn)
+        self.assertIn("forbidden_events", loaded)
+        self.assertIn("final_state_summary", loaded)
+
+    def test_all_scripted_scenarios_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for path in sorted(SCENARIO_DIR.glob("*.json")):
+                artifact_path = Path(tmpdir) / f"{path.stem}.json"
+                artifact = run_scenario(
+                    scenario_path=path,
+                    artifact_path=artifact_path,
+                )
+                self.assertTrue(
+                    artifact["judge"]["passed"],
+                    (path.name, artifact["judge"]),
+                )
+                self.assertTrue(
+                    artifact["source_integrity"]["unchanged"],
+                    path.name,
+                )
+                self.assertNotEqual(
+                    artifact["paths"]["source_path"],
+                    artifact["paths"]["work_graph_path"],
+                    path.name,
+                )
 
     def test_judge_detects_preview_mutation_if_injected(self) -> None:
         artifact = _minimal_artifact(
@@ -191,7 +237,7 @@ class ProductionHarnessTests(unittest.TestCase):
             self.assertNotIn("super-secret-test-value", text)
             self.assertNotIn("ollama_key", text)
             self.assertNotIn("OLLAMA_API_KEY", text)
-            self.assertIn("cloud_key_present", artifact["ollama_readiness"])
+        self.assertIn("cloud_key_present", artifact["ollama_readiness"])
 
 
 def _minimal_artifact(
