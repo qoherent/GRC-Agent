@@ -1,0 +1,14 @@
+{
+  "schema_version": "2026-05-15.phase5-ollama-gameplay-config-v1",
+  "model": "gemma3:4b",
+  "provider": "cloud",
+  "temperature": 0.0,
+  "seed": 4200,
+  "n_runs": 5,
+  "max_turns": 1,
+  "scenarios": [
+    "natural_read_only_explain",
+    "natural_set_param",
+    "natural_save_load"
+  ]
+}

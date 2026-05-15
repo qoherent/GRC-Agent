@@ -7,7 +7,13 @@ import tempfile
 import unittest
 
 from tests.production.gameplay_judge import judge_artifact
-from tests.production.gameplay_runner import run_scenario
+from tests.production.gameplay_runner import (
+    FAILURE_CATEGORIES,
+    aggregate_ollama_runs,
+    classify_failure,
+    run_repeated_ollama_config,
+    run_scenario,
+)
 from tests.production.ollama_readiness import prepare_ollama_cloud_environment
 from tests.production.ollama_user_client import (
     OllamaUserClient,
@@ -21,6 +27,7 @@ PRODUCTION_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = PRODUCTION_DIR / "corpus_manifest.json"
 SCENARIO_DIR = PRODUCTION_DIR / "scenarios"
 OLLAMA_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama"
+OLLAMA_GAMEPLAY_CONFIG = PRODUCTION_DIR / "ollama_gameplay_config.json"
 EXPECTED_SCENARIOS = {
     "add_variable",
     "clarification_required",
@@ -119,6 +126,18 @@ class ProductionHarnessTests(unittest.TestCase):
             self.assertIsInstance(scenario.get("forbidden_user_behavior"), list)
             self.assertGreaterEqual(int(scenario.get("max_user_turns", 0)), 1)
         self.assertEqual(scenario_ids, EXPECTED_OLLAMA_SCENARIOS)
+
+    def test_ollama_gameplay_config_validates(self) -> None:
+        config = json.loads(OLLAMA_GAMEPLAY_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["schema_version"],
+            "2026-05-15.phase5-ollama-gameplay-config-v1",
+        )
+        self.assertEqual(config["provider"], "cloud")
+        self.assertEqual(config["model"], "gemma3:4b")
+        self.assertEqual(config["temperature"], 0.0)
+        self.assertEqual(config["n_runs"], 5)
+        self.assertEqual(set(config["scenarios"]), EXPECTED_OLLAMA_SCENARIOS)
 
     def test_runner_copies_graph_and_never_mutates_source(self) -> None:
         source = ROOT / "tests/data/random_bit_generator.grc"
@@ -362,6 +381,120 @@ class ProductionHarnessTests(unittest.TestCase):
         self.assertIn("grc_agent_failure", artifact)
         self.assertIn("config", artifact["dummy_user"])
         self.assertIn("credential_present", artifact["dummy_user"]["config"])
+
+    def test_repeated_ollama_config_writes_named_artifacts_and_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "2026-05-15.phase5-ollama-gameplay-config-v1",
+                        "model": "gemma3:4b",
+                        "provider": "cloud",
+                        "temperature": 0.0,
+                        "seed": 100,
+                        "n_runs": 2,
+                        "max_turns": 1,
+                        "scenarios": ["natural_read_only_explain"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifact_dir = Path(tmpdir) / "artifacts"
+            report = run_repeated_ollama_config(
+                config_path=config_path,
+                artifact_dir=artifact_dir,
+                enable_ollama_network=False,
+            )
+            self.assertEqual(
+                report["schema_version"],
+                "2026-05-15.phase5-ollama-aggregate-v1",
+            )
+            self.assertEqual(report["total_runs"], 2)
+            self.assertTrue((artifact_dir / "natural_read_only_explain_run_01.json").exists())
+            self.assertTrue((artifact_dir / "natural_read_only_explain_run_02.json").exists())
+            self.assertTrue((artifact_dir / "aggregate_report.json").exists())
+            self.assertEqual(report["failure_categories"], {"infra_failure": 2})
+            text = (artifact_dir / "aggregate_report.json").read_text(encoding="utf-8")
+            self.assertNotIn("super-secret-test-value", text)
+            self.assertNotIn("OLLAMA_API_KEY", text)
+            self.assertNotIn("ollama_key", text)
+
+    def test_aggregate_report_schema_and_failure_categories(self) -> None:
+        passing = _minimal_artifact(requested=[], executed=[], before_hash="a", after_hash="a")
+        passing["judge"] = judge_artifact(passing)
+        passing["failure_category"] = classify_failure(passing)
+        forbidden = _minimal_artifact(
+            requested=[{"name": "apply_edit", "arguments": {}}],
+            executed=[],
+            before_hash="a",
+            after_hash="a",
+        )
+        forbidden["judge"] = judge_artifact(forbidden)
+        forbidden["failure_category"] = classify_failure(forbidden)
+        report = aggregate_ollama_runs(
+            [passing, forbidden],
+            config={"model": "test", "provider": "cloud"},
+            artifact_dir=Path("/tmp/grc_agent_test_artifacts"),
+        )
+        self.assertEqual(report["schema_version"], "2026-05-15.phase5-ollama-aggregate-v1")
+        self.assertEqual(report["total_runs"], 2)
+        self.assertIn("passed", report["failure_categories"])
+        self.assertIn("forbidden_event", report["failure_categories"])
+        self.assertEqual(report["raw_legacy_attempt_count"], 1)
+        self.assertIn(classify_failure(forbidden), FAILURE_CATEGORIES)
+
+    def test_forbidden_event_fails_run_and_is_attributed(self) -> None:
+        artifact = _minimal_artifact(
+            requested=[{"name": "apply_edit", "arguments": {}}],
+            executed=[],
+            before_hash="a",
+            after_hash="a",
+        )
+        artifact["judge"] = judge_artifact(artifact)
+        self.assertFalse(artifact["judge"]["passed"])
+        self.assertEqual(classify_failure(artifact), "forbidden_event")
+
+    def test_underspecified_dummy_user_failure_is_attributed(self) -> None:
+        artifact = _minimal_artifact(
+            requested=[{"name": "change_graph", "arguments": {"operation_kind": "set_param"}}],
+            executed=[
+                {
+                    "name": "change_graph",
+                    "arguments": {
+                        "ok": False,
+                        "error_type": "preflight_rejected",
+                        "operation_kind": "set_param",
+                    },
+                }
+            ],
+            before_hash="a",
+            after_hash="a",
+        )
+        artifact["scenario"]["user_mode"] = "ollama_user"
+        artifact["scenario"]["allowed_capabilities"] = ["R1_SET_PARAM_ONLY"]
+        artifact["scenario"]["expected_final_state"] = {
+            "variables": {"samp_rate": "48000"}
+        }
+        artifact["turns"][0]["user_prompt"] = "Please set the sample rate to 48000."
+        artifact["dummy_user"] = {"mode": "ollama_user", "turns": [{"turn_index": 0}]}
+        artifact["judge"] = judge_artifact(artifact)
+        self.assertEqual(classify_failure(artifact), "dummy_user_underspecified")
+
+    def test_infra_failure_does_not_count_as_grc_agent_failure(self) -> None:
+        artifact = _minimal_artifact(requested=[], executed=[], before_hash="a", after_hash="a")
+        artifact["infra_failure"] = {"source": "ollama_user", "error_type": "missing_key"}
+        artifact["grc_agent_failure"] = False
+        artifact["judge"] = judge_artifact(artifact)
+        self.assertFalse(artifact["judge"]["passed"])
+        self.assertFalse(artifact["grc_agent_failure"])
+        self.assertEqual(classify_failure(artifact), "infra_failure")
+
+    def test_deterministic_judge_remains_non_llm(self) -> None:
+        source = (PRODUCTION_DIR / "gameplay_judge.py").read_text(encoding="utf-8")
+        self.assertNotIn("OllamaUserClient", source)
+        self.assertNotIn("run_bounded_llama_turn", source)
+        self.assertNotIn("LlamaServerClient", source)
 
 
 def _minimal_artifact(

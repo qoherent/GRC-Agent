@@ -31,6 +31,7 @@ from tests.production.ollama_user_client import (
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = Path(__file__).resolve().parent / "corpus_manifest.json"
 DEFAULT_ARTIFACT_DIR = Path("/tmp/grc_agent_gameplay")
+DEFAULT_OLLAMA_SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios_ollama"
 SECRET_MARKERS = ("ollama_key", "OLLAMA_API_KEY")
 
 
@@ -48,8 +49,17 @@ def run_scenario(
     ollama_cloud_mode: bool = True,
     ollama_model: str | None = None,
     ollama_base_url: str | None = None,
+    ollama_temperature: float = 0.2,
+    ollama_seed: int | None = None,
+    max_turns_override: int | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     scenario = load_json(scenario_path)
+    if max_turns_override is not None:
+        scenario = dict(scenario)
+        scenario["max_turns"] = max_turns_override
+        if scenario.get("user_mode") == "ollama_user":
+            scenario["max_user_turns"] = max_turns_override
     manifest = load_json(manifest_path)
     corpus_entry = _corpus_entry(manifest, str(scenario["graph_id"]))
 
@@ -89,6 +99,8 @@ def run_scenario(
             cloud_mode=ollama_cloud_mode,
             model=ollama_model,
             base_url=ollama_base_url,
+            temperature=ollama_temperature,
+            seed=ollama_seed,
         )
     elif mode == "scripted_user":
         _run_scripted_turns(
@@ -109,6 +121,14 @@ def run_scenario(
     artifact = {
         "schema_version": "2026-05-14.phase4-gameplay-artifact-v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "run": {
+            "run_id": run_id,
+            "scenario_id": scenario.get("scenario_id"),
+            "provider": "cloud" if ollama_cloud_mode else "local",
+            "model": ollama_model,
+            "temperature": ollama_temperature,
+            "seed": ollama_seed,
+        },
         "scenario": scenario,
         "corpus_entry": corpus_entry,
         "paths": {
@@ -147,6 +167,7 @@ def run_scenario(
     }
     artifact["judge"] = judge_artifact(artifact)
     artifact["forbidden_events"] = artifact["judge"].get("forbidden_events", [])
+    artifact["failure_category"] = classify_failure(artifact)
     sanitized = _redact(artifact)
     artifact_text = json.dumps(sanitized, indent=2, sort_keys=True)
     for marker in SECRET_MARKERS:
@@ -250,10 +271,14 @@ def _run_ollama_user_turns(
     cloud_mode: bool,
     model: str | None,
     base_url: str | None,
+    temperature: float,
+    seed: int | None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     client = OllamaUserClient.from_environment(
         base_url=base_url,
         model=model,
+        temperature=temperature,
+        seed=seed,
         enabled=enable_network,
         cloud_mode=cloud_mode,
     )
@@ -364,6 +389,131 @@ def _run_ollama_user_turns(
                 "message": error_text,
             }
     return dummy_user, None
+
+
+FAILURE_CATEGORIES = {
+    "dummy_user_invalid_request",
+    "dummy_user_underspecified",
+    "grc_agent_no_tool_call",
+    "grc_agent_wrong_tool",
+    "grc_agent_missing_arg",
+    "runtime_refusal_safe",
+    "runtime_bug",
+    "judge_bug",
+    "infra_failure",
+    "timeout",
+    "secret_redaction_failure",
+    "forbidden_event",
+    "passed",
+}
+
+
+def classify_failure(artifact: dict[str, Any]) -> str:
+    """Assign one deterministic failure category for aggregate reporting."""
+    if _artifact_has_secret_marker(artifact):
+        return "secret_redaction_failure"
+    if artifact.get("infra_failure") is not None:
+        failure = artifact.get("infra_failure")
+        if isinstance(failure, dict) and failure.get("error_type") in {
+            "timeout",
+            "network_error",
+        }:
+            return "timeout"
+        return "infra_failure"
+    judge = artifact.get("judge")
+    if not isinstance(judge, dict):
+        return "judge_bug"
+    if judge.get("passed") is True:
+        return "passed"
+    if judge.get("forbidden_events"):
+        return "forbidden_event"
+    dimensions = judge.get("dimensions")
+    if not isinstance(dimensions, dict):
+        return "judge_bug"
+    if dimensions.get("natural_user_quality") is False:
+        return "dummy_user_invalid_request"
+    expected = artifact.get("scenario")
+    expected_tools = _expected_model_tools(expected if isinstance(expected, dict) else {})
+    actual_tools = [
+        str(tool)
+        for turn in artifact.get("turns", [])
+        if isinstance(turn, dict)
+        for tool in turn.get("executed_tools", [])
+    ]
+    if isinstance(expected, dict) and _dummy_user_underspecified(artifact, expected):
+        return "dummy_user_underspecified"
+    if expected_tools and not actual_tools:
+        return "grc_agent_no_tool_call"
+    if expected_tools and not set(actual_tools).issubset(expected_tools):
+        return "grc_agent_wrong_tool"
+    if _has_invalid_request_tool_result(artifact):
+        return "grc_agent_missing_arg"
+    if _has_safe_refusal(artifact):
+        return "runtime_refusal_safe"
+    if dimensions.get("graph_delta_pass") is False or dimensions.get("final_state_pass") is False:
+        return "dummy_user_underspecified"
+    if artifact.get("grc_agent_failure") is True:
+        return "runtime_bug"
+    return "judge_bug"
+
+
+def _dummy_user_underspecified(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
+    expected_state = scenario.get("expected_final_state")
+    if not isinstance(expected_state, dict):
+        return False
+    variables = expected_state.get("variables")
+    if not isinstance(variables, dict) or not variables:
+        return False
+    prompt_text = "\n".join(
+        str(turn.get("user_prompt", ""))
+        for turn in artifact.get("turns", [])
+        if isinstance(turn, dict)
+    ).lower()
+    return not any(str(name).lower() in prompt_text for name in variables)
+
+
+def _artifact_has_secret_marker(artifact: dict[str, Any]) -> bool:
+    text = json.dumps(artifact, sort_keys=True)
+    return any(marker in text for marker in SECRET_MARKERS)
+
+
+def _expected_model_tools(scenario: dict[str, Any]) -> set[str]:
+    capabilities = {
+        str(item) for item in scenario.get("allowed_capabilities", []) if isinstance(item, str)
+    }
+    if "R0_READ_ONLY" in capabilities:
+        return {"inspect_graph", "search_blocks", "ask_grc_docs"}
+    if "R1_SET_PARAM_ONLY" in capabilities:
+        return {"change_graph"}
+    if "R5_SAVE_LOAD" in capabilities:
+        return {"save_graph_explicit", "load_graph_explicit"}
+    if capabilities:
+        return {"change_graph"}
+    return set()
+
+
+def _has_invalid_request_tool_result(artifact: dict[str, Any]) -> bool:
+    for turn in artifact.get("turns", []):
+        if not isinstance(turn, dict):
+            continue
+        for call in turn.get("executed_tool_calls_raw", []):
+            args = call.get("arguments") if isinstance(call, dict) else None
+            if isinstance(args, dict) and args.get("error_type") == "invalid_request":
+                return True
+    return False
+
+
+def _has_safe_refusal(artifact: dict[str, Any]) -> bool:
+    if artifact.get("graph_delta") not in ({}, None):
+        return False
+    for turn in artifact.get("turns", []):
+        if not isinstance(turn, dict):
+            continue
+        for call in turn.get("executed_tool_calls_raw", []):
+            args = call.get("arguments") if isinstance(call, dict) else None
+            if isinstance(args, dict) and args.get("ok") is False:
+                return True
+    return False
 
 
 def _append_turn_trace(
@@ -542,15 +692,205 @@ def _summary(artifact: dict[str, Any]) -> dict[str, Any]:
         ),
         "validation_status": artifact.get("final_graph_snapshot", {}).get("validation_status"),
         "forbidden_events": judge.get("forbidden_events", []),
+        "failure_category": artifact.get("failure_category"),
         "artifact_path": artifact.get("paths", {}).get("artifact_path"),
+    }
+
+
+def run_repeated_ollama_config(
+    *,
+    config_path: Path,
+    artifact_dir: Path,
+    enable_ollama_network: bool,
+    provider_override: str | None = None,
+    model_override: str | None = None,
+    temperature_override: float | None = None,
+    n_runs_override: int | None = None,
+    seed_override: int | None = None,
+    max_turns_override: int | None = None,
+) -> dict[str, Any]:
+    config = load_json(config_path)
+    provider = provider_override or str(config.get("provider", "cloud"))
+    model = model_override or str(config.get("model", "gemma3:4b"))
+    temperature = (
+        float(temperature_override)
+        if temperature_override is not None
+        else float(config.get("temperature", 0.0))
+    )
+    n_runs = int(n_runs_override) if n_runs_override is not None else int(config.get("n_runs", 1))
+    seed = seed_override if seed_override is not None else config.get("seed")
+    base_seed = int(seed) if seed is not None else None
+    max_turns = (
+        int(max_turns_override)
+        if max_turns_override is not None
+        else config.get("max_turns")
+    )
+    scenarios = config.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        raise ValueError("config scenarios must be a non-empty list")
+    if n_runs < 1:
+        raise ValueError("n_runs must be >= 1")
+    if provider not in {"local", "cloud"}:
+        raise ValueError("provider must be local or cloud")
+
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: list[dict[str, Any]] = []
+    for scenario_id in scenarios:
+        scenario_path = DEFAULT_OLLAMA_SCENARIO_DIR / f"{scenario_id}.json"
+        if not scenario_path.exists():
+            raise FileNotFoundError(scenario_path)
+        for run_index in range(1, n_runs + 1):
+            run_seed = base_seed + run_index - 1 if base_seed is not None else None
+            run_id = f"{scenario_id}_run_{run_index:02d}"
+            artifact_path = artifact_dir / f"{run_id}.json"
+            artifacts.append(
+                run_scenario(
+                    scenario_path=scenario_path,
+                    artifact_path=artifact_path,
+                    enable_ollama_network=enable_ollama_network,
+                    ollama_cloud_mode=provider == "cloud",
+                    ollama_model=model,
+                    ollama_temperature=temperature,
+                    ollama_seed=run_seed,
+                    max_turns_override=int(max_turns) if max_turns is not None else None,
+                    run_id=run_id,
+                )
+            )
+
+    report = aggregate_ollama_runs(
+        artifacts,
+        config={
+            "config_path": str(config_path),
+            "model": model,
+            "provider": provider,
+            "temperature": temperature,
+            "n_runs": n_runs,
+            "seed": base_seed,
+            "max_turns": max_turns,
+            "scenarios": [str(item) for item in scenarios],
+            "network_enabled": bool(enable_ollama_network),
+        },
+        artifact_dir=artifact_dir,
+    )
+    report_path = artifact_dir / "aggregate_report.json"
+    report_text = json.dumps(_redact(report), indent=2, sort_keys=True)
+    for marker in SECRET_MARKERS:
+        if marker in report_text:
+            raise RuntimeError(f"secret marker leaked into aggregate report: {marker}")
+    report_path.write_text(report_text + "\n", encoding="utf-8")
+    return report
+
+
+def aggregate_ollama_runs(
+    artifacts: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    scenarios: dict[str, dict[str, Any]] = {}
+    failures: dict[str, int] = {}
+    total_turns = 0
+    total_tool_calls = 0
+    total_latency = 0
+    latency_count = 0
+    raw_legacy_attempts = 0
+    failed_validation_commits = 0
+    forbidden_event_count = 0
+    runtime_safety_passes = 0
+    model_contract_passes = 0
+
+    for artifact in artifacts:
+        scenario_id = str(artifact.get("scenario", {}).get("scenario_id", "unknown"))
+        summary = scenarios.setdefault(
+            scenario_id,
+            {
+                "runs": 0,
+                "passes": 0,
+                "failures": 0,
+                "pass_rate": 0.0,
+                "artifact_paths": [],
+            },
+        )
+        summary["runs"] += 1
+        judge = artifact.get("judge") if isinstance(artifact.get("judge"), dict) else {}
+        if judge.get("passed") is True:
+            summary["passes"] += 1
+        else:
+            summary["failures"] += 1
+        paths = artifact.get("paths") if isinstance(artifact.get("paths"), dict) else {}
+        summary["artifact_paths"].append(paths.get("artifact_path"))
+        category = str(artifact.get("failure_category") or "judge_bug")
+        failures[category] = failures.get(category, 0) + 1
+        dimensions = judge.get("dimensions") if isinstance(judge.get("dimensions"), dict) else {}
+        runtime_safety_passes += int(dimensions.get("runtime_safety_pass") is True)
+        model_contract_passes += int(dimensions.get("model_contract_pass") is True)
+        for event in judge.get("forbidden_events", []):
+            if not isinstance(event, dict):
+                continue
+            forbidden_event_count += 1
+            if event.get("event") == "raw_legacy_tool_call":
+                raw_legacy_attempts += 1
+            if event.get("event") == "failed_validation_commit":
+                failed_validation_commits += 1
+        turns = artifact.get("turns") if isinstance(artifact.get("turns"), list) else []
+        total_turns += len(turns)
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            calls = turn.get("requested_tool_calls_raw")
+            if isinstance(calls, list):
+                total_tool_calls += len(calls)
+        dummy = artifact.get("dummy_user") if isinstance(artifact.get("dummy_user"), dict) else {}
+        for turn in dummy.get("turns", []) if isinstance(dummy.get("turns"), list) else []:
+            if isinstance(turn, dict) and isinstance(turn.get("latency_ms"), int):
+                total_latency += int(turn["latency_ms"])
+                latency_count += 1
+
+    total_runs = len(artifacts)
+    for summary in scenarios.values():
+        summary["pass_rate"] = (
+            summary["passes"] / summary["runs"] if summary["runs"] else 0.0
+        )
+    return {
+        "schema_version": "2026-05-15.phase5-ollama-aggregate-v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config": config,
+        "total_runs": total_runs,
+        "overall_pass_rate": (
+            sum(1 for artifact in artifacts if artifact.get("judge", {}).get("passed") is True)
+            / total_runs
+            if total_runs
+            else 0.0
+        ),
+        "scenarios": scenarios,
+        "failure_categories": failures,
+        "runtime_safety_rate": runtime_safety_passes / total_runs if total_runs else 0.0,
+        "model_contract_rate": model_contract_passes / total_runs if total_runs else 0.0,
+        "forbidden_event_count": forbidden_event_count,
+        "raw_legacy_attempt_count": raw_legacy_attempts,
+        "failed_validation_commit_count": failed_validation_commits,
+        "average_turns": total_turns / total_runs if total_runs else 0.0,
+        "average_tool_calls": total_tool_calls / total_runs if total_runs else 0.0,
+        "average_dummy_user_latency_ms": (
+            total_latency / latency_count if latency_count else None
+        ),
+        "artifact_dir": str(artifact_dir),
+        "aggregate_path": str(artifact_dir / "aggregate_report.json"),
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", type=Path, required=True)
+    parser.add_argument("--scenario", type=Path)
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--artifact-dir", type=Path)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--n-runs", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--max-turns", type=int)
+    parser.add_argument("--provider", choices=("local", "cloud"))
     parser.add_argument(
         "--enable-ollama-network",
         action="store_true",
@@ -562,16 +902,85 @@ def main(argv: list[str] | None = None) -> int:
         help="Use local Ollama API mode for dummy-user generation.",
     )
     parser.add_argument("--ollama-model")
+    parser.add_argument("--model", dest="model")
     parser.add_argument("--ollama-base-url")
     args = parser.parse_args(argv)
+    model = args.model or args.ollama_model
+    if args.config is not None:
+        artifact_dir = args.artifact_dir or DEFAULT_ARTIFACT_DIR
+        report = run_repeated_ollama_config(
+            config_path=args.config,
+            artifact_dir=artifact_dir,
+            enable_ollama_network=bool(args.enable_ollama_network),
+            provider_override=args.provider,
+            model_override=model,
+            temperature_override=args.temperature,
+            n_runs_override=args.n_runs,
+            seed_override=args.seed,
+            max_turns_override=args.max_turns,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["overall_pass_rate"] == 1.0 else 1
+    if args.scenario is None:
+        parser.error("--scenario is required unless --config is provided")
+    n_runs = int(args.n_runs or 1)
+    if n_runs < 1:
+        parser.error("--n-runs must be >= 1")
+    if n_runs > 1:
+        artifact_dir = args.artifact_dir or DEFAULT_ARTIFACT_DIR
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifacts = []
+        scenario_id = load_json(args.scenario).get("scenario_id", args.scenario.stem)
+        for run_index in range(1, n_runs + 1):
+            run_seed = args.seed + run_index - 1 if args.seed is not None else None
+            run_id = f"{scenario_id}_run_{run_index:02d}"
+            artifacts.append(
+                run_scenario(
+                    scenario_path=args.scenario,
+                    artifact_path=artifact_dir / f"{run_id}.json",
+                    manifest_path=args.manifest,
+                    enable_ollama_network=bool(args.enable_ollama_network),
+                    ollama_cloud_mode=(args.provider or "cloud") == "cloud",
+                    ollama_model=model,
+                    ollama_base_url=args.ollama_base_url,
+                    ollama_temperature=(
+                        args.temperature if args.temperature is not None else 0.2
+                    ),
+                    ollama_seed=run_seed,
+                    max_turns_override=args.max_turns,
+                    run_id=run_id,
+                )
+            )
+        report = aggregate_ollama_runs(
+            artifacts,
+            config={
+                "model": model,
+                "provider": args.provider or "cloud",
+                "temperature": args.temperature if args.temperature is not None else 0.2,
+                "n_runs": n_runs,
+                "seed": args.seed,
+                "max_turns": args.max_turns,
+                "scenarios": [str(scenario_id)],
+                "network_enabled": bool(args.enable_ollama_network),
+            },
+            artifact_dir=artifact_dir,
+        )
+        report_path = artifact_dir / "aggregate_report.json"
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["overall_pass_rate"] == 1.0 else 1
     artifact = run_scenario(
         scenario_path=args.scenario,
         artifact_path=args.artifact,
         manifest_path=args.manifest,
         enable_ollama_network=bool(args.enable_ollama_network),
-        ollama_cloud_mode=not bool(args.ollama_local),
-        ollama_model=args.ollama_model,
+        ollama_cloud_mode=(args.provider or ("local" if args.ollama_local else "cloud"))
+        == "cloud",
+        ollama_model=model,
         ollama_base_url=args.ollama_base_url,
+        ollama_temperature=args.temperature if args.temperature is not None else 0.2,
+        ollama_seed=args.seed,
+        max_turns_override=args.max_turns,
     )
     summary = _summary(artifact)
     print(json.dumps(summary, indent=2, sort_keys=True))

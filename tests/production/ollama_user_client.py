@@ -40,6 +40,7 @@ class OllamaUserClientConfig:
     timeout: float = 20.0
     max_tokens: int = 96
     temperature: float = 0.2
+    seed: int | None = None
     enabled: bool = False
     cloud_mode: bool = True
 
@@ -74,6 +75,7 @@ class OllamaUserClient:
         timeout: float = 20.0,
         max_tokens: int = 96,
         temperature: float = 0.2,
+        seed: int | None = None,
         enabled: bool = False,
         cloud_mode: bool = True,
     ) -> "OllamaUserClient":
@@ -88,6 +90,7 @@ class OllamaUserClient:
             timeout=float(timeout),
             max_tokens=int(max_tokens),
             temperature=float(temperature),
+            seed=seed,
             enabled=bool(enabled),
             cloud_mode=bool(cloud_mode),
         )
@@ -104,6 +107,7 @@ class OllamaUserClient:
             "timeout": self.config.timeout,
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
+            "seed": self.config.seed,
             "enabled": self.config.enabled,
             "cloud_mode": self.config.cloud_mode,
             "credential_present": bool(self._api_key),
@@ -151,6 +155,8 @@ class OllamaUserClient:
                 "num_predict": self.config.max_tokens,
             },
         }
+        if self.config.seed is not None:
+            payload["options"]["seed"] = self.config.seed
         started = time.monotonic()
         response, latency = self._request_json("POST", "/generate", payload=payload)
         text = _extract_generate_text(response)
