@@ -17,7 +17,20 @@ Evidence bundle for the current MVP wrapper runtime. This file is the concise tr
 | R5_SAVE_LOAD | Beta-validated | Local dashboard n=3 passes | Explicit lifecycle wrappers only; not release-validated |
 | R7_EXACT_EXTERNAL | Diagnostic-clean | External exact dashboard n=3 passes | Diagnostic, not release-gating |
 | Tier5_ADVERSARIAL | Diagnostic-clean | Adversarial dashboard n=3 passes | Diagnostic, not release-gating |
-| R7_NATURAL_EXTERNAL | Diagnostic-partial | Natural external dashboard n=3 is tracked as diagnostic evidence | Natural-language ergonomics remains incomplete |
+| R7_NATURAL_EXTERNAL | Diagnostic-clean | Latest natural external dashboard n=3 passes | Diagnostic, not release-gating |
+
+## Phase 7 Alias Safety Note
+
+Phase 7 added one deterministic graph-local alias resolver for `change_graph`
+`operation_kind="set_param"` only. It resolves sample-rate wording
+(`sample rate`, `sample_rate`, `samp rate`) to the existing variable target
+`samp_rate.value` only when the active graph has a unique compatible variable
+named `samp_rate` and the user supplied an explicit value.
+
+This is not broad natural-language resolution. It does not use docs/RAG as
+mutation authority, does not infer values, and does not bypass validation.
+Missing values, missing `samp_rate`, multiple sample-rate-like variables, or
+explicit target conflicts remain safe clarification/refusal paths.
 
 ## Gate Summary
 
@@ -66,6 +79,6 @@ No current STOP_THE_LINE issue is accepted in this evidence bundle. Required inv
 - Runtime is not production-ready.
 - Only R0_READ_ONLY and R1_SET_PARAM_ONLY are release-validated.
 - Broader mutation operations are beta-validated and require broader independent/external coverage before release promotion.
-- R7_NATURAL_EXTERNAL remains diagnostic-partial, so natural-language ergonomics is incomplete.
+- R7_NATURAL_EXTERNAL is diagnostic-clean on the latest sweep, but remains diagnostic and not release-gating.
 - Docs QA remains safety-baseline only.
 - Model behavior remains a dependency; live evals are evidence, not a guarantee of autonomy.

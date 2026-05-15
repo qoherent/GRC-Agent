@@ -1,6 +1,6 @@
 # GRC Agent System Blueprint
 
-Updated: 2026-05-09
+Updated: 2026-05-15
 
 This is the single source-of-truth design document for GRC Agent. It merges the former blueprint, system-design, and package-guide material into one operational contract: product scope, package shape, harness flow, model loop, tools, safety boundaries, retrieval, eval gates, and release criteria.
 
@@ -218,6 +218,12 @@ Required behavior:
 
 - Reject unsupported workflows such as raw YAML, undo, redo, save, or Python export.
 - Ask for clarification when exact executable details are missing.
+- Resolve the Phase 7 sample-rate alias only for `operation_kind="set_param"`
+  and only from graph-local evidence: `sample rate`, `sample_rate`, or
+  `samp rate` may target `samp_rate.value` when the active graph has exactly
+  one compatible variable named `samp_rate` and the user supplied an explicit
+  value. Missing values, absent targets, ambiguous sample-rate-like variables,
+  and explicit target conflicts must clarify/refuse without mutation.
 - Dispatch internally to verified handlers only.
 - Preserve preflight, `grcc`, rollback, checkpoint, and save-state semantics.
 
@@ -544,7 +550,7 @@ Before claiming production-ready:
   groundedness gaps remain below production quality.
 - No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
 
-Current classification (2026-05-10):
+Current classification (2026-05-15):
 
 - **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Release-validated.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R1_SET_PARAM_ONLY** (change_graph set_param): **Release-validated.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
@@ -555,6 +561,9 @@ Current classification (2026-05-10):
 - **R4A_INSERT** (change_graph insert_block on connection): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R4B_REMOVE** (change_graph remove_block): **Beta-validated.** 7/7 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
 - **R4C_ADD_VARIABLE** (change_graph add_variable): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
+- **R7_EXACT_EXTERNAL:** **Diagnostic-clean.** Latest external exact sweep passed 27/27 at n=3. Diagnostic only; not release-gating.
+- **R7_NATURAL_EXTERNAL:** **Diagnostic-clean on latest sweep.** Latest natural external sweep passed 27/27 at n=3 after Phase 7 graph-local sample-rate alias handling. Diagnostic only; not release-gating and not release promotion evidence.
+- **Tier5_ADVERSARIAL:** **Diagnostic-clean.** Latest adversarial sweep passed 54/54 at n=3. Diagnostic only; not release-gating.
 - **Release-validated subset (R0_READ_ONLY + R1_SET_PARAM_ONLY):** Supported on clean commit with passing deterministic gates. Default MVP runtime remains beta-capable. Not production-ready.
 
 ## 17. Completed / Hardened Items
@@ -563,6 +572,7 @@ Current classification (2026-05-10):
 - Doctor fixed: context check requires actual >= desired, not unknown-pass.
 - Release dashboard validates raw tool-call history (`raw_legacy_tool_entries`) and fails closed when raw requested/executed history is missing or malformed.
 - Diagnostic manifests exist for R7 exact/natural and Tier5; they report diagnostic status and are explicitly not release-gating.
+- Phase 7 graph-local alias resolver exists for `set_param` sample-rate wording only. It is limited to a unique active-graph `samp_rate` variable plus explicit value; ambiguity and conflicts stay non-mutating clarification/refusal paths.
 - Native MVP R0/R1 eval case catalogs created; legacy translation removed from release-gating paths.
 - `release_profile` persisted in run-store metadata and dashboard scope filtering implemented.
 - MVP tool-round ceiling = 8, fallback parser disabled in MVP mode.
