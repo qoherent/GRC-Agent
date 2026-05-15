@@ -75,6 +75,25 @@ class MvpToolProfileTests(unittest.TestCase):
             "base_state_revision": agent.session.state_revision,
         }
 
+    def _variable_value(self, agent: GrcAgent, instance_name: str) -> str | None:
+        assert agent.session.flowgraph is not None
+        for block in agent.session.flowgraph.blocks:
+            if block.block_type == "variable" and block.instance_name == instance_name:
+                parameters = block.params.get("parameters")
+                if isinstance(parameters, dict):
+                    value = parameters.get("value")
+                    return None if value is None else str(value)
+        return None
+
+    def _load_agent_without_samp_rate(self) -> GrcAgent:
+        source = self._fixture_path().read_text()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_path = Path(temp_dir) / "no_samp_rate.grc"
+            graph_path.write_text(source.replace("samp_rate", "clock_rate"))
+            session = FlowgraphSession()
+            session.load(graph_path)
+        return GrcAgent(session)
+
 
     def test_mvp_tool_schemas_exist(self) -> None:
         agent = self._load_agent()
@@ -661,6 +680,201 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertIn("operation_kind", result.get("message", ""))
+
+    def test_change_graph_resolves_unique_sample_rate_alias_to_variable_value(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Change the sample rate to 48000.",
+                "operation_kind": "set_param",
+                "param_key": "sample_rate",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(result["operation_kind"], "set_param")
+        self.assertEqual(self._variable_value(agent, "samp_rate"), "48000")
+        self.assertGreater(agent.session.state_revision, before_revision)
+        alias = result.get("resolved_target_alias")
+        self.assertIsInstance(alias, dict)
+        self.assertEqual(alias.get("alias_text"), "sample rate")
+        self.assertEqual(alias.get("source"), "graph_local_alias")
+        self.assertEqual(
+            alias.get("resolved_to"),
+            {"instance_name": "samp_rate", "param_key": "value"},
+        )
+
+    def test_change_graph_sample_rate_alias_without_value_clarifies_without_mutation(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_value = self._variable_value(agent, "samp_rate")
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Change the sample rate.",
+                "operation_kind": "set_param",
+                "param_key": "sample_rate",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertEqual(self._variable_value(agent, "samp_rate"), before_value)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        alias = result.get("resolved_target_alias")
+        self.assertIsInstance(alias, dict)
+        self.assertEqual(alias.get("reason"), "missing_explicit_value")
+
+    def test_change_graph_sample_rate_alias_without_samp_rate_clarifies(self) -> None:
+        agent = self._load_agent_without_samp_rate()
+        before_revision = agent.session.state_revision
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Change the sample rate to 48000.",
+                "operation_kind": "set_param",
+                "param_key": "sample_rate",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        alias = result.get("resolved_target_alias")
+        self.assertIsInstance(alias, dict)
+        self.assertEqual(alias.get("reason"), "missing_samp_rate_variable")
+
+    def test_change_graph_sample_rate_alias_ambiguous_variables_clarifies(self) -> None:
+        agent = self._load_agent()
+        agent.session.add_block(
+            "sample_rate",
+            "variable",
+            {"value": "32000"},
+            _skip_grcc=True,
+        )
+        agent.session.is_dirty = False
+        before_revision = agent.session.state_revision
+        before_samp_rate = self._variable_value(agent, "samp_rate")
+        before_sample_rate = self._variable_value(agent, "sample_rate")
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Change the sample rate to 48000.",
+                "operation_kind": "set_param",
+                "param_key": "sample_rate",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(self._variable_value(agent, "samp_rate"), before_samp_rate)
+        self.assertEqual(self._variable_value(agent, "sample_rate"), before_sample_rate)
+        alias = result.get("resolved_target_alias")
+        self.assertIsInstance(alias, dict)
+        self.assertEqual(alias.get("reason"), "ambiguous_sample_rate_variable")
+        self.assertEqual(alias.get("ambiguity_count"), 2)
+
+    def test_change_graph_sample_rate_alias_conflicting_target_clarifies(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_value = self._variable_value(agent, "samp_rate")
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Change the sample rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "blocks_throttle2_0",
+                "param_key": "srate",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(self._variable_value(agent, "samp_rate"), before_value)
+        alias = result.get("resolved_target_alias")
+        self.assertIsInstance(alias, dict)
+        self.assertEqual(alias.get("reason"), "explicit_target_conflict")
+
+    def test_change_graph_sample_rate_alias_preview_does_not_mutate(self) -> None:
+        agent = self._load_agent()
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+        before_value = self._variable_value(agent, "samp_rate")
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": True,
+                "user_goal": "Preview changing the sample rate to 48000.",
+                "operation_kind": "set_param",
+                "param_key": "sample_rate",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(self._variable_value(agent, "samp_rate"), before_value)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+        alias = result.get("resolved_target_alias")
+        self.assertIsInstance(alias, dict)
+        self.assertEqual(alias.get("reason"), "unique_samp_rate_variable")
+
+    def test_change_graph_exact_samp_rate_behavior_is_unchanged(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "dry_run": False,
+                "user_goal": "Set variable samp_rate to 48000.",
+                "operation_kind": "set_param",
+                "instance_name": "samp_rate",
+                "param_key": "value",
+                "param_value": "48000",
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._variable_value(agent, "samp_rate"), "48000")
+        self.assertNotIn("resolved_target_alias", result)
+
+    def test_change_graph_sample_rate_alias_uses_no_docs_or_raw_yaml_path(self) -> None:
+        agent = self._load_agent()
+        with mock.patch.object(agent, "_ask_grc_docs") as docs_mock:
+            result = agent.execute_tool(
+                "change_graph",
+                {
+                    "dry_run": False,
+                    "user_goal": "Change the sample rate to 48000.",
+                    "operation_kind": "set_param",
+                    "param_key": "sample_rate",
+                    "param_value": "48000",
+                },
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(docs_mock.call_count, 0)
+        self.assertNotIn("raw_yaml", json.dumps(result).lower())
 
     def test_change_graph_rejects_unsupported_operation_kind(self) -> None:
         agent = self._load_agent()
