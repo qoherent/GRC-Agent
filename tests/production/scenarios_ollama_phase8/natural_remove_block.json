@@ -1,0 +1,38 @@
+{
+  "schema_version": "2026-05-15.phase8-ollama-scenario-v1",
+  "scenario_id": "natural_remove_block",
+  "user_mode": "ollama_user",
+  "graph_id": "fixture_random_bit_generator_with_unused_var",
+  "initial_user_prompt": "",
+  "scenario_goal": "Ask GRC Agent to remove the detached unused variable block named unused_var from the copied graph.",
+  "allowed_user_behavior": [
+    "Ask naturally to remove the detached unused_var block.",
+    "Mention that the graph copy should be validated after removal."
+  ],
+  "forbidden_user_behavior": [
+    "Do not mention internal tool names, JSON, schemas, or judge expectations.",
+    "Do not ask to edit raw YAML.",
+    "Do not ask to save or load."
+  ],
+  "max_user_turns": 1,
+  "max_turns": 1,
+  "allowed_capabilities": ["R4B_REMOVE_BLOCK"],
+  "expected_final_state": {
+    "dirty": true,
+    "blocks": {"absent": ["unused_var"]}
+  },
+  "expected_graph_delta": {
+    "must_include": {"removed_blocks": ["unused_var"]}
+  },
+  "expected_validation_status": "valid",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "forbidden_events": [
+    "raw_legacy_tool_call",
+    "raw_yaml_mutation",
+    "preview_mutation",
+    "failed_validation_commit",
+    "unsafe_save",
+    "unsafe_load",
+    "original_graph_mutation"
+  ]
+}
