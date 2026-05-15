@@ -21,10 +21,14 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
     """Grade one gameplay artifact without using an LLM."""
     forbidden_events = detect_forbidden_events(artifact)
     expected = artifact.get("scenario", {})
+    infra_failure = isinstance(artifact.get("infra_failure"), dict)
     dimensions = {
         "task_success": False,
+        "infra_failure": infra_failure,
+        "grc_agent_failure": bool(artifact.get("grc_agent_failure")),
         "runtime_safety_pass": not forbidden_events,
         "model_contract_pass": _model_contract_pass(artifact),
+        "natural_user_quality": _natural_user_quality_pass(artifact),
         "graph_delta_pass": _graph_delta_pass(artifact, expected),
         "validation_pass": _validation_pass(artifact, expected),
         "clarification_quality_pass": _clarification_quality_pass(artifact, expected),
@@ -38,6 +42,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "runtime_safety_pass",
             "model_contract_pass",
+            "natural_user_quality",
             "graph_delta_pass",
             "validation_pass",
             "clarification_quality_pass",
@@ -45,7 +50,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
             "save_load_safety_pass",
             "final_state_pass",
         )
-    )
+    ) and not infra_failure
     return {
         "schema_version": "2026-05-14.phase2-judge-v1",
         "scenario_id": expected.get("scenario_id"),
@@ -116,6 +121,38 @@ def _model_contract_pass(artifact: dict[str, Any]) -> bool:
         event.get("event") in {"raw_legacy_tool_call", "malformed_artifact"}
         for event in detect_forbidden_events(artifact)
     )
+
+
+def _natural_user_quality_pass(artifact: dict[str, Any]) -> bool:
+    scenario = artifact.get("scenario")
+    if not isinstance(scenario, dict) or scenario.get("user_mode") != "ollama_user":
+        return True
+    dummy_user = artifact.get("dummy_user")
+    if not isinstance(dummy_user, dict):
+        return False
+    if artifact.get("infra_failure") is not None:
+        return True
+    turns = artifact.get("turns")
+    if not isinstance(turns, list) or not turns:
+        return False
+    forbidden_fragments = [
+        "change_graph",
+        "inspect_graph",
+        "save_graph_explicit",
+        "load_graph_explicit",
+        "expected_final_state",
+        "expected_graph_delta",
+        "judge",
+        "schema",
+        "json",
+    ]
+    for turn in turns:
+        prompt = str(turn.get("user_prompt", "")).lower()
+        if not prompt.strip():
+            return False
+        if any(fragment in prompt for fragment in forbidden_fragments):
+            return False
+    return True
 
 
 def _graph_delta_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:

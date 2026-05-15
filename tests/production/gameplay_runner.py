@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from grc_agent.agent import GrcAgent
+from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.llama_server import LlamaServerClient, run_bounded_llama_turn
 from tests.llama_eval.harness import (
     executed_tool_calls_since,
     graph_delta,
@@ -21,6 +23,10 @@ from tests.llama_eval.harness import (
 )
 from tests.production.gameplay_judge import judge_artifact
 from tests.production.ollama_readiness import readiness_report
+from tests.production.ollama_user_client import (
+    OllamaUserClient,
+    OllamaUserClientError,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = Path(__file__).resolve().parent / "corpus_manifest.json"
@@ -38,6 +44,10 @@ def run_scenario(
     artifact_path: Path | None = None,
     manifest_path: Path = DEFAULT_MANIFEST,
     keep_workdir: bool = True,
+    enable_ollama_network: bool = False,
+    ollama_cloud_mode: bool = True,
+    ollama_model: str | None = None,
+    ollama_base_url: str | None = None,
 ) -> dict[str, Any]:
     scenario = load_json(scenario_path)
     manifest = load_json(manifest_path)
@@ -61,13 +71,110 @@ def run_scenario(
     conversation: list[dict[str, Any]] = []
     save_load_events: list[dict[str, Any]] = []
 
+    infra_failure: dict[str, Any] | None = None
+    dummy_user: dict[str, Any] | None = None
+    mode = str(scenario.get("user_mode", "scripted_user"))
+    if mode == "ollama_user":
+        dummy_user, infra_failure = _run_ollama_user_turns(
+            scenario=scenario,
+            agent=agent,
+            initial_snapshot=initial_snapshot,
+            work_graph_path=work_graph_path,
+            source_path=source_path,
+            save_path=save_path,
+            conversation=conversation,
+            turns=turns,
+            save_load_events=save_load_events,
+            enable_network=enable_ollama_network,
+            cloud_mode=ollama_cloud_mode,
+            model=ollama_model,
+            base_url=ollama_base_url,
+        )
+    elif mode == "scripted_user":
+        _run_scripted_turns(
+            scenario=scenario,
+            agent=agent,
+            work_graph_path=work_graph_path,
+            source_path=source_path,
+            save_path=save_path,
+            conversation=conversation,
+            turns=turns,
+            save_load_events=save_load_events,
+        )
+    else:
+        raise ValueError(f"unsupported user_mode: {mode}")
+
+    final_snapshot = graph_snapshot(agent)
+    source_after = _sha256_file(source_path)
+    artifact = {
+        "schema_version": "2026-05-14.phase4-gameplay-artifact-v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "scenario": scenario,
+        "corpus_entry": corpus_entry,
+        "paths": {
+            "source_path": str(source_path),
+            "work_dir": str(temp_root),
+            "work_graph_path": str(work_graph_path),
+            "save_path": str(save_path),
+            "artifact_path": str(artifact_target),
+        },
+        "ollama_readiness": readiness_report(check_cloud=False),
+        "dummy_user": dummy_user,
+        "infra_failure": infra_failure,
+        "grc_agent_failure": bool(
+            isinstance(infra_failure, dict) and infra_failure.get("source") == "grc_agent"
+        ),
+        "conversation": conversation,
+        "turns": turns,
+        "initial_graph_snapshot": initial_snapshot,
+        "final_graph_snapshot": final_snapshot,
+        "graph_delta": graph_delta(initial_snapshot, final_snapshot),
+        "validation_results": [item for turn in turns for item in turn["validation_results"]],
+        "save_load_events": save_load_events,
+        "source_integrity": {
+            "before_sha256": source_before,
+            "after_sha256": source_after,
+            "unchanged": source_before == source_after,
+        },
+        "final_state_summary": {
+            "dirty": final_snapshot.get("dirty"),
+            "validation_status": final_snapshot.get("validation_status"),
+            "state_revision": final_snapshot.get("state_revision"),
+            "block_count": final_snapshot.get("block_count"),
+            "connection_count": final_snapshot.get("connection_count"),
+            "variables": final_snapshot.get("variable_values"),
+        },
+    }
+    artifact["judge"] = judge_artifact(artifact)
+    artifact["forbidden_events"] = artifact["judge"].get("forbidden_events", [])
+    sanitized = _redact(artifact)
+    artifact_text = json.dumps(sanitized, indent=2, sort_keys=True)
+    for marker in SECRET_MARKERS:
+        if marker in artifact_text:
+            raise RuntimeError(f"secret marker leaked into artifact: {marker}")
+    artifact_target.write_text(artifact_text + "\n", encoding="utf-8")
+    if not keep_workdir:
+        shutil.rmtree(temp_root)
+    return sanitized
+
+
+def _run_scripted_turns(
+    *,
+    scenario: dict[str, Any],
+    agent: GrcAgent,
+    work_graph_path: Path,
+    source_path: Path,
+    save_path: Path,
+    conversation: list[dict[str, Any]],
+    turns: list[dict[str, Any]],
+    save_load_events: list[dict[str, Any]],
+) -> None:
     turn_specs = scenario.get("scripted_user_turns")
     if not isinstance(turn_specs, list):
         raise ValueError("scenario scripted_user_turns must be a list")
     max_turns = int(scenario.get("max_turns", len(turn_specs)))
     if len(turn_specs) > max_turns:
         raise ValueError("scenario has more scripted turns than max_turns")
-
     for index, turn_spec in enumerate(turn_specs):
         prompt_template = (
             turn_spec.get("user_prompt")
@@ -124,97 +231,181 @@ def run_scenario(
             result = agent.execute_tool(tool_name, kwargs, model_tool_call=True)
             agent.history.append({"role": "tool", "name": tool_name, "content": result})
             conversation.append({"role": "tool", "name": tool_name, "content": result})
-            if tool_name in {"save_graph_explicit", "load_graph_explicit"}:
-                save_load_events.append(
-                    {
-                        "turn_index": index,
-                        "tool": tool_name,
-                        "ok": bool(result.get("ok")),
-                        "path": result.get("path"),
-                    }
-                )
+            _record_lifecycle_event(save_load_events, index, tool_name, result)
+        _append_turn_trace(agent, turns, index, prompt, before, history_start)
 
-        after = graph_snapshot(agent)
-        requested = requested_tool_calls_since(agent.history, history_start)
-        executed = executed_tool_calls_since(agent.history, history_start)
-        turn_delta = graph_delta(before, after)
-        turns.append(
+
+def _run_ollama_user_turns(
+    *,
+    scenario: dict[str, Any],
+    agent: GrcAgent,
+    initial_snapshot: dict[str, Any],
+    work_graph_path: Path,
+    source_path: Path,
+    save_path: Path,
+    conversation: list[dict[str, Any]],
+    turns: list[dict[str, Any]],
+    save_load_events: list[dict[str, Any]],
+    enable_network: bool,
+    cloud_mode: bool,
+    model: str | None,
+    base_url: str | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    client = OllamaUserClient.from_environment(
+        base_url=base_url,
+        model=model,
+        enabled=enable_network,
+        cloud_mode=cloud_mode,
+    )
+    dummy_user = {
+        "mode": "ollama_user",
+        "provider": "cloud" if client.config.cloud_mode else "local",
+        "cloud_used": bool(client.config.cloud_mode and enable_network),
+        "network_enabled": bool(enable_network),
+        "config": client.redacted_config(),
+        "turns": [],
+    }
+    max_turns = int(scenario.get("max_user_turns", scenario.get("max_turns", 1)))
+    app_config = load_app_config()
+    grc_client = LlamaServerClient(
+        base_url=app_config.llama.server_url,
+        timeout_seconds=app_config.llama.request_timeout_seconds,
+        max_tokens=app_config.llama.max_tokens,
+        temperature=app_config.llama.temperature,
+        enable_thinking=app_config.llama.enable_thinking,
+    )
+    for index in range(max_turns):
+        try:
+            generated = client.generate_user_turn(
+                scenario_goal=str(
+                    _render_templates(
+                        scenario.get("scenario_goal", ""),
+                        work_graph_path=work_graph_path,
+                        source_path=source_path,
+                        save_path=save_path,
+                    )
+                ),
+                graph_summary=initial_snapshot,
+                allowed_user_behavior=_string_list(
+                    _render_templates(
+                        scenario.get("allowed_user_behavior"),
+                        work_graph_path=work_graph_path,
+                        source_path=source_path,
+                        save_path=save_path,
+                    )
+                ),
+                forbidden_user_behavior=_string_list(
+                    _render_templates(
+                        scenario.get("forbidden_user_behavior"),
+                        work_graph_path=work_graph_path,
+                        source_path=source_path,
+                        save_path=save_path,
+                    )
+                ),
+                prior_conversation=conversation,
+            )
+        except OllamaUserClientError as exc:
+            return dummy_user, {
+                "source": "ollama_user",
+                "error_type": exc.error_type,
+                "message": str(exc),
+            }
+        prompt = _render_templates(
+            str(generated["text"]),
+            work_graph_path=work_graph_path,
+            source_path=source_path,
+            save_path=save_path,
+        )
+        dummy_user["turns"].append(
             {
                 "turn_index": index,
-                "user_prompt": prompt,
-                "requested_tool_calls_raw": requested,
-                "normalized_args": [
-                    {
-                        "name": call.get("name"),
-                        "arguments": call.get("arguments"),
-                    }
-                    for call in requested
-                ],
-                "executed_tool_calls_raw": executed,
-                "executed_tools": [call.get("name") for call in executed],
-                "tool_results": [
-                    {
-                        "name": call.get("name"),
-                        "result": call.get("arguments"),
-                    }
-                    for call in executed
-                ],
-                "graph_snapshot_before": before,
-                "graph_snapshot_after": after,
-                "graph_revision_before": before.get("state_revision"),
-                "graph_revision_after": after.get("state_revision"),
-                "graph_delta": turn_delta,
-                "validation_results": _validation_results(executed),
+                "latency_ms": generated.get("latency_ms"),
+                "usage": generated.get("usage", {}),
+                "prompt_chars": generated.get("prompt_chars"),
+                "response_chars": generated.get("response_chars"),
             }
         )
+        before = graph_snapshot(agent)
+        history_start = len(agent.history)
+        result: dict[str, Any] = {}
+        error_text = ""
+        try:
+            result = run_bounded_llama_turn(
+                agent=agent,
+                client=grc_client,
+                model=app_config.llama.model,
+                user_message=prompt,
+                advisor_enabled=app_config.agent.advisor_enabled,
+                advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
+                advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
+                mvp_tool_profile=True,
+            )
+        except Exception as exc:  # pragma: no cover - exercised by integration only.
+            error_text = str(exc)
+        conversation.append({"role": "user", "content": prompt})
+        assistant_text = result.get("assistant_text") if isinstance(result, dict) else ""
+        if isinstance(assistant_text, str) and assistant_text:
+            conversation.append({"role": "assistant", "content": assistant_text})
+        for call in executed_tool_calls_since(agent.history, history_start):
+            _record_lifecycle_event(
+                save_load_events,
+                index,
+                str(call.get("name", "")),
+                call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
+            )
+        turn = _append_turn_trace(agent, turns, index, prompt, before, history_start)
+        turn["dummy_user"] = dummy_user["turns"][-1]
+        turn["agent_result"] = result
+        turn["agent_error"] = error_text
+        if error_text:
+            return dummy_user, {
+                "source": "grc_agent",
+                "error_type": "agent_turn_error",
+                "message": error_text,
+            }
+    return dummy_user, None
 
-    final_snapshot = graph_snapshot(agent)
-    source_after = _sha256_file(source_path)
-    artifact = {
-        "schema_version": "2026-05-14.phase3-gameplay-artifact-v1",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "scenario": scenario,
-        "corpus_entry": corpus_entry,
-        "paths": {
-            "source_path": str(source_path),
-            "work_dir": str(temp_root),
-            "work_graph_path": str(work_graph_path),
-            "save_path": str(save_path),
-            "artifact_path": str(artifact_target),
-        },
-        "ollama_readiness": readiness_report(check_cloud=False),
-        "conversation": conversation,
-        "turns": turns,
-        "initial_graph_snapshot": initial_snapshot,
-        "final_graph_snapshot": final_snapshot,
-        "graph_delta": graph_delta(initial_snapshot, final_snapshot),
-        "validation_results": [item for turn in turns for item in turn["validation_results"]],
-        "save_load_events": save_load_events,
-        "source_integrity": {
-            "before_sha256": source_before,
-            "after_sha256": source_after,
-            "unchanged": source_before == source_after,
-        },
-        "final_state_summary": {
-            "dirty": final_snapshot.get("dirty"),
-            "validation_status": final_snapshot.get("validation_status"),
-            "state_revision": final_snapshot.get("state_revision"),
-            "block_count": final_snapshot.get("block_count"),
-            "connection_count": final_snapshot.get("connection_count"),
-            "variables": final_snapshot.get("variable_values"),
-        },
+
+def _append_turn_trace(
+    agent: GrcAgent,
+    turns: list[dict[str, Any]],
+    index: int,
+    prompt: str,
+    before: dict[str, Any],
+    history_start: int,
+) -> dict[str, Any]:
+    after = graph_snapshot(agent)
+    requested = requested_tool_calls_since(agent.history, history_start)
+    executed = executed_tool_calls_since(agent.history, history_start)
+    turn = {
+        "turn_index": index,
+        "user_prompt": prompt,
+        "requested_tool_calls_raw": requested,
+        "normalized_args": [
+            {
+                "name": call.get("name"),
+                "arguments": call.get("arguments"),
+            }
+            for call in requested
+        ],
+        "executed_tool_calls_raw": executed,
+        "executed_tools": [call.get("name") for call in executed],
+        "tool_results": [
+            {
+                "name": call.get("name"),
+                "result": call.get("arguments"),
+            }
+            for call in executed
+        ],
+        "graph_snapshot_before": before,
+        "graph_snapshot_after": after,
+        "graph_revision_before": before.get("state_revision"),
+        "graph_revision_after": after.get("state_revision"),
+        "graph_delta": graph_delta(before, after),
+        "validation_results": _validation_results(executed),
     }
-    artifact["judge"] = judge_artifact(artifact)
-    artifact["forbidden_events"] = artifact["judge"].get("forbidden_events", [])
-    sanitized = _redact(artifact)
-    artifact_text = json.dumps(sanitized, indent=2, sort_keys=True)
-    for marker in SECRET_MARKERS:
-        if marker in artifact_text:
-            raise RuntimeError(f"secret marker leaked into artifact: {marker}")
-    artifact_target.write_text(artifact_text + "\n", encoding="utf-8")
-    if not keep_workdir:
-        shutil.rmtree(temp_root)
-    return sanitized
+    turns.append(turn)
+    return turn
 
 
 def _validation_results(executed: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -227,6 +418,23 @@ def _validation_results(executed: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(validation, dict):
             results.append({"tool": call.get("name"), "validation_result": validation})
     return results
+
+
+def _record_lifecycle_event(
+    save_load_events: list[dict[str, Any]],
+    turn_index: int,
+    tool_name: str,
+    result: dict[str, Any],
+) -> None:
+    if tool_name in {"save_graph_explicit", "load_graph_explicit"}:
+        save_load_events.append(
+            {
+                "turn_index": turn_index,
+                "tool": tool_name,
+                "ok": bool(result.get("ok")),
+                "path": result.get("path"),
+            }
+        )
 
 
 def _corpus_entry(manifest: dict[str, Any], graph_id: str) -> dict[str, Any]:
@@ -292,6 +500,12 @@ def _render_templates(
     return value
 
 
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
@@ -337,11 +551,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", type=Path, required=True)
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--enable-ollama-network",
+        action="store_true",
+        help="Allow ollama_user scenarios to call Ollama. Disabled by default.",
+    )
+    parser.add_argument(
+        "--ollama-local",
+        action="store_true",
+        help="Use local Ollama API mode for dummy-user generation.",
+    )
+    parser.add_argument("--ollama-model")
+    parser.add_argument("--ollama-base-url")
     args = parser.parse_args(argv)
     artifact = run_scenario(
         scenario_path=args.scenario,
         artifact_path=args.artifact,
         manifest_path=args.manifest,
+        enable_ollama_network=bool(args.enable_ollama_network),
+        ollama_cloud_mode=not bool(args.ollama_local),
+        ollama_model=args.ollama_model,
+        ollama_base_url=args.ollama_base_url,
     )
     summary = _summary(artifact)
     print(json.dumps(summary, indent=2, sort_keys=True))

@@ -1,4 +1,4 @@
-"""Secret-safe Ollama Cloud readiness helpers for Phase 2 evidence harnesses."""
+"""Secret-safe Ollama Cloud readiness helpers for production evidence harnesses."""
 
 from __future__ import annotations
 
@@ -71,10 +71,24 @@ def check_ollama_cloud_reachable(
     )
     try:
         with request.urlopen(req, timeout=timeout_seconds) as response:  # noqa: S310
+            model_count = 0
+            model_names: list[str] = []
+            try:
+                payload = json.loads(response.read().decode("utf-8"))
+                models = payload.get("models") if isinstance(payload, dict) else None
+                if isinstance(models, list):
+                    for item in models:
+                        if isinstance(item, dict) and isinstance(item.get("name"), str):
+                            model_names.append(item["name"])
+                model_count = len(model_names)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                model_count = 0
             return {
                 "network_checked": True,
                 "reachable": 200 <= int(response.status) < 500,
                 "status_code": int(response.status),
+                "model_count": model_count,
+                "models": model_names[:20],
             }
     except error.HTTPError as exc:
         return {
@@ -108,7 +122,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-path", type=Path, default=Path.cwd() / ".env")
     parser.add_argument(
         "--check-ollama-cloud",
+        "--check-cloud",
         action="store_true",
+        dest="check_ollama_cloud",
         help="Perform an explicit network reachability check. Disabled by default.",
     )
     args = parser.parse_args(argv)

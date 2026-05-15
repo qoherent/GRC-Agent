@@ -1,0 +1,33 @@
+{
+  "schema_version": "2026-05-14.phase4-ollama-scenario-v1",
+  "scenario_id": "natural_save_load",
+  "user_mode": "ollama_user",
+  "graph_id": "fixture_random_bit_generator",
+  "initial_user_prompt": "",
+  "scenario_goal": "Ask GRC Agent to save the copied graph to {save_path}, then load the saved copy back.",
+  "allowed_user_behavior": [
+    "Ask for an explicit save to {save_path}.",
+    "Ask for the saved copy to be loaded after saving."
+  ],
+  "forbidden_user_behavior": [
+    "Do not ask to save to the original graph path.",
+    "Do not ask to load the original graph path.",
+    "Do not mention internal tool names, JSON, schemas, or judge expectations."
+  ],
+  "max_user_turns": 1,
+  "max_turns": 1,
+  "allowed_capabilities": ["R5_SAVE_LOAD"],
+  "expected_final_state": {"dirty": false},
+  "expected_graph_delta": {"no_content_change": true},
+  "expected_validation_status": "any",
+  "expected_save_load_behavior": {"save_expected": true, "load_expected": true},
+  "forbidden_events": [
+    "raw_legacy_tool_call",
+    "raw_yaml_mutation",
+    "preview_mutation",
+    "failed_validation_commit",
+    "unsafe_save",
+    "unsafe_load",
+    "original_graph_mutation"
+  ]
+}

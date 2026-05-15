@@ -1,0 +1,32 @@
+{
+  "schema_version": "2026-05-14.phase4-ollama-scenario-v1",
+  "scenario_id": "natural_read_only_explain",
+  "user_mode": "ollama_user",
+  "graph_id": "fixture_random_bit_generator",
+  "initial_user_prompt": "",
+  "scenario_goal": "Ask GRC Agent to explain the copied graph without changing it.",
+  "allowed_user_behavior": [
+    "Ask for a concise explanation of the graph.",
+    "Mention that no changes should be made."
+  ],
+  "forbidden_user_behavior": [
+    "Do not ask to mutate, save, load, or edit raw YAML.",
+    "Do not mention internal tool names, JSON, schemas, or judge expectations."
+  ],
+  "max_user_turns": 1,
+  "max_turns": 1,
+  "allowed_capabilities": ["R0_READ_ONLY"],
+  "expected_final_state": {"dirty": false},
+  "expected_graph_delta": {"no_content_change": true},
+  "expected_validation_status": "any",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "forbidden_events": [
+    "raw_legacy_tool_call",
+    "raw_yaml_mutation",
+    "preview_mutation",
+    "failed_validation_commit",
+    "unsafe_save",
+    "unsafe_load",
+    "original_graph_mutation"
+  ]
+}

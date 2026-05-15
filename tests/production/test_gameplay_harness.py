@@ -9,11 +9,18 @@ import unittest
 from tests.production.gameplay_judge import judge_artifact
 from tests.production.gameplay_runner import run_scenario
 from tests.production.ollama_readiness import prepare_ollama_cloud_environment
+from tests.production.ollama_user_client import (
+    OllamaUserClient,
+    OllamaUserClientConfig,
+    OllamaUserClientError,
+    build_dummy_user_prompt,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = PRODUCTION_DIR / "corpus_manifest.json"
 SCENARIO_DIR = PRODUCTION_DIR / "scenarios"
+OLLAMA_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama"
 EXPECTED_SCENARIOS = {
     "add_variable",
     "clarification_required",
@@ -30,6 +37,11 @@ EXPECTED_SCENARIOS = {
     "set_state_toggle",
     "unsafe_load_refused",
     "unsafe_save_refused",
+}
+EXPECTED_OLLAMA_SCENARIOS = {
+    "natural_read_only_explain",
+    "natural_save_load",
+    "natural_set_param",
 }
 
 
@@ -85,6 +97,28 @@ class ProductionHarnessTests(unittest.TestCase):
             scenario_ids,
             EXPECTED_SCENARIOS,
         )
+
+    def test_ollama_scenarios_validate(self) -> None:
+        scenario_ids = set()
+        manifest_ids = {
+            entry["id"]
+            for entry in json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["entries"]
+        }
+        for path in sorted(OLLAMA_SCENARIO_DIR.glob("*.json")):
+            scenario = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                scenario["schema_version"],
+                "2026-05-14.phase4-ollama-scenario-v1",
+            )
+            self.assertEqual(scenario["user_mode"], "ollama_user")
+            self.assertNotIn(scenario["scenario_id"], scenario_ids)
+            scenario_ids.add(scenario["scenario_id"])
+            self.assertIn(scenario["graph_id"], manifest_ids)
+            self.assertIsInstance(scenario.get("scenario_goal"), str)
+            self.assertIsInstance(scenario.get("allowed_user_behavior"), list)
+            self.assertIsInstance(scenario.get("forbidden_user_behavior"), list)
+            self.assertGreaterEqual(int(scenario.get("max_user_turns", 0)), 1)
+        self.assertEqual(scenario_ids, EXPECTED_OLLAMA_SCENARIOS)
 
     def test_runner_copies_graph_and_never_mutates_source(self) -> None:
         source = ROOT / "tests/data/random_bit_generator.grc"
@@ -238,6 +272,96 @@ class ProductionHarnessTests(unittest.TestCase):
             self.assertNotIn("ollama_key", text)
             self.assertNotIn("OLLAMA_API_KEY", text)
         self.assertIn("cloud_key_present", artifact["ollama_readiness"])
+
+    def test_ollama_client_redacts_key_and_disables_network_by_default(self) -> None:
+        client = OllamaUserClient(
+            OllamaUserClientConfig(enabled=False, cloud_mode=True),
+            api_key="super-secret-test-value",
+        )
+        redacted = json.dumps(client.redacted_config(), sort_keys=True)
+        self.assertNotIn("super-secret-test-value", redacted)
+        self.assertNotIn("OLLAMA_API_KEY", redacted)
+        self.assertNotIn("ollama_key", redacted)
+        with self.assertRaises(OllamaUserClientError) as ctx:
+            client.generate_user_turn(
+                scenario_goal="Ask for a read-only graph explanation.",
+                graph_summary={"block_count": 1},
+                allowed_user_behavior=["Ask naturally."],
+                forbidden_user_behavior=["Do not mention tools."],
+                prior_conversation=[],
+            )
+        self.assertEqual(ctx.exception.error_type, "network_disabled")
+
+    def test_dummy_user_prompt_excludes_hidden_expected_answer(self) -> None:
+        prompt = build_dummy_user_prompt(
+            scenario_goal="Ask for a harmless graph explanation.",
+            graph_summary={"block_count": 1, "variable_values": {"samp_rate": "32000"}},
+            allowed_user_behavior=["Ask naturally."],
+            forbidden_user_behavior=["Do not mention internals."],
+            prior_conversation=[
+                {"role": "assistant", "content": "Visible prior assistant text."}
+            ],
+        )
+        self.assertIn("Ask for a harmless graph explanation.", prompt)
+        self.assertNotIn("expected_final_state", prompt)
+        self.assertNotIn("expected_graph_delta", prompt)
+        self.assertNotIn("hidden-pass-token", prompt)
+
+    def test_ollama_disabled_artifact_marks_infra_failure_not_grc_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "ollama_disabled.json"
+            artifact = run_scenario(
+                scenario_path=OLLAMA_SCENARIO_DIR / "natural_read_only_explain.json",
+                artifact_path=artifact_path,
+                enable_ollama_network=False,
+            )
+            text = artifact_path.read_text(encoding="utf-8")
+        self.assertFalse(artifact["judge"]["passed"])
+        self.assertEqual(artifact["infra_failure"]["source"], "ollama_user")
+        self.assertEqual(artifact["infra_failure"]["error_type"], "network_disabled")
+        self.assertFalse(artifact["grc_agent_failure"])
+        self.assertIn("dummy_user", artifact)
+        self.assertNotIn("super-secret-test-value", text)
+        self.assertNotIn("OLLAMA_API_KEY", text)
+        self.assertNotIn("ollama_key", text)
+
+    def test_deterministic_judge_handles_ollama_user_text(self) -> None:
+        artifact = _minimal_artifact(
+            requested=[],
+            executed=[],
+            before_hash="a",
+            after_hash="a",
+        )
+        artifact["scenario"]["user_mode"] = "ollama_user"
+        artifact["dummy_user"] = {
+            "mode": "ollama_user",
+            "provider": "cloud",
+            "network_enabled": True,
+            "turns": [{"turn_index": 0}],
+        }
+        artifact["conversation"] = [{"role": "user", "content": "Explain this graph."}]
+        artifact["turns"][0]["user_prompt"] = "Explain this graph."
+        result = judge_artifact(artifact)
+        self.assertTrue(result["dimensions"]["natural_user_quality"])
+
+    def test_ollama_artifact_schema_has_required_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "ollama_disabled.json"
+            run_scenario(
+                scenario_path=OLLAMA_SCENARIO_DIR / "natural_set_param.json",
+                artifact_path=artifact_path,
+                enable_ollama_network=False,
+            )
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            artifact["schema_version"],
+            "2026-05-14.phase4-gameplay-artifact-v1",
+        )
+        self.assertIn("dummy_user", artifact)
+        self.assertIn("infra_failure", artifact)
+        self.assertIn("grc_agent_failure", artifact)
+        self.assertIn("config", artifact["dummy_user"])
+        self.assertIn("credential_present", artifact["dummy_user"]["config"])
 
 
 def _minimal_artifact(
