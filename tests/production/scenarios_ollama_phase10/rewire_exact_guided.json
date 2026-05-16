@@ -1,0 +1,45 @@
+{
+  "schema_version": "2026-05-15.phase10-ollama-scenario-v1",
+  "scenario_id": "rewire_exact_guided",
+  "user_mode": "ollama_user",
+  "graph_id": "fixture_random_bit_generator",
+  "initial_user_prompt": "",
+  "scenario_goal": "Ask for this graph edit in one sentence using the exact identifiers provided below. Do not paraphrase identifiers. Exact request: Rewire exact connection_id blocks_throttle2_0:0->blocks_char_to_float_0:0 to analog_random_source_x_0:0->blocks_char_to_float_0:0 with operation_kind rewire, dry_run=false, state_revision 1, new_src_block=analog_random_source_x_0, new_src_port=0, new_dst_block=blocks_char_to_float_0, new_dst_port=0.",
+  "allowed_user_behavior": [
+    "Use the exact identifiers provided in the scenario goal.",
+    "Do not paraphrase identifiers.",
+    "Ask for the operation in one sentence."
+  ],
+  "forbidden_user_behavior": [
+    "Do not mention tool names, JSON, schemas, or judge expectations.",
+    "Do not edit raw YAML.",
+    "Do not change any identifier."
+  ],
+  "max_user_turns": 1,
+  "max_turns": 1,
+  "allowed_capabilities": ["R3_REWIRE"],
+  "expected_final_state": {
+    "dirty": true,
+    "connections": {
+      "present": ["analog_random_source_x_0:0->blocks_char_to_float_0:0"],
+      "absent": ["blocks_throttle2_0:0->blocks_char_to_float_0:0"]
+    }
+  },
+  "expected_graph_delta": {
+    "must_include": {
+      "added_connections": ["analog_random_source_x_0:0->blocks_char_to_float_0:0"],
+      "removed_connections": ["blocks_throttle2_0:0->blocks_char_to_float_0:0"]
+    }
+  },
+  "expected_validation_status": "valid",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "forbidden_events": [
+    "raw_legacy_tool_call",
+    "raw_yaml_mutation",
+    "preview_mutation",
+    "failed_validation_commit",
+    "unsafe_save",
+    "unsafe_load",
+    "original_graph_mutation"
+  ]
+}

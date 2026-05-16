@@ -103,6 +103,17 @@ def run_scenario(
             temperature=ollama_temperature,
             seed=ollama_seed,
         )
+    elif mode == "direct_user":
+        infra_failure = _run_direct_user_turns(
+            scenario=scenario,
+            agent=agent,
+            work_graph_path=work_graph_path,
+            source_path=source_path,
+            save_path=save_path,
+            conversation=conversation,
+            turns=turns,
+            save_load_events=save_load_events,
+        )
     elif mode == "scripted_user":
         _run_scripted_turns(
             scenario=scenario,
@@ -390,6 +401,86 @@ def _run_ollama_user_turns(
                 "message": error_text,
             }
     return dummy_user, None
+
+
+def _run_direct_user_turns(
+    *,
+    scenario: dict[str, Any],
+    agent: GrcAgent,
+    work_graph_path: Path,
+    source_path: Path,
+    save_path: Path,
+    conversation: list[dict[str, Any]],
+    turns: list[dict[str, Any]],
+    save_load_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    turn_specs = scenario.get("scripted_user_turns")
+    if not isinstance(turn_specs, list):
+        raise ValueError("direct_user scenario scripted_user_turns must be a list")
+    max_turns = int(scenario.get("max_turns", len(turn_specs)))
+    if len(turn_specs) > max_turns:
+        raise ValueError("scenario has more scripted turns than max_turns")
+
+    app_config = load_app_config()
+    grc_client = LlamaServerClient(
+        base_url=app_config.llama.server_url,
+        timeout_seconds=app_config.llama.request_timeout_seconds,
+        max_tokens=app_config.llama.max_tokens,
+        temperature=app_config.llama.temperature,
+        enable_thinking=app_config.llama.enable_thinking,
+    )
+    for index, turn_spec in enumerate(turn_specs):
+        prompt_template = (
+            turn_spec.get("user_prompt")
+            if isinstance(turn_spec, dict) and turn_spec.get("user_prompt")
+            else scenario.get("initial_user_prompt")
+        )
+        if not isinstance(prompt_template, str) or not prompt_template.strip():
+            raise ValueError(f"turn {index} has no user prompt")
+        prompt = _render_templates(
+            prompt_template,
+            work_graph_path=work_graph_path,
+            source_path=source_path,
+            save_path=save_path,
+        )
+        before = graph_snapshot(agent)
+        history_start = len(agent.history)
+        result: dict[str, Any] = {}
+        error_text = ""
+        try:
+            result = run_bounded_llama_turn(
+                agent=agent,
+                client=grc_client,
+                model=app_config.llama.model,
+                user_message=str(prompt),
+                advisor_enabled=app_config.agent.advisor_enabled,
+                advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
+                advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
+                mvp_tool_profile=True,
+            )
+        except Exception as exc:  # pragma: no cover - exercised by integration only.
+            error_text = str(exc)
+        conversation.append({"role": "user", "content": prompt})
+        assistant_text = result.get("assistant_text") if isinstance(result, dict) else ""
+        if isinstance(assistant_text, str) and assistant_text:
+            conversation.append({"role": "assistant", "content": assistant_text})
+        for call in executed_tool_calls_since(agent.history, history_start):
+            _record_lifecycle_event(
+                save_load_events,
+                index,
+                str(call.get("name", "")),
+                call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
+            )
+        turn = _append_turn_trace(agent, turns, index, str(prompt), before, history_start)
+        turn["agent_result"] = result
+        turn["agent_error"] = error_text
+        if error_text:
+            return {
+                "source": "grc_agent",
+                "error_type": "agent_turn_error",
+                "message": error_text,
+            }
+    return None
 
 
 FAILURE_CATEGORIES = {
