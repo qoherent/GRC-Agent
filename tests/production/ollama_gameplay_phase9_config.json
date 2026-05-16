@@ -1,0 +1,19 @@
+{
+  "schema_version": "2026-05-15.phase9-ollama-gameplay-config-v1",
+  "model": "gemma3:4b",
+  "provider": "cloud",
+  "temperature": 0.0,
+  "seed": 9100,
+  "n_runs": 5,
+  "max_turns": 1,
+  "scenarios": [
+    "rewire_vague",
+    "rewire_natural_actionable",
+    "rewire_semi_exact",
+    "rewire_exact",
+    "insert_vague",
+    "insert_natural_actionable",
+    "insert_semi_exact",
+    "insert_exact"
+  ]
+}

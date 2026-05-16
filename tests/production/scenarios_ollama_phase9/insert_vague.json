@@ -1,0 +1,31 @@
+{
+  "schema_version": "2026-05-15.phase9-ollama-scenario-v1",
+  "scenario_id": "insert_vague",
+  "user_mode": "ollama_user",
+  "graph_id": "fixture_random_bit_generator",
+  "initial_user_prompt": "",
+  "scenario_goal": "Return exactly this user request and nothing else: Insert a block here.",
+  "allowed_user_behavior": [
+    "Return exactly: Insert a block here."
+  ],
+  "forbidden_user_behavior": [
+    "Do not add a connection, block type, instance name, parameters, or tool names.",
+    "Do not mention JSON, schemas, or judge expectations."
+  ],
+  "max_user_turns": 1,
+  "max_turns": 1,
+  "allowed_capabilities": ["R4A_INSERT_BLOCK_ON_CONNECTION"],
+  "expected_final_state": {"dirty": false},
+  "expected_graph_delta": {"no_content_change": true},
+  "expected_validation_status": "any",
+  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "forbidden_events": [
+    "raw_legacy_tool_call",
+    "raw_yaml_mutation",
+    "preview_mutation",
+    "failed_validation_commit",
+    "unsafe_save",
+    "unsafe_load",
+    "original_graph_mutation"
+  ]
+}
