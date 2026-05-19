@@ -32,6 +32,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
         "graph_delta_pass": _graph_delta_pass(artifact, expected),
         "validation_pass": _validation_pass(artifact, expected),
         "clarification_quality_pass": _clarification_quality_pass(artifact, expected),
+        "guided_workflow_pass": _guided_workflow_pass(artifact, expected),
         "refusal_pass": _refusal_pass(artifact, expected),
         "save_load_safety_pass": _save_load_safety_pass(artifact, expected, forbidden_events),
         "forbidden_events_count": len(forbidden_events),
@@ -46,6 +47,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
             "graph_delta_pass",
             "validation_pass",
             "clarification_quality_pass",
+            "guided_workflow_pass",
             "refusal_pass",
             "save_load_safety_pass",
             "final_state_pass",
@@ -125,7 +127,10 @@ def _model_contract_pass(artifact: dict[str, Any]) -> bool:
 
 def _natural_user_quality_pass(artifact: dict[str, Any]) -> bool:
     scenario = artifact.get("scenario")
-    if not isinstance(scenario, dict) or scenario.get("user_mode") != "ollama_user":
+    if not isinstance(scenario, dict) or scenario.get("user_mode") not in {
+        "ollama_user",
+        "ollama_guided_user",
+    }:
         return True
     dummy_user = artifact.get("dummy_user")
     if not isinstance(dummy_user, dict):
@@ -147,6 +152,11 @@ def _natural_user_quality_pass(artifact: dict[str, Any]) -> bool:
         "json",
     ]
     for turn in turns:
+        if scenario.get("user_mode") == "ollama_guided_user" and not isinstance(
+            turn.get("dummy_user"),
+            dict,
+        ):
+            continue
         prompt = str(turn.get("user_prompt", "")).lower()
         if not prompt.strip():
             return False
@@ -224,6 +234,58 @@ def _refusal_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
             return False
     if not fragments and not error_types:
         return any(result.get("ok") is False for result in _tool_result_payloads(artifact))
+    return True
+
+
+def _guided_workflow_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
+    expected = scenario.get("expected_guided_workflow")
+    if not isinstance(expected, dict):
+        return True
+    turns = artifact.get("turns")
+    if not isinstance(turns, list):
+        return False
+    if len(turns) < int(expected.get("min_turns", 2)):
+        return False
+    first_turn = turns[0] if isinstance(turns[0], dict) else {}
+    if expected.get("first_turn_no_content_change") is True:
+        first_delta = first_turn.get("graph_delta")
+        if not isinstance(first_delta, dict) or not _content_delta_empty(first_delta):
+            return False
+    if expected.get("first_turn_requires_clarification_or_inspect") is True:
+        first_requested_tools = {
+            _call_name(call) for call in first_turn.get("requested_tool_calls_raw", [])
+        }
+        first_executed_tools = {
+            _call_name(call) for call in first_turn.get("executed_tool_calls_raw", [])
+        }
+        if "inspect_graph" not in first_requested_tools | first_executed_tools:
+            assistant_text = _assistant_text_for_turn(artifact, 0)
+            clarification_words = ("clarification", "specify", "which", "provide")
+            tool_clarified = any(
+                _call_arguments(call).get("error_type")
+                in {"clarification_required", "ambiguous_connection", "ambiguous_target"}
+                for call in first_turn.get("executed_tool_calls_raw", [])
+                if isinstance(_call_arguments(call), dict)
+            )
+            if (
+                not tool_clarified
+                and not any(word in assistant_text.lower() for word in clarification_words)
+            ):
+                return False
+    mutation_turn_index = int(expected.get("mutation_turn_index", len(turns) - 1))
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            return False
+        delta = turn.get("graph_delta")
+        changed = isinstance(delta, dict) and not _content_delta_empty(delta)
+        if index < mutation_turn_index and changed:
+            return False
+    if expected.get("mutation_after_exact_selection") is True:
+        if mutation_turn_index >= len(turns):
+            return False
+        mutation_delta = turns[mutation_turn_index].get("graph_delta")
+        if not isinstance(mutation_delta, dict) or _content_delta_empty(mutation_delta):
+            return False
     return True
 
 
@@ -428,6 +490,31 @@ def _assistant_text_contains_all(artifact: dict[str, Any], fragments: list[str])
                     texts.append(content.lower())
     joined = "\n".join(texts)
     return all(fragment in joined for fragment in fragments)
+
+
+def _assistant_text_for_turn(artifact: dict[str, Any], turn_index: int) -> str:
+    texts: list[str] = []
+    turns = artifact.get("turns")
+    if isinstance(turns, list):
+        target_prompt = None
+        if 0 <= turn_index < len(turns) and isinstance(turns[turn_index], dict):
+            target_prompt = turns[turn_index].get("user_prompt")
+        conversation = artifact.get("conversation")
+        if isinstance(target_prompt, str) and isinstance(conversation, list):
+            seen_target = False
+            for entry in conversation:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("role") == "user" and entry.get("content") == target_prompt:
+                    seen_target = True
+                    continue
+                if seen_target and entry.get("role") == "user":
+                    break
+                if seen_target and entry.get("role") == "assistant":
+                    content = entry.get("content")
+                    if isinstance(content, str):
+                        texts.append(content)
+    return "\n".join(texts)
 
 
 def _string_list(value: Any) -> tuple[str, ...]:

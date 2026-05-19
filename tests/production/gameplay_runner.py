@@ -59,7 +59,7 @@ def run_scenario(
     if max_turns_override is not None:
         scenario = dict(scenario)
         scenario["max_turns"] = max_turns_override
-        if scenario.get("user_mode") == "ollama_user":
+        if scenario.get("user_mode") in {"ollama_user", "ollama_guided_user"}:
             scenario["max_user_turns"] = max_turns_override
     manifest = load_json(manifest_path)
     corpus_entry = _corpus_entry(manifest, str(scenario["graph_id"]))
@@ -103,6 +103,38 @@ def run_scenario(
             temperature=ollama_temperature,
             seed=ollama_seed,
         )
+    elif mode == "ollama_guided_user":
+        guided_scenario = dict(scenario)
+        guided_scenario["max_user_turns"] = 1
+        dummy_user, infra_failure = _run_ollama_user_turns(
+            scenario=guided_scenario,
+            agent=agent,
+            initial_snapshot=initial_snapshot,
+            work_graph_path=work_graph_path,
+            source_path=source_path,
+            save_path=save_path,
+            conversation=conversation,
+            turns=turns,
+            save_load_events=save_load_events,
+            enable_network=enable_ollama_network,
+            cloud_mode=ollama_cloud_mode,
+            model=ollama_model,
+            base_url=ollama_base_url,
+            temperature=ollama_temperature,
+            seed=ollama_seed,
+        )
+        if infra_failure is None:
+            infra_failure = _run_direct_user_turns(
+                scenario=scenario,
+                agent=agent,
+                work_graph_path=work_graph_path,
+                source_path=source_path,
+                save_path=save_path,
+                conversation=conversation,
+                turns=turns,
+                save_load_events=save_load_events,
+                start_index=len(turns),
+            )
     elif mode == "direct_user":
         infra_failure = _run_direct_user_turns(
             scenario=scenario,
@@ -413,6 +445,7 @@ def _run_direct_user_turns(
     conversation: list[dict[str, Any]],
     turns: list[dict[str, Any]],
     save_load_events: list[dict[str, Any]],
+    start_index: int = 0,
 ) -> dict[str, Any] | None:
     turn_specs = scenario.get("scripted_user_turns")
     if not isinstance(turn_specs, list):
@@ -429,7 +462,8 @@ def _run_direct_user_turns(
         temperature=app_config.llama.temperature,
         enable_thinking=app_config.llama.enable_thinking,
     )
-    for index, turn_spec in enumerate(turn_specs):
+    for offset, turn_spec in enumerate(turn_specs):
+        index = start_index + offset
         prompt_template = (
             turn_spec.get("user_prompt")
             if isinstance(turn_spec, dict) and turn_spec.get("user_prompt")

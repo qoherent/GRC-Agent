@@ -1,0 +1,13 @@
+{
+  "schema_version": "2026-05-19.phase11-direct-gameplay-config-v1",
+  "model": "local-grc-agent",
+  "provider": "local",
+  "temperature": 0.0,
+  "seed": 11100,
+  "n_runs": 3,
+  "max_turns": 2,
+  "scenarios": [
+    "natural_rewire_guided_by_options",
+    "natural_insert_guided_by_options"
+  ]
+}

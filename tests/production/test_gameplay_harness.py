@@ -32,12 +32,16 @@ PHASE8_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama_phase8"
 PHASE9_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama_phase9"
 PHASE10_DIRECT_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_direct_phase10"
 PHASE10_OLLAMA_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama_phase10"
+PHASE11_DIRECT_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_direct_phase11"
+PHASE11_OLLAMA_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama_phase11"
 OLLAMA_GAMEPLAY_CONFIG = PRODUCTION_DIR / "ollama_gameplay_config.json"
 OLLAMA_PHASE6_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase6_config.json"
 OLLAMA_PHASE8_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase8_config.json"
 OLLAMA_PHASE9_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase9_config.json"
 DIRECT_PHASE10_CONFIG = PRODUCTION_DIR / "direct_gameplay_phase10_config.json"
 OLLAMA_PHASE10_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase10_config.json"
+DIRECT_PHASE11_CONFIG = PRODUCTION_DIR / "direct_gameplay_phase11_config.json"
+OLLAMA_PHASE11_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase11_config.json"
 EXPECTED_SCENARIOS = {
     "add_variable",
     "clarification_required",
@@ -91,6 +95,14 @@ EXPECTED_PHASE10_DIRECT_SCENARIOS = {
 EXPECTED_PHASE10_OLLAMA_SCENARIOS = {
     "insert_exact_guided",
     "rewire_exact_guided",
+}
+EXPECTED_PHASE11_DIRECT_SCENARIOS = {
+    "natural_insert_guided_by_options",
+    "natural_rewire_guided_by_options",
+}
+EXPECTED_PHASE11_OLLAMA_SCENARIOS = {
+    "ollama_natural_insert_guided_by_options",
+    "ollama_natural_rewire_guided_by_options",
 }
 
 
@@ -336,6 +348,74 @@ class ProductionHarnessTests(unittest.TestCase):
         self.assertEqual(config["model"], "gemma3:4b")
         self.assertEqual(config["temperature"], 0.0)
         self.assertEqual(config["n_runs"], 5)
+
+    def test_phase11_direct_scenarios_and_config_validate(self) -> None:
+        scenario_ids = set()
+        manifest_ids = {
+            entry["id"]
+            for entry in json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["entries"]
+        }
+        for path in sorted(PHASE11_DIRECT_SCENARIO_DIR.glob("*.json")):
+            scenario = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                scenario["schema_version"],
+                "2026-05-19.phase11-direct-scenario-v1",
+            )
+            self.assertEqual(scenario["user_mode"], "direct_user")
+            self.assertNotIn(scenario["scenario_id"], scenario_ids)
+            scenario_ids.add(scenario["scenario_id"])
+            self.assertIn(scenario["graph_id"], manifest_ids)
+            self.assertIsInstance(scenario.get("scripted_user_turns"), list)
+            self.assertEqual(len(scenario["scripted_user_turns"]), 2)
+            self.assertIsInstance(scenario.get("expected_guided_workflow"), dict)
+            self.assertIsInstance(scenario.get("forbidden_events"), list)
+        self.assertEqual(scenario_ids, EXPECTED_PHASE11_DIRECT_SCENARIOS)
+        config = json.loads(DIRECT_PHASE11_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["schema_version"],
+            "2026-05-19.phase11-direct-gameplay-config-v1",
+        )
+        self.assertEqual(set(config["scenarios"]), EXPECTED_PHASE11_DIRECT_SCENARIOS)
+        self.assertEqual(config["provider"], "local")
+        self.assertEqual(config["n_runs"], 3)
+        self.assertEqual(config["max_turns"], 2)
+
+    def test_phase11_ollama_scenarios_and_config_validate(self) -> None:
+        scenario_ids = set()
+        manifest_ids = {
+            entry["id"]
+            for entry in json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["entries"]
+        }
+        for path in sorted(PHASE11_OLLAMA_SCENARIO_DIR.glob("*.json")):
+            scenario = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                scenario["schema_version"],
+                "2026-05-19.phase11-ollama-scenario-v1",
+            )
+            self.assertEqual(scenario["user_mode"], "ollama_guided_user")
+            self.assertNotIn(scenario["scenario_id"], scenario_ids)
+            scenario_ids.add(scenario["scenario_id"])
+            self.assertIn(scenario["graph_id"], manifest_ids)
+            self.assertIsInstance(scenario.get("scenario_goal"), str)
+            self.assertIsInstance(scenario.get("allowed_user_behavior"), list)
+            self.assertIsInstance(scenario.get("forbidden_user_behavior"), list)
+            self.assertEqual(len(scenario.get("scripted_user_turns", [])), 1)
+            self.assertEqual(int(scenario.get("max_user_turns", 0)), 1)
+            self.assertEqual(int(scenario.get("max_turns", 0)), 2)
+            self.assertIsInstance(scenario.get("expected_guided_workflow"), dict)
+            self.assertIsInstance(scenario.get("forbidden_events"), list)
+        self.assertEqual(scenario_ids, EXPECTED_PHASE11_OLLAMA_SCENARIOS)
+        config = json.loads(OLLAMA_PHASE11_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["schema_version"],
+            "2026-05-19.phase11-ollama-gameplay-config-v1",
+        )
+        self.assertEqual(set(config["scenarios"]), EXPECTED_PHASE11_OLLAMA_SCENARIOS)
+        self.assertEqual(config["provider"], "cloud")
+        self.assertEqual(config["model"], "gemma3:4b")
+        self.assertEqual(config["temperature"], 0.0)
+        self.assertEqual(config["n_runs"], 5)
+        self.assertEqual(config["max_turns"], 2)
 
     def test_runner_copies_graph_and_never_mutates_source(self) -> None:
         source = ROOT / "tests/data/random_bit_generator.grc"
