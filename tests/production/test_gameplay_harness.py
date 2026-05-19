@@ -35,6 +35,7 @@ PHASE10_OLLAMA_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama_phase10"
 PHASE11_DIRECT_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_direct_phase11"
 PHASE11_OLLAMA_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_ollama_phase11"
 PHASE12_DIRECT_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_direct_phase12"
+PHASE13_DIRECT_SCENARIO_DIR = PRODUCTION_DIR / "scenarios_direct_phase13"
 OLLAMA_GAMEPLAY_CONFIG = PRODUCTION_DIR / "ollama_gameplay_config.json"
 OLLAMA_PHASE6_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase6_config.json"
 OLLAMA_PHASE8_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase8_config.json"
@@ -44,6 +45,7 @@ OLLAMA_PHASE10_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase10_config.json"
 DIRECT_PHASE11_CONFIG = PRODUCTION_DIR / "direct_gameplay_phase11_config.json"
 OLLAMA_PHASE11_CONFIG = PRODUCTION_DIR / "ollama_gameplay_phase11_config.json"
 DIRECT_PHASE12_CONFIG = PRODUCTION_DIR / "direct_gameplay_phase12_config.json"
+DIRECT_PHASE13_CONFIG = PRODUCTION_DIR / "direct_gameplay_phase13_config.json"
 EXPECTED_SCENARIOS = {
     "add_variable",
     "clarification_required",
@@ -110,6 +112,12 @@ EXPECTED_PHASE12_DIRECT_SCENARIOS = {
     "connection_edit_workflow",
     "dial_tone_workflow",
     "safety_refusal_workflow",
+}
+EXPECTED_PHASE13_DIRECT_SCENARIOS = {
+    "dial_tone_insert_exact_after_prior_edits",
+    "dial_tone_insert_exact_isolated",
+    "dial_tone_insert_guided_after_prior_edits",
+    "dial_tone_insert_isolated_same_prompt",
 }
 
 
@@ -461,6 +469,44 @@ class ProductionHarnessTests(unittest.TestCase):
         self.assertEqual(config["provider"], "local")
         self.assertEqual(config["n_runs"], 3)
         self.assertEqual(config["max_turns"], 8)
+
+    def test_phase13_direct_scenarios_and_config_validate(self) -> None:
+        scenario_ids = set()
+        manifest_ids = {
+            entry["id"]
+            for entry in json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["entries"]
+        }
+        for path in sorted(PHASE13_DIRECT_SCENARIO_DIR.glob("*.json")):
+            scenario = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                scenario["schema_version"],
+                "2026-05-19.phase13-direct-scenario-v1",
+            )
+            self.assertEqual(scenario["user_mode"], "direct_user")
+            self.assertNotIn(scenario["scenario_id"], scenario_ids)
+            scenario_ids.add(scenario["scenario_id"])
+            self.assertIn(scenario["graph_id"], manifest_ids)
+            self.assertEqual(scenario["graph_id"], "installed_audio_dial_tone")
+            self.assertIsInstance(scenario.get("scripted_user_turns"), list)
+            self.assertGreaterEqual(len(scenario["scripted_user_turns"]), 1)
+            self.assertLessEqual(
+                len(scenario["scripted_user_turns"]),
+                int(scenario["max_turns"]),
+            )
+            self.assertTrue(scenario.get("expected_transcript_complete"))
+            self.assertIsInstance(scenario.get("expected_graph_delta"), dict)
+            self.assertIsInstance(scenario.get("expected_save_load_behavior"), dict)
+            self.assertIsInstance(scenario.get("forbidden_events"), list)
+        self.assertEqual(scenario_ids, EXPECTED_PHASE13_DIRECT_SCENARIOS)
+        config = json.loads(DIRECT_PHASE13_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["schema_version"],
+            "2026-05-19.phase13-direct-gameplay-config-v1",
+        )
+        self.assertEqual(set(config["scenarios"]), EXPECTED_PHASE13_DIRECT_SCENARIOS)
+        self.assertEqual(config["provider"], "local")
+        self.assertEqual(config["n_runs"], 3)
+        self.assertEqual(config["max_turns"], 5)
 
     def test_runner_copies_graph_and_never_mutates_source(self) -> None:
         source = ROOT / "tests/data/random_bit_generator.grc"

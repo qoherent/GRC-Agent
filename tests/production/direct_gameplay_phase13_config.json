@@ -1,0 +1,14 @@
+{
+  "schema_version": "2026-05-19.phase13-direct-gameplay-config-v1",
+  "model": "local-grc-agent",
+  "provider": "local",
+  "temperature": 0.0,
+  "n_runs": 3,
+  "max_turns": 5,
+  "scenarios": [
+    "dial_tone_insert_exact_after_prior_edits",
+    "dial_tone_insert_exact_isolated",
+    "dial_tone_insert_guided_after_prior_edits",
+    "dial_tone_insert_isolated_same_prompt"
+  ]
+}
