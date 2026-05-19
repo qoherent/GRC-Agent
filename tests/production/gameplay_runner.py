@@ -636,15 +636,28 @@ def _expected_model_tools(scenario: dict[str, Any]) -> set[str]:
     capabilities = {
         str(item) for item in scenario.get("allowed_capabilities", []) if isinstance(item, str)
     }
+    tools: set[str] = set()
     if "R0_READ_ONLY" in capabilities:
-        return {"inspect_graph", "search_blocks", "ask_grc_docs"}
+        tools.update({"inspect_graph", "search_blocks", "ask_grc_docs"})
     if "R1_SET_PARAM_ONLY" in capabilities:
-        return {"change_graph"}
+        tools.add("change_graph")
+    if any(
+        capability
+        in {
+            "R1_SET_STATE",
+            "R2_DISCONNECT",
+            "R3_REWIRE",
+            "R4A_INSERT_BLOCK_ON_CONNECTION",
+            "R4B_REMOVE_BLOCK",
+            "R4C_ADD_VARIABLE",
+            "Tier5_ADVERSARIAL",
+        }
+        for capability in capabilities
+    ):
+        tools.add("change_graph")
     if "R5_SAVE_LOAD" in capabilities:
-        return {"save_graph_explicit", "load_graph_explicit"}
-    if capabilities:
-        return {"change_graph"}
-    return set()
+        tools.update({"save_graph_explicit", "load_graph_explicit"})
+    return tools
 
 
 def _has_invalid_request_tool_result(artifact: dict[str, Any]) -> bool:

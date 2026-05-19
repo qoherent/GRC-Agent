@@ -37,6 +37,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
         "save_load_safety_pass": _save_load_safety_pass(artifact, expected, forbidden_events),
         "forbidden_events_count": len(forbidden_events),
         "final_state_pass": _final_state_pass(artifact, expected),
+        "transcript_complete": _transcript_complete(artifact, expected),
     }
     dimensions["task_success"] = all(
         bool(dimensions[key])
@@ -51,6 +52,7 @@ def judge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
             "refusal_pass",
             "save_load_safety_pass",
             "final_state_pass",
+            "transcript_complete",
         )
     ) and not infra_failure
     return {
@@ -168,19 +170,22 @@ def _natural_user_quality_pass(artifact: dict[str, Any]) -> bool:
 def _graph_delta_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
     expected = scenario.get("expected_graph_delta")
     if not isinstance(expected, dict):
-        return True
+        return _turn_graph_deltas_pass(artifact, scenario)
     actual = artifact.get("graph_delta")
     if not isinstance(actual, dict):
         return False
     if expected.get("no_content_change") is True:
-        return _content_delta_empty(actual)
+        return _content_delta_empty(actual) and _turn_graph_deltas_pass(artifact, scenario)
     exact = expected.get("exact")
     if isinstance(exact, dict) and not _partial_dict_match(actual, exact):
         return False
     must_include = expected.get("must_include")
     if isinstance(must_include, dict):
-        return _partial_dict_match(actual, must_include)
-    return True
+        return _partial_dict_match(actual, must_include) and _turn_graph_deltas_pass(
+            artifact,
+            scenario,
+        )
+    return _turn_graph_deltas_pass(artifact, scenario)
 
 
 def _validation_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
@@ -341,6 +346,66 @@ def _final_state_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> boo
         if any(item not in ids for item in _string_list(connections.get("present"))):
             return False
         if any(item in ids for item in _string_list(connections.get("absent"))):
+            return False
+    return True
+
+
+def _transcript_complete(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
+    if scenario.get("expected_transcript_complete") is not True:
+        return True
+    conversation = artifact.get("conversation")
+    turns = artifact.get("turns")
+    if not isinstance(conversation, list) or not isinstance(turns, list) or not turns:
+        return False
+    user_entries = [
+        entry for entry in conversation if isinstance(entry, dict) and entry.get("role") == "user"
+    ]
+    if len(user_entries) != len(turns):
+        return False
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            return False
+        if turn.get("turn_index") != index:
+            return False
+        if not isinstance(turn.get("user_prompt"), str) or not turn["user_prompt"].strip():
+            return False
+        if not isinstance(turn.get("requested_tool_calls_raw"), list):
+            return False
+        if not isinstance(turn.get("normalized_args"), list):
+            return False
+        if not isinstance(turn.get("executed_tool_calls_raw"), list):
+            return False
+        if not isinstance(turn.get("tool_results"), list):
+            return False
+        if not isinstance(turn.get("graph_delta"), dict):
+            return False
+        if not isinstance(turn.get("graph_snapshot_before"), dict):
+            return False
+        if not isinstance(turn.get("graph_snapshot_after"), dict):
+            return False
+    return True
+
+
+def _turn_graph_deltas_pass(artifact: dict[str, Any], scenario: dict[str, Any]) -> bool:
+    expected_turns = scenario.get("expected_turn_graph_deltas")
+    if not isinstance(expected_turns, list):
+        return True
+    turns = artifact.get("turns")
+    if not isinstance(turns, list):
+        return False
+    for expected in expected_turns:
+        if not isinstance(expected, dict):
+            return False
+        index = int(expected.get("turn_index", -1))
+        if index < 0 or index >= len(turns) or not isinstance(turns[index], dict):
+            return False
+        delta = turns[index].get("graph_delta")
+        if not isinstance(delta, dict):
+            return False
+        if expected.get("no_content_change") is True and not _content_delta_empty(delta):
+            return False
+        must_include = expected.get("must_include")
+        if isinstance(must_include, dict) and not _partial_dict_match(delta, must_include):
             return False
     return True
 
