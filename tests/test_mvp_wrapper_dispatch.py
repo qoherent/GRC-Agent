@@ -842,6 +842,66 @@ class MvpWrapperDispatchTests(unittest.TestCase):
         self.assertIn("stream", lower)
         self.assertIn("message", lower)
 
+    def test_ask_grc_docs_phase15_curated_sources_cover_answerable_rows(self) -> None:
+        agent = self._load_agent()
+        object.__setattr__(agent._docs_answer_cfg, "helper_mode", "never")
+        cases = (
+            (
+                "What does grcc do?",
+                "grcc",
+                "compile",
+            ),
+            (
+                "How do variables affect blocks?",
+                "Variables in Flowgraphs",
+                "block parameter",
+            ),
+            (
+                "What is a hierarchical block in GNU Radio?",
+                "Hier Blocks",
+                "used as one block",
+            ),
+            (
+                "What does interpolation mean in GNU Radio context?",
+                "Sample Rate",
+                "increases the sampling rate",
+            ),
+            (
+                "What is an embedded python block?",
+                "Embedded Python Block",
+                "custom GNU Radio block",
+            ),
+            (
+                "How do stream tags carry packet boundaries?",
+                "Tagged Stream Blocks",
+                "PDU boundaries",
+            ),
+        )
+        with mock.patch.object(
+            agent_module,
+            "semantic_search_grc",
+            return_value={"ok": True, "results": []},
+        ):
+            for question, expected_source_title, expected_answer_text in cases:
+                with self.subTest(question=question):
+                    result = agent.execute_tool(
+                        "ask_grc_docs",
+                        {"question": question, "debug": True},
+                    )
+                    self.assertTrue(result["ok"], result)
+                    self.assertFalse(result["insufficient_evidence"], result)
+                    self.assertIn(expected_answer_text.lower(), result["answer"].lower())
+                    self.assertTrue(
+                        any(
+                            expected_source_title.lower()
+                            in str(source.get("title") or "").lower()
+                            for source in result.get("sources", [])
+                        ),
+                        result,
+                    )
+                    telemetry = result.get("docs_answer_telemetry") or {}
+                    self.assertFalse(telemetry.get("helper_eligible"), result)
+
     def test_ask_grc_docs_repeated_query_hits_answer_cache(self) -> None:
         agent = self._load_agent()
         lexical_payload = {

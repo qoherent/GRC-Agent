@@ -10,10 +10,17 @@ TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 ALIAS_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("audio", "smoother"), ("low", "pass", "filter", "lowpass")),
     (("automatic", "gain", "control"), ("agc",)),
+    (("decimation",), ("sample", "rate", "change", "downsample")),
+    (("embedded", "python", "block"), ("epy", "custom", "creating")),
+    (("grcc",), ("compiler", "compile", "validation", "flowgraph")),
+    (("hierarchical", "block"), ("hier", "blocks", "parameters", "wrapper")),
+    (("interpolation",), ("sample", "rate", "change", "upsample")),
+    (("packet", "boundaries"), ("tagged", "stream", "length", "tags")),
     (("spectrum",), ("frequency", "waterfall", "sink")),
     (("rate", "limiter"), ("throttle",)),
     (("scope",), ("time", "sink")),
     (("trace",), ("time", "sink")),
+    (("variables", "affect", "blocks"), ("parameters", "flowgraphs")),
 )
 
 

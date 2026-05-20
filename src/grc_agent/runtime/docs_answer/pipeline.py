@@ -578,12 +578,14 @@ def rank_docs_candidates(
     query_l = question.lower()
     howto = agent._is_tutorial_or_howto_query(question)
     block_definition_query = agent._is_block_definition_query(question)
+    preferred_markers = _preferred_docs_source_markers(question)
     ranked: list[_DocsEvidenceCandidate] = []
     for candidate in candidates:
         title_l = candidate.snippet.title.lower()
         section_l = candidate.section.lower()
         excerpt_l = candidate.snippet.excerpt.lower()
-        text = " ".join([title_l, section_l, excerpt_l])
+        source_l = candidate.snippet.source.lower()
+        text = " ".join([title_l, section_l, source_l, excerpt_l])
         term_hits = sum(1 for term in keywords if term in text)
         title_hits = sum(1 for term in keywords if term in title_l)
         heading_hits = sum(1 for term in keywords if term in section_l)
@@ -635,14 +637,26 @@ def rank_docs_candidates(
         weak_absence_penalty = 0.0
         if topic_score <= 0.0 and (candidate.semantic_score or 0.0) < 0.74:
             weak_absence_penalty = 2.0
+        off_topic_curated_penalty = 0.0
+        if (
+            "variables in flowgraphs" in title_l
+            and "variable" not in query_l
+            and "variables" not in query_l
+        ):
+            off_topic_curated_penalty = 6.0
+        preferred_source_bonus = 0.0
+        if preferred_markers and any(marker in text for marker in preferred_markers):
+            preferred_source_bonus = 3.5
         quality_score = (
             topic_score
             + source_pref
+            + preferred_source_bonus
             + lexical_component
             + semantic_component
             - low_value_penalty
             - procedural_penalty
             - weak_absence_penalty
+            - off_topic_curated_penalty
         )
         ranked.append(
             _DocsEvidenceCandidate(
@@ -668,6 +682,29 @@ def rank_docs_candidates(
         )
     )
     return ranked
+
+
+def _preferred_docs_source_markers(question: str) -> tuple[str, ...]:
+    lower = question.lower()
+    markers: list[str] = []
+    if "grcc" in lower:
+        markers.extend(("grcc", "gnu radio companion compiler"))
+    if "hierarchical block" in lower or "hier block" in lower:
+        markers.extend(("hier blocks", "hier_blocks", "hierarchical_block"))
+    if "embedded python block" in lower:
+        markers.extend(("embedded python block", "embedded_python_block"))
+    if "decimation" in lower or "interpolation" in lower or "sample rate" in lower:
+        markers.extend(("sample rate change", "sample_rate_change", "sample_rate"))
+    if "variables" in lower and "block" in lower:
+        markers.extend(("variables in flowgraphs", "variables_in_flowgraphs"))
+    if "tagged stream" in lower or "packet boundaries" in lower or "packet length" in lower:
+        markers.extend(("tagged stream blocks", "tagged_stream_blocks", "packet_communications"))
+    if "stream" in lower and "message" in lower and "port" in lower:
+        markers.extend(("streams and vectors", "stream_ports", "message passing", "message_ports"))
+    if "options" in lower and ("flowgraph" in lower or "block" in lower):
+        markers.extend(("options_blocks", "catalog:options", " options "))
+    return tuple(dict.fromkeys(markers))
+
 
 def build_docs_source_quality(
     agent,
@@ -1014,6 +1051,8 @@ def build_typed_docs_answer(
                     "Local docs only provided overlapping evidence; not enough direct evidence to compare both sides distinctly.",
                     True,
                 )
+        left_sentence = _shorten_docs_comparison_sentence(left_sentence)
+        right_sentence = _shorten_docs_comparison_sentence(right_sentence)
         answer = (
             f"{sides.left_label}: {left_sentence} "
             f"{sides.right_label}: {right_sentence} "
@@ -1086,8 +1125,6 @@ def build_typed_docs_answer(
         agent._docs_primary_terms(question) or agent._docs_topic_terms(question)
     )
     lower_question = question.lower()
-    if "hierarchical block" in lower_question:
-        return ("Local docs did not contain enough direct evidence for this question.", True)
     require_hier_source = "hierarchical block" in lower_question
     if "message ports" in lower_question:
         for candidate in ranked_candidates[:6]:
@@ -1117,3 +1154,10 @@ def build_typed_docs_answer(
         if sentence:
             return (f"According to local docs, {sentence}", False)
     return ("Local docs did not contain enough direct evidence for this question.", True)
+
+
+def _shorten_docs_comparison_sentence(sentence: str, limit: int = 120) -> str:
+    compact = " ".join(sentence.split()).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip(" ,;:.") + "…"

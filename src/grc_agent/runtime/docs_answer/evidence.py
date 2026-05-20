@@ -21,6 +21,8 @@ _DOCS_TOPIC_SYNONYMS: dict[str, tuple[str, ...]] = {
     "grcc": ("compiler", "compile", "validation", "validate"),
     "hierarchical": ("hier", "wrapper", "block"),
     "tagged": ("length", "packet", "pdu"),
+    "variable": ("variables", "parameter", "parameters"),
+    "variables": ("variable", "parameter", "parameters"),
 }
 
 

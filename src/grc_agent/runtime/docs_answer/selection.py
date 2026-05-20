@@ -192,8 +192,21 @@ def classify_docs_answer_type(question: str) -> str:
 
 def normalized_docs_retrieval_query(*, question: str, answer_type: str) -> str:
     query = " ".join(question.split()).strip()
+    lower = query.lower()
     if answer_type == "tool_command_concept" and "grcc" in query.lower():
         return "grcc compile validation flowgraph"
+    if "hierarchical block" in lower:
+        return "Hier Blocks and Parameters hierarchical block wrapper"
+    if "embedded python block" in lower:
+        return "Embedded Python Block custom Python block flowgraph"
+    if "decimation" in lower:
+        return "Sample Rate Change decimation sample rate downsample"
+    if "interpolation" in lower:
+        return "Sample Rate Change interpolation sample rate upsample"
+    if "variables" in lower and "block" in lower:
+        return "Variables in Flowgraphs variables blocks parameters"
+    if "stream tags" in lower and "packet" in lower:
+        return "Tagged Stream Blocks stream tags packet boundaries length tag"
     return query
 
 
@@ -308,10 +321,16 @@ def pick_typed_sentence(
     best = ""
     best_score = -999.0
     for sentence in sentence_list(candidate.snippet.excerpt):
+        sentence = re.sub(r"^#+\s*", "", sentence).strip()
         lower = sentence.lower()
         if len(sentence) < 24 or len(sentence) > 220:
             continue
         if sentence.count("#") >= 1 or "```" in sentence:
+            continue
+        if re.match(
+            r"(?i)^(source title|source url|retrieval topic|aliases|official or primary|why relevant):",
+            sentence,
+        ):
             continue
         if sentence.count("`") >= 2 or "self.connect(" in lower:
             continue
@@ -350,7 +369,11 @@ def pick_typed_sentence(
             continue
         if not allow_procedural and is_procedural_walkthrough_text(lower):
             continue
-        term_hits = sum(1 for term in required_terms if term in lower)
+        term_hits = sum(
+            1
+            for term in required_terms
+            if text_matches_term_or_synonym(lower, term)
+        )
         if required_terms and term_hits < max(1, min_term_hits):
             continue
         synonym_hits = 0
@@ -358,8 +381,16 @@ def pick_typed_sentence(
             for synonym in _DOCS_TOPIC_SYNONYMS.get(term, ()):
                 if synonym in lower:
                     synonym_hits += 1
-        score = float(term_hits) + min(2.0, float(synonym_hits) * 0.5)
-        if re.search(r"\b(is|are|means|refers to|used for|allows|converts|provides|carries)\b", lower):
+        exact_term_hits = sum(1 for term in required_terms if term and term in lower)
+        score = (
+            float(term_hits)
+            + float(exact_term_hits)
+            + min(2.0, float(synonym_hits) * 0.5)
+        )
+        if re.search(
+            r"\b(is|are|means|refers to|used for|allows|lets|converts|provides|carries|increases|decreases|reduces)\b",
+            lower,
+        ):
             score += 1.5
         if any(marker in lower for marker in ("asynchronous", "between blocks", "control data", "time domain", "frequency domain")):
             score += 1.6

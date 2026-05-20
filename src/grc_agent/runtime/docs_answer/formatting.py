@@ -217,6 +217,50 @@ def docs_title_aliases(title: str) -> list[str]:
         if prefix and lhs and rhs:
             aliases.add(f"{prefix}_{lhs}_and_{rhs}")
             aliases.add(f"{prefix}_{rhs}_and_{lhs}")
+    explicit_aliases = {
+        "creating your first block": (
+            "embedded_python_block",
+            "epy_block",
+        ),
+        "embedded python block": (
+            "embedded_python_block",
+            "epy_block",
+        ),
+        "hier blocks and parameters": (
+            "hier_blocks",
+            "hierarchical_block",
+            "hierarchical_blocks",
+        ),
+        "message passing": (
+            "message_ports",
+            "pmt_message",
+        ),
+        "sample rate": (
+            "sample_rate",
+            "sample_rate_change",
+            "decimation",
+            "interpolation",
+        ),
+        "sample rate change": (
+            "sample_rate",
+            "decimation",
+            "interpolation",
+        ),
+        "streams and vectors": (
+            "stream_ports",
+            "streams_and_vectors",
+        ),
+        "tagged stream blocks": (
+            "tagged_stream_blocks",
+            "packet_length_tags",
+            "packet_tags",
+        ),
+        "variables in flowgraphs": (
+            "variables_blocks",
+            "variables_in_flowgraphs",
+        ),
+    }
+    aliases.update(explicit_aliases.get(compact, ()))
     return sorted(alias for alias in aliases if alias)
 
 
