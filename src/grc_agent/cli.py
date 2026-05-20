@@ -14,6 +14,11 @@ from grc_agent.agent import GrcAgent
 from grc_agent.runtime.clarification import render_clarification_prompt
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.config import AppConfig, ConfigError, load_app_config
+from grc_agent.debug_bundle import (
+    build_debug_bundle,
+    debug_bundle_summary,
+    write_debug_bundle,
+)
 from grc_agent.doctor import print_doctor_report, run_doctor
 from grc_agent.dogfood import (
     VALID_DOGFOOD_SOURCES,
@@ -117,6 +122,20 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
     subparsers.add_parser(
         "release-manifest",
         help="Print a JSON release evidence manifest for the active runtime profile.",
+    )
+
+    debug_bundle_parser = subparsers.add_parser(
+        "debug-bundle",
+        help="Write a redacted JSON support bundle for issue reports.",
+    )
+    debug_bundle_parser.add_argument(
+        "--output",
+        required=True,
+        help="Path to write the redacted debug bundle JSON.",
+    )
+    debug_bundle_parser.add_argument(
+        "--vector-index-dir",
+        help="Optional local vector index directory to inspect.",
     )
 
     fake_parser = subparsers.add_parser(
@@ -1131,6 +1150,44 @@ def _run_release_manifest_command(config: AppConfig) -> int:
     return 0
 
 
+def _run_debug_bundle_command(
+    *,
+    config: AppConfig,
+    config_path: str | None,
+    output_path: str,
+    vector_index_dir: str | None,
+) -> int:
+    """Write a redacted debug bundle and print a compact summary."""
+
+    doctor_report = run_doctor(
+        config_path=config_path,
+        check_retrieval=True,
+        check_llama=False,
+    )
+    health_report = _build_health_report(config)
+    release_manifest = _build_release_manifest(config)
+    try:
+        vector_stats = vector_index_stats(index_dir=vector_index_dir)
+    except Exception as exc:
+        vector_stats = build_error_payload(
+            error_type=ErrorCode.INTERNAL_ERROR,
+            message=str(exc),
+        )
+    repo_root = Path(__file__).resolve().parents[2]
+    payload = build_debug_bundle(
+        config=config,
+        config_path=config_path,
+        doctor_report=doctor_report,
+        health_report=health_report,
+        release_manifest=release_manifest,
+        vector_stats=vector_stats,
+        repo_root=repo_root,
+    )
+    written = write_debug_bundle(output_path, payload)
+    print(json.dumps(debug_bundle_summary(payload, written), indent=2, sort_keys=True))
+    return 0
+
+
 def _run_manual_search_command(query: str, k: int, *, json_output: bool) -> int:
     payload = search_manual(query, k=k)
     if json_output:
@@ -1518,6 +1575,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "release-manifest":
         return _run_release_manifest_command(app_config)
+
+    if args.command == "debug-bundle":
+        return _run_debug_bundle_command(
+            config=app_config,
+            config_path=args.config,
+            output_path=args.output,
+            vector_index_dir=args.vector_index_dir,
+        )
 
     if args.command == "fake":
         return _run_fake_runtime(args.file, app_config)

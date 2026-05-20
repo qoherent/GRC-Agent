@@ -102,6 +102,19 @@ The CLI can auto-start a configured local llama.cpp server for normal `chat` use
 
 `uv sync --locked` installs Python dependencies including Graphify-backed lexical search and Qdrant/FastEmbed vector search. It does not install GNU Radio or llama.cpp. `uv run grc-agent vector build` explicitly builds the local vector index and may download the FastEmbed model on first run.
 
+GNU Radio is normally installed outside this Python package. A plain uv virtual
+environment may not automatically see distro-installed GNU Radio Python
+bindings, even when `grcc` is on `PATH`. Supported local approaches are:
+
+- run GRC Agent with a Python environment where `import gnuradio` already works;
+- create a venv configured to include system site packages when that matches the
+  local GNU Radio install;
+- bridge the distro GNU Radio Python path with `PYTHONPATH` only when you know
+  the ABI and Python version match;
+- use a future container/devcontainer image once one is defined.
+
+Always verify the final environment with `uv run grc-agent doctor`.
+
 ## Usage
 
 Open an existing graph:
@@ -253,6 +266,16 @@ When reporting issues, include prompt, expected behavior, actual behavior,
 sanitized copied-graph reference, validation result, and checkpoint result.
 Use `docs/ISSUE_INTAKE.md` for the current report template and attachment
 guidance.
+
+Generate a redacted support bundle:
+
+```bash
+uv run grc-agent debug-bundle --output /tmp/grc_agent_debug_bundle.json
+```
+
+The bundle records doctor, health, release-manifest, tool-surface, hash, vector,
+and artifact hygiene summaries. It does not include `.env` contents, API keys,
+raw prompt history, or raw graph contents.
 
 ## Verification
 

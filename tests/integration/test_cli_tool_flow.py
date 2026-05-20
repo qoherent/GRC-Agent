@@ -11,6 +11,10 @@ from unittest import mock
 
 from grc_agent.cli import main
 from grc_agent.config import ConfigError
+from grc_agent.debug_bundle import (
+    DEBUG_BUNDLE_SCHEMA_VERSION,
+    redact_for_debug_bundle,
+)
 
 from tests.llama_launcher_support import reserve_free_port, terminate_pid, write_stub_llama_server
 
@@ -517,6 +521,98 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
         payload = json.loads(output)
         expected = 0 if payload["status"] == "ok" else 1
         self.assertEqual(exit_code, expected)
+
+    def test_debug_bundle_command_writes_redacted_bundle(self) -> None:
+        fake_doctor = {
+            "ok": True,
+            "checks": [
+                {"name": "Python version", "ok": True, "detail": "3.12"},
+                {"name": "grcc on PATH", "ok": True, "detail": "/usr/bin/grcc"},
+                {"name": "GNU Radio import/version", "ok": True, "detail": "3.10.9.2"},
+            ],
+        }
+        fake_health = {
+            "status": "not_ready",
+            "status_reasons": ["llama_unreachable"],
+            "llama_model_ready": False,
+            "llama_context_verified": False,
+            "llama_actual_context_tokens": None,
+            "llama_desired_context_tokens": 120000,
+        }
+        fake_manifest = {
+            "ok": True,
+            "git": {"commit": "abc", "dirty": False, "dirty_files": []},
+            "runtime": {"server_url": "http://127.0.0.1:8080"},
+            "tool_surface": {"model_tool_names": ["inspect_graph"]},
+            "hashes": {
+                "prompt_sha256": "p",
+                "schema_sha256": "s",
+                "policy_sha256": "x",
+            },
+            "sensitive": {
+                "Authorization": "Bearer phase18-secret",
+                "ollama_key": "phase18-secret",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "nested" / "debug_bundle.json"
+            missing_vector = Path(tmpdir) / "missing-vector-index"
+            with (
+                mock.patch("grc_agent.cli.run_doctor", return_value=fake_doctor),
+                mock.patch("grc_agent.cli._build_health_report", return_value=fake_health),
+                mock.patch("grc_agent.cli._build_release_manifest", return_value=fake_manifest),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "OLLAMA_API_KEY": "phase18-secret",
+                        "EXTRA_TOKEN": "phase18-secret",
+                    },
+                    clear=False,
+                ),
+            ):
+                exit_code, output = self._run_cli(
+                    "debug-bundle",
+                    "--output",
+                    str(output_path),
+                    "--vector-index-dir",
+                    str(missing_vector),
+                )
+
+            summary = json.loads(output)
+            bundle_text = output_path.read_text()
+            bundle = json.loads(bundle_text)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["schema_version"], DEBUG_BUNDLE_SCHEMA_VERSION)
+        self.assertEqual(bundle["schema_version"], DEBUG_BUNDLE_SCHEMA_VERSION)
+        self.assertIn("doctor", bundle)
+        self.assertIn("health", bundle)
+        self.assertIn("release_manifest", bundle)
+        self.assertEqual(bundle["health"]["status"], "not_ready")
+        self.assertFalse(bundle["vector_index"]["ok"])
+        self.assertEqual(bundle["vector_index"]["error_type"], "missing_index")
+        self.assertFalse(bundle["exclusions"]["env_contents_included"])
+        for forbidden in (
+            "phase18-secret",
+            "ollama_key",
+            "OLLAMA_API_KEY",
+            "Authorization",
+            "Bearer",
+        ):
+            self.assertNotIn(forbidden, bundle_text)
+
+    def test_debug_bundle_redactor_removes_secret_keys_and_values(self) -> None:
+        redacted = redact_for_debug_bundle(
+            {
+                "ollama_key": "phase18-secret",
+                "headers": {"Authorization": "Bearer phase18-secret"},
+                "nested": ["Bearer phase18-secret"],
+            }
+        )
+        text = json.dumps(redacted, sort_keys=True)
+        for forbidden in ("phase18-secret", "ollama_key", "Authorization", "Bearer"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("[REDACTED]", text)
 
     def test_release_manifest_reports_runtime_hashes_and_tool_surface(self) -> None:
         with mock.patch(
