@@ -201,7 +201,10 @@ Forbidden behavior:
 - Returning graph recipes from tutorials as edit plans.
 - Treating docs as block/default authority when catalog metadata and `grcc` disagree.
 
-Current quality caveat: docs-answer eval exits 0 but has relevance and groundedness gaps. Treat this as safe read-only support, not production-grade docs QA.
+Current quality status: docs-answer eval meets the deterministic docs QA baseline
+(32/35 relevance, 28/35 groundedness, 0 misleading answers, 0 mutation leakage,
+0 helper use). Treat this as read-only docs support; docs/RAG remains non-authority
+for mutation and the runtime is still not production-ready.
 
 ### `change_graph`
 
@@ -456,14 +459,14 @@ Operating contract:
 Current eval evidence:
 
 - Vector regression: 290 cases, 276 vector top-k hits, 290 provenance passes, 290 safety passes.
-- Docs-answer eval: 35 rows, 0 mutation leakage, 0 misleading answer count, but only 24 relevance passes and 19 groundedness passes.
+- Docs-answer eval: 35 rows, 32 relevance passes, 28 groundedness passes, 0 mutation leakage, 0 misleading answer count, 0 helper use.
 
 RAG recommendation:
 
 - Keep Qdrant + FastEmbed now.
 - Do not add rerankers, hybrid sparse search, or llama.cpp embeddings until measured misses justify them.
-- Add better source coverage for `grcc`, validation, GRC compile/generation behavior, and comparison questions.
-- Add explicit quality thresholds before production docs QA claims.
+- Add better source coverage and comparison assembly for remaining weak rows, especially stream/message-port and tag/metadata comparisons.
+- Keep the explicit deterministic docs QA baseline separate from runtime production-readiness claims.
 
 ## 14. llama.cpp Runtime
 
@@ -544,10 +547,11 @@ Before claiming production-ready:
 - Release dashboard must inspect raw tool-call history, not just metadata. **Fixed.**
 - Release manifest must include commit, dirty state, model alias, actual context, prompt hash, schema hash, policy hash, eval versions, and fixture identifiers. **Fixed.**
 - Committed mutation evals must include save/reload/`grcc` semantic checks. **Validated at beta level (R5), not release-validated.**
-- Docs-answer quality thresholds must be explicit. **Safety baseline passed.**
-  `grc_docs_answer_eval` checks for misleading answers and mutation leakage, but
-  it does not validate production-grade docs QA. Current relevance and
-  groundedness gaps remain below production quality.
+- Docs-answer quality thresholds must be explicit. **Threshold-met deterministic
+  baseline passed.** `grc_docs_answer_eval`: 32/35 relevance, 28/35
+  groundedness, 0 misleading answers, 0 mutation leakage, 0 helper use. Remaining
+  comparison/unsupported-topic gaps do not authorize mutation and do not make the
+  runtime production-ready.
 - No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
 
 Current classification (2026-05-15):
@@ -580,8 +584,8 @@ Current classification (2026-05-15):
 ## 18. Remaining Work (Not Release-Gating for R0/R1)
 
 - **set_state promotion hardening:** Current R1_SET_STATE suite is stable at beta level. Add at least one independent fixture or external example before promoting set_state into release-validated scope.
-- **Retrieval eval gates:** ~~Requires Qdrant available. Blocked in current env.~~ **Passed.** vector_regression=290/290 ok. grc_docs_answer_eval=safety baseline passed (0 misleading, 0 mutation leakage). Relevance/groundedness are reported metrics, not enforced thresholds.
-- **Docs-answer eval gate:** ~~Requires Qdrant + vector index. Blocked in current env.~~ **Safety baseline passed.** 35 questions answered, 0 misleading, 0 mutation leakage. This is a safety gate, not a docs-QA quality gate.
+- **Retrieval eval gates:** ~~Requires Qdrant available. Blocked in current env.~~ **Passed.** vector_regression=290/290 ok. grc_docs_answer_eval=threshold-met deterministic baseline (32/35 relevance, 28/35 groundedness, 0 misleading, 0 mutation leakage, 0 helper use).
+- **Docs-answer eval gate:** ~~Requires Qdrant + vector index. Blocked in current env.~~ **Threshold-met deterministic baseline passed.** 35 questions answered, 32/35 relevance, 28/35 groundedness, 0 misleading, 0 mutation leakage. This remains a read-only docs QA baseline, not mutation authority or a runtime production-ready claim.
 - **Clean commit:** ~~No unstaged changes remain; intended changes are staged. Repository remains dirty until committed.~~ **Committed.** dirty=false, commit=6a2243c437e4.
 - **Save/load semantic checks:** Tracked in R5 lifecycle evals and beta-validated; still outside the release-validated R0/R1 subset until a separate lifecycle safety audit promotes them.
 - **Complex mutation evidence:** Beta only; not release-gating.

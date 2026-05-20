@@ -70,9 +70,12 @@ No current STOP_THE_LINE issue is accepted in this evidence bundle. Required inv
 - Unsafe original/example paths are protected.
 - Docs/RAG has no mutation authority.
 
-## Docs QA Caveat
+## Docs QA Status
 
-`grc_docs_answer_eval` is a safety/baseline gate. It checks no misleading answers and no mutation leakage. It does not validate production-grade docs QA; relevance and groundedness gaps remain.
+`grc_docs_answer_eval` now meets the proposed deterministic docs QA baseline:
+32/35 relevance, 28/35 groundedness, 0 misleading answers, 0 mutation
+leakage, and 0 helper use. This is a read-only docs/RAG quality baseline,
+not mutation authority and not runtime production readiness.
 
 ## Production Blockers
 
@@ -80,5 +83,7 @@ No current STOP_THE_LINE issue is accepted in this evidence bundle. Required inv
 - Only R0_READ_ONLY and R1_SET_PARAM_ONLY are release-validated.
 - Broader mutation operations are beta-validated and require broader independent/external coverage before release promotion.
 - R7_NATURAL_EXTERNAL is diagnostic-clean on the latest sweep, but remains diagnostic and not release-gating.
-- Docs QA remains safety-baseline only.
+- Docs QA is a threshold-met deterministic baseline, but remaining docs
+  comparison/unsupported-topic gaps and runtime/model dependency still block
+  production-ready claims.
 - Model behavior remains a dependency; live evals are evidence, not a guarantee of autonomy.
