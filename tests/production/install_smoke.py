@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_UV_MODE = "default-uv"
+SYSTEM_SITE_VENV_MODE = "system-site-venv"
+INSTALL_SMOKE_SCHEMA_VERSION = "2026-05-20.phase19-install-smoke-v2"
 DEFAULT_IGNORE = {
     ".git",
     ".venv",
@@ -39,10 +44,13 @@ def _ignore(_directory: str, names: list[str]) -> set[str]:
 
 def _run(command: list[str], *, cwd: Path, timeout_seconds: int) -> dict[str, Any]:
     started = time.monotonic()
+    env = dict(os.environ)
+    env.pop("VIRTUAL_ENV", None)
     try:
         completed = subprocess.run(
             command,
             cwd=cwd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -104,62 +112,213 @@ def _classify_health(step: dict[str, Any]) -> list[str]:
     return []
 
 
+def _doctor_check(payload: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    for check in payload.get("checks", []):
+        if isinstance(check, dict) and str(check.get("name")) == name:
+            return check
+    return None
+
+
+def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    doctor_payload = _json_from_stdout(steps.get("doctor", {}))
+    health_payload = _json_from_stdout(steps.get("health", {}))
+    gnu_radio_check = _doctor_check(doctor_payload, "GNU Radio import/version")
+    grcc_check = _doctor_check(doctor_payload, "grcc on PATH")
+    retrieval_check = _doctor_check(doctor_payload, "Retrieval readiness")
+    package_ready = (
+        steps.get("uv_sync", {}).get("returncode") == 0
+        and steps.get("help", {}).get("returncode") == 0
+        and steps.get("production_tests", {}).get("returncode") == 0
+    )
+    gnu_radio_ready = bool(gnu_radio_check and gnu_radio_check.get("ok") is True)
+    grcc_ready = bool(grcc_check and grcc_check.get("ok") is True)
+    retrieval_ready = bool(retrieval_check and retrieval_check.get("ok") is True)
+    health_status = (
+        health_payload.get("status") if isinstance(health_payload, dict) else None
+    )
+    llama_ready = health_status == "ok"
+    context_verified = bool(
+        isinstance(health_payload, dict)
+        and health_payload.get("llama_context_verified") is True
+    )
+    vector_stats = steps.get("vector_stats", {})
+    vector_index_ready = vector_stats.get("returncode") == 0
+    if (
+        package_ready
+        and gnu_radio_ready
+        and grcc_ready
+        and retrieval_ready
+        and llama_ready
+        and context_verified
+    ):
+        classification = "runtime_ready"
+    elif package_ready and gnu_radio_ready and grcc_ready and retrieval_ready:
+        classification = "package_ready_runtime_not_ready"
+    elif package_ready:
+        classification = "package_ready_missing_runtime_dependencies"
+    else:
+        classification = "package_not_ready"
+    return {
+        "package_ready": package_ready,
+        "gnu_radio_ready": gnu_radio_ready,
+        "gnu_radio_detail": gnu_radio_check.get("detail") if gnu_radio_check else None,
+        "grcc_ready": grcc_ready,
+        "grcc_path": grcc_check.get("path") if grcc_check else None,
+        "retrieval_ready": retrieval_ready,
+        "vector_index_ready": vector_index_ready,
+        "vector_index_state": "ready" if vector_index_ready else "missing_or_unavailable",
+        "llama_ready": llama_ready,
+        "health_status": health_status,
+        "context_verified": context_verified,
+        "overall_environment_classification": classification,
+    }
+
+
+def _system_python(default: str | None) -> str:
+    if default:
+        return default
+    for candidate in ("/usr/bin/python3", shutil.which("python3"), sys.executable):
+        if candidate and Path(candidate).exists():
+            return candidate
+    return sys.executable
+
+
 def run_install_smoke(
     *,
+    mode: str = DEFAULT_UV_MODE,
+    python_executable: str | None = None,
     output_path: Path | None = None,
     keep_workspace: bool = False,
     timeout_seconds: int = 180,
+    build_vector_index: bool = False,
 ) -> dict[str, Any]:
+    if mode not in {DEFAULT_UV_MODE, SYSTEM_SITE_VENV_MODE}:
+        raise ValueError(f"unsupported install smoke mode: {mode}")
     parent = Path(tempfile.mkdtemp(prefix="grc_agent_install_smoke_"))
     workspace = parent / "workspace"
     shutil.copytree(ROOT, workspace, ignore=_ignore)
     steps: dict[str, dict[str, Any]] = {}
+    selected_python = _system_python(python_executable)
+    if mode == SYSTEM_SITE_VENV_MODE:
+        steps["create_system_site_venv"] = _run(
+            [
+                "uv",
+                "venv",
+                "--system-site-packages",
+                "--python",
+                selected_python,
+            ],
+            cwd=workspace,
+            timeout_seconds=timeout_seconds,
+        )
+        uv_sync = ["uv", "sync", "--locked", "--python", ".venv/bin/python"]
+    else:
+        selected_python = None
+        uv_sync = ["uv", "sync", "--locked"]
     commands = {
-        "uv_sync": ["uv", "sync", "--locked"],
+        "uv_sync": uv_sync,
         "help": ["uv", "run", "grc-agent", "--help"],
         "doctor": ["uv", "run", "grc-agent", "doctor", "--json"],
         "health": ["uv", "run", "grc-agent", "health"],
-        "production_tests": ["uv", "run", "python", "-m", "unittest", "tests.production"],
     }
+    if build_vector_index:
+        commands["vector_build"] = [
+            "uv",
+            "run",
+            "grc-agent",
+            "vector",
+            "build",
+            "--json",
+        ]
+    commands["vector_stats"] = [
+        "uv",
+        "run",
+        "grc-agent",
+        "vector",
+        "stats",
+        "--json",
+    ]
+    commands["production_tests"] = [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "unittest",
+        "tests.production",
+    ]
     for name, command in commands.items():
         steps[name] = _run(command, cwd=workspace, timeout_seconds=timeout_seconds)
     expected_failures = {
         "doctor": _classify_doctor(steps["doctor"]) if steps["doctor"]["returncode"] else [],
         "health": _classify_health(steps["health"]) if steps["health"]["returncode"] else [],
+        "vector_stats": (
+            ["missing_vector_index"]
+            if steps["vector_stats"]["returncode"]
+            else []
+        ),
     }
+    readiness = _build_readiness_summary(steps)
     result = {
-        "schema_version": "2026-05-20.phase18-install-smoke-v1",
+        "schema_version": INSTALL_SMOKE_SCHEMA_VERSION,
+        "mode": mode,
+        "selected_python": selected_python,
         "ok": (
             steps["uv_sync"]["returncode"] == 0
             and steps["help"]["returncode"] == 0
             and steps["production_tests"]["returncode"] == 0
+            and (
+                mode != SYSTEM_SITE_VENV_MODE
+                or steps["create_system_site_venv"]["returncode"] == 0
+            )
         ),
         "workspace": str(workspace),
         "workspace_kept": keep_workspace,
         "steps": steps,
+        "readiness": readiness,
         "expected_failures": expected_failures,
     }
-    if output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     if not keep_workspace:
         result["workspace_removed"] = True
         shutil.rmtree(parent, ignore_errors=True)
     else:
         result["workspace_removed"] = False
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode",
+        choices=[DEFAULT_UV_MODE, SYSTEM_SITE_VENV_MODE],
+        default=DEFAULT_UV_MODE,
+        help="Environment mode to smoke-test.",
+    )
+    parser.add_argument(
+        "--python",
+        dest="python_executable",
+        help="Python executable for --mode system-site-venv. Defaults to python3 on PATH.",
+    )
+    parser.add_argument(
+        "--build-vector-index",
+        action="store_true",
+        help="Also run vector index build. Off by default to avoid downloads/long runs.",
+    )
     parser.add_argument("--output", help="Optional JSON output path.")
     parser.add_argument("--keep-workspace", action="store_true")
     parser.add_argument("--timeout-seconds", type=int, default=180)
     args = parser.parse_args(argv)
     result = run_install_smoke(
+        mode=args.mode,
+        python_executable=args.python_executable,
         output_path=Path(args.output) if args.output else None,
         keep_workspace=args.keep_workspace,
         timeout_seconds=args.timeout_seconds,
+        build_vector_index=args.build_vector_index,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1

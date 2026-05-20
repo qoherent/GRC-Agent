@@ -24,9 +24,13 @@ Prefer a copied, minimized graph that still reproduces the issue.
 
 Attach these when available:
 
+- Redacted debug bundle:
+  `uv run grc-agent debug-bundle --output /tmp/grc_agent_debug_bundle.json`.
 - Redacted `uv run grc-agent doctor --json` output.
 - Redacted `uv run grc-agent health` output.
 - Redacted `uv run grc-agent release-manifest` output.
+- Install smoke output when the issue is setup-related:
+  `uv run python -m tests.production.install_smoke --mode system-site-venv --output /tmp/grc_agent_install_smoke.json`.
 - A copied `.grc` graph or a minimized reproduction graph.
 - Relevant trace/gameplay artifact, with secrets and private paths reviewed.
 - Recent terminal error output.

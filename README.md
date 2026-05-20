@@ -104,16 +104,31 @@ The CLI can auto-start a configured local llama.cpp server for normal `chat` use
 
 GNU Radio is normally installed outside this Python package. A plain uv virtual
 environment may not automatically see distro-installed GNU Radio Python
-bindings, even when `grcc` is on `PATH`. Supported local approaches are:
+bindings, even when `grcc` is on `PATH`.
 
-- run GRC Agent with a Python environment where `import gnuradio` already works;
-- create a venv configured to include system site packages when that matches the
-  local GNU Radio install;
-- bridge the distro GNU Radio Python path with `PYTHONPATH` only when you know
-  the ABI and Python version match;
-- use a future container/devcontainer image once one is defined.
+Recommended local Linux profile when GNU Radio is installed by the OS package
+manager:
 
-Always verify the final environment with `uv run grc-agent doctor`.
+```bash
+rm -rf .venv
+uv venv --system-site-packages --python /usr/bin/python3
+uv sync --locked --python .venv/bin/python
+uv run grc-agent doctor
+```
+
+This keeps GRC Agent dependencies locked by uv while allowing the venv to import
+the system GNU Radio Python bindings. Verify the full environment with:
+
+```bash
+uv run python -m tests.production.install_smoke \
+  --mode system-site-venv \
+  --output /tmp/grc_agent_install_smoke_system_site.json
+```
+
+Other approaches are documented in `docs/PRODUCTION_READINESS_PHASE19.md`.
+`PYTHONPATH` bridges are supported only as a last-resort local workaround when
+the ABI and Python version match. Container/devcontainer and conda/mamba
+profiles remain future packaging work.
 
 ## Usage
 

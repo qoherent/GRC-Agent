@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -16,7 +17,7 @@ from typing import Any
 from grc_agent.config import AppConfig, resolve_config_path
 
 
-DEBUG_BUNDLE_SCHEMA_VERSION = "2026-05-20.phase18-debug-bundle-v1"
+DEBUG_BUNDLE_SCHEMA_VERSION = "2026-05-20.phase19-debug-bundle-v2"
 _REDACTED = "[REDACTED]"
 _SENSITIVE_KEY_RE = re.compile(
     r"(api[_-]?key|ollama[_-]?key|token|secret|password|credential|authorization|auth[_-]?header|bearer)",
@@ -193,6 +194,67 @@ def summarize_vector_stats(vector_stats: dict[str, Any]) -> dict[str, Any]:
     return {key: vector_stats.get(key) for key in keys if key in vector_stats}
 
 
+def _read_pyvenv_cfg() -> dict[str, str]:
+    cfg_path = Path(sys.prefix) / "pyvenv.cfg"
+    if not cfg_path.exists():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        lines = cfg_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip().lower()] = value.strip()
+    return values
+
+
+def detect_environment_mode() -> dict[str, Any]:
+    """Detect the active Python environment shape without reading secrets."""
+
+    in_virtualenv = sys.prefix != sys.base_prefix
+    pyvenv_cfg = _read_pyvenv_cfg()
+    include_system_site = (
+        pyvenv_cfg.get("include-system-site-packages", "").lower() == "true"
+    )
+    if in_virtualenv and include_system_site:
+        mode = "system-site-venv"
+    elif in_virtualenv:
+        mode = "virtualenv"
+    else:
+        mode = "system-python"
+    return {
+        "mode": mode,
+        "in_virtualenv": in_virtualenv,
+        "include_system_site_packages": include_system_site,
+        "python_prefix": sys.prefix,
+        "python_base_prefix": sys.base_prefix,
+    }
+
+
+def detect_gnu_radio_runtime() -> dict[str, Any]:
+    """Return import and executable details for GNU Radio without graph access."""
+
+    result: dict[str, Any] = {
+        "grcc_path": shutil.which("grcc"),
+        "gnuradio_import_ok": False,
+        "gnuradio_import_path": None,
+        "gnuradio_version": None,
+        "gnuradio_import_error": None,
+    }
+    try:
+        import gnuradio  # type: ignore[import-not-found]
+    except Exception as exc:
+        result["gnuradio_import_error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    result["gnuradio_import_ok"] = True
+    result["gnuradio_import_path"] = getattr(gnuradio, "__file__", None)
+    result["gnuradio_version"] = getattr(gnuradio, "__version__", None)
+    return result
+
+
 def build_debug_bundle(
     *,
     config: AppConfig,
@@ -228,6 +290,7 @@ def build_debug_bundle(
             "platform": platform.platform(),
             "system": platform.system(),
             "machine": platform.machine(),
+            "mode": detect_environment_mode(),
         },
         "config": {
             "source": str(resolved_config) if resolved_config else "built-in defaults",
@@ -240,6 +303,7 @@ def build_debug_bundle(
         "hashes": redact_for_debug_bundle(release_manifest.get("hashes", {})),
         "vector_index": redact_for_debug_bundle(summarize_vector_stats(vector_stats)),
         "gnu_radio": {
+            "runtime": detect_gnu_radio_runtime(),
             "doctor_checks": [
                 check
                 for check in doctor_report.get("checks", [])
@@ -308,6 +372,8 @@ def debug_bundle_summary(payload: dict[str, Any], output_path: Path) -> dict[str
 __all__ = [
     "DEBUG_BUNDLE_SCHEMA_VERSION",
     "build_debug_bundle",
+    "detect_environment_mode",
+    "detect_gnu_radio_runtime",
     "debug_bundle_summary",
     "redact_for_debug_bundle",
     "summarize_vector_stats",
