@@ -814,7 +814,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
             "results": [
                 {
                     "title": "Message Passing",
-                    "excerpt": "Message ports carry asynchronous control data between blocks.",
+                    "excerpt": "Message ports carry asynchronous PMT messages between blocks.",
                     "score": 72.0,
                     "citation": {"url": "https://wiki.gnuradio.org/index.php/Message_Passing"},
                 },

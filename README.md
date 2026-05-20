@@ -251,6 +251,8 @@ failures or STOP_THE_LINE safety issues.
 
 When reporting issues, include prompt, expected behavior, actual behavior,
 sanitized copied-graph reference, validation result, and checkpoint result.
+Use `docs/ISSUE_INTAKE.md` for the current report template and attachment
+guidance.
 
 ## Verification
 
