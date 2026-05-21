@@ -22,7 +22,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UV_MODE = "default-uv"
 SYSTEM_SITE_VENV_MODE = "system-site-venv"
-INSTALL_SMOKE_SCHEMA_VERSION = "2026-05-20.phase19-install-smoke-v2"
+INSTALL_SMOKE_SCHEMA_VERSION = "2026-05-21.phase19-install-smoke-v3"
 DEFAULT_IGNORE = {
     ".git",
     ".venv",
@@ -145,13 +145,23 @@ def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]
     )
     vector_stats = steps.get("vector_stats", {})
     vector_index_ready = vector_stats.get("returncode") == 0
+    retrieval_catalog_ready = retrieval_ready
+    model_runtime_ready = llama_ready and context_verified
+    end_to_end_ready = (
+        package_ready
+        and gnu_radio_ready
+        and grcc_ready
+        and retrieval_catalog_ready
+        and vector_index_ready
+        and model_runtime_ready
+    )
     if (
         package_ready
         and gnu_radio_ready
         and grcc_ready
         and retrieval_ready
-        and llama_ready
-        and context_verified
+        and vector_index_ready
+        and model_runtime_ready
     ):
         classification = "runtime_ready"
     elif package_ready and gnu_radio_ready and grcc_ready and retrieval_ready:
@@ -167,11 +177,14 @@ def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]
         "grcc_ready": grcc_ready,
         "grcc_path": grcc_check.get("path") if grcc_check else None,
         "retrieval_ready": retrieval_ready,
+        "retrieval_catalog_ready": retrieval_catalog_ready,
         "vector_index_ready": vector_index_ready,
         "vector_index_state": "ready" if vector_index_ready else "missing_or_unavailable",
         "llama_ready": llama_ready,
         "health_status": health_status,
         "context_verified": context_verified,
+        "model_runtime_ready": model_runtime_ready,
+        "end_to_end_ready": end_to_end_ready,
         "overall_environment_classification": classification,
     }
 
@@ -185,6 +198,25 @@ def _system_python(default: str | None) -> str:
     return sys.executable
 
 
+def _smoke_ok(
+    *,
+    steps: dict[str, dict[str, Any]],
+    mode: str,
+    readiness: dict[str, Any],
+    require_vector_index: bool,
+) -> bool:
+    return (
+        steps["uv_sync"]["returncode"] == 0
+        and steps["help"]["returncode"] == 0
+        and steps["production_tests"]["returncode"] == 0
+        and (
+            mode != SYSTEM_SITE_VENV_MODE
+            or steps["create_system_site_venv"]["returncode"] == 0
+        )
+        and (not require_vector_index or readiness["vector_index_ready"])
+    )
+
+
 def run_install_smoke(
     *,
     mode: str = DEFAULT_UV_MODE,
@@ -193,6 +225,7 @@ def run_install_smoke(
     keep_workspace: bool = False,
     timeout_seconds: int = 180,
     build_vector_index: bool = False,
+    require_vector_index: bool = False,
 ) -> dict[str, Any]:
     if mode not in {DEFAULT_UV_MODE, SYSTEM_SITE_VENV_MODE}:
         raise ValueError(f"unsupported install smoke mode: {mode}")
@@ -264,14 +297,13 @@ def run_install_smoke(
         "schema_version": INSTALL_SMOKE_SCHEMA_VERSION,
         "mode": mode,
         "selected_python": selected_python,
-        "ok": (
-            steps["uv_sync"]["returncode"] == 0
-            and steps["help"]["returncode"] == 0
-            and steps["production_tests"]["returncode"] == 0
-            and (
-                mode != SYSTEM_SITE_VENV_MODE
-                or steps["create_system_site_venv"]["returncode"] == 0
-            )
+        "build_vector_index": build_vector_index,
+        "require_vector_index": require_vector_index,
+        "ok": _smoke_ok(
+            steps=steps,
+            mode=mode,
+            readiness=readiness,
+            require_vector_index=require_vector_index,
         ),
         "workspace": str(workspace),
         "workspace_kept": keep_workspace,
@@ -308,6 +340,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also run vector index build. Off by default to avoid downloads/long runs.",
     )
+    parser.add_argument(
+        "--require-vector-index",
+        action="store_true",
+        help="Fail the smoke when vector stats reports a missing/unavailable index.",
+    )
     parser.add_argument("--output", help="Optional JSON output path.")
     parser.add_argument("--keep-workspace", action="store_true")
     parser.add_argument("--timeout-seconds", type=int, default=180)
@@ -319,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         keep_workspace=args.keep_workspace,
         timeout_seconds=args.timeout_seconds,
         build_vector_index=args.build_vector_index,
+        require_vector_index=args.require_vector_index,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1

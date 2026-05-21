@@ -8,6 +8,7 @@ from tests.production.install_smoke import (
     _build_readiness_summary,
     _classify_doctor,
     _classify_health,
+    _smoke_ok,
 )
 
 
@@ -90,11 +91,39 @@ class InstallSmokeClassificationTests(unittest.TestCase):
         self.assertTrue(readiness["gnu_radio_ready"])
         self.assertTrue(readiness["grcc_ready"])
         self.assertTrue(readiness["retrieval_ready"])
+        self.assertTrue(readiness["retrieval_catalog_ready"])
         self.assertFalse(readiness["llama_ready"])
         self.assertFalse(readiness["vector_index_ready"])
+        self.assertFalse(readiness["model_runtime_ready"])
+        self.assertFalse(readiness["end_to_end_ready"])
         self.assertEqual(
             readiness["overall_environment_classification"],
             "package_ready_runtime_not_ready",
+        )
+
+    def test_vector_index_requirement_is_explicit(self) -> None:
+        steps = {
+            "uv_sync": {"returncode": 0},
+            "help": {"returncode": 0},
+            "production_tests": {"returncode": 0},
+        }
+        readiness = {"vector_index_ready": False}
+
+        self.assertTrue(
+            _smoke_ok(
+                steps=steps,
+                mode="default-uv",
+                readiness=readiness,
+                require_vector_index=False,
+            )
+        )
+        self.assertFalse(
+            _smoke_ok(
+                steps=steps,
+                mode="default-uv",
+                readiness=readiness,
+                require_vector_index=True,
+            )
         )
 
     def test_system_site_mode_constant_is_public_cli_value(self) -> None:

@@ -108,11 +108,22 @@ Report fields now include:
 - `readiness.package_ready`
 - `readiness.gnu_radio_ready`
 - `readiness.grcc_ready`
-- `readiness.retrieval_ready`
+- `readiness.retrieval_catalog_ready`
 - `readiness.vector_index_ready`
 - `readiness.llama_ready`
 - `readiness.context_verified`
+- `readiness.model_runtime_ready`
+- `readiness.end_to_end_ready`
 - `readiness.overall_environment_classification`
+
+Vector readiness policy:
+
+- Package smoke does not require a prebuilt vector index.
+- Missing vector index is reported as `vector_index_ready=false` and
+  `missing_vector_index`, but does not fail package smoke by default.
+- Runtime-readiness smoke can require it with `--require-vector-index`.
+- A smoke can build it first with `--build-vector-index`; this is explicit
+  because it can download/build FastEmbed/Qdrant state.
 
 Optional vector build check:
 
@@ -125,6 +136,15 @@ uv run python -m tests.production.install_smoke \
 
 The vector build is not default because it can download/build FastEmbed/Qdrant
 state and should be explicit.
+
+Require an already-ready or newly-built vector index:
+
+```bash
+uv run python -m tests.production.install_smoke \
+  --mode system-site-venv \
+  --require-vector-index \
+  --output /tmp/grc_agent_phase19_install_smoke_require_vector.json
+```
 
 ## Llama Runtime Strategy
 
@@ -140,9 +160,9 @@ Supported runtime mode remains external/local llama.cpp server mode:
   - status reasons such as `llama_unreachable`
 
 Package install readiness does not require llama. End-to-end runtime readiness
-does require llama reachability and verified context. Auto-start/reuse exists
-for configured chat paths, but production-ready ops still needs a pinned and
-documented model-server profile.
+does require vector index readiness, llama reachability, and verified context.
+Auto-start/reuse exists for configured chat paths, but production-ready ops
+still needs a pinned and documented model-server profile.
 
 ## Debug Bundle Integration
 
@@ -184,7 +204,8 @@ Expected local result while llama is down:
 - Health: `not_ready`, `llama_unreachable`.
 - Debug bundle: generated successfully with health `not_ready`.
 - Install smoke `system-site-venv`: package/GNU Radio/grcc/retrieval ready;
-  runtime not ready until llama is reachable and context is verified.
+  vector index may be missing unless explicitly built or required; runtime not
+  ready until vector index, llama reachability, and context are verified.
 
 ## Remaining Production Blockers
 

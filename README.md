@@ -125,6 +125,10 @@ uv run python -m tests.production.install_smoke \
   --output /tmp/grc_agent_install_smoke_system_site.json
 ```
 
+Package smoke does not require a prebuilt vector index. Use
+`--require-vector-index` for runtime-readiness smoke, or `--build-vector-index`
+when you explicitly want the smoke to build local Qdrant/FastEmbed state first.
+
 Other approaches are documented in `docs/PRODUCTION_READINESS_PHASE19.md`.
 `PYTHONPATH` bridges are supported only as a last-resort local workaround when
 the ABI and Python version match. Container/devcontainer and conda/mamba
