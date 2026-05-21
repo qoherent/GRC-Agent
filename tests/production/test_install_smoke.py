@@ -115,6 +115,7 @@ class InstallSmokeClassificationTests(unittest.TestCase):
                 mode="default-uv",
                 readiness=readiness,
                 require_vector_index=False,
+                require_llama=False,
             )
         )
         self.assertFalse(
@@ -123,6 +124,34 @@ class InstallSmokeClassificationTests(unittest.TestCase):
                 mode="default-uv",
                 readiness=readiness,
                 require_vector_index=True,
+                require_llama=False,
+            )
+        )
+
+    def test_llama_requirement_is_explicit(self) -> None:
+        steps = {
+            "uv_sync": {"returncode": 0},
+            "help": {"returncode": 0},
+            "production_tests": {"returncode": 0},
+        }
+        readiness = {"vector_index_ready": True, "model_runtime_ready": False}
+
+        self.assertTrue(
+            _smoke_ok(
+                steps=steps,
+                mode="default-uv",
+                readiness=readiness,
+                require_vector_index=True,
+                require_llama=False,
+            )
+        )
+        self.assertFalse(
+            _smoke_ok(
+                steps=steps,
+                mode="default-uv",
+                readiness=readiness,
+                require_vector_index=True,
+                require_llama=True,
             )
         )
 

@@ -22,7 +22,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UV_MODE = "default-uv"
 SYSTEM_SITE_VENV_MODE = "system-site-venv"
-INSTALL_SMOKE_SCHEMA_VERSION = "2026-05-21.phase19-install-smoke-v3"
+INSTALL_SMOKE_SCHEMA_VERSION = "2026-05-21.phase20-install-smoke-v4"
 DEFAULT_IGNORE = {
     ".git",
     ".venv",
@@ -204,6 +204,7 @@ def _smoke_ok(
     mode: str,
     readiness: dict[str, Any],
     require_vector_index: bool,
+    require_llama: bool,
 ) -> bool:
     return (
         steps["uv_sync"]["returncode"] == 0
@@ -214,6 +215,7 @@ def _smoke_ok(
             or steps["create_system_site_venv"]["returncode"] == 0
         )
         and (not require_vector_index or readiness["vector_index_ready"])
+        and (not require_llama or readiness["model_runtime_ready"])
     )
 
 
@@ -226,6 +228,7 @@ def run_install_smoke(
     timeout_seconds: int = 180,
     build_vector_index: bool = False,
     require_vector_index: bool = False,
+    require_llama: bool = False,
 ) -> dict[str, Any]:
     if mode not in {DEFAULT_UV_MODE, SYSTEM_SITE_VENV_MODE}:
         raise ValueError(f"unsupported install smoke mode: {mode}")
@@ -299,11 +302,13 @@ def run_install_smoke(
         "selected_python": selected_python,
         "build_vector_index": build_vector_index,
         "require_vector_index": require_vector_index,
+        "require_llama": require_llama,
         "ok": _smoke_ok(
             steps=steps,
             mode=mode,
             readiness=readiness,
             require_vector_index=require_vector_index,
+            require_llama=require_llama,
         ),
         "workspace": str(workspace),
         "workspace_kept": keep_workspace,
@@ -345,6 +350,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Fail the smoke when vector stats reports a missing/unavailable index.",
     )
+    parser.add_argument(
+        "--require-llama",
+        action="store_true",
+        help=(
+            "Fail the smoke unless grc-agent health reports llama reachable "
+            "and actual context verified."
+        ),
+    )
     parser.add_argument("--output", help="Optional JSON output path.")
     parser.add_argument("--keep-workspace", action="store_true")
     parser.add_argument("--timeout-seconds", type=int, default=180)
@@ -357,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds=args.timeout_seconds,
         build_vector_index=args.build_vector_index,
         require_vector_index=args.require_vector_index,
+        require_llama=args.require_llama,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1

@@ -128,6 +128,8 @@ uv run python -m tests.production.install_smoke \
 Package smoke does not require a prebuilt vector index. Use
 `--require-vector-index` for runtime-readiness smoke, or `--build-vector-index`
 when you explicitly want the smoke to build local Qdrant/FastEmbed state first.
+Use `--require-llama` when the smoke must fail unless `grc-agent health`
+reports a reachable llama.cpp server with verified actual context.
 
 Other approaches are documented in `docs/PRODUCTION_READINESS_PHASE19.md`.
 `PYTHONPATH` bridges are supported only as a last-resort local workaround when
