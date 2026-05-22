@@ -1,141 +1,167 @@
 # AGENTS.md
 
-## Vision
+## Mission
 
-GRC Agent should become a reliable local assistant for GNU Radio Companion graphs: it should understand natural prompts, inspect the active graph, make validated tool-based mutations, verify outcomes, and ask the user naturally when required information is missing or contradictory.
+GRC Agent is a local assistant for GNU Radio Companion `.grc` graphs. It should inspect the active graph, explain what it sees, make only validated tool-based edits, verify outcomes, and ask for clarification when the graph evidence is insufficient.
 
-Autonomy must come from typed state, explicit tools, deterministic validation, and measured behavior. It must not come from hidden repairs, prompt tricks, YAML patching, fixture-specific shortcuts, or unbounded retries.
+Autonomy must come from typed state, explicit wrappers, deterministic validation, `grcc`, rollback, and measured behavior. It must not come from raw YAML patches, hidden retries, prompt tricks, tutorial recipes, broad synonym dictionaries, or fixture-specific shortcuts.
+
+## Current Runtime Truth
+
+- Runtime is not production-ready.
+- Release-validated: `R0_READ_ONLY`, `R1_SET_PARAM_ONLY`.
+- Beta-validated: `R1_SET_STATE`, `R2_DISCONNECT`, `R3_REWIRE`, `R4A_INSERT_BLOCK_ON_CONNECTION`, `R4B_REMOVE_BLOCK`, `R4C_ADD_VARIABLE`, `R5_SAVE_LOAD`.
+- Diagnostic-clean: `R7_EXACT_EXTERNAL`, `R7_NATURAL_EXTERNAL`, `Tier5_ADVERSARIAL`.
+- Default chat surface is exactly six MVP wrappers: `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`, `save_graph_explicit`, `load_graph_explicit`.
+- Low-level graph, catalog, validation, save, and transaction tools are internal primitives, not model-facing chat tools.
+- CUDA llama.cpp on `CUDA0` is the preferred NVIDIA path. Health must prove llama reachability and actual context before model-backed runtime is treated as ready.
+
+## Safety Contract
+
+- Never edit raw `.grc` YAML directly.
+- Mutate copied graphs, not installed examples or user originals.
+- `change_graph` is the only model-facing graph-content mutation wrapper.
+- Save/load are explicit lifecycle wrappers, not implicit side effects.
+- Preview must never mutate.
+- Failed schema validation, preflight, or `grcc` validation must not commit.
+- Failed edits must roll back atomically.
+- Save requires explicit user intent and validation of the current graph revision.
+- Loading validates before replacing the active session.
+- Docs/RAG are explanation-only and never mutation authority.
+- Ambiguous targets clarify using real graph candidates; no first-match mutation.
+- `grcc` remains final graph-validity authority.
+
+## Tool Design Lessons
+
+The `inspect_graph` redesign is the template for future wrapper work.
+
+- Tool schemas should expose user intent, not internal query APIs.
+- Keep model-facing arguments few, required, and easy to choose.
+- Runtime code owns budgets, truncation, target resolution, handle generation, and safe defaults.
+- A read-only overview can be forgiving and ignore stray narrowing fields.
+- Targeted details must be strict about targets: no target, no details dump.
+- Use semantic selectors such as `params=["all"]` or exact parameter names instead of low-level budget flags; if the model omits `params`, runtime safely defaults details to `["all"]` within bounded output.
+- Tool output must include graph-local facts the model can actually use: labels, parameter names, current values, target refs, state revisions, connections, ambiguity, and truncation.
+- Required fields must still be validated at runtime. Local models can omit them.
+- Raw requested tool calls and raw tool outputs must be inspected when diagnosing behavior; pass/fail summaries are not enough.
+- Validation and lifecycle policy belong in runtime code, not as another model-facing inspect mode.
+
+## Wrapper Contracts
+
+### `inspect_graph`
+
+Read-only graph inspection.
+
+- Args: `view`, `targets`, `params`.
+- `view`: `overview` or `details`.
+- `overview`: whole-graph summary; runtime ignores `targets` and `params`.
+- `details`: requires one to five graph-local targets; `params` may be `["all"]`, exact parameter names, omitted, or empty. Missing/empty means bounded useful parameters.
+- Returns state revision, validation status, compact facts, ambiguity/truncation metadata, and editable handles only for resolved targets.
+- Does not validate on demand as a separate model-facing mode; validation is surfaced from lifecycle/mutation state.
+
+### `search_blocks`
+
+Read-only block catalog discovery.
+
+- Use for broad block discovery, candidate lookup, and catalog metadata.
+- It does not authorize mutation. Mutation still requires graph-local inspection, target refs or exact identifiers, and `change_graph`.
+
+### `ask_grc_docs`
+
+Read-only grounded docs answering.
+
+- Use for conceptual GNU Radio help.
+- Returns sources and `insufficient_evidence` when local evidence is weak.
+- Never returns mutation authority, hidden recipes, or graph edit payloads.
+
+### `change_graph`
+
+The only model-facing graph-content mutation wrapper.
+
+- Requires `dry_run`, `user_goal`, and `operation_kind`.
+- Supported operation kinds include `set_param`, `set_state`, `add_variable`, `disconnect`, `rewire`, `insert_block`, `remove_block`, `clarify`, and `unsupported`.
+- `set_param` supports graph-local metadata-driven natural resolution only when exactly one candidate matches and a new value is explicit.
+- `expected_old_value`, when supplied, must match the current graph value before mutation.
+- No docs/RAG authority, hidden retries, raw YAML, or broad phrase dictionaries.
+
+### `save_graph_explicit`
+
+Explicit save lifecycle wrapper.
+
+- Save only when the user asks.
+- Validate current revision before saving.
+- CLI `/save` bypasses the model and calls the save path directly.
+
+### `load_graph_explicit`
+
+Explicit load lifecycle wrapper.
+
+- Validate loaded graph before activating it.
+- If load/validation fails, preserve the current active session.
+
+## Agent Loop
+
+1. Maintain one active `FlowgraphSession`.
+2. Build compact messages from policy, session state, recent history, and bounded tool outputs.
+3. Send six wrapper schemas to llama.cpp.
+4. Validate every requested tool call before execution.
+5. Execute tools serially.
+6. Route mutations through transaction normalization, preflight, candidate apply, `grcc`, and commit/rollback.
+7. Store raw requested calls, executed calls, tool results, graph deltas, validation state, and save/load events in traceable history.
+8. Stop after bounded tool rounds or final assistant text.
+
+Fallback free-text parsing is disabled for MVP runtime. Invalid tool calls fail closed or produce clarification.
+
+## Context Handling
+
+- Keep context compact through wrapper output design, not low `max_tokens`.
+- Preserve raw tool history in traces even when model-facing history is compacted.
+- Surface truncation and ambiguity explicitly.
+- Include state revisions on graph-local handles.
+- Reject stale target refs or stale expected old values.
+- Desired llama context target is 120000 tokens; `doctor`/`health` must verify actual context before claiming large-context behavior.
 
 ## Engineering Rules
 
-- Be concise, objective, and grounded.
-- Ask for missing details when needed; do not guess unsupported graph facts.
-- Reject ad-hoc logic that adds redundancy, latency, cost, maintenance burden, or worse performance.
-- Prefer simple, deterministic, typed, testable designs over clever or fragile flows.
-- Prefer the smallest correct change, smallest useful experiment, and smallest sufficient test gate.
-- Do not optimize for passing tests at the expense of correctness, safety, or maintainability.
-- Measurement comes before redesign: prove a repeated generic gap before changing prompts, schemas, tool order, or runtime behavior.
-
-## Tooling
-
+- Prefer the smallest correct change.
+- Measure repeated generic failures before changing schemas, prompts, tool order, or runtime behavior.
+- Do not add broad natural-language regexes or phrase dictionaries.
+- Do not add new model-facing tools unless repeated evidence proves the existing surface is insufficient.
+- Keep `llama_server.py` transport/loop oriented; graph policy belongs behind `GrcAgent`, wrappers, sessions, validation, and transactions.
+- Use package imports under `src/grc_agent/`.
+- Keep `pyproject.toml` authoritative.
 - Use `uv run` for commands.
-- Use `uv add` / `uv add --dev` for dependencies.
-- Keep package code under `src/grc_agent/` and use package imports.
-- Keep `pyproject.toml` authoritative for metadata and dependencies.
 - Use stdlib `unittest` for deterministic tests.
-- Lint gate: `uv run ruff check src/ tests/`.
-- Full repo lint gate after cleanup/refactors: `uv run ruff check`.
-- Regression gate: `uv run python -m unittest`.
-- Canonical example fixture: `tests/data/random_bit_generator.grc`. Do not duplicate it at repo root.
-- Context budgeting rule: keep wrapper/tool outputs compact via retrieval and
-  schema limits; do not treat low `max_tokens` as compression.
-- Desired llama context target is `120000` tokens when server/model support it;
-  verify desired vs actual via doctor/health before claiming large-context behavior.
 
-## Research And Accuracy
+## Testing
 
-- Use current packages, APIs, model behavior, and documented GNU Radio behavior.
-- Before changing GNU-facing behavior, verify against real `.grc` files and `grcc`.
-- Do not rely on stale assumptions or undocumented behavior when docs/tests can verify it.
-- Record new GNU behavior, edge cases, widened API contracts, and accepted limitations in `docs/BLUEPRINT.md`.
-
-## GRC Safety Contract
-
-- Never edit raw `.grc` YAML directly.
-- All graph mutations must go through verified tools.
-- `apply_edit` / verified workflow tools are the mutation boundary.
-- `grcc` remains final validation authority.
-- Failed edits must roll back atomically.
-- Preview operations must never mutate.
-- Save only when explicitly requested.
-- No hidden repairs.
-- No prompt-regex transaction rewriting.
-- No fixture-specific logic.
-- No block recipes or block blacklists.
-- No unbounded retries or unbounded candidate search.
-- Keep `llama_server.py` transport/loop oriented; GNU Radio policy belongs behind `GrcAgent` and verified tools.
-
-## Tool And Workflow Design
-
-- Default model-facing chat surface is MVP wrappers only:
-  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`,
-  `save_graph_explicit`, `load_graph_explicit`.
-- `change_graph` remains mutation-only. Save/load are explicit lifecycle wrappers
-  and require explicit user intent.
-- Save/load wrappers are beta-validated and not release-validated yet.
-- Low-level tools remain internal implementation primitives; they are not part
-  of the model-facing chat surface.
-- Tool order matters. Models prefer earlier tools.
-- Keep internal verified-workflow ordering stable unless a separate live eval proves a safer alternative.
-- Keep tool descriptions concise and non-contradictory; put durable routing policy in one place.
-- Avoid overlapping tools unless each has a tested, distinct job.
-- Add new tools only when repeated evidence proves the current surface is insufficient.
-- Before adding or removing a tool, confirm the failure repeats across unrelated cases, the fix is generic, it can be tested without fixture hacks, and it preserves rollback plus `grcc` validation.
-- If safe execution is ambiguous, ask for clarification using real graph/tool candidates rather than guessing.
-- Clarification options must come from real executable candidates, not hardcoded wording.
-- Always include a free-text/custom option when asking the user to choose.
-
-## Autonomy Design
-
-- Advisor-first intent classification is the intended direction: a local LLM
-  advisor classifies user intent into a small structured mode, and runtime code
-  maps that mode to a bounded tool class.
-- Advisor is currently shadow-only and does not control default runtime routing.
-- Current MVP advisor shadow vocabulary is:
-  `inspect`, `preview`, `change`, `clarify`, `unsupported`.
-- Do not solve intent routing with regexes, phrase dictionaries, or hardcoded
-  natural-language branches. Intent routing belongs to the Advisor.
-- Runtime code enforces contracts and graph safety: enum/schema validation,
-  allowed tool lists, operation type validation, preflight, `grcc`, rollback,
-  explicit save state, and UID target-ref structure.
-- Runtime code must not maintain phrase lists for preview wording, raw YAML
-  wording, vague topology wording, block UID wording, or natural-language
-  synonyms.
-- If the Advisor is uncertain, it must output `clarify` or `unsupported`;
-  improve advisor prompt/context/evals rather than bypassing it with growing
-  hardcoded language rules.
-- Prefer a typed turn-state/executor policy over more prompt rules.
-- Track requested actions, completed actions, failed actions, mutation state, validation state, save requirements, clarification state, and retry budget explicitly.
-- The orchestrator may decide whether to continue, stop, report failure, or ask the user; it must not synthesize graph recipes or mutate outside tools.
-- One corrected retry is acceptable only when the user requested recovery and the tool error gives a clear generic fix.
-- Do not add a broad planner that invents graph designs from tutorials, examples, or memory.
-
-## Eval And Testing
-
-- Keep deterministic safety tests separate from live/model evals.
-- Default development gate is deterministic (`ruff`, `unittest`,
-  `tests.retrieval_eval.vector_regression`).
-- Retrieval/vector eval gates currently run sequentially when sharing the same
-  local index path.
-- Live quick tiers run only after runtime/model-facing behavior changes.
-- `--n-runs 3` + `release_dashboard` is release-only evidence, not routine.
-- Advisor/model bakeoff scripts are research-only and must be run explicitly.
-- Tier 1 and Tier 2 live evals are routing and behavior evidence, not proof of full autonomy.
-- Live eval reports should distinguish routing pass, tool success, semantic/end-state pass, and safety pass.
-- Add semantic checks before changing tool design: exact params, graph diffs, saved files, reload/`grcc`, clarification resolution, and no-mutation previews.
 - Run targeted tests while iterating.
-- Run the full deterministic suite after runtime, schema, tool, prompt, validation, transaction, or harness changes.
-- Run Tier 1 after prompt/schema/runtime/live-eval harness changes.
-- Run Tier 2 after adapter changes, tool-order changes, major prompt changes, or release candidates.
+- Run `uv run ruff check src/ tests/` after code/test edits.
+- Run `uv run python -m unittest <target>` for focused regression proof.
+- Run full `uv run python -m unittest` after runtime, schema, prompt, validation, transaction, or wrapper behavior changes.
+- Run live llama evals only when model-facing behavior changes and targeted deterministic tests pass.
 - Do not delete or weaken safety tests.
-- Reclassify bad tests only when the expectation is demonstrably wrong.
+- Reclassify or delete a test only when it is redundant, stale, or demonstrably checking the wrong contract.
+- Prefer semantic assertions: tool call shape, graph diff, validation result, rollback/no-mutation behavior, save/load outcome, and user-facing answer quality.
 
-## Tutorial Corpus And RAG
+## Docs/RAG
 
-- Keep `docs/wiki_gnuradio_org/` as explanation/retrieval/eval material.
-- `ask_grc_docs` default is deterministic grounded answering with source
-  evidence and honest `insufficient_evidence`; helper synthesis is optional
-  research-only and not required for the frozen runtime path.
-- Tutorials are not mutation authority.
-- Do not turn tutorials into hidden runtime recipes, block allowlists, block blacklists, or parameter defaults.
-- Catalog metadata remains authority for block IDs, ports, params, defaults, and signatures.
-- `grcc` remains authority for graph validity.
-- Future tutorial retrieval must be read-only, provenance-first, and explanation-scoped before any mutation-adjacent evals.
+- Keep `docs/wiki_gnuradio_org/` explanation-scoped.
+- Catalog metadata and active graph inspection are authorities for block IDs, ports, parameters, defaults, and graph-local facts.
+- Tutorials are not runtime recipes.
+- Docs-answer quality is evaluated separately from mutation safety.
+- Helper synthesis remains optional research unless explicitly enabled.
 
-## Documentation
+## Durable Docs
 
-- `docs/BLUEPRINT.md` is the current source of truth.
-- `README.md` should explain the product status, reliability truth, usage, and roadmap without stale reports.
-- `docs/QUICKSTART.md` should stay procedural.
-- Update docs when tool count, architecture, safety rules, eval gates, capability status, or roadmap changes.
-- Keep docs concise and actionable.
+- `docs/BLUEPRINT.md` is the current source of truth for architecture, wrappers, safety, context, evals, and runtime status.
+- `docs/QUICKSTART.md` is procedural setup/use guidance.
+- `docs/ISSUE_INTAKE.md` is the support/debug report template.
+- `docs/DEMO_VIDEO.md` documents the reproducible demo workflow.
+- Update docs when wrapper contracts, safety boundaries, eval gates, runtime requirements, or capability labels change.
+
+## Next Wrapper Focus
+
+The next wrapper to redesign should be `change_graph`.
+
+Reason: `inspect_graph` now produces cleaner graph-local facts and handles. The remaining high-value work is making the mutation contract easier for the model while keeping one mutation boundary. Refactor internally by operation kind, not by exposing many new model tools. Tighten operation-specific validation, stale-state checks, old-value guards, clarification payloads, and error messages returned to the model for one safe retry or user clarification.

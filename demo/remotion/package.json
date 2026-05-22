@@ -1,0 +1,22 @@
+{
+  "name": "grc-agent-demo-video",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "remotion render src/index.ts Demo /tmp/grc_agent_demo/grc_agent_demo.mp4 --props=/tmp/grc_agent_demo/demo_timeline.json",
+    "preview": "remotion studio src/index.ts",
+    "still": "remotion still src/index.ts Demo --props=/tmp/grc_agent_demo/demo_timeline.json --frame=90 --output=/tmp/grc_agent_demo/demo_frame.png"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.292",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "remotion": "^4.0.292"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.5",
+    "typescript": "^5.8.3"
+  }
+}
+

@@ -1219,13 +1219,11 @@ def _mvp_completion_aliases(
 ) -> tuple[str, ...]:
     """Map MVP wrapper calls onto internal required-action aliases for turn completion."""
     if tool_name == "inspect_graph":
-        operation = str(arguments.get("operation") or "").strip().lower()
-        if operation == "summarize":
+        view = str(arguments.get("view") or "").strip().lower()
+        if view == "overview":
             return ("summarize_graph",)
-        if operation == "context":
+        if view == "details":
             return ("get_grc_context",)
-        if operation == "validate":
-            return ("validate_graph",)
         return ()
     if tool_name == "search_blocks":
         return ("search_grc",)

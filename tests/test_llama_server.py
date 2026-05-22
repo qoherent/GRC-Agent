@@ -658,7 +658,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "tool_calls": [
                                     {
                                         "name": "inspect_graph",
-                                        "arguments": json.dumps({"operation": "summarize"}),
+                                        "arguments": json.dumps({"view": "overview", "targets": [], "params": []}),
                                     }
                                 ],
                             }
@@ -779,7 +779,7 @@ class LlamaServerAdapterTests(unittest.TestCase):
                                 "tool_calls": [
                                     {
                                         "name": "inspect_graph",
-                                        "arguments": json.dumps({"operation": "summarize"}),
+                                        "arguments": json.dumps({"view": "overview", "targets": [], "params": []}),
                                     }
                                 ],
                             }

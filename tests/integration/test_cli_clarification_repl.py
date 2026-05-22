@@ -10,12 +10,20 @@ Agent-level verified execution is covered by test_clarification_contract.
 from __future__ import annotations
 
 import io
+from pathlib import Path
+import shutil
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 from grc_agent.agent import GrcAgent
-from grc_agent.cli import _maybe_render_pending_clarification, _run_repl_loop
+from grc_agent.cli import (
+    _maybe_render_pending_clarification,
+    _run_repl_loop,
+    _run_repl_save_command,
+)
+from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.clarification import (
     ClarificationOption,
     ClarificationRequest,
@@ -203,6 +211,105 @@ class ClarificationREPLRoutingTests(unittest.TestCase):
         after = [b.instance_name for b in self.agent.session.flowgraph.blocks]
         self.assertEqual(before, after)
         self.assertIn("Understood", text)
+
+    def test_normal_turn_hides_history_by_default(self) -> None:
+        self.agent._clear_pending_clarification()
+        fake_model_result = {
+            "ok": True,
+            "assistant_text": "Plain assistant answer.",
+            "model": "test-model",
+            "tool_calls_executed": 0,
+            "steps": 1,
+        }
+        buf = io.StringIO()
+        with (
+            patch("builtins.input", side_effect=["hello", "/quit"]),
+            patch("grc_agent.cli.run_bounded_llama_turn", return_value=fake_model_result),
+            redirect_stdout(buf),
+        ):
+            exit_code = _run_repl_loop(self.agent, MagicMock(), None)
+
+        text = buf.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Assistant:", text)
+        self.assertIn("Plain assistant answer.", text)
+        self.assertNotIn("--- History ---", text)
+
+    def test_history_command_prints_debug_history(self) -> None:
+        self.agent.history.append({"role": "user", "content": "hello"})
+        self.agent.history.append({"role": "assistant", "content": "hi"})
+        buf = io.StringIO()
+        with (
+            patch("builtins.input", side_effect=["/history", "/quit"]),
+            redirect_stdout(buf),
+        ):
+            exit_code = _run_repl_loop(self.agent, MagicMock(), None)
+
+        text = buf.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("--- History ---", text)
+        self.assertIn("'role': 'user'", text)
+
+
+class SaveCommandREPLTests(unittest.TestCase):
+    """Test deterministic /save routing bypasses model text routing."""
+
+    def test_save_command_saves_current_session_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc"
+            target = Path(tmpdir) / "work.grc"
+            shutil.copy2(source, target)
+            session = FlowgraphSession()
+            session.load(target)
+            agent = GrcAgent(session)
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                exit_code = _run_repl_save_command(agent, "/save")
+
+            self.assertEqual(exit_code, 0, buf.getvalue())
+            self.assertIn("Save OK", buf.getvalue())
+            self.assertEqual(agent.session.path, target)
+            self.assertFalse(agent.session.is_dirty)
+
+    def test_save_command_saves_explicit_copy_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc"
+            work = Path(tmpdir) / "work.grc"
+            target = Path(tmpdir) / "saved_copy.grc"
+            shutil.copy2(source, work)
+            session = FlowgraphSession()
+            session.load(work)
+            agent = GrcAgent(session)
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                exit_code = _run_repl_save_command(agent, f"/save {target}")
+
+            self.assertEqual(exit_code, 0, buf.getvalue())
+            self.assertTrue(target.exists())
+            self.assertEqual(agent.session.path, target)
+
+    def test_repl_save_command_bypasses_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc"
+            target = Path(tmpdir) / "work.grc"
+            shutil.copy2(source, target)
+            session = FlowgraphSession()
+            session.load(target)
+            agent = GrcAgent(session)
+
+            buf = io.StringIO()
+            with (
+                patch("builtins.input", side_effect=["/save", "/quit"]),
+                patch("grc_agent.cli.run_bounded_llama_turn") as llama_turn,
+                redirect_stdout(buf),
+            ):
+                exit_code = _run_repl_loop(agent, MagicMock(), None)
+
+            self.assertEqual(exit_code, 0, buf.getvalue())
+            self.assertEqual(llama_turn.call_count, 0)
+            self.assertIn("Save OK", buf.getvalue())
 
 
 if __name__ == "__main__":

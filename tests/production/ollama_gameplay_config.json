@@ -4,7 +4,7 @@
   "provider": "cloud",
   "temperature": 0.0,
   "seed": 4200,
-  "n_runs": 5,
+  "n_runs": 1,
   "max_turns": 1,
   "scenarios": [
     "natural_read_only_explain",

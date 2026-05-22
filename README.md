@@ -79,9 +79,10 @@ Advisor remains shadow-only and is not used for default runtime routing.
 - `tests/`: deterministic `unittest` regression coverage.
 - `tests/data/random_bit_generator.grc`: canonical fixture graph.
 - `tests/llama_eval/`: live llama.cpp routing and behavior evals.
-- `docs/BLUEPRINT.md`: single source of truth for architecture, package flow, harness loop, tool surface, safety contract, retrieval, eval gates, status, and roadmap.
-- `docs/CURRENT_RELEASE_EVIDENCE.md`: concise current evidence bundle.
+- `docs/BLUEPRINT.md`: concise source of truth for architecture, wrappers, harness loop, context handling, safety contract, eval harness, status, and roadmap.
 - `docs/QUICKSTART.md`: setup and common usage.
+- `docs/ISSUE_INTAKE.md`: issue report template and debug-bundle guidance.
+- `docs/DEMO_VIDEO.md`: reproducible demo workflow.
 - `docs/wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus for explanation-only retrieval and evals.
 - `tests/data/retrieval/vector_eval_governed_metadata.json`: frozen vector regression baseline artifact.
 
@@ -96,9 +97,9 @@ Prerequisites:
 
 - Python >= 3.12
 - GNU Radio 3.10.x with `grcc` on `PATH`
-- llama.cpp `llama-server` on `PATH` for model-backed chat
+- CUDA-enabled llama.cpp `llama-server` on `PATH` for model-backed chat on NVIDIA machines
 
-The CLI can auto-start a configured local llama.cpp server for normal `chat` use when `llama-server` is installed. `doctor` is passive by default; use `uv run grc-agent doctor --start-llama` when you explicitly want it to start or reuse llama.cpp during environment checks.
+The CLI can auto-start a configured local llama.cpp server for normal `chat` use when `llama-server` is installed. The configured default is explicit CUDA device `CUDA0` with `gpu_layers=999`; `llama-server --list-devices` must show `CUDA0`. `doctor` is passive by default; use `uv run grc-agent doctor --start-llama` when you explicitly want it to start or reuse llama.cpp during environment checks.
 
 `uv sync --locked` installs Python dependencies including Graphify-backed lexical search and Qdrant/FastEmbed vector search. It does not install GNU Radio or llama.cpp. `uv run grc-agent vector build` explicitly builds the local vector index and may download the FastEmbed model on first run.
 
@@ -131,7 +132,6 @@ when you explicitly want the smoke to build local Qdrant/FastEmbed state first.
 Use `--require-llama` when the smoke must fail unless `grc-agent health`
 reports a reachable llama.cpp server with verified actual context.
 
-Other approaches are documented in `docs/PRODUCTION_READINESS_PHASE19.md`.
 `PYTHONPATH` bridges are supported only as a last-resort local workaround when
 the ABI and Python version match. Container/devcontainer and conda/mamba
 profiles remain future packaging work.
@@ -154,22 +154,23 @@ uv run grc-agent chat /tmp/grc-agent-test.grc
 Recommended local validation sequence:
 1. `uv run grc-agent doctor`
 2. `uv run grc-agent health`
-3. inspect with `inspect_graph`
-4. search with `search_blocks` / `ask_grc_docs`
-5. preview via `change_graph` dry-run behavior
-6. apply via `change_graph` committed behavior
-7. validate
-8. review history/checkpoints
-9. use `history` restore to explicit copy path if needed
+3. open chat on a copied graph
+4. inspect naturally, then ask for targeted block details when needed
+5. search with `search_blocks` / `ask_grc_docs` for read-only discovery or explanation
+6. preview or apply edits through `change_graph`
+7. let load/mutation/save paths run validation automatically
+8. use `/save [path] [--overwrite]` for explicit manual save
+9. use `/history` or `grc-agent history ...` only for debug/checkpoint review
 
 Safe first prompts for manual testing:
 - `Summarize this graph.`
-- `Validate this graph.`
+- `What are the variables and connections in this graph?`
+- `Show the parameters for analog_sig_source_x_0.`
 - `Find a low-pass filter block.`
 - `Ask docs: what are stream tags?`
 - `Preview changing samp_rate to 48000. Do not apply.`
 - `Change samp_rate to 48000 and validate.`
-- `Show history/checkpoints.`
+- `Change the signal source frequency from 440 to 10k.`
 
 Run one prompt:
 

@@ -14,7 +14,7 @@ from grc_agent.runtime.capabilities import (
     change_graph_operation_kinds,
     get_capability_spec,
 )
-from grc_agent.runtime.target_aliases import resolve_set_param_target_alias
+from grc_agent.runtime.editable_parameters import resolve_set_param_candidate
 from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
 
 from .context import ChangeGraphOperationContext
@@ -55,6 +55,7 @@ def dispatch_change_graph(
     detach_connection_ids: list[str] | None = None,
     param_key: str | None = None,
     param_value: Any = None,
+    expected_old_value: Any = None,
     state: str | None = None,
     variable_name: str | None = None,
     variable_value: Any = None,
@@ -223,29 +224,36 @@ def dispatch_change_graph(
                             candidate.dst_block,
                             candidate.dst_port,
                         )
-    resolved_target_alias: dict[str, Any] | None = None
-    target_alias_resolution = resolve_set_param_target_alias(
+    target_resolution: dict[str, Any] | None = None
+    set_param_resolution = resolve_set_param_candidate(
         user_text=user_goal,
         session=agent.session,
+        catalog_root=agent.catalog_root,
         operation_kind=resolved_operation_kind,
         instance_name=instance_name,
         param_key=param_key,
         param_value=param_value,
+        target_ref=target_ref,
+        expected_old_value=expected_old_value,
     )
-    instance_name = target_alias_resolution.instance_name
-    param_key = target_alias_resolution.param_key
-    resolved_target_alias = target_alias_resolution.resolved_target_alias
-    if target_alias_resolution.clarification is not None:
-        clarification_payload = copy.deepcopy(target_alias_resolution.clarification)
+    instance_name = set_param_resolution.instance_name
+    param_key = set_param_resolution.param_key
+    param_value = set_param_resolution.param_value
+    target_ref = set_param_resolution.target_ref
+    expected_old_value = set_param_resolution.expected_old_value
+    target_resolution = set_param_resolution.target_resolution
+    if set_param_resolution.clarification is not None:
+        clarification_payload = copy.deepcopy(set_param_resolution.clarification)
         clarification_payload["dry_run"] = bool(dry_run)
         clarification_payload["operation_kind"] = resolved_operation_kind
-        clarification_payload["resolved_target_alias"] = copy.deepcopy(resolved_target_alias)
+        if target_resolution is not None:
+            clarification_payload["target_resolution"] = copy.deepcopy(target_resolution)
         result = agent._payload_result("change_graph", clarification_payload)
         return agent._attach_wrapper_dispatch_telemetry(
             debug=debug,
             wrapper_name="change_graph",
-            wrapper_action="target_alias_clarification",
-            internal_handlers=["target_alias_resolution"],
+            wrapper_action="target_resolution_clarification",
+            internal_handlers=["editable_parameter_resolution"],
             started=started,
             before_revision=before_revision,
             before_dirty=before_dirty,
@@ -708,6 +716,7 @@ def dispatch_change_graph(
             ctx=operation_ctx,
             param_key=param_key,
             param_value=param_value,
+            expected_old_value=expected_old_value,
             target_ref=target_ref,
             instance_name=instance_name,
             tx_tool=tx_tool,
@@ -832,8 +841,8 @@ def dispatch_change_graph(
         "checkpoint_id": result.get("checkpoint_id") if isinstance(result, dict) else None,
         "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
     }
-    if resolved_target_alias is not None:
-        payload["resolved_target_alias"] = copy.deepcopy(resolved_target_alias)
+    if target_resolution is not None:
+        payload["target_resolution"] = copy.deepcopy(target_resolution)
     if isinstance(result, dict) and result.get("error_type"):
         payload["error_type"] = result.get("error_type")
     if isinstance(result, dict) and result.get("clarification_required"):

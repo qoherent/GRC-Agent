@@ -7,8 +7,22 @@ from typing import Any
 from tests.llama_eval.harness import ToolExpectation
 
 
-def _inspect(operation: str) -> tuple[ToolExpectation, ...]:
-    return (ToolExpectation("inspect_graph", arguments={"operation": operation}),)
+def _inspect(view: str) -> tuple[ToolExpectation, ...]:
+    if view in {"summarize", "summary", "overview", "validate"}:
+        return (
+            ToolExpectation(
+                "inspect_graph",
+                arguments={"view": "overview", "targets": [], "params": []},
+            ),
+        )
+    if view in {"context", "details"}:
+        return (
+            ToolExpectation(
+                "inspect_graph",
+                arguments={"view": "details"},
+            ),
+        )
+    return (ToolExpectation("inspect_graph"),)
 
 
 def _search(query: str) -> tuple[ToolExpectation, ...]:

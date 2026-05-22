@@ -326,38 +326,62 @@ def load_graph_explicit(
             output_truncated=False,
         )
 
-    agent._replace_session(loaded, reason="load_graph_explicit")
     handlers.append("validate_graph")
-    validation = agent._validate_graph()
+    is_valid = loaded.validate()
+    validation_result = {
+        "valid": bool(is_valid),
+        "returncode": loaded.last_validation_returncode,
+        "stderr": loaded.last_validation_stderr,
+    }
+    if not is_valid:
+        payload: dict[str, object] = {
+            "ok": False,
+            "path": str(resolved_path),
+            "state_revision": loaded.state_revision,
+            "message": "Refusing to activate loaded graph because validation failed.",
+            "valid": False,
+            "validation_result": validation_result,
+            "dirty": before_dirty,
+            "error_type": (
+                ErrorCode.VALIDATION_TIMEOUT
+                if loaded.last_validation_returncode == -2
+                else ErrorCode.GNU_VALIDATION_FAILED
+            ),
+            "active_session_preserved": True,
+        }
+        result = agent._payload_result("load_graph_explicit", payload)
+        return agent._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="load_graph_explicit",
+            wrapper_action="validation_failed",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=True,
+            output_truncated=False,
+        )
+
+    agent._replace_session(loaded, reason="load_graph_explicit")
     summary_payload = summarize_graph(agent.session)
     validation_result = {
-        "valid": bool(validation.get("valid")),
-        "returncode": validation.get("returncode"),
-        "stderr": validation.get("stderr"),
+        "valid": True,
+        "returncode": agent.session.last_validation_returncode,
+        "stderr": agent.session.last_validation_stderr,
     }
-    valid_graph = bool(validation.get("ok")) and bool(validation.get("valid"))
     payload: dict[str, object] = {
-        "ok": valid_graph,
+        "ok": True,
         "path": str(agent.session.path) if agent.session.path is not None else str(resolved_path),
         "state_revision": agent.session.state_revision,
-        "message": (
-            "Graph loaded and validated."
-            if valid_graph
-            else "Graph loaded, but validation failed for the loaded state."
-        ),
-        "valid": bool(validation.get("valid")),
+        "message": "Graph loaded and validated.",
+        "valid": True,
         "validation_result": validation_result,
         "graph_summary": summary_payload.get("summary"),
         "block_count": summary_payload.get("block_count"),
         "connection_count": summary_payload.get("connection_count"),
         "dirty": agent.session.is_dirty,
     }
-    if not valid_graph:
-        payload["error_type"] = (
-            validation.get("error_type")
-            if validation.get("ok") is False
-            else ErrorCode.GNU_VALIDATION_FAILED
-        )
     result = agent._payload_result("load_graph_explicit", payload)
     return agent._attach_wrapper_dispatch_telemetry(
         debug=debug,

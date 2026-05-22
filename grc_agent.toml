@@ -2,6 +2,8 @@
 server_url = "http://127.0.0.1:8080"
 model = "unsloth/gemma-4-E2B-it-GGUF"
 hf_model = "unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL"
+device = "CUDA0"
+gpu_layers = 999
 desired_context_tokens = 120000
 startup_timeout_seconds = 300.0
 max_tokens = 4096

@@ -11,10 +11,13 @@ from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.tool_schemas import MVP_MODEL_TOOL_NAMES
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE, PUBLIC_TOOL_NAMES
+from grc_agent.session_ops import connection_id
 import yaml
 
 
 class MvpToolProfileTests(unittest.TestCase):
+    _raw_cache: dict[Path, dict[str, object]] = {}
+
     def _fixture_path(self) -> Path:
         return Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 
@@ -27,19 +30,26 @@ class MvpToolProfileTests(unittest.TestCase):
         )
 
     def _load_agent(self) -> GrcAgent:
-        session = FlowgraphSession()
-        session.load(self._fixture_path())
+        session = self._session_from_fixture(self._fixture_path())
         return GrcAgent(session)
 
     def _load_dual_sink_agent(self) -> GrcAgent:
-        session = FlowgraphSession()
-        session.load(self._dual_sink_fixture_path())
+        session = self._session_from_fixture(self._dual_sink_fixture_path())
         return GrcAgent(session)
 
     def _load_agent_with_fixture(self, fixture_name: str) -> GrcAgent:
-        session = FlowgraphSession()
-        session.load(self._fixture_named(fixture_name))
+        session = self._session_from_fixture(self._fixture_named(fixture_name))
         return GrcAgent(session)
+
+    def _session_from_fixture(self, path: Path) -> FlowgraphSession:
+        resolved = path.resolve()
+        raw_data = self._raw_cache.get(resolved)
+        if raw_data is None:
+            loaded = yaml.safe_load(resolved.read_text(encoding="utf-8"))
+            self.assertIsInstance(loaded, dict)
+            raw_data = loaded
+            self._raw_cache[resolved] = raw_data
+        return FlowgraphSession.from_raw_data(raw_data, path=resolved)
 
     def _dual_sink_target_block(self, agent: GrcAgent) -> tuple[str, str, str, int]:
         assert agent.session.flowgraph is not None
@@ -93,6 +103,42 @@ class MvpToolProfileTests(unittest.TestCase):
             session = FlowgraphSession()
             session.load(graph_path)
         return GrcAgent(session)
+
+    def _load_dial_tone_agent(self) -> GrcAgent:
+        graph_path = Path("/usr/share/gnuradio/examples/audio/dial_tone.grc")
+        if not graph_path.exists():
+            self.skipTest("installed GNU Radio dial_tone.grc is unavailable")
+        catalog_root = Path("/usr/share/gnuradio/grc/blocks")
+        session = self._session_from_fixture(graph_path)
+        return GrcAgent(
+            session,
+            catalog_root=str(catalog_root) if catalog_root.exists() else None,
+        )
+
+    @staticmethod
+    def _block_param_value(agent: GrcAgent, instance_name: str, param_key: str) -> str | None:
+        assert agent.session.flowgraph is not None
+        for block in agent.session.flowgraph.blocks:
+            if block.instance_name != instance_name:
+                continue
+            parameters = block.params.get("parameters")
+            if isinstance(parameters, dict):
+                value = parameters.get(param_key)
+                return None if value is None else str(value)
+        return None
+
+    @staticmethod
+    def _connection_ids(agent: GrcAgent) -> list[str]:
+        assert agent.session.flowgraph is not None
+        return [
+            connection_id(
+                connection.src_block,
+                connection.src_port,
+                connection.dst_block,
+                connection.dst_port,
+            )
+            for connection in agent.session.flowgraph.connections
+        ]
 
 
     def test_mvp_tool_schemas_exist(self) -> None:
@@ -209,13 +255,214 @@ class MvpToolProfileTests(unittest.TestCase):
         ):
             self.assertNotIn(legacy_name, prompt)
 
-    def test_inspect_graph_summarize_returns_compact_payload(self) -> None:
+    def test_inspect_graph_overview_returns_compact_payload(self) -> None:
         agent = self._load_agent()
-        result = agent.execute_tool("inspect_graph", {"operation": "summarize"})
+        result = agent.execute_tool(
+            "inspect_graph",
+            {"view": "overview", "targets": [], "params": []},
+        )
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["tool"], "inspect_graph")
-        self.assertEqual(result["operation"], "summarize")
+        self.assertEqual(result["view"], "overview")
         self.assertIn("summary", result)
+        self.assertEqual(result["targets"], [])
+        self.assertEqual(result["editable_handles"], [])
+
+    def test_inspect_graph_overview_defaults_and_ignores_schema_fillers(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool("inspect_graph", {"view": "overview"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["view"], "overview")
+        self.assertEqual(result["targets"], [])
+        self.assertEqual(result["params_filter"]["requested"], [])
+
+        result = agent.execute_tool(
+            "inspect_graph",
+            {"view": "overview", "targets": ["samp_rate"], "params": ["value"]},
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["targets"], [])
+        self.assertEqual(result["target_matches"], [])
+
+    def test_inspect_graph_overview_includes_catalog_and_dependency_facts(self) -> None:
+        agent = self._load_dial_tone_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {"view": "overview", "targets": [], "params": ["all"]},
+        )
+
+        self.assertTrue(result["ok"], result)
+        blocks = {row["name"]: row for row in result["summary"]["blocks"]}
+        self.assertEqual(blocks["analog_sig_source_x_1"]["catalog_label"], "Signal Source")
+        self.assertIn(
+            {
+                "name": "freq",
+                "label": "Frequency",
+                "value": "440",
+                "dtype": "real",
+            },
+            blocks["analog_sig_source_x_1"]["parameters"],
+        )
+        self.assertEqual(blocks["blocks_add_xx"]["catalog_label"], "Add")
+        self.assertEqual(blocks["audio_sink"]["catalog_label"], "Audio Sink")
+        dependencies = result["summary"]["parameter_dependencies"]
+        self.assertTrue(
+            any(
+                item["symbol"] == "ampl"
+                and item["used_by"] == "analog_sig_source_x_1.amp"
+                for item in dependencies
+            ),
+            dependencies,
+        )
+
+    def test_inspect_graph_details_returns_requested_block_params(self) -> None:
+        agent = self._load_dial_tone_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {
+                "view": "details",
+                "targets": ["analog_sig_source_x_0", "analog_sig_source_x_1"],
+                "params": ["freq"],
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["complete"], result)
+        by_name = {row["name"]: row for row in result["targets"]}
+        self.assertEqual(
+            by_name["analog_sig_source_x_0"]["parameters"][0]["value"],
+            "350",
+        )
+        self.assertEqual(
+            by_name["analog_sig_source_x_1"]["parameters"][0]["value"],
+            "440",
+        )
+        self.assertEqual(
+            by_name["analog_sig_source_x_1"]["parameters"][0]["label"],
+            "Frequency",
+        )
+        self.assertEqual(
+            by_name["analog_sig_source_x_1"]["parameters"][0]["dtype"],
+            "real",
+        )
+        handle = next(
+            item
+            for item in result["editable_handles"]
+            if item["display_name"] == "analog_sig_source_x_1.freq"
+        )
+        self.assertEqual(handle["requires_state_revision"], agent.session.state_revision)
+        self.assertIsInstance(handle["target_ref"], dict)
+
+    def test_inspect_graph_details_returns_only_requested_blocks(self) -> None:
+        agent = self._load_dial_tone_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {
+                "view": "details",
+                "targets": ["analog_sig_source_x_1"],
+                "params": ["all"],
+            },
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            [row["name"] for row in result["targets"]],
+            ["analog_sig_source_x_1"],
+        )
+        returned_param_names = {
+            param["name"] for param in result["targets"][0]["parameters"]
+        }
+        self.assertIn("freq", returned_param_names)
+        self.assertNotIn("maxoutbuf", returned_param_names)
+
+    def test_inspect_graph_details_defaults_missing_or_empty_params_to_all(self) -> None:
+        agent = self._load_dial_tone_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {"view": "details", "targets": ["analog_sig_source_x_1"]},
+        )
+
+        self.assertTrue(result["ok"], result)
+        returned_param_names = {
+            param["name"] for param in result["targets"][0]["parameters"]
+        }
+        self.assertIn("freq", returned_param_names)
+
+        result = agent.execute_tool(
+            "inspect_graph",
+            {
+                "view": "details",
+                "targets": ["analog_sig_source_x_1"],
+                "params": [],
+            },
+        )
+        self.assertTrue(result["ok"], result)
+        returned_param_names = {
+            param["name"] for param in result["targets"][0]["parameters"]
+        }
+        self.assertIn("freq", returned_param_names)
+
+    def test_inspect_graph_rejects_old_mode_syntax(self) -> None:
+        agent = self._load_dial_tone_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {"mode": "parameters", "max_blocks": 1, "max_params_per_block": 1},
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("error_type"), "tool_call_invalid")
+        errors = result.get("validation_errors") or []
+        self.assertTrue(any(error.get("field") == "mode" for error in errors))
+
+    def test_inspect_graph_rejects_invalid_details_target_combination(self) -> None:
+        agent = self._load_agent()
+        cases = [
+            (
+                {"view": "details", "targets": [], "params": ["all"]},
+                "target_required",
+            ),
+        ]
+        for args, expected_code in cases:
+            with self.subTest(args=args):
+                result = agent.execute_tool("inspect_graph", args)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["errors"][0]["code"], expected_code)
+
+    def test_inspect_graph_schema_rejects_too_many_targets_and_params(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {
+                "view": "details",
+                "targets": [f"block_{index}" for index in range(6)],
+                "params": [],
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["validation_errors"][0]["code"], "too_many_items")
+
+        result = agent.execute_tool(
+            "inspect_graph",
+            {
+                "view": "details",
+                "targets": ["samp_rate"],
+                "params": [f"param_{index}" for index in range(13)],
+            },
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["validation_errors"][0]["code"], "too_many_items")
+
+    def test_inspect_graph_unknown_param_reports_unmatched_without_guessing(self) -> None:
+        agent = self._load_agent()
+        result = agent.execute_tool(
+            "inspect_graph",
+            {"view": "details", "targets": ["samp_rate"], "params": ["not_a_param"]},
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["params_filter"]["matched"], [])
+        self.assertEqual(result["params_filter"]["unmatched"], ["not_a_param"])
+        self.assertEqual(result["editable_handles"], [])
 
     def test_search_blocks_returns_minimal_candidates(self) -> None:
         agent = self._load_agent()
@@ -253,7 +500,10 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
-        inspect_result = agent.execute_tool("inspect_graph", {"operation": "list_blocks"})
+        inspect_result = agent.execute_tool(
+            "inspect_graph",
+            {"view": "overview", "targets": [], "params": []},
+        )
         search_blocks_result = agent.execute_tool(
             "search_blocks",
             {"query": "throttle", "k": 5},
@@ -681,36 +931,45 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertIn("operation_kind", result.get("message", ""))
 
-    def test_change_graph_resolves_unique_sample_rate_alias_to_variable_value(self) -> None:
-        agent = self._load_agent()
+    def test_change_graph_resolves_natural_old_value_set_param_from_metadata(self) -> None:
+        agent = self._load_dial_tone_agent()
         before_revision = agent.session.state_revision
 
         result = agent.execute_tool(
             "change_graph",
             {
                 "dry_run": False,
-                "user_goal": "Change the sample rate to 48000.",
+                "user_goal": "Change the signal source frequency from 440 to 10k.",
                 "operation_kind": "set_param",
-                "param_key": "sample_rate",
-                "param_value": "48000",
+                "param_key": "frequency",
+                "param_value": "10k",
+                "expected_old_value": "440",
             },
         )
 
         self.assertTrue(result["ok"], result)
         self.assertFalse(result["dry_run"])
         self.assertEqual(result["operation_kind"], "set_param")
-        self.assertEqual(self._variable_value(agent, "samp_rate"), "48000")
-        self.assertGreater(agent.session.state_revision, before_revision)
-        alias = result.get("resolved_target_alias")
-        self.assertIsInstance(alias, dict)
-        self.assertEqual(alias.get("alias_text"), "sample rate")
-        self.assertEqual(alias.get("source"), "graph_local_alias")
         self.assertEqual(
-            alias.get("resolved_to"),
-            {"instance_name": "samp_rate", "param_key": "value"},
+            self._block_param_value(agent, "analog_sig_source_x_0", "freq"),
+            "350",
         )
+        self.assertEqual(
+            self._block_param_value(agent, "analog_sig_source_x_1", "freq"),
+            "10000",
+        )
+        self.assertGreater(agent.session.state_revision, before_revision)
+        resolution = result.get("target_resolution")
+        self.assertIsInstance(resolution, dict)
+        self.assertEqual(resolution.get("source"), "graph_local_metadata")
+        self.assertEqual(resolution.get("reason"), "unique_graph_local_candidate")
+        self.assertEqual(
+            resolution.get("selected", {}).get("instance_name"),
+            "analog_sig_source_x_1",
+        )
+        self.assertEqual(resolution.get("selected", {}).get("param_key"), "freq")
 
-    def test_change_graph_sample_rate_alias_without_value_clarifies_without_mutation(self) -> None:
+    def test_change_graph_natural_set_param_without_value_clarifies_without_mutation(self) -> None:
         agent = self._load_agent()
         before_revision = agent.session.state_revision
         before_value = self._variable_value(agent, "samp_rate")
@@ -719,9 +978,9 @@ class MvpToolProfileTests(unittest.TestCase):
             "change_graph",
             {
                 "dry_run": False,
-                "user_goal": "Change the sample rate.",
+                "user_goal": "Change samp_rate.",
                 "operation_kind": "set_param",
-                "param_key": "sample_rate",
+                "param_key": "value",
             },
         )
 
@@ -729,116 +988,90 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "clarification_required")
         self.assertEqual(self._variable_value(agent, "samp_rate"), before_value)
         self.assertEqual(agent.session.state_revision, before_revision)
-        alias = result.get("resolved_target_alias")
-        self.assertIsInstance(alias, dict)
-        self.assertEqual(alias.get("reason"), "missing_explicit_value")
 
-    def test_change_graph_sample_rate_alias_without_samp_rate_clarifies(self) -> None:
-        agent = self._load_agent_without_samp_rate()
+    def test_change_graph_ambiguous_signal_source_frequency_clarifies(self) -> None:
+        agent = self._load_dial_tone_agent()
         before_revision = agent.session.state_revision
+        before_first = self._block_param_value(agent, "analog_sig_source_x_0", "freq")
+        before_second = self._block_param_value(agent, "analog_sig_source_x_1", "freq")
 
         result = agent.execute_tool(
             "change_graph",
             {
                 "dry_run": False,
-                "user_goal": "Change the sample rate to 48000.",
+                "user_goal": "Change the signal source frequency to 10k.",
                 "operation_kind": "set_param",
-                "param_key": "sample_rate",
-                "param_value": "48000",
+                "param_key": "frequency",
+                "param_value": "10k",
             },
         )
 
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["error_type"], "clarification_required")
         self.assertEqual(agent.session.state_revision, before_revision)
-        alias = result.get("resolved_target_alias")
-        self.assertIsInstance(alias, dict)
-        self.assertEqual(alias.get("reason"), "missing_samp_rate_variable")
+        self.assertEqual(self._block_param_value(agent, "analog_sig_source_x_0", "freq"), before_first)
+        self.assertEqual(self._block_param_value(agent, "analog_sig_source_x_1", "freq"), before_second)
+        resolution = result.get("target_resolution")
+        self.assertIsInstance(resolution, dict)
+        self.assertEqual(resolution.get("reason"), "ambiguous_graph_local_candidates")
+        self.assertEqual(resolution.get("candidate_count"), 2)
 
-    def test_change_graph_sample_rate_alias_ambiguous_variables_clarifies(self) -> None:
-        agent = self._load_agent()
-        agent.session.add_block(
-            "sample_rate",
-            "variable",
-            {"value": "32000"},
-            _skip_grcc=True,
-        )
-        agent.session.is_dirty = False
+    def test_change_graph_old_value_mismatch_refuses_without_mutation(self) -> None:
+        agent = self._load_dial_tone_agent()
         before_revision = agent.session.state_revision
-        before_samp_rate = self._variable_value(agent, "samp_rate")
-        before_sample_rate = self._variable_value(agent, "sample_rate")
+        before_value = self._block_param_value(agent, "analog_sig_source_x_0", "freq")
 
         result = agent.execute_tool(
             "change_graph",
             {
                 "dry_run": False,
-                "user_goal": "Change the sample rate to 48000.",
+                "user_goal": "Change analog_sig_source_x_0 frequency from 440 to 10k.",
                 "operation_kind": "set_param",
-                "param_key": "sample_rate",
-                "param_value": "48000",
+                "instance_name": "analog_sig_source_x_0",
+                "param_key": "freq",
+                "param_value": "10k",
+                "expected_old_value": "440",
             },
         )
 
         self.assertFalse(result["ok"], result)
-        self.assertEqual(result["error_type"], "clarification_required")
+        self.assertEqual(result["error_type"], "preflight_rejected")
         self.assertEqual(agent.session.state_revision, before_revision)
-        self.assertEqual(self._variable_value(agent, "samp_rate"), before_samp_rate)
-        self.assertEqual(self._variable_value(agent, "sample_rate"), before_sample_rate)
-        alias = result.get("resolved_target_alias")
-        self.assertIsInstance(alias, dict)
-        self.assertEqual(alias.get("reason"), "ambiguous_sample_rate_variable")
-        self.assertEqual(alias.get("ambiguity_count"), 2)
-
-    def test_change_graph_sample_rate_alias_conflicting_target_clarifies(self) -> None:
-        agent = self._load_agent()
-        before_revision = agent.session.state_revision
-        before_value = self._variable_value(agent, "samp_rate")
-
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "dry_run": False,
-                "user_goal": "Change the sample rate to 48000.",
-                "operation_kind": "set_param",
-                "instance_name": "blocks_throttle2_0",
-                "param_key": "srate",
-                "param_value": "48000",
-            },
+        self.assertEqual(
+            self._block_param_value(agent, "analog_sig_source_x_0", "freq"),
+            before_value,
         )
+        self.assertEqual(result.get("errors", [{}])[0].get("code"), "expected_param_mismatch")
 
-        self.assertFalse(result["ok"], result)
-        self.assertEqual(result["error_type"], "clarification_required")
-        self.assertEqual(agent.session.state_revision, before_revision)
-        self.assertEqual(self._variable_value(agent, "samp_rate"), before_value)
-        alias = result.get("resolved_target_alias")
-        self.assertIsInstance(alias, dict)
-        self.assertEqual(alias.get("reason"), "explicit_target_conflict")
-
-    def test_change_graph_sample_rate_alias_preview_does_not_mutate(self) -> None:
-        agent = self._load_agent()
+    def test_change_graph_natural_set_param_preview_does_not_mutate(self) -> None:
+        agent = self._load_dial_tone_agent()
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
-        before_value = self._variable_value(agent, "samp_rate")
+        before_value = self._block_param_value(agent, "analog_sig_source_x_1", "freq")
 
         result = agent.execute_tool(
             "change_graph",
             {
                 "dry_run": True,
-                "user_goal": "Preview changing the sample rate to 48000.",
+                "user_goal": "Preview changing the signal source frequency from 440 to 10k.",
                 "operation_kind": "set_param",
-                "param_key": "sample_rate",
-                "param_value": "48000",
+                "param_key": "frequency",
+                "param_value": "10k",
+                "expected_old_value": "440",
             },
         )
 
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["dry_run"])
-        self.assertEqual(self._variable_value(agent, "samp_rate"), before_value)
+        self.assertEqual(
+            self._block_param_value(agent, "analog_sig_source_x_1", "freq"),
+            before_value,
+        )
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
-        alias = result.get("resolved_target_alias")
-        self.assertIsInstance(alias, dict)
-        self.assertEqual(alias.get("reason"), "unique_samp_rate_variable")
+        resolution = result.get("target_resolution")
+        self.assertIsInstance(resolution, dict)
+        self.assertEqual(resolution.get("reason"), "unique_graph_local_candidate")
 
     def test_change_graph_exact_samp_rate_behavior_is_unchanged(self) -> None:
         agent = self._load_agent()
@@ -856,19 +1089,20 @@ class MvpToolProfileTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(self._variable_value(agent, "samp_rate"), "48000")
-        self.assertNotIn("resolved_target_alias", result)
+        self.assertNotIn("target_resolution", result)
 
-    def test_change_graph_sample_rate_alias_uses_no_docs_or_raw_yaml_path(self) -> None:
-        agent = self._load_agent()
+    def test_change_graph_metadata_resolution_uses_no_docs_or_raw_yaml_path(self) -> None:
+        agent = self._load_dial_tone_agent()
         with mock.patch.object(agent, "_ask_grc_docs") as docs_mock:
             result = agent.execute_tool(
                 "change_graph",
                 {
                     "dry_run": False,
-                    "user_goal": "Change the sample rate to 48000.",
+                    "user_goal": "Change the signal source frequency from 440 to 10k.",
                     "operation_kind": "set_param",
-                    "param_key": "sample_rate",
-                    "param_value": "48000",
+                    "param_key": "frequency",
+                    "param_value": "10k",
+                    "expected_old_value": "440",
                 },
             )
 
@@ -1158,9 +1392,7 @@ class MvpToolProfileTests(unittest.TestCase):
 
     def test_change_graph_disconnect_by_exact_connection_id(self) -> None:
         agent = self._load_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"])
-        connection_ids = listed.get("items") or []
+        connection_ids = self._connection_ids(agent)
         self.assertTrue(connection_ids)
         result = agent.execute_tool(
             "change_graph",
@@ -1176,10 +1408,8 @@ class MvpToolProfileTests(unittest.TestCase):
 
     def test_change_graph_disconnect_preview_by_exact_connection_id_does_not_mutate(self) -> None:
         agent = self._load_dual_sink_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"], listed)
         connection_id = "blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"
-        self.assertIn(connection_id, listed.get("items") or [])
+        self.assertIn(connection_id, self._connection_ids(agent))
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
         result = agent.execute_tool(
@@ -1198,7 +1428,7 @@ class MvpToolProfileTests(unittest.TestCase):
 
     def test_change_graph_disconnect_by_endpoint_hints_resolves_exactly_one(self) -> None:
         agent = self._load_agent_with_fixture("random_bit_generator_dual_sink_sink1_disabled.grc")
-        before_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        before_connections = self._connection_ids(agent)
         before_revision = agent.session.state_revision
         result = agent.execute_tool(
             "change_graph",
@@ -1213,7 +1443,7 @@ class MvpToolProfileTests(unittest.TestCase):
             },
         )
         self.assertTrue(result["ok"], result)
-        after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        after_connections = self._connection_ids(agent)
         self.assertNotIn("blocks_char_to_float_0:0->qtgui_time_sink_x_1:0", after_connections)
         self.assertEqual(len(before_connections) - 1, len(after_connections))
         self.assertGreater(agent.session.state_revision, before_revision)
@@ -1240,7 +1470,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_change_graph_disconnect_invalid_commit_rolls_back(self) -> None:
         agent = self._load_agent()
         target_connection = "blocks_char_to_float_0:0->qtgui_time_sink_x_0:0"
-        before_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        before_connections = self._connection_ids(agent)
         self.assertIn(target_connection, before_connections)
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
@@ -1259,7 +1489,7 @@ class MvpToolProfileTests(unittest.TestCase):
         validation_result = result.get("validation_result")
         self.assertIsInstance(validation_result, dict)
         self.assertEqual(validation_result.get("status"), "invalid")
-        after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        after_connections = self._connection_ids(agent)
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
@@ -1306,7 +1536,7 @@ class MvpToolProfileTests(unittest.TestCase):
         )
         self.assertTrue(mutate["ok"], mutate)
         before_revision = agent.session.state_revision
-        before_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        before_connections = self._connection_ids(agent)
         result = agent.execute_tool(
             "change_graph",
             {
@@ -1320,12 +1550,12 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(result.get("error_type"), "stale_revision")
         self.assertEqual(agent.session.state_revision, before_revision)
-        after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        after_connections = self._connection_ids(agent)
         self.assertEqual(before_connections, after_connections)
 
     def test_change_graph_disconnect_message_port_supported(self) -> None:
         agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
-        before_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        before_connections = self._connection_ids(agent)
         target_connection = "strobe_0:strobe->debug_0:print"
         self.assertIn(target_connection, before_connections)
         result = agent.execute_tool(
@@ -1338,7 +1568,7 @@ class MvpToolProfileTests(unittest.TestCase):
             },
         )
         self.assertTrue(result["ok"], result)
-        after_connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        after_connections = self._connection_ids(agent)
         self.assertNotIn(target_connection, after_connections)
 
     def test_change_graph_remove_block_detached_preview_does_not_mutate(self) -> None:
@@ -1398,9 +1628,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent_with_fixture("random_bit_generator_dual_sink_sink1_disabled.grc")
         target_connection = "blocks_char_to_float_0:0->qtgui_time_sink_x_1:0"
         before_revision = agent.session.state_revision
-        before_connections = list(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
-        )
+        before_connections = self._connection_ids(agent)
         result = agent.execute_tool(
             "change_graph",
             {
@@ -1416,9 +1644,7 @@ class MvpToolProfileTests(unittest.TestCase):
         planned = result.get("planned_operations") or []
         self.assertTrue(any(op.get("op_type") == "remove_connection" for op in planned))
         self.assertTrue(any(op.get("op_type") == "remove_block" for op in planned))
-        after_connections = list(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
-        )
+        after_connections = self._connection_ids(agent)
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
 
@@ -1440,7 +1666,7 @@ class MvpToolProfileTests(unittest.TestCase):
         graph_delta = result.get("graph_delta") or {}
         self.assertEqual(graph_delta.get("removed_blocks"), ["qtgui_time_sink_x_1"])
         self.assertEqual(graph_delta.get("removed_connections"), [target_connection])
-        connections = list(agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"])
+        connections = self._connection_ids(agent)
         self.assertNotIn(target_connection, connections)
         assert agent.session.flowgraph is not None
         self.assertNotIn(
@@ -1451,9 +1677,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_change_graph_remove_block_dependency_refusal_no_mutation(self) -> None:
         agent = self._load_agent()
         before_revision = agent.session.state_revision
-        before_connections = list(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
-        )
+        before_connections = self._connection_ids(agent)
         result = agent.execute_tool(
             "change_graph",
             {
@@ -1468,9 +1692,7 @@ class MvpToolProfileTests(unittest.TestCase):
         errors = result.get("errors") or []
         self.assertTrue(errors, result)
         self.assertEqual(errors[0].get("code"), "block_still_referenced")
-        after_connections = list(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
-        )
+        after_connections = self._connection_ids(agent)
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
 
@@ -1586,7 +1808,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         target_connection = "analog_random_source_x_0:0->blocks_throttle2_0:0"
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
@@ -1605,7 +1827,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["operation_summary"], "insert_block_on_connection")
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -1641,7 +1863,7 @@ class MvpToolProfileTests(unittest.TestCase):
             {expected_added_a, expected_added_b},
         )
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         assert agent.session.flowgraph is not None
         after_blocks = {block.instance_name for block in agent.session.flowgraph.blocks}
@@ -1655,7 +1877,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         target_connection = "analog_random_source_x_0:0->blocks_throttle2_0:0"
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
@@ -1673,7 +1895,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(result.get("error_type"), "preflight_rejected")
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -1775,7 +1997,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(mutate["ok"], mutate)
         before_revision = agent.session.state_revision
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         result = agent.execute_tool(
             "change_graph",
@@ -1793,7 +2015,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "stale_revision")
         self.assertEqual(agent.session.state_revision, before_revision)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
 
@@ -1803,7 +2025,7 @@ class MvpToolProfileTests(unittest.TestCase):
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
 
         def _fake_invalid_grcc(_raw_data: object) -> tuple[bool, str, str, int]:
@@ -1832,7 +2054,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
 
@@ -1840,7 +2062,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
         before_revision = agent.session.state_revision
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         result = agent.execute_tool(
             "change_graph",
@@ -1857,7 +2079,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "preflight_rejected")
         self.assertEqual(agent.session.state_revision, before_revision)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
 
@@ -1880,7 +2102,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         old_connection = "blocks_throttle2_0:0->blocks_char_to_float_0:0"
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertIn(old_connection, before_connections)
         before_revision = agent.session.state_revision
@@ -1902,7 +2124,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["operation_summary"], "rewire_connection")
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -1913,7 +2135,7 @@ class MvpToolProfileTests(unittest.TestCase):
         old_connection = "blocks_throttle2_0:0->blocks_char_to_float_0:0"
         new_connection = "analog_random_source_x_0:0->blocks_char_to_float_0:0"
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertIn(old_connection, before_connections)
         before_revision = agent.session.state_revision
@@ -1935,7 +2157,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result["operation_summary"], "rewire_connection")
         self.assertEqual(result["validation_result"]["status"], "valid")
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         removed = before_connections - after_connections
         added = after_connections - before_connections
@@ -1947,7 +2169,7 @@ class MvpToolProfileTests(unittest.TestCase):
         old_connection = "strobe_0:strobe->debug_0:print"
         new_connection = "strobe_0:strobe->debug_1:print"
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertIn(old_connection, before_connections)
         before_revision = agent.session.state_revision
@@ -1967,7 +2189,7 @@ class MvpToolProfileTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"], result)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertNotIn(old_connection, after_connections)
         self.assertIn(new_connection, after_connections)
@@ -1975,7 +2197,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_change_graph_rewire_invalid_new_endpoint_refused_without_mutation(self) -> None:
         agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
@@ -1996,7 +2218,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(result.get("error_type"), "preflight_rejected")
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -2022,7 +2244,7 @@ class MvpToolProfileTests(unittest.TestCase):
         )
         self.assertTrue(first["ok"], first)
         before_second_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_second_revision = agent.session.state_revision
         second = agent.execute_tool(
@@ -2042,7 +2264,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(second["ok"], second)
         self.assertEqual(second.get("error_type"), "connection_not_found")
         after_second_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_second_connections, after_second_connections)
         self.assertEqual(agent.session.state_revision, before_second_revision)
@@ -2063,7 +2285,7 @@ class MvpToolProfileTests(unittest.TestCase):
         )
         self.assertTrue(mutate["ok"], mutate)
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         result = agent.execute_tool(
@@ -2083,7 +2305,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(result.get("error_type"), "stale_revision")
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -2091,7 +2313,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_change_graph_rewire_requires_state_revision(self) -> None:
         agent = self._load_agent()
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         result = agent.execute_tool(
@@ -2111,14 +2333,14 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "invalid_request")
         self.assertEqual(agent.session.state_revision, before_revision)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
 
     def test_change_graph_rewire_ambiguous_old_edge_clarifies_without_mutation(self) -> None:
         agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
@@ -2141,7 +2363,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "ambiguous_connection")
         self.assertIn("clarification_options", result)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -2150,7 +2372,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_change_graph_rewire_ambiguous_new_source_clarifies_without_mutation(self) -> None:
         agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
@@ -2171,7 +2393,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "ambiguous_rewire_endpoint")
         self.assertIn("clarification_options", result)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -2180,7 +2402,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_change_graph_rewire_ambiguous_new_destination_clarifies_without_mutation(self) -> None:
         agent = self._load_agent_with_fixture("rewire_message_ambiguous.grc")
         before_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
@@ -2201,7 +2423,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "ambiguous_rewire_endpoint")
         self.assertIn("clarification_options", result)
         after_connections = set(
-            agent.execute_tool("inspect_graph", {"operation": "list_connections"})["items"]
+            self._connection_ids(agent)
         )
         self.assertEqual(before_connections, after_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
@@ -2250,7 +2472,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         result = agent.execute_tool(
             "inspect_graph",
-            {"operation": "summarize", "debug": True},
+            {"view": "overview", "targets": [], "params": [], "debug": True},
             model_tool_call=True,
         )
         self.assertFalse(result["ok"], result)
@@ -2440,7 +2662,7 @@ class MvpToolProfileTests(unittest.TestCase):
             self.assertEqual(result["path"], str(copied))
             self.assertTrue(result["valid"])
 
-    def test_load_graph_explicit_keeps_invalid_loaded_session_active(self) -> None:
+    def test_load_graph_explicit_refuses_invalid_loaded_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             raw = yaml.safe_load(self._fixture_path().read_text(encoding="utf-8"))
             connections = raw.get("connections")
@@ -2453,12 +2675,14 @@ class MvpToolProfileTests(unittest.TestCase):
             broken.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
             agent = self._load_agent()
+            original_path = str(agent.session.path)
             agent.init_turn_requirements(f"Load {broken}.")
             result = agent.execute_tool("load_graph_explicit", {"path": str(broken)})
             self.assertFalse(result["ok"], result)
             self.assertFalse(result["valid"])
             self.assertEqual(result["path"], str(broken))
-            self.assertEqual(str(agent.session.path), str(broken))
+            self.assertTrue(result["active_session_preserved"])
+            self.assertEqual(str(agent.session.path), original_path)
 
 
 if __name__ == "__main__":

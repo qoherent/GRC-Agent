@@ -8,7 +8,7 @@
       "assistant_actions": [
         {
           "tool": "inspect_graph",
-          "kwargs": {"operation": "summary", "max_items": 8}
+          "kwargs": {"view": "overview", "targets": [], "params": []}
         },
         {
           "text": "The graph is a small stream chain with a sample-rate variable and no requested mutation."

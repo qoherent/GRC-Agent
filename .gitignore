@@ -24,6 +24,12 @@ tmp/
 # Generated eval/report artifacts (not tracked)
 reports/
 
+# Node/Remotion generated artifacts
+node_modules/
+demo/remotion/out/
+demo/remotion/dist/
+demo/video_outputs/
+
 # Frozen governed retrieval baseline artifact (tracked)
 !tests/data/retrieval/vector_eval_governed_metadata.json
 

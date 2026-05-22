@@ -56,7 +56,7 @@
       "release_gating": false
     },
     "R7_NATURAL_EXTERNAL": {
-      "status": "diagnostic-partial",
+      "status": "diagnostic-clean",
       "release_gating": false
     }
   }

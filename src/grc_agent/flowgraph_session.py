@@ -65,6 +65,7 @@ class FlowgraphSession:
         self.last_validation_stderr: str | None = None
         self.last_validation_returncode: int | None = None
         self.last_validation_ok: bool | None = None
+        self.last_validation_revision: int | None = None
         # Revision and caches support bounded inspection and retrieval reuse.
         self._state_revision = 0
         self._graph_id_revision: int | None = None
@@ -116,6 +117,7 @@ class FlowgraphSession:
         self.last_validation_stderr = None
         self.last_validation_returncode = None
         self.last_validation_ok = None
+        self.last_validation_revision = None
         self._bump_state_revision()
         logger.info("load path=%s blocks=%d connections=%d", source_path, len(blocks), len(connections))
 
@@ -151,6 +153,7 @@ class FlowgraphSession:
         session.last_validation_stderr = None
         session.last_validation_returncode = None
         session.last_validation_ok = None
+        session.last_validation_revision = None
         session._bump_state_revision()
         return session
 
@@ -220,6 +223,7 @@ class FlowgraphSession:
         session.last_validation_stderr = None
         session.last_validation_returncode = None
         session.last_validation_ok = None
+        session.last_validation_revision = None
         session._bump_state_revision()
         logger.info("create graph_id=%s", graph_id)
         return session
@@ -234,6 +238,20 @@ class FlowgraphSession:
         target_path = Path(path) if path is not None else self.path
         if target_path is None:
             raise ValueError("No save path provided and no session path is set.")
+
+        # Save only a graph version that has passed grcc validation.
+        if (
+            self.last_validation_ok is not True
+            or self.last_validation_revision != self._state_revision
+        ):
+            if not self.validate():
+                raise ValueError(
+                    "Refusing to save invalid graph: "
+                    + self._grcc_failure_message(
+                        self.last_validation_stdout or "",
+                        self.last_validation_stderr or "",
+                    )
+                )
 
         # Serialize the current YAML once so save and validate stay consistent.
         serialized = self._serialize_raw_data(self.flowgraph.raw_data)
@@ -317,6 +335,7 @@ class FlowgraphSession:
         self.last_validation_stderr = stderr
         self.last_validation_returncode = returncode
         self.last_validation_ok = is_valid
+        self.last_validation_revision = self._state_revision if is_valid else None
         logger.info("validate ok=%s returncode=%s", is_valid, returncode)
         return is_valid
 
@@ -351,6 +370,7 @@ class FlowgraphSession:
         payload: dict[str, Any] = {
             "status": status,
             "returncode": self.last_validation_returncode,
+            "state_revision": self.last_validation_revision,
         }
         if self.last_validation_stdout is not None:
             payload["stdout"] = self.last_validation_stdout
@@ -1105,6 +1125,11 @@ class FlowgraphSession:
     def _bump_state_revision(self) -> None:
         """Advance the session revision after load, save-path changes, or mutation."""
         self._state_revision += 1
+        self.last_validation_stdout = None
+        self.last_validation_stderr = None
+        self.last_validation_returncode = None
+        self.last_validation_ok = None
+        self.last_validation_revision = None
 
     def _require_loaded_flowgraph(self) -> Flowgraph:
         """Return the active flowgraph or raise when the session is empty."""

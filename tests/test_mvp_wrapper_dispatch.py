@@ -9,9 +9,13 @@ from unittest import mock
 from grc_agent.agent import GrcAgent
 import grc_agent.agent as agent_module
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.session_ops import connection_id
+import yaml
 
 
 class MvpWrapperDispatchTests(unittest.TestCase):
+    _raw_cache: dict[Path, dict[str, object]] = {}
+
     def _fixture_path(self) -> Path:
         return Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 
@@ -19,36 +23,47 @@ class MvpWrapperDispatchTests(unittest.TestCase):
         return Path(__file__).resolve().parent / "data" / name
 
     def _load_agent(self, fixture_name: str = "random_bit_generator.grc") -> GrcAgent:
-        session = FlowgraphSession()
-        session.load(self._fixture_named(fixture_name))
+        path = self._fixture_named(fixture_name).resolve()
+        raw_data = self._raw_cache.get(path)
+        if raw_data is None:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            self.assertIsInstance(loaded, dict)
+            raw_data = loaded
+            self._raw_cache[path] = raw_data
+        session = FlowgraphSession.from_raw_data(raw_data, path=path)
         agent = GrcAgent(session)
         object.__setattr__(agent._docs_answer_cfg, "helper_mode", "always")
         return agent
 
+    @staticmethod
+    def _connection_ids(agent: GrcAgent) -> list[str]:
+        assert agent.session.flowgraph is not None
+        return [
+            connection_id(
+                connection.src_block,
+                connection.src_port,
+                connection.dst_block,
+                connection.dst_port,
+            )
+            for connection in agent.session.flowgraph.connections
+        ]
+
     def test_inspect_graph_dispatch_map_with_debug_telemetry(self) -> None:
         agent = self._load_agent()
         cases = [
-            ("summarize", {"operation": "summarize", "debug": True}, "summarize_graph"),
+            ("overview", {"view": "overview", "targets": [], "params": [], "debug": True}),
             (
-                "context",
-                {"operation": "context", "target": "samp_rate", "debug": True},
-                "get_grc_context",
-            ),
-            ("validate", {"operation": "validate", "debug": True}, "validate_graph"),
-            ("list_blocks", {"operation": "list_blocks", "debug": True}, "session_snapshot.list_blocks"),
-            (
-                "list_connections",
-                {"operation": "list_connections", "debug": True},
-                "session_snapshot.list_connections",
-            ),
-            (
-                "list_variables",
-                {"operation": "list_variables", "debug": True},
-                "session_snapshot.list_variables",
+                "details",
+                {
+                    "view": "details",
+                    "targets": ["samp_rate"],
+                    "params": ["value"],
+                    "debug": True,
+                },
             ),
         ]
-        for operation, payload, expected_handler in cases:
-            with self.subTest(operation=operation):
+        for view, payload in cases:
+            with self.subTest(view=view):
                 before_revision = agent.session.state_revision
                 before_dirty = agent.session.is_dirty
                 result = agent.execute_tool("inspect_graph", payload)
@@ -56,8 +71,8 @@ class MvpWrapperDispatchTests(unittest.TestCase):
                 telemetry = result.get("dispatch_telemetry")
                 self.assertIsInstance(telemetry, dict)
                 self.assertEqual(telemetry["wrapper_name"], "inspect_graph")
-                self.assertEqual(telemetry["wrapper_action"], operation)
-                self.assertIn(expected_handler, telemetry["internal_handler_called"])
+                self.assertEqual(telemetry["wrapper_action"], view)
+                self.assertIn("inspect_graph_view", telemetry["internal_handler_called"])
                 self.assertFalse(telemetry["graph_mutated"])
                 self.assertEqual(agent.session.state_revision, before_revision)
                 self.assertEqual(agent.session.is_dirty, before_dirty)
@@ -1286,9 +1301,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
 
     def test_change_graph_exact_disconnect_routes_to_remove_handler(self) -> None:
         agent = self._load_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"], listed)
-        connection_id = listed["items"][0]
+        connection_id = self._connection_ids(agent)[0]
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
         with (
@@ -1364,9 +1377,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
 
     def test_change_graph_exact_rewire_routes_to_rewire_handler(self) -> None:
         agent = self._load_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"], listed)
-        connection_id = listed["items"][0]
+        connection_id = self._connection_ids(agent)[0]
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
         with (
@@ -1508,9 +1519,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
 
     def test_change_graph_exact_insert_routes_to_insert_handler(self) -> None:
         agent = self._load_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"], listed)
-        connection_id = listed["items"][0]
+        connection_id = self._connection_ids(agent)[0]
         before_revision = agent.session.state_revision
         before_dirty = agent.session.is_dirty
         with (
@@ -1542,9 +1551,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
 
     def test_change_graph_insert_accepts_candidate_id_alias(self) -> None:
         agent = self._load_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"], listed)
-        connection_id = listed["items"][0]
+        connection_id = self._connection_ids(agent)[0]
         with mock.patch.object(
             agent,
             "_insert_block_on_connection",
@@ -1571,9 +1578,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
 
     def test_change_graph_insert_rejects_conflicting_block_and_candidate_ids(self) -> None:
         agent = self._load_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"], listed)
-        connection_id = listed["items"][0]
+        connection_id = self._connection_ids(agent)[0]
         with mock.patch.object(
             agent,
             "_insert_block_on_connection",
@@ -1597,9 +1602,7 @@ class MvpWrapperDispatchTests(unittest.TestCase):
 
     def test_change_graph_compatible_insertion_dispatches_by_dry_run(self) -> None:
         agent = self._load_agent()
-        listed = agent.execute_tool("inspect_graph", {"operation": "list_connections"})
-        self.assertTrue(listed["ok"], listed)
-        connection_id = listed["items"][0]
+        connection_id = self._connection_ids(agent)[0]
         with (
             mock.patch.object(
                 agent,

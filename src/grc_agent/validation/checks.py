@@ -206,6 +206,34 @@ def _apply_update_params(
             )
         ], []
 
+    expected_params = operation.payload.get("expected_params")
+    if expected_params is not None:
+        if not isinstance(expected_params, dict):
+            return [
+                make_issue(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="expected_params",
+                    code="invalid_expected_params",
+                    message="expected_params must be a mapping when provided.",
+                )
+            ], []
+        for parameter_id, expected_value in expected_params.items():
+            current_value = raw_parameters.get(parameter_id)
+            if str(current_value) != str(expected_value):
+                return [
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field=f"expected_params.{parameter_id}",
+                        code="expected_param_mismatch",
+                        message=(
+                            f"Current value for {instance_name}.{parameter_id} "
+                            f"does not match expected_old_value."
+                        ),
+                    )
+                ], []
+
     for parameter_id, value in params.items():
         raw_parameters[parameter_id] = copy.deepcopy(value)
     snapshot.refresh()

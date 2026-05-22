@@ -59,6 +59,8 @@ class ValidationOperation:
                 res["block_type"] = self.payload["block_type"]
             if "target_ref" in self.payload:
                 res["target_ref"] = copy.deepcopy(self.payload["target_ref"])
+            if "expected_params" in self.payload:
+                res["expected_params"] = copy.deepcopy(self.payload["expected_params"])
             return res
         if self.op_type == "update_states":
             res = {
@@ -387,7 +389,14 @@ def _normalize_operation(
     candidate: dict[str, Any],
 ) -> tuple[list[ValidationIssue], ValidationOperation | None]:
     allowed_fields: dict[OperationType, tuple[str, ...]] = {
-        "update_params": ("op_type", "instance_name", "params", "block_type", "target_ref"),
+        "update_params": (
+            "op_type",
+            "instance_name",
+            "params",
+            "expected_params",
+            "block_type",
+            "target_ref",
+        ),
         "update_states": ("op_type", "instance_name", "state", "block_type", "target_ref"),
         "add_connection": ("op_type", "src_block", "src_port", "dst_block", "dst_port"),
         "remove_connection": (
@@ -630,6 +639,28 @@ def _normalize_operation(
             issues.extend(parameter_issues)
             if not parameter_issues:
                 payload["params"] = copy.deepcopy(params)
+        expected_params = candidate.get("expected_params")
+        if expected_params is not None:
+            if not isinstance(expected_params, dict):
+                issues.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type=op_type,
+                        field="expected_params",
+                        code="invalid_field_type",
+                        message="expected_params must be a mapping when provided.",
+                    )
+                )
+            else:
+                expected_issues = _validate_parameter_mapping(
+                    op_index=op_index,
+                    op_type=op_type,
+                    field="expected_params",
+                    parameters=expected_params,
+                )
+                issues.extend(expected_issues)
+                if not expected_issues:
+                    payload["expected_params"] = copy.deepcopy(expected_params)
 
     if op_type == "update_states":
         state = candidate.get("state")

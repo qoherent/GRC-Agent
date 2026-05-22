@@ -480,8 +480,25 @@ class FlowgraphSessionTests(unittest.TestCase):
         ok = session.validate()
         self.assertTrue(ok)
         self.assertEqual(session.last_validation_returncode, 0)
+        self.assertEqual(session.last_validation_revision, session.state_revision)
         self.assertIsNotNone(session.last_validation_stdout)
         self.assertIsNotNone(session.last_validation_stderr)
+
+    def test_mutation_clears_stale_validation_diagnostics(self) -> None:
+        fixture_path = self._fixture_path()
+        session = FlowgraphSession()
+        session.load(fixture_path)
+
+        self.assertTrue(session.validate())
+        self.assertIsNotNone(session.last_validation_returncode)
+
+        session.set_param("samp_rate", "value", "48000")
+
+        self.assertIsNone(session.last_validation_stdout)
+        self.assertIsNone(session.last_validation_stderr)
+        self.assertIsNone(session.last_validation_returncode)
+        self.assertIsNone(session.last_validation_ok)
+        self.assertIsNone(session.last_validation_revision)
 
     # Loading a new graph should clear diagnostics from any previous validation run.
     def test_load_clears_previous_validation_diagnostics(self) -> None:

@@ -1,625 +1,335 @@
-# GRC Agent System Blueprint
+# GRC Agent Blueprint
 
-Updated: 2026-05-15
+This is the current high-level design contract. It is intentionally concise; old phase reports were removed because they were stale evidence logs, not durable product docs.
 
-This is the single source-of-truth design document for GRC Agent. It merges the former blueprint, system-design, and package-guide material into one operational contract: product scope, package shape, harness flow, model loop, tools, safety boundaries, retrieval, eval gates, and release criteria.
+## Status
 
-## 1. Product Scope
+GRC Agent is a local assistant for GNU Radio Companion `.grc` graphs. It is built around explicit tool calls, typed validation, `grcc`, rollback, and copied-graph safety.
 
-GRC Agent is a local-first assistant for GNU Radio Companion `.grc` flowgraphs. It should read, inspect, explain, preview edits, apply verified edits, validate with GNU Radio tooling, and save only when the user explicitly asks.
+Current classification:
 
-The release-validated subset is **R0_READ_ONLY + R1_SET_PARAM_ONLY**. The default MVP runtime remains beta-capable because `change_graph` exposes additional `operation_kind` values beyond the validated subset and lifecycle wrappers are beta-validated only. `set_state`, `disconnect`, `rewire`, `insert_block`, `remove_block`, `add_variable`, and save/load are beta-validated. The overall project is **not production-ready**.
+- Release-validated: `R0_READ_ONLY`, `R1_SET_PARAM_ONLY`
+- Beta-validated: `R1_SET_STATE`, `R2_DISCONNECT`, `R3_REWIRE`, `R4A_INSERT_BLOCK_ON_CONNECTION`, `R4B_REMOVE_BLOCK`, `R4C_ADD_VARIABLE`, `R5_SAVE_LOAD`
+- Diagnostic-clean: `R7_EXACT_EXTERNAL`, `R7_NATURAL_EXTERNAL`, `Tier5_ADVERSARIAL`
+- Runtime: not production-ready
 
-Supported local scope:
+The default model-facing surface is the six-wrapper MVP profile only. Low-level graph tools remain internal.
 
-- Load copied `.grc` files and summarize graph state.
-- Inspect blocks, variables, connections, and local graph neighborhoods.
-- Search installed GNU Radio block metadata.
-- Answer GNU Radio conceptual questions from local docs with citations.
-- Preview supported graph edits without mutation.
-- Apply verified parameter, state, connection, rewire, insertion, and block operations through deterministic tools.
-- Validate graph candidates with `grcc` before committing live mutations.
-- Save explicitly, after validation, through atomic file replacement.
-- Keep local checkpoints and graph deltas for CLI/debug infrastructure.
+## Safety Contract
 
-Non-goals:
-
-- Unsupervised production autonomy.
-- Broad graph planning from tutorials or memory.
-- Direct raw YAML/text mutation of `.grc` files.
-- Hidden repairs that rewrite user intent.
-- Fixture-specific shortcuts.
-- Vector/doc retrieval as mutation authority.
-- Unbounded retries or unbounded candidate search.
-- Model-facing access to low-level mutation tools in default chat.
-- Model-facing undo/redo/restore.
-
-## 2. System Invariants
-
-These rules are stronger than prompt text or model behavior:
-
-- One `GrcAgent` owns runtime state and tool execution.
-- The model may request actions only through exposed tools.
-- Runtime validates tool name, schema, route, operation type, and graph state before execution.
-- All graph mutations go through verified Python tooling, never raw YAML edits.
-- `change_graph` is the only default model-facing mutation wrapper.
-- Internal mutation handlers must preserve preflight, candidate clone, `grcc`, rollback, and checkpoint semantics.
-- Preview operations must not mutate the live graph.
-- Failed edits must not commit candidate state.
+- Never edit raw `.grc` YAML directly.
+- Never mutate originals under installed example paths; copy graphs first.
+- Preview must never mutate.
+- Failed schema validation, preflight, or `grcc` validation must not commit.
+- Save requires explicit user intent.
+- Docs/RAG are explanation-only and never mutation authority.
+- Ambiguous graph targets clarify instead of first-match mutation.
 - `grcc` remains final graph-validity authority.
-- Save requires explicit user intent and a successfully validated latest dirty state.
-- Checkpoint restore is CLI-only and writes to an explicit copy path.
-- Clarification options must come from real executable candidates and include free text/custom fallback.
-- Route mismatches fail closed; they are not silently remapped.
-- Source retrieval is read-only evidence and never mutation authority.
-- Assistant-text fallback parsing is frozen compatibility infrastructure, not a routing layer.
 
-## 3. Package Architecture
-
-| Layer | Main files | Responsibility |
-| --- | --- | --- |
-| CLI | `src/grc_agent/cli.py` | `doctor`, `health`, chat, fake runtime, direct tools, vector/manual/dogfood/history commands |
-| Runtime | `src/grc_agent/agent.py`, `src/grc_agent/runtime/` | Tool registries, wrapper dispatch, route validation, prompt state, turn policy, clarification, history checkpoints |
-| Adapter | `src/grc_agent/llama_server.py`, `src/grc_agent/llama_launcher.py` | llama.cpp HTTP client, server reuse/startup, OpenAI-compatible tool calls, bounded loop |
-| Session | `src/grc_agent/flowgraph_session.py`, `src/grc_agent/session/` | Loaded graph state, parsing, compact snapshots, validation, atomic save |
-| Transactions | `src/grc_agent/transaction/` | Preflight, candidate clone, apply/propose, commit or rollback |
-| Validation | `src/grc_agent/validation/` | Deterministic graph and operation checks before `grcc` |
-| Catalog | `src/grc_agent/catalog/` | Installed GNU Radio block metadata, params, ports, defaults, descriptions |
-| Retrieval | `src/grc_agent/retrieval/` | Read-only Qdrant/FastEmbed vector retrieval and catalog indexing |
-| Manual | `src/grc_agent/manual/` | Cleaned GNU Radio wiki/tutorial search with citations |
-| History | `src/grc_agent/history.py` | Local checkpoint JSONL, graph deltas, retention, CLI restore-to-copy |
-| Advisor | `src/grc_agent/runtime/turnplan_advisor.py` | Shadow-only local LLM intent advisor |
-| Evals | `tests/llama_eval/`, `tests/retrieval_eval/`, `tests/dogfood/` | Deterministic, retrieval, live, release, and dogfood evidence |
-
-## 4. Runtime Harness Flow
-
-Default chat flow:
-
-```text
-User prompt + copied .grc path
-  -> CLI loads config and session
-  -> GrcAgent records compact active-session context
-  -> Turn policy selects tool profile and allowed tools
-  -> llama.cpp bounded chat/tool loop
-  -> native tool-call parsing
-  -> schema validation
-  -> route validation
-  -> wrapper tool execution
-  -> deterministic internal dispatch
-  -> preflight on candidate graph
-  -> grcc validation when mutation is committed
-  -> atomic commit or rollback
-  -> compact tool output
-  -> assistant response
-  -> explicit save only when requested
-```
-
-Mutation flow:
-
-```text
-change_graph(dry_run=false, exact args)
-  -> route/schema validation
-  -> internal handler selection
-  -> propose/preflight
-  -> clone live session
-  -> apply operations to clone
-  -> candidate.validate() via grcc
-  -> if valid: commit candidate to live session and journal checkpoint
-  -> if invalid: return failure and keep live session unchanged
-```
-
-Preview flow:
-
-```text
-change_graph(dry_run=true, exact args)
-  -> route/schema validation
-  -> propose/preflight only
-  -> return normalized operations, warnings, errors, and clarification if needed
-  -> live graph revision stays unchanged
-```
-
-Save flow:
-
-```text
-explicit user save request
-  -> latest dirty state must have validated successfully
-  -> save writes same-directory temp file
-  -> fsync temp file
-  -> os.replace into target path
-  -> dirty flag clears only after successful write
-```
-
-## 5. Model Tool Surface
-
-Default model-facing chat surface is MVP wrappers:
-
-1. `inspect_graph`
-2. `search_blocks`
-3. `ask_grc_docs`
-4. `change_graph`
-5. `save_graph_explicit`
-6. `load_graph_explicit`
-
-Low-level tools remain internal implementation primitives. They must not leak into model-backed chat; the legacy model-facing tool surface and prompt branch have been removed from the runtime path.
-
-Current implementation caveat: the codebase still builds internal primitive schemas for direct runtime tests, CLI developer inspection, and wrapper implementation support. Model-backed chat receives only the six MVP wrappers.
-
-## 6. Wrapper Contracts
+## Model-Facing Wrappers
 
 ### `inspect_graph`
 
-Purpose: read-only active graph inspection.
+Purpose: read-only graph inspection.
 
-Allowed behavior:
+Args:
 
-- Summarize graph state.
-- List blocks, variables, and connections within configured bounds.
-- Validate graph through read-only validation operation where supported.
-- Return local context around exact loaded blocks or variables.
+- `view`: required; one of `overview`, `details`
+- `targets`: required string array; ignored for `overview`, one to five graph-local targets for `details`
+- `params`: schema-visible string array; ignored for `overview`; for `details`, pass `["all"]` for useful visible parameters or exact parameter names to filter. Missing or empty `params` defaults to bounded useful parameters.
+- `debug`: internal eval/dev telemetry only, not model-facing
 
-Forbidden behavior:
+Expected output:
 
-- Mutating graph state.
-- Saving files.
-- Returning mutation recipes as instructions to the model.
+- stable top-level fields: `ok`, `view`, `state_revision`, `complete`, `summary`, `targets`, `target_matches`, `params_filter`, `editable_handles`, `ambiguity`, `truncation`, `validation_status`, `errors`
+- `overview`: compact whole-graph summary, counts, blocks/connections preview, validation status
+- `details`: resolved graph-local targets, selected/current params, compact connection context, guarded editable handles with `target_ref` and state revision
+- ambiguous or missing details targets return candidates/errors and no guessed mutation
+- details calls with missing or empty `params` default to `["all"]`; overview is read-only and normalizes stray `targets`/`params`
+
+Internal subtools/data:
+
+- `summarize_graph`
+- editable parameter candidate index
+- session graph metadata and connection summaries
+
+Design lessons from the redesign:
+
+- The model-facing schema is an intent contract, not an internal query API.
+- Required fields are still validated at runtime because local models can omit them; safe read-only defaults are filled before validation where omission is harmless.
+- Overview is forgiving because it is read-only; details is strict because it can expose mutation-ready handles.
+- Runtime owns budgets, truncation, target matching, and handle generation.
+- Tool output must include labels, parameter keys, current values, target refs, state revisions, ambiguity, and truncation so the model is not forced to infer graph facts.
+- Validation is not a model-facing inspect mode; validation runs at load, after mutation, and before save, then appears as status metadata.
 
 ### `search_blocks`
 
-Purpose: block discovery over installed GNU Radio catalog metadata.
+Purpose: find installed GNU Radio catalog blocks.
 
-Default output:
+Args:
 
-- `block_id`
-- `name`
-- `summary`
+- `query`: required
+- `k`: optional result bound
+- `enrich`: optional block-description enrichment
+- `debug`: optional telemetry
 
-Internal behavior:
+Expected output:
 
-- Exact ID/name/alias fast path.
-- Lexical catalog search.
-- Semantic catalog search when useful.
-- Bounded cache for repeated conceptual queries.
-- Lexical fallback when vector index is missing.
-- Debug-only ranking/provenance telemetry.
+- compact ranked block candidates with block IDs, names, summaries, provenance, and warnings
 
-No mutation-shaped payloads should be returned in normal output.
+Internal subtools/data:
+
+- lexical/vector block retrieval
+- catalog metadata
+- optional `describe_block` enrichment
 
 ### `ask_grc_docs`
 
-Purpose: explanation-only GNU Radio docs answers with sources.
+Purpose: explanation-only grounded docs answers.
 
-Default behavior:
+Args:
 
-- Search local cleaned manual/tutorial corpus.
-- Use semantic manual/tutorial retrieval only when useful.
-- Return concise grounded answer, source snippets, `insufficient_evidence`, and fallback telemetry.
-- Use catalog-assisted block definitions only when explicitly allowed by the docs-answer path.
+- `question`: required
+- `k`: optional source count
+- `focus`: optional topic hint
+- `debug`: optional telemetry
 
-Forbidden behavior:
+Expected output:
 
-- Authorizing graph mutation.
-- Returning graph recipes from tutorials as edit plans.
-- Treating docs as block/default authority when catalog metadata and `grcc` disagree.
+- concise answer
+- source list
+- `insufficient_evidence` when local docs do not support an answer
+- no mutation payloads
 
-Current quality status: docs-answer eval meets the deterministic docs QA baseline
-(32/35 relevance, 28/35 groundedness, 0 misleading answers, 0 mutation leakage,
-0 helper use). Treat this as read-only docs support; docs/RAG remains non-authority
-for mutation and the runtime is still not production-ready.
+Internal subtools/data:
+
+- local GNU Radio wiki/tutorial corpus under `docs/wiki_gnuradio_org/`
+- deterministic grounded-answer builder
+- optional helper synthesis only when explicitly enabled for research
 
 ### `change_graph`
 
-Purpose: only default model-facing graph mutation/preview surface.
+Purpose: the only model-facing graph-content mutation wrapper.
 
-Current required fields:
+Required args:
 
-- `dry_run`: true for preview, false for committed mutation.
-- `user_goal`: compact natural-language evidence for the requested change.
+- `dry_run`
+- `user_goal`
+- `operation_kind`
 
-Optional exact fields include instance names, connection IDs, endpoints, new endpoints, selected block IDs, parameter keys/values, state, variable names/values, and verified `target_ref` objects.
+Common args:
 
-Required behavior:
+- `target_ref`
+- `instance_name`
+- `state_revision`
+- `debug`
 
-- Reject unsupported workflows such as raw YAML, undo, redo, save, or Python export.
-- Ask for clarification when exact executable details are missing.
-- Resolve the Phase 7 sample-rate alias only for `operation_kind="set_param"`
-  and only from graph-local evidence: `sample rate`, `sample_rate`, or
-  `samp rate` may target `samp_rate.value` when the active graph has exactly
-  one compatible variable named `samp_rate` and the user supplied an explicit
-  value. Missing values, absent targets, ambiguous sample-rate-like variables,
-  and explicit target conflicts must clarify/refuse without mutation.
-- Dispatch internally to verified handlers only.
-- Preserve preflight, `grcc`, rollback, checkpoint, and save-state semantics.
+Supported `operation_kind` values:
 
-Implemented: `operation_kind` enum added to `change_graph` schema and required for model-facing `change_graph` calls. `user_goal` is supporting evidence; routing is based on `operation_kind`.
+- `set_param`
+- `set_state`
+- `add_variable`
+- `disconnect`
+- `rewire`
+- `insert_block`
+- `remove_block`
+- `clarify`
+- `unsupported`
+- `auto_insert` is experimental/non-gating
 
-## 7. Internal Tool And Handler Inventory
+`set_param` args:
 
-Internal/compatibility tools currently include:
+- `instance_name` or guarded `target_ref`
+- `param_key`
+- `param_value`
+- optional `expected_old_value`
 
-- `new_grc`
-- `load_grc`
-- `summarize_graph`
-- `search_grc`
-- `get_grc_context`
-- `describe_block`
-- `search_manual`
-- `semantic_search_grc`
-- `suggest_compatible_insertions`
-- `insert_block_on_connection`
-- `auto_insert_block`
-- `remove_connection`
-- `rewire_connection`
-- `apply_edit`
-- `propose_edit`
-- `validate_graph`
+Natural `set_param` resolution is graph-local and metadata-driven only. It may resolve through loaded graph instance names, block types, catalog labels, parameter keys/labels, current values, and explicit old-value guards. It does not use phrase dictionaries, docs/RAG, tutorials, hidden retries, or raw YAML. If zero or multiple candidates match, it clarifies. If `expected_old_value` does not match the active graph, it refuses without mutation.
+
+Other operation args:
+
+- `set_state`: `instance_name` or `target_ref`, `state`
+- `add_variable`: `variable_name`, `variable_value`
+- `disconnect`: exact `connection_id` or uniquely resolved endpoints
+- `rewire`: `connection_id`, `state_revision`, `new_src_block`, `new_src_port`, `new_dst_block`, `new_dst_port`
+- `insert_block`: `connection_id`, `block_id`/`candidate_id`/`insert_block`, `instance_name`, optional `insert_params`
+- `remove_block`: `instance_name` or `target_ref`, optional explicit detach controls
+
+Expected output:
+
+- `ok`, `dry_run`, `operation_summary`
+- graph delta and active session state when applicable
+- validation result for committed mutations
+- clarification payload for ambiguous or underspecified requests
+- rollback/refusal details for failed validation
+
+Internal subtools/data:
+
+- `propose_edit` for preview
+- `apply_edit` for committed mutation
+- transaction normalizer
+- validation rules and preflight checks
+- `grcc`
+- graph history/checkpoints
+
+Recommended next refactor focus:
+
+- Keep one model-facing mutation wrapper for now.
+- Make the internal implementation operation-kind oriented: `set_param`, `set_state`, `add_variable`, `disconnect`, `rewire`, `insert_block`, `remove_block`, `clarify`, `unsupported`.
+- Keep schema narrowing so the model sees only relevant mutation fields when possible.
+- Return clearer validation errors to the model, such as missing required arg, stale state revision, ambiguous target, old-value mismatch, and failed `grcc`.
+- Require graph-local authority for edits: exact identifiers, guarded target refs, or uniquely resolved metadata candidates from the active graph.
+- Preserve existing safety: no docs/RAG authority, no raw YAML, no hidden retries, no first-match mutation, and rollback on failed validation.
+
+### `save_graph_explicit`
+
+Purpose: explicit lifecycle save only.
+
+Args:
+
+- `path`: optional destination; omit only for saving the current loaded path
+- `overwrite`: optional
+- `debug`: optional telemetry
+
+Expected output:
+
+- save status
+- path
+- validation result
+- active session dirty state
+
+Internal subtools/data:
+
 - `save_graph`
+- path-safety policy
+- atomic write path
+- validation before save
 
-These are acceptable internal boundaries. They should not be treated as default model-facing tools.
+### `load_graph_explicit`
 
-## 8. Supported Graph Work
+Purpose: explicit lifecycle load/open only.
 
-### Creation And Loading
+Args:
 
-- `new_grc` creates a minimal empty graph skeleton.
-- `load_grc` loads an existing `.grc` file into the active session.
-- CLI must reject direct mutation of canonical fixtures or original user files when a copied-graph safety rule applies.
+- `path`: required
+- `debug`: optional telemetry
 
-### Inspection
+Expected output:
 
-- Graph summaries include bounded block previews, connection information, variable counts, dirty state, validation state, and provenance.
-- Context lookup requires exact loaded instance names or verified resolved references.
-- Duplicate ambiguous targets must clarify rather than pick the first match.
+- load status
+- active session summary
+- path-safety result
 
-### Parameter And State Edits
+Internal subtools/data:
 
-- `update_params` supports unique loaded blocks and variables.
-- Values may be literals or GNU/Python expressions.
-- `update_states` supports enabled/disabled state changes.
-- Same-name duplicate handling requires verified discriminators or `target_ref`.
+- `load_grc`
+- path-safety policy
 
-### Block Identity And `target_ref`
+## Internal Tool Boundary
 
-Loaded blocks carry deterministic `block_uid` for inspection and eval identity. Free-form text cannot mutate by UID.
+Internal tools include graph creation/loading, summaries, catalog retrieval, block descriptions, manual search, insert suggestions, connection removal/rewire, edit proposal/application, validation, and raw save. They are implementation primitives, not default model-facing chat tools.
 
-The only supported UID mutation path is a structured `target_ref` containing:
+The model sees only the six wrappers above in MVP chat mode.
 
-- `block_uid`
-- `expected_instance_name`
-- `expected_block_type`
-- `base_state_revision`
+## Agent Loop
 
-The runtime must reject stale `target_ref` values after graph changes.
+1. Load or create one active `FlowgraphSession`.
+2. Build compact model messages from system policy, session snapshot, recent history, and bounded tool results.
+3. Ask llama.cpp for a response with the six wrapper schemas.
+4. Validate every requested tool call against wrapper schemas.
+5. Execute tool calls serially.
+6. For mutations, route through `change_graph`, transaction validation, preflight, `grcc`, and rollback/commit.
+7. Append raw requested calls, executed calls, tool results, deltas, and validation state to history/trace.
+8. Stop after bounded tool rounds or when the assistant returns final text.
 
-### Connections And Rewires
+Fallback free-text parsing is disabled for the MVP runtime. If the model cannot produce a valid call, the turn fails closed or asks for clarification.
 
-- `add_connection` and `remove_connection` support stream and message ports.
-- Exact disconnect uses `connection_id` as the preferred executable path.
-- Endpoint hints are allowed only to resolve one exact existing connection.
-- Ambiguous endpoint hints must clarify and must not mutate.
-- Stale `connection_id` / stale `state_revision` must fail closed.
-- Disconnect preview must never mutate.
-- Failed `grcc` validation on disconnect must never commit.
-- `rewire_connection` is one ordered transaction: remove old resolved connection, add new resolved connection.
-- `change_graph(operation_kind=\"rewire\")` requires `state_revision` and fails closed when stale.
-- Partial endpoint hints may clarify only with executable candidate options; no endpoint is synthesized from user_goal text.
-- Invalid message-port numeric hints must fail before becoming executable clarification choices.
+## Context Handling
 
-### Insertions
+Context is compacted by tool output design, not by hiding raw tool calls.
 
-- `suggest_compatible_insertions` is read-only.
-- `insert_block_on_connection` requires exact selected candidate args.
-- `auto_insert_block` may perform bounded candidate search and commit only the first `grcc`-valid candidate, clarify, or reject.
-- No tutorial-derived hidden block recipes are allowed.
+- `inspect_graph` has only `overview` and `details`, with explicit truncation and ambiguity metadata.
+- `details` exposes mutation-ready handles only for resolved, requested targets.
+- Tool results are compacted for future model turns, while raw call/result history remains traceable.
+- Health checks verify desired vs actual llama context; current target is 120000 tokens when supported.
+- `max_tokens` limits generation length only; it is not used as a compression strategy.
 
-### Removal
+## Mutation Safety
 
-- `remove_block` requires the target to be detached or the transaction to remove attached wires first.
-- Dependency repairs must be explicit operations in the same verified transaction when required for validity.
-- Failed removal must leave the live graph unchanged.
+All graph-content mutations pass through `change_graph`.
 
-## 9. Agent Loop And Recovery
+Commit path:
 
-The loop is bounded and must remain simpler than a broad planner.
+1. schema validation
+2. operation dispatch
+3. graph-local target validation
+4. transaction normalization
+5. preflight checks
+6. apply on a candidate copy
+7. `grcc` validation
+8. atomic commit or rollback
 
-Allowed loop behavior:
+Preview path uses proposal/candidate logic and must leave the live graph unchanged.
 
-- Use native OpenAI-compatible tool calls from llama.cpp.
-- Disable parallel tool calls unless intentionally tested.
-- Execute only schema-valid and route-valid calls.
-- Stop on failed mutation unless a typed recovery policy allows exactly one retry.
-- Use continuation nudges only for explicit requested actions that remain incomplete.
-- Return compact assistant text after terminal success or failure.
+Save/load are lifecycle operations, not graph-content mutations. `/save` in the CLI bypasses the model and calls `save_graph_explicit` directly.
 
-Recovery rules:
+## CLI Chat UX
 
-- One corrected retry is allowed only for selected recoverable missing-argument failures.
-- The retry must stay within the current route policy and allowed tool set.
-- Runtime recovery must not switch preview into apply.
-- Runtime recovery must not synthesize graph recipes from docs.
-- Failed `grcc` validation is not automatically repaired unless a narrow tested recovery exists and the user requested recovery.
+- `uv run grc-agent chat <copy.grc>` starts interactive chat on a copied graph.
+- Bare `uv run grc-agent` enters chat only in an interactive TTY; non-interactive use prints help and exits command-safe.
+- Startup/reuse of llama.cpp is explicit and health-verified.
+- Normal chat prints assistant text plus concise operation summaries.
+- Full history is hidden by default; use `/history`.
+- Use `/save [path] [--overwrite]` for deterministic manual save.
 
-Current concern:
+## Eval Harness
 
-- Fixed: MVP mode defaults to `max_tool_rounds=8`. Higher limits reserved for explicit compatibility or research modes.
+Deterministic tests and live/model evals are separate.
 
-## 10. Fallback Parser Policy
+Deterministic gates:
 
-Assistant-text fallback parsing exists for weak-model compatibility. It can parse pseudo tool calls or mutation-shaped JSON when native tool calls are absent.
+- `uv run ruff check src/ tests/`
+- `uv run python -m unittest <targeted modules>`
+- `uv run python -m tests.retrieval_eval.vector_regression`
+- `uv run python -m tests.retrieval_eval.grc_docs_answer_eval`
+- `uv run grc-agent doctor`
+- `uv run grc-agent health`
+- `uv run grc-agent release-manifest`
 
-Contract:
+Live dashboards exercise llama.cpp routing and behavior by suite. They preserve raw requested/executed tool calls, separate task success from runtime safety, and fail closed on forbidden raw/internal tool history.
 
-- It must not bypass route validation.
-- It must not execute legacy mutation tools in MVP mode.
-- It must not become a hidden planner or repair layer.
-- It must not expand to more shapes without separate design review and live eval evidence.
+Production gameplay harnesses run copied graphs only, record full artifacts, apply deterministic local judging, and keep Ollama/dummy users out of mutation authority and judging.
 
-Recommended direction:
+The full `unittest` discovery currently contains about 950 tests and is slow because it includes integration-style graph loading, `grcc` validation, eval harness logic, CLI loops, and production gameplay tests. Use targeted tests during iteration and reserve full runs for release candidates.
 
-- Disable fallback parsing by default in MVP mode unless a model-specific compatibility flag requires it.
-- Move fallback policy behind `GrcAgent` or a `ToolSurface` profile so transport remains transport-only.
+## Docs/RAG
 
-## 11. Advisor And Turn Policy
+`docs/wiki_gnuradio_org/` is a local explanation corpus. It can support user education and docs QA, but it cannot authorize mutations or provide hidden graph recipes.
 
-Long-term direction: advisor-first intent classification.
+Docs-answer quality is evaluated separately from mutation safety. Groundedness and relevance matter; misleading answers and mutation leakage must remain zero.
 
-Current advisor shadow vocabulary:
+## Runtime Readiness
 
-```json
-{"mode":"inspect|preview|change|clarify|unsupported"}
-```
+End-to-end runtime readiness requires:
 
-Advisor status:
+- package installed
+- GNU Radio Python import works
+- `grcc` works
+- retrieval catalog ready
+- vector index ready when retrieval is required
+- llama.cpp reachable
+- actual llama context verified
+- six MVP model-facing wrappers only
 
-- Shadow-only by default.
-- Does not control default routing.
-- Uses the same local llama.cpp server.
-- Must output labels only, never transactions.
+CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
 
-Current deterministic TurnPlan status:
+## Documentation Set
 
-- It provides finite policy and allowed-tool narrowing today.
-- It still contains phrase/regex-based routing assumptions.
-- That is acceptable only as current safety scaffolding, not as the desired long-term semantic architecture.
+Durable docs kept under `docs/`:
 
-Promotion criteria for advisor control:
-
-- Deterministic tests show no safety regressions.
-- Live evals prove better or equal routing accuracy than current TurnPlan.
-- Advisor uncertainty routes to clarify/unsupported, not guessed mutations.
-- Runtime still owns schema validation, route gates, operation validation, preflight, `grcc`, rollback, save state, and retry budgets.
-
-## 12. Context And Health
-
-Config defaults:
-
-- Desired context target: `120000` tokens when backend/model support it.
-- `max_tokens`: generation ceiling only, not compression strategy.
-- History compact budget: configured under `[agent]`.
-- Tool output limits: configured under `[agent.guardrails]`.
-
-Context strategy:
-
-- Prefer compact wrapper outputs over large raw graph dumps.
-- Keep active session summaries bounded.
-- Keep docs snippets bounded and cited.
-- Track truncation in telemetry.
-- Verify desired vs actual context before claiming large-context behavior.
-
-Health contract:
-
-- `doctor` checks local environment: Python, `grcc`, GNU Radio import/version, app config, retrieval readiness.
-- `health` should report end-to-end readiness, not just package object construction.
-
-Required health fields:
-
-- `core_ready`
-- `retrieval_ready`
-- `model_ready`
-- `context_verified`
-- `llama_desired_context_tokens`
-- `llama_actual_context_tokens`
-- `tool_surface`
-- `model_tool_count`
-- `internal_tool_count`
-- `status`: `ok`, `degraded`, or `not_ready`
-
-Fixed:
-
-- `doctor` and `health` now treat unknown actual context as a failure (`context_verified=false`).
-- `grc-agent health` already fails when llama.cpp is unreachable.
-
-Remaining concern:
-
-- Health should distinguish `ok`/`degraded`/`not_ready` rather than binary pass/fail when context is below desired but still functional.
-
-## 13. Retrieval And RAG
-
-Current vector architecture:
-
-- Qdrant local mode.
-- FastEmbed default model: `BAAI/bge-small-en-v1.5`.
-- Read-only vector index over catalog, manual, and tutorial records.
-- Vector-only baseline; no default hybrid sparse search or reranker.
-- Source types: catalog block, manual chunk, tutorial chunk.
-- Result payloads strip mutation-shaped keys.
-
-Current lexical docs architecture:
-
-- Cleaned GNU Radio wiki/tutorial markdown in `docs/wiki_gnuradio_org/`.
-- Bounded lexical chunk search with source URL, line range, oldid, edit date, and license metadata.
-- Docs answers must return `insufficient_evidence` when support is weak.
-
-Operating contract:
-
-- Catalog metadata is authority for block IDs, ports, params, defaults, and signatures.
-- `grcc` is authority for graph validity.
-- Manuals/tutorials explain concepts only.
-- Retrieval must never return mutation plans, transactions, allowlists, blacklists, or hidden default recipes.
-
-Current eval evidence:
-
-- Vector regression: 290 cases, 276 vector top-k hits, 290 provenance passes, 290 safety passes.
-- Docs-answer eval: 35 rows, 32 relevance passes, 28 groundedness passes, 0 mutation leakage, 0 misleading answer count, 0 helper use.
-
-RAG recommendation:
-
-- Keep Qdrant + FastEmbed now.
-- Do not add rerankers, hybrid sparse search, or llama.cpp embeddings until measured misses justify them.
-- Add better source coverage and comparison assembly for remaining weak rows, especially stream/message-port and tag/metadata comparisons.
-- Keep the explicit deterministic docs QA baseline separate from runtime production-readiness claims.
-
-## 14. llama.cpp Runtime
-
-The adapter uses llama.cpp's OpenAI-compatible server API:
-
-- `/v1/chat/completions`
-- tools/function definitions
-- `tool_choice="auto"`
-- `parallel_tool_calls=false`
-- `parse_tool_calls=true`
-- temperature `0`
-
-This is a reasonable local runtime path.
-
-Requirements:
-
-- Launch/reuse must verify server readiness.
-- Model alias must match configured alias.
-- `/props` or equivalent must verify actual context.
-- Health must distinguish unreachable model from OK runtime.
-- Tool schemas and prompt must match the active tool profile.
-
-Do not claim 120k context behavior unless actual server properties prove it.
-
-## 15. Testing And Eval Gates
-
-Default deterministic development gates:
-
-```bash
-uv run ruff check src/ tests/
-uv run ruff check
-uv run python -m unittest
-uv run python -m tests.retrieval_eval.vector_regression
-uv run python -m tests.retrieval_eval.grc_docs_answer_eval
-uv run grc-agent doctor
-uv run grc-agent health
-```
-
-Gate roles:
-
-- Lint gates catch style and import errors.
-- Unit tests validate deterministic runtime, transaction, safety, wrapper, config, and harness behavior.
-- Vector regression validates retrieval safety/provenance and governed quality.
-- Docs-answer eval tracks grounded answer quality but currently tolerates known gaps.
-- Doctor validates local dependencies and GNU Radio environment.
-- Health must validate end-to-end runtime readiness after its semantics are fixed.
-
-Live eval tiers:
-
-- Tier 1: quick routing/behavior smoke.
-- Tier 2: release-level prompt/schema/tool-order evidence.
-- Tier 3: multiturn behavior.
-- Tier 4: external installed examples.
-- Tier 5: adversarial intent/safety.
-
-Dogfood evidence:
-
-- Use copied graphs only.
-- Classify failures by routing, argument extraction, preflight false reject, unsafe mutation risk, `grcc` failure, save/reload mismatch, clarification quality, retrieval miss, tool error, or other.
-- Dogfood reports support release decisions but do not replace deterministic tests.
-
-Current test-harness caveat:
-
-- Full `unittest` took about 28 minutes in the audit run. Split fast inner-loop gates from full release gates.
-- Retrieval evals share local index state and should run sequentially unless isolated temp indexes are used.
-- Legacy-to-MVP eval canonicalization has been removed. Blocked legacy tool attempts remain visible in scoring and correctly fail `model_contract_pass` while passing `runtime_safety_pass` only when no mutation occurred.
-
-## 16. Release Criteria
-
-Before claiming production-ready:
-
-- `health` must not return overall OK when configured llama runtime is unreachable or actual context is unknown. **Fixed.**
-- MVP prompt must mention only MVP wrappers, not legacy low-level tools. **Verified.**
-- `ToolSurface` or equivalent must align schemas, prompt, fallback policy, health counts, and eval profile. **Verified for runtime; native MVP eval case catalogs created for R0/R1.**
-- Default MVP tool-round ceiling must be reduced and tested. **Verified (8 rounds).**
-- Assistant-text fallback parser must be disabled/frozen for MVP mode. **Verified (disabled in MVP).**
-- Live evals must run against the default MVP wrapper profile. **Verified.**
-- Release dashboard must inspect raw tool-call history, not just metadata. **Fixed.**
-- Release manifest must include commit, dirty state, model alias, actual context, prompt hash, schema hash, policy hash, eval versions, and fixture identifiers. **Fixed.**
-- Committed mutation evals must include save/reload/`grcc` semantic checks. **Validated at beta level (R5), not release-validated.**
-- Docs-answer quality thresholds must be explicit. **Threshold-met deterministic
-  baseline passed.** `grc_docs_answer_eval`: 32/35 relevance, 28/35
-  groundedness, 0 misleading answers, 0 mutation leakage, 0 helper use. Remaining
-  comparison/unsupported-topic gaps do not authorize mutation and do not make the
-  runtime production-ready.
-- No STOP_THE_LINE safety findings may be open. **Three fixed: eval canonicalization, dashboard metadata-only validation, doctor unknown-context pass.**
-
-Current classification (2026-05-15):
-
-- **R0_READ_ONLY** (inspect_graph, search_blocks, ask_grc_docs): **Release-validated.** 14/14 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R1_SET_PARAM_ONLY** (change_graph set_param): **Release-validated.** 2/2 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R1_SET_STATE** (change_graph set_state): **Beta-validated.** 3/3 cases stable at 3/3 (9/9 runs). model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00, end_state_pass=1.00. Not release-validated yet; evidence currently relies on one dual-sink fixture family plus one invalid-state refusal case.
-- **R5_SAVE_LOAD** (`save_graph_explicit`, `load_graph_explicit`): **Beta-validated only.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00. Not release-validated pending separate lifecycle safety audit decision.
-- **R2_DISCONNECT** (change_graph disconnect): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R3_REWIRE** (change_graph rewire): **Beta-validated.** 7/7 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R4A_INSERT** (change_graph insert_block on connection): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R4B_REMOVE** (change_graph remove_block): **Beta-validated.** 7/7 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R4C_ADD_VARIABLE** (change_graph add_variable): **Beta-validated.** 5/5 cases stable at 3/3. model_contract_pass=1.00, runtime_safety_pass=1.00, semantic_pass=1.00.
-- **R7_EXACT_EXTERNAL:** **Diagnostic-clean.** Latest external exact sweep passed 27/27 at n=3. Diagnostic only; not release-gating.
-- **R7_NATURAL_EXTERNAL:** **Diagnostic-clean on latest sweep.** Latest natural external sweep passed 27/27 at n=3 after Phase 7 graph-local sample-rate alias handling. Diagnostic only; not release-gating and not release promotion evidence.
-- **Tier5_ADVERSARIAL:** **Diagnostic-clean.** Latest adversarial sweep passed 54/54 at n=3. Diagnostic only; not release-gating.
-- **Release-validated subset (R0_READ_ONLY + R1_SET_PARAM_ONLY):** Supported on clean commit with passing deterministic gates. Default MVP runtime remains beta-capable. Not production-ready.
-
-## 17. Completed / Hardened Items
-
-- Health semantics fixed: fails closed when actual context is unknown.
-- Doctor fixed: context check requires actual >= desired, not unknown-pass.
-- Release dashboard validates raw tool-call history (`raw_legacy_tool_entries`) and fails closed when raw requested/executed history is missing or malformed.
-- Diagnostic manifests exist for R7 exact/natural and Tier5; they report diagnostic status and are explicitly not release-gating.
-- Phase 7 graph-local alias resolver exists for `set_param` sample-rate wording only. It is limited to a unique active-graph `samp_rate` variable plus explicit value; ambiguity and conflicts stay non-mutating clarification/refusal paths.
-- Native MVP R0/R1 eval case catalogs created; legacy translation removed from release-gating paths.
-- `release_profile` persisted in run-store metadata and dashboard scope filtering implemented.
-- MVP tool-round ceiling = 8, fallback parser disabled in MVP mode.
-
-## 18. Remaining Work (Not Release-Gating for R0/R1)
-
-- **set_state promotion hardening:** Current R1_SET_STATE suite is stable at beta level. Add at least one independent fixture or external example before promoting set_state into release-validated scope.
-- **Retrieval eval gates:** ~~Requires Qdrant available. Blocked in current env.~~ **Passed.** vector_regression=290/290 ok. grc_docs_answer_eval=threshold-met deterministic baseline (32/35 relevance, 28/35 groundedness, 0 misleading, 0 mutation leakage, 0 helper use).
-- **Docs-answer eval gate:** ~~Requires Qdrant + vector index. Blocked in current env.~~ **Threshold-met deterministic baseline passed.** 35 questions answered, 32/35 relevance, 28/35 groundedness, 0 misleading, 0 mutation leakage. This remains a read-only docs QA baseline, not mutation authority or a runtime production-ready claim.
-- **Clean commit:** ~~No unstaged changes remain; intended changes are staged. Repository remains dirty until committed.~~ **Committed.** dirty=false, commit=6a2243c437e4.
-- **Save/load semantic checks:** Tracked in R5 lifecycle evals and beta-validated; still outside the release-validated R0/R1 subset until a separate lifecycle safety audit promotes them.
-- **Complex mutation evidence:** Beta only; not release-gating.
-- **Run MVP wrapper dogfood.** Pending.
-- **Run Tier 1 and Tier 2 live evals against default MVP profile.** Pending.
-- **Generate release dashboard and manifest.** Manifest dirty=false. Note: `release-manifest` is an evidence manifest for human review, not a readiness gate; it always reports `ok=true` and records degraded health as data.
-- **Stricter release profile (future):** Default MVP runtime surface remains six wrappers. A hardened release profile could temporarily restrict to `inspect_graph`, `search_blocks`, `ask_grc_docs`, and `change_graph` with `operation_kind=set_param` only, narrowing the visible action space to match the release-validated subset.
-
-## 19. STOP_THE_LINE Conditions
-
-Stop the release and report clearly if any of these are found:
-
-- Legacy mutation tools exposed in default MVP model chat.
-- Preview mutates live graph state.
-- Raw YAML/text mutation path reaches live graph.
-- Failed preflight commits live graph changes.
-- Failed `grcc` validation commits live graph changes.
-- Rollback bypass or checkpoint corruption.
-- Docs/vector retrieval directly drives mutation parameters or transactions.
-- Fallback parser bypasses route validation.
-- Save occurs without explicit user request.
-- Health claims OK when configured model runtime is required but unreachable.
-
-Do not patch STOP_THE_LINE issues silently inside release reports. Fix with explicit tests and review.
-
-## 20. External References
-
-- llama.cpp function calling: https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md
-- llama.cpp server: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
-- GNU Radio Companion tutorial: https://wiki.gnuradio.org/index.php/GNURadioCompanion
-- GNU Radio YAML GRC: https://wiki.gnuradio.org/index.php?title=YAML_GRC
-- Qdrant FastEmbed semantic search: https://qdrant.tech/documentation/fastembed/fastembed-semantic-search/
-- Qdrant FastEmbed optimization: https://qdrant.tech/documentation/fastembed/fastembed-optimize/
-- Qdrant FastEmbed rerankers: https://qdrant.tech/documentation/fastembed/fastembed-rerankers/
-- FastEmbed docs: https://qdrant.github.io/fastembed/
-- MCP tools: https://modelcontextprotocol.io/docs/concepts/tools
-- MCP resources: https://modelcontextprotocol.io/docs/concepts/resources
+- `BLUEPRINT.md`: architecture and safety contract
+- `QUICKSTART.md`: setup and use
+- `ISSUE_INTAKE.md`: report template
+- `DEMO_VIDEO.md`: demo workflow
+- `capability_classification.json`: current capability labels
+- `wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus

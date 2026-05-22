@@ -32,7 +32,6 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = Path(__file__).resolve().parent / "corpus_manifest.json"
 DEFAULT_ARTIFACT_DIR = Path("/tmp/grc_agent_gameplay")
 DEFAULT_OLLAMA_SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios_ollama"
-DEFAULT_PHASE6_SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios_ollama_phase6"
 SECRET_MARKERS = ("ollama_key", "OLLAMA_API_KEY")
 
 

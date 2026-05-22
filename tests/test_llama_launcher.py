@@ -31,6 +31,8 @@ class LlamaServerLauncherTests(unittest.TestCase):
             server_url=f"http://127.0.0.1:{port}",
             model=model,
             hf_model="stub/model:Q4_K_M",
+            device="CUDA0",
+            gpu_layers=999,
             desired_context_tokens=120000,
             startup_timeout_seconds=5.0,
             max_tokens=256,
@@ -99,6 +101,13 @@ class LlamaServerLauncherTests(unittest.TestCase):
 
             self.assertEqual(first.status, "started")
             self.assertIsInstance(first.pid, int)
+            assert first.pid is not None
+            cmdline = Path(f"/proc/{first.pid}/cmdline").read_bytes().decode(
+                "utf-8",
+                errors="ignore",
+            )
+            self.assertIn("--device\x00CUDA0", cmdline)
+            self.assertIn("--gpu-layers\x00999", cmdline)
             self.assertEqual(second.status, "reused")
             self.assertEqual(second.pid, first.pid)
 

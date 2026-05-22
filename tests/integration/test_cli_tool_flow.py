@@ -375,7 +375,9 @@ class CliToolFlowIntegrationTests(unittest.TestCase):
         self.assertIn("--- Active Session ---", output)
         self.assertIn(str(self._fixture_path()), output)
         self.assertIn(f"Started llama.cpp server for {model_alias} at http://127.0.0.1:{port}", output)
-        self.assertIn("inspect_graph: ok", output)
+        self.assertNotIn("--- History ---", output)
+        self.assertIn("Operations:", output)
+        self.assertIn("inspect_graph[summary]: ok", output)
 
     def test_chat_subcommand_reuses_healthy_server_on_second_run(self) -> None:
         port = reserve_free_port()

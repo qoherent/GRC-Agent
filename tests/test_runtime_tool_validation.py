@@ -35,6 +35,11 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "missing_required")
         self.assertEqual(result["validation_errors"][0]["field"], "file_path")
+        self.assertTrue(result["schema_repair_instruction"]["no_tool_ran"])
+        self.assertEqual(
+            result["schema_repair_instruction"]["missing_fields"],
+            ["file_path"],
+        )
 
     def test_unsupported_extra_argument_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
@@ -47,6 +52,10 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(result["validation_errors"][0]["field"], "unexpected")
+        self.assertIn(
+            "Retry this tool once only",
+            result["schema_repair_instruction"]["retry_policy"],
+        )
 
     def test_invalid_argument_type_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
@@ -71,3 +80,15 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_enum")
         self.assertEqual(result["validation_errors"][0]["field"], "scope")
+
+    def test_too_few_array_items_is_rejected(self) -> None:
+        result = validate_runtime_tool_call(
+            "inspect_graph",
+            {"view": "details", "targets": ["analog_sig_source_x_1"], "params": []},
+            self._schema_map(),
+        )
+
+        assert result is not None
+        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertEqual(result["validation_errors"][0]["code"], "too_few_items")
+        self.assertEqual(result["validation_errors"][0]["field"], "params")

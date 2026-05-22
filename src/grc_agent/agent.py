@@ -570,6 +570,23 @@ class GrcAgent:
             normalized[key] = value
         if tool_name in {"save_graph", "save_graph_explicit"}:
             normalized = self._normalize_save_graph_path(normalized)
+        if tool_name == "inspect_graph":
+            normalized = self._normalize_inspect_graph_args(normalized)
+        return normalized
+
+    def _normalize_inspect_graph_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Fill safe read-only inspect defaults without hiding unsupported syntax."""
+        if "view" not in kwargs:
+            return kwargs
+        normalized = dict(kwargs)
+        view = normalized.get("view")
+        if isinstance(view, str) and view.strip().lower() == "overview":
+            normalized["targets"] = []
+            normalized["params"] = ["all"]
+        elif isinstance(view, str) and view.strip().lower() == "details":
+            params = normalized.get("params")
+            if params is None or params == []:
+                normalized["params"] = ["all"]
         return normalized
 
     def _normalize_save_graph_path(self, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -1657,16 +1674,16 @@ class GrcAgent:
 
     def _inspect_graph(
         self,
-        operation: str,
-        target: str | None = None,
-        max_items: int | None = None,
+        view: str,
+        targets: list[str],
+        params: list[str],
         debug: bool = False,
     ) -> ToolResult:
         return inspect_graph_wrapper(
             self,
-            operation=operation,
-            target=target,
-            max_items=max_items,
+            view=view,
+            targets=targets,
+            params=params,
             debug=debug,
         )
 
@@ -2160,6 +2177,7 @@ class GrcAgent:
         detach_connection_ids: list[str] | None = None,
         param_key: str | None = None,
         param_value: Any = None,
+        expected_old_value: Any = None,
         state: str | None = None,
         variable_name: str | None = None,
         variable_value: Any = None,
@@ -2190,6 +2208,7 @@ class GrcAgent:
             detach_connection_ids=detach_connection_ids,
             param_key=param_key,
             param_value=param_value,
+            expected_old_value=expected_old_value,
             state=state,
             variable_name=variable_name,
             variable_value=variable_value,
@@ -2197,10 +2216,10 @@ class GrcAgent:
         )
 
     @staticmethod
-    def _compact_inspect_payload(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _compact_inspect_payload(mode: str, payload: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {
             "ok": bool(payload.get("ok")),
-            "operation": operation,
+            "mode": mode,
             "message": payload.get("message"),
         }
         for key in (
@@ -2297,9 +2316,23 @@ class GrcAgent:
                 message=loaded.get("message", "Failed to load .grc file."),
                 error_type=loaded.get("error_type", ErrorCode.FILE_LOAD_ERROR),
             )
+        is_valid = loaded.validate()
+        if not is_valid:
+            return self._tool_result(
+                "load_grc",
+                ok=False,
+                message="Refusing to activate loaded graph because validation failed.",
+                error_type=(
+                    ErrorCode.VALIDATION_TIMEOUT
+                    if loaded.last_validation_returncode == -2
+                    else ErrorCode.GNU_VALIDATION_FAILED
+                ),
+                validation=loaded.validation_state(),
+            )
         self._replace_session(loaded, reason="load_grc")
         payload = summarize_graph(self.session)
         result = self._payload_result("load_grc", payload, default_message="Graph loaded.")
+        result["validation"] = self.session.validation_state()
         result["provenance"] = self.session.session_provenance()
         return result
 
@@ -2936,7 +2969,26 @@ class GrcAgent:
                     ),
                     error_type=ErrorCode.SAVE_REFUSED,
                 )
-        if self.session.is_dirty and (
+        if (
+            not self._last_validation_ok
+            or self._last_validated_state_revision != self.session.state_revision
+        ):
+            validation = self._validate_graph()
+            if validation.get("ok") is not True or not bool(validation.get("valid")):
+                return self._tool_result(
+                    tool_name="save_graph",
+                    ok=False,
+                    message=(
+                        "Refusing to save before successful validation. "
+                        "Fix the graph and validate again before saving."
+                    ),
+                    error_type=ErrorCode.SAVE_REFUSED,
+                    requires_validation=True,
+                    dirty=self.session.is_dirty,
+                    validation=validation,
+                )
+
+        if (
             not self._last_validation_ok
             or self._last_validated_state_revision != self.session.state_revision
         ):
@@ -2944,13 +2996,12 @@ class GrcAgent:
                 tool_name="save_graph",
                 ok=False,
                 message=(
-                    "Refusing to save a dirty graph before successful validation. "
-                    "Next step: call validate_graph, then save_graph. "
-                    "Do NOT call apply_edit again."
+                    "Refusing to save before successful validation. "
+                    "Fix the graph and validate again before saving."
                 ),
                 error_type=ErrorCode.SAVE_REFUSED,
                 requires_validation=True,
-                dirty=True,
+                dirty=self.session.is_dirty,
             )
 
         try:

@@ -24,6 +24,8 @@ class LlamaConfig:
     server_url: str
     model: str
     hf_model: str
+    device: str
+    gpu_layers: int
     desired_context_tokens: int
     startup_timeout_seconds: float
     max_tokens: int
@@ -169,6 +171,8 @@ def default_app_config() -> AppConfig:
             server_url="http://127.0.0.1:8080",
             model="unsloth/gemma-4-E2B-it-GGUF",
             hf_model="unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL",
+            device="CUDA0",
+            gpu_layers=999,
             desired_context_tokens=120000,
             startup_timeout_seconds=300.0,
             max_tokens=4096,
@@ -278,6 +282,18 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
             model=_require_non_empty_string(llama_table, "model", context="[llama]"),
             hf_model=_require_non_empty_string(
                 llama_table, "hf_model", context="[llama]"
+            ),
+            device=_optional_non_empty_string(
+                llama_table,
+                "device",
+                default=defaults.llama.device,
+                context="[llama]",
+            ),
+            gpu_layers=_optional_positive_int(
+                llama_table,
+                "gpu_layers",
+                default=defaults.llama.gpu_layers,
+                context="[llama]",
             ),
             desired_context_tokens=_optional_positive_int(
                 llama_table,

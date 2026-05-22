@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from typing import Any
@@ -92,7 +93,7 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Optional path to a TOML config file. Defaults to workspace config when present, then user config, then built-in defaults.",
     )
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.required = True
+    subparsers.required = False
 
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -610,6 +611,79 @@ def _print_history(agent: GrcAgent, *, verbose: bool = False) -> None:
             print(f"  Assistant: {text[:120]}")
 
 
+def _print_turn_operations(agent: GrcAgent, *, start_index: int) -> None:
+    """Render concise operation details for the just-completed turn."""
+    lines: list[str] = []
+    requested: list[str] = []
+    for turn in agent.history[start_index:]:
+        if turn.get("role") == "assistant" and turn.get("tool_calls"):
+            for tool_call in turn["tool_calls"]:
+                fn = tool_call.get("function") or {}
+                name = tool_call.get("name") or fn.get("name") or "?"
+                args = tool_call.get("arguments")
+                if not isinstance(args, dict):
+                    args = fn.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {}
+                detail = _tool_detail_from_args(args if isinstance(args, dict) else {})
+                requested.append(f"{name}{detail}")
+        if turn.get("role") != "tool" or not isinstance(turn.get("content"), dict):
+            continue
+        content = turn["content"]
+        name = content.get("tool") or turn.get("name") or "?"
+        ok = content.get("ok")
+        status = "ok" if ok is True else "FAILED" if ok is False else "unknown"
+        detail = _tool_detail_from_args(content)
+        validation = _validation_status(content)
+        dirty = _dirty_status(content)
+        line = f"{name}{detail}: {status}"
+        extras = [item for item in (validation, dirty) if item]
+        if extras:
+            line += f" ({', '.join(extras)})"
+        lines.append(line)
+    if not lines and not requested:
+        return
+    print("\nOperations:")
+    if requested:
+        print(f"  requested: {'; '.join(requested)}")
+    for line in lines:
+        print(f"  {line}")
+
+
+def _tool_detail_from_args(payload: dict[str, Any]) -> str:
+    mode = payload.get("mode")
+    operation_kind = payload.get("operation_kind")
+    operation_summary = payload.get("operation_summary")
+    detail = mode or operation_kind or operation_summary
+    return f"[{detail}]" if isinstance(detail, str) and detail else ""
+
+
+def _validation_status(payload: dict[str, Any]) -> str | None:
+    validation = payload.get("validation_result") or payload.get("validation")
+    if isinstance(validation, dict):
+        status = validation.get("status")
+        if status is None and "valid" in validation:
+            status = "valid" if validation.get("valid") else "invalid"
+        if status is not None:
+            return f"validation={status}"
+    active = payload.get("active_session")
+    if isinstance(active, dict):
+        validation = active.get("validation")
+        if isinstance(validation, dict) and validation.get("status") is not None:
+            return f"validation={validation.get('status')}"
+    return None
+
+
+def _dirty_status(payload: dict[str, Any]) -> str | None:
+    active = payload.get("active_session")
+    if isinstance(active, dict) and "dirty" in active:
+        return f"dirty={active.get('dirty')}"
+    return None
+
+
 def _print_active_session(agent: GrcAgent, *, verbose: bool = False) -> None:
     """Render the currently bound session before running the chat loop."""
     active_session = agent.active_session_snapshot()
@@ -650,6 +724,19 @@ def _load_initial_session(file_path: str | None) -> FlowgraphSession:
         loaded = load_grc_session(file_path)
         if isinstance(loaded, dict):
             raise CliError(loaded)
+        if not loaded.validate():
+            raise CliError(
+                {
+                    "ok": False,
+                    "message": "Refusing to load graph because validation failed.",
+                    "error_type": (
+                        ErrorCode.VALIDATION_TIMEOUT
+                        if loaded.last_validation_returncode == -2
+                        else ErrorCode.GNU_VALIDATION_FAILED
+                    ),
+                    "validation": loaded.validation_state(),
+                }
+            )
         session = loaded
     return session
 
@@ -806,6 +893,7 @@ def _run_llama_runtime(
         model_alias=model,
         api_key=api_key,
     )
+    print(f"Checking llama.cpp server at {server_url} for model {model or llama_config.model}...")
     try:
         launch_result = launcher.ensure_server_ready()
     except LlamaLauncherError as exc:
@@ -819,13 +907,13 @@ def _run_llama_runtime(
         logger.info("server_started url=%s pid=%s", launch_result.server_url, launch_result.pid)
         print(
             f"Started llama.cpp server for {launch_result.model_alias} "
-            f"at {launch_result.server_url} (pid {launch_result.pid})"
+            f"at {launch_result.server_url} (pid {launch_result.pid}; health verified)"
         )
     else:
         logger.info("server_reused url=%s", launch_result.server_url)
         print(
             f"Reusing llama.cpp server for {launch_result.model_alias} "
-            f"at {launch_result.server_url}"
+            f"at {launch_result.server_url} (health verified)"
         )
 
     if user_message is not None:
@@ -858,6 +946,7 @@ def _run_single_turn(
     if config is None:
         config = load_app_config()
     try:
+        history_start = len(agent.history)
         result = run_bounded_llama_turn(
             agent,
             client,
@@ -876,7 +965,7 @@ def _run_single_turn(
 
     print(f"Using model {result['model']}")
     if result["ok"]:
-        print("\n--- Assistant ---")
+        print("\nAssistant:")
         print(result["assistant_text"])
     else:
         print("\n--- Runtime ---")
@@ -885,7 +974,10 @@ def _run_single_turn(
     # Check for pending clarification after turn completes
     _maybe_render_pending_clarification(agent)
 
-    _print_history(agent, verbose=verbose)
+    if verbose:
+        _print_history(agent, verbose=True)
+    else:
+        _print_turn_operations(agent, start_index=history_start)
     return 0 if result["ok"] else 1
 
 
@@ -900,12 +992,12 @@ def _run_repl_loop(
     """Run an interactive REPL loop over the current agent and session."""
     if config is None:
         config = load_app_config()
-    print("\nInteractive REPL. Type /quit or /exit to stop.\n")
+    print("\nInteractive chat. Type /save [path], /history, /quit, or /exit.\n")
     last_exit_code = 0
 
     while True:
         try:
-            user_input = input(">>> ").strip()
+            user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -914,6 +1006,14 @@ def _run_repl_loop(
             continue
         if user_input.lower() in ("/quit", "/exit"):
             break
+        if user_input.lower() == "/history":
+            _print_history(agent, verbose=True)
+            print()
+            continue
+        if user_input.lower().startswith("/save"):
+            last_exit_code = _run_repl_save_command(agent, user_input)
+            print()
+            continue
 
         # If pending clarification exists, resolve before model turn
         if agent._pending_clarification is not None:
@@ -945,9 +1045,8 @@ def _run_repl_loop(
                 user_input = resolved.get("custom_hint") or user_input
             # mode == "none" should not happen when _pending_clarification is not None
 
-        _print_active_session(agent, verbose=verbose)
-
         try:
+            history_start = len(agent.history)
             result = run_bounded_llama_turn(
                 agent,
                 client,
@@ -965,16 +1064,76 @@ def _run_repl_loop(
             continue
 
         if result["ok"]:
-            print(f"\n--- Assistant ---\n{result['assistant_text']}")
+            print(f"\nAssistant:\n{result['assistant_text']}")
         else:
             print(f"\n--- Runtime ---\n{result['message']}")
             last_exit_code = 1
 
         _maybe_render_pending_clarification(agent)
-        _print_history(agent, verbose=verbose)
+        if verbose:
+            _print_history(agent, verbose=True)
+        else:
+            _print_turn_operations(agent, start_index=history_start)
         print()
 
     return last_exit_code
+
+
+def _run_repl_save_command(agent: GrcAgent, user_input: str) -> int:
+    """Run a deterministic manual REPL save without asking the model to route it."""
+    try:
+        parts = shlex.split(user_input)
+    except ValueError as exc:
+        print("\n--- Save FAILED ---")
+        print(f"Could not parse /save command: {exc}")
+        return 1
+    if not parts or parts[0] != "/save":
+        print("\n--- Save FAILED ---")
+        print("Usage: /save [path] [--overwrite]")
+        return 1
+
+    overwrite = False
+    paths: list[str] = []
+    for part in parts[1:]:
+        if part == "--overwrite":
+            overwrite = True
+        else:
+            paths.append(part)
+    if len(paths) > 1:
+        print("\n--- Save FAILED ---")
+        print("Usage: /save [path] [--overwrite]")
+        return 1
+
+    path = paths[0] if paths else None
+    intent = "save"
+    if path:
+        intent = f"save to {path}"
+    agent.init_turn_requirements(intent)
+    kwargs: dict[str, Any] = {"overwrite": overwrite}
+    if path is not None:
+        kwargs["path"] = path
+    result = agent.execute_tool(
+        "save_graph_explicit",
+        kwargs,
+        model_tool_call=False,
+    )
+    ok = result.get("ok") is True
+    print(f"\nSave {'OK' if ok else 'FAILED'}")
+    message = result.get("message")
+    if message:
+        print(message)
+    saved_path = result.get("path")
+    if saved_path:
+        print(f"Saved: {saved_path}")
+    validation = result.get("validation_result") or result.get("validation")
+    if isinstance(validation, dict):
+        status = validation.get("status")
+        if status is not None:
+            print(f"Validation: {status}")
+    active = result.get("active_session")
+    if isinstance(active, dict) and "dirty" in active:
+        print(f"Dirty: {active.get('dirty')}")
+    return 0 if ok else 1
 
 
 def _run_tool_command(
@@ -1024,6 +1183,8 @@ def _build_health_report(config: AppConfig) -> dict[str, Any]:
         report["retrieval_message"] = readiness.get("message", "Retrieval not ready.")
         status_reasons.append("retrieval_not_ready")
     report["llama_desired_context_tokens"] = config.llama.desired_context_tokens
+    report["llama_device"] = config.llama.device
+    report["llama_gpu_layers"] = config.llama.gpu_layers
     report["llama_max_tokens"] = config.llama.max_tokens
     report["llama_max_tool_rounds"] = config.llama.max_tool_rounds
     report["llama_model_ready"] = False
@@ -1119,6 +1280,8 @@ def _build_release_manifest(config: AppConfig) -> dict[str, Any]:
         "runtime": {
             "model_alias": config.llama.model,
             "server_url": config.llama.server_url,
+            "device": config.llama.device,
+            "gpu_layers": config.llama.gpu_layers,
             "desired_context_tokens": config.llama.desired_context_tokens,
             "actual_context_tokens": health_report.get("llama_actual_context_tokens"),
             "health_status": health_report.get("status"),
@@ -1561,6 +1724,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.verbose:
         logging.getLogger("grc_agent").setLevel(logging.DEBUG)
+
+    if args.command is None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return _run_llama_runtime(
+                None,
+                None,
+                app_config,
+                app_config.llama.server_url,
+                app_config.llama.model,
+                None,
+                verbose=args.verbose,
+            )
+        parser.print_help()
+        return 2
 
     if args.command == "doctor":
         return _run_doctor_command(

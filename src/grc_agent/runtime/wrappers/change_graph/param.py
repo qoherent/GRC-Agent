@@ -12,6 +12,7 @@ def handle_set_param(
     ctx: ChangeGraphOperationContext,
     param_key: str | None,
     param_value: Any,
+    expected_old_value: Any,
     target_ref: dict[str, Any] | None,
     instance_name: str | None,
     tx_tool: Callable[[Any], ToolResult],
@@ -44,14 +45,21 @@ def handle_set_param(
         )
 
     ctx.handlers.append("propose_edit" if ctx.dry_run else "apply_edit")
+    expected_params = (
+        {param_key.strip(): expected_old_value}
+        if expected_old_value is not None
+        else None
+    )
     if isinstance(target_ref, dict):
-        tool_result = tx_tool(
-            {
-                "op_type": "update_params",
-                "target_ref": target_ref,
-                "params": {param_key.strip(): param_value},
-            }
-        )
+        operation = {
+            "op_type": "update_params",
+            "target_ref": target_ref,
+            "instance_name": target_ref.get("expected_instance_name"),
+            "params": {param_key.strip(): param_value},
+        }
+        if expected_params is not None:
+            operation["expected_params"] = expected_params
+        tool_result = tx_tool(operation)
         return ChangeGraphOperationResult(
             handled=True,
             operation_summary=operation_summary,
@@ -59,13 +67,14 @@ def handle_set_param(
         )
 
     if isinstance(instance_name, str) and instance_name.strip():
-        tool_result = tx_tool(
-            {
-                "op_type": "update_params",
-                "instance_name": instance_name.strip(),
-                "params": {param_key.strip(): param_value},
-            }
-        )
+        operation = {
+            "op_type": "update_params",
+            "instance_name": instance_name.strip(),
+            "params": {param_key.strip(): param_value},
+        }
+        if expected_params is not None:
+            operation["expected_params"] = expected_params
+        tool_result = tx_tool(operation)
         return ChangeGraphOperationResult(
             handled=True,
             operation_summary=operation_summary,

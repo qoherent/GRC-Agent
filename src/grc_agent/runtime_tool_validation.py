@@ -59,6 +59,7 @@ def validate_runtime_tool_call(
                     "received_type": _describe_value_type(arguments),
                 }
             ],
+            "schema_repair_instruction": _schema_repair_instruction(tool_name, []),
         }
 
     issues = _validate_object(arguments, schema_map[tool_name], field_path=None)
@@ -67,8 +68,41 @@ def validate_runtime_tool_call(
 
     return {
         "error_type": ErrorCode.TOOL_CALL_INVALID,
-        "message": f"Rejected invalid tool call for {tool_name}: {issues[0]['message']}",
+        "message": (
+            f"Rejected invalid tool call for {tool_name}: {issues[0]['message']} "
+            "No tool ran. Retry the same tool only if you can fill the invalid "
+            "or missing fields from the user request or prior graph output; otherwise ask the user."
+        ),
         "validation_errors": issues,
+        "schema_repair_instruction": _schema_repair_instruction(tool_name, issues),
+    }
+
+
+def _schema_repair_instruction(
+    tool_name: str,
+    issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    missing = [
+        issue.get("field")
+        for issue in issues
+        if issue.get("code") == "missing_required" and isinstance(issue.get("field"), str)
+    ]
+    invalid = [
+        issue.get("field")
+        for issue in issues
+        if issue.get("code") != "missing_required" and isinstance(issue.get("field"), str)
+    ]
+    return {
+        "tool": tool_name,
+        "no_tool_ran": True,
+        "missing_fields": missing,
+        "invalid_fields": invalid,
+        "retry_policy": (
+            "Retry this tool once only if the missing or invalid fields are available "
+            "from the user request or prior graph/tool output. Otherwise ask the user "
+            "for the missing information. Do not invent graph identifiers, file paths, "
+            "mutation targets, or mutation values."
+        ),
     }
 
 
@@ -165,6 +199,34 @@ def _validate_value(
 
     item_schema = schema.get("items")
     if isinstance(value, list) and isinstance(item_schema, dict):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            issues.append(
+                {
+                    "code": "too_few_items",
+                    "field": field_path,
+                    "message": (
+                        f"Argument '{field_path}' must contain at least "
+                        f"{min_items} item."
+                    ),
+                    "min_items": min_items,
+                    "received_items": len(value),
+                }
+            )
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            issues.append(
+                {
+                    "code": "too_many_items",
+                    "field": field_path,
+                    "message": (
+                        f"Argument '{field_path}' must contain at most "
+                        f"{max_items} items."
+                    ),
+                    "max_items": max_items,
+                    "received_items": len(value),
+                }
+            )
         for index, item in enumerate(value):
             issues.extend(
                 _validate_value(

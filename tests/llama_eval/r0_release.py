@@ -113,41 +113,27 @@ R0_CASES: list[LiveScenario] = [
     ),
     LiveScenario(
         category="inspect",
-        name="validate_check",
-        description="Graph validation via inspect_graph.",
+        name="status_check",
+        description="Graph status via inspect_graph overview.",
         release_profile="R0_READ_ONLY",
         turns=(
             LiveTurnSpec(
-                prompt="Check whether this flowgraph is valid.",
-                expected_tool_calls=_inspect("validate"),
-                semantic_checks=READ_ONLY_CHECKS()
-                + (
-                    {
-                        "kind": "tool_result",
-                        "tool": "inspect_graph",
-                        "arguments": {"valid": True},
-                    },
-                ),
+                prompt="Show the current graph status.",
+                expected_tool_calls=_inspect("overview"),
+                semantic_checks=READ_ONLY_CHECKS(),
             ),
         ),
     ),
     LiveScenario(
         category="inspect",
-        name="validate_compile",
-        description="Graph compile check via inspect_graph.",
+        name="compile_status",
+        description="Current compile/validation status via inspect_graph overview.",
         release_profile="R0_READ_ONLY",
         turns=(
             LiveTurnSpec(
-                prompt="Will the currently loaded flowgraph compile cleanly?",
-                expected_tool_calls=_inspect("validate"),
-                semantic_checks=READ_ONLY_CHECKS()
-                + (
-                    {
-                        "kind": "tool_result",
-                        "tool": "inspect_graph",
-                        "arguments": {"valid": True},
-                    },
-                ),
+                prompt="What is the current validation status for the loaded graph?",
+                expected_tool_calls=_inspect("overview"),
+                semantic_checks=READ_ONLY_CHECKS(),
             ),
         ),
     ),
@@ -219,35 +205,21 @@ R0_CASES: list[LiveScenario] = [
     ),
     _scenario_if_present(
         category="external",
-        name="resampler_validate",
+        name="resampler_status",
         relative_path="filter/resampler_demo.grc",
-        prompt="Validate this installed GNU Radio resampler example.",
-        expected_tool_calls=_inspect("validate"),
-        semantic_checks=READ_ONLY_CHECKS()
-        + (
-            {
-                "kind": "tool_result",
-                "tool": "inspect_graph",
-                "arguments": {"valid": True},
-            },
-        ),
-        description="Validation on an installed filter example.",
+        prompt="Summarize the current status of this installed GNU Radio resampler example.",
+        expected_tool_calls=_inspect("overview"),
+        semantic_checks=READ_ONLY_CHECKS(),
+        description="Status overview on an installed filter example.",
     ),
     _scenario_if_present(
         category="external",
-        name="stream_mux_validate",
+        name="stream_mux_status",
         relative_path="blocks/stream_mux_demo.grc",
-        prompt="Validate this installed GNU Radio stream mux example.",
-        expected_tool_calls=_inspect("validate"),
-        semantic_checks=READ_ONLY_CHECKS()
-        + (
-            {
-                "kind": "tool_result",
-                "tool": "inspect_graph",
-                "arguments": {"valid": True},
-            },
-        ),
-        description="Validation on an installed stream-mux blocks example.",
+        prompt="Summarize the current status of this installed GNU Radio stream mux example.",
+        expected_tool_calls=_inspect("overview"),
+        semantic_checks=READ_ONLY_CHECKS(),
+        description="Status overview on an installed stream-mux blocks example.",
     ),
     _scenario_if_present(
         category="external",

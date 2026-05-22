@@ -22,8 +22,9 @@ def _schema(
     properties: dict[str, Any],
     *,
     required: list[str] | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
-    return {
+    schema = {
         "type": "function",
         "function": {
             "name": name,
@@ -36,6 +37,9 @@ def _schema(
             },
         },
     }
+    if strict:
+        schema["function"]["strict"] = True
+    return schema
 
 
 def _strip_debug_properties(schema: dict[str, Any]) -> dict[str, Any]:
@@ -419,37 +423,48 @@ def build_tool_schemas(
     mvp_schemas = [
         _schema(
             "inspect_graph",
-            "Single model-facing graph inspection surface. "
-            "Use this for summary, block/connection context, validate, list blocks/connections/variables, "
-            "or compact checkpoint/history overview. Returns bounded compact output only.",
+            "Read-only inspection of the current GRC graph. "
+            "Use overview for a compact whole-graph summary. "
+            "Use details to inspect specific blocks, variables, connections, or parameters before explaining "
+            "or preparing a safe change. Use search_blocks for broad catalog discovery. Use change_graph for edits.",
             {
-                "operation": {
+                "view": {
                     "type": "string",
-                    "enum": [
-                        "summarize",
-                        "context",
-                        "validate",
-                        "list_blocks",
-                        "list_connections",
-                        "list_variables",
-                        "history_summary",
-                    ],
-                    "description": "Inspection operation.",
+                    "enum": ["overview", "details"],
+                    "description": (
+                        "overview returns a compact whole-graph summary and ignores targets/params. "
+                        "details returns graph-local information for one to five specific targets."
+                    ),
                 },
-                "target": {
-                    "type": "string",
-                    "description": "Optional target block/variable name for context operations.",
+                "targets": {
+                    "type": "array",
+                    "maxItems": 5,
+                    "items": {"type": "string"},
+                    "description": (
+                        "Required for schema consistency. For overview, any value is ignored. "
+                        "For details, pass one to five exact graph identifiers, "
+                        "block names, handles, or short graph-local target descriptions. "
+                        "Do not use this for broad discovery."
+                    ),
                 },
-                "max_items": {
-                    "type": "integer",
-                    "description": "Optional compact output bound.",
+                "params": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "items": {"type": "string"},
+                    "description": (
+                        "For overview, any value is ignored. For details, pass ['all'] to return "
+                        "useful visible parameters, or exact parameter names such as 'freq' or "
+                        "'cutoff_freq' to filter. If omitted or empty, runtime safely defaults to ['all']."
+                    ),
                 },
                 "debug": {
                     "type": "boolean",
                     "description": "When true, include wrapper dispatch telemetry for eval/debug.",
                 },
             },
-            required=["operation"],
+            required=["view", "targets", "params"],
+            strict=True,
         ),
         _schema(
             "search_blocks",
@@ -679,6 +694,13 @@ def build_tool_schemas(
                     "description": "Parameter name for set_param (for example `value`). Not a block name.",
                 },
                 "param_value": {"type": ["string", "number", "integer", "boolean"]},
+                "expected_old_value": {
+                    "type": ["string", "number", "integer", "boolean"],
+                    "description": (
+                        "Optional current value guard for set_param. When provided, "
+                        "the active graph value must match before mutation."
+                    ),
+                },
                 "state": {"type": "string", "enum": ["enabled", "disabled"]},
                 "variable_name": {
                     "type": "string",

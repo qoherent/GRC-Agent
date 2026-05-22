@@ -232,7 +232,10 @@ TIER5_CASES: list[LiveScenario] = [
             LiveTurnSpec(
                 prompt="Validate the graph.",
                 expected_tool_calls=(
-                    ToolExpectation("inspect_graph", arguments={"operation": "validate"}),
+                    ToolExpectation(
+                        "inspect_graph",
+                        arguments={"view": "overview", "targets": [], "params": []},
+                    ),
                 ),
                 semantic_checks=(
                     {

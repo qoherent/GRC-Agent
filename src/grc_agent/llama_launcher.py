@@ -200,6 +200,10 @@ class LlamaServerLauncher:
             str(port),
             "--ctx-size",
             str(self.config.desired_context_tokens),
+            "--device",
+            self.config.device,
+            "--gpu-layers",
+            str(self.config.gpu_layers),
             "--jinja",
         ]
         if _get_mmproj_support():
