@@ -23,9 +23,6 @@ from grc_agent.history import (
     operation_type_from_result,
     snapshot_session,
 )
-from grc_agent.manual import search_manual
-from grc_agent.manual.search import DEFAULT_MANUAL_ROOT
-from grc_agent.retrieval.search import _search_grc_with_context
 from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
 from grc_agent.runtime.clarification_state import (
     normalize_pending_clarification,
@@ -47,10 +44,6 @@ from grc_agent.runtime.tool_context import (
 from grc_agent.runtime.model_context import (
     history_content_as_text as history_content_as_text_wrapper,
     render_model_messages,
-    session_history_content_as_text as session_history_content_as_text_wrapper,
-)
-from grc_agent.runtime.schema_narrowing import (
-    schema_narrowed_for_turn as schema_narrowed_for_turn_wrapper,
 )
 from grc_agent.runtime.tool_surface import (
     MVP_MODEL_TOOL_NAMES,
@@ -96,7 +89,6 @@ from grc_agent.runtime.docs_answer.selection import (
     helper_candidates_for_docs_answer,
     helper_eligibility_for_docs_answer,
     is_docs_evidence_strong,
-    is_lexical_docs_evidence_strong,
     minimum_required_term_hits,
     normalized_docs_retrieval_query,
     pick_typed_sentence,
@@ -113,19 +105,11 @@ from grc_agent.runtime.clarification_payloads import (
     rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
 )
 from grc_agent.runtime.wrappers.inspect_graph import inspect_graph as inspect_graph_wrapper
-from grc_agent.runtime.wrappers.lifecycle import (
-    load_graph_explicit as load_graph_explicit_wrapper,
-    save_graph_explicit as save_graph_explicit_wrapper,
-)
 from grc_agent.runtime.wrappers.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
 from grc_agent.runtime.wrappers.get_grc_context_internal import (
     get_grc_context_internal as get_grc_context_internal_wrapper,
-)
-from grc_agent.runtime.wrappers.search_grc_internal import (
-    search_grc_internal as search_grc_internal_wrapper,
-    search_result_preview as search_result_preview_wrapper,
 )
 from grc_agent.runtime.wrappers.change_graph.dispatcher import dispatch_change_graph
 from grc_agent.runtime.wrappers.change_graph.disconnect_resolution import (
@@ -146,24 +130,14 @@ from grc_agent.runtime.wrappers.change_graph_validation import (
     canonicalize_change_graph_target_ref,
     validate_change_graph_operation_args,
 )
-from grc_agent.runtime.turn_plan import (
-    INTENT_ADD_VARIABLE,
-    INTENT_PREVIEW,
-    INTENT_REWIRE,
-    TurnPlan,
-    build_turn_plan,
-    enrich_turn_plan_with_graph_context,
-)
 from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime_tool_validation import (
     build_tool_schema_map,
     validate_runtime_tool_call,
 )
-from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
 from grc_agent.session import get_grc_context, load_grc, summarize_graph
 from grc_agent.session.insertion_suggestions import suggest_insertions
 from grc_agent.transaction import apply_edit, propose_edit
-from grc_agent.turn_guard import build_continuation_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -171,16 +145,6 @@ ToolResult = dict[str, Any]
 ToolCallable = Callable[..., ToolResult]
 HistoryEntry = dict[str, Any]
 
-_ADD_VARIABLE_EXACT_PATTERN = re.compile(
-    r"\b(?:add|create)\s+(?:a\s+)?variable\s+"
-    r"(?:(?:called|named)\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+"
-    r"(?:(?:set\s+to)|(?:with\s+(?:a\s+)?value\s+of)|(?:with\s+value)|value)\s+"
-    r"(?P<value>[^\n]+)",
-    re.IGNORECASE,
-)
-_CONNECTION_ID_TOKEN_PATTERN = re.compile(
-    r"[A-Za-z0-9_./-]+:[^\s,;()]+->[A-Za-z0-9_./-]+:[^\s,;()]+"
-)
 _SAVE_PATH_HINT_PATTERN = re.compile(r"(?P<path>(?:~|/)[^\s'\"`]+\.grc)\b")
 _ALIAS_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
 _SEARCH_BLOCK_SUMMARY_MAX_CHARS = 120
@@ -197,6 +161,174 @@ _JOURNALED_MUTATION_TOOLS = {
     "auto_insert_block",
     "change_graph",
 }
+_CHANGE_GRAPH_COMMON_ENVELOPE_KEYS = {
+    "dry_run",
+    "op",
+    "user_goal",
+    "state_revision",
+    "preview_token",
+    "target_ref",
+    "args",
+    "debug",
+}
+_CHANGE_GRAPH_ARG_KEYS = {
+    "block_id",
+    "block_type",
+    "source_block_id",
+    "instance_name",
+    "connection_id",
+    "src_block",
+    "src_port",
+    "dst_block",
+    "dst_port",
+    "new_src_block",
+    "new_src_port",
+    "new_dst_block",
+    "new_dst_port",
+    "insert_params",
+    "parameters",
+    "freq",
+    "frequency",
+    "preview_token",
+    "sample_rate",
+    "samp_rate",
+    "waveform",
+    "amplitude",
+    "amp",
+    "offset",
+    "phase",
+    "allow_increase_num_inputs",
+    "connect_to",
+    "destination_block",
+    "detach_connections",
+    "detach_connection_ids",
+    "param_key",
+    "param_value",
+    "expected_old_value",
+    "state",
+    "variable_name",
+    "variable_value",
+}
+_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS = {
+    "options",
+    "question",
+    "reason",
+}
+_CHANGE_GRAPH_ARG_KEYS_BY_OP = {
+    "set_param": {
+        "instance_name",
+        "target_ref",
+        "param_key",
+        "param_value",
+        "expected_old_value",
+    },
+    "set_state": {"instance_name", "target_ref", "state"},
+    "add_variable": {"variable_name", "variable_value"},
+    "disconnect": {"connection_id", "src_block", "src_port", "dst_block", "dst_port"},
+    "rewire": {
+        "connection_id",
+        "src_block",
+        "src_port",
+        "dst_block",
+        "dst_port",
+        "new_src_block",
+        "new_src_port",
+        "new_dst_block",
+        "new_dst_port",
+    },
+    "insert_in_connection": {
+        "connection_id",
+        "block_id",
+        "instance_name",
+        "insert_params",
+    },
+    "add_signal_source_to_sum": {
+        "block_id",
+        "source_block_id",
+        "instance_name",
+        "freq",
+        "frequency",
+        "preview_token",
+        "insert_params",
+        "sample_rate",
+        "samp_rate",
+        "waveform",
+        "amplitude",
+        "amp",
+        "offset",
+        "phase",
+        "allow_increase_num_inputs",
+        "connect_to",
+        "dst_block",
+        "dst_port",
+        "target_ref",
+    },
+    "remove_block": {
+        "instance_name",
+        "target_ref",
+        "detach_connections",
+        "detach_connection_ids",
+    },
+    "clarify": set(_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS),
+    "unsupported": set(_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS),
+}
+_CHANGE_GRAPH_NESTED_OP_KEYS = {
+    "set_param",
+    "set_state",
+    "add_variable",
+    "disconnect",
+    "rewire",
+    "insert_in_connection",
+    "add_signal_source_to_sum",
+    "remove_block",
+    "clarify",
+    "unsupported",
+}
+
+
+def _normalize_change_graph_operation_args_payload(
+    op: str | None,
+    args: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Normalize common model shapes inside the compact change_graph args object."""
+    if not isinstance(args, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    for raw_key, value in args.items():
+        key = str(raw_key).strip().strip("\"'").strip()
+        if op and key == op and isinstance(value, dict):
+            normalized.update(_normalize_change_graph_operation_args_payload(None, value))
+            continue
+        if op and key in _CHANGE_GRAPH_NESTED_OP_KEYS and isinstance(value, dict):
+            continue
+        if key == "block_type":
+            key = "block_id"
+        elif key == "parameters":
+            key = "insert_params"
+        elif key == "destination_block":
+            key = "dst_block"
+        elif key in {"target", "destination"}:
+            key = "dst_block"
+        normalized[key] = value
+    return normalized
+
+
+def _looks_like_preview_commit_confirmation(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    lowered = " ".join(text.lower().split())
+    if not lowered:
+        return False
+    commit_terms = (
+        "commit",
+        "apply",
+        "confirm",
+        "do it",
+        "go ahead",
+        "yes",
+        "proceed",
+    )
+    return any(term in lowered for term in commit_terms)
 
 
 def _normalize_alias_key(value: str) -> str:
@@ -268,24 +400,6 @@ def _catalog_version_token(catalog_root: str | None) -> str:
     return f"{snapshot.root}|blocks={len(snapshot.blocks)}|mtime_ns={newest_mtime}"
 
 
-def _manual_corpus_version_token(root: Path = DEFAULT_MANUAL_ROOT) -> str:
-    try:
-        resolved = root.resolve()
-    except Exception:
-        resolved = root
-    if not resolved.is_dir():
-        return f"{resolved}|missing"
-    newest_mtime = 0
-    count = 0
-    for path in resolved.glob("*.md"):
-        count += 1
-        try:
-            newest_mtime = max(newest_mtime, path.stat().st_mtime_ns)
-        except OSError:
-            continue
-    return f"{resolved}|files={count}|mtime_ns={newest_mtime}"
-
-
 class GrcAgent:
     """A thin integration layer between a language model and package-level owners."""
 
@@ -320,23 +434,6 @@ class GrcAgent:
         "propose_edit",
         "insert_block_on_connection",
         "auto_insert_block",
-    )
-    _EXPLICIT_SAVE_INTENT_TOKENS: tuple[str, ...] = (
-        "save",
-        "persist",
-        "write out",
-        "write it out",
-        "write a copy",
-        "save a copy",
-        "copy to path",
-        "save to",
-    )
-    _EXPLICIT_LOAD_INTENT_TOKENS: tuple[str, ...] = (
-        "load",
-        "open",
-        "switch to",
-        "switch over to",
-        "reload",
     )
 
     def __init__(
@@ -390,15 +487,11 @@ class GrcAgent:
         self._all_tool_schemas = build_tool_schemas(MODEL_TOOL_NAMES_ORDERED)
         self._tool_schema_map = build_tool_schema_map(self._all_tool_schemas)
         self._record_active_session_history(reason="initial_session")
-        self._turn_required_actions: set[str] = set()
-        self._turn_completed_actions: set[str] = set()
-        self._turn_any_execution_failed = False
-        self._turn_continuation_budget = 0
-        self._turn_plan = TurnPlan()
         self._turn_user_message = ""
         self._transaction_normalizer = TransactionNormalizer(session=self.session)
         self._pending_clarification: dict[str, Any] | None = None
         self._pending_clarification_revision: int | None = None
+        self._pending_change_previews: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._docs_advisor_probe_at: float = 0.0
         self._docs_advisor_reachable: bool = True
         self._last_docs_advisor_meta: dict[str, Any] = {
@@ -413,9 +506,9 @@ class GrcAgent:
             "cache_hit": False,
             "helper_finish_reason": None,
         }
-        self._ask_grc_docs_cache: OrderedDict[
-            tuple[str, int, str, str, str, str], dict[str, Any]
-        ] = OrderedDict()
+        self._ask_grc_docs_cache: OrderedDict[tuple[str, ...], dict[str, Any]] = (
+            OrderedDict()
+        )
         self._search_blocks_cache: OrderedDict[
             tuple[str, int, str], dict[str, Any]
         ] = OrderedDict()
@@ -436,9 +529,9 @@ class GrcAgent:
         self,
         allowed_tool_names: set[str] | tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return schemas narrowed by the active typed turn policy."""
+        """Return model-facing schemas, optionally filtered by an explicit allow-list."""
         if allowed_tool_names is None:
-            allowed_order = tuple(self._turn_plan.allowed_tools)
+            allowed_order = tuple(self._active_tool_surface.model_tool_names)
         elif isinstance(allowed_tool_names, set):
             allowed_order = tuple(
                 name for name in MODEL_TOOL_NAMES_ORDERED if name in allowed_tool_names
@@ -446,11 +539,7 @@ class GrcAgent:
         else:
             allowed_order = tuple(allowed_tool_names)
         schemas_by_name = {schema["function"]["name"]: schema for schema in self._tool_schemas}
-        return [
-            self._schema_narrowed_for_turn(schemas_by_name[name])
-            for name in allowed_order
-            if name in schemas_by_name
-        ]
+        return [schemas_by_name[name] for name in allowed_order if name in schemas_by_name]
 
     def _surface_tool_gate_result(
         self,
@@ -483,7 +572,11 @@ class GrcAgent:
         model_tool_call: bool = False,
     ) -> ToolResult:
         """Execute one runtime tool and return a structured result."""
-        kwargs = self.normalize_tool_call_arguments(tool_name, kwargs)
+        kwargs = self.normalize_tool_call_arguments(
+            tool_name,
+            kwargs,
+            model_tool_call=model_tool_call,
+        )
         before_snapshot = self._checkpoint_before(tool_name)
         surface_gate = self._surface_tool_gate_result(
             tool_name=tool_name,
@@ -557,6 +650,8 @@ class GrcAgent:
         self,
         tool_name: str,
         kwargs: Any,
+        *,
+        model_tool_call: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(kwargs, dict):
             return {}
@@ -568,26 +663,195 @@ class GrcAgent:
             if key == "transaction":
                 value = self._transaction_normalizer.normalize_transaction_instance_names(value)
             normalized[key] = value
-        if tool_name in {"save_graph", "save_graph_explicit"}:
+        if tool_name == "save_graph":
             normalized = self._normalize_save_graph_path(normalized)
         if tool_name == "inspect_graph":
             normalized = self._normalize_inspect_graph_args(normalized)
+        if tool_name == "change_graph":
+            normalized = self._normalize_change_graph_args(
+                normalized,
+                model_tool_call=model_tool_call,
+            )
+        return normalized
+
+    def _normalize_change_graph_args(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        model_tool_call: bool,
+    ) -> dict[str, Any]:
+        """Normalize legacy direct calls into the compact model-facing envelope."""
+        if model_tool_call:
+            normalized = self._normalize_model_change_graph_envelope(kwargs)
+            return self._normalize_model_change_graph_confirmation(normalized)
+        if "op" in kwargs or "args" in kwargs:
+            return kwargs
+        if "operation_kind" not in kwargs and not (
+            set(kwargs) & _CHANGE_GRAPH_ARG_KEYS
+        ):
+            return kwargs
+
+        envelope = {
+            key: value
+            for key, value in kwargs.items()
+            if key in _CHANGE_GRAPH_COMMON_ENVELOPE_KEYS
+        }
+        operation_kind = kwargs.get("operation_kind")
+        if operation_kind is not None:
+            envelope["op"] = operation_kind
+        operation_args = {
+            key: value for key, value in kwargs.items() if key in _CHANGE_GRAPH_ARG_KEYS
+        }
+        if operation_args:
+            envelope["args"] = operation_args
+        return envelope
+
+    @staticmethod
+    def _normalize_model_change_graph_envelope(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Lift envelope fields when a small model nests them inside args."""
+        normalized = dict(kwargs)
+        args = normalized.get("args")
+        if not isinstance(args, dict):
+            return normalized
+        lifted_args = dict(args)
+        changed = False
+        for key in (
+            "dry_run",
+            "op",
+            "user_goal",
+            "state_revision",
+            "preview_token",
+            "target_ref",
+        ):
+            if key not in normalized and key in lifted_args:
+                normalized[key] = lifted_args.pop(key)
+                changed = True
+        if changed:
+            normalized["args"] = lifted_args
+        return normalized
+
+    def _normalize_model_change_graph_confirmation(
+        self,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fill preview guard fields only after explicit user confirmation."""
+        if kwargs.get("op") != "add_signal_source_to_sum":
+            return kwargs
+        if kwargs.get("dry_run") is not False:
+            return kwargs
+        if kwargs.get("state_revision") is not None and kwargs.get("preview_token") is not None:
+            return kwargs
+        if not _looks_like_preview_commit_confirmation(self._turn_user_message):
+            return kwargs
+        latest = self._latest_change_graph_preview("add_signal_source_to_sum")
+        if latest is None:
+            return kwargs
+        token, preview = latest
+        normalized = dict(kwargs)
+        normalized.setdefault("state_revision", preview.get("state_revision"))
+        normalized.setdefault("preview_token", token)
         return normalized
 
     def _normalize_inspect_graph_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         """Fill safe read-only inspect defaults without hiding unsupported syntax."""
-        if "view" not in kwargs:
-            return kwargs
         normalized = dict(kwargs)
         view = normalized.get("view")
+        normalized.setdefault("targets", [])
+        normalized.setdefault("params", [])
+        if "view" not in normalized:
+            targets = normalized.get("targets")
+            normalized["view"] = (
+                "details"
+                if isinstance(targets, list) and len(targets) > 0
+                else "overview"
+            )
+            view = normalized["view"]
         if isinstance(view, str) and view.strip().lower() == "overview":
             normalized["targets"] = []
-            normalized["params"] = ["all"]
+            normalized["params"] = []
         elif isinstance(view, str) and view.strip().lower() == "details":
+            normalized = self._normalize_inspect_parameter_targets(normalized)
             params = normalized.get("params")
             if params is None or params == []:
-                normalized["params"] = ["all"]
+                normalized["params"] = []
         return normalized
+
+    def _normalize_inspect_parameter_targets(
+        self,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Split exact `block.parameter` inspect refs into target and param filter."""
+        targets = kwargs.get("targets")
+        if not isinstance(targets, list):
+            return kwargs
+        params = kwargs.get("params")
+        normalized_params = [str(item) for item in params] if isinstance(params, list) else []
+        if any(str(item).strip().lower() == "all" for item in normalized_params):
+            return kwargs
+
+        param_keys_by_block = self._inspect_param_keys_by_block()
+        if not param_keys_by_block:
+            return kwargs
+
+        changed = False
+        normalized_targets: list[Any] = []
+        seen_targets: set[str] = set()
+        seen_params = {item.strip() for item in normalized_params if item.strip()}
+        for target in targets:
+            if not isinstance(target, str):
+                normalized_targets.append(target)
+                continue
+            split_ref = self._split_inspect_parameter_ref(target, param_keys_by_block)
+            if split_ref is None:
+                target_key = target.strip()
+                if target_key and target_key not in seen_targets:
+                    normalized_targets.append(target)
+                    seen_targets.add(target_key)
+                continue
+            block_name, param_key = split_ref
+            changed = True
+            if block_name not in seen_targets:
+                normalized_targets.append(block_name)
+                seen_targets.add(block_name)
+            if param_key not in seen_params:
+                normalized_params.append(param_key)
+                seen_params.add(param_key)
+
+        if not changed:
+            return kwargs
+        normalized = dict(kwargs)
+        normalized["targets"] = normalized_targets
+        normalized["params"] = normalized_params
+        return normalized
+
+    def _inspect_param_keys_by_block(self) -> dict[str, set[str]]:
+        flowgraph = self.session.flowgraph
+        if flowgraph is None:
+            return {}
+        result: dict[str, set[str]] = {}
+        for block in flowgraph.blocks:
+            params = block.params.get("parameters") if isinstance(block.params, dict) else None
+            if not isinstance(params, dict):
+                continue
+            result[block.instance_name] = {str(key) for key in params}
+        return result
+
+    @staticmethod
+    def _split_inspect_parameter_ref(
+        value: str,
+        param_keys_by_block: dict[str, set[str]],
+    ) -> tuple[str, str] | None:
+        text = value.strip()
+        if "." not in text:
+            return None
+        for block_name in sorted(param_keys_by_block, key=len, reverse=True):
+            prefix = f"{block_name}."
+            if not text.startswith(prefix):
+                continue
+            param_key = text.removeprefix(prefix)
+            if param_key in param_keys_by_block[block_name]:
+                return block_name, param_key
+        return None
 
     def _normalize_save_graph_path(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         raw_path = kwargs.get("path")
@@ -656,18 +920,6 @@ class GrcAgent:
                 return content.strip()
         return ""
 
-    def _has_explicit_save_intent(self) -> bool:
-        text = self._current_user_text().lower()
-        return bool(text) and any(
-            token in text for token in self._EXPLICIT_SAVE_INTENT_TOKENS
-        )
-
-    def _has_explicit_load_intent(self) -> bool:
-        text = self._current_user_text().lower()
-        return bool(text) and any(
-            token in text for token in self._EXPLICIT_LOAD_INTENT_TOKENS
-        )
-
     @staticmethod
     def _resolved_path(path_value: str | Path) -> Path:
         return resolve_runtime_path(path_value)
@@ -705,7 +957,11 @@ class GrcAgent:
                 message="Debug telemetry is not available through the model-facing tool surface.",
                 error_type=ErrorCode.INVALID_REQUEST,
             )
-        kwargs = self.normalize_tool_call_arguments(tool_name, kwargs)
+        kwargs = self.normalize_tool_call_arguments(
+            tool_name,
+            kwargs,
+            model_tool_call=model_tool_call,
+        )
         validation_error = validate_runtime_tool_call(
             tool_name, kwargs, self._tool_schema_map
         )
@@ -721,12 +977,10 @@ class GrcAgent:
         return tool_name in {
             "new_grc",
             "load_grc",
-            "load_graph_explicit",
             "apply_edit",
             "remove_connection",
             "validate_graph",
             "save_graph",
-            "save_graph_explicit",
         }
 
     def resolve_pending_clarification(
@@ -880,8 +1134,8 @@ class GrcAgent:
                             "assistant_text": (
                                 "That requested compatibility tool is not available through "
                                 "the default model-facing surface. Use the approved wrappers "
-                                "only: inspect_graph, search_blocks, ask_grc_docs, change_graph, "
-                                "save_graph_explicit, and load_graph_explicit. I will not "
+                                "only: inspect_graph, search_blocks, ask_grc_docs, and change_graph. "
+                                "I will not "
                                 "translate an internal tool request into a graph mutation."
                             ),
                         }
@@ -896,8 +1150,7 @@ class GrcAgent:
                     "assistant_text": (
                         "Raw .grc YAML editing is unsupported. "
                         "Use the approved model-facing wrappers instead: change_graph for "
-                        "validated graph changes, dry_run previews, and save_graph_explicit "
-                        "for explicit saves."
+                        "validated graph changes and dry_run previews."
                     ),
                 }
         unsupported_operations: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -922,69 +1175,6 @@ class GrcAgent:
                 }
         return None
 
-    def check_ambiguous_connection_edit(self, user_message: str) -> dict[str, Any] | None:
-        """Ask for exact endpoints before vague connection mutations reach the model."""
-        lowered = user_message.lower()
-        connection_edit = any(
-            phrase in lowered
-            for phrase in (
-                "disconnect",
-                "unwire",
-                "remove connection",
-                "delete connection",
-                "remove the wire",
-                "delete the wire",
-            )
-        )
-        if not connection_edit:
-            return None
-
-        has_exact_endpoint_language = (
-            "->" in user_message
-            or (
-                " output " in f" {lowered} "
-                and " input " in f" {lowered} "
-                and any(char.isdigit() for char in user_message)
-            )
-            or ("src_block" in lowered and "dst_block" in lowered)
-        )
-        if has_exact_endpoint_language:
-            return None
-
-        return {
-            "ok": True,
-            "model": "guard",
-            "steps": 0,
-            "tool_rounds_used": 0,
-            "tool_calls_executed": 0,
-            "assistant_text": (
-                "I need exact connection endpoints before changing wires. "
-                "Provide source block, source port, destination block, and destination port, "
-                "or ask me to inspect the graph first."
-            ),
-        }
-
-    def init_turn_requirements(self, user_message: str) -> TurnPlan:
-        """Parse user message and initialise typed turn-completion tracking."""
-        self._turn_user_message = user_message
-        plan = build_turn_plan(user_message)
-        if self.session.flowgraph is not None:
-            plan = enrich_turn_plan_with_graph_context(
-                plan,
-                user_message,
-                self.session.flowgraph.blocks,
-            )
-        self._turn_plan = plan
-        self._turn_required_actions = set(self._turn_plan.required_actions)
-        self._turn_completed_actions = set()
-        self._turn_any_execution_failed = False
-        self._turn_continuation_budget = 1
-        return self._turn_plan
-
-    def active_turn_plan(self) -> TurnPlan:
-        """Return the current typed turn plan."""
-        return self._turn_plan
-
     def validate_turn_route(
         self,
         tool_name: str,
@@ -992,190 +1182,24 @@ class GrcAgent:
         *,
         allowed_tool_names: set[str] | tuple[str, ...] | None = None,
     ) -> ToolResult | None:
-        """Reject model tool calls that contradict the active turn policy."""
-        plan = self._turn_plan
+        """Reject model tool calls outside the current model-facing surface."""
+        del kwargs
         effective_allowed = (
-            set(plan.allowed_tools)
+            set(self._active_tool_surface.model_tool_names)
             if allowed_tool_names is None
             else set(allowed_tool_names)
         )
-        if tool_name not in effective_allowed:
-            return self._route_mismatch_result(
-                tool_name,
-                f"Tool `{tool_name}` is not allowed for intent `{plan.intent}`.",
-            )
-        if not plan.expected_op_types or tool_name not in {"apply_edit", "propose_edit"}:
+        if tool_name in effective_allowed:
             return None
-
-        op_types = self._transaction_op_types(kwargs.get("transaction"))
-        if not op_types:
-            return None
-        unexpected = sorted(set(op_types) - set(plan.expected_op_types))
-        if not unexpected:
-            return None
-        return self._route_mismatch_result(
-            tool_name,
-            (
-                f"Intent `{plan.intent}` only allows operation type(s) "
-                f"{', '.join(plan.expected_op_types)}, but the model attempted "
-                f"{', '.join(unexpected)}."
-            ),
-        )
-
-    def record_tool_completion(self, tool_name: str, ok: bool) -> None:
-        """Record a tool execution result for turn-completion tracking."""
-        if ok and tool_name in self._turn_required_actions:
-            self._turn_completed_actions.add(tool_name)
-        if not ok:
-            self._turn_any_execution_failed = True
-
-    def mark_turn_recovery_success(self) -> None:
-        """Allow normal turn nudges after a bounded correction succeeds."""
-        self._turn_any_execution_failed = False
-
-    def check_turn_continuation(self) -> tuple[bool, str]:
-        """Return (should_nudge, nudge_text) if remaining actions need a nudge."""
-        remaining = self._turn_required_actions - self._turn_completed_actions
-        if not remaining or self._turn_continuation_budget <= 0 or self._turn_any_execution_failed:
-            return False, ""
-        self._turn_continuation_budget -= 1
-        return True, build_continuation_prompt(remaining)
-
-    def deterministic_turn_tool_call(
-        self,
-        user_message: str,
-    ) -> dict[str, Any] | None:
-        """Return an exact verified-tool call for simple typed intents.
-
-        This keeps deterministic routing policy behind GrcAgent while the
-        llama.cpp adapter remains a transport/bounded-loop layer. Callers must
-        still run route validation, schema validation, and normal tool
-        execution before any graph mutation.
-        """
-        if self._turn_plan.intent == INTENT_REWIRE:
-            return self._deterministic_exact_rewire_tool_call(user_message)
-        if self._turn_plan.intent == INTENT_ADD_VARIABLE:
-            return self._deterministic_exact_add_variable_tool_call(user_message)
-        return None
-
-    def _deterministic_exact_add_variable_tool_call(
-        self,
-        user_message: str,
-    ) -> dict[str, Any] | None:
-        match = _ADD_VARIABLE_EXACT_PATTERN.search(user_message)
-        if match is None:
-            return None
-        value = re.split(
-            r"(?:\s+(?:and|then)\s+)|[,;]",
-            match.group("value").strip(),
-            maxsplit=1,
-        )[0]
-        value = value.strip().strip("\"'").rstrip(".")
-        if not value:
-            return None
-        tool_name = (
-            "propose_edit"
-            if INTENT_PREVIEW in {self._turn_plan.intent}
-            or (
-                "propose_edit" in self._turn_plan.required_actions
-                and "apply_edit" not in self._turn_plan.required_actions
-            )
-            else "apply_edit"
-        )
-        if tool_name not in self._turn_plan.allowed_tools:
-            return None
-        return {
-            "id": "deterministic_add_variable",
-            "name": tool_name,
-            "arguments": {
-                "transaction": {
-                    "op_type": "add_block",
-                    "block_type": "variable",
-                    "instance_name": match.group("name"),
-                    "parameters": {"value": value},
-                }
-            },
-        }
-
-    def _deterministic_exact_rewire_tool_call(
-        self,
-        user_message: str,
-    ) -> dict[str, Any] | None:
-        if "rewire_connection" not in self._turn_plan.allowed_tools:
-            return None
-
-        parsed_connection_ids: list[tuple[str, int | str, str, int | str]] = []
-        for match in _CONNECTION_ID_TOKEN_PATTERN.finditer(user_message):
-            parsed = parse_connection_id(match.group(0).rstrip(".,;"))
-            if parsed is None:
-                continue
-            parsed_connection_ids.append(parsed)
-            if len(parsed_connection_ids) == 2:
-                break
-
-        if len(parsed_connection_ids) != 2:
-            return None
-
-        old_src_block, old_src_port, old_dst_block, old_dst_port = parsed_connection_ids[0]
-        new_src_block, new_src_port, new_dst_block, new_dst_port = parsed_connection_ids[1]
-        return {
-            "id": "deterministic_rewire_connection",
-            "name": "rewire_connection",
-            "arguments": {
-                "old_connection_id": render_connection_id(
-                    old_src_block,
-                    old_src_port,
-                    old_dst_block,
-                    old_dst_port,
-                ),
-                "new_src_block": new_src_block,
-                "new_src_port": new_src_port,
-                "new_dst_block": new_dst_block,
-                "new_dst_port": new_dst_port,
-            },
-        }
-
-    def _route_mismatch_result(self, tool_name: str, message: str) -> ToolResult:
         return self._tool_result(
             tool_name=tool_name,
             ok=False,
             message=(
-                f"{message} No graph change was made because the requested route "
-                "did not match the typed turn policy."
+                f"Tool `{tool_name}` is not available through the model-facing "
+                "surface for this graph session."
             ),
-            error_type="route_mismatch",
-            turn_plan=self._turn_plan.as_dict(),
-            allowed_tools=list(self._turn_plan.allowed_tools),
-            expected_op_types=list(self._turn_plan.expected_op_types),
-        )
-
-    @staticmethod
-    def _transaction_op_types(transaction: Any) -> tuple[str, ...]:
-        operations = transaction if isinstance(transaction, list) else [transaction]
-        op_types: list[str] = []
-        for operation in operations:
-            if not isinstance(operation, dict):
-                continue
-            op_type = operation.get("op_type")
-            if isinstance(op_type, str) and op_type:
-                op_types.append(op_type)
-        return tuple(op_types)
-
-    def _turn_exact_new_rewire_endpoint(
-        self,
-    ) -> tuple[str, int | str, str, int | str] | None:
-        """Return exact `to src:port->dst:port` endpoint for schema narrowing."""
-        for match in re.finditer(r"\bto\s+([^\s,;]+->[^\s,;]+)", self._turn_user_message):
-            parsed = parse_connection_id(match.group(1).rstrip(".:"))
-            if parsed is not None:
-                return parsed
-        return None
-
-    def _schema_narrowed_for_turn(self, schema: dict[str, Any]) -> dict[str, Any]:
-        return schema_narrowed_for_turn_wrapper(
-            schema,
-            turn_plan=self._turn_plan,
-            exact_new_rewire_endpoint=self._turn_exact_new_rewire_endpoint,
+            error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
+            allowed_tools=sorted(effective_allowed),
         )
 
     @staticmethod
@@ -1254,7 +1278,6 @@ class GrcAgent:
         return render_model_messages(
             self.history,
             system_prompt_provider=self.get_system_prompt,
-            search_result_preview=search_result_preview_wrapper,
             semantic_search_result_preview=self._semantic_search_result_preview,
         )
 
@@ -1339,7 +1362,6 @@ class GrcAgent:
     def _compact_tool_entry(turn: HistoryEntry) -> HistoryEntry:
         return compact_tool_entry_wrapper(
             turn,
-            search_result_preview=search_result_preview_wrapper,
             semantic_search_result_preview=GrcAgent._semantic_search_result_preview,
         )
 
@@ -1353,7 +1375,6 @@ class GrcAgent:
         return history_content_as_text_wrapper(
             content,
             tool_name=tool_name,
-            search_result_preview=search_result_preview_wrapper,
             semantic_search_result_preview=self._semantic_search_result_preview,
         )
 
@@ -1366,14 +1387,8 @@ class GrcAgent:
         return tool_history_content_as_text_wrapper(
             content,
             tool_name=tool_name,
-            search_result_preview=search_result_preview_wrapper,
             semantic_search_result_preview=self._semantic_search_result_preview,
         )
-
-    def _session_history_content_as_text(
-        self, content: Any, *, reason: Any = None
-    ) -> str:
-        return session_history_content_as_text_wrapper(content, reason=reason)
 
     @staticmethod
     def _semantic_search_result_preview(
@@ -1408,10 +1423,8 @@ class GrcAgent:
             "new_grc": self._new_grc,
             "load_grc": self._load_grc,
             "summarize_graph": self._summarize_graph,
-            "search_grc": self._search_grc,
             "get_grc_context": self._get_grc_context,
             "describe_block": self._describe_block,
-            "search_manual": self._search_manual,
             "semantic_search_grc": self._semantic_search_grc,
             "suggest_compatible_insertions": self._suggest_compatible_insertions,
             "insert_block_on_connection": self._insert_block_on_connection,
@@ -1431,8 +1444,6 @@ class GrcAgent:
             "search_blocks": self._search_blocks,
             "ask_grc_docs": self._ask_grc_docs,
             "change_graph": self._change_graph,
-            "save_graph_explicit": self._save_graph_explicit,
-            "load_graph_explicit": self._load_graph_explicit,
         }
 
     # ------------------------------------------------------------------- #
@@ -1463,7 +1474,7 @@ class GrcAgent:
     def _checkpoint_before(self, tool_name: str) -> GraphSnapshot | None:
         if (
             tool_name not in _JOURNALED_MUTATION_TOOLS
-            and tool_name not in {"save_graph", "save_graph_explicit"}
+            and tool_name != "save_graph"
         ):
             return None
         if self.session.flowgraph is None:
@@ -1512,7 +1523,7 @@ class GrcAgent:
             elif not result.get("ok"):
                 self._record_failure_journal(tool_name, result, before)
             return
-        if tool_name in {"save_graph", "save_graph_explicit"}:
+        if tool_name == "save_graph":
             if result.get("ok"):
                 self._record_accepted_checkpoint(tool_name, result, before)
             return
@@ -1544,7 +1555,7 @@ class GrcAgent:
                 ),
                 save_path=(
                     result.get("path")
-                    if tool_name in {"save_graph", "save_graph_explicit"}
+                    if tool_name == "save_graph"
                     else None
                 ),
             )
@@ -1581,7 +1592,13 @@ class GrcAgent:
             logger.exception("history_failure_journal_failed tool=%s", tool_name)
 
     def _tool_result(
-        self, tool_name: str, ok: bool, message: str, **extra: Any
+        self,
+        tool_name: str,
+        ok: bool,
+        message: str,
+        *,
+        include_active_session: bool | None = None,
+        **extra: Any,
     ) -> ToolResult:
         """Build the common structured result payload returned by every tool."""
         result: ToolResult = {
@@ -1592,7 +1609,14 @@ class GrcAgent:
         result.update(extra)
         if not ok and "error_type" not in result:
             result["error_type"] = ErrorCode.INTERNAL_ERROR
-        result["active_session"] = self.active_session_snapshot()
+        if include_active_session is None:
+            include_active_session = tool_name != "change_graph"
+        if tool_name == "change_graph":
+            result.setdefault("state_revision", self.session.state_revision)
+            if "committed" not in result and isinstance(result.get("dry_run"), bool):
+                result["committed"] = bool(result.get("ok") and not result.get("dry_run"))
+        if include_active_session:
+            result["active_session"] = self.active_session_snapshot()
         return result
 
     def _payload_result(
@@ -1601,12 +1625,20 @@ class GrcAgent:
         payload: dict[str, Any],
         *,
         default_message: str | None = None,
+        include_active_session: bool | None = None,
     ) -> ToolResult:
         result = dict(payload)
         result["tool"] = tool_name
         if default_message is not None and "message" not in result:
             result["message"] = default_message
-        result["active_session"] = self.active_session_snapshot()
+        if include_active_session is None:
+            include_active_session = tool_name != "change_graph"
+        if tool_name == "change_graph":
+            result.setdefault("state_revision", self.session.state_revision)
+            if "committed" not in result and isinstance(result.get("dry_run"), bool):
+                result["committed"] = bool(result.get("ok") and not result.get("dry_run"))
+        if include_active_session:
+            result["active_session"] = self.active_session_snapshot()
         result = self._enforce_tool_output_budget(result)
         return result
 
@@ -1674,16 +1706,16 @@ class GrcAgent:
 
     def _inspect_graph(
         self,
-        view: str,
-        targets: list[str],
-        params: list[str],
+        view: str = "overview",
+        targets: list[str] | None = None,
+        params: list[str] | None = None,
         debug: bool = False,
     ) -> ToolResult:
         return inspect_graph_wrapper(
             self,
             view=view,
-            targets=targets,
-            params=params,
+            targets=targets or [],
+            params=params or [],
             debug=debug,
         )
 
@@ -1723,7 +1755,9 @@ class GrcAgent:
         k: int,
         retrieval_mode: str,
         sources: list[dict[str, str]],
-    ) -> tuple[str, int, str, str, str, str, str]:
+        focus: str | None = None,
+        cache_scope: str = "sources",
+    ) -> tuple[str, ...]:
         source_digest = hashlib.sha1()
         for row in sources:
             title = str(row.get("title", "")).strip()
@@ -1731,18 +1765,20 @@ class GrcAgent:
             excerpt = str(row.get("excerpt", "")).strip()
             source_digest.update(f"{title}|{source}|{excerpt}".encode("utf-8"))
         return (
+            cache_scope,
             question,
-            k,
+            str(k),
+            str(focus or ""),
             retrieval_mode,
             source_digest.hexdigest(),
-            _manual_corpus_version_token(),
+            vector_index_version_token(),
             self._docs_answer_cfg.helper_prompt_version,
             self._docs_answer_cfg.helper_mode,
         )
 
     def _ask_grc_docs_cache_get(
         self,
-        key: tuple[str, int, str, str, str, str, str],
+        key: tuple[str, ...],
     ) -> dict[str, Any] | None:
         hit = self._ask_grc_docs_cache.get(key)
         if hit is None:
@@ -1752,7 +1788,7 @@ class GrcAgent:
 
     def _ask_grc_docs_cache_put(
         self,
-        key: tuple[str, int, str, str, str, str, str],
+        key: tuple[str, ...],
         payload: dict[str, Any],
     ) -> None:
         self._ask_grc_docs_cache[key] = copy.deepcopy(payload)
@@ -1793,13 +1829,11 @@ class GrcAgent:
     def _collect_docs_candidates(
         self,
         *,
-        lexical_payload: dict[str, Any],
         semantic_manual: dict[str, Any],
         semantic_tutorial: dict[str, Any],
     ) -> list[_DocsEvidenceCandidate]:
         return collect_docs_candidates_wrapper(
             self,
-            lexical_payload=lexical_payload,
             semantic_manual=semantic_manual,
             semantic_tutorial=semantic_tutorial,
         )
@@ -2045,23 +2079,6 @@ class GrcAgent:
         )
 
     @staticmethod
-    def _is_lexical_docs_evidence_strong(
-        *,
-        query: str,
-        question: str,
-        answer_type: str,
-        lexical_payload: dict[str, Any],
-        limit: int,
-    ) -> bool:
-        return is_lexical_docs_evidence_strong(
-            query=query,
-            question=question,
-            answer_type=answer_type,
-            lexical_payload=lexical_payload,
-            limit=limit,
-        )
-
-    @staticmethod
     def _classify_docs_advisor_error(message: str) -> str:
         return classify_docs_advisor_error(message)
 
@@ -2091,7 +2108,6 @@ class GrcAgent:
         operation_kind: str | None,
         target_ref: dict[str, Any] | None,
         block_id: str | None,
-        candidate_id: str | None,
         instance_name: str | None,
         connection_id: str | None,
         src_block: str | None,
@@ -2103,6 +2119,7 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
         insert_params: dict[str, Any] | None,
+        operation_args: dict[str, Any] | None = None,
         detach_connections: bool | None,
         detach_connection_ids: list[str] | None,
         param_key: str | None,
@@ -2117,7 +2134,6 @@ class GrcAgent:
             operation_kind=operation_kind,
             target_ref=target_ref,
             block_id=block_id,
-            candidate_id=candidate_id,
             instance_name=instance_name,
             connection_id=connection_id,
             src_block=src_block,
@@ -2129,6 +2145,7 @@ class GrcAgent:
             new_dst_block=new_dst_block,
             new_dst_port=new_dst_port,
             insert_params=insert_params,
+            operation_args=copy.deepcopy(operation_args),
             detach_connections=detach_connections,
             detach_connection_ids=detach_connection_ids,
             param_key=param_key,
@@ -2156,64 +2173,201 @@ class GrcAgent:
         self,
         dry_run: bool,
         user_goal: str,
-        operation_kind: str | None = None,
+        op: str | None = None,
+        args: dict[str, Any] | None = None,
         target_ref: dict[str, Any] | None = None,
-        block_id: str | None = None,
-        candidate_id: str | None = None,
-        insert_block: str | None = None,
-        instance_name: str | None = None,
-        connection_id: str | None = None,
-        src_block: str | None = None,
-        src_port: int | str | None = None,
-        dst_block: str | None = None,
-        dst_port: int | str | None = None,
         state_revision: int | None = None,
-        new_src_block: str | None = None,
-        new_src_port: int | str | None = None,
-        new_dst_block: str | None = None,
-        new_dst_port: int | str | None = None,
-        insert_params: dict[str, Any] | None = None,
-        detach_connections: bool | None = None,
-        detach_connection_ids: list[str] | None = None,
-        param_key: str | None = None,
-        param_value: Any = None,
-        expected_old_value: Any = None,
-        state: str | None = None,
-        variable_name: str | None = None,
-        variable_value: Any = None,
+        preview_token: str | None = None,
         debug: bool = False,
     ) -> ToolResult:
+        operation_args = _normalize_change_graph_operation_args_payload(op, args)
+        duplicate_error = self._change_graph_duplicate_common_arg_error(
+            dry_run=bool(dry_run),
+            operation_kind=op,
+            operation_args=operation_args,
+            state_revision=state_revision,
+            preview_token=preview_token,
+            target_ref=target_ref,
+        )
+        if duplicate_error is not None:
+            return duplicate_error
+        if target_ref is None and isinstance(operation_args.get("target_ref"), dict):
+            target_ref = operation_args.pop("target_ref")
+        else:
+            operation_args.pop("target_ref", None)
+        if isinstance(target_ref, dict) and not target_ref:
+            target_ref = None
+        if state_revision is None and "state_revision" in operation_args:
+            state_revision = operation_args.pop("state_revision")
+        else:
+            operation_args.pop("state_revision", None)
+        if preview_token is None and "preview_token" in operation_args:
+            preview_token = operation_args.pop("preview_token")
+        else:
+            operation_args.pop("preview_token", None)
+        if preview_token is not None:
+            operation_args["preview_token"] = preview_token
+
+        allowed_arg_keys = set(_CHANGE_GRAPH_ARG_KEYS)
+        if op in {"clarify", "unsupported"}:
+            allowed_arg_keys.update(_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS)
+        if isinstance(op, str) and op in _CHANGE_GRAPH_ARG_KEYS_BY_OP:
+            allowed_arg_keys = set(_CHANGE_GRAPH_ARG_KEYS_BY_OP[op])
+        unsupported_args = sorted(key for key in operation_args if key not in allowed_arg_keys)
+        if unsupported_args:
+            return self._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": op,
+                    "error_type": ErrorCode.INVALID_REQUEST,
+                    "message": "Unsupported change_graph args field(s): "
+                    + ", ".join(unsupported_args),
+                },
+            )
+
         return dispatch_change_graph(
             self,
             dry_run=dry_run,
             user_goal=user_goal,
-            operation_kind=operation_kind,
+            operation_kind=op,
             target_ref=target_ref,
-            block_id=block_id,
-            candidate_id=candidate_id,
-            insert_block=insert_block,
-            instance_name=instance_name,
-            connection_id=connection_id,
-            src_block=src_block,
-            src_port=src_port,
-            dst_block=dst_block,
-            dst_port=dst_port,
+            block_id=operation_args.get("block_id"),
+            instance_name=operation_args.get("instance_name"),
+            connection_id=operation_args.get("connection_id"),
+            src_block=operation_args.get("src_block"),
+            src_port=operation_args.get("src_port"),
+            dst_block=operation_args.get("dst_block"),
+            dst_port=operation_args.get("dst_port"),
             state_revision=state_revision,
-            new_src_block=new_src_block,
-            new_src_port=new_src_port,
-            new_dst_block=new_dst_block,
-            new_dst_port=new_dst_port,
-            insert_params=insert_params,
-            detach_connections=detach_connections,
-            detach_connection_ids=detach_connection_ids,
-            param_key=param_key,
-            param_value=param_value,
-            expected_old_value=expected_old_value,
-            state=state,
-            variable_name=variable_name,
-            variable_value=variable_value,
+            new_src_block=operation_args.get("new_src_block"),
+            new_src_port=operation_args.get("new_src_port"),
+            new_dst_block=operation_args.get("new_dst_block"),
+            new_dst_port=operation_args.get("new_dst_port"),
+            insert_params=operation_args.get("insert_params"),
+            operation_args=operation_args,
+            detach_connections=operation_args.get("detach_connections"),
+            detach_connection_ids=operation_args.get("detach_connection_ids"),
+            param_key=operation_args.get("param_key"),
+            param_value=operation_args.get("param_value"),
+            expected_old_value=operation_args.get("expected_old_value"),
+            state=operation_args.get("state"),
+            variable_name=operation_args.get("variable_name"),
+            variable_value=operation_args.get("variable_value"),
             debug=debug,
         )
+
+    def _change_graph_duplicate_common_arg_error(
+        self,
+        *,
+        dry_run: bool,
+        operation_kind: str | None,
+        operation_args: dict[str, Any],
+        state_revision: int | None,
+        preview_token: str | None,
+        target_ref: dict[str, Any] | None,
+    ) -> ToolResult | None:
+        duplicate_fields: list[str] = []
+        if state_revision is not None and "state_revision" in operation_args:
+            duplicate_fields.append("state_revision")
+        if preview_token is not None and "preview_token" in operation_args:
+            duplicate_fields.append("preview_token")
+        if target_ref is not None and "target_ref" in operation_args:
+            duplicate_fields.append("target_ref")
+        if not duplicate_fields:
+            return None
+        return self._payload_result(
+            "change_graph",
+            {
+                "ok": False,
+                "dry_run": dry_run,
+                "operation_kind": operation_kind,
+                "error_type": ErrorCode.INVALID_REQUEST,
+                "message": (
+                    "Put common change_graph fields at the top level, not also in args: "
+                    + ", ".join(duplicate_fields)
+                ),
+            },
+        )
+
+    def _register_change_graph_preview(
+        self,
+        *,
+        operation_summary: str,
+        operations: list[dict[str, Any]],
+    ) -> str:
+        fingerprint = self._change_graph_preview_fingerprint(
+            operation_summary=operation_summary,
+            operations=operations,
+        )
+        token = f"pt_{fingerprint[:16]}"
+        self._pending_change_previews[token] = {
+            "fingerprint": fingerprint,
+            "operation_summary": operation_summary,
+            "state_revision": self.session.state_revision,
+            "created_at": time.time(),
+        }
+        while len(self._pending_change_previews) > 16:
+            self._pending_change_previews.popitem(last=False)
+        return token
+
+    def _validate_change_graph_preview_token(
+        self,
+        *,
+        preview_token: str | None,
+        operation_summary: str,
+        operations: list[dict[str, Any]],
+    ) -> str | None:
+        if not isinstance(preview_token, str) or not preview_token.strip():
+            return (
+                f"{operation_summary} commits require args.preview_token from a "
+                "matching dry_run preview."
+            )
+        preview = self._pending_change_previews.get(preview_token.strip())
+        if not isinstance(preview, dict):
+            return (
+                "preview_token was not found in this session. Run a dry_run preview "
+                "and commit using the returned preview_token."
+            )
+        current_fingerprint = self._change_graph_preview_fingerprint(
+            operation_summary=operation_summary,
+            operations=operations,
+        )
+        if preview.get("fingerprint") != current_fingerprint:
+            return (
+                "preview_token does not match the current graph state or resolved "
+                "edit plan. Run a fresh dry_run preview before committing."
+            )
+        return None
+
+    def _latest_change_graph_preview(
+        self,
+        operation_summary: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        for token, preview in reversed(self._pending_change_previews.items()):
+            if preview.get("operation_summary") == operation_summary:
+                return token, preview
+        return None
+
+    def _change_graph_preview_fingerprint(
+        self,
+        *,
+        operation_summary: str,
+        operations: list[dict[str, Any]],
+    ) -> str:
+        try:
+            graph_id = self.session.graph_id()
+        except Exception:
+            graph_id = None
+        payload = {
+            "graph_id": graph_id,
+            "operation_summary": operation_summary,
+            "operations": operations,
+            "state_revision": self.session.state_revision,
+        }
+        encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _compact_inspect_payload(mode: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2347,19 +2501,6 @@ class GrcAgent:
             default_message="Graph summary generated.",
         )
 
-    def _search_grc(self, query: str, scope: str = "catalog", k: int | None = None) -> ToolResult:
-        session_ctx = self.session if self.session.flowgraph is not None else None
-        payload = search_grc_internal_wrapper(
-            query,
-            scope=scope,
-            k=k,
-            session=session_ctx,
-            catalog_root=self.catalog_root,
-            search_fn=_search_grc_with_context,
-        )
-        result = self._payload_result("search_grc", payload)
-        return result
-
     def _get_grc_context(
         self,
         node_id: str,
@@ -2375,7 +2516,6 @@ class GrcAgent:
             default_max_nodes=self._guardrails_cfg.max_context_nodes,
             symbol_resolver=self._resolve_symbol_like_name,
             context_fn=get_grc_context,
-            search_fn=_search_grc_with_context,
         )
         result = self._payload_result("get_grc_context", payload)
         return result
@@ -2395,18 +2535,6 @@ class GrcAgent:
                 "Use a search result's `block_id`, not its `node_id`."
             )
         return result
-
-    def _search_manual(self, query: str, k: int | None = None) -> ToolResult:
-        if k is None:
-            payload = search_manual(query)
-        else:
-            payload = search_manual(query, k=k)
-        if payload.get("ok"):
-            payload["hint"] = (
-                "Manual results are explanation-only. Do not use them as transaction "
-                "recipes; use catalog/session tools plus grcc validation for graph changes."
-            )
-        return self._payload_result("search_manual", payload)
 
     def _semantic_search_grc(
         self,
@@ -2813,18 +2941,24 @@ class GrcAgent:
             )
         return result
 
-    def _state_driven_suggested_next_tools(self, *, completed_tool: str) -> list[str]:
-        """Derive follow-up tool suggestions from session state, not from prompt text."""
-        suggestions: list[str] = []
-
-        if completed_tool == "apply_edit" and self.session.is_dirty:
-            suggestions.append("validate_graph")
-
-        if completed_tool == "validate_graph" and self._last_validation_ok:
-            if self.session.is_dirty:
-                suggestions.append("save_graph")
-
-        return suggestions
+    def _autosave_after_validated_mutation(self) -> dict[str, Any]:
+        """Persist a successfully validated committed mutation when possible."""
+        if self.session.path is None:
+            return {
+                "ok": False,
+                "skipped": True,
+                "error_type": "SAVE_PATH_REQUIRED",
+                "message": "Autosave skipped because this graph has no file path.",
+            }
+        save_result = self._save_graph()
+        return {
+            "ok": save_result.get("ok") is True,
+            "skipped": False,
+            "path": save_result.get("path"),
+            "dirty": save_result.get("dirty"),
+            "error_type": save_result.get("error_type"),
+            "message": save_result.get("message", "Autosave failed."),
+        }
 
     def _duplicate_block_clarification_payload(
         self,
@@ -2848,14 +2982,18 @@ class GrcAgent:
             return self._payload_result("apply_edit", clarification)
         result = self._payload_result("apply_edit", payload)
         if result.get("ok"):
-            suggested = self._state_driven_suggested_next_tools(completed_tool="apply_edit")
-            result["hint"] = (
-                "Edit applied and the graph was validated. Do not repeat the same change. "
-                "If the user explicitly asked for a separate validation or save, use the "
-                "appropriate model-facing wrapper next."
-            )
-            if suggested:
-                result["suggested_next_tools"] = suggested
+            autosave = self._autosave_after_validated_mutation()
+            result["autosave"] = autosave
+            if autosave.get("ok"):
+                result["hint"] = (
+                    "Edit applied, validated, and autosaved. "
+                    "Do not repeat the same change."
+                )
+            else:
+                result["hint"] = (
+                    "Edit applied and validated, but autosave did not write the graph: "
+                    f"{autosave.get('message', 'autosave failed')}"
+                )
         else:
             errors = result.get("errors")
             if isinstance(errors, list) and any(
@@ -2912,40 +3050,10 @@ class GrcAgent:
             returncode=self.session.last_validation_returncode,
         )
         if is_valid:
-            suggested = self._state_driven_suggested_next_tools(completed_tool="validate_graph")
-            result["hint"] = (
-                "Validation passed. If the user also asked to save or summarize, use the "
-                "appropriate model-facing wrapper."
-            )
-            if suggested:
-                result["suggested_next_tools"] = suggested
+            result["hint"] = "Validation passed."
         return result
 
-    def _save_graph_explicit(
-        self,
-        path: str | None = None,
-        overwrite: bool = False,
-        debug: bool = False,
-    ) -> ToolResult:
-        return save_graph_explicit_wrapper(
-            self,
-            path=path,
-            overwrite=overwrite,
-            debug=debug,
-        )
-
-    def _load_graph_explicit(
-        self,
-        path: str,
-        debug: bool = False,
-    ) -> ToolResult:
-        return load_graph_explicit_wrapper(
-            self,
-            path=path,
-            debug=debug,
-        )
-
-    def _save_graph(self, path: str | None = None) -> ToolResult:
+    def _save_graph(self, path: str | None = None, overwrite: bool = False) -> ToolResult:
         missing_session = self._missing_session_result("save_graph")
         if missing_session is not None:
             return missing_session
@@ -2956,9 +3064,11 @@ class GrcAgent:
                 message="This new graph has no file path yet. Call save_graph(path=\"...\").",
                 error_type="SAVE_PATH_REQUIRED",
             )
-        target_path = Path(path).expanduser() if isinstance(path, str) and path.strip() else self.session.path
+        explicit_path = isinstance(path, str) and bool(path.strip())
+        target_path = Path(path).expanduser() if explicit_path else self.session.path
         if target_path is not None:
-            unsafe_root = self._unsafe_graph_root_for_path(target_path.resolve(strict=False))
+            resolved_target = target_path.resolve(strict=False)
+            unsafe_root = self._unsafe_graph_root_for_path(resolved_target)
             if unsafe_root is not None:
                 return self._tool_result(
                     tool_name="save_graph",
@@ -2968,6 +3078,28 @@ class GrcAgent:
                         f"Choose a copied working path outside {unsafe_root}."
                     ),
                     error_type=ErrorCode.SAVE_REFUSED,
+                )
+            current_path = (
+                self.session.path.resolve(strict=False)
+                if self.session.path is not None
+                else None
+            )
+            if (
+                explicit_path
+                and resolved_target.exists()
+                and current_path is not None
+                and resolved_target != current_path
+                and not overwrite
+            ):
+                return self._tool_result(
+                    tool_name="save_graph",
+                    ok=False,
+                    message=(
+                        "Refusing to overwrite existing destination without explicit "
+                        "overwrite permission."
+                    ),
+                    error_type=ErrorCode.SAVE_REFUSED,
+                    path=str(resolved_target),
                 )
         if (
             not self._last_validation_ok

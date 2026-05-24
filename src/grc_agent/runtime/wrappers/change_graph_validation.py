@@ -20,7 +20,6 @@ def validate_change_graph_operation_args(
     operation_kind: str | None,
     target_ref: dict[str, Any] | None,
     block_id: str | None,
-    candidate_id: str | None,
     instance_name: str | None,
     connection_id: str | None,
     src_block: str | None,
@@ -32,6 +31,7 @@ def validate_change_graph_operation_args(
     new_dst_block: str | None,
     new_dst_port: int | str | None,
     insert_params: dict[str, Any] | None,
+    operation_args: dict[str, Any] | None = None,
     detach_connections: bool | None,
     detach_connection_ids: list[str] | None,
     param_key: str | None,
@@ -195,7 +195,7 @@ def validate_change_graph_operation_args(
                     "error_type": ErrorCode.INVALID_REQUEST,
                     "message": (
                         "disconnect does not accept rewire fields. "
-                        "Use operation_kind='rewire' for new endpoint arguments."
+                        "Use op='rewire' for new endpoint arguments."
                     ),
                 },
             )
@@ -229,29 +229,7 @@ def validate_change_graph_operation_args(
                 "exact new endpoints or bounded hints for both new source and new destination."
             ),
         )
-    if operation_kind == "insert_block":
-        normalized_block_id = block_id.strip() if isinstance(block_id, str) and block_id.strip() else None
-        normalized_candidate_id = (
-            candidate_id.strip() if isinstance(candidate_id, str) and candidate_id.strip() else None
-        )
-        if (
-            normalized_block_id is not None
-            and normalized_candidate_id is not None
-            and normalized_block_id != normalized_candidate_id
-        ):
-            return agent._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": (
-                        "insert_block received conflicting block_id and candidate_id. "
-                        "Provide one catalog id or matching values for both."
-                    ),
-                },
-            )
+    if operation_kind in {"add_signal_source_to_sum", "insert_in_connection"}:
         if insert_params is not None and not isinstance(insert_params, dict):
             return agent._payload_result(
                 "change_graph",
@@ -263,14 +241,56 @@ def validate_change_graph_operation_args(
                     "message": "insert_params must be an object when provided.",
                 },
             )
+
+    if operation_kind == "add_signal_source_to_sum":
+        args = operation_args if isinstance(operation_args, dict) else {}
+        source_block_id = args.get("source_block_id") or block_id
+        frequency = args.get("freq", args.get("frequency"))
         return _require(
-            isinstance(connection_id, str)
-            and connection_id.strip()
-            and isinstance(instance_name, str)
-            and instance_name.strip()
-            and (normalized_block_id is not None or normalized_candidate_id is not None),
-            "insert_block requires connection_id, block_id (or candidate_id), and instance_name.",
+            isinstance(source_block_id, str)
+            and bool(source_block_id.strip())
+            and frequency is not None
+            and (not isinstance(frequency, str) or bool(frequency.strip())),
+            "add_signal_source_to_sum requires block_id/source_block_id and freq.",
         )
+
+    if operation_kind == "insert_in_connection":
+        normalized_block_id = block_id.strip() if isinstance(block_id, str) and block_id.strip() else None
+        missing_fields = []
+        if not (isinstance(connection_id, str) and connection_id.strip()):
+            missing_fields.append("connection_id")
+        if normalized_block_id is None:
+            missing_fields.append("block_id")
+        if not (isinstance(instance_name, str) and instance_name.strip()):
+            missing_fields.append("instance_name")
+        if missing_fields:
+            return agent._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": operation_kind,
+                    "error_type": "clarification_required",
+                    "message": (
+                        "insert_in_connection only inserts a block into an existing connection. "
+                        "It needs exact placement before it can run: "
+                        + ", ".join(missing_fields)
+                        + "."
+                    ),
+                    "clarification_options": [
+                        (
+                            "Provide an existing connection_id where the new block "
+                            "should be inserted."
+                        ),
+                        "Provide a unique instance_name for the new block.",
+                        (
+                            "Adding a parallel source to a new destination input is not "
+                            "the same operation as insert_in_connection."
+                        ),
+                    ],
+                },
+            )
+        return None
     if operation_kind == "remove_block":
         if detach_connections is not None and not isinstance(detach_connections, bool):
             return agent._payload_result(
@@ -297,11 +317,6 @@ def validate_change_graph_operation_args(
                 ),
             },
         )
-    if operation_kind == "auto_insert":
-        return _require(
-            isinstance(connection_id, str) and connection_id.strip(),
-            "auto_insert requires connection_id.",
-        )
     if operation_kind in {"new_grc", "load_grc", "save_graph"}:
         return agent._payload_result(
             "change_graph",
@@ -310,7 +325,7 @@ def validate_change_graph_operation_args(
                 "dry_run": bool(dry_run),
                 "operation_kind": operation_kind,
                 "error_type": ErrorCode.UNSUPPORTED_OP,
-                "message": "change_graph is mutation-only. Use explicit lifecycle wrappers for save/load.",
+                "message": "change_graph is graph-mutation only. Save is a CLI/manual lifecycle action and load happens at session start.",
             },
         )
     # Keep unused operation fields referenced so static checks do not regress silently.

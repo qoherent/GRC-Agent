@@ -396,7 +396,7 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
 
 
 def operation_type_from_result(tool_name: str, result: dict[str, Any]) -> str:
-    if tool_name in {"save_graph", "save_graph_explicit"}:
+    if tool_name == "save_graph":
         return "save_graph"
     operations = result.get("normalized_operations")
     if isinstance(operations, list) and operations:

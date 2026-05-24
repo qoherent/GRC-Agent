@@ -48,7 +48,6 @@ class DocsAnswerConfig:
     max_sources: int
     answer_target_chars: int
     excerpt_target_chars: int
-    lexical_first: bool
     semantic_manual_enabled: bool
     semantic_tutorial_enabled: bool
     probe_timeout_seconds: float
@@ -68,7 +67,6 @@ class RetrievalConfig:
     ask_grc_docs_default_k: int
     ask_grc_docs_max_k: int
     conceptual_cache_size: int
-    exact_match_fast_path: bool
 
 
 @dataclass(frozen=True)
@@ -100,7 +98,6 @@ DEFAULT_DOCS_ANSWER_CONFIG = DocsAnswerConfig(
     max_sources=2,
     answer_target_chars=300,
     excerpt_target_chars=220,
-    lexical_first=True,
     semantic_manual_enabled=True,
     semantic_tutorial_enabled=True,
     probe_timeout_seconds=0.5,
@@ -117,7 +114,6 @@ DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
     ask_grc_docs_default_k=3,
     ask_grc_docs_max_k=6,
     conceptual_cache_size=64,
-    exact_match_fast_path=True,
 )
 
 DEFAULT_HISTORY_CONFIG = HistoryConfig(checkpoint_retention=100)
@@ -137,9 +133,6 @@ class AgentConfig:
     """Configurable defaults for the GrcAgent behavior."""
 
     history_compact_budget: int
-    advisor_enabled: bool = False
-    advisor_limited_advisory: bool = False
-    advisor_shadow_telemetry: bool = True
     docs_answer: DocsAnswerConfig = DEFAULT_DOCS_ANSWER_CONFIG
     retrieval: RetrievalConfig = DEFAULT_RETRIEVAL_CONFIG
     history: HistoryConfig = DEFAULT_HISTORY_CONFIG
@@ -183,9 +176,6 @@ def default_app_config() -> AppConfig:
         ),
         agent=AgentConfig(
             history_compact_budget=100000,
-            advisor_enabled=False,
-            advisor_limited_advisory=False,
-            advisor_shadow_telemetry=True,
             docs_answer=DEFAULT_DOCS_ANSWER_CONFIG,
             retrieval=DEFAULT_RETRIEVAL_CONFIG,
             history=DEFAULT_HISTORY_CONFIG,
@@ -246,15 +236,6 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
         agent_config = AgentConfig(
             history_compact_budget=_require_positive_int(
                 agent_table, "history_compact_budget", context="[agent]"
-            ),
-            advisor_enabled=_optional_bool(
-                agent_table, "advisor_enabled", default=False, context="[agent]"
-            ),
-            advisor_limited_advisory=_optional_bool(
-                agent_table, "advisor_limited_advisory", default=False, context="[agent]"
-            ),
-            advisor_shadow_telemetry=_optional_bool(
-                agent_table, "advisor_shadow_telemetry", default=True, context="[agent]"
             ),
             docs_answer=_docs_answer_config(
                 docs_table if isinstance(docs_table, dict) else {},
@@ -491,12 +472,6 @@ def _docs_answer_config(
             default=defaults.excerpt_target_chars,
             context="[agent.docs_answer]",
         ),
-        lexical_first=_optional_bool(
-            table,
-            "lexical_first",
-            default=defaults.lexical_first,
-            context="[agent.docs_answer]",
-        ),
         semantic_manual_enabled=_optional_bool(
             table,
             "semantic_manual_enabled",
@@ -582,12 +557,6 @@ def _retrieval_config(
             table,
             "conceptual_cache_size",
             default=defaults.conceptual_cache_size,
-            context="[agent.retrieval]",
-        ),
-        exact_match_fast_path=_optional_bool(
-            table,
-            "exact_match_fast_path",
-            default=defaults.exact_match_fast_path,
             context="[agent.retrieval]",
         ),
     )

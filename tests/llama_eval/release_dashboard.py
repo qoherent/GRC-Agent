@@ -21,7 +21,6 @@ PHASE_NAMES = {
     25: "r1_set_state",
     35: "r2_disconnect",
     50: "tier5_adversarial",
-    55: "r5_save_load",
     56: "r3_rewire",
     57: "r4a_insert",
     58: "r4b_remove",
@@ -53,7 +52,7 @@ def load_capability_manifests() -> dict[str, dict[str, Any]]:
 def build_release_dashboard(
     stores: Iterable[dict[str, Any]],
     *,
-    required_phases: tuple[int, ...] = (20, 25, 35, 56, 57, 58, 59, 55, 71, 72, 50),
+    required_phases: tuple[int, ...] = (20, 25, 35, 56, 57, 58, 59, 71, 72, 50),
     min_runs_per_case: int = 3,
     stability_threshold: float = 1.0,
     scope: str = "all",
@@ -408,8 +407,6 @@ def _scope_matches(metadata: dict[str, Any] | None, scope: str) -> bool:
         return profile == "R0_READ_ONLY"
     if scope == "r1":
         return profile in {"R0_READ_ONLY", "R1_SET_PARAM_ONLY"}
-    if scope == "r5":
-        return profile == "R5_SAVE_LOAD"
     return True
 
 
@@ -489,9 +486,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--scope",
-        choices=("r0", "r1", "r5", "beta", "all"),
+        choices=("r0", "r1", "beta", "all"),
         default="all",
-        help="Release scope filter. r0=read-only, r1=R0+simple-edit, r5=save/load lifecycle, beta=all, all=no filter. Default: all.",
+        help="Release scope filter. r0=read-only, r1=R0+simple-edit, beta=all, all=no filter. Default: all.",
     )
     args = parser.parse_args(argv)
 
@@ -504,10 +501,8 @@ def main(argv: list[str] | None = None) -> int:
         effective_required_phases = tuple(args.required_phase)
     elif args.scope in ("r0", "r1"):
         effective_required_phases = (20,)
-    elif args.scope == "r5":
-        effective_required_phases = (55,)
     else:
-        effective_required_phases = (20, 25, 35, 56, 57, 58, 59, 55, 71, 72, 50)
+        effective_required_phases = (20, 25, 35, 56, 57, 58, 59, 71, 72, 50)
 
     dashboard = build_release_dashboard(
         _load_stores(args.results_path),

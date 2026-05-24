@@ -9,9 +9,12 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from grc_agent.runtime.docs_answer_advisor import (
-    DocsAnswerLlamaClient,
     DocsAnswerSnippet,
     run_docs_answer_advisor as run_docs_answer_advisor_core,
+)
+from grc_agent.toolagents_runtime import (
+    ToolAgentsJsonClient,
+    ToolAgentsLlamaProviderConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,14 +90,24 @@ def run_docs_answer_advisor(
     agent._last_docs_advisor_meta["advisor_attempted"] = True
     started = time.perf_counter()
     try:
-        client = DocsAnswerLlamaClient(
+        provider_config = ToolAgentsLlamaProviderConfig(
             base_url=agent._llama_server_url,
+            model=agent._llama_model,
+            api_key=None,
             timeout_seconds=min(
                 agent._llama_request_timeout_seconds,
                 agent._docs_answer_cfg.helper_timeout_seconds,
             ),
             max_tokens=agent._docs_answer_cfg.helper_max_output_tokens,
             temperature=0.0,
+            enable_thinking=False,
+        )
+        client = ToolAgentsJsonClient(
+            provider_config,
+            timeout_seconds=provider_config.timeout_seconds,
+            max_tokens=provider_config.max_tokens,
+            temperature=0.0,
+            enable_thinking=False,
         )
         result = run_docs_answer_advisor_core(
             client=client,

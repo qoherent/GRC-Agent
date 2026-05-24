@@ -23,6 +23,7 @@ from .insert import handle_insert_block_on_connection
 from .param import handle_set_param
 from .remove import handle_remove_block
 from .rewire import handle_rewire
+from .source_to_sum import handle_add_signal_source_to_sum
 from .state import handle_set_state
 from .variable import handle_add_variable
 
@@ -37,8 +38,6 @@ def dispatch_change_graph(
     operation_kind: str | None = None,
     target_ref: dict[str, Any] | None = None,
     block_id: str | None = None,
-    candidate_id: str | None = None,
-    insert_block: str | None = None,
     instance_name: str | None = None,
     connection_id: str | None = None,
     src_block: str | None = None,
@@ -51,6 +50,7 @@ def dispatch_change_graph(
     new_dst_block: str | None = None,
     new_dst_port: int | str | None = None,
     insert_params: dict[str, Any] | None = None,
+    operation_args: dict[str, Any] | None = None,
     detach_connections: bool | None = None,
     detach_connection_ids: list[str] | None = None,
     param_key: str | None = None,
@@ -140,7 +140,7 @@ def dispatch_change_graph(
         result = agent._tool_result(
             "change_graph",
             ok=False,
-            message=f"Unsupported change_graph operation_kind: {resolved_operation_kind!r}",
+            message=f"Unsupported change_graph op: {resolved_operation_kind!r}",
             error_type=ErrorCode.INVALID_REQUEST,
         )
         return agent._attach_wrapper_dispatch_telemetry(
@@ -163,9 +163,10 @@ def dispatch_change_graph(
         and resolved_operation_kind not in CONTROL_OUTCOME_KINDS
         and resolved_operation_kind in EXPERIMENTAL_OPERATION_SPECS
     ):
-        # Exposed non-gating operation metadata path (currently auto_insert).
+        # Internal non-gating operation metadata path.
         _ = EXPERIMENTAL_OPERATION_SPECS[resolved_operation_kind]
-    if resolved_operation_kind == "insert_block":
+    operation_args = operation_args if isinstance(operation_args, dict) else {}
+    if resolved_operation_kind == "insert_in_connection":
         if isinstance(insert_params, dict):
             normalized_insert_params: dict[str, Any] = {}
             for key, value in insert_params.items():
@@ -177,22 +178,6 @@ def dispatch_change_graph(
                 else:
                     normalized_insert_params[key_text] = value
             insert_params = normalized_insert_params
-        if (
-            not (isinstance(block_id, str) and block_id.strip())
-            and not (isinstance(candidate_id, str) and candidate_id.strip())
-            and isinstance(insert_block, str)
-            and insert_block.strip()
-        ):
-            candidate_id = insert_block.strip()
-        if (
-            not (isinstance(block_id, str) and block_id.strip())
-            and not (isinstance(candidate_id, str) and candidate_id.strip())
-            and isinstance(new_dst_block, str)
-            and new_dst_block.strip()
-        ):
-            candidate_id = new_dst_block.strip()
-            new_dst_block = None
-
         if isinstance(connection_id, str) and connection_id.strip():
             normalized_connection_id = connection_id.strip()
             if parse_connection_id(normalized_connection_id) is None and "->" in normalized_connection_id:
@@ -210,19 +195,20 @@ def dispatch_change_graph(
                             src_port_value = src_port_token
                 dst_block_hint = right.strip()
                 if src_block and src_port_value is not None and dst_block_hint and ":" not in dst_block_hint:
-                    candidates = agent.session.find_connection_candidates(
+                    candidates_payload = agent.session.find_connection_candidates(
                         src_block=src_block,
                         src_port=src_port_value,
                         dst_block=dst_block_hint,
                         dst_port=None,
                     )
+                    candidates = candidates_payload.get("candidates", [])
                     if len(candidates) == 1:
                         candidate = candidates[0]
                         connection_id = render_connection_id(
-                            candidate.src_block,
-                            candidate.src_port,
-                            candidate.dst_block,
-                            candidate.dst_port,
+                            candidate["src_block"],
+                            candidate["src_port"],
+                            candidate["dst_block"],
+                            candidate["dst_port"],
                         )
     target_resolution: dict[str, Any] | None = None
     set_param_resolution = resolve_set_param_candidate(
@@ -285,7 +271,6 @@ def dispatch_change_graph(
         operation_kind=resolved_operation_kind,
         target_ref=target_ref,
         block_id=block_id,
-        candidate_id=candidate_id,
         instance_name=instance_name,
         connection_id=connection_id,
         src_block=src_block,
@@ -297,6 +282,7 @@ def dispatch_change_graph(
         new_dst_block=new_dst_block,
         new_dst_port=new_dst_port,
         insert_params=insert_params,
+        operation_args=operation_args,
         detach_connections=detach_connections,
         detach_connection_ids=detach_connection_ids,
         param_key=param_key,
@@ -424,6 +410,72 @@ def dispatch_change_graph(
             validation_run=False,
             output_truncated=False,
         )
+    target_ref_revision = (
+        target_ref.get("base_state_revision") if isinstance(target_ref, dict) else None
+    )
+    if (
+        resolved_operation_kind == "add_signal_source_to_sum"
+        and not dry_run
+        and state_revision is None
+        and not isinstance(target_ref_revision, int)
+    ):
+        stale_result = agent._payload_result(
+            "change_graph",
+            {
+                "ok": False,
+                "dry_run": bool(dry_run),
+                "operation_kind": resolved_operation_kind,
+                "error_type": ErrorCode.INVALID_REQUEST,
+                "message": (
+                    "add_signal_source_to_sum commits require state_revision or a "
+                    "target_ref.base_state_revision to guard against stale structural edits. "
+                    "Use the current state_revision from inspect_graph or a preview result."
+                ),
+                "state_revision": agent.session.state_revision,
+            },
+        )
+        return agent._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="change_graph",
+            wrapper_action="invalid_operation_args",
+            internal_handlers=["none"],
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=stale_result,
+            validation_run=False,
+            output_truncated=False,
+            )
+    if not dry_run:
+        file_integrity = agent.session.file_integrity_state()
+        if file_integrity.get("externally_modified"):
+            stale_result = agent._payload_result(
+                "change_graph",
+                {
+                    "ok": False,
+                    "dry_run": bool(dry_run),
+                    "operation_kind": resolved_operation_kind,
+                    "error_type": ErrorCode.STALE_REVISION,
+                    "message": (
+                        "The active graph file changed on disk after this session "
+                        "loaded or saved it. Reload the graph before committing."
+                    ),
+                    "file_integrity": _compact_file_integrity(file_integrity),
+                    "state_revision": agent.session.state_revision,
+                },
+            )
+            return agent._attach_wrapper_dispatch_telemetry(
+                debug=debug,
+                wrapper_name="change_graph",
+                wrapper_action="external_file_changed",
+                internal_handlers=["file_integrity_guard"],
+                started=started,
+                before_revision=before_revision,
+                before_dirty=before_dirty,
+                result=stale_result,
+                validation_run=False,
+                output_truncated=False,
+            )
     lower_goal = user_goal.lower()
     if not dry_run and resolved_operation_kind is None:
         has_structured_mutation_args = any(
@@ -455,13 +507,13 @@ def dispatch_change_graph(
                     "dry_run": bool(dry_run),
                     "error_type": "clarification_required",
                     "message": (
-                        "Committed mutation requires operation_kind. "
+                        "Committed mutation requires op. "
                         "Provide one of: set_param, set_state, add_variable, "
-                        "disconnect, rewire, insert_block, remove_block, auto_insert."
+                            "disconnect, rewire, insert_in_connection, remove_block."
                     ),
                     "clarification_options": [
                         (
-                            "Retry with operation_kind set to the intended mutation class "
+                            "Retry with op set to the intended mutation class "
                             "and preserve all exact fields from this call, including "
                             "connection_id, block_id, instance_name, and insert_params "
                             "when they were supplied."
@@ -518,7 +570,7 @@ def dispatch_change_graph(
                 "clarification_options": [
                     "Provide exact instance_name + param_key + param_value for param edits.",
                     "Provide exact connection_id (preferred) or endpoint hints for disconnect.",
-                    "Provide exact block_id and placement details for inserts.",
+                    "Provide exact block_id and placement details for add/insert operations.",
                 ],
             },
         )
@@ -542,8 +594,8 @@ def dispatch_change_graph(
                 "dry_run": bool(dry_run),
                 "error_type": ErrorCode.UNSUPPORTED_OP,
                 "message": (
-                    "change_graph is mutation-only. Use save_graph_explicit for "
-                    "explicit lifecycle save requests."
+                    "change_graph is mutation-only. The CLI /save command handles "
+                    "manual saves outside the model tool surface."
                 ),
             },
         )
@@ -597,14 +649,30 @@ def dispatch_change_graph(
     resolved_insert_block_id: str | None = None
     if isinstance(block_id, str) and block_id.strip():
         resolved_insert_block_id = block_id.strip()
-    elif isinstance(candidate_id, str) and candidate_id.strip():
-        resolved_insert_block_id = candidate_id.strip()
 
     rewire_old_hint = any(
         value is not None and (not isinstance(value, str) or value.strip())
         for value in (src_block, src_port, dst_block, dst_port)
     )
-    if resolved_operation_kind == "rewire" and (
+    if resolved_operation_kind == "add_signal_source_to_sum":
+        signal_source_dispatch = handle_add_signal_source_to_sum(
+            ctx=operation_ctx,
+            user_goal=user_goal,
+            target_ref=target_ref,
+            block_id=resolved_insert_block_id,
+            instance_name=instance_name,
+            dst_block=dst_block,
+            dst_port=dst_port,
+            insert_params=insert_params,
+            operation_args=operation_args,
+            tx_tool=tx_tool,
+            kind_mismatch_result=_kind_mismatch_result,
+        )
+        operation_summary = signal_source_dispatch.operation_summary
+        if signal_source_dispatch.terminal_result is not None:
+            return signal_source_dispatch.terminal_result
+        result = signal_source_dispatch.tool_result if signal_source_dispatch.tool_result is not None else {}
+    elif resolved_operation_kind == "rewire" and (
         (isinstance(connection_id, str) and connection_id.strip()) or rewire_old_hint
     ):
         rewire_dispatch = handle_rewire(
@@ -625,6 +693,8 @@ def dispatch_change_graph(
             return rewire_dispatch.terminal_result
         result = rewire_dispatch.tool_result if rewire_dispatch.tool_result is not None else {}
     elif (
+        resolved_operation_kind == "insert_in_connection"
+        and
         resolved_insert_block_id is not None
         and isinstance(connection_id, str)
         and connection_id.strip()
@@ -643,37 +713,20 @@ def dispatch_change_graph(
             return insert_dispatch.terminal_result
         result = insert_dispatch.tool_result if insert_dispatch.tool_result is not None else {}
     elif isinstance(connection_id, str) and connection_id.strip():
-        insertion_words = ("insert", "add", "compatible")
-        if resolved_operation_kind == "auto_insert" or (
-            resolved_operation_kind is None
-            and any(word in lower_goal for word in insertion_words)
-        ):
-            operation_summary = "auto_insert_block"
-            if dry_run:
-                handlers.append("suggest_compatible_insertions")
-                result = agent._suggest_compatible_insertions(connection_id=connection_id.strip())
-            else:
-                handlers.append("auto_insert_block")
-                result = agent._auto_insert_block(
-                    goal=user_goal,
-                    preferred_block_type=block_id,
-                    target_hint=connection_id.strip(),
-                )
-        else:
-            disconnect_dispatch = handle_disconnect_by_connection_id(
-                ctx=operation_ctx,
-                connection_id=connection_id.strip(),
-                tx_tool=tx_tool,
-                kind_mismatch_result=_kind_mismatch_result,
-            )
-            operation_summary = disconnect_dispatch.operation_summary
-            if disconnect_dispatch.terminal_result is not None:
-                return disconnect_dispatch.terminal_result
-            result = (
-                disconnect_dispatch.tool_result
-                if disconnect_dispatch.tool_result is not None
-                else {}
-            )
+        disconnect_dispatch = handle_disconnect_by_connection_id(
+            ctx=operation_ctx,
+            connection_id=connection_id.strip(),
+            tx_tool=tx_tool,
+            kind_mismatch_result=_kind_mismatch_result,
+        )
+        operation_summary = disconnect_dispatch.operation_summary
+        if disconnect_dispatch.terminal_result is not None:
+            return disconnect_dispatch.terminal_result
+        result = (
+            disconnect_dispatch.tool_result
+            if disconnect_dispatch.tool_result is not None
+            else {}
+        )
     elif (
         resolved_operation_kind == "disconnect"
         and any(
@@ -781,6 +834,7 @@ def dispatch_change_graph(
                     "Provide exact instance_name + param_key + param_value for param edits.",
                     "Provide exact connection_id (preferred) or endpoint hints for disconnect.",
                     "Provide exact rewire endpoints for rewiring.",
+                    "Use add_signal_source_to_sum for another compatible source into an existing summing input.",
                 ],
             },
         )
@@ -831,16 +885,31 @@ def dispatch_change_graph(
             if returncode is not None:
                 synthesized_delta["validation_returncode"] = returncode
         graph_delta = synthesized_delta
-    payload: dict[str, Any] = {
-        "ok": bool(result.get("ok")) if isinstance(result, dict) else False,
-        "dry_run": bool(dry_run),
-        "operation_kind": resolved_operation_kind,
-        "operation_summary": operation_summary,
-        "graph_delta": graph_delta,
-        "validation_result": validation_result,
-        "checkpoint_id": result.get("checkpoint_id") if isinstance(result, dict) else None,
-        "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
-    }
+    ok = bool(result.get("ok")) if isinstance(result, dict) else False
+    normalized_operations = (
+        result.get("normalized_operations") if isinstance(result, dict) else None
+    )
+    operation_effects = _operation_effects(normalized_operations)
+    payload: dict[str, Any] = _drop_empty_result_fields(
+        {
+            "ok": ok,
+            "dry_run": bool(dry_run),
+            "committed": ok and not bool(dry_run),
+            "operation_kind": resolved_operation_kind,
+            "operation_summary": operation_summary,
+            "state_revision": agent.session.state_revision,
+            "effect": operation_effects[0] if len(operation_effects) == 1 else None,
+            "effects": operation_effects if len(operation_effects) > 1 else None,
+            "graph_delta": graph_delta,
+            "validation_result": validation_result,
+            "autosave": result.get("autosave") if isinstance(result, dict) else None,
+            "assumptions": result.get("assumptions") if isinstance(result, dict) else None,
+            "preview_token": result.get("preview_token") if isinstance(result, dict) else None,
+            "commit_hint": result.get("commit_hint") if isinstance(result, dict) else None,
+            "checkpoint_id": result.get("checkpoint_id") if isinstance(result, dict) else None,
+            "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
+        }
+    )
     if target_resolution is not None:
         payload["target_resolution"] = copy.deepcopy(target_resolution)
     if isinstance(result, dict) and result.get("error_type"):
@@ -848,14 +917,13 @@ def dispatch_change_graph(
     if isinstance(result, dict) and result.get("clarification_required"):
         payload["clarification_options"] = result.get("options")
     if isinstance(result, dict):
-        normalized_operations = result.get("normalized_operations")
-        if isinstance(normalized_operations, list):
+        if isinstance(normalized_operations, list) and (bool(dry_run) or not ok):
             payload["planned_operations"] = copy.deepcopy(normalized_operations)
         errors = result.get("errors")
-        if isinstance(errors, list):
+        if isinstance(errors, list) and errors:
             payload["errors"] = copy.deepcopy(errors)
         hint = result.get("hint")
-        if isinstance(hint, str) and hint:
+        if isinstance(hint, str) and hint and not ok:
             payload["hint"] = hint
     wrapper_result = agent._payload_result("change_graph", payload)
     validation_run = bool(validation_result) or operation_summary in {
@@ -864,6 +932,7 @@ def dispatch_change_graph(
         "rewire_connection",
         "insert_block_on_connection",
         "add_variable",
+        "add_signal_source_to_sum",
     }
     return agent._attach_wrapper_dispatch_telemetry(
         debug=debug,
@@ -877,3 +946,109 @@ def dispatch_change_graph(
         validation_run=validation_run,
         output_truncated=False,
     )
+
+
+def _drop_empty_result_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _compact_file_integrity(file_integrity: dict[str, Any]) -> dict[str, Any]:
+    def _short_hash(value: Any) -> str | None:
+        return value[:12] if isinstance(value, str) and value else None
+
+    compact = {
+        "status": file_integrity.get("status"),
+        "path": file_integrity.get("path"),
+        "persisted_sha256": _short_hash(file_integrity.get("persisted_sha256")),
+        "current_sha256": _short_hash(file_integrity.get("current_sha256")),
+    }
+    return _drop_empty_result_fields(compact)
+
+
+def _operation_effects(operations: Any) -> list[str]:
+    if not isinstance(operations, list):
+        return []
+    effects: list[str] = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        effect = _operation_effect(operation)
+        if effect:
+            effects.append(effect)
+    return effects
+
+
+def _operation_effect(operation: dict[str, Any]) -> str | None:
+    op_type = str(operation.get("op_type") or "").strip()
+    if op_type == "update_params":
+        target = _operation_target_name(operation)
+        params = operation.get("params")
+        expected = operation.get("expected_params")
+        if target and isinstance(params, dict) and params:
+            parts = []
+            for key, value in params.items():
+                if isinstance(expected, dict) and key in expected:
+                    parts.append(f"{target}.{key}:{expected[key]}->{value}")
+                else:
+                    parts.append(f"{target}.{key}={value}")
+            return "; ".join(parts)
+    if op_type == "update_states":
+        target = _operation_target_name(operation)
+        state = operation.get("state")
+        if target and state is not None:
+            return f"{target}.state={state}"
+    if op_type == "add_block":
+        block_type = operation.get("block_type")
+        name = operation.get("instance_name")
+        params = operation.get("parameters")
+        if block_type == "variable" and name:
+            value = params.get("value") if isinstance(params, dict) else None
+            return f"add variable {name}={value}" if value is not None else f"add variable {name}"
+        if block_type and name:
+            return f"add {block_type} as {name}"
+    if op_type == "remove_block":
+        target = _operation_target_name(operation)
+        return f"remove {target}" if target else "remove block"
+    if op_type == "remove_connection":
+        connection_id = operation.get("connection_id")
+        if isinstance(connection_id, str) and connection_id:
+            return f"disconnect {connection_id}"
+        rendered = _render_operation_connection(operation)
+        return f"disconnect {rendered}" if rendered else "disconnect"
+    if op_type == "add_connection":
+        rendered = _render_operation_connection(operation)
+        return f"connect {rendered}" if rendered else "connect"
+    if op_type == "insert_block_on_connection":
+        block_type = operation.get("block_type")
+        name = operation.get("instance_name")
+        connection_id = operation.get("connection_id")
+        if block_type and connection_id:
+            alias = f" as {name}" if name else ""
+            return f"insert {block_type}{alias} on {connection_id}"
+    return op_type or None
+
+
+def _operation_target_name(operation: dict[str, Any]) -> str | None:
+    instance_name = operation.get("instance_name")
+    if isinstance(instance_name, str) and instance_name:
+        return instance_name
+    target_ref = operation.get("target_ref")
+    if isinstance(target_ref, dict):
+        expected_name = target_ref.get("expected_instance_name")
+        if isinstance(expected_name, str) and expected_name:
+            return expected_name
+    return None
+
+
+def _render_operation_connection(operation: dict[str, Any]) -> str | None:
+    src_block = operation.get("src_block")
+    src_port = operation.get("src_port")
+    dst_block = operation.get("dst_block")
+    dst_port = operation.get("dst_port")
+    if src_block is None or src_port is None or dst_block is None or dst_port is None:
+        return None
+    return render_connection_id(str(src_block), src_port, str(dst_block), dst_port)

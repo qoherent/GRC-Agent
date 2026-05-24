@@ -155,7 +155,7 @@ def handle_remove_block(
                 clarification_options = [
                     (
                         "Preview exact detach+remove plan by retrying change_graph "
-                        "with operation_kind='remove_block', dry_run=true, "
+                        "with op='remove_block', dry_run=true, "
                         "detach_connections=true, and the same target."
                     ),
                     (

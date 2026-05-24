@@ -108,37 +108,13 @@ def build_tool_schemas(
             "or for vague whole-graph questions like what am I looking at, what is generating the signal here, "
             "give me a quick overview, what variables are in the graph, what blocks are loaded, "
             "is the graph dirty, show me the current state, or what changed. "
-            "Use it even when a previous tool result already showed the state; do not answer those questions from memory alone. "
-            "Do NOT use this when the user explicitly says to search or look through the current graph "
-            "for a class of blocks like sinks or sources; use `search_grc` with `scope=\"session\"` instead.",
+            "Use it even when a previous tool result already showed the state; do not answer those questions from memory alone.",
             {
                 "max_blocks": {
                     "type": "integer",
                     "description": "Optional maximum number of blocks to preview.",
                 }
             },
-        ),
-        _schema(
-            "search_grc",
-            "Search GNU Radio blocks by name or function. Use `scope=\"catalog\"` for discovery and `scope=\"session\"` only for the loaded graph. "
-            "If the user said find / search / look up first, use this before `describe_block`. "
-            "Example: `Find the Head block` => `search_grc(query=\"Head\", scope=\"catalog\")`.",
-            {
-                "query": {
-                    "type": "string",
-                    "description": "Search text to look up.",
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["catalog", "session"],
-                    "description": "Whether to search the installed GNU catalog or the active session.",
-                },
-                "k": {
-                    "type": "integer",
-                    "description": "Optional maximum number of results to return.",
-                },
-            },
-            required=["query"],
         ),
         _schema(
             "get_grc_context",
@@ -173,27 +149,10 @@ def build_tool_schemas(
             required=["block_id"],
         ),
         _schema(
-            "search_manual",
-            "Search bundled GNU Radio tutorial/manual pages for explanation-only context with citations. "
-            "Use this for how/why/conceptual GNU Radio questions. "
-            "Do NOT use manual results as mutation authority; graph changes must use catalog/session tools and grcc validation.",
-            {
-                "query": {
-                    "type": "string",
-                    "description": "Conceptual GNU Radio question or search text.",
-                },
-                "k": {
-                    "type": "integer",
-                    "description": "Optional maximum number of cited excerpts.",
-                },
-            },
-            required=["query"],
-        ),
-        _schema(
             "semantic_search_grc",
             "Search the local read-only vector index for semantically similar GNU Radio catalog blocks or documentation chunks. "
-            "Use only for read-only discovery or explanation when lexical search is likely insufficient. "
-            "This tool never authorizes graph mutation; any edit still requires exact TurnPlan intent, verified tools, and grcc validation. "
+            "Use only for read-only discovery or explanation. "
+            "This tool never authorizes graph mutation; edits require graph-local evidence, verified tools, and grcc validation. "
             "If the index is missing, tell the user to run `grc-agent vector build`.",
             {
                 "query": {
@@ -220,7 +179,7 @@ def build_tool_schemas(
             "First inspect the graph (summarize_graph, get_grc_context) to identify the connection_id, "
             "then call this tool, then use insert_block_on_connection with one suggested candidate. "
             "Each candidate includes insert_tool_args that can be passed directly to insert_block_on_connection. "
-            "Do NOT call search_grc or describe_block first for insertion requests; this tool already searches the catalog for compatible candidates.",
+            "Do NOT call describe_block first for insertion requests; this tool already searches the catalog for compatible candidates.",
             {
                 "connection_id": {
                     "type": "string",
@@ -407,7 +366,7 @@ def build_tool_schemas(
             "save_graph",
             "Write the current graph to disk. Use this to save, persist, write out, or write a copy to a path. "
             "Phrases like `write it out`, `write this out`, `save a copy to path` mean the current loaded graph. "
-            "An explicit save request still requires this tool even if the graph is already clean. "
+            "Manual save requests still require this internal tool even if the graph is already clean. "
             "Do NOT use this for `export as Python`, `standalone Python script`, or code generation requests; those are unsupported. "
             "Allowed only after the latest dirty state has validated successfully. "
             "When the user asks to save a copy, save to a specific path, or save a new graph, pass the explicit `path` parameter. "
@@ -416,60 +375,49 @@ def build_tool_schemas(
                 "path": {
                     "type": "string",
                     "description": "Destination path for the saved .grc file. Required when saving a copy, a new graph, or to a specific location.",
-                }
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "Allow overwriting an explicit destination path.",
+                },
             },
         ),
     ]
     mvp_schemas = [
         _schema(
             "inspect_graph",
-            "Read-only inspection of the current GRC graph. "
-            "Use overview for a compact whole-graph summary. "
-            "Use details to inspect specific blocks, variables, connections, or parameters before explaining "
-            "or preparing a safe change. Use search_blocks for broad catalog discovery. Use change_graph for edits.",
+            "Read graph. No args=overview. targets=details. params filters keys.",
             {
                 "view": {
                     "type": "string",
                     "enum": ["overview", "details"],
-                    "description": (
-                        "overview returns a compact whole-graph summary and ignores targets/params. "
-                        "details returns graph-local information for one to five specific targets."
-                    ),
+                    "description": "Optional.",
                 },
                 "targets": {
                     "type": "array",
                     "maxItems": 5,
                     "items": {"type": "string"},
                     "description": (
-                        "Required for schema consistency. For overview, any value is ignored. "
-                        "For details, pass one to five exact graph identifiers, "
-                        "block names, handles, or short graph-local target descriptions. "
-                        "Do not use this for broad discovery."
+                        "Block/conn/handle/exact block.param. No bare param or '.param'."
                     ),
                 },
                 "params": {
                     "type": "array",
-                    "minItems": 1,
                     "maxItems": 12,
                     "items": {"type": "string"},
-                    "description": (
-                        "For overview, any value is ignored. For details, pass ['all'] to return "
-                        "useful visible parameters, or exact parameter names such as 'freq' or "
-                        "'cutoff_freq' to filter. If omitted or empty, runtime safely defaults to ['all']."
-                    ),
+                    "description": "Param keys or ['all']. For X on Y: targets=['Y'], params=['X'].",
                 },
                 "debug": {
                     "type": "boolean",
                     "description": "When true, include wrapper dispatch telemetry for eval/debug.",
                 },
             },
-            required=["view", "targets", "params"],
+            required=[],
             strict=True,
         ),
         _schema(
             "search_blocks",
-            "Single model-facing block search. Returns compact block candidates only: block_id, name, summary. "
-            "Internally combines semantic and lexical retrieval with exact-ID boost.",
+            "Search installed block catalog. Returns block_id, name, match, why.",
             {
                 "query": {
                     "type": "string",
@@ -483,17 +431,12 @@ def build_tool_schemas(
                     "type": "boolean",
                     "description": "When true, include internal ranking/debug metadata.",
                 },
-                "enrich": {
-                    "type": "boolean",
-                    "description": "When true, optionally enrich missing summaries via internal block descriptions.",
-                },
             },
             required=["query"],
         ),
         _schema(
             "ask_grc_docs",
-            "Single model-facing GNU Radio docs answer helper. Retrieves local docs/tutorial/manual snippets, "
-            "then returns a concise grounded answer with sources. Explanation-only and never mutation authority.",
+            "Answer GNU Radio docs questions with local sources. Explanation-only.",
             {
                 "question": {
                     "type": "string",
@@ -502,10 +445,6 @@ def build_tool_schemas(
                 "k": {
                     "type": "integer",
                     "description": "Optional maximum sources (default 3).",
-                },
-                "focus": {
-                    "type": "string",
-                    "description": "Optional short topic focus.",
                 },
                 "debug": {
                     "type": "boolean",
@@ -516,28 +455,13 @@ def build_tool_schemas(
         ),
         _schema(
             "change_graph",
-            "Single model-facing graph change surface. "
-            "Set dry_run=true for preview and dry_run=false for committed mutation. "
-            "Internally routes through verified mutation handlers with preflight, grcc validation, and rollback. "
-            "Every mutation call must include dry_run, user_goal, and operation_kind. "
-            "Example rewire commit: dry_run=false, operation_kind='rewire', user_goal='rewire tag debug input', "
-            "connection_id='old_src:0->dst:0', new_src_block='new_src', new_src_port=0, new_dst_block='dst', new_dst_port=0. "
-            "Example insert commit: dry_run=false, operation_kind='insert_block', user_goal='insert throttle', "
-            "connection_id='src:0->dst:0', block_id='blocks_throttle2', instance_name='blocks_throttle2_0', "
-            "insert_params={'type':'float','samples_per_second':'samp_rate'}.",
+            "Preview or commit one graph edit. Use clear ops; validates, rolls back, autosaves valid commits.",
             {
                 "dry_run": {
                     "type": "boolean",
-                    "description": "Preview only when true; live mutation when false.",
+                    "description": "true=preview, false=commit.",
                 },
-                "user_goal": {
-                    "type": "string",
-                    "description": (
-                        "Required on every call: short natural-language restatement of "
-                        "the requested graph change. Evidence only; not routing authority."
-                    ),
-                },
-                "operation_kind": {
+                "op": {
                     "type": "string",
                     "enum": [
                         "set_param",
@@ -545,196 +469,38 @@ def build_tool_schemas(
                         "add_variable",
                         "disconnect",
                         "rewire",
-                        "insert_block",
+                        "insert_in_connection",
+                        "add_signal_source_to_sum",
                         "remove_block",
-                        "auto_insert",
                         "clarify",
                         "unsupported",
                     ],
-                    "description": (
-                        "Structured operation selector. The runtime dispatches from this "
-                        "when present; user_goal does not override it."
-                    ),
+                    "description": "Edit kind.",
                 },
-                "target_ref": {
-                    "type": "object",
-                    "description": "Optional guarded duplicate-target reference.",
-                    "properties": {
-                        "block_uid": {"type": "string"},
-                        "expected_instance_name": {"type": "string"},
-                        "expected_block_type": {"type": "string"},
-                        "base_state_revision": {"type": "integer"},
-                    },
-                    "required": [
-                        "block_uid",
-                        "expected_instance_name",
-                        "expected_block_type",
-                        "base_state_revision",
-                    ],
-                    "additionalProperties": False,
-                },
-                "block_id": {
+                "user_goal": {
                     "type": "string",
-                    "description": (
-                        "Catalog block id for insert_block operations (for example "
-                        "`blocks_throttle2` or `blocks_head`), not the new instance name. "
-                        "Use with a connection_id; runtime validates compatibility and refuses invalid candidates."
-                    ),
-                },
-                "candidate_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional alias for a previously selected insert candidate block id. "
-                        "For insert_block, provide block_id or candidate_id."
-                    ),
-                },
-                "insert_block": {
-                    "type": "string",
-                    "description": (
-                        "Legacy alias for insert candidate id used by some models. "
-                        "Equivalent to block_id for insert_block operations; pass a catalog "
-                        "block id here, not the new instance name."
-                    ),
-                },
-                "instance_name": {
-                    "type": "string",
-                    "description": (
-                        "Exact loaded block/variable instance name. Required for "
-                        "set_param and set_state. For remove_block, provide instance_name "
-                        "or guarded target_ref."
-                    ),
-                },
-                "connection_id": {
-                    "type": "string",
-                    "description": (
-                        "Exact connection id `src_block:src_port->dst_block:dst_port`. "
-                        "Primary path for disconnect and required old edge for rewire. "
-                        "Required anchor for insert_block. If the user says between source "
-                        "output N and destination input M, construct `source:N->destination:M`."
-                    ),
+                    "description": "Short user intent.",
                 },
                 "state_revision": {
                     "type": "integer",
-                    "description": (
-                        "Optional optimistic revision guard. When provided, it must "
-                        "match the active graph state_revision or the call is refused. "
-                        "Required for rewire operations."
-                    ),
+                    "description": "Revision guard; required for structural commits.",
                 },
-                "src_block": {"type": "string"},
-                "src_port": {"type": ["integer", "string"]},
-                "dst_block": {"type": "string"},
-                "dst_port": {"type": ["integer", "string"]},
-                "new_src_block": {
+                "preview_token": {
                     "type": "string",
-                    "description": (
-                        "Rewire new source block. Exact path provides all new_* fields; "
-                        "partial hints are allowed only when they resolve to one executable candidate."
-                    ),
+                    "description": "Token returned by a matching structural dry_run preview.",
                 },
-                "new_src_port": {
-                    "type": ["integer", "string"],
-                    "description": "Rewire new source port (stream index or message port id).",
-                },
-                "new_dst_block": {
-                    "type": "string",
-                    "description": (
-                        "Rewire new destination block. Exact path provides all new_* fields; "
-                        "partial hints are allowed only when they resolve to one executable candidate."
-                    ),
-                },
-                "new_dst_port": {
-                    "type": ["integer", "string"],
-                    "description": "Rewire new destination port (stream index or message port id).",
-                },
-                "insert_params": {
+                "target_ref": {
                     "type": "object",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "description": (
-                                "GNU item type for type-polymorphic inserted blocks. "
-                                "If the user says 'with type float', pass 'float'."
-                            ),
-                        },
-                        "samples_per_second": {
-                            "type": ["string", "number", "integer"],
-                            "description": (
-                                "Sample rate expression for throttle-like inserted blocks."
-                            ),
-                        },
-                    },
+                    "description": "Guarded ref from inspect_graph.",
+                },
+                "args": {
+                    "type": "object",
                     "description": (
-                        "Optional parameter overrides for insert_block candidates. "
-                        "Used when the selected block needs explicit compatible params "
-                        "(for example stream type or length parameters). If the prompt "
-                        "says 'with type float', include {'type': 'float'}."
-                    ),
-                },
-                "detach_connections": {
-                    "type": "boolean",
-                    "description": (
-                        "remove_block only. When true, explicitly allow removing all "
-                        "connections attached to the target block in the same ordered "
-                        "transaction before the remove_block step. When false or omitted, "
-                        "attached targets are refused with a clarification payload."
-                    ),
-                },
-                "detach_connection_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "remove_block only. Optional explicit connection ids expected to be "
-                        "removed before block removal. When provided, they must match the "
-                        "current attached connections exactly or the call is refused."
-                    ),
-                },
-                "param_key": {
-                    "type": "string",
-                    "description": "Parameter name for set_param (for example `value`). Not a block name.",
-                },
-                "param_value": {"type": ["string", "number", "integer", "boolean"]},
-                "expected_old_value": {
-                    "type": ["string", "number", "integer", "boolean"],
-                    "description": (
-                        "Optional current value guard for set_param. When provided, "
-                        "the active graph value must match before mutation."
-                    ),
-                },
-                "state": {"type": "string", "enum": ["enabled", "disabled"]},
-                "variable_name": {
-                    "type": "string",
-                    "description": "New variable instance name for operation_kind=add_variable.",
-                },
-                "variable_value": {
-                    "type": ["string", "number", "integer", "boolean"],
-                    "description": "Initial value/expression for operation_kind=add_variable.",
-                },
-                "debug": {
-                    "type": "boolean",
-                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
-                },
-            },
-            required=["dry_run", "user_goal", "operation_kind"],
-        ),
-        _schema(
-            "save_graph_explicit",
-            "Explicit lifecycle save wrapper for model-facing MVP chat. "
-            "Use only when the user explicitly asks to save, persist, or write a graph copy. "
-            "This wrapper always validates the current graph before writing and refuses unsafe writes.",
-            {
-                "path": {
-                    "type": "string",
-                    "description": (
-                        "Optional destination .grc path. Omit only to save in-place to the "
-                        "currently loaded graph path."
-                    ),
-                },
-                "overwrite": {
-                    "type": "boolean",
-                    "description": (
-                        "When true, allow overwrite of an existing explicit destination path. "
-                        "Ignored for in-place save to the active session path."
+                        "Op args: set_param instance_name/target_ref,param_key,param_value; "
+                        "insert_in_connection connection_id,block_id,instance_name,insert_params; "
+                        "add_signal_source_to_sum block_id,freq,preview_token for commit,target/dst optional; "
+                        "disconnect connection_id or endpoints; rewire connection_id,new_* endpoints; "
+                        "remove_block instance_name/target_ref; add_variable variable_name,variable_value."
                     ),
                 },
                 "debug": {
@@ -742,23 +508,7 @@ def build_tool_schemas(
                     "description": "When true, include wrapper dispatch telemetry for eval/debug.",
                 },
             },
-        ),
-        _schema(
-            "load_graph_explicit",
-            "Explicit lifecycle load wrapper for model-facing MVP chat. "
-            "Use only when the user explicitly asks to load/open/switch to a graph file. "
-            "This wrapper enforces copied-graph safety policy and validates after load.",
-            {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the .grc file to load into the active session.",
-                },
-                "debug": {
-                    "type": "boolean",
-                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
-                },
-            },
-            required=["path"],
+            required=["dry_run", "op", "user_goal"],
         ),
     ]
     all_schemas = [*internal_schemas, *mvp_schemas]

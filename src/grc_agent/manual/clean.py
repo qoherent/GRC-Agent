@@ -8,7 +8,9 @@ from pathlib import Path
 
 from .schema import ManualChunk, ManualPage
 
-_RETRIEVED_RE = re.compile(r'Retrieved from "\[(?P<url>https://[^ ]+).*oldid=(?P<oldid>\d+)')
+_RETRIEVED_MARKDOWN_RE = re.compile(r'Retrieved from "\[(?P<url>https://[^\]]+)\]\(')
+_RETRIEVED_URL_RE = re.compile(r'Retrieved from "?(?P<url>https://[^\s"]+)')
+_OLDID_RE = re.compile(r"[?&]oldid=(?P<oldid>\d+)")
 _LAST_EDITED_RE = re.compile(r"This page was last edited on (?P<date>.+?)\.")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 
@@ -49,9 +51,12 @@ def _extract_title(lines: list[str], source: Path) -> str:
 
 def _extract_retrieved(lines: list[str]) -> tuple[str, str | None]:
     for line in lines:
-        match = _RETRIEVED_RE.search(line)
+        match = _RETRIEVED_MARKDOWN_RE.search(line) or _RETRIEVED_URL_RE.search(line)
         if match:
-            return match.group("url").rstrip("]"), match.group("oldid")
+            url = match.group("url").replace(r"\(", "(").replace(r"\)", ")")
+            oldid_match = _OLDID_RE.search(url)
+            oldid = oldid_match.group("oldid") if oldid_match else None
+            return url.rstrip("]"), oldid
     return "", None
 
 

@@ -75,6 +75,7 @@ class FlowgraphSession:
         self._neighbor_names_cache: dict[str, tuple[str, ...]] = {}
         self._incoming_connection_cache: dict[str, tuple[Connection, ...]] = {}
         self._outgoing_connection_cache: dict[str, tuple[Connection, ...]] = {}
+        self._persisted_file_sha256: str | None = None
 
     # Session lifecycle
 
@@ -103,6 +104,7 @@ class FlowgraphSession:
 
         # Remember the file that was loaded.
         self.path = source_path
+        self._persisted_file_sha256 = self._sha256_text(raw_text)
         # Store the parsed data in memory.
         self.flowgraph = Flowgraph(
             blocks=blocks,
@@ -154,6 +156,8 @@ class FlowgraphSession:
         session.last_validation_returncode = None
         session.last_validation_ok = None
         session.last_validation_revision = None
+        if path is not None and not dirty:
+            session._persisted_file_sha256 = session._read_file_sha256_if_available(Path(path))
         session._bump_state_revision()
         return session
 
@@ -224,6 +228,7 @@ class FlowgraphSession:
         session.last_validation_returncode = None
         session.last_validation_ok = None
         session.last_validation_revision = None
+        session._persisted_file_sha256 = None
         session._bump_state_revision()
         logger.info("create graph_id=%s", graph_id)
         return session
@@ -257,6 +262,7 @@ class FlowgraphSession:
         serialized = self._serialize_raw_data(self.flowgraph.raw_data)
 
         self._atomic_write_text(target_path, serialized)
+        self._persisted_file_sha256 = self._sha256_text(serialized)
 
         path_changed = target_path != self.path
 
@@ -266,6 +272,52 @@ class FlowgraphSession:
         if path_changed:
             self._bump_state_revision()
         logger.info("save path=%s", target_path)
+
+    @property
+    def persisted_file_sha256(self) -> str | None:
+        """Return the hash of the file version this session last loaded or saved."""
+        return self._persisted_file_sha256
+
+    @staticmethod
+    def _sha256_text(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _read_file_sha256_if_available(path: Path) -> str | None:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    def file_integrity_state(self) -> dict[str, Any]:
+        """Return whether the active file still matches the loaded/saved version."""
+        payload: dict[str, Any] = {
+            "path": str(self.path) if self.path is not None else None,
+            "persisted_sha256": self._persisted_file_sha256,
+            "current_sha256": None,
+            "status": "untracked",
+            "externally_modified": False,
+        }
+        if self.path is None or self._persisted_file_sha256 is None:
+            return payload
+        if not self.path.exists():
+            payload["status"] = "missing"
+            payload["externally_modified"] = True
+            return payload
+        try:
+            current_sha256 = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        except OSError as exc:
+            payload["status"] = "unreadable"
+            payload["externally_modified"] = True
+            payload["error"] = str(exc)
+            return payload
+        payload["current_sha256"] = current_sha256
+        if current_sha256 == self._persisted_file_sha256:
+            payload["status"] = "clean"
+            return payload
+        payload["status"] = "modified"
+        payload["externally_modified"] = True
+        return payload
 
     @staticmethod
     def _atomic_write_text(target_path: Path, text: str) -> None:

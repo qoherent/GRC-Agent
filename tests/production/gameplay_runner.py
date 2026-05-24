@@ -14,7 +14,7 @@ from typing import Any
 from grc_agent.agent import GrcAgent
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.llama_server import LlamaServerClient, run_bounded_llama_turn
+from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig, run_bounded_toolagents_turn
 from tests.llama_eval.harness import (
     executed_tool_calls_since,
     graph_delta,
@@ -79,7 +79,7 @@ def run_scenario(
     initial_snapshot = graph_snapshot(agent)
     turns: list[dict[str, Any]] = []
     conversation: list[dict[str, Any]] = []
-    save_load_events: list[dict[str, Any]] = []
+    autosave_events: list[dict[str, Any]] = []
 
     infra_failure: dict[str, Any] | None = None
     dummy_user: dict[str, Any] | None = None
@@ -94,7 +94,7 @@ def run_scenario(
             save_path=save_path,
             conversation=conversation,
             turns=turns,
-            save_load_events=save_load_events,
+            autosave_events=autosave_events,
             enable_network=enable_ollama_network,
             cloud_mode=ollama_cloud_mode,
             model=ollama_model,
@@ -114,7 +114,7 @@ def run_scenario(
             save_path=save_path,
             conversation=conversation,
             turns=turns,
-            save_load_events=save_load_events,
+            autosave_events=autosave_events,
             enable_network=enable_ollama_network,
             cloud_mode=ollama_cloud_mode,
             model=ollama_model,
@@ -131,7 +131,7 @@ def run_scenario(
                 save_path=save_path,
                 conversation=conversation,
                 turns=turns,
-                save_load_events=save_load_events,
+                autosave_events=autosave_events,
                 start_index=len(turns),
             )
     elif mode == "direct_user":
@@ -143,7 +143,7 @@ def run_scenario(
             save_path=save_path,
             conversation=conversation,
             turns=turns,
-            save_load_events=save_load_events,
+            autosave_events=autosave_events,
         )
     elif mode == "scripted_user":
         _run_scripted_turns(
@@ -154,7 +154,7 @@ def run_scenario(
             save_path=save_path,
             conversation=conversation,
             turns=turns,
-            save_load_events=save_load_events,
+            autosave_events=autosave_events,
         )
     else:
         raise ValueError(f"unsupported user_mode: {mode}")
@@ -193,7 +193,7 @@ def run_scenario(
         "final_graph_snapshot": final_snapshot,
         "graph_delta": graph_delta(initial_snapshot, final_snapshot),
         "validation_results": [item for turn in turns for item in turn["validation_results"]],
-        "save_load_events": save_load_events,
+        "autosave_events": autosave_events,
         "source_integrity": {
             "before_sha256": source_before,
             "after_sha256": source_after,
@@ -231,7 +231,7 @@ def _run_scripted_turns(
     save_path: Path,
     conversation: list[dict[str, Any]],
     turns: list[dict[str, Any]],
-    save_load_events: list[dict[str, Any]],
+    autosave_events: list[dict[str, Any]],
 ) -> None:
     turn_specs = scenario.get("scripted_user_turns")
     if not isinstance(turn_specs, list):
@@ -259,7 +259,7 @@ def _run_scripted_turns(
 
         before = graph_snapshot(agent)
         history_start = len(agent.history)
-        agent.init_turn_requirements(prompt)
+        agent._turn_user_message = prompt
         agent.history.append({"role": "user", "content": prompt})
         conversation.append({"role": "user", "content": prompt})
 
@@ -295,7 +295,7 @@ def _run_scripted_turns(
             result = agent.execute_tool(tool_name, kwargs, model_tool_call=True)
             agent.history.append({"role": "tool", "name": tool_name, "content": result})
             conversation.append({"role": "tool", "name": tool_name, "content": result})
-            _record_lifecycle_event(save_load_events, index, tool_name, result)
+            _record_autosave_event(autosave_events, index, tool_name, result)
         _append_turn_trace(agent, turns, index, prompt, before, history_start)
 
 
@@ -309,7 +309,7 @@ def _run_ollama_user_turns(
     save_path: Path,
     conversation: list[dict[str, Any]],
     turns: list[dict[str, Any]],
-    save_load_events: list[dict[str, Any]],
+    autosave_events: list[dict[str, Any]],
     enable_network: bool,
     cloud_mode: bool,
     model: str | None,
@@ -335,8 +335,9 @@ def _run_ollama_user_turns(
     }
     max_turns = int(scenario.get("max_user_turns", scenario.get("max_turns", 1)))
     app_config = load_app_config()
-    grc_client = LlamaServerClient(
+    grc_client = ToolAgentsLlamaProviderConfig(
         base_url=app_config.llama.server_url,
+        model=app_config.llama.model,
         timeout_seconds=app_config.llama.request_timeout_seconds,
         max_tokens=app_config.llama.max_tokens,
         temperature=app_config.llama.temperature,
@@ -398,14 +399,11 @@ def _run_ollama_user_turns(
         result: dict[str, Any] = {}
         error_text = ""
         try:
-            result = run_bounded_llama_turn(
+            result = run_bounded_toolagents_turn(
                 agent=agent,
                 client=grc_client,
                 model=app_config.llama.model,
                 user_message=prompt,
-                advisor_enabled=app_config.agent.advisor_enabled,
-                advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
-                advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
                 mvp_tool_profile=True,
             )
         except Exception as exc:  # pragma: no cover - exercised by integration only.
@@ -415,8 +413,8 @@ def _run_ollama_user_turns(
         if isinstance(assistant_text, str) and assistant_text:
             conversation.append({"role": "assistant", "content": assistant_text})
         for call in executed_tool_calls_since(agent.history, history_start):
-            _record_lifecycle_event(
-                save_load_events,
+            _record_autosave_event(
+                autosave_events,
                 index,
                 str(call.get("name", "")),
                 call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
@@ -443,7 +441,7 @@ def _run_direct_user_turns(
     save_path: Path,
     conversation: list[dict[str, Any]],
     turns: list[dict[str, Any]],
-    save_load_events: list[dict[str, Any]],
+    autosave_events: list[dict[str, Any]],
     start_index: int = 0,
 ) -> dict[str, Any] | None:
     turn_specs = scenario.get("scripted_user_turns")
@@ -454,8 +452,9 @@ def _run_direct_user_turns(
         raise ValueError("scenario has more scripted turns than max_turns")
 
     app_config = load_app_config()
-    grc_client = LlamaServerClient(
+    grc_client = ToolAgentsLlamaProviderConfig(
         base_url=app_config.llama.server_url,
+        model=app_config.llama.model,
         timeout_seconds=app_config.llama.request_timeout_seconds,
         max_tokens=app_config.llama.max_tokens,
         temperature=app_config.llama.temperature,
@@ -481,14 +480,11 @@ def _run_direct_user_turns(
         result: dict[str, Any] = {}
         error_text = ""
         try:
-            result = run_bounded_llama_turn(
+            result = run_bounded_toolagents_turn(
                 agent=agent,
                 client=grc_client,
                 model=app_config.llama.model,
                 user_message=str(prompt),
-                advisor_enabled=app_config.agent.advisor_enabled,
-                advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
-                advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
                 mvp_tool_profile=True,
             )
         except Exception as exc:  # pragma: no cover - exercised by integration only.
@@ -498,8 +494,8 @@ def _run_direct_user_turns(
         if isinstance(assistant_text, str) and assistant_text:
             conversation.append({"role": "assistant", "content": assistant_text})
         for call in executed_tool_calls_since(agent.history, history_start):
-            _record_lifecycle_event(
-                save_load_events,
+            _record_autosave_event(
+                autosave_events,
                 index,
                 str(call.get("name", "")),
                 call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
@@ -654,8 +650,6 @@ def _expected_model_tools(scenario: dict[str, Any]) -> set[str]:
         for capability in capabilities
     ):
         tools.add("change_graph")
-    if "R5_SAVE_LOAD" in capabilities:
-        tools.update({"save_graph_explicit", "load_graph_explicit"})
     return tools
 
 
@@ -737,21 +731,25 @@ def _validation_results(executed: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return results
 
 
-def _record_lifecycle_event(
-    save_load_events: list[dict[str, Any]],
+def _record_autosave_event(
+    autosave_events: list[dict[str, Any]],
     turn_index: int,
     tool_name: str,
     result: dict[str, Any],
 ) -> None:
-    if tool_name in {"save_graph_explicit", "load_graph_explicit"}:
-        save_load_events.append(
-            {
-                "turn_index": turn_index,
-                "tool": tool_name,
-                "ok": bool(result.get("ok")),
-                "path": result.get("path"),
-            }
-        )
+    if tool_name != "change_graph":
+        return
+    autosave = result.get("autosave")
+    if not isinstance(autosave, dict):
+        return
+    autosave_events.append(
+        {
+            "turn_index": turn_index,
+            "tool": tool_name,
+            "ok": autosave.get("ok") is True,
+            "path": autosave.get("path"),
+        }
+    )
 
 
 def _corpus_entry(manifest: dict[str, Any], graph_id: str) -> dict[str, Any]:

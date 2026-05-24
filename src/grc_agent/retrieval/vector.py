@@ -20,15 +20,14 @@ import uuid
 from qdrant_client import QdrantClient, models
 
 from grc_agent._payload import ErrorCode, build_error_payload, join_non_empty
-from grc_agent.catalog.loaders import discover_catalog_root
-from grc_agent.manual.clean import clean_manual_page
-from grc_agent.manual.search import DEFAULT_MANUAL_ROOT
-
-from .index import build_catalog_index
+from grc_agent.catalog.describe import _build_block_description
+from grc_agent.catalog.loaders import build_catalog_snapshot, discover_catalog_root
+from grc_agent.catalog.normalize import compact_text
+from grc_agent.manual import DEFAULT_MANUAL_ROOT, clean_manual_page
 
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_VECTOR_COLLECTION_ALIAS = "grc_agent_retrieval_v1"
-INDEX_SCHEMA_VERSION = "2026-04-28-vector-v1"
+INDEX_SCHEMA_VERSION = "2026-05-22-vector-v2"
 MISS_INTAKE_SCHEMA_VERSION = "2026-04-28-vector-miss-intake-v1"
 CORPUS_VERSION = "2026-04-28"
 SOURCE_TYPE_CATALOG_BLOCK = "catalog_block"
@@ -50,7 +49,6 @@ VALID_MISS_CATEGORIES = frozenset(
         "should_clarify",
         "should_remain_miss",
         "source_type_regression",
-        "lexical_win",
         "real_user",
     }
 )
@@ -58,6 +56,10 @@ DEFAULT_VECTOR_LIMIT = 5
 MAX_VECTOR_LIMIT = 10
 MAX_QUERY_CHARS = 800
 MAX_EXCERPT_CHARS = 700
+RERANK_FETCH_MULTIPLIER = 4
+MIN_RERANK_FETCH_LIMIT = 20
+MAX_RERANK_FETCH_LIMIT = 50
+MAX_RERANK_DOCS_PER_SOURCE = 2
 DEFAULT_TUTORIAL_MANIFEST = DEFAULT_MANUAL_ROOT / "tutorial_manifest.txt"
 FORBIDDEN_RESULT_KEYS = frozenset(
     {
@@ -253,6 +255,25 @@ _MISS_TOPIC_STOP_TOKENS = frozenset(
         "signal",
     }
 )
+_RERANK_STOP_TOKENS = _MISS_TOPIC_STOP_TOKENS | frozenset(
+    {
+        "about",
+        "between",
+        "can",
+        "does",
+        "from",
+        "give",
+        "help",
+        "how",
+        "into",
+        "tell",
+        "that",
+        "this",
+        "what",
+        "when",
+        "with",
+    }
+)
 
 
 class VectorIndexError(RuntimeError):
@@ -282,6 +303,15 @@ class VectorRecord:
         payload = asdict(self)
         _strip_forbidden_keys(payload)
         return payload
+
+
+@dataclass(frozen=True)
+class _VectorCandidate:
+    record: VectorRecord
+    vector_score_raw: float
+    original_rank: int
+    rerank_score: float
+    diversity_key: str
 
 
 def point_id_for_record(record_id: str) -> str:
@@ -334,8 +364,13 @@ def build_manual_vector_records(
         source_hash = _file_sha256(path)
         for chunk in page.chunks:
             section = " > ".join(chunk.heading_path) if chunk.heading_path else page.title
+            chunk_text = _strip_repeated_chunk_headings(
+                chunk.text,
+                page_title=page.title,
+                section=section,
+            )
             normalized_text = _normalize_record_text(
-                join_non_empty(page.title, section, chunk.text)
+                join_non_empty(page.title, section if section != page.title else "", chunk_text)
             )
             records.append(
                 VectorRecord(
@@ -370,46 +405,159 @@ def build_catalog_vector_records(
     corpus_version: str = CORPUS_VERSION,
 ) -> list[VectorRecord]:
     """Build catalog block vector records from installed GNU Radio metadata."""
-    index = build_catalog_index(catalog_root)
+    snapshot = build_catalog_snapshot(catalog_root)
     records: list[VectorRecord] = []
-    for node in sorted(index.node_records.values(), key=lambda item: item.node_id):
-        if node.node_type != "block" or not node.block_id:
-            continue
-        source_path = Path(node.provenance.path)
+    for raw_block in sorted(snapshot.blocks.values(), key=lambda item: item.block_id):
+        description = _build_block_description(raw_block).to_payload()
+        block_id = str(description["block_id"])
+        label = str(description["label"])
+        documentation = compact_text(description.get("documentation"))
+        categories = _catalog_category_labels(raw_block, description)
+        parameters = [
+            item for item in description.get("parameters", []) if isinstance(item, dict)
+        ]
+        inputs = [item for item in description.get("inputs", []) if isinstance(item, dict)]
+        outputs = [item for item in description.get("outputs", []) if isinstance(item, dict)]
+        parameter_names = [
+            str(item.get("id")) for item in parameters if isinstance(item.get("id"), str)
+        ]
+        parameter_labels = [
+            compact_text(item.get("label")) or str(item.get("id"))
+            for item in parameters
+            if isinstance(item.get("id"), str)
+        ]
+        input_signatures = [
+            _catalog_port_signature("input", item, index)
+            for index, item in enumerate(inputs)
+        ]
+        output_signatures = [
+            _catalog_port_signature("output", item, index)
+            for index, item in enumerate(outputs)
+        ]
+        port_domains = sorted(
+            {
+                compact_text(port.get("domain"))
+                for port in [*inputs, *outputs]
+                if compact_text(port.get("domain"))
+            }
+        )
+        flags = [str(item) for item in description.get("flags", []) if item]
+        field_summary = _catalog_field_summary(
+            parameter_names=parameter_names,
+            input_signatures=input_signatures,
+            output_signatures=output_signatures,
+            categories=categories,
+            flags=flags,
+        )
+        port_summary = _catalog_field_summary(
+            parameter_names=parameter_names[:6],
+            input_signatures=input_signatures[:2],
+            output_signatures=output_signatures[:2],
+            categories=categories[:4],
+            flags=(),
+        )
+        block_description = documentation or (
+            f"{label} ({block_id}) with {len(inputs)} input port(s), "
+            f"{len(outputs)} output port(s), and {len(parameters)} parameter(s)."
+        )
         metadata = {
-            "category": node.related_node_labels,
-            "block_family": _block_family(node.block_id),
-            "parameter_names": _extract_parameter_names(node.search_fields.get("related", "")),
-            "port_signatures": node.adjacency_summary,
-            "aliases": list(CATALOG_SEMANTIC_ALIASES.get(node.block_id, ())),
+            "category": categories,
+            "block_family": _block_family(block_id),
+            "parameter_names": parameter_names,
+            "port_signatures": port_summary,
+            "aliases": list(CATALOG_SEMANTIC_ALIASES.get(block_id, ())),
         }
         normalized_text = _normalize_record_text(
             join_non_empty(
-                node.label,
-                node.block_id,
-                " ".join(CATALOG_SEMANTIC_ALIASES.get(node.block_id, ())),
-                node.block_description or "",
-                node.field_summary or "",
-                node.adjacency_summary or "",
-                " ".join(node.related_node_labels),
-                *node.search_fields.values(),
+                label,
+                block_id,
+                " ".join(CATALOG_SEMANTIC_ALIASES.get(block_id, ())),
+                block_description,
+                field_summary,
+                port_summary,
+                " ".join(categories),
+                " ".join(flags),
+                " ".join(parameter_names),
+                " ".join(parameter_labels),
+                " ".join(input_signatures),
+                " ".join(output_signatures),
+                " ".join(port_domains),
+                compact_text(description.get("doc_url")),
             )
         )
         records.append(
             VectorRecord(
-                record_id=f"{SOURCE_TYPE_CATALOG_BLOCK}:{node.block_id}",
+                record_id=f"{SOURCE_TYPE_CATALOG_BLOCK}:{block_id}",
                 source_type=SOURCE_TYPE_CATALOG_BLOCK,
-                canonical_block_id=node.block_id,
-                title=node.label,
+                canonical_block_id=block_id,
+                title=label,
                 normalized_text=normalized_text,
-                provenance={"path": node.provenance.path, "pointer": node.provenance.pointer},
+                provenance={"path": str(raw_block.path), "pointer": f"blocks[{block_id}]"},
                 metadata=metadata,
-                source_hash=_file_sha256(source_path),
+                source_hash=_file_sha256(raw_block.path),
                 corpus_version=corpus_version,
                 index_schema_version=INDEX_SCHEMA_VERSION,
             )
         )
     return records
+
+
+def _catalog_category_labels(raw_block: Any, description: dict[str, Any]) -> list[str]:
+    labels = {
+        " > ".join(path)
+        for path in getattr(raw_block, "category_paths", ())
+        if isinstance(path, tuple) and path
+    }
+    category_path = description.get("category_path")
+    if isinstance(category_path, list) and category_path:
+        labels.add(" > ".join(str(item) for item in category_path if item))
+    return sorted(label for label in labels if label)
+
+
+def _catalog_port_signature(direction: str, port: dict[str, Any], index: int) -> str:
+    label = compact_text(port.get("label")) or compact_text(port.get("id")) or str(index)
+    details = [
+        compact_text(port.get("domain")),
+        compact_text(port.get("dtype")),
+        f"vlen={compact_text(port.get('vlen'))}" if port.get("vlen") is not None else "",
+        "optional" if port.get("optional") else "",
+    ]
+    suffix = " ".join(item for item in details if item)
+    return f"{direction}:{label} {suffix}".strip()
+
+
+def _catalog_field_summary(
+    *,
+    parameter_names: list[str],
+    input_signatures: list[str],
+    output_signatures: list[str],
+    categories: list[str] | tuple[str, ...],
+    flags: list[str] | tuple[str, ...],
+) -> str:
+    return _truncate(
+        join_non_empty(
+            _label_group("parameters", parameter_names[:8]),
+            _label_group("inputs", input_signatures[:4]),
+            _label_group("outputs", output_signatures[:4]),
+            _label_group("categories", list(categories)[:4]),
+            _label_group("flags", list(flags)[:4]),
+        ),
+        240,
+    )
+
+
+def _truncate(text: str, limit: int) -> str:
+    compact = " ".join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _label_group(label: str, values: list[str]) -> str:
+    cleaned = [compact_text(value) for value in values if compact_text(value)]
+    if not cleaned:
+        return ""
+    return f"{label}: {', '.join(cleaned)}"
 
 
 def build_vector_records(
@@ -541,6 +689,9 @@ def vector_index_stats(index_dir: str | Path | None = None) -> dict[str, Any]:
             manifest = _read_manifest(qdrant_path)
             if manifest is None:
                 return _missing_index_payload()
+            stale_payload = _stale_index_payload(manifest)
+            if stale_payload is not None:
+                return stale_payload
             client = QdrantClient(path=str(qdrant_path))
             try:
                 active_collection = manifest.get("active_collection")
@@ -623,7 +774,7 @@ def semantic_search_grc(
     k: int = DEFAULT_VECTOR_LIMIT,
     *,
     index_dir: str | Path | None = None,
-    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    embedding_model: str | None = None,
 ) -> dict[str, Any]:
     """Search the local vector index without mutating graph/session state."""
     normalized_query = _normalize_query(query)
@@ -648,12 +799,20 @@ def semantic_search_grc(
     except ValueError as exc:
         return build_error_payload(error_type=ErrorCode.INVALID_REQUEST, message=str(exc))
 
+    fetch_limit = _rerank_fetch_limit(limit)
     qdrant_path = resolve_vector_index_dir(index_dir)
     try:
         with _VectorIndexLock(qdrant_path, exclusive=True):
             manifest = _read_manifest(qdrant_path)
             if manifest is None:
                 return _missing_index_payload()
+            stale_payload = _stale_index_payload(manifest)
+            if stale_payload is not None:
+                return stale_payload
+            query_embedding_model = _query_embedding_model(
+                manifest,
+                explicit_embedding_model=embedding_model,
+            )
             if scope == "tutorial" and manifest.get("records_by_source_type", {}).get(SOURCE_TYPE_TUTORIAL_CHUNK, 0) == 0:
                 return {
                     "ok": True,
@@ -669,9 +828,9 @@ def semantic_search_grc(
                 query_filter = _scope_filter(scope)
                 hits = client.query_points(
                     collection_name=DEFAULT_VECTOR_COLLECTION_ALIAS,
-                    query=models.Document(text=normalized_query, model=embedding_model),
+                    query=models.Document(text=normalized_query, model=query_embedding_model),
                     query_filter=query_filter,
-                    limit=limit,
+                    limit=fetch_limit,
                     with_payload=True,
                     with_vectors=False,
                 )
@@ -689,10 +848,23 @@ def semantic_search_grc(
     except Exception as exc:
         return build_error_payload(error_type=ErrorCode.INTERNAL_ERROR, message=str(exc))
 
-    results = [
-        render_vector_result(_record_from_payload(point.payload or {}), vector_score_raw=point.score)
+    scored_records = [
+        (_record_from_payload(point.payload), _point_score(point))
         for point in hits.points
         if isinstance(point.payload, dict)
+    ]
+    candidates = _rerank_vector_records(
+        normalized_query,
+        scored_records,
+        limit=limit,
+        scope=scope,
+    )
+    results = [
+        render_vector_result(
+            candidate.record,
+            vector_score_raw=candidate.vector_score_raw,
+        )
+        for candidate in candidates
     ]
     return {
         "ok": True,
@@ -1041,6 +1213,32 @@ def _normalize_record_text(text: str) -> str:
     return " ".join(str(text).split())
 
 
+def _strip_repeated_chunk_headings(
+    text: str,
+    *,
+    page_title: str,
+    section: str,
+) -> str:
+    headings = {
+        _normalize_record_text(page_title).casefold(),
+        *(
+            _normalize_record_text(part).casefold()
+            for part in section.split(" > ")
+            if _normalize_record_text(part)
+        ),
+    }
+    lines = text.splitlines()
+    while lines:
+        stripped = lines[0].strip()
+        if not stripped.startswith("#"):
+            break
+        heading = _normalize_record_text(stripped.lstrip("#").strip()).casefold()
+        if heading not in headings:
+            break
+        lines.pop(0)
+    return "\n".join(lines).strip() or text
+
+
 def _normalize_query(query: Any) -> str:
     if not isinstance(query, str):
         return ""
@@ -1053,6 +1251,193 @@ def _normalize_limit(k: Any) -> int:
     if k < 1:
         raise ValueError("k must be greater than zero.")
     return min(k, MAX_VECTOR_LIMIT)
+
+
+def _rerank_fetch_limit(limit: int) -> int:
+    return min(
+        MAX_RERANK_FETCH_LIMIT,
+        max(limit, MIN_RERANK_FETCH_LIMIT, limit * RERANK_FETCH_MULTIPLIER),
+    )
+
+
+def _point_score(point: Any) -> float:
+    try:
+        return float(point.score)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _rerank_vector_records(
+    query: str,
+    scored_records: list[tuple[VectorRecord, float]],
+    *,
+    limit: int,
+    scope: str,
+) -> list[_VectorCandidate]:
+    terms = _rerank_query_terms(query)
+    candidates = [
+        _VectorCandidate(
+            record=record,
+            vector_score_raw=score,
+            original_rank=index,
+            rerank_score=_rerank_score(
+                query=query,
+                terms=terms,
+                record=record,
+                vector_score_raw=score,
+                original_rank=index,
+            ),
+            diversity_key=_rerank_diversity_key(record),
+        )
+        for index, (record, score) in enumerate(scored_records)
+    ]
+    return _select_reranked_candidates(candidates, limit=limit, scope=scope)
+
+
+def _rerank_query_terms(query: str) -> tuple[str, ...]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[a-z0-9_]+", query.casefold()):
+        if len(token) <= 1 or token in _RERANK_STOP_TOKENS:
+            continue
+        stemmed = _stem_query_token(token)
+        if stemmed and stemmed not in seen:
+            terms.append(stemmed)
+            seen.add(stemmed)
+    return tuple(terms)
+
+
+def _rerank_score(
+    *,
+    query: str,
+    terms: tuple[str, ...],
+    record: VectorRecord,
+    vector_score_raw: float,
+    original_rank: int,
+) -> float:
+    title_terms = _rerank_text_terms(record.title)
+    alias_terms = _rerank_text_terms(_metadata_alias_text(record.metadata))
+    record_terms = _rerank_text_terms(
+        " ".join(
+            (
+                record.record_id,
+                record.canonical_block_id or "",
+                record.title,
+                record.normalized_text,
+                _metadata_alias_text(record.metadata),
+            )
+        )
+    )
+    title_hits = sum(1 for term in terms if term in title_terms)
+    alias_hits = sum(1 for term in terms if term in alias_terms)
+    record_hits = sum(1 for term in terms if term in record_terms)
+    term_coverage = (record_hits / len(terms)) if terms else 0.0
+    all_terms_bonus = 0.05 if terms and record_hits == len(terms) else 0.0
+    return (
+        float(vector_score_raw)
+        + _identity_bonus(query, record)
+        + _phrase_bonus(query, record)
+        + min(0.08, 0.025 * title_hits)
+        + min(0.06, 0.02 * alias_hits)
+        + min(0.06, 0.01 * record_hits)
+        + min(0.08, 0.05 * term_coverage)
+        + all_terms_bonus
+        - min(original_rank, 50) * 0.0005
+    )
+
+
+def _rerank_text_terms(text: str) -> set[str]:
+    return {
+        _stem_query_token(token)
+        for token in re.findall(r"[a-z0-9_]+", text.casefold())
+        if len(token) > 1 and token not in _RERANK_STOP_TOKENS
+    }
+
+
+def _metadata_alias_text(metadata: dict[str, Any]) -> str:
+    aliases = metadata.get("aliases")
+    if not isinstance(aliases, list):
+        return ""
+    return " ".join(str(alias) for alias in aliases if isinstance(alias, str))
+
+
+def _identity_bonus(query: str, record: VectorRecord) -> float:
+    query_key = _identity_key(query)
+    if not query_key:
+        return 0.0
+    identity_keys = {
+        _identity_key(record.record_id),
+        _identity_key(record.canonical_block_id or ""),
+        _identity_key(record.title),
+    }
+    if query_key in identity_keys:
+        return 0.18
+    block_key = _identity_key(record.canonical_block_id or "")
+    if block_key and len(query_key) >= 5 and (query_key in block_key or block_key in query_key):
+        return 0.08
+    return 0.0
+
+
+def _phrase_bonus(query: str, record: VectorRecord) -> float:
+    normalized_query = query.casefold()
+    if len(normalized_query) < 8:
+        return 0.0
+    haystack = " ".join(
+        (
+            record.record_id,
+            record.canonical_block_id or "",
+            record.title,
+            record.normalized_text,
+            _metadata_alias_text(record.metadata),
+        )
+    ).casefold()
+    return 0.04 if normalized_query in haystack else 0.0
+
+
+def _identity_key(value: str) -> str:
+    return "".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _rerank_diversity_key(record: VectorRecord) -> str:
+    if record.source_type == SOURCE_TYPE_CATALOG_BLOCK:
+        return record.canonical_block_id or record.record_id
+    provenance = record.provenance
+    source = provenance.get("url") or provenance.get("path") or record.title
+    return f"{record.source_type}:{source}"
+
+
+def _select_reranked_candidates(
+    candidates: list[_VectorCandidate],
+    *,
+    limit: int,
+    scope: str,
+) -> list[_VectorCandidate]:
+    ranked = sorted(
+        candidates,
+        key=lambda item: (-item.rerank_score, item.original_rank, item.record.record_id),
+    )
+    if scope == "catalog":
+        return ranked[:limit]
+
+    selected: list[_VectorCandidate] = []
+    selected_ids: set[str] = set()
+    source_counts: Counter[str] = Counter()
+    for candidate in ranked:
+        if source_counts[candidate.diversity_key] >= MAX_RERANK_DOCS_PER_SOURCE:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate.record.record_id)
+        source_counts[candidate.diversity_key] += 1
+        if len(selected) >= limit:
+            return selected
+
+    for candidate in ranked:
+        if candidate.record.record_id in selected_ids:
+            continue
+        selected.append(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _sanitize_string_list(values: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -1222,7 +1607,6 @@ def _miss_recommendation(
         "missing_metadata",
         "bad_record_text",
         "embedding_limitation",
-        "lexical_win",
         "real_user",
         "untriaged",
     }:
@@ -1428,6 +1812,36 @@ def _read_manifest(qdrant_path: Path) -> dict[str, Any] | None:
     except json.JSONDecodeError as exc:
         raise VectorIndexError(f"Vector index manifest is invalid: {path}") from exc
     return payload if isinstance(payload, dict) else None
+
+
+def _stale_index_payload(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    actual = manifest.get("index_schema_version")
+    if actual == INDEX_SCHEMA_VERSION:
+        return None
+    return build_error_payload(
+        error_type="stale_index",
+        message=(
+            "Vector index schema is stale for this runtime. "
+            "Run `grc-agent vector build` before semantic search."
+        ),
+        details={
+            "index_schema_version": actual,
+            "expected_index_schema_version": INDEX_SCHEMA_VERSION,
+        },
+    )
+
+
+def _query_embedding_model(
+    manifest: dict[str, Any],
+    *,
+    explicit_embedding_model: str | None,
+) -> str:
+    if explicit_embedding_model:
+        return explicit_embedding_model
+    manifest_model = manifest.get("embedding_model")
+    if isinstance(manifest_model, str) and manifest_model.strip():
+        return manifest_model.strip()
+    return DEFAULT_EMBEDDING_MODEL
 
 
 def _missing_index_payload() -> dict[str, Any]:

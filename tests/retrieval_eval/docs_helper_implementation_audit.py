@@ -19,9 +19,12 @@ from grc_agent.agent import GrcAgent
 from grc_agent.config import default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.docs_answer_advisor import (
-    DocsAnswerLlamaClient,
     DocsAnswerSnippet,
     run_docs_answer_advisor_diagnostic,
+)
+from grc_agent.toolagents_runtime import (
+    ToolAgentsJsonClient,
+    ToolAgentsLlamaProviderConfig,
 )
 
 DEFAULT_CORPUS = Path("tests/data/grc_docs_answer_eval.jsonl")
@@ -315,11 +318,14 @@ def run_audit(
 
         if row.index in prompt_index_set:
             sample_source_count = min(2, len(snippets))
-            sample_client = DocsAnswerLlamaClient(
+            sample_client = ToolAgentsJsonClient(
+                ToolAgentsLlamaProviderConfig(
                 base_url=llama_cfg.server_url,
+                    model=llama_cfg.model,
                 timeout_seconds=5.0,
                 max_tokens=512,
                 temperature=0.0,
+                )
             )
             sample_diag = run_docs_answer_advisor_diagnostic(
                 client=sample_client,
@@ -352,11 +358,14 @@ def run_audit(
                 for response_mode in RESPONSE_MODE_SWEEP:
                     for source_count in usable_source_counts:
                         subset = snippets[:source_count]
-                        client = DocsAnswerLlamaClient(
+                        client = ToolAgentsJsonClient(
+                            ToolAgentsLlamaProviderConfig(
                             base_url=llama_cfg.server_url,
+                                model=llama_cfg.model,
                             timeout_seconds=timeout_seconds,
                             max_tokens=max_tokens,
                             temperature=0.0,
+                            )
                         )
                         started = time.perf_counter()
                         diag = run_docs_answer_advisor_diagnostic(

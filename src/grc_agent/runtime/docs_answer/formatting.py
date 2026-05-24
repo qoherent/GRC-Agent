@@ -55,6 +55,7 @@ _DOCS_QUERY_STOP_WORDS = frozenset(
         "to",
         "used",
         "using",
+        "use",
         "what",
         "with",
     }
@@ -66,6 +67,19 @@ _DOCS_NAVIGATION_MARKERS = (
     "jump to navigation",
     "table of contents",
     "table of content",
+)
+_DOCS_INSTRUCTION_LEAK_MARKERS = (
+    "ignore previous",
+    "ignore all previous",
+    "system prompt",
+    "developer message",
+    "system instruction",
+    "developer instruction",
+    "call change_graph",
+    "use change_graph",
+    "execute change_graph",
+    "tool call",
+    "you are now",
 )
 _DOCS_MENU_TITLE_MARKERS = (
     "tutorials",
@@ -152,6 +166,8 @@ def is_tutorial_or_howto_query(query: str) -> bool:
     return bool(
         re.search(r"(?i)^\s*how\s+do\s+.+\s+work\??\s*$", query)
         or re.search(r"(?i)^\s*how\s+does\s+.+\s+work\??\s*$", query)
+        or re.search(r"(?i)^\s*how\s+do\s+i\s+use\s+.+\??\s*$", query)
+        or re.search(r"(?i)^\s*how\s+can\s+i\s+use\s+.+\??\s*$", query)
     )
 
 
@@ -159,7 +175,7 @@ def docs_topic_terms(query: str) -> list[str]:
     return [
         token
         for token in re.findall(r"[a-z0-9]+", query.lower())
-        if len(token) > 2 and token not in _DOCS_QUERY_STOP_WORDS
+        if (len(token) > 2 or token == "qt") and token not in _DOCS_QUERY_STOP_WORDS
     ]
 
 
@@ -188,11 +204,28 @@ def clean_docs_excerpt(excerpt: str) -> str:
     text = " ".join(str(excerpt or "").split()).strip()
     if not text:
         return ""
+    repeated_heading = re.match(
+        r"^(?P<title>[A-Za-z0-9][A-Za-z0-9 /()_.:-]{2,80})\s+##\s+(?P=title)\s+",
+        text,
+    )
+    if repeated_heading:
+        text = text[repeated_heading.end() :].strip()
+    inline_heading = re.match(
+        r"^(?P<head>(?:[A-Z][A-Za-z0-9()_.:/-]*\s+){1,5})"
+        r"(?P<body>(?:All|Another|For|Here|If|In|Messages|Streams|This|There|When)\b.+)",
+        text,
+    )
+    if inline_heading:
+        heading_words = inline_heading.group("head").split()
+        if 1 < len(heading_words) <= 5:
+            text = inline_heading.group("body").strip()
     segments = re.split(r"(?<=[.!?])\s+", text)
     kept: list[str] = []
     for segment in segments:
         lower = segment.lower()
         if any(marker in lower for marker in _DOCS_NAVIGATION_MARKERS):
+            continue
+        if any(marker in lower for marker in _DOCS_INSTRUCTION_LEAK_MARKERS):
             continue
         if _DOCS_LIST_MARKERS_RE.search(segment) and len(segment) < 70:
             continue

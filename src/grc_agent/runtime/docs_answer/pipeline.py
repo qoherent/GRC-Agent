@@ -13,6 +13,22 @@ from .evidence import _DOCS_TOPIC_SYNONYMS, _DocsEvidenceCandidate
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
+_ANSWER_SOURCE_STOP_WORDS = frozenset(
+    {
+        "according",
+        "also",
+        "and",
+        "are",
+        "for",
+        "from",
+        "local",
+        "that",
+        "the",
+        "this",
+        "with",
+    }
+)
+
 
 def ask_grc_docs(
     agent: "GrcAgent",
@@ -68,39 +84,74 @@ def ask_grc_docs(
         question=question_text,
         answer_type=answer_type,
     )
-    handlers.append("search_manual")
-    lexical_payload = agent_module.search_manual(retrieval_query, k=retrieval_k)
+    retrieval_queries = _docs_retrieval_queries(question_text, retrieval_query)
     semantic_manual: dict[str, Any] = {"ok": False, "results": []}
     semantic_tutorial: dict[str, Any] = {"ok": False, "results": []}
     degraded_retrieval = False
     fallback_used = False
     fallback_reason = "not_attempted"
     warnings: list[str] = []
-    retrieval_mode = "lexical_only"
-
-    lexical_strong = agent._is_lexical_docs_evidence_strong(
-        query=retrieval_query,
+    retrieval_mode = "semantic_docs"
+    source_limit = min(limit, agent._docs_answer_cfg.max_sources)
+    final_cache_key = agent._ask_grc_docs_cache_key(
         question=question_text,
-        answer_type=answer_type,
-        lexical_payload=lexical_payload,
-        limit=limit,
+        k=source_limit,
+        focus=focus_text,
+        retrieval_mode=retrieval_mode,
+        sources=[],
+        cache_scope="final",
     )
-    lexical_weak = not lexical_strong
-    tutorial_or_howto_query = agent._is_tutorial_or_howto_query(question_text)
-    run_manual_semantic = (
-        agent._docs_answer_cfg.semantic_manual_enabled
-        and (not agent._docs_answer_cfg.lexical_first or lexical_weak)
-    )
-    run_tutorial_semantic = (
-        agent._docs_answer_cfg.semantic_tutorial_enabled
-        and (tutorial_or_howto_query or lexical_weak)
-        and (not agent._docs_answer_cfg.lexical_first or lexical_weak)
-    )
+    cached_final_answer = agent._ask_grc_docs_cache_get(final_cache_key)
+    if cached_final_answer is not None:
+        handlers.append("answer_cache(hit)")
+        result = agent._payload_result(
+            "ask_grc_docs",
+            _docs_answer_payload_from_cache(
+                question=question_text,
+                focus=focus_text,
+                retrieval_mode=retrieval_mode,
+                cached=cached_final_answer,
+            ),
+        )
+        agent._last_docs_advisor_meta.update(
+            {
+                "advisor_attempted": False,
+                "advisor_success": True,
+                "fallback_reason": "none",
+                "helper_latency_ms": 0,
+                "prompt_chars": 0,
+                "snippet_count": 0,
+                "schema_valid": True,
+                "cache_hit": True,
+                "helper_finish_reason": "answer_cache_hit",
+                "source_quality": dict(cached_final_answer.get("source_quality") or {}),
+                "helper_eligible": bool(cached_final_answer.get("helper_eligible", False)),
+                "helper_skipped_reason": str(
+                    cached_final_answer.get("helper_skipped_reason") or "answer_cache_hit"
+                ),
+            }
+        )
+        return agent._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="ask_grc_docs",
+            wrapper_action="query",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=False,
+            output_truncated=False,
+        )
+
+    run_manual_semantic = agent._docs_answer_cfg.semantic_manual_enabled
+    run_tutorial_semantic = agent._docs_answer_cfg.semantic_tutorial_enabled
 
     if run_manual_semantic:
         handlers.append("semantic_search_grc(manual)")
-        semantic_manual = agent_module.semantic_search_grc(
-            retrieval_query,
+        semantic_manual = _run_docs_semantic_queries(
+            agent_module,
+            retrieval_queries,
             scope="manual",
             k=retrieval_k,
         )
@@ -114,8 +165,9 @@ def ask_grc_docs(
 
     if run_tutorial_semantic:
         handlers.append("semantic_search_grc(tutorial)")
-        semantic_tutorial = agent_module.semantic_search_grc(
-            retrieval_query,
+        semantic_tutorial = _run_docs_semantic_queries(
+            agent_module,
+            retrieval_queries,
             scope="tutorial",
             k=retrieval_k,
         )
@@ -127,18 +179,55 @@ def ask_grc_docs(
         }:
             degraded_retrieval = True
 
-    if run_manual_semantic and run_tutorial_semantic:
-        retrieval_mode = "lexical_plus_manual_and_tutorial_semantic"
-    elif run_manual_semantic:
-        retrieval_mode = "lexical_plus_manual_semantic"
-    elif run_tutorial_semantic:
-        retrieval_mode = "lexical_plus_tutorial_semantic"
-
-    if degraded_retrieval:
-        retrieval_mode = "lexical_fallback_missing_vector"
+    enabled_semantic_payloads = [
+        payload
+        for enabled, payload in (
+            (run_manual_semantic, semantic_manual),
+            (run_tutorial_semantic, semantic_tutorial),
+        )
+        if enabled
+    ]
+    if (
+        enabled_semantic_payloads
+        and all(payload.get("ok") is not True for payload in enabled_semantic_payloads)
+    ):
+        error_type = (
+            semantic_manual.get("error_type")
+            or semantic_tutorial.get("error_type")
+            or ErrorCode.RETRIEVAL_NOT_READY
+        )
+        warnings.append("vector_index_missing_or_not_ready")
+        result = agent._payload_result(
+            "ask_grc_docs",
+            {
+                "ok": False,
+                "question": question_text,
+                "focus": focus_text,
+                "answer": "",
+                "sources": [],
+                "insufficient_evidence": True,
+                "fallback_used": False,
+                "degraded_retrieval": True,
+                "retrieval_mode": "semantic_unavailable",
+                "warnings": warnings,
+                "message": "Docs vector retrieval is not available.",
+                "error_type": error_type,
+            },
+        )
+        return agent._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="ask_grc_docs",
+            wrapper_action="query",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=False,
+            output_truncated=False,
+        )
 
     candidates = agent._collect_docs_candidates(
-        lexical_payload=lexical_payload,
         semantic_manual=semantic_manual,
         semantic_tutorial=semantic_tutorial,
     )
@@ -156,7 +245,10 @@ def ask_grc_docs(
                 question=question_text,
                 candidates=[*candidates, assisted],
             )
-    elif agent._should_catalog_assist(question_text, ranked_candidates):
+    elif answer_type != "procedural_how_to" and agent._should_catalog_assist(
+        question_text,
+        ranked_candidates,
+    ):
         handlers.append("search_blocks(catalog_assisted_docs)")
         assisted = agent._build_catalog_assisted_candidate(question=question_text)
         if assisted is not None:
@@ -177,11 +269,15 @@ def ask_grc_docs(
         if not any(reason in severe_reasons for reason in candidate.low_value_reasons)
     ]
     selected_pool = filtered_candidates or ranked_candidates
+    answer_candidate_limit = _docs_answer_candidate_limit(
+        requested_limit=limit,
+        max_limit=agent._retrieval_cfg.ask_grc_docs_max_k,
+    )
     selected_candidates = agent._select_docs_candidates_for_answer_type(
         question=question_text,
         answer_type=answer_type,
         ranked_candidates=selected_pool,
-        limit=max(1, min(limit, agent._retrieval_cfg.ask_grc_docs_max_k)),
+        limit=answer_candidate_limit,
     )
     snippets = [candidate.snippet for candidate in selected_candidates]
     source_quality = agent._build_docs_source_quality(
@@ -194,15 +290,12 @@ def ask_grc_docs(
 
     insufficient_evidence = len(snippets) == 0 or str(source_quality.get("quality")) == "weak"
     answer = ""
-    source_limit = min(limit, agent._docs_answer_cfg.max_sources)
-    sources = [
-        {
-            "title": snippet.title,
-            "source": snippet.source,
-            "excerpt": snippet.excerpt[: agent._docs_answer_cfg.excerpt_target_chars],
-        }
-        for snippet in snippets
-    ]
+    sources = _sources_from_candidates(
+        selected_candidates,
+        answer="",
+        limit=source_limit,
+        excerpt_chars=agent._docs_answer_cfg.excerpt_target_chars,
+    )
     agent._last_docs_advisor_meta = {
         "advisor_attempted": False,
         "advisor_success": False,
@@ -224,6 +317,8 @@ def ask_grc_docs(
         k=source_limit,
         retrieval_mode=retrieval_mode,
         sources=sources[:source_limit],
+        focus=focus_text,
+        cache_scope="sources",
     )
     cached_docs_answer = agent._ask_grc_docs_cache_get(cache_key)
     if cached_docs_answer is not None:
@@ -255,6 +350,7 @@ def ask_grc_docs(
                 "helper_skipped_reason": helper_skipped_reason,
             }
         )
+    helper_sources_selected = False
     if snippets and cached_docs_answer is None:
         helper_eligible = False
         helper_skipped_reason = "not_evaluated"
@@ -263,7 +359,7 @@ def ask_grc_docs(
         if str(source_quality.get("quality")) != "weak":
             typed_answer, typed_insufficient = agent._build_typed_docs_answer(
                 question=question_text,
-                ranked_candidates=ranked_candidates,
+                ranked_candidates=selected_candidates,
                 answer_type=answer_type,
             )
             helper_eligible, helper_skipped_reason = agent._helper_eligibility_for_docs_answer(
@@ -358,6 +454,7 @@ def ask_grc_docs(
                         )
                 if selected_sources:
                     sources = selected_sources[:source_limit]
+                    helper_sources_selected = True
                 insufficient_evidence = bool(helper_result.get("insufficient_evidence"))
                 fallback_used = False
                 fallback_reason = "none"
@@ -369,7 +466,7 @@ def ask_grc_docs(
             fallback_reason = str(advisor_meta.get("fallback_reason") or "advisor_failed")
             if not agent._last_docs_advisor_meta.get("helper_finish_reason"):
                 agent._last_docs_advisor_meta["helper_finish_reason"] = fallback_reason
-            if helper_eligible:
+            if helper_eligible and agent._docs_answer_cfg.helper_mode != "never":
                 warnings.append("docs_answer_advisor_fallback")
         agent._last_docs_advisor_meta["helper_eligible"] = bool(helper_eligible)
         agent._last_docs_advisor_meta["helper_skipped_reason"] = helper_skipped_reason
@@ -389,24 +486,33 @@ def ask_grc_docs(
     answer = " ".join(answer.split())
     if len(answer) > agent._docs_answer_cfg.answer_target_chars:
         answer = answer[: agent._docs_answer_cfg.answer_target_chars - 1].rstrip() + "…"
+    if cached_docs_answer is None and snippets and not helper_sources_selected:
+        sources = _sources_from_candidates(
+            selected_candidates,
+            answer=answer,
+            limit=source_limit,
+            excerpt_chars=agent._docs_answer_cfg.excerpt_target_chars,
+        )
     if cached_docs_answer is None:
+        cache_payload = {
+            "answer": answer,
+            "sources": sources[:source_limit],
+            "insufficient_evidence": bool(insufficient_evidence),
+            "fallback_used": bool(fallback_used or degraded_retrieval),
+            "fallback_reason": fallback_reason,
+            "source_quality": dict(source_quality),
+            "helper_eligible": bool(
+                agent._last_docs_advisor_meta.get("helper_eligible", False)
+            ),
+            "helper_skipped_reason": str(
+                agent._last_docs_advisor_meta.get("helper_skipped_reason") or ""
+            ),
+        }
         agent._ask_grc_docs_cache_put(
             cache_key,
-            {
-                "answer": answer,
-                "sources": sources[:source_limit],
-                "insufficient_evidence": bool(insufficient_evidence),
-                "fallback_used": bool(fallback_used or degraded_retrieval),
-                "fallback_reason": fallback_reason,
-                "source_quality": dict(source_quality),
-                "helper_eligible": bool(
-                    agent._last_docs_advisor_meta.get("helper_eligible", False)
-                ),
-                "helper_skipped_reason": str(
-                    agent._last_docs_advisor_meta.get("helper_skipped_reason") or ""
-                ),
-            },
+            cache_payload,
         )
+        agent._ask_grc_docs_cache_put(final_cache_key, cache_payload)
 
     result = agent._payload_result(
         "ask_grc_docs",
@@ -443,24 +549,272 @@ def ask_grc_docs(
     )
 
 
+def _docs_retrieval_queries(question_text: str, retrieval_query: str) -> list[str]:
+    raw = " ".join(question_text.split())
+    expanded = " ".join(retrieval_query.split())
+    if not raw:
+        return [expanded] if expanded else []
+    if not expanded or _docs_query_key(raw) == _docs_query_key(expanded):
+        return [raw]
+    return [raw, expanded]
+
+
+def _docs_query_key(query: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9_]+", query.lower()))
+
+
+def _docs_answer_candidate_limit(*, requested_limit: int, max_limit: int) -> int:
+    # Keep the model-facing source count small while answer extraction can see
+    # a few adjacent retrieved chunks from the same topic/page.
+    return max(1, min(10, max(requested_limit, max_limit, 8)))
+
+
+def _docs_answer_payload_from_cache(
+    *,
+    question: str,
+    focus: str | None,
+    retrieval_mode: str,
+    cached: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "question": question,
+        "focus": focus,
+        "answer": str(cached.get("answer") or ""),
+        "sources": list(cached.get("sources") or []),
+        "insufficient_evidence": bool(cached.get("insufficient_evidence")),
+        "fallback_used": bool(cached.get("fallback_used")),
+        "degraded_retrieval": False,
+        "retrieval_mode": retrieval_mode,
+        "warnings": [],
+        "message": "Grounded docs answer returned from cache.",
+    }
+
+
+def _run_docs_semantic_queries(
+    agent_module: Any,
+    queries: list[str],
+    *,
+    scope: str,
+    k: int,
+) -> dict[str, Any]:
+    payloads = [
+        agent_module.semantic_search_grc(query, scope=scope, k=k)
+        for query in queries
+        if query
+    ]
+    if not payloads:
+        return {"ok": False, "results": []}
+    ok_payloads = [payload for payload in payloads if payload.get("ok") is True]
+    if not ok_payloads:
+        return payloads[0]
+
+    merged_results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for payload in ok_payloads:
+        for row in payload.get("results", []):
+            if not isinstance(row, dict):
+                continue
+            result_id = _semantic_result_id(row)
+            if result_id in seen:
+                continue
+            seen.add(result_id)
+            merged_results.append(row)
+
+    merged = dict(ok_payloads[0])
+    merged["results"] = merged_results
+    warnings: list[Any] = []
+    for payload in ok_payloads:
+        raw_warnings = payload.get("warnings")
+        if isinstance(raw_warnings, list):
+            warnings.extend(raw_warnings)
+    merged["warnings"] = list(dict.fromkeys(warnings))
+    return merged
+
+
+def _semantic_result_id(row: dict[str, Any]) -> str:
+    for key in ("record_id", "canonical_block_id"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return repr(sorted(row.items()))
+
+
+def _docs_candidate_record_key(
+    *,
+    record_id: Any,
+    source: str,
+    excerpt: str,
+) -> str:
+    if isinstance(record_id, str) and record_id:
+        return f"record:{record_id}"
+    source_key = _docs_query_key(source)
+    excerpt_key = _docs_query_key(excerpt[:160])
+    return f"source_excerpt:{source_key}:{excerpt_key}"
+
+
+def _sources_from_candidates(
+    candidates: list[_DocsEvidenceCandidate],
+    *,
+    answer: str,
+    limit: int,
+    excerpt_chars: int,
+) -> list[dict[str, str]]:
+    ranked = list(enumerate(candidates))
+    if answer:
+        ranked.sort(
+            key=lambda item: (
+                _answer_source_score(answer, item[1]),
+                -item[0],
+            ),
+            reverse=True,
+        )
+
+    sources: list[dict[str, str]] = []
+    source_counts: dict[str, int] = {}
+    for _, candidate in ranked:
+        source_key = _docs_query_key(candidate.snippet.source)
+        if source_counts.get(source_key, 0) >= 1:
+            continue
+        excerpt = _source_excerpt_for_answer(
+            candidate,
+            answer=answer,
+            excerpt_chars=excerpt_chars,
+        )
+        if not excerpt:
+            continue
+        sources.append(
+            {
+                "title": candidate.snippet.title,
+                "source": candidate.snippet.source,
+                "excerpt": excerpt,
+            }
+        )
+        source_counts[source_key] = source_counts.get(source_key, 0) + 1
+        if len(sources) >= limit:
+            break
+    return sources
+
+
+def _answer_source_score(answer: str, candidate: _DocsEvidenceCandidate) -> tuple[float, float, float, float]:
+    answer_text = _answer_evidence_text(answer)
+    source_text = " ".join(
+        [
+            candidate.snippet.title,
+            candidate.section,
+            candidate.snippet.excerpt,
+        ]
+    ).lower()
+    answer_lower = answer_text.lower()
+    exact = 1.0 if answer_lower and answer_lower in source_text else 0.0
+    answer_terms = _answer_terms(answer_text)
+    if answer_terms:
+        coverage = sum(1 for term in answer_terms if term in source_text) / len(answer_terms)
+    else:
+        coverage = 0.0
+    return (
+        exact,
+        coverage,
+        candidate.quality_score,
+        candidate.semantic_score or 0.0,
+    )
+
+
+def _source_excerpt_for_answer(
+    candidate: _DocsEvidenceCandidate,
+    *,
+    answer: str,
+    excerpt_chars: int,
+) -> str:
+    excerpt = candidate.snippet.excerpt
+    answer_text = _answer_evidence_text(answer)
+    best_sentence = _best_support_sentence(answer_text, excerpt)
+    if best_sentence:
+        return best_sentence[:excerpt_chars]
+    if answer_text:
+        return ""
+    return excerpt[:excerpt_chars]
+
+
+def _best_support_sentence(answer_text: str, excerpt: str) -> str:
+    answer_terms = _answer_terms(answer_text)
+    if not answer_terms:
+        return ""
+    answer_lower = answer_text.lower()
+    best_sentence = ""
+    best_score = -1.0
+    for sentence in re.split(r"(?<=[.!?])\s+", excerpt):
+        sentence = " ".join(sentence.split()).strip()
+        if not sentence:
+            continue
+        if _low_value_source_sentence(sentence):
+            continue
+        lower = sentence.lower()
+        if answer_lower and (answer_lower in lower or lower in answer_lower):
+            return sentence
+        score = sum(1 for term in answer_terms if term in lower) / len(answer_terms)
+        if score > best_score:
+            best_score = score
+            best_sentence = sentence
+    return best_sentence if best_score >= 0.5 else ""
+
+
+def _low_value_source_sentence(sentence: str) -> bool:
+    lower = sentence.lower()
+    if "```" in sentence or sentence.count("`") >= 2:
+        return True
+    if "::" in sentence or "self.connect(" in lower:
+        return True
+    if re.match(
+        r"(?i)^(source title|source url|retrieval topic|aliases|official or primary|why relevant):",
+        sentence,
+    ):
+        return True
+    if re.search(r"\b(id|inputs|outputs|parameters|states):\s", lower) and sentence.count(":") >= 2:
+        return True
+    return False
+
+
+def _answer_terms(answer: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for token in re.findall(r"[a-z0-9_]+", answer.lower()):
+        if len(token) <= 2 or token in _ANSWER_SOURCE_STOP_WORDS:
+            continue
+        if token in seen:
+            continue
+        terms.append(token)
+        seen.add(token)
+    return tuple(terms)
+
+
+def _answer_evidence_text(answer: str) -> str:
+    text = " ".join(str(answer or "").split()).strip()
+    text = re.sub(
+        r"(?i)^(according to local docs|according to the local block catalog|local docs say)[:,]?\s*",
+        "",
+        text,
+    )
+    return text
+
+
 def collect_docs_candidates(
     agent,
     *,
-    lexical_payload: dict[str, Any],
     semantic_manual: dict[str, Any],
     semantic_tutorial: dict[str, Any],
 ) -> list[_DocsEvidenceCandidate]:
     candidates: list[_DocsEvidenceCandidate] = []
-    seen_sources: set[str] = set()
+    seen_records: set[str] = set()
 
     def _append(
         *,
+        record_id: Any,
         title: Any,
         source: Any,
         excerpt: Any,
         section: Any,
         channel: str,
-        lexical_score: float = 0.0,
         semantic_score: float | None = None,
         source_type_hint: str | None = None,
     ) -> None:
@@ -473,16 +827,21 @@ def collect_docs_candidates(
         if aliases:
             source_text = f"{source_text} | title_aliases:{','.join(aliases)}"
 
-        source_key = agent._normalize_docs_source_key(source_text)
-        if source_key in seen_sources:
+        record_key = _docs_candidate_record_key(
+            record_id=record_id,
+            source=source_text,
+            excerpt=excerpt_text,
+        )
+        if record_key in seen_records:
             return
-        seen_sources.add(source_key)
+        seen_records.add(record_key)
 
         lower_excerpt = excerpt_text.lower()
         if title_text and lower_excerpt.startswith(title_text.lower()):
             excerpt_text = excerpt_text[len(title_text):].lstrip(" -:.\n")
         elif source_text and lower_excerpt.startswith(source_text.lower()):
             excerpt_text = excerpt_text[len(source_text):].lstrip(" -:.\n")
+        excerpt_text = agent._clean_docs_excerpt(excerpt_text)
 
         max_collected_excerpt_chars = max(
             agent._docs_answer_cfg.helper_max_total_context_chars,
@@ -505,7 +864,6 @@ def collect_docs_candidates(
                     source_type_hint=source_type_hint,
                 ),
                 section=" ".join(str(section or "").split()).strip(),
-                lexical_score=float(lexical_score),
                 semantic_score=semantic_score,
                 topic_score=0.0,
                 quality_score=0.0,
@@ -513,27 +871,6 @@ def collect_docs_candidates(
                 procedural=False,
             )
         )
-
-    if lexical_payload.get("ok") is True:
-        for row in lexical_payload.get("results", []):
-            if not isinstance(row, dict):
-                continue
-            citation = row.get("citation")
-            source = None
-            if isinstance(citation, dict):
-                source = citation.get("url") or citation.get("path")
-            score_raw = row.get("score")
-            lexical_score = (
-                float(score_raw) if isinstance(score_raw, int | float) else 0.0
-            )
-            _append(
-                title=row.get("title"),
-                source=source,
-                excerpt=row.get("excerpt"),
-                section=row.get("section"),
-                channel="lexical",
-                lexical_score=lexical_score,
-            )
 
     for payload, channel in (
         (semantic_manual, "semantic_manual"),
@@ -555,6 +892,7 @@ def collect_docs_candidates(
                 else None
             )
             _append(
+                record_id=row.get("record_id"),
                 title=row.get("title"),
                 source=source,
                 excerpt=row.get("excerpt"),
@@ -615,7 +953,6 @@ def rank_docs_candidates(
             source_pref = 1.5
         elif candidate.source_type == "tutorial":
             source_pref = -1.2
-        lexical_component = min(4.0, candidate.lexical_score / 25.0)
         semantic_component = 0.0
         if isinstance(candidate.semantic_score, float):
             semantic_component = (candidate.semantic_score - 0.62) * 7.0
@@ -651,7 +988,6 @@ def rank_docs_candidates(
             topic_score
             + source_pref
             + preferred_source_bonus
-            + lexical_component
             + semantic_component
             - low_value_penalty
             - procedural_penalty
@@ -664,7 +1000,6 @@ def rank_docs_candidates(
                 source_channel=candidate.source_channel,
                 source_type=candidate.source_type,
                 section=candidate.section,
-                lexical_score=candidate.lexical_score,
                 semantic_score=candidate.semantic_score,
                 topic_score=topic_score,
                 quality_score=quality_score,
@@ -677,7 +1012,6 @@ def rank_docs_candidates(
             -item.quality_score,
             -item.topic_score,
             -(item.semantic_score or 0.0),
-            -item.lexical_score,
             item.snippet.title.lower(),
         )
     )
@@ -934,6 +1268,17 @@ def build_typed_docs_answer(
                 "Local docs only provided one-sided evidence; not enough direct evidence to compare both sides.",
                 True,
             )
+        direct_comparison = _pick_direct_docs_comparison_sentence(
+            agent=agent,
+            candidates=comparison_candidates,
+            left_terms=left_terms,
+            right_terms=right_terms,
+        )
+        if direct_comparison:
+            return (
+                f"Local docs say: {_shorten_docs_comparison_sentence(direct_comparison, limit=220)}",
+                False,
+            )
         left_sentence = ""
         right_sentence = ""
         for candidate in comparison_candidates:
@@ -1140,7 +1485,11 @@ def build_typed_docs_answer(
             ):
                 return (f"According to local docs, {sentence}", False)
     min_hits = agent._minimum_required_term_hits(required_terms)
-    for candidate in ranked_candidates[:6]:
+    if answer_type == "procedural_how_to" and len(required_terms) >= 2:
+        min_hits = max(min_hits, min(2, len(required_terms)))
+    best_sentence = ""
+    best_score: tuple[float, float, float, float, int] | None = None
+    for candidate in ranked_candidates[:10]:
         if require_hier_source:
             title_source = " ".join([candidate.snippet.title, candidate.snippet.source]).lower()
             if "hier" not in title_source:
@@ -1152,8 +1501,90 @@ def build_typed_docs_answer(
             min_term_hits=min_hits,
         )
         if sentence:
-            return (f"According to local docs, {sentence}", False)
+            lower_sentence = sentence.lower()
+            term_hits = sum(
+                1
+                for term in required_terms
+                if agent._text_matches_term_or_synonym(lower_sentence, term)
+            )
+            exact_hits = sum(1 for term in required_terms if term and term in lower_sentence)
+            focus_bonus = _definition_focus_bonus(
+                lower_sentence,
+                required_terms=required_terms,
+            )
+            score = (
+                float(term_hits + exact_hits) + focus_bonus,
+                candidate.quality_score,
+                candidate.topic_score,
+                candidate.semantic_score or 0.0,
+                -len(sentence),
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_sentence = sentence
+    if best_sentence:
+        return (f"According to local docs, {best_sentence}", False)
     return ("Local docs did not contain enough direct evidence for this question.", True)
+
+
+def _definition_focus_bonus(
+    lower_sentence: str,
+    *,
+    required_terms: tuple[str, ...],
+) -> float:
+    if not required_terms:
+        return 0.0
+    focus_terms = required_terms[-1:]
+    for term in focus_terms:
+        if not term:
+            continue
+        pattern = rf"\b(?:the\s+)?{re.escape(term)}s?\s+(?:is|are|means|refers to|describes|contains|can contain)\b"
+        if re.search(pattern, lower_sentence):
+            return 3.0
+    return 0.0
+
+
+def _pick_direct_docs_comparison_sentence(
+    *,
+    agent,
+    candidates: list[_DocsEvidenceCandidate],
+    left_terms: tuple[str, ...],
+    right_terms: tuple[str, ...],
+) -> str:
+    contrast_markers = (
+        " differ",
+        " difference",
+        " different",
+        " unlike ",
+        " whereas ",
+        " while ",
+        " not possible ",
+        " cannot ",
+        " can connect ",
+    )
+    for candidate in candidates:
+        for sentence in agent._sentence_list(candidate.snippet.excerpt):
+            compact = " ".join(sentence.split()).strip()
+            for prefix in (candidate.section, candidate.snippet.title):
+                prefix_text = " ".join(str(prefix or "").split()).strip()
+                if prefix_text and compact.lower().startswith(f"{prefix_text.lower()} "):
+                    compact = compact[len(prefix_text) :].lstrip(" -:#")
+            compact = agent._clean_docs_excerpt(compact)
+            lower = compact.lower()
+            if len(compact) < 40 or len(compact) > 280:
+                continue
+            has_left = any(
+                agent._text_matches_term_or_synonym(lower, term)
+                for term in left_terms
+            )
+            has_right = any(
+                agent._text_matches_term_or_synonym(lower, term)
+                for term in right_terms
+            )
+            has_contrast = any(marker in f" {lower} " for marker in contrast_markers)
+            if has_left and has_right and has_contrast:
+                return compact
+    return ""
 
 
 def _shorten_docs_comparison_sentence(sentence: str, limit: int = 120) -> str:

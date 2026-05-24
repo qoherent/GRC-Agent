@@ -17,7 +17,8 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from grc_agent.config import LlamaConfig
-from grc_agent.llama_server import LlamaServerClient, LlamaServerError
+from grc_agent.llama_probe import LlamaHealthProbe, LlamaServerError
+from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig
 
 
 DEFAULT_STARTUP_POLL_SECONDS = 0.5
@@ -63,7 +64,8 @@ class LlamaLaunchResult:
     pid: int | None
     server_url: str
     model_alias: str
-    client: LlamaServerClient
+    provider_config: ToolAgentsLlamaProviderConfig
+    health_evidence: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -227,7 +229,7 @@ class LlamaServerLauncher:
         started: bool,
     ) -> LlamaLaunchResult:
         deadline = time.monotonic() + self.config.startup_timeout_seconds
-        client = self._client()
+        probe = self._probe()
         last_error = "server is not reachable yet"
 
         while time.monotonic() < deadline:
@@ -250,14 +252,29 @@ class LlamaServerLauncher:
 
             if self._socket_is_open():
                 try:
-                    client.require_ready()
-                    client.require_model_alias(self.model_alias)
+                    probe.require_ready()
+                    probe.require_model_alias(self.model_alias)
+                    props = probe.get_server_properties()
+                    from grc_agent.llama_probe import extract_model_context_limit
+
+                    actual_context = extract_model_context_limit(props)
+                    if actual_context is None:
+                        raise LlamaServerError(
+                            "llama.cpp server context is unknown from /props."
+                        )
                     return LlamaLaunchResult(
                         status="started" if started else "reused",
                         pid=cached_state.pid if cached_state is not None else None,
                         server_url=self.server_url,
                         model_alias=self.model_alias,
-                        client=client,
+                        provider_config=self._provider_config(),
+                        health_evidence={
+                            "llama_server_url": self.server_url,
+                            "llama_model": self.model_alias,
+                            "llama_actual_context_tokens": actual_context,
+                            "llama_context_verified": True,
+                            "llama_model_ready": True,
+                        },
                     )
                 except LlamaServerError as exc:
                     last_error = str(exc)
@@ -272,9 +289,17 @@ class LlamaServerLauncher:
             f"Log tail:\n{self._read_log_tail(cached_state)}"
         )
 
-    def _client(self) -> LlamaServerClient:
-        return LlamaServerClient(
+    def _probe(self) -> LlamaHealthProbe:
+        return LlamaHealthProbe(
             base_url=self.server_url,
+            api_key=self.api_key,
+            timeout_seconds=self.config.request_timeout_seconds,
+        )
+
+    def _provider_config(self) -> ToolAgentsLlamaProviderConfig:
+        return ToolAgentsLlamaProviderConfig(
+            base_url=self.server_url,
+            model=self.model_alias,
             api_key=self.api_key,
             timeout_seconds=self.config.request_timeout_seconds,
             max_tokens=self.config.max_tokens,

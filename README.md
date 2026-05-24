@@ -4,7 +4,7 @@ Local GNU Radio Companion `.grc` assistant focused on safe, validated, local-fir
 
 ## Vision
 
-GRC Agent is a reliable local assistant for GNU Radio Companion graphs. It inspects the active graph, uses verified tools, mutates only through validated transactions, verifies results, saves only when asked, and asks for clarification when required details are missing.
+GRC Agent is a reliable local assistant for GNU Radio Companion graphs. It inspects the active graph, uses verified tools, mutates only through validated transactions, verifies results, autosaves successful mutations, and asks for clarification when required details are missing.
 
 The project optimizes for reliability over cleverness. Autonomy comes from typed state, explicit tools, deterministic validation, and measured evals, not from hidden YAML edits, prompt tricks, or tutorial-derived recipes.
 
@@ -15,19 +15,16 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
   production-ready.
 - One active `.grc` session per agent.
 - Default model-facing runtime surface is the MVP wrapper profile:
-  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`,
-  `save_graph_explicit`, `load_graph_explicit`.
+  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`.
+- The read-only wrappers are intentionally compact: `inspect_graph` overview is
+  topology-only, targeted details expose guarded target refs and selected
+  parameters, `search_blocks` returns concise catalog candidates, and
+  `ask_grc_docs` returns cited explanation evidence.
 - Low-level tools remain internal implementation primitives and are not
   model-facing.
-- Save/load are model-facing only through explicit lifecycle wrappers:
-  `save_graph_explicit` and `load_graph_explicit`.
-- Lifecycle wrappers require explicit user intent and are currently
-  beta-validated by R5 save/load evals; not release-validated.
-- All meaningful mutations go through verified tools and validate before commit.
-- Classified turns use typed tool narrowing before llama.cpp sees schemas, so clear requests expose only relevant wrapper actions.
+- The model cannot save or load directly. `/save` is a CLI command; graph loading happens when the CLI session starts.
+- All meaningful mutations go through verified tools, validate before commit, and autosave after successful validation when the active copied graph path is safe and writable.
 - Vague or under-specified mutation requests clarify before execution.
-- TurnPlan Advisor remains shadow-only. It does not affect default runtime
-  routing or mutation authority.
 - Raw `.grc` YAML editing, undo/redo, and Python export/code-generation requests are refused.
 - `ask_grc_docs` is explanation-only: it retrieves local manual/tutorial snippets and
   returns concise grounded answers with sources when evidence is strong. The
@@ -54,28 +51,16 @@ The validated subset is intentionally scoped: `R0_READ_ONLY` and
 `R1_SET_PARAM_ONLY` are release-validated, broader graph mutations are
 beta-validated, and the runtime is not production-ready.
 
-- Deterministic tests cover schema rejection, raw-YAML refusal, rollback, save gating, atomic save, insert safety, clarification handling, turn-guard behavior, and typed recovery classification.
+- Deterministic tests cover schema rejection, raw-YAML refusal, rollback, autosave/manual-save behavior, insert safety, clarification handling, route validation, and typed recovery classification.
 - Live evals check whether the local model routes representative prompts through the right tools and reaches selected semantic/end states.
 - Live evals report routing pass, argument pass, tool success pass, semantic/end-state pass, safety pass, and recovery pass separately.
 - A task is not considered reliable just because the expected tool name appeared. Correct arguments, graph diff, validation, saved file, and user-facing behavior matter.
 - Route mismatches fail closed. For example, if a disable request is interpreted as block removal, execution is blocked before mutation rather than silently repaired.
-- Deterministic adversarial TurnPlan coverage now exercises 100+ prompts, and live evals can run the Tier 5 adversarial intent/safety suite.
-
-## Advisor-First Intent Boundary
-
-Do not solve intent routing with regexes, phrase dictionaries, or hardcoded
-natural-language branches. Intent routing belongs to the local Advisor. Runtime
-code may validate enum/schema shape, map advisor mode to a tool class, enforce
-allowed tools, validate operation schemas, run preflight/`grcc`, roll back
-failed edits, and enforce save state. Runtime code must not duplicate semantic
-intent logic with phrase lists such as preview wording, raw-YAML wording,
-vague-topology wording, or block-UID wording.
-
-Advisor remains shadow-only and is not used for default runtime routing.
+- Live evals can run the Tier 5 adversarial intent/safety suite. Do not solve routing failures with regexes, phrase dictionaries, prompt folklore, or fixture-specific shortcuts; fix the authoritative data path, wrapper contract, validation, or context budget.
 
 ## Repo Map
 
-- `src/grc_agent/`: package code for runtime, session, catalog, retrieval, validation, transaction, llama adapter, and CLI.
+- `src/grc_agent/`: package code for runtime, ToolAgents integration, session, catalog, retrieval, validation, transaction, llama probing/launching, and CLI.
 - `tests/`: deterministic `unittest` regression coverage.
 - `tests/data/random_bit_generator.grc`: canonical fixture graph.
 - `tests/llama_eval/`: live llama.cpp routing and behavior evals.
@@ -83,6 +68,7 @@ Advisor remains shadow-only and is not used for default runtime routing.
 - `docs/QUICKSTART.md`: setup and common usage.
 - `docs/ISSUE_INTAKE.md`: issue report template and debug-bundle guidance.
 - `docs/DEMO_VIDEO.md`: reproducible demo workflow.
+- `docs/HANDOFF.md`: current handoff for the next implementation/audit agent.
 - `docs/wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus for explanation-only retrieval and evals.
 - `tests/data/retrieval/vector_eval_governed_metadata.json`: frozen vector regression baseline artifact.
 
@@ -101,7 +87,14 @@ Prerequisites:
 
 The CLI can auto-start a configured local llama.cpp server for normal `chat` use when `llama-server` is installed. The configured default is explicit CUDA device `CUDA0` with `gpu_layers=999`; `llama-server --list-devices` must show `CUDA0`. `doctor` is passive by default; use `uv run grc-agent doctor --start-llama` when you explicitly want it to start or reuse llama.cpp during environment checks.
 
-`uv sync --locked` installs Python dependencies including Graphify-backed lexical search and Qdrant/FastEmbed vector search. It does not install GNU Radio or llama.cpp. `uv run grc-agent vector build` explicitly builds the local vector index and may download the FastEmbed model on first run.
+`uv sync --locked` installs Python dependencies including ToolAgents and Qdrant/FastEmbed vector search. It does not install GNU Radio, llama.cpp, chat models, or embedding model files. `uv run grc-agent vector build` explicitly builds the local vector index and may download the FastEmbed embedding model into the user's local cache on first run.
+
+Packaging policy:
+
+- `pyproject.toml` is the primary install contract for Python dependencies.
+- Docker is not required for the default local install path. A container/devcontainer can be added later for reproducible development, but it should not become the normal user path unless GNU Radio packaging forces it.
+- Model files are runtime assets, not repo/package assets. Do not commit or bundle GGUF files, FastEmbed/Hugging Face caches, `.grc_agent/vector_index/`, or generated Qdrant state.
+- The current vector default is `BAAI/bge-small-en-v1.5` through FastEmbed. The local cached quantized ONNX package is about 65 MB on disk.
 
 GNU Radio is normally installed outside this Python package. A plain uv virtual
 environment may not automatically see distro-installed GNU Radio Python
@@ -144,6 +137,17 @@ Open an existing graph:
 uv run grc-agent chat tests/data/random_bit_generator.grc
 ```
 
+For exploratory local turns where the model may need multiple tool steps before
+answering:
+
+```bash
+uv run grc-agent chat --agentic tests/data/random_bit_generator.grc
+```
+
+`--agentic` only raises the bounded tool-round budget and request timeout. It
+does not expose internal tools, lifecycle tools, or bypass validation. Use
+`--max-tool-rounds N` for an explicit per-session limit.
+
 Copied-graph rule: strongly prefer testing on copied graphs only.
 
 ```bash
@@ -158,7 +162,7 @@ Recommended local validation sequence:
 4. inspect naturally, then ask for targeted block details when needed
 5. search with `search_blocks` / `ask_grc_docs` for read-only discovery or explanation
 6. preview or apply edits through `change_graph`
-7. let load/mutation/save paths run validation automatically
+7. let load, mutation, autosave, and manual-save paths run validation automatically
 8. use `/save [path] [--overwrite]` for explicit manual save
 9. use `/history` or `grc-agent history ...` only for debug/checkpoint review
 
@@ -192,12 +196,6 @@ uv run grc-agent tool summarize_graph --file tests/data/random_bit_generator.grc
 uv run grc-agent tool validate_graph --file tests/data/random_bit_generator.grc
 ```
 
-Search cited GNU Radio manual/tutorial excerpts without a model or graph mutation:
-
-```bash
-uv run grc-agent manual search "stream tags" --k 3 --json
-```
-
 Build and query the local read-only vector index:
 
 ```bash
@@ -210,6 +208,12 @@ uv run grc-agent vector proposals --json
 uv run grc-agent vector gc --json
 uv run grc-agent vector gc --apply --json
 ```
+
+`vector build` indexes installed GNU Radio block metadata plus the local docs
+corpus. The default embedding model is downloaded by FastEmbed when missing.
+Use `--embedding-model <fastembed-model-name>` only when intentionally
+rebuilding and querying with a different local embedding model. `vector search`
+defaults to the embedding model recorded in the active vector index manifest.
 
 `vector miss` records sanitized real-user retrieval misses in JSONL evidence
 without changing metadata, rankings, tools, or graph state. Use it to collect
@@ -239,19 +243,30 @@ uv run grc-agent history restore <id> --to /tmp/restored_copy.grc
 
 History is local-only under `.grc_agent/history/`. A baseline checkpoint is
 created when a graph loads, accepted versions are recorded after verified
-mutations and explicit saves, previews do not commit checkpoints, and restore
+mutations and manual saves, previews do not commit checkpoints, and restore
 refuses to overwrite existing files.
 
 ## Beta Smoke (Local-Only)
 
-Single local smoke command (no live model required):
+Single local smoke command without llama.cpp:
 
 ```bash
 uv run grc-agent doctor \
-  && uv run grc-agent health \
   && uv run grc-agent fake tests/data/random_bit_generator.grc \
-  && uv run python -m tests.retrieval_eval.vector_regression \
-  && uv run python -m unittest tests.test_mvp_tool_profile tests.test_mvp_wrapper_dispatch tests.test_history_journal
+  && uv run python -m unittest tests.test_mvp_tool_profile tests.test_toolagents_runtime tests.test_history_journal
+```
+
+Model-backed readiness smoke:
+
+```bash
+uv run grc-agent doctor --start-llama \
+  && uv run grc-agent health
+```
+
+Retrieval regression is a separate slower gate:
+
+```bash
+uv run python -m tests.retrieval_eval.vector_regression
 ```
 
 Record real-use dogfooding observations without changing runtime behavior:
@@ -301,14 +316,15 @@ raw prompt history, or raw graph contents.
 
 ## Verification
 
-Fast default gate (normal development):
+Targeted gate (normal development):
 
 ```bash
 uv run ruff check src/ tests/
-uv run ruff check
-uv run python -m unittest
+uv run python -m unittest tests.test_toolagents_runtime tests.test_mvp_tool_profile
 uv run python -m tests.retrieval_eval.vector_regression
 ```
+
+Reserve full `uv run python -m unittest` for release-candidate gates or broad runtime sweeps.
 
 Retrieval/vector eval note: run retrieval gates sequentially. Do not run
 `vector_regression` and `grc_docs_answer_eval` in parallel while using the same
@@ -325,7 +341,6 @@ uv run python -m tests.llama_eval.run_r3_rewire --n-runs 1 --results-path /tmp/r
 uv run python -m tests.llama_eval.run_r4a_insert --n-runs 1 --results-path /tmp/r4a.json
 uv run python -m tests.llama_eval.run_r4b_remove --n-runs 1 --results-path /tmp/r4b.json
 uv run python -m tests.llama_eval.run_r4c_add_variable --n-runs 1 --results-path /tmp/r4c.json
-uv run python -m tests.llama_eval.run_r5_save_load --n-runs 1 --results-path /tmp/r5.json
 ```
 
 Release/default-routing evidence sweep:
@@ -339,13 +354,10 @@ uv run python -m tests.llama_eval.run_r3_rewire --n-runs 3 --results-path /tmp/r
 uv run python -m tests.llama_eval.run_r4a_insert --n-runs 3 --results-path /tmp/r4a_n3.json
 uv run python -m tests.llama_eval.run_r4b_remove --n-runs 3 --results-path /tmp/r4b_n3.json
 uv run python -m tests.llama_eval.run_r4c_add_variable --n-runs 3 --results-path /tmp/r4c_n3.json
-uv run python -m tests.llama_eval.run_r5_save_load --n-runs 3 --results-path /tmp/r5_n3.json
 uv run python -m tests.llama_eval.run_r7_exact_external --n-runs 3 --results-path /tmp/r7_exact_n3.json
 uv run python -m tests.llama_eval.run_r7_natural_external --n-runs 3 --results-path /tmp/r7_natural_n3.json
 uv run python -m tests.llama_eval.tier5_adversarial --n-runs 3 --results-path /tmp/tier5_n3.json
 ```
-
-Advisor/model bakeoff scripts are research-only and are not part of default verification.
 
 Operational reports are generated locally during eval/dogfood runs and are not required to be tracked in git for normal development.
 
@@ -355,12 +367,12 @@ Operational reports are generated locally during eval/dogfood runs and are not r
 - Default model-facing mutation entrypoint is `change_graph` (wrapper). Internal verified handlers remain safety boundaries.
 - Preview-only turns must not expose, require, nudge, or execute `apply_edit`,
   including prompts that say "do not apply" or "without applying".
-- Save only when the user asks and only after validation of the latest dirty state.
+- The model cannot save or load. Successful committed mutations autosave after validation when the copied graph path is safe and writable; `/save` remains the explicit manual save command.
 - Failed edits must not mutate the live graph.
 - Clarification choices must come from real executable candidates.
 - Manual/tutorial retrieval is read-only explanation support with provenance; it is not mutation authority or runtime recipe material.
 - `ask_grc_docs` remains explanation-only and never authorizes graph mutation.
-- `search_blocks` and `ask_grc_docs` are the default model-facing retrieval wrappers. Internal lexical/vector/manual handlers remain read-only.
+- `search_blocks` and `ask_grc_docs` are the default model-facing retrieval wrappers. `search_blocks` uses exact/catalog metadata lookup, cached in-memory SQLite FTS5 sparse ranking, and vector retrieval when the local index is available; docs/manual retrieval remains read-only explanation support. Their model-visible outputs should stay concise and evidence-only.
 - Loaded blocks include a deterministic `block_uid` in graph context for
   duplicate identity evidence. Free-form UID mutation remains rejected; the
   only supported UID path is a checked `target_ref` object for block-local
@@ -384,7 +396,8 @@ Operational reports are generated locally during eval/dogfood runs and are not r
   invalid rewires roll back without committing a partial disconnect.
 - Live-eval pre-turn setup, where needed, must use public verified tools,
   record the setup calls, and validate the graph before the measured turn.
-- Retrieval eval currently covers 290 deterministic cases; vector search has 276 top-k hits versus 168 lexical hits with 0 exact-ID misses, 0 false-positive failures, and 0 source-type misses. A six-model FastEmbed bakeoff kept `BAAI/bge-small-en-v1.5` as the runtime default.
+- Retrieval eval currently covers 290 deterministic cases; vector search has 276 top-k hits with 0 exact-ID misses, 0 false-positive failures, and 0 source-type misses. A six-model FastEmbed bakeoff kept `BAAI/bge-small-en-v1.5` as the runtime default.
+- Block catalog search uses exact/catalog lexical metadata lookup, cached in-memory SQLite FTS5 sparse ranking, and vector retrieval when the local index is available, then deterministic merge/rerank. Exact block IDs, parameter IDs, ports, and dtypes must not depend on dense embeddings alone.
 - Vector retrieval baseline evidence is frozen in `tests/data/retrieval/vector_eval_governed_metadata.json`; the no-LLM regression gate is `uv run python -m tests.retrieval_eval.vector_regression`.
 - Any future catalog semantic metadata change must be evidence-backed and must rerun retrieval regression before acceptance.
 - The `numpy<2` dependency marker is GNU Radio ABI compatibility debt for the current supported local GNU Radio 3.10.x environment; remove it only after the supported GNU Radio target and deterministic gates pass with NumPy 2.x.
@@ -393,11 +406,10 @@ Operational reports are generated locally during eval/dogfood runs and are not r
 
 - Expand Tier 2 semantic checks beyond the canonical fixture and into more installed GNU examples where available.
 - Keep persisting Tier 2/3/4/5 `--n-runs 3` results and gate release candidates through the dashboard.
-- Expand the typed TurnPlan/executor policy behind `GrcAgent`; do not add a broad graph planner.
+- Keep the four-wrapper model surface small; keep `change_graph` as a compact `op + args` envelope instead of adding broad planners or new chat tools.
 - Run Tier 2, Tier 3, Tier 4, and Tier 5 with `--n-runs 3` before release candidates so stochastic 2B behavior is measured explicitly.
-- Keep vector retrieval vector-only until eval evidence justifies hybrid sparse search or reranking.
-- Improve explanation quality using the read-only manual search path, but keep catalog metadata and `grcc` authoritative for graph edits.
+- Keep the default local retrieval stack lightweight: pyproject-managed dependencies, user-local model/cache downloads, generated local Qdrant state, and no bundled model artifacts.
+- Improve explanation quality through the read-only vector docs path, but keep catalog metadata and `grcc` authoritative for graph edits.
 - Continue real-user/user-graph pilot intake with `grc-agent dogfood record/report`; patch only STOP_THE_LINE issues or repeated generic failures across unrelated graphs, not one-off small-model weirdness.
 
 See `docs/BLUEPRINT.md` for the current design contract and patch criteria.
-See `docs/BLUEPRINT.md` for the active retrieval operating contract.

@@ -19,14 +19,13 @@
   "expected_final_state": {"dirty": false},
   "expected_graph_delta": {"no_content_change": true},
   "expected_validation_status": "any",
-  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "expected_autosave_behavior": {"autosave_expected": false},
   "forbidden_events": [
     "raw_legacy_tool_call",
     "raw_yaml_mutation",
     "preview_mutation",
     "failed_validation_commit",
-    "unsafe_save",
-    "unsafe_load",
+    "unsafe_autosave",
     "original_graph_mutation"
   ]
 }

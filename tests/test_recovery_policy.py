@@ -88,7 +88,7 @@ class RecoveryPolicyTests(unittest.TestCase):
         self.assertTrue(decision.recoverable)
         self.assertEqual(
             decision.allowed_tools,
-            ("validate_graph", "save_graph", "save_graph_explicit"),
+            ("validate_graph", "save_graph"),
         )
         self.assertEqual(decision.max_mutation_retries, 0)
 

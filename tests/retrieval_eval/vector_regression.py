@@ -75,14 +75,12 @@ def evaluate_vector_regression(payload: dict[str, Any]) -> dict[str, Any]:
         "summary": {
             "total_cases": summary.get("total_cases"),
             "vector_top_k_hits": vector_hits,
-            "lexical_top_k_hits": summary.get("lexical_top_k_hits"),
             "safety_passes": safety_passes,
             "provenance_passes": provenance_passes,
             "deterministic_rebuild_pass": summary.get("deterministic_rebuild_pass"),
         },
         "miss_analysis": {
             "vector_miss_count": miss_analysis.get("vector_miss_count"),
-            "lexical_win_count": miss_analysis.get("lexical_win_count"),
             "exact_id_miss_count": exact_id_misses,
             "false_positive_failure_count": false_positive_failures,
             "source_type_miss_count": source_type_misses,

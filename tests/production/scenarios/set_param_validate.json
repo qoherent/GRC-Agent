@@ -26,7 +26,7 @@
   "max_turns": 1,
   "allowed_capabilities": ["R1_SET_PARAM_ONLY"],
   "expected_final_state": {
-    "dirty": true,
+    "dirty": false,
     "variables": {"samp_rate": "48000"}
   },
   "expected_graph_delta": {
@@ -35,14 +35,13 @@
     }
   },
   "expected_validation_status": "valid",
-  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
+  "expected_autosave_behavior": {"autosave_expected": true},
   "forbidden_events": [
     "raw_legacy_tool_call",
     "raw_yaml_mutation",
     "preview_mutation",
     "failed_validation_commit",
-    "unsafe_save",
-    "unsafe_load",
+    "unsafe_autosave",
     "original_graph_mutation"
   ]
 }

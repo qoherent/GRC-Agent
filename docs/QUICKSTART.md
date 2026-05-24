@@ -7,7 +7,6 @@ Use copied `.grc` files. Do not edit installed examples or originals directly.
 ```bash
 uv sync --locked
 uv run grc-agent doctor
-uv run grc-agent health
 ```
 
 Required outside this package:
@@ -15,6 +14,13 @@ Required outside this package:
 - Python 3.12+
 - GNU Radio 3.10.x with `grcc` on `PATH`
 - CUDA-enabled `llama-server` from llama.cpp for model-backed chat on NVIDIA machines
+
+ToolAgents is installed by `uv sync` and is the chat/tool-call harness. GRC Agent still owns wrapper validation, graph transactions, rollback, autosave, manual `/save`, graph loading at session start, and trace evidence.
+
+The default install path is local Python packaging through `pyproject.toml` and
+`uv`. Docker is not required for normal use. Do not bundle model files with this
+repo: chat GGUF files, FastEmbed/Hugging Face model caches, and Qdrant vector
+state are user-local runtime assets.
 
 If GNU Radio is installed by the OS and a normal uv venv cannot import it, use a system-site venv:
 
@@ -32,9 +38,21 @@ uv run grc-agent vector build
 uv run grc-agent vector stats --json
 ```
 
-## Start llama.cpp
+`vector build` indexes installed GNU Radio block metadata plus the local docs
+corpus. On first run it may download the default FastEmbed model,
+`BAAI/bge-small-en-v1.5`, into the user's local cache. The cached quantized ONNX
+package is about 65 MB. The generated index lives under local ignored state, not
+inside the package.
 
-CUDA path for the local NVIDIA runtime:
+## llama.cpp Backend
+
+Normal chat use does not require manually launching llama.cpp. `grc-agent chat`
+checks the configured server, starts or reuses `llama-server` when needed, then
+verifies `/health`, `/v1/models`, and `/props`.
+
+Use the explicit start path when you want to manage the backend yourself, debug
+llama.cpp directly, or record reproducible readiness evidence. CUDA path for the
+local NVIDIA runtime:
 
 ```bash
 llama-server --list-devices
@@ -56,10 +74,13 @@ If `llama-server --list-devices` does not show `CUDA0`, the installed llama.cpp 
 Verify:
 
 ```bash
+uv run grc-agent doctor --start-llama
 uv run grc-agent health
 ```
 
-Health must report reachable llama and verified context for end-to-end runtime readiness.
+Health is passive: it reports `not_ready` when no server is reachable. For
+end-to-end runtime readiness it must report reachable llama and verified context.
+Verified context is a capacity check, not a reason to send huge prompts. Keep repro prompts small when testing small local models.
 
 ## Open A Copied Graph
 
@@ -70,6 +91,17 @@ cp /usr/share/gnuradio/examples/audio/dial_tone.grc \
 
 uv run grc-agent chat playground/grc_agent_interactive/dial_tone_interactive.grc
 ```
+
+For exploratory turns where the model may need several inspect/search/mutate
+rounds before answering, use the larger bounded tool budget:
+
+```bash
+uv run grc-agent chat --agentic playground/grc_agent_interactive/dial_tone_interactive.grc
+```
+
+`--agentic` does not expose extra tools or bypass validation. It only raises the
+tool-round ceiling and request timeout. For explicit experiments, override the
+round limit with `--max-tool-rounds N`.
 
 Interactive commands:
 
@@ -121,7 +153,7 @@ Save manually:
 
 `grc-agent tool` is a deterministic debug entrypoint for internal primitives, not
 the model-facing wrapper surface. For normal use, start chat and let the model use
-the six wrappers.
+the four wrappers.
 
 ```bash
 uv run grc-agent tool summarize_graph \
@@ -138,11 +170,12 @@ uv run grc-agent tool get_grc_context \
 The agent will:
 
 - inspect the active graph
-- expose mutation-ready handles during targeted inspection
+- expose guarded target refs during targeted inspection
 - preview without mutation
 - mutate only through `change_graph`
 - validate committed graph edits
-- save only when explicitly asked
+- autosave successful validated mutations to the active copied graph
+- save manually only through explicit `/save`
 - clarify ambiguous graph targets
 
 The agent will not:

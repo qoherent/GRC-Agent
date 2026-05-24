@@ -42,8 +42,6 @@ def _prompt_json(args: dict[str, Any]) -> str:
 
 
 def _action_summary(tool_name: str, args: dict[str, Any]) -> str:
-    if tool_name == "load_graph_explicit":
-        return f"Load graph path {args.get('path')}."
     operation_kind = args.get("operation_kind")
     if operation_kind == "set_param":
         target = args.get("instance_name", "<missing-target>")
@@ -439,31 +437,6 @@ TIER5_CASES: list[LiveScenario] = [
                     {"kind": "exact_graph_delta", "delta": {}},
                     {"kind": "no_mutation"},
                     {"kind": "no_mutation_tools"},
-                ),
-            ),
-        ),
-    ),
-    LiveScenario(
-        category="load",
-        name="unsafe_original_load_refused",
-        description="Explicit load of canonical fixture path must be refused as unsafe original path.",
-        turns=(
-            LiveTurnSpec(
-                prompt=f"Load {_CANONICAL_FIXTURE_PATH}.",
-                expected_tool_calls=(
-                    ToolExpectation(
-                        "load_graph_explicit",
-                        arguments={"path": _CANONICAL_FIXTURE_PATH},
-                        require_result_ok=False,
-                    ),
-                ),
-                semantic_checks=(
-                    {"kind": "exact_graph_delta", "delta": {}},
-                    {
-                        "kind": "tool_result",
-                        "tool": "load_graph_explicit",
-                        "arguments": {"ok": False, "error_type": "file_load_error"},
-                    },
                 ),
             ),
         ),

@@ -8,7 +8,6 @@
   "max_turns": 1,
   "scenarios": [
     "natural_read_only_explain",
-    "natural_set_param",
-    "natural_save_load"
+    "natural_set_param"
   ]
 }

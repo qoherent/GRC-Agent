@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import fcntl
+import json
 import tempfile
 import unittest
 from unittest import mock
@@ -10,6 +11,7 @@ from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.retrieval.vector import semantic_search_grc
 from grc_agent.retrieval.vector import vector_index_stats
+from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
 
 
 class SemanticSearchToolTests(unittest.TestCase):
@@ -23,6 +25,29 @@ class SemanticSearchToolTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error_type"], "missing_index")
         self.assertIn("grc-agent vector build", payload["message"])
+
+    def test_stale_index_schema_fails_closed_before_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            index_dir = root / "qdrant"
+            (root / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "active_collection": "old_collection",
+                        "index_schema_version": "old-schema",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = semantic_search_grc("audio smoother", index_dir=index_dir)
+            stats = vector_index_stats(index_dir=index_dir)
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_type"], "stale_index")
+        self.assertFalse(stats["ok"])
+        self.assertEqual(stats["error_type"], "stale_index")
 
     def test_stats_uses_exclusive_local_qdrant_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -62,15 +87,13 @@ class SemanticSearchToolTests(unittest.TestCase):
         self.assertEqual(session.state_revision, before_revision)
         self.assertEqual(session.is_dirty, before_dirty)
 
-    def test_uncertain_mutation_does_not_expose_semantic_search(self) -> None:
+    def test_semantic_search_stays_internal_to_model_surface(self) -> None:
         session = FlowgraphSession()
         session.load(self._fixture_path())
         agent = GrcAgent(session)
-
-        agent.init_turn_requirements("Fix this graph and make the signal chain better.")
         tool_names = [schema["function"]["name"] for schema in agent.get_tool_schemas_for_turn()]
 
-        self.assertEqual(tool_names, [])
+        self.assertEqual(tool_names, list(MVP_MODEL_TOOL_NAMES))
         self.assertNotIn("semantic_search_grc", tool_names)
 
 

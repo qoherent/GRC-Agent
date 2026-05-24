@@ -30,7 +30,7 @@ class CapabilitySpec:
 
 @dataclass(frozen=True, slots=True)
 class ExperimentalOperationSpec:
-    """Metadata for non-release-gating operation kinds still exposed in schema."""
+    """Metadata for non-release-gating operation kinds kept internal."""
 
     operation_kind: str
     status: CapabilityStatus
@@ -51,7 +51,7 @@ def change_graph_operation_kinds() -> tuple[str, ...]:
         change_graph_schema.get("function", {})
         .get("parameters", {})
         .get("properties", {})
-        .get("operation_kind", {})
+        .get("op", {})
     )
     enum_values = operation_kind.get("enum", [])
     return tuple(str(value) for value in enum_values)
@@ -60,14 +60,8 @@ def change_graph_operation_kinds() -> tuple[str, ...]:
 # Control outcomes are explicit non-mutation responses from change_graph.
 CONTROL_OUTCOME_KINDS: frozenset[str] = frozenset({"clarify", "unsupported"})
 
-# Exposed but not part of release/beta capability gating.
-EXPERIMENTAL_OPERATION_SPECS: dict[str, ExperimentalOperationSpec] = {
-    "auto_insert": ExperimentalOperationSpec(
-        operation_kind="auto_insert",
-        status="unvalidated",
-        release_gating=False,
-    )
-}
+# Internal experiments are not part of the model-facing change_graph schema.
+EXPERIMENTAL_OPERATION_SPECS: dict[str, ExperimentalOperationSpec] = {}
 
 # Mutable operation capabilities tracked for validation progress.
 CAPABILITY_SPECS: dict[str, CapabilitySpec] = {
@@ -141,11 +135,11 @@ CAPABILITY_SPECS: dict[str, CapabilitySpec] = {
         supports_preview=True,
         supports_commit=True,
     ),
-    "insert_block": CapabilitySpec(
-        operation_kind="insert_block",
+    "insert_in_connection": CapabilitySpec(
+        operation_kind="insert_in_connection",
         status="beta_validated",
-        required_args=("connection_id", "block_id|candidate_id", "instance_name"),
-        allowed_aliases=("insert_block",),
+        required_args=("connection_id", "block_id", "instance_name"),
+        allowed_aliases=(),
         target_ref_policy="not_applicable",
         graph_delta_contract="one_added_block_one_removed_connection_two_added_connections",
         eval_suite="R4A_INSERT",
@@ -153,6 +147,23 @@ CAPABILITY_SPECS: dict[str, CapabilitySpec] = {
             "incompatible_candidate_refused",
             "stale_revision",
             "missing_candidate_refused",
+            "preview_no_mutation",
+        ),
+        supports_preview=True,
+        supports_commit=True,
+    ),
+    "add_signal_source_to_sum": CapabilitySpec(
+        operation_kind="add_signal_source_to_sum",
+        status="unvalidated",
+        required_args=("block_id", "freq"),
+        allowed_aliases=(),
+        target_ref_policy="optional_guarded_or_inferred_single_sum_target",
+        graph_delta_contract="one_added_signal_source_optional_input_count_update_one_added_connection",
+        eval_suite=None,
+        negative_tests=(
+            "ambiguous_sum_target_clarification",
+            "missing_frequency_refused",
+            "incompatible_candidate_rollback",
             "preview_no_mutation",
         ),
         supports_preview=True,

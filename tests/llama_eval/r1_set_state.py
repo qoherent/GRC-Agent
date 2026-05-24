@@ -1,6 +1,6 @@
 """Native MVP R1 set_state eval (expansion track, non-release profile).
 
-Default MVP surface includes six wrappers; this suite intentionally expects only
+Default MVP surface includes four wrappers; this suite intentionally expects only
 change_graph calls for set_state behavior.
 """
 

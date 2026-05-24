@@ -14,9 +14,6 @@ request_timeout_seconds = 120.0
 
 [agent]
 history_compact_budget = 100000
-advisor_enabled = false
-advisor_limited_advisory = false
-advisor_shadow_telemetry = true
 
 [agent.docs_answer]
 enabled = true
@@ -30,7 +27,6 @@ helper_max_total_context_chars = 900
 max_sources = 3
 answer_target_chars = 320
 excerpt_target_chars = 180
-lexical_first = true
 semantic_manual_enabled = true
 semantic_tutorial_enabled = true
 probe_timeout_seconds = 0.5
@@ -41,12 +37,13 @@ answer_cache_size = 64
 helper_prompt_version = "v3_compact"
 
 [agent.retrieval]
+# The embedding model is intentionally not bundled. `grc-agent vector build`
+# downloads/caches the FastEmbed default locally when needed.
 search_blocks_default_k = 5
 search_blocks_max_k = 10
 ask_grc_docs_default_k = 3
 ask_grc_docs_max_k = 6
 conceptual_cache_size = 64
-exact_match_fast_path = true
 
 [agent.history]
 checkpoint_retention = 100

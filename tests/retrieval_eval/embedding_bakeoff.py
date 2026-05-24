@@ -98,7 +98,6 @@ def run_bakeoff(
                         **eval_payload["summary"],
                         "mean_latency_ms": _mean_latency_ms(eval_payload["cases"]),
                         "vector_miss_count": miss_analysis["vector_miss_count"],
-                        "lexical_win_count": miss_analysis["lexical_win_count"],
                         "exact_id_miss_count": miss_analysis["exact_id_miss_count"],
                         "false_positive_failure_count": miss_analysis["false_positive_failure_count"],
                         "source_type_miss_count": miss_analysis["source_type_miss_count"],

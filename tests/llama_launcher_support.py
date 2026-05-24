@@ -33,9 +33,10 @@ def _parser():
 
 
 class _Server(ThreadingHTTPServer):
-    def __init__(self, address, alias):
+    def __init__(self, address, alias, ctx_size):
         super().__init__(address, _Handler)
         self.alias = alias
+        self.ctx_size = ctx_size
         self.alias_override = os.environ.get("GRC_AGENT_TEST_LAUNCH_ALIAS")
         self.health_delay = float(os.environ.get("GRC_AGENT_TEST_LAUNCH_DELAY", "0.0"))
         self.start_time = time.monotonic()
@@ -71,6 +72,17 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/props":
+            self._write_json(
+                200,
+                {
+                    "default_generation_settings": {
+                        "params": {"n_ctx": server.ctx_size}
+                    }
+                },
+            )
+            return
+
         self._write_json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):
@@ -89,8 +101,12 @@ class _Handler(BaseHTTPRequestHandler):
                             "role": "assistant",
                             "tool_calls": [
                                 {
-                                    "name": "inspect_graph",
-                                    "arguments": json.dumps({"view": "overview", "targets": [], "params": []}),
+                                    "id": "call_stub_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "inspect_graph",
+                                        "arguments": json.dumps({"view": "overview", "targets": [], "params": ["all"]}),
+                                    },
                                 }
                             ],
                         }
@@ -127,7 +143,7 @@ def main():
     if os.environ.get("GRC_AGENT_TEST_LAUNCH_MODE") == "exit-immediately":
         raise SystemExit(9)
 
-    server = _Server((args.host, args.port), args.alias)
+    server = _Server((args.host, args.port), args.alias, args.ctx_size)
     try:
         server.serve_forever()
     finally:

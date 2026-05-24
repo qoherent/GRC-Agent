@@ -1,4 +1,4 @@
-"""insert_block operation helper for change_graph."""
+"""insert_in_connection operation helper for change_graph."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ def handle_insert_block_on_connection(
     tx_tool: Callable[[Any], ToolResult],
     kind_mismatch_result: Callable[..., ToolResult | None],
 ) -> ChangeGraphOperationResult:
-    """Handle insert_block on an existing connection."""
+    """Handle insert_in_connection on an existing connection."""
 
     operation_summary = "insert_block_on_connection"
-    mismatch = kind_mismatch_result("insert_block")
+    mismatch = kind_mismatch_result("insert_in_connection")
     if mismatch is not None:
         terminal_result = ctx.agent._attach_wrapper_dispatch_telemetry(
             debug=ctx.debug,

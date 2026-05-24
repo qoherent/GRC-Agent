@@ -13,12 +13,13 @@ Prefer a copied, minimized graph that still reproduces the issue.
 - Runtime model/backend:
 - Llama health status:
 - Vector index status:
+- Vector embedding model and whether `grc-agent vector build` was run:
 - Command or prompt that reproduced the issue:
 - Expected behavior:
 - Actual behavior:
 - Was the graph a copied working file, not an original installed/example file?
 - Did validation run? Include result:
-- Did save/load run? Include explicit path and result:
+- Did autosave or manual `/save` run? Include path and result:
 
 ## Attachments
 
@@ -39,6 +40,7 @@ Do not attach:
 
 - `.env` files.
 - API keys or authorization headers.
+- GGUF/chat model files, FastEmbed/Hugging Face model caches, or Qdrant vector-index directories.
 - Full private filesystem dumps.
 - Sensitive original graphs without review.
 
@@ -61,4 +63,4 @@ Call out any of these immediately:
 - Save happened without explicit user intent.
 - Original or installed example graph was modified.
 - Docs/RAG output was treated as mutation authority.
-- Raw legacy/internal tool calls appeared in model-facing history.
+- Raw non-MVP/internal tool calls appeared in model-facing history.

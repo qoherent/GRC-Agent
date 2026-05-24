@@ -35,9 +35,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
-        self.assertFalse(config.agent.advisor_enabled)
-        self.assertFalse(config.agent.advisor_limited_advisory)
-        self.assertTrue(config.agent.advisor_shadow_telemetry)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 320)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 64)
         self.assertEqual(config.agent.docs_answer.helper_prompt_version, "v3_compact")
@@ -56,6 +53,25 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(args.llama_server_url, config.llama.server_url)
         self.assertEqual(args.model, config.llama.model)
+        self.assertFalse(args.agentic)
+        self.assertIsNone(args.max_tool_rounds)
+
+    def test_cli_parser_accepts_agentic_tool_budget_override(self) -> None:
+        config = load_app_config()
+        parser = _build_parser(config)
+
+        args = parser.parse_args(
+            [
+                "chat",
+                "fixture.grc",
+                "--agentic",
+                "--max-tool-rounds",
+                "24",
+            ]
+        )
+
+        self.assertTrue(args.agentic)
+        self.assertEqual(args.max_tool_rounds, 24)
 
     def test_load_app_config_falls_back_to_builtin_defaults_when_no_file_exists(
         self,
@@ -85,9 +101,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "request_timeout_seconds = 30.0\n"
                     "\n[agent]\n"
                     "history_compact_budget = 5000\n"
-                    "advisor_enabled = true\n"
-                    "advisor_limited_advisory = true\n"
-                    "advisor_shadow_telemetry = false\n"
                     "\n[agent.docs_answer]\n"
                     "helper_max_output_tokens = 512\n"
                     "answer_cache_size = 32\n"
@@ -105,9 +118,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:9000")
         self.assertEqual(config.llama.model, "custom-model")
         self.assertTrue(config.llama.enable_thinking)
-        self.assertTrue(config.agent.advisor_enabled)
-        self.assertTrue(config.agent.advisor_limited_advisory)
-        self.assertFalse(config.agent.advisor_shadow_telemetry)
         self.assertEqual(config.llama.max_tool_rounds, 42)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 512)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 32)

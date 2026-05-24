@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
 from grc_agent.agent import GrcAgent  # noqa: E402
 from grc_agent.config import load_app_config  # noqa: E402
 from grc_agent.flowgraph_session import FlowgraphSession  # noqa: E402
-from grc_agent.llama_server import LlamaServerClient, run_bounded_llama_turn  # noqa: E402
+from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig, run_bounded_toolagents_turn  # noqa: E402
 from tests.llama_eval.harness import (  # noqa: E402
     executed_tool_calls_since,
     graph_delta,
@@ -169,7 +169,7 @@ def validate_demo_artifact(artifact: dict[str, Any]) -> list[str]:
         for key in (
             "original_graph_not_mutated",
             "validation_succeeded",
-            "explicit_save",
+            "autosave_succeeded",
             "debug_bundle_generated",
             "no_secrets_in_artifacts",
         ):
@@ -212,16 +212,8 @@ def default_demo_steps(work_graph_path: Path) -> list[dict[str, str]]:
             ),
         },
         {
-            "label": "Explicit Save",
-            "prompt": f"Save the copied graph explicitly to {graph_path}.",
-        },
-        {
-            "label": "Load Saved Graph",
-            "prompt": f"Load the saved copied graph from {graph_path}.",
-        },
-        {
             "label": "Inspect Final State",
-            "prompt": "Inspect the final copied graph state after reload.",
+            "prompt": f"Inspect the final copied graph state at {graph_path}.",
         },
     ]
 
@@ -250,24 +242,26 @@ def validation_results_from_executed(executed: list[dict[str, Any]]) -> list[dic
     return results
 
 
-def lifecycle_events_from_executed(
+def autosave_events_from_executed(
     executed: list[dict[str, Any]],
     *,
     turn_index: int,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for call in executed:
-        tool_name = str(call.get("name") or "")
-        if tool_name not in {"save_graph_explicit", "load_graph_explicit"}:
+        if str(call.get("name") or "") != "change_graph":
             continue
         payload = call.get("arguments")
-        path = payload.get("path") if isinstance(payload, dict) else None
+        autosave = payload.get("autosave") if isinstance(payload, dict) else None
+        if not isinstance(autosave, dict):
+            continue
         events.append(
             {
                 "turn_index": turn_index,
-                "tool": tool_name,
-                "ok": bool(isinstance(payload, dict) and payload.get("ok") is True),
-                "path": path,
+                "tool": "change_graph",
+                "ok": autosave.get("ok") is True,
+                "path": autosave.get("path"),
+                "message": autosave.get("message"),
             }
         )
     return events
@@ -276,7 +270,7 @@ def lifecycle_events_from_executed(
 def run_agent_turn(
     *,
     agent: GrcAgent,
-    client: LlamaServerClient,
+    client: ToolAgentsLlamaProviderConfig,
     model: str,
     prompt: str,
     label: str,
@@ -288,14 +282,11 @@ def run_agent_turn(
     result: dict[str, Any] = {}
     error_text = ""
     try:
-        result = run_bounded_llama_turn(
+        result = run_bounded_toolagents_turn(
             agent=agent,
             client=client,
             model=model,
             user_message=prompt,
-            advisor_enabled=False,
-            advisor_limited_advisory=False,
-            advisor_shadow_telemetry=True,
             mvp_tool_profile=True,
         )
     except Exception as exc:  # pragma: no cover - exercised by live demo.
@@ -331,7 +322,7 @@ def run_agent_turn(
         "graph_delta": graph_delta(before, after),
         "mutation": before.get("raw_hash") != after.get("raw_hash"),
         "validation_results": validation_results_from_executed(executed),
-        "save_load_events": lifecycle_events_from_executed(executed, turn_index=turn_index),
+        "autosave_events": autosave_events_from_executed(executed, turn_index=turn_index),
     }
 
 
@@ -368,9 +359,8 @@ def build_safety_summary(
             != artifact.get("paths", {}).get("source_graph_path")
         ),
         "validation_succeeded": bool(validation_succeeded),
-        "explicit_save": any(
-            event.get("tool") == "save_graph_explicit" and event.get("ok") is True
-            for event in artifact.get("save_load_events", [])
+        "autosave_succeeded": any(
+            event.get("ok") is True for event in artifact.get("autosave_events", [])
         ),
         "raw_legacy_attempts": raw_legacy_attempts,
         "failed_validation_commits": failed_validation_commits,
@@ -441,15 +431,8 @@ def build_demo_flow_errors(artifact: dict[str, Any]) -> list[str]:
         errors.append("insert_tool_call_not_requested")
     if not executed_insert:
         errors.append("insert_tool_call_not_executed_ok")
-    save_tools = {
-        str(event.get("tool")): event
-        for event in artifact.get("save_load_events", [])
-        if isinstance(event, dict)
-    }
-    if save_tools.get("save_graph_explicit", {}).get("ok") is not True:
-        errors.append("explicit_save_missing")
-    if save_tools.get("load_graph_explicit", {}).get("ok") is not True:
-        errors.append("explicit_load_missing")
+    if not any(event.get("ok") is True for event in artifact.get("autosave_events", [])):
+        errors.append("autosave_missing")
     return errors
 
 
@@ -479,7 +462,7 @@ def run_demo(
             "safety_requirements": {
                 "original_graph_not_mutated": True,
                 "validation_succeeded": False,
-                "explicit_save": False,
+                "autosave_succeeded": False,
                 "raw_legacy_attempts": 0,
                 "failed_validation_commits": 0,
                 "debug_bundle_generated": False,
@@ -508,8 +491,9 @@ def run_demo(
     session.load(work_graph_path)
     agent = GrcAgent(session)
     config = load_app_config()
-    client = LlamaServerClient(
+    client = ToolAgentsLlamaProviderConfig(
         base_url=config.llama.server_url,
+        model=config.llama.model,
         timeout_seconds=request_timeout_seconds or config.llama.request_timeout_seconds,
         max_tokens=min(config.llama.max_tokens, max_tokens),
         temperature=config.llama.temperature,
@@ -519,7 +503,7 @@ def run_demo(
 
     initial_snapshot = graph_snapshot(agent)
     steps: list[dict[str, Any]] = []
-    save_load_events: list[dict[str, Any]] = []
+    autosave_events: list[dict[str, Any]] = []
     for index, step in enumerate(default_demo_steps(work_graph_path)):
         print(f"demo step {index + 1}: {step['label']}", file=sys.stderr, flush=True)
         turn = run_agent_turn(
@@ -531,7 +515,7 @@ def run_demo(
             turn_index=index,
         )
         steps.append(turn)
-        save_load_events.extend(turn["save_load_events"])
+        autosave_events.extend(turn["autosave_events"])
 
     final_snapshot = graph_snapshot(agent)
     debug_command = run_command(
@@ -584,7 +568,7 @@ def run_demo(
         "validation_results": [
             result for step in steps for result in step.get("validation_results", [])
         ],
-        "save_load_events": save_load_events,
+        "autosave_events": autosave_events,
         "source_integrity": source_integrity,
         "debug_bundle": {
             "path": str(debug_bundle_path),

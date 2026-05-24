@@ -32,7 +32,6 @@ class _DocsEvidenceCandidate:
     source_channel: str
     source_type: str
     section: str
-    lexical_score: float
     semantic_score: float | None
     topic_score: float
     quality_score: float

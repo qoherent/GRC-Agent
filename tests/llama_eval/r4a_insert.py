@@ -33,15 +33,15 @@ R4A_INSERT_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt=(
-                    "Call change_graph now with operation_kind insert_block, dry_run true, "
-                    "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
+                    "Call change_graph now with op insert_in_connection, dry_run true, "
+                    "and args containing connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
                     "block_id blocks_abs_xx, and instance_name blocks_abs_preview."
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
                         "change_graph",
                         arguments={
-                            "operation_kind": "insert_block",
+                            "op": "insert_in_connection",
                             "dry_run": True,
                         },
                     ),
@@ -62,8 +62,8 @@ R4A_INSERT_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt=(
-                    "Call change_graph now with operation_kind insert_block, dry_run false, "
-                    "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
+                    "Call change_graph now with op insert_in_connection, dry_run false, "
+                    "and args containing connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
                     "block_id blocks_throttle2, instance_name blocks_throttle2_r4a, "
                     "and insert_params {{type: byte, samples_per_second: 32000}}."
                 ),
@@ -71,7 +71,7 @@ R4A_INSERT_CASES: list[LiveScenario] = [
                     ToolExpectation(
                         "change_graph",
                         arguments={
-                            "operation_kind": "insert_block",
+                            "op": "insert_in_connection",
                             "dry_run": False,
                         },
                     ),
@@ -110,15 +110,15 @@ R4A_INSERT_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt=(
-                    "Call change_graph now with operation_kind insert_block, dry_run false, "
-                    "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
+                    "Call change_graph now with op insert_in_connection, dry_run false, "
+                    "and args containing connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
                     "block_id blocks_add_xx, and instance_name add_xx_r4a."
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
                         "change_graph",
                         arguments={
-                            "operation_kind": "insert_block",
+                            "op": "insert_in_connection",
                             "dry_run": False,
                         },
                         require_result_ok=False,
@@ -146,15 +146,15 @@ R4A_INSERT_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt=(
-                    "Call change_graph now with operation_kind insert_block, dry_run false, "
-                    "and connection_id analog_random_source_x_0:0->blocks_throttle2_0:0. "
+                    "Call change_graph now with op insert_in_connection, dry_run false, "
+                    "and args containing connection_id analog_random_source_x_0:0->blocks_throttle2_0:0. "
                     "Do not provide block_id."
                 ),
                 expected_tool_calls=(
                     ToolExpectation(
                         "change_graph",
                         arguments={
-                            "operation_kind": "insert_block",
+                            "op": "insert_in_connection",
                             "dry_run": False,
                         },
                         require_result_ok=False,
@@ -190,8 +190,8 @@ R4A_INSERT_CASES: list[LiveScenario] = [
                     }
                 },
                 prompt=(
-                    "Call change_graph now with operation_kind insert_block, dry_run false, "
-                    "connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
+                    "Call change_graph now with op insert_in_connection, dry_run false, "
+                    "args containing connection_id analog_random_source_x_0:0->blocks_throttle2_0:0, "
                     "block_id blocks_throttle2, instance_name stale_insert_r4a, "
                     "insert_params {{type: byte, samples_per_second: 32000}}, "
                     "state_revision 1, and include user_goal as 'stale insert attempt'."
@@ -200,7 +200,7 @@ R4A_INSERT_CASES: list[LiveScenario] = [
                     ToolExpectation(
                         "change_graph",
                         arguments={
-                            "operation_kind": "insert_block",
+                            "op": "insert_in_connection",
                             "dry_run": False,
                         },
                         require_result_ok=False,

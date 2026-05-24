@@ -103,14 +103,14 @@
       "id": "installed_blocks_selector",
       "source_path": "/usr/share/gnuradio/examples/blocks/selector.grc",
       "copied_work_path_policy": "installed_examples_must_be_copied_to_temp_before_load_or_edit",
-      "graph_type_tags": ["installed_example", "stream", "selector", "save_load_candidate"],
+      "graph_type_tags": ["installed_example", "stream", "selector", "autosave_candidate"],
       "gnu_radio_version": "3.10.9.2",
       "block_count": 10,
       "connection_count": 5,
       "stream_message_tags": {"stream_connections": 5, "message_connections": 0},
       "variables_present": ["freq", "input_index", "output_index", "samp_rate"],
-      "safe_candidate_operations": ["inspect_graph", "connected_remove_refusal", "save_graph_explicit", "load_graph_explicit"],
-      "expected_delta_categories": ["no_mutation", "safe_refusal", "save_load_lifecycle"],
+      "safe_candidate_operations": ["inspect_graph", "connected_remove_refusal", "autosave_after_mutation"],
+      "expected_delta_categories": ["no_mutation", "safe_refusal", "autosave_after_mutation"],
       "portability_notes": "Requires GNU Radio examples installed at the distro default path; original must remain read-only."
     }
   ]

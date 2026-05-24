@@ -18,11 +18,9 @@ from typing import Any, Callable, Iterator
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
-from grc_agent.llama_server import LlamaServerClient
 from grc_agent.runtime import prompt as runtime_prompt
 from grc_agent.runtime import tool_schemas as runtime_tool_schemas
 from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
-from grc_agent.runtime import turn_plan as runtime_turn_plan
 from grc_agent.recovery import (
     NO_RECOVERY_NEEDED,
     RecoveryDecision,
@@ -30,6 +28,10 @@ from grc_agent.recovery import (
 )
 from grc_agent.trace import build_live_eval_turn_trace
 from grc_agent.session_ops import parse_connection_id
+from grc_agent.toolagents_runtime import (
+    ToolAgentsLlamaProviderConfig,
+    run_bounded_toolagents_turn,
+)
 
 DEFAULT_FIXTURE_NAME = "random_bit_generator.grc"
 DEFAULT_LIVE_EVAL_MAX_TOKENS = 2048
@@ -54,27 +56,24 @@ MUTATION_TOOL_NAMES = frozenset(
     {
         "new_grc",
         "load_grc",
-        "load_graph_explicit",
         "apply_edit",
         "insert_block_on_connection",
         "auto_insert_block",
         "remove_connection",
         "rewire_connection",
         "save_graph",
-        "save_graph_explicit",
     }
 )
 RECOVERY_MUTATION_RETRY_TOOL_NAMES = frozenset(
     {
         "new_grc",
         "load_grc",
-        "load_graph_explicit",
         "apply_edit",
         "insert_block_on_connection",
         "auto_insert_block",
         "remove_connection",
         "rewire_connection",
-        "save_graph_explicit",
+        "save_graph",
     }
 )
 PRE_TURN_SETUP_TOOL_NAMES = frozenset(
@@ -87,7 +86,7 @@ PRE_TURN_SETUP_TOOL_NAMES = frozenset(
     }
 )
 
-CaseRunner = Callable[[LlamaServerClient, str, Any], dict[str, Any]]
+CaseRunner = Callable[[ToolAgentsLlamaProviderConfig, str, Any], dict[str, Any]]
 CaseReportBuilder = Callable[[Any, list[dict[str, Any]], int, float], dict[str, Any]]
 StatusRenderer = Callable[[Any, dict[str, Any]], str]
 SummaryBuilder = Callable[[list[dict[str, Any]], int], dict[str, Any]]
@@ -526,7 +525,7 @@ def saved_graph_reloads_and_validates(path: str | Path) -> dict[str, Any]:
 
 
 def collect_backend_metadata(
-    client: LlamaServerClient | None,
+    client: ToolAgentsLlamaProviderConfig | None,
     *,
     server_url: str,
     model: str,
@@ -623,7 +622,6 @@ def collect_release_metadata(
         sort_keys=True,
         separators=(",", ":"),
     )
-    policy_text = _source_text_for(runtime_turn_plan)
     backend = backend_metadata if isinstance(backend_metadata, dict) else {}
     return {
         "results_schema_version": RESULTS_SCHEMA_VERSION,
@@ -632,8 +630,6 @@ def collect_release_metadata(
         "prompt_version": getattr(runtime_prompt, "__version__", "unknown"),
         "prompt_sha256": _sha256_text(prompt_text),
         "tool_schema_sha256": _sha256_text(tool_schema_text),
-        "turn_plan_policy_version": getattr(runtime_turn_plan, "__version__", "unknown"),
-        "turn_plan_policy_sha256": _sha256_text(policy_text),
         "model_alias": model_alias or backend.get("model") or "",
         "backend_metadata": backend,
         "chat_template_hash": backend.get("chat_template_sha256")
@@ -689,21 +685,19 @@ def _git_dirty() -> bool | None:
 
 def run_live_scenario_once(
     *,
-    client: LlamaServerClient,
+    client: ToolAgentsLlamaProviderConfig,
     model: str,
     scenario: LiveScenario,
     mvp_tool_profile: bool = True,
 ) -> dict[str, Any]:
     """Run one declarative live scenario in an isolated fixture workspace."""
     from grc_agent.agent import GrcAgent
-    from grc_agent.llama_server import run_bounded_llama_turn
 
     fixture_names = [scenario.fixture_name]
     if scenario.target_fixture_name:
         fixture_names.append(scenario.target_fixture_name)
 
     with isolated_fixture_workspace(*fixture_names) as (workspace, paths):
-        app_config = load_app_config()
         fixture_path = paths[scenario.fixture_name]
         target_path = (
             str(paths[scenario.target_fixture_name])
@@ -789,15 +783,12 @@ def run_live_scenario_once(
                         "clarification_result": clarification,
                     }
                 else:
-                    result = run_bounded_llama_turn(
+                    result = run_bounded_toolagents_turn(
                         client=client,
                         model=model,
                         agent=agent,
                         user_message=prompt,
                         mvp_tool_profile=mvp_tool_profile,
-                        advisor_enabled=app_config.agent.advisor_enabled,
-                        advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
-                        advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
                     )
             except Exception as exc:
                 turn_error = str(exc)
@@ -862,7 +853,6 @@ def run_live_scenario_once(
                 if result
                 else None,
                 "pre_turn_setup": pre_turn_setup,
-                "turn_plan": result.get("turn_plan") if result else None,
                 "ok": result.get("ok", False) if result else False,
                 "error": turn_error,
                 "elapsed_seconds": round(
@@ -879,14 +869,6 @@ def run_live_scenario_once(
                 model_contract_pass = requested_names_raw.issubset(MVP_RELEASE_MODEL_TOOLS) and executed_names_raw.issubset(
                     MVP_RELEASE_MODEL_TOOLS
                 )
-                if scenario.release_profile in {"R0_READ_ONLY", "R1_SET_PARAM_ONLY"}:
-                    disallowed_lifecycle = {"save_graph_explicit", "load_graph_explicit"}
-                    lifecycle_used = bool(
-                        requested_names_raw & disallowed_lifecycle
-                        or executed_names_raw & disallowed_lifecycle
-                    )
-                    if lifecycle_used:
-                        model_contract_pass = False
                 turn_result["model_contract_pass"] = model_contract_pass
 
                 safe_surface_block = _is_safe_surface_blocked_legacy_attempt(
@@ -1335,7 +1317,7 @@ def evaluate_semantic_checks(
 
 def evaluate_turn_recovery(
     *,
-    client: LlamaServerClient,
+    client: ToolAgentsLlamaProviderConfig,
     model: str,
     agent: Any,
     history_start: int,
@@ -1400,22 +1382,15 @@ def evaluate_turn_recovery(
     ):
         return result
 
-    from grc_agent.llama_server import run_bounded_llama_turn
-
-    app_config = load_app_config()
     recovery_history_start = history_start
     pre_recovery_snapshot = _maybe_graph_snapshot(agent)
     try:
-        run_bounded_llama_turn(
+        run_bounded_toolagents_turn(
             client=client,
             model=model,
             agent=agent,
             user_message=decision.prompt,
-            track_turn_requirements=False,
             mvp_tool_profile=mvp_tool_profile,
-            advisor_enabled=app_config.agent.advisor_enabled,
-            advisor_limited_advisory=app_config.agent.advisor_limited_advisory,
-            advisor_shadow_telemetry=app_config.agent.advisor_shadow_telemetry,
         )
     except Exception as exc:
         result["recovery_error"] = str(exc)
@@ -1506,10 +1481,10 @@ def _normalize_failed_call_for_recovery(
         "set_param",
         "set_state",
         "add_variable",
-        "insert_block",
+        "insert_in_connection",
+        "add_signal_source_to_sum",
         "remove_block",
         "rewire",
-        "auto_insert",
     }:
         return "apply_edit", normalized_payload
     return tool_name, normalized_payload
@@ -1522,7 +1497,7 @@ def _is_safe_surface_blocked_legacy_attempt(
     before_snapshot: dict[str, Any],
     after_snapshot: dict[str, Any],
 ) -> bool:
-    """Return true when MVP blocked a legacy/internal tool and state stayed unchanged."""
+    """Return true when MVP blocked a non-wrapper/internal tool and state stayed unchanged."""
     requested_names = _tool_names(requested_tool_calls)
     if not requested_names:
         return False
@@ -1586,7 +1561,7 @@ def isolated_fixture_workspace(
 def ensure_llama_server(
     server_url: str | None = None,
     model: str | None = None,
-) -> tuple[str, str, LlamaServerClient]:
+) -> tuple[str, str, ToolAgentsLlamaProviderConfig]:
     """Ensure the llama.cpp server is reachable, starting it if necessary.
 
     Returns (server_url, model_alias, client).
@@ -1605,14 +1580,14 @@ def ensure_llama_server(
         print(
             f"{result.status.capitalize()} llama.cpp server at {result.server_url} (pid={result.pid})"
         )
-        return result.server_url, result.model_alias, result.client
+        return result.server_url, result.model_alias, result.provider_config
     except LlamaLauncherError as exc:
         print(f"Failed to start llama.cpp server: {exc}")
         raise
 
 
 def apply_live_generation_bounds(
-    client: LlamaServerClient,
+    client: ToolAgentsLlamaProviderConfig,
     *,
     max_tokens: int | None,
 ) -> None:
@@ -1628,7 +1603,7 @@ def apply_live_generation_bounds(
 def restart_llama_server(
     server_url: str | None = None,
     model: str | None = None,
-) -> tuple[str, str, LlamaServerClient]:
+) -> tuple[str, str, ToolAgentsLlamaProviderConfig]:
     """Force a fresh llama.cpp server instance and return a new client."""
     config = load_app_config()
     resolved_url = (server_url or config.llama.server_url).rstrip("/")
@@ -1642,7 +1617,7 @@ def restart_llama_server(
 
     result = launcher.restart_server_ready()
     print(f"Restarted llama.cpp server at {result.server_url} (pid={result.pid})")
-    return (result.server_url, result.model_alias, result.client)
+    return (result.server_url, result.model_alias, result.provider_config)
 
 
 def build_phase_parser(
@@ -2123,7 +2098,7 @@ def run_phase_eval(
     resolved_url = (server_url or config.llama.server_url).rstrip("/")
     resolved_model = model or config.llama.model
     temperature = config.llama.temperature
-    client: LlamaServerClient | None = None
+    client: ToolAgentsLlamaProviderConfig | None = None
 
     cached_runs = (
         persisted_phase_runs(results_path, phase=phase)
@@ -2131,7 +2106,7 @@ def run_phase_eval(
         else {}
     )
 
-    def safe_run_case(active_client: LlamaServerClient, active_model: str, case: Any) -> dict[str, Any]:
+    def safe_run_case(active_client: ToolAgentsLlamaProviderConfig, active_model: str, case: Any) -> dict[str, Any]:
         try:
             return run_case(active_client, active_model, case)
         except Exception as exc:

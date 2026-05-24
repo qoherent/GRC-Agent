@@ -13,7 +13,6 @@ from typing import Any
 from grc_agent.agent import GrcAgent
 from grc_agent.config import default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.manual.search import search_manual
 from grc_agent.retrieval.vector import semantic_search_grc
 from tests.retrieval_eval._eval_gate_lock import acquire_retrieval_eval_lock
 
@@ -149,19 +148,15 @@ def _is_menu_title(title: str) -> bool:
     return any(marker in lower for marker in _MENU_MARKERS)
 
 
-def _extract_top_source(payload: dict[str, Any], *, lexical: bool) -> tuple[str, str, str]:
+def _extract_top_source(payload: dict[str, Any]) -> tuple[str, str, str]:
     rows = payload.get("results")
     if not isinstance(rows, list) or not rows:
         return ("", "", "")
     top = rows[0] if isinstance(rows[0], dict) else {}
     title = str(top.get("title") or "")
     excerpt = str(top.get("excerpt") or "")
-    if lexical:
-        citation = top.get("citation") if isinstance(top.get("citation"), dict) else {}
-        source = str(citation.get("url") or citation.get("path") or "")
-    else:
-        provenance = top.get("provenance") if isinstance(top.get("provenance"), dict) else {}
-        source = str(provenance.get("url") or provenance.get("path") or "")
+    provenance = top.get("provenance") if isinstance(top.get("provenance"), dict) else {}
+    source = str(provenance.get("url") or provenance.get("path") or "")
     return (title, source, excerpt)
 
 
@@ -392,18 +387,10 @@ def run_eval(
     samples: list[dict[str, Any]] = []
     for row in rows:
         for _ in range(max(1, runs_per_question)):
-            lexical = search_manual(row.question, k=docs_k)
             semantic_manual = semantic_search_grc(row.question, scope="manual", k=docs_k)
             semantic_tutorial = semantic_search_grc(row.question, scope="tutorial", k=docs_k)
-            lexical_top_title, lexical_top_source, _lex_excerpt = _extract_top_source(lexical, lexical=True)
-            sem_manual_top_title, sem_manual_top_source, _sem_manual_excerpt = _extract_top_source(
-                semantic_manual,
-                lexical=False,
-            )
-            sem_tutorial_top_title, sem_tutorial_top_source, _sem_tutorial_excerpt = _extract_top_source(
-                semantic_tutorial,
-                lexical=False,
-            )
+            sem_manual_top_title, sem_manual_top_source, _sem_manual_excerpt = _extract_top_source(semantic_manual)
+            sem_tutorial_top_title, sem_tutorial_top_source, _sem_tutorial_excerpt = _extract_top_source(semantic_tutorial)
 
             started = time.perf_counter()
             result = agent.execute_tool(
@@ -499,11 +486,7 @@ def run_eval(
 
             mode = str(result.get("retrieval_mode") or "unknown")
             retrieval_modes[mode] = retrieval_modes.get(mode, 0) + 1
-            if mode in {
-                "lexical_plus_manual_semantic",
-                "lexical_plus_tutorial_semantic",
-                "lexical_plus_manual_and_tutorial_semantic",
-            }:
+            if mode == "semantic_docs":
                 semantic_retrieval_used_count += 1
 
             if _contains_mutation_payload(result):
@@ -568,8 +551,6 @@ def run_eval(
                     "should_have_answer": row.should_have_answer,
                     "notes": row.notes,
                     "retrieval_mode": mode,
-                    "top_lexical_title": lexical_top_title,
-                    "top_lexical_source": lexical_top_source,
                     "top_semantic_manual_title": sem_manual_top_title,
                     "top_semantic_manual_source": sem_manual_top_source,
                     "top_semantic_tutorial_title": sem_tutorial_top_title,
@@ -783,7 +764,6 @@ def write_retrieval_quality_audit(path: Path, metrics: dict[str, Any], corpus: P
                 f"- Required terms: `{row.get('required_terms')}`",
                 f"- Required source hint: `{row.get('required_source_hint')}`",
                 f"- Allow catalog assist: `{row.get('allow_catalog_assist')}`",
-                f"- Top lexical result: {row.get('top_lexical_title')} | {row.get('top_lexical_source')}",
                 f"- Top semantic manual result: {row.get('top_semantic_manual_title')} | {row.get('top_semantic_manual_source')}",
                 f"- Top semantic tutorial result: {row.get('top_semantic_tutorial_title')} | {row.get('top_semantic_tutorial_source')}",
                 f"- Retrieval mode: `{row.get('retrieval_mode')}`",

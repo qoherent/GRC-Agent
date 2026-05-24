@@ -13,7 +13,7 @@ from typing import Any
 
 from grc_agent.agent import GrcAgent
 from grc_agent.dogfood import record_dogfood_case, summarize_dogfood_cases
-from grc_agent.llama_server import run_bounded_llama_turn
+from grc_agent.toolagents_runtime import run_bounded_toolagents_turn
 from tests.dogfood.self_dogfood import (
     GraphInfo,
     _new_variable_value,
@@ -37,8 +37,6 @@ WRAPPER_TOOLS = {
     "search_blocks",
     "ask_grc_docs",
     "change_graph",
-    "save_graph_explicit",
-    "load_graph_explicit",
 }
 
 
@@ -226,7 +224,7 @@ def run_task(
     start = len(agent.history)
     error = ""
     try:
-        result = run_bounded_llama_turn(
+        result = run_bounded_toolagents_turn(
             agent=agent,
             client=client,
             user_message=task.prompt,

@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from grc_agent.models import Block, Connection
+from grc_agent.runtime.block_semantics import build_block_semantics_by_type
 from grc_agent.runtime.editable_parameters import (
     EditableParameterCandidate,
     build_editable_parameter_candidates,
@@ -21,10 +22,11 @@ if TYPE_CHECKING:
 VALID_VIEWS = {"overview", "details"}
 MAX_TARGETS = 5
 MAX_PARAMS = 12
-MAX_PARAMS_PER_BLOCK = 50
-MAX_OVERVIEW_PARAMS_PER_BLOCK = 6
+MAX_PARAMS_PER_BLOCK = 12
+MAX_ALL_DETAIL_PARAMS = 8
+MAX_DEFAULT_DETAIL_PARAMS = 8
 MAX_CONNECTIONS_PER_BLOCK = 12
-MAX_OVERVIEW_CONNECTIONS = 12
+MAX_OVERVIEW_CONNECTIONS = 8
 MAX_CANDIDATES = 8
 
 
@@ -60,8 +62,6 @@ def inspect_graph(
 
     normalized_targets = _normalize_string_list(targets, limit=MAX_TARGETS)
     normalized_params = _normalize_string_list(params, limit=MAX_PARAMS)
-    if selected_view == "details" and not normalized_params:
-        normalized_params = ["all"]
     if selected_view not in VALID_VIEWS:
         result = _invalid_request(
             agent,
@@ -90,7 +90,11 @@ def inspect_graph(
         result = _details(agent, targets=normalized_targets, params=normalized_params)
         output_truncated = bool(result.get("truncation", {}).get("truncated"))
 
-    tool_result = agent._payload_result("inspect_graph", result)
+    tool_result = agent._payload_result(
+        "inspect_graph",
+        result,
+        include_active_session=False,
+    )
     return agent._attach_wrapper_dispatch_telemetry(
         debug=debug,
         wrapper_name="inspect_graph",
@@ -111,6 +115,7 @@ def _overview(
     targets: list[str],
     params: list[str],
 ) -> dict[str, Any]:
+    del targets, params
     summary = summarize_graph(
         agent.session,
         max_blocks=agent._guardrails_cfg.max_graph_summary_blocks,
@@ -130,45 +135,38 @@ def _overview(
         )
 
     assert agent.session.flowgraph is not None
-    candidates = build_editable_parameter_candidates(
-        agent.session,
-        catalog_root=agent.catalog_root,
-        include_connections=True,
-    )
-    by_block = _group_candidates_by_block(candidates)
     block_types = Counter(block.block_type for block in agent.session.flowgraph.blocks)
-    connections = list(summary.get("connections", []))
+    semantics_by_type = build_block_semantics_by_type(
+        block_types,
+        catalog_root=agent.catalog_root,
+    )
+    connections = [
+        render_connection_id(
+            connection.src_block,
+            connection.src_port,
+            connection.dst_block,
+            connection.dst_port,
+        )
+        for connection in agent.session.flowgraph.connections
+    ]
     shown_connections = connections[:MAX_OVERVIEW_CONNECTIONS]
     omitted_connections = max(0, len(connections) - len(shown_connections))
     incoming, outgoing = _connection_summaries(agent.session.flowgraph.connections)
+    block_rows = _overview_block_rows(
+        agent.session.flowgraph.blocks,
+        semantics_by_type=semantics_by_type,
+        incoming=incoming,
+        outgoing=outgoing,
+    )
     overview = {
         "graph_name": _graph_name(agent),
-        "graph_metadata": _graph_metadata(agent),
-        "path": summary.get("path"),
-        "graph_id": summary.get("graph_id"),
         "counts": {
             "blocks": summary.get("block_count", 0),
             "connections": summary.get("connection_count", 0),
             "variables": summary.get("variable_count", 0),
         },
-        "blocks": _overview_block_rows(
-            agent.session.flowgraph.blocks,
-            by_block=by_block,
-            incoming=incoming,
-            outgoing=outgoing,
-        ),
+        "blocks": block_rows,
         "connections": shown_connections,
-        "parameter_dependencies": _parameter_dependencies(
-            agent.session.flowgraph.blocks,
-            candidates,
-        ),
-        "top_block_types": [
-            {"type": block_type, "count": count}
-            for block_type, count in block_types.most_common(8)
-        ],
-        "notes": [
-            "Compact overview only. Use details with specific targets for parameters, connections, and edit handles."
-        ],
     }
     omitted_blocks = int(summary.get("blocks_truncated") or 0)
     truncated = omitted_blocks > 0 or omitted_connections > 0
@@ -217,13 +215,14 @@ def _details(
         catalog_root=agent.catalog_root,
         include_connections=True,
     )
+    variable_values = _graph_variable_values(agent.session.flowgraph.blocks)
     by_block = _group_candidates_by_block(candidates)
     connections = list(agent.session.flowgraph.connections)
     incoming, outgoing = _connection_summaries(connections)
     resolved_rows: list[dict[str, Any]] = []
     target_matches: list[dict[str, Any]] = []
-    editable_handles: list[dict[str, Any]] = []
     matched_params: set[str] = set()
+    matched_requested_params: set[str] = set()
     has_ambiguity = False
     errors: list[dict[str, Any]] = []
     truncated = False
@@ -237,7 +236,8 @@ def _details(
             params=_specific_params(params),
             connections=connections,
         )
-        target_matches.append(match.match_payload())
+        if match.status != "resolved":
+            target_matches.append(match.match_payload())
         if match.status == "ambiguous":
             has_ambiguity = True
             errors.append(
@@ -251,36 +251,42 @@ def _details(
             errors.append(
                 {
                     "code": "target_not_found",
-                    "message": f"Target {requested_target!r} did not match the active graph.",
+                    "message": match.message
+                    or f"Target {requested_target!r} did not match the active graph.",
                 }
             )
             continue
 
         block_candidates = by_block.get(match.block.block_uid, [])
-        row, row_handles, row_matched_params, row_truncated = _block_details_row(
+        row, row_matched_params, row_matched_requested, row_truncated = _block_details_row(
             match.block,
             block_candidates,
             requested=requested_target,
             matched_by=match.matched_by,
             params=params,
+            state_revision=agent.session.state_revision,
             incoming_connections=incoming.get(match.block.instance_name, ()),
             outgoing_connections=outgoing.get(match.block.instance_name, ()),
+            variable_values=variable_values,
         )
         resolved_rows.append(row)
-        editable_handles.extend(row_handles)
         matched_params.update(row_matched_params)
+        matched_requested_params.update(row_matched_requested)
         if row_truncated:
             truncated = True
-            omitted_counts["parameters"] = omitted_counts.get("parameters", 0) + 1
+            omitted = row.get("omitted_param_count")
+            omitted_counts["parameters"] = omitted_counts.get("parameters", 0) + (
+                omitted if isinstance(omitted, int) and omitted > 0 else 1
+            )
 
     if _params_request_all(params):
         unmatched_params = []
     else:
+        matched_requested_norm = {_normalize_text(item) for item in matched_requested_params}
         unmatched_params = [
             param
             for param in params
-            if _normalize_text(param)
-            not in {_normalize_text(item) for item in matched_params}
+            if _normalize_text(param) not in matched_requested_norm
         ]
     complete = not has_ambiguity and not errors and not truncated
     return _base_payload(
@@ -295,7 +301,6 @@ def _details(
             sorted(matched_params),
             unmatched=unmatched_params,
         ),
-        editable_handles=editable_handles,
         ambiguity={
             "has_ambiguity": has_ambiguity,
             "reason": "Target matched multiple graph objects. Re-run details with an exact candidate name or uid."
@@ -320,12 +325,14 @@ class _TargetMatch:
         block: Block | None = None,
         matched_by: str | None = None,
         candidates: list[dict[str, Any]] | None = None,
+        message: str | None = None,
     ) -> None:
         self.request = request
         self.status = status
         self.block = block
         self.matched_by = matched_by
         self.candidates = candidates or []
+        self.message = message
 
     def match_payload(self) -> dict[str, Any]:
         return {
@@ -334,6 +341,7 @@ class _TargetMatch:
             "resolved_name": self.block.instance_name if self.block is not None else None,
             "matched_by": self.matched_by,
             "candidates": self.candidates,
+            "message": self.message,
         }
 
 
@@ -348,6 +356,28 @@ def _resolve_target(
     request = str(target).strip()
     if not request:
         return _TargetMatch(request=request, status="not_found")
+
+    invalid_ref = _unknown_parameter_ref(request, blocks, candidates)
+    if invalid_ref is not None:
+        block, param_key = invalid_ref
+        return _TargetMatch(
+            request=request,
+            status="not_found",
+            candidates=[
+                {
+                    "name": block.instance_name,
+                    "kind": "block",
+                    "type": block.block_type,
+                    "uid": block.block_uid,
+                    "reason": f"unknown parameter key {param_key!r}",
+                }
+            ],
+            message=(
+                f"Target {request!r} uses unknown parameter key {param_key!r}. "
+                "Use an exact block.param reference or pass the block in targets "
+                "and the parameter key in params."
+            ),
+        )
 
     exact_blocks = [
         block
@@ -418,6 +448,25 @@ def _resolve_target(
     )
 
 
+def _unknown_parameter_ref(
+    request: str,
+    blocks: list[Block],
+    candidates: list[EditableParameterCandidate],
+) -> tuple[Block, str] | None:
+    if "." not in request:
+        return None
+    by_block = _group_candidates_by_block(candidates)
+    for block in sorted(blocks, key=lambda item: len(item.instance_name), reverse=True):
+        prefix = f"{block.instance_name}."
+        if not request.startswith(prefix):
+            continue
+        param_key = request.removeprefix(prefix)
+        known_params = {candidate.param_key for candidate in by_block.get(block.block_uid, [])}
+        if param_key and param_key not in known_params:
+            return block, param_key
+    return None
+
+
 def _target_score(
     block: Block,
     candidates: list[EditableParameterCandidate],
@@ -480,93 +529,142 @@ def _block_details_row(
     requested: str,
     matched_by: str | None,
     params: list[str],
+    state_revision: int,
     incoming_connections: tuple[str, ...],
     outgoing_connections: tuple[str, ...],
-) -> tuple[dict[str, Any], list[dict[str, Any]], set[str], bool]:
+    variable_values: dict[str, Any],
+) -> tuple[dict[str, Any], set[str], set[str], bool]:
     specific_params = _specific_params(params)
     requested_param_tokens = [_tokens(param) for param in specific_params]
     matched_params: set[str] = set()
+    matched_requested_params: set[str] = set()
     selected_candidates: list[EditableParameterCandidate] = []
     for candidate in candidates:
-        if _params_request_all(params) and _default_detail_param(candidate):
+        if not params:
+            if len(candidates) <= MAX_DEFAULT_DETAIL_PARAMS or _default_detail_param(candidate):
+                selected_candidates.append(candidate)
+                matched_params.add(candidate.param_key)
+        elif _params_request_all(params):
             selected_candidates.append(candidate)
             matched_params.add(candidate.param_key)
-        elif specific_params and _param_matches(
-            candidate,
-            specific_params,
-            requested_param_tokens,
-        ):
-            selected_candidates.append(candidate)
-            matched_params.add(candidate.param_key)
-    if _params_request_all(params) and not selected_candidates:
+        elif specific_params:
+            matched_requests = _matched_param_requests(
+                candidate,
+                specific_params,
+                requested_param_tokens,
+            )
+            if matched_requests:
+                selected_candidates.append(candidate)
+                matched_params.add(candidate.param_key)
+                matched_requested_params.update(matched_requests)
+    if not params and len(candidates) <= MAX_DEFAULT_DETAIL_PARAMS and not selected_candidates:
+        selected_candidates = candidates[:MAX_DEFAULT_DETAIL_PARAMS]
+    elif _params_request_all(params) and not selected_candidates:
         selected_candidates = candidates[:MAX_PARAMS_PER_BLOCK]
 
-    params_truncated = len(selected_candidates) > MAX_PARAMS_PER_BLOCK
-    returned_candidates = selected_candidates[:MAX_PARAMS_PER_BLOCK]
+    if not params:
+        param_limit = MAX_DEFAULT_DETAIL_PARAMS
+    elif _params_request_all(params):
+        param_limit = MAX_ALL_DETAIL_PARAMS
+    else:
+        param_limit = MAX_PARAMS_PER_BLOCK
+    params_truncated = len(selected_candidates) > param_limit
+    returned_candidates = selected_candidates[:param_limit]
     parameters = [
-        {
-            "name": candidate.param_key,
-            "label": candidate.param_label,
-            "dtype": candidate.param_dtype,
-            "default": candidate.param_default,
-            "options": list(candidate.param_options),
-            "option_labels": list(candidate.param_option_labels),
-            "value_label": _option_label_for_current(candidate),
-            "visibility": candidate.param_hide,
-            "value": candidate.current_value,
-            "editable": True,
-            "editable_handle": _editable_handle_id(candidate),
-            "target_ref": candidate.target_ref,
-            "state_revision": candidate.state_revision,
-        }
+        _parameter_payload(candidate, variable_values=variable_values)
         for candidate in returned_candidates
     ]
-    handles = [
-        {
-            "handle": _editable_handle_id(candidate),
-            "kind": "parameter",
-            "display_name": f"{candidate.instance_name}.{candidate.param_key}",
-            "allowed_change_kinds": ["set_param"],
-            "requires_state_revision": candidate.state_revision,
-            "target_ref": candidate.target_ref,
-            "instance_name": candidate.instance_name,
-            "param_key": candidate.param_key,
-            "current_value": candidate.current_value,
-        }
-        for candidate in returned_candidates
-    ]
+    target_ref = (
+        returned_candidates[0].target_ref
+        if returned_candidates
+        else _block_target_ref(block, state_revision=state_revision)
+    )
+    available_param_count = len(candidates)
+    returned_param_count = len(returned_candidates)
+    omitted_param_count = max(0, len(selected_candidates) - returned_param_count)
+    more_params_available = available_param_count > returned_param_count
     incoming = _connection_dicts(incoming_connections)
     outgoing = _connection_dicts(outgoing_connections)
-    row = {
+    row: dict[str, Any] = {
         "request": requested,
-        "match_status": "resolved",
         "matched_by": matched_by,
         "name": block.instance_name,
-        "kind": "block",
         "type": block.block_type,
         "catalog_label": _block_label(candidates),
-        "uid": block.block_uid,
-        "parameters": parameters,
-        "connections": {
+        "target_ref": target_ref,
+    }
+    if parameters:
+        row["parameters"] = parameters
+    if incoming or outgoing:
+        row["connections"] = {
             "incoming": incoming[:MAX_CONNECTIONS_PER_BLOCK],
             "outgoing": outgoing[:MAX_CONNECTIONS_PER_BLOCK],
-        },
-        "safe_actions": ["inspect", "set_param"],
-        "params_truncated": params_truncated,
+        }
+    if params_truncated:
+        row["params_truncated"] = True
+        row["omitted_param_count"] = omitted_param_count
+    elif not params and more_params_available:
+        row["more_params_available"] = True
+        row["available_param_count"] = available_param_count
+        row["params_omitted"] = True
+    return row, matched_params, matched_requested_params, params_truncated
+
+
+def _parameter_payload(
+    candidate: EditableParameterCandidate,
+    *,
+    variable_values: dict[str, Any],
+) -> dict[str, Any]:
+    value = _compact_value(candidate.current_value)
+    payload: dict[str, Any] = {
+        "name": candidate.param_key,
+        "label": candidate.param_label,
+        "dtype": candidate.param_dtype,
+        "value": value,
     }
-    return row, handles, matched_params, params_truncated
+    if isinstance(value, str) and value in variable_values:
+        payload["resolved_value"] = _compact_value(variable_values[value])
+    value_label = _option_label_for_current(candidate)
+    if value_label is not None:
+        payload["value_label"] = value_label
+    if candidate.param_options:
+        payload["options"] = list(candidate.param_options)
+    if candidate.param_option_labels:
+        payload["option_labels"] = list(candidate.param_option_labels)
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
 
 
-def _param_matches(
+def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for block in blocks:
+        params = block.params.get("parameters") if isinstance(block.params, dict) else None
+        if not isinstance(params, dict) or "value" not in params:
+            continue
+        if block.block_type == "variable" or block.block_type.startswith("variable_"):
+            values[block.instance_name] = params.get("value")
+    return values
+
+
+def _block_target_ref(block: Block, *, state_revision: int) -> dict[str, Any]:
+    return {
+        "block_uid": block.block_uid,
+        "expected_instance_name": block.instance_name,
+        "expected_block_type": block.block_type,
+        "base_state_revision": state_revision,
+    }
+
+
+def _matched_param_requests(
     candidate: EditableParameterCandidate,
     params: list[str],
     token_sets: list[set[str]],
-) -> bool:
+) -> set[str]:
     fields = [candidate.param_key, candidate.param_label]
+    matched: set[str] = set()
     for param, tokens in zip(params, token_sets, strict=False):
         if _any_field_matches(fields, request=param, tokens=tokens):
-            return True
-    return False
+            matched.add(param)
+    return matched
 
 
 def _base_payload(
@@ -579,28 +677,32 @@ def _base_payload(
     targets: list[dict[str, Any]] | None = None,
     target_matches: list[dict[str, Any]] | None = None,
     params_filter: dict[str, Any] | None = None,
-    editable_handles: list[dict[str, Any]] | None = None,
     ambiguity: dict[str, Any] | None = None,
     truncation: dict[str, Any] | None = None,
     errors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "ok": ok,
         "view": view,
         "state_revision": agent.session.state_revision,
         "complete": complete,
-        "summary": summary,
-        "targets": targets or [],
-        "target_matches": target_matches or [],
-        "params_filter": params_filter
-        or {"requested": [], "matched": [], "unmatched": []},
-        "editable_handles": editable_handles or [],
-        "ambiguity": ambiguity or {"has_ambiguity": False, "reason": None},
-        "truncation": truncation
-        or {"truncated": False, "reason": None, "omitted_counts": {}},
         "validation_status": _validation_status(agent),
-        "errors": errors or [],
     }
+    if summary is not None:
+        payload["summary"] = summary
+    if targets:
+        payload["targets"] = targets
+    if target_matches:
+        payload["target_matches"] = target_matches
+    if params_filter and params_filter.get("unmatched"):
+        payload["params_filter"] = params_filter
+    if ambiguity and ambiguity.get("has_ambiguity"):
+        payload["ambiguity"] = ambiguity
+    if truncation and truncation.get("truncated"):
+        payload["truncation"] = truncation
+    if errors:
+        payload["errors"] = errors
+    return payload
 
 
 def _invalid_request(
@@ -709,52 +811,31 @@ def _connection_dicts(connection_ids: tuple[str, ...]) -> list[dict[str, Any]]:
 def _overview_block_rows(
     blocks: list[Block],
     *,
-    by_block: dict[str, list[EditableParameterCandidate]],
+    semantics_by_type: dict[str, dict[str, Any]],
     incoming: dict[str, tuple[str, ...]],
     outgoing: dict[str, tuple[str, ...]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for block in blocks:
-        candidates = by_block.get(block.block_uid, [])
+        semantics = semantics_by_type.get(block.block_type, {})
         row = {
             "name": block.instance_name,
             "type": block.block_type,
-            "catalog_label": _block_label(candidates),
+            "catalog_label": semantics.get("label"),
             "role": _block_role(
                 block,
+                semantics=semantics,
                 incoming=incoming.get(block.instance_name, ()),
                 outgoing=outgoing.get(block.instance_name, ()),
             ),
-            "parameters": [
-                _overview_param(candidate)
-                for candidate in candidates
-                if _overview_param_visible(candidate)
-            ][:MAX_OVERVIEW_PARAMS_PER_BLOCK],
         }
-        rows.append(row)
+        rows.append({key: value for key, value in row.items() if value not in (None, "", [], {})})
     return rows
 
 
-def _overview_param(candidate: EditableParameterCandidate) -> dict[str, Any]:
-    payload = {
-        "name": candidate.param_key,
-        "label": candidate.param_label,
-        "value": candidate.current_value,
-        "value_label": _option_label_for_current(candidate),
-        "dtype": candidate.param_dtype,
-    }
-    return {key: value for key, value in payload.items() if value not in (None, [], {})}
-
-
-def _overview_param_visible(candidate: EditableParameterCandidate) -> bool:
-    if not _default_detail_param(candidate):
-        return False
-    value = _compact_value(candidate.current_value)
-    return bool(value) and value != "0"
-
-
 def _default_detail_param(candidate: EditableParameterCandidate) -> bool:
-    if candidate.param_hide in {"all", "part"}:
+    hide = str(candidate.param_hide or "").strip().lower()
+    if hide and hide != "none":
         return False
     if isinstance(candidate.param_label, str) and candidate.param_label.strip():
         value = _compact_value(candidate.current_value)
@@ -786,12 +867,13 @@ def _option_label_for_current(candidate: EditableParameterCandidate) -> Any:
 def _block_role(
     block: Block,
     *,
+    semantics: dict[str, Any],
     incoming: tuple[str, ...],
     outgoing: tuple[str, ...],
 ) -> str:
-    block_type = block.block_type.lower()
-    if block_type == "variable" or block_type.startswith("variable"):
-        return "variable_or_control"
+    role = semantics.get("role")
+    if isinstance(role, str) and role.strip():
+        return role.strip()
     if outgoing and not incoming:
         return "source"
     if incoming and not outgoing:
@@ -799,52 +881,6 @@ def _block_role(
     if incoming and outgoing:
         return "transform"
     return "metadata"
-
-
-def _parameter_dependencies(
-    blocks: list[Block],
-    candidates: list[EditableParameterCandidate],
-) -> list[dict[str, Any]]:
-    block_names = {block.instance_name for block in blocks}
-    dependencies: list[dict[str, Any]] = []
-    for candidate in candidates:
-        value = candidate.current_value
-        if not isinstance(value, str):
-            continue
-        stripped = value.strip()
-        if stripped not in block_names or stripped == candidate.instance_name:
-            continue
-        dependencies.append(
-            {
-                "symbol": stripped,
-                "used_by": f"{candidate.instance_name}.{candidate.param_key}",
-                "parameter_label": candidate.param_label,
-                "value": stripped,
-            }
-        )
-    return dependencies[:24]
-
-
-def _graph_metadata(agent: "GrcAgent") -> dict[str, Any]:
-    flowgraph = agent.session.flowgraph
-    if flowgraph is None or not isinstance(flowgraph.raw_data, dict):
-        return {}
-    options = flowgraph.raw_data.get("options")
-    if not isinstance(options, dict):
-        return {}
-    parameters = options.get("parameters")
-    if not isinstance(parameters, dict):
-        return {}
-    keys = ("id", "title", "description", "author", "category", "generate_options")
-    return {
-        key: value
-        for key in keys
-        if (value := parameters.get(key)) not in (None, "")
-    }
-
-
-def _editable_handle_id(candidate: EditableParameterCandidate) -> str:
-    return f"param:{candidate.block_uid}:{candidate.param_key}"
 
 
 def _params_request_all(params: list[str]) -> bool:
@@ -871,6 +907,8 @@ def _any_field_matches(
         field_tokens = _tokens(field_lower)
         meaningful = {token for token in field_tokens if len(token) > 1}
         if meaningful and meaningful.issubset(tokens):
+            return True
+        if tokens and tokens.issubset(meaningful):
             return True
     return False
 

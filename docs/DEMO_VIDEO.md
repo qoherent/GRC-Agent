@@ -1,10 +1,13 @@
 # Programmatic Demo Video Workflow
 
-This demo uses real GRC Agent turns against a copied GNU Radio Companion graph. It does not mock tool calls, graph deltas, validation results, save/load events, or debug bundle output.
+This demo uses real GRC Agent turns against a copied GNU Radio Companion graph. It does not mock tool calls, graph deltas, validation results, autosave events, or debug bundle output.
 
 ## Preconditions
 
-Use the CUDA llama.cpp path on NVIDIA machines. The demo expects `llama-server --list-devices` to show `CUDA0`.
+Use the CUDA llama.cpp path on NVIDIA machines. Normal chat can auto-start the
+configured llama.cpp backend, but the demo should use an explicitly verified
+server so the recorded evidence is reproducible. The demo expects
+`llama-server --list-devices` to show `CUDA0`.
 
 ```bash
 llama-server --list-devices
@@ -24,11 +27,15 @@ llama-server \
 Verify runtime readiness before recording evidence:
 
 ```bash
+uv run grc-agent doctor --start-llama
 uv run grc-agent health
 uv run grc-agent vector stats --json
 ```
 
 `health` must be `ok`, and `llama_context_verified` must be `true`.
+If vector stats reports a missing or stale index, run `uv run grc-agent vector build`.
+That command may download the default FastEmbed embedding model into the local
+user cache; model files are not bundled with this repository or demo artifact.
 
 ## Run The Demo
 
@@ -66,7 +73,7 @@ uv run python scripts/demo/export_demo_timeline.py \
   --output /tmp/grc_agent_demo/demo_timeline.json
 ```
 
-The timeline is a compact video input derived from the real artifact. It includes prompt text, wrapper names, `operation_kind`, graph deltas, validation status, mutation yes/no, graph paths, and optional screenshots.
+The timeline is a compact video input derived from the real artifact. It includes prompt text, wrapper names, mutation op, graph deltas, validation status, mutation yes/no, graph paths, and optional screenshots.
 
 ## Render Video
 
@@ -97,8 +104,8 @@ npm run still
 2. Change the sample rate to `48000`.
 3. Add variable `demo_gain=0.25`.
 4. Ask for a guided throttle insertion, then provide the exact selected connection and block parameters.
-5. Save the copied graph explicitly.
-6. Load the saved graph and inspect final state.
+5. Confirm committed mutations validated and autosaved.
+6. Inspect final state.
 7. Generate a debug bundle.
 
 ## Safety Evidence
@@ -108,7 +115,7 @@ The artifact must show:
 - original graph hash unchanged
 - copied graph path under `/tmp/grc_agent_demo/`
 - validation succeeded
-- explicit `save_graph_explicit` event
+- autosave event after each successful committed mutation
 - `raw_legacy_attempts=0`
 - `failed_validation_commits=0`
 - debug bundle generated
@@ -116,7 +123,7 @@ The artifact must show:
 
 ## Troubleshooting
 
-- If the runner refuses with `health status is not ok`, start the CPU `llama-server` command above and rerun `uv run grc-agent health`.
+- If the runner refuses with `health status is not ok`, start the CUDA `llama-server` command above and rerun `uv run grc-agent health`.
 - If context is not verified, confirm `/props` reports an actual context at least the configured desired context.
 - If the source graph is missing, install GNU Radio examples or provide another copied-safe source graph.
 - If Remotion render fails, first run `npm install` inside `demo/remotion/`, then verify `/tmp/grc_agent_demo/demo_timeline.json` exists.

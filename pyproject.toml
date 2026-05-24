@@ -9,14 +9,17 @@ description = "Local GNU Radio Companion .grc assistant."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "graphifyy==0.4.11",
-    "networkx>=3.6.1",
+    "ToolAgents==0.3.0",
     # GNU Radio 3.10.x Python bindings in the supported local environment are
     # built against the NumPy 1.x ABI. Remove this when the supported GNU Radio
     # target and deterministic gates pass with NumPy 2.x.
     "numpy<2 ; python_full_version < '3.13'",
     "pyyaml>=6.0.3",
+    # Provides local Qdrant + FastEmbed integration. Embedding model files are
+    # downloaded/cached by the user's environment during explicit vector build;
+    # they are not bundled in this package.
     "qdrant-client[fastembed]>=1.14.2",
+    "mistralai<2",
 ]
 
 [project.scripts]

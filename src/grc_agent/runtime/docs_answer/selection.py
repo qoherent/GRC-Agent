@@ -23,14 +23,37 @@ from .formatting import (
     is_tutorial_or_howto_query,
 )
 
+_DOCS_QUERY_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "does",
+        "for",
+        "from",
+        "how",
+        "is",
+        "it",
+        "me",
+        "of",
+        "please",
+        "tell",
+        "the",
+        "to",
+        "what",
+    }
+)
+
 
 def build_catalog_assisted_candidate(
     agent: Any,
     *,
     question: str,
 ) -> _DocsEvidenceCandidate | None:
+    subject = extract_block_definition_subject(question) or extract_docs_subject(question) or question
     try:
-        result = agent._search_blocks(question, k=3, debug=False, enrich=True)
+        result = agent._search_blocks(subject, k=3, debug=False, enrich=True)
     except Exception:
         return None
     if result.get("ok") is not True:
@@ -38,7 +61,6 @@ def build_catalog_assisted_candidate(
     rows = result.get("results")
     if not isinstance(rows, list) or not rows:
         return None
-    subject = extract_block_definition_subject(question) or question
     subject_terms = docs_primary_terms(subject) or docs_topic_terms(subject)
     scored_rows: list[tuple[int, dict[str, Any]]] = []
     for row in rows:
@@ -83,7 +105,6 @@ def build_catalog_assisted_candidate(
         source_channel="catalog_assist",
         source_type="catalog",
         section=name,
-        lexical_score=18.0,
         semantic_score=None,
         topic_score=0.0,
         quality_score=0.0,
@@ -168,6 +189,8 @@ def classify_docs_answer_type(question: str) -> str:
         return "insufficient"
     if "hierarchical block" in lower:
         return "definition"
+    if is_tutorial_or_howto_query(question):
+        return "procedural_how_to"
     if is_block_definition_query(question):
         return "block_definition"
     if (
@@ -183,8 +206,6 @@ def classify_docs_answer_type(question: str) -> str:
         return "comparison"
     if "grcc" in lower:
         return "tool_command_concept"
-    if is_tutorial_or_howto_query(question):
-        return "procedural_how_to"
     if lower.startswith(("what is ", "what are ", "explain ")):
         return "definition"
     return "definition"
@@ -193,21 +214,65 @@ def classify_docs_answer_type(question: str) -> str:
 def normalized_docs_retrieval_query(*, question: str, answer_type: str) -> str:
     query = " ".join(question.split()).strip()
     lower = query.lower()
+    if "pmt" in lower or "pmts" in lower:
+        return _expanded_docs_query(
+            query,
+            "Polymorphic Types PMTs opaque data type message passing stream tags",
+        )
+    if "stream tag" in lower or "stream tags" in lower:
+        return _expanded_docs_query(
+            query,
+            "Stream Tags Introduction isosynchronous data stream metadata",
+        )
+    if "qt gui" in lower and "sink" in lower:
+        return _expanded_docs_query(
+            query,
+            "QT GUI Time Sink Frequency Sink tutorial plot samples",
+        )
     if answer_type == "tool_command_concept" and "grcc" in query.lower():
-        return "grcc compile validation flowgraph"
+        return _expanded_docs_query(query, "grcc compile validation flowgraph")
     if "hierarchical block" in lower:
-        return "Hier Blocks and Parameters hierarchical block wrapper"
+        return _expanded_docs_query(
+            query,
+            "Hier Blocks and Parameters hierarchical block wrapper",
+        )
     if "embedded python block" in lower:
-        return "Embedded Python Block custom Python block flowgraph"
+        return _expanded_docs_query(
+            query,
+            "Embedded Python Block custom Python block flowgraph",
+        )
     if "decimation" in lower:
-        return "Sample Rate Change decimation sample rate downsample"
+        return _expanded_docs_query(query, "Sample Rate Change decimation sample rate downsample")
     if "interpolation" in lower:
-        return "Sample Rate Change interpolation sample rate upsample"
+        return _expanded_docs_query(query, "Sample Rate Change interpolation sample rate upsample")
     if "variables" in lower and "block" in lower:
-        return "Variables in Flowgraphs variables blocks parameters"
+        return _expanded_docs_query(query, "Variables in Flowgraphs variables blocks parameters")
     if "stream tags" in lower and "packet" in lower:
-        return "Tagged Stream Blocks stream tags packet boundaries length tag"
+        return _expanded_docs_query(
+            query,
+            "Tagged Stream Blocks stream tags packet boundaries length tag",
+        )
     return query
+
+
+def _expanded_docs_query(query: str, expansion: str) -> str:
+    user_terms = [
+        token
+        for token in re.findall(r"[A-Za-z0-9_]+", query)
+        if len(token) > 1 and token.lower() not in _DOCS_QUERY_STOP_WORDS
+    ]
+    prefix = " ".join(dict.fromkeys(user_terms))
+    if not prefix:
+        return expansion
+    expansion_key = expansion.lower()
+    novel_terms = [
+        term
+        for term in prefix.split()
+        if term.lower() not in expansion_key
+    ]
+    if not novel_terms:
+        return expansion
+    return f"{' '.join(novel_terms)} {expansion}"
 
 
 def text_matches_term_or_synonym(text: str, term: str) -> bool:
@@ -536,101 +601,3 @@ def build_fallback_answer(
         ranked_candidates=ranked_candidates,
         answer_type=answer_type,
     )
-
-
-def is_lexical_docs_evidence_strong(
-    *,
-    query: str,
-    question: str,
-    answer_type: str,
-    lexical_payload: dict[str, Any],
-    limit: int,
-) -> bool:
-    if lexical_payload.get("ok") is not True:
-        return False
-    results = lexical_payload.get("results")
-    if not isinstance(results, list) or not results:
-        return False
-    top = results[0] if isinstance(results[0], dict) else {}
-    top_title = str(top.get("title") or "").lower()
-    top_excerpt = str(top.get("excerpt") or "").lower()
-    top_source = ""
-    citation = top.get("citation")
-    if isinstance(citation, dict):
-        top_source = str(citation.get("url") or citation.get("path") or "").lower()
-    from .formatting import _DOCS_MENU_TITLE_MARKERS
-
-    if any(marker in top_title for marker in _DOCS_MENU_TITLE_MARKERS):
-        return False
-    if top_title.strip() == "what is gnu radio":
-        return False
-    if any(marker in top_excerpt for marker in _DOCS_NAVIGATION_MARKERS):
-        return False
-    if answer_type == "tool_command_concept":
-        top_text = " ".join([top_title, top_excerpt, top_source]).lower()
-        has_grcc = "grcc" in top_text
-        has_tool_context = ("compile" in top_text) or ("validation" in top_text)
-        return has_grcc and has_tool_context
-    if answer_type == "comparison":
-        sides = extract_comparison_sides(question)
-        if sides is None:
-            return False
-        rows = [row for row in results if isinstance(row, dict)][: max(3, min(6, limit + 2))]
-        left_match = False
-        right_match = False
-        for row in rows:
-            citation = row.get("citation") if isinstance(row.get("citation"), dict) else {}
-            row_source = str(citation.get("url") or citation.get("path") or "").lower()
-            row_text = " ".join(
-                [
-                    str(row.get("title") or "").lower(),
-                    str(row.get("excerpt") or "").lower(),
-                    row_source,
-                ]
-            )
-            if not left_match and any(
-                text_matches_term_or_synonym(row_text, term) for term in sides.left_terms
-            ):
-                left_match = True
-            if not right_match and any(
-                text_matches_term_or_synonym(row_text, term) for term in sides.right_terms
-            ):
-                right_match = True
-            if left_match and right_match:
-                break
-        if not (left_match and right_match):
-            return False
-    if is_procedural_walkthrough_text(top_excerpt) and not is_tutorial_or_howto_query(query):
-        query_tokens = docs_primary_terms(query)
-        title_hits = sum(1 for token in query_tokens if token and token in top_title)
-        if title_hits == 0:
-            return False
-    top_score = top.get("score")
-    score_value = float(top_score) if isinstance(top_score, int | float) else 0.0
-    result_count = len([row for row in results if isinstance(row, dict)])
-    if score_value >= 28.0:
-        query_tokens = docs_primary_terms(query)
-        if query_tokens and not any(
-            token in top_title or token in top_excerpt or token in top_source
-            for token in query_tokens
-        ):
-            return False
-        return True
-    if score_value >= 20.0 and result_count >= min(2, max(1, limit)):
-        query_tokens = docs_primary_terms(query)
-        if query_tokens and not any(
-            token in top_title or token in top_excerpt or token in top_source
-            for token in query_tokens
-        ):
-            return False
-        return True
-    query_tokens = docs_primary_terms(query) or docs_topic_terms(query)
-    token_hits = sum(1 for token in query_tokens if token and token in top_excerpt)
-    title_hits = sum(1 for token in query_tokens if token and token in top_title)
-    if query_tokens and (token_hits + title_hits) == 0:
-        return False
-    if token_hits < max(1, min(3, len(query_tokens))):
-        return False
-    if score_value < 12.0 and token_hits < 2:
-        return False
-    return True

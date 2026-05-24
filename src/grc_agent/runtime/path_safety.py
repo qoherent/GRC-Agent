@@ -1,4 +1,4 @@
-"""Path safety helpers for lifecycle wrapper operations."""
+"""Path safety helpers for graph loading, autosave, and manual save."""
 
 from __future__ import annotations
 

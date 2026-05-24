@@ -56,6 +56,8 @@ class LlamaServerLauncherTests(unittest.TestCase):
                 "127.0.0.1",
                 "--port",
                 str(urlparse(config.server_url).port),
+                "--ctx-size",
+                str(config.desired_context_tokens),
                 "--jinja",
                 "--no-mmproj",
             ],

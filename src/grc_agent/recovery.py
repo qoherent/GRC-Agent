@@ -20,7 +20,7 @@ NONRECOVERABLE_UNSUPPORTED = "nonrecoverable_unsupported"
 NONRECOVERABLE_FAILED_MUTATION = "nonrecoverable_failed_mutation"
 NO_RECOVERY_NEEDED = "no_recovery_needed"
 
-READ_ONLY_INSPECTION_TOOLS = ("summarize_graph", "get_grc_context", "search_grc")
+READ_ONLY_INSPECTION_TOOLS = ("summarize_graph", "get_grc_context")
 
 
 @dataclass(frozen=True)
@@ -60,17 +60,17 @@ def classify_tool_result_for_recovery(
             reason="unsupported request",
         )
 
-    if tool_name in {"save_graph", "save_graph_explicit"} and (
+    if tool_name == "save_graph" and (
         error_type == ErrorCode.SAVE_REFUSED or result.get("requires_validation") is True
     ):
         return RecoveryDecision(
             recovery_class=RECOVERABLE_SAVE_REFUSED,
             recoverable=True,
-            allowed_tools=("validate_graph", "save_graph", "save_graph_explicit"),
+            allowed_tools=("validate_graph", "save_graph"),
             max_mutation_retries=0,
             prompt=(
                 "The previous save was refused because the dirty graph needs validation. "
-                "If save was explicitly requested, call validate_graph and then save_graph_explicit. "
+                "If save was explicitly requested, call validate_graph and then save_graph. "
                 "Do not change graph structure or parameters."
             ),
             reason="dirty graph requires validation before save",

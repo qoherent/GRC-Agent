@@ -14,7 +14,7 @@ from typing import Any
 
 from grc_agent.agent import GrcAgent
 from grc_agent.dogfood import record_dogfood_case, summarize_dogfood_cases
-from grc_agent.llama_server import run_bounded_llama_turn
+from grc_agent.toolagents_runtime import run_bounded_toolagents_turn
 from tests.dogfood.self_dogfood import (
     GraphInfo,
     _new_variable_value,
@@ -38,8 +38,6 @@ WRAPPER_TOOLS = {
     "search_blocks",
     "ask_grc_docs",
     "change_graph",
-    "save_graph_explicit",
-    "load_graph_explicit",
 }
 TASK_TARGETS = {
     "inspect_graph": 25,
@@ -270,14 +268,14 @@ def _search_blocks_tasks(graph: GraphInfo) -> list[Task]:
             task_group="search_blocks",
             task_type="retrieval",
             prompt="Search blocks for exact id blocks_throttle2.",
-            expected="search_blocks exact match path",
+            expected="search_blocks semantic catalog path",
         ),
         Task(
             graph=graph,
             task_group="search_blocks",
             task_type="retrieval",
             prompt="Find a block that limits sample rate of a stream.",
-            expected="search_blocks conceptual semantic+lexical path",
+            expected="search_blocks semantic catalog path",
         ),
         Task(
             graph=graph,
@@ -529,7 +527,7 @@ def run_task(
     history_start = len(agent.history)
     error = ""
     try:
-        result = run_bounded_llama_turn(
+        result = run_bounded_toolagents_turn(
             agent=agent,
             client=client,
             user_message=task.prompt,
@@ -538,7 +536,7 @@ def run_task(
             wrapper_eval_telemetry=True,
         )
         if task.repeat_same_prompt:
-            _ = run_bounded_llama_turn(
+            _ = run_bounded_toolagents_turn(
                 agent=agent,
                 client=client,
                 user_message=task.prompt,

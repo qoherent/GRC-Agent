@@ -1,5 +1,5 @@
 {
-  "capability": "insert_block",
+  "capability": "insert_in_connection",
   "status": "beta_validated",
   "suite": "R4A_INSERT",
   "min_runs_per_case": 3,

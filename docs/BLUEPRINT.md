@@ -1,6 +1,6 @@
 # GRC Agent Blueprint
 
-This is the current high-level design contract. It is intentionally concise; old phase reports were removed because they were stale evidence logs, not durable product docs.
+This is the current high-level design contract. It is intentionally concise and limited to durable runtime facts.
 
 ## Status
 
@@ -9,11 +9,13 @@ GRC Agent is a local assistant for GNU Radio Companion `.grc` graphs. It is buil
 Current classification:
 
 - Release-validated: `R0_READ_ONLY`, `R1_SET_PARAM_ONLY`
-- Beta-validated: `R1_SET_STATE`, `R2_DISCONNECT`, `R3_REWIRE`, `R4A_INSERT_BLOCK_ON_CONNECTION`, `R4B_REMOVE_BLOCK`, `R4C_ADD_VARIABLE`, `R5_SAVE_LOAD`
+- Beta-validated: `R1_SET_STATE`, `R2_DISCONNECT`, `R3_REWIRE`, `R4A_INSERT_BLOCK_ON_CONNECTION`, `R4B_REMOVE_BLOCK`, `R4C_ADD_VARIABLE`
 - Diagnostic-clean: `R7_EXACT_EXTERNAL`, `R7_NATURAL_EXTERNAL`, `Tier5_ADVERSARIAL`
 - Runtime: not production-ready
 
-The default model-facing surface is the six-wrapper MVP profile only. Low-level graph tools remain internal.
+The default model-facing surface is the four-wrapper MVP profile only. Low-level graph tools remain internal.
+ToolAgents is the model/provider/tool-call harness; GRC Agent still owns wrapper validation, routing, graph transactions, `grcc`, rollback, autosave, manual `/save`, history, and raw trace evidence.
+Chat transport lives in ToolAgents; this repo keeps only non-chat health/probe HTTP code.
 
 ## Safety Contract
 
@@ -21,10 +23,13 @@ The default model-facing surface is the six-wrapper MVP profile only. Low-level 
 - Never mutate originals under installed example paths; copy graphs first.
 - Preview must never mutate.
 - Failed schema validation, preflight, or `grcc` validation must not commit.
-- Save requires explicit user intent.
+- The model cannot save or load directly.
+- Successful committed mutations validate, then autosave to the active copied graph path when that path is safe and writable.
+- Committed mutations refuse when the active copied graph file changed on disk since the session last loaded or saved it.
+- Manual `/save` requires explicit user intent.
 - Docs/RAG are explanation-only and never mutation authority.
 - Ambiguous graph targets clarify instead of first-match mutation.
-- `grcc` remains final graph-validity authority.
+- `grcc` remains final graph-validity authority, but it proves compilability rather than semantic/user-intent correctness.
 
 ## Model-Facing Wrappers
 
@@ -34,18 +39,26 @@ Purpose: read-only graph inspection.
 
 Args:
 
-- `view`: required; one of `overview`, `details`
-- `targets`: required string array; ignored for `overview`, one to five graph-local targets for `details`
-- `params`: schema-visible string array; ignored for `overview`; for `details`, pass `["all"]` for useful visible parameters or exact parameter names to filter. Missing or empty `params` defaults to bounded useful parameters.
-- `debug`: internal eval/dev telemetry only, not model-facing
+- `view`: optional; one of `overview`, `details`
+- `targets`: optional string array; ignored for `overview`, one to five graph-local targets for `details`
+- `params`: optional string array; ignored for `overview`; for `details`, pass `["all"]`, exact parameter names, or omit it for bounded useful parameters
+- `debug`: internal eval/dev telemetry only, stripped from the model-facing schema
+
+Runtime defaults:
+
+- omitted `view` plus no targets becomes `overview`
+- omitted `view` plus targets becomes `details`
+- `overview` normalizes away stray `targets` and `params`
+- `details` with missing or empty `params` returns target identity, connections, and parameter availability without dumping large parameter lists
+- exact `block.parameter` refs are split into the owning block target plus parameter filter
 
 Expected output:
 
-- stable top-level fields: `ok`, `view`, `state_revision`, `complete`, `summary`, `targets`, `target_matches`, `params_filter`, `editable_handles`, `ambiguity`, `truncation`, `validation_status`, `errors`
-- `overview`: compact whole-graph summary, counts, blocks/connections preview, validation status
-- `details`: resolved graph-local targets, selected/current params, compact connection context, guarded editable handles with `target_ref` and state revision
+- stable top-level fields: `ok`, `view`, `state_revision`, `complete`, `summary` for overview, `targets` for details, plus `target_matches`, `params_filter`, `ambiguity`, `truncation`, `validation_status`, and `errors` only when they carry non-default evidence
+- `overview`: minimal topology index with counts, block name/type/label/role rows, connection IDs, state revision, truncation, and validation status
+- `details`: resolved graph-local targets, compact connection context, one block-level guarded `target_ref`, selected/current params only when requested or safely bounded, and explicit `params_omitted`/availability or truncation metadata
 - ambiguous or missing details targets return candidates/errors and no guessed mutation
-- details calls with missing or empty `params` default to `["all"]`; overview is read-only and normalizes stray `targets`/`params`
+- details calls with missing or empty `params` must not become `["all"]`; `params=["all"]` is bounded and may truncate
 
 Internal subtools/data:
 
@@ -57,10 +70,11 @@ Design lessons from the redesign:
 
 - The model-facing schema is an intent contract, not an internal query API.
 - Required fields are still validated at runtime because local models can omit them; safe read-only defaults are filled before validation where omission is harmless.
-- Overview is forgiving because it is read-only; details is strict because it can expose mutation-ready handles.
-- Runtime owns budgets, truncation, target matching, and handle generation.
-- Tool output must include labels, parameter keys, current values, target refs, state revisions, ambiguity, and truncation so the model is not forced to infer graph facts.
-- Validation is not a model-facing inspect mode; validation runs at load, after mutation, and before save, then appears as status metadata.
+- Overview is forgiving because it is read-only; details is strict because it can expose mutation-ready target refs.
+- Runtime owns budgets, truncation, target matching, and target-ref generation.
+- Overview output must stay small and omit parameter previews, dependency lists, editable handles, and duplicated grouping. Details output carries parameter keys, current values, target refs, state revisions, ambiguity, and truncation only when those facts are needed so the model is not forced to infer precise graph facts.
+- Overview block roles come from catalog/GNU metadata and connection evidence. Do not hardcode block-name role lists.
+- Validation is not a model-facing inspect mode; validation runs at load, after mutation, before autosave, and before manual save, then appears as status metadata.
 
 ### `search_blocks`
 
@@ -70,16 +84,20 @@ Args:
 
 - `query`: required
 - `k`: optional result bound
-- `enrich`: optional block-description enrichment
 - `debug`: optional telemetry
 
 Expected output:
 
-- compact ranked block candidates with block IDs, names, summaries, provenance, and warnings
+- compact ranked block candidates with `block_id`, title/name, match type, and a short factual excerpt
+- no raw vector scores in model-visible output
+- no mutation payloads or edit authority
 
 Internal subtools/data:
 
-- lexical/vector block retrieval
+- exact/catalog lexical lookup over installed GNU metadata
+- cached in-memory SQLite FTS5 sparse ranking over compact catalog metadata/prose
+- vector block retrieval when the local generated index is available
+- deterministic merge/rerank
 - catalog metadata
 - optional `describe_block` enrichment
 
@@ -91,7 +109,6 @@ Args:
 
 - `question`: required
 - `k`: optional source count
-- `focus`: optional topic hint
 - `debug`: optional telemetry
 
 Expected output:
@@ -99,7 +116,9 @@ Expected output:
 - concise answer
 - source list
 - `insufficient_evidence` when local docs do not support an answer
+- instruction-like retrieved text is stripped before it reaches model-visible answers/sources
 - no mutation payloads
+- no docs-derived graph edit recipes or hidden plans
 
 Internal subtools/data:
 
@@ -114,30 +133,33 @@ Purpose: the only model-facing graph-content mutation wrapper.
 Required args:
 
 - `dry_run`
+- `op`
 - `user_goal`
-- `operation_kind`
 
 Common args:
 
 - `target_ref`
-- `instance_name`
 - `state_revision`
+- `args`
 - `debug`
 
-Supported `operation_kind` values:
+The model-facing schema is a compact envelope. Runtime validates and compiles `op + args` into internal transaction operations; raw YAML patches, arbitrary GNU `FlowGraph` calls, and lifecycle actions are not accepted as `args`.
+`dry_run=true` is always preview-only. If the user asked to commit but the model previews, the loop may allow one bounded repair call; the wrapper must not silently turn a preview into a commit.
+
+Supported `op` values:
 
 - `set_param`
 - `set_state`
 - `add_variable`
 - `disconnect`
 - `rewire`
-- `insert_block`
+- `insert_in_connection`
+- `add_signal_source_to_sum`
 - `remove_block`
 - `clarify`
 - `unsupported`
-- `auto_insert` is experimental/non-gating
 
-`set_param` args:
+`set_param` `args`:
 
 - `instance_name` or guarded `target_ref`
 - `param_key`
@@ -146,22 +168,32 @@ Supported `operation_kind` values:
 
 Natural `set_param` resolution is graph-local and metadata-driven only. It may resolve through loaded graph instance names, block types, catalog labels, parameter keys/labels, current values, and explicit old-value guards. It does not use phrase dictionaries, docs/RAG, tutorials, hidden retries, or raw YAML. If zero or multiple candidates match, it clarifies. If `expected_old_value` does not match the active graph, it refuses without mutation.
 
-Other operation args:
+Other operation `args`:
 
 - `set_state`: `instance_name` or `target_ref`, `state`
 - `add_variable`: `variable_name`, `variable_value`
 - `disconnect`: exact `connection_id` or uniquely resolved endpoints
-- `rewire`: `connection_id`, `state_revision`, `new_src_block`, `new_src_port`, `new_dst_block`, `new_dst_port`
-- `insert_block`: `connection_id`, `block_id`/`candidate_id`/`insert_block`, `instance_name`, optional `insert_params`
+- `rewire`: `connection_id`, top-level `state_revision`, `new_src_block`, `new_src_port`, `new_dst_block`, `new_dst_port`
+- `insert_in_connection`: `connection_id`, `block_id`, `instance_name`, optional `insert_params`
+- `add_signal_source_to_sum`: `block_id`, `freq`, optional `dst_block` or `target_ref`; commits require top-level `state_revision` or `target_ref.base_state_revision` plus the `preview_token` from a matching dry-run preview; runtime infers the summing target only when exactly one graph-local target is supported by existing source edges, additive/summing catalog semantics, and GNU catalog multiplicity metadata
 - `remove_block`: `instance_name` or `target_ref`, optional explicit detach controls
+
+Generic `add_block`, `connect`, and `add_connected_block` remain internal transaction primitives, not model-facing `op` values. Live traces showed they made the small model choose detached or underspecified edits for requests like "add another source and connect it"; the model-facing grammar should use a specific composite operation when the runtime can expand it safely.
+For `add_signal_source_to_sum`, inherited source params such as sample rate, waveform, amplitude, and type must agree across existing sources unless the user/model supplies an explicit override; disagreement clarifies instead of falling through to catalog defaults.
+When the user explicitly confirms a pending structural preview, runtime normalization may fill only the preview guard fields (`state_revision`, `preview_token`) from the stored preview. It must not invent operation args such as block IDs, frequency, target, or params.
+Unsupported generic mutation ops return structured errors for model repair. The runtime must not silently rewrite `add_block`, `connect`, or `add_connected_block` into supported ops; raw requested calls remain in trace history.
 
 Expected output:
 
-- `ok`, `dry_run`, `operation_summary`
-- graph delta and active session state when applicable
+- `ok`, `dry_run`, `committed`, operation kind, `state_revision`
+- compact `effect`/`effects` or preview `plan` describing the exact graph fact changed or planned
+- compact graph delta when applicable
 - validation result for committed mutations
+- autosave result for committed mutations
+- stale file-integrity refusal when the active file hash no longer matches the last loaded/saved hash
 - clarification payload for ambiguous or underspecified requests
 - rollback/refusal details for failed validation
+- no model-visible `active_session` dump; state revision, validation, and autosave fields carry the needed state
 
 Internal subtools/data:
 
@@ -172,75 +204,64 @@ Internal subtools/data:
 - `grcc`
 - graph history/checkpoints
 
-Recommended next refactor focus:
+Current mutation-wrapper status:
 
 - Keep one model-facing mutation wrapper for now.
-- Make the internal implementation operation-kind oriented: `set_param`, `set_state`, `add_variable`, `disconnect`, `rewire`, `insert_block`, `remove_block`, `clarify`, `unsupported`.
-- Keep schema narrowing so the model sees only relevant mutation fields when possible.
-- Return clearer validation errors to the model, such as missing required arg, stale state revision, ambiguous target, old-value mismatch, and failed `grcc`.
+- Keep internal implementation organized by operation kind: `set_param`, `set_state`, `add_variable`, `disconnect`, `rewire`, `insert_in_connection`, `add_signal_source_to_sum`, `remove_block`, `clarify`, `unsupported`.
+- Return compact model-visible results with exact effect or preview plan, committed status, state revision, validation, autosave, and concise refusal evidence.
 - Require graph-local authority for edits: exact identifiers, guarded target refs, or uniquely resolved metadata candidates from the active graph.
 - Preserve existing safety: no docs/RAG authority, no raw YAML, no hidden retries, no first-match mutation, and rollback on failed validation.
-
-### `save_graph_explicit`
-
-Purpose: explicit lifecycle save only.
-
-Args:
-
-- `path`: optional destination; omit only for saving the current loaded path
-- `overwrite`: optional
-- `debug`: optional telemetry
-
-Expected output:
-
-- save status
-- path
-- validation result
-- active session dirty state
-
-Internal subtools/data:
-
-- `save_graph`
-- path-safety policy
-- atomic write path
-- validation before save
-
-### `load_graph_explicit`
-
-Purpose: explicit lifecycle load/open only.
-
-Args:
-
-- `path`: required
-- `debug`: optional telemetry
-
-Expected output:
-
-- load status
-- active session summary
-- path-safety result
-
-Internal subtools/data:
-
-- `load_grc`
-- path-safety policy
+- Remaining follow-up work should focus on live eval quality for mutation phrasing and operation-specific edge cases, not expanding the model-facing tool surface.
+- Deprecated model-facing compatibility aliases such as `operation_kind`, `candidate_id`, `insert_block`, and `auto_insert` must not be restored without eval evidence.
 
 ## Internal Tool Boundary
 
-Internal tools include graph creation/loading, summaries, catalog retrieval, block descriptions, manual search, insert suggestions, connection removal/rewire, edit proposal/application, validation, and raw save. They are implementation primitives, not default model-facing chat tools.
+Internal tools include graph creation/loading, summaries, catalog retrieval, block descriptions, vector retrieval, insert suggestions, connection removal/rewire, edit proposal/application, validation, and raw save. They are implementation primitives, not default model-facing chat tools.
 
-The model sees only the six wrappers above in MVP chat mode.
+The model sees only the four wrappers above in MVP chat mode.
+
+## Data Authority
+
+Active graph inspection is authority for instance names, current values, connections, target refs, and state revisions.
+Installed GNU Radio catalog metadata is authority for block IDs, ports, parameters, defaults, option labels, categories, and block-level semantics.
+GNU platform metadata is preferred when available for semantic flags such as `not_dsp`.
+Block search uses exact/catalog lexical lookup and cached in-memory SQLite FTS5 sparse ranking for identifiers and metadata, with vector retrieval as semantic discovery when the local index exists. Exact block IDs, parameter IDs, port names, and dtypes must not depend on dense embeddings alone.
+
+Docs and ToolAgents tutorials are not runtime graph-edit recipes. When model behavior is confused, fix the authoritative data path, wrapper contract, validation, or context budget instead of adding prompt folklore or fixture-specific special cases.
+
+## Runtime Harness
+
+Model-backed chat uses ToolAgents with llama.cpp through its OpenAI-compatible `/v1` API. The runtime uses bounded `ChatToolAgent.step(...)` calls rather than an unbounded response loop so the repo still controls the max tool-round ceiling.
+
+Each model step rebuilds a `ToolRegistry` from the currently allowed wrapper schemas. Delegates record the raw requested tool call, validate route and schema through `GrcAgent`, and execute `GrcAgent.execute_tool(..., model_tool_call=True)` only after validation passes. Invalid or disallowed calls return structured tool results for model repair or user-facing refusal without mutation.
+
+The CLI default uses the configured bounded round limit. `grc-agent chat
+--agentic` raises the bounded limit and request timeout for exploratory local
+turns without exposing extra tools or weakening validation. `--max-tool-rounds
+N` is an explicit per-session override.
+
+If the assistant returns final text that says it needs inspection/search, or
+answers a graph-local fact question without any tool evidence, the runtime adds
+one reminder and continues the same bounded turn. This is a missed-tool nudge,
+not a free-text fallback parser, hidden repair path, or permission bypass.
+
+Vague graph-edit requests are allowed into the model/tool loop so the model can
+inspect and clarify. Mutation safety remains enforced by wrapper schemas, route
+validation, graph-local resolution, `change_graph`, preflight, `grcc`, rollback,
+and autosave checks.
+
+There is no assistant-text fallback parser, JSON repair path, or AST/text transaction recovery path.
 
 ## Agent Loop
 
 1. Load or create one active `FlowgraphSession`.
-2. Build compact model messages from system policy, session snapshot, recent history, and bounded tool results.
-3. Ask llama.cpp for a response with the six wrapper schemas.
-4. Validate every requested tool call against wrapper schemas.
-5. Execute tool calls serially.
+2. Build compact model messages from system policy, recent user/assistant/tool history, and bounded tool results.
+3. Ask llama.cpp through ToolAgents for one bounded `step(...)` with the four wrapper schemas.
+4. Validate every requested tool call against wrapper schemas and current route constraints.
+5. Execute accepted tool calls serially through GRC delegates.
 6. For mutations, route through `change_graph`, transaction validation, preflight, `grcc`, and rollback/commit.
 7. Append raw requested calls, executed calls, tool results, deltas, and validation state to history/trace.
-8. Stop after bounded tool rounds or when the assistant returns final text.
+8. Stop after bounded tool rounds or when the assistant returns grounded final text.
 
 Fallback free-text parsing is disabled for the MVP runtime. If the model cannot produce a valid call, the turn fails closed or asks for clarification.
 
@@ -249,10 +270,14 @@ Fallback free-text parsing is disabled for the MVP runtime. If the model cannot 
 Context is compacted by tool output design, not by hiding raw tool calls.
 
 - `inspect_graph` has only `overview` and `details`, with explicit truncation and ambiguity metadata.
-- `details` exposes mutation-ready handles only for resolved, requested targets.
-- Tool results are compacted for future model turns, while raw call/result history remains traceable.
+- `details` exposes guarded target refs only for resolved graph-local targets and omits large param lists unless specifically requested.
+- `search_blocks` and `ask_grc_docs` return compact evidence objects; retrieval scores and verbose source text stay out of model-visible output.
+- Tool results are compacted before future model turns, while raw call/result history remains traceable.
+- The system prompt and four wrapper schemas are intentionally budgeted; long examples belong in tests/docs, not every model turn.
 - Health checks verify desired vs actual llama context; current target is 120000 tokens when supported.
 - `max_tokens` limits generation length only; it is not used as a compression strategy.
+
+Small models are sensitive to context bloat. A simple read-only inspect turn should not carry a large policy block, oversized schemas, full history, and verbose overview payload. Keep schemas and wrapper output compact; reserve broad context for tasks that need it.
 
 ## Mutation Safety
 
@@ -268,16 +293,18 @@ Commit path:
 6. apply on a candidate copy
 7. `grcc` validation
 8. atomic commit or rollback
+9. autosave to the active copied graph path when safe and writable
 
 Preview path uses proposal/candidate logic and must leave the live graph unchanged.
 
-Save/load are lifecycle operations, not graph-content mutations. `/save` in the CLI bypasses the model and calls `save_graph_explicit` directly.
+The model has no lifecycle tools. `/save` in the CLI bypasses the model and calls the internal save path directly after validation.
 
 ## CLI Chat UX
 
 - `uv run grc-agent chat <copy.grc>` starts interactive chat on a copied graph.
 - Bare `uv run grc-agent` enters chat only in an interactive TTY; non-interactive use prints help and exits command-safe.
-- Startup/reuse of llama.cpp is explicit and health-verified.
+- Chat startup checks the configured llama.cpp server and starts/reuses it when needed; readiness is still health-verified before model-backed use.
+- `grc-agent health` is passive and reports `not_ready` if llama.cpp is not already reachable. Use `grc-agent doctor --start-llama` or chat startup when you want the launcher to start/reuse llama.cpp.
 - Normal chat prints assistant text plus concise operation summaries.
 - Full history is hidden by default; use `/history`.
 - Use `/save [path] [--overwrite]` for deterministic manual save.
@@ -302,24 +329,37 @@ Production gameplay harnesses run copied graphs only, record full artifacts, app
 
 The full `unittest` discovery currently contains about 950 tests and is slow because it includes integration-style graph loading, `grcc` validation, eval harness logic, CLI loops, and production gameplay tests. Use targeted tests during iteration and reserve full runs for release candidates.
 
-## Docs/RAG
+## Docs And Retrieval
 
-`docs/wiki_gnuradio_org/` is a local explanation corpus. It can support user education and docs QA, but it cannot authorize mutations or provide hidden graph recipes.
+`docs/wiki_gnuradio_org/` is a local explanation corpus. It can support user education and docs QA, but it cannot authorize mutations, infer active graph semantics, or provide hidden graph recipes.
+
+Catalog metadata and active graph inspection own block semantics, ports, parameters, current values, and edit targets. ToolAgents RAG examples are useful research material for simplifying explanation retrieval, but adopting them must not move mutation authority into retrieval.
 
 Docs-answer quality is evaluated separately from mutation safety. Groundedness and relevance matter; misleading answers and mutation leakage must remain zero.
+
+The default retrieval stack is local and lightweight:
+
+- Python dependencies come from `pyproject.toml`.
+- The active vector index is generated locally with `grc-agent vector build`.
+- Embedding models are downloaded/cached by the user environment at runtime; they are not bundled, vendored, or committed.
+- The current default embedding model is `BAAI/bge-small-en-v1.5` through FastEmbed. The cached quantized ONNX package is about 65 MB.
+- `search_blocks` combines exact/catalog lexical metadata lookup, cached in-memory SQLite FTS5 sparse ranking, and vector retrieval when the generated index is available. Lexical lookup covers exact block IDs, parameter IDs, port names, dtypes, labels, and categories; FTS5 covers sparse prose matches; vector retrieval covers semantic discovery.
+- Stale index schemas fail closed and tell the user to rebuild.
 
 ## Runtime Readiness
 
 End-to-end runtime readiness requires:
 
 - package installed
+- ToolAgents runtime dependency installed
 - GNU Radio Python import works
 - `grcc` works
 - retrieval catalog ready
 - vector index ready when retrieval is required
+- embedding model available in the user's local cache or downloadable during explicit vector build
 - llama.cpp reachable
 - actual llama context verified
-- six MVP model-facing wrappers only
+- four MVP model-facing wrappers only
 
 CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
 
@@ -331,5 +371,6 @@ Durable docs kept under `docs/`:
 - `QUICKSTART.md`: setup and use
 - `ISSUE_INTAKE.md`: report template
 - `DEMO_VIDEO.md`: demo workflow
+- `HANDOFF.md`: current implementation handoff and verification checklist
 - `capability_classification.json`: current capability labels
 - `wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus

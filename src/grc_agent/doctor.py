@@ -103,7 +103,6 @@ def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
     try:
         from grc_agent.config import load_app_config as _load
         from grc_agent.llama_launcher import LlamaServerLauncher
-        from grc_agent.llama_server import extract_model_context_limit
 
         config = _load(config_path)
         launcher = LlamaServerLauncher(
@@ -112,8 +111,7 @@ def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
             model_alias=config.llama.model,
         )
         result = launcher.ensure_server_ready()
-        props = result.client.get_server_properties()
-        actual_context = extract_model_context_limit(props)
+        actual_context = result.health_evidence.get("llama_actual_context_tokens")
         desired_context = config.llama.desired_context_tokens
         context_ok = (
             actual_context is not None and actual_context >= desired_context

@@ -25,12 +25,12 @@
   "max_turns": 1,
   "allowed_capabilities": ["R4C_ADD_VARIABLE"],
   "expected_final_state": {
-    "dirty": true,
+    "dirty": false,
     "variables": {"noise_level": "0.1"},
     "blocks": {"present": ["noise_level"]}
   },
   "expected_graph_delta": {"must_include": {"added_blocks": ["noise_level"], "variables": {"noise_level": "0.1"}}},
   "expected_validation_status": "valid",
-  "expected_save_load_behavior": {"save_expected": false, "load_expected": false},
-  "forbidden_events": ["raw_legacy_tool_call", "raw_yaml_mutation", "preview_mutation", "failed_validation_commit", "unsafe_save", "unsafe_load", "original_graph_mutation"]
+  "expected_autosave_behavior": {"autosave_expected": true},
+  "forbidden_events": ["raw_legacy_tool_call", "raw_yaml_mutation", "preview_mutation", "failed_validation_commit", "unsafe_autosave", "original_graph_mutation"]
 }

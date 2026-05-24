@@ -7,10 +7,8 @@ PUBLIC_TOOL_NAMES: tuple[str, ...] = (
     "new_grc",
     "load_grc",
     "summarize_graph",
-    "search_grc",
     "get_grc_context",
     "describe_block",
-    "search_manual",
     "semantic_search_grc",
     "suggest_compatible_insertions",
     "insert_block_on_connection",
@@ -28,8 +26,6 @@ MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
     "search_blocks",
     "ask_grc_docs",
     "change_graph",
-    "save_graph_explicit",
-    "load_graph_explicit",
 )
 
 MODEL_TOOL_NAMES_ORDERED: tuple[str, ...] = (

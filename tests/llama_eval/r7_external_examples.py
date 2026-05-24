@@ -107,7 +107,7 @@ EXTERNAL_CANDIDATES: tuple[ExternalCandidate, ...] = (
         },
     ),
     ExternalCandidate(
-        capability="insert_block",
+        capability="insert_in_connection",
         relative_path="audio/dial_tone.grc",
         block_count=8,
         connection_count=4,
@@ -149,15 +149,6 @@ EXTERNAL_CANDIDATES: tuple[ExternalCandidate, ...] = (
             "validation_returncode": 0,
         },
     ),
-    ExternalCandidate(
-        capability="save_load",
-        relative_path="blocks/selector.grc",
-        block_count=10,
-        connection_count=5,
-        why_useful="installed graph suitable for explicit save-copy and load-copy lifecycle checks",
-        expected_safe_operation="save to explicit copy path or load copied target path",
-        expected_graph_delta={},
-    ),
 )
 
 
@@ -180,16 +171,10 @@ def _prompt_json(args: dict[str, Any]) -> str:
     return (
         text.replace("{", "{{")
         .replace("}", "}}")
-        .replace("{{save_path}}", "{save_path}")
-        .replace("{{target_path}}", "{target_path}")
     )
 
 
 def _action_summary(tool_name: str, args: dict[str, Any]) -> str:
-    if tool_name == "save_graph_explicit":
-        return f"Save the currently loaded copied graph to {args.get('path')}."
-    if tool_name == "load_graph_explicit":
-        return f"Load the copied graph at {args.get('path')}."
     operation_kind = args.get("operation_kind")
     if operation_kind == "set_param":
         target = args.get("instance_name")
@@ -205,8 +190,8 @@ def _action_summary(tool_name: str, args: dict[str, Any]) -> str:
             f"{args.get('new_src_block')}:{args.get('new_src_port')}->"
             f"{args.get('new_dst_block')}:{args.get('new_dst_port')}."
         )
-    if operation_kind == "insert_block":
-        block_id = args.get("block_id", args.get("candidate_id", args.get("insert_block")))
+    if operation_kind == "insert_in_connection":
+        block_id = args.get("block_id")
         return (
             f"Insert {block_id} named {args.get('instance_name')} "
             f"on connection {args.get('connection_id')}."
@@ -444,22 +429,22 @@ def exact_cases() -> list[LiveScenario]:
             ),
         ),
         _scenario_if_present(
-            by_capability["insert_block"],
+            by_capability["insert_in_connection"],
             LiveScenario(
                 category="external_exact_insert",
                 name="dial_tone_insert_throttle_on_connection",
                 fixture_name=_source_path("audio/dial_tone.grc"),
                 release_profile=EXACT_PROFILE,
-                description=_metadata_description(by_capability["insert_block"]),
+                description=_metadata_description(by_capability["insert_in_connection"]),
                 turns=(
                     LiveTurnSpec(
                         prompt=_exact_tool_prompt(
                             "change_graph",
                             {
-                                "operation_kind": "insert_block",
+                                "op": "insert_in_connection",
                                 "dry_run": False,
                                 "connection_id": "analog_sig_source_x_0:0->blocks_add_xx:0",
-                                "insert_block": "blocks_throttle2",
+                                "block_id": "blocks_throttle2",
                                 "instance_name": "blocks_throttle2_r7",
                                 "insert_params": {
                                     "type": "float",
@@ -472,10 +457,10 @@ def exact_cases() -> list[LiveScenario]:
                             ToolExpectation(
                                 "change_graph",
                                 arguments={
-                                    "operation_kind": "insert_block",
+                                    "op": "insert_in_connection",
                                     "dry_run": False,
                                     "connection_id": "analog_sig_source_x_0:0->blocks_add_xx:0",
-                                    "insert_block": "blocks_throttle2",
+                                    "block_id": "blocks_throttle2",
                                     "instance_name": "blocks_throttle2_r7",
                                     "insert_params": {
                                         "type": "float",
@@ -487,7 +472,7 @@ def exact_cases() -> list[LiveScenario]:
                         semantic_checks=(
                             {
                                 "kind": "exact_graph_delta",
-                                "delta": by_capability["insert_block"].expected_graph_delta,
+                                "delta": by_capability["insert_in_connection"].expected_graph_delta,
                             },
                             {
                                 "kind": "connection_absent",
@@ -584,60 +569,6 @@ def exact_cases() -> list[LiveScenario]:
                                 "delta": by_capability["add_variable"].expected_graph_delta,
                             },
                             {"kind": "variable_equals", "name": "r7_gain", "value": "0.25"},
-                        ),
-                    ),
-                ),
-            ),
-        ),
-        _scenario_if_present(
-            by_capability["save_load"],
-            LiveScenario(
-                category="external_exact_lifecycle",
-                name="selector_save_copy",
-                fixture_name=_source_path("blocks/selector.grc"),
-                release_profile=EXACT_PROFILE,
-                description=_metadata_description(by_capability["save_load"]),
-                turns=(
-                    LiveTurnSpec(
-                        prompt=_exact_tool_prompt(
-                            "save_graph_explicit",
-                            {"path": "{save_path}"},
-                        ),
-                        expected_tool_calls=(
-                            ToolExpectation("save_graph_explicit", arguments={"path": "{save_path}"}),
-                        ),
-                        semantic_checks=(
-                            {"kind": "saved_path_valid", "path": "{save_path}", "copy": True},
-                        ),
-                    ),
-                ),
-            ),
-        ),
-        _scenario_if_present(
-            by_capability["save_load"],
-            LiveScenario(
-                category="external_exact_lifecycle",
-                name="selector_load_copy",
-                fixture_name=_source_path("audio/dial_tone.grc"),
-                target_fixture_name=_source_path("blocks/selector.grc"),
-                release_profile=EXACT_PROFILE,
-                description=_metadata_description(by_capability["save_load"]),
-                turns=(
-                    LiveTurnSpec(
-                        prompt=_exact_tool_prompt(
-                            "load_graph_explicit",
-                            {"path": "{target_path}"},
-                        ),
-                        expected_tool_calls=(
-                            ToolExpectation("load_graph_explicit", arguments={"path": "{target_path}"}),
-                        ),
-                        semantic_checks=(
-                            {
-                                "kind": "tool_result",
-                                "tool": "load_graph_explicit",
-                                "arguments": {"ok": True, "path": "{target_path}", "valid": True},
-                            },
-                            {"kind": "path_equals", "path": "{target_path}"},
                         ),
                     ),
                 ),
@@ -784,13 +715,13 @@ def natural_cases() -> list[LiveScenario]:
             ),
         ),
         _scenario_if_present(
-            by_capability["insert_block"],
+            by_capability["insert_in_connection"],
             LiveScenario(
                 category="external_natural_insert",
                 name="dial_tone_insert_throttle_on_connection",
                 fixture_name=_source_path("audio/dial_tone.grc"),
                 release_profile=NATURAL_PROFILE,
-                description=_metadata_description(by_capability["insert_block"]),
+                description=_metadata_description(by_capability["insert_in_connection"]),
                 turns=(
                     LiveTurnSpec(
                         prompt=(
@@ -801,13 +732,13 @@ def natural_cases() -> list[LiveScenario]:
                         expected_tool_calls=(
                             ToolExpectation(
                                 "change_graph",
-                                arguments={"operation_kind": "insert_block", "dry_run": False},
+                                arguments={"op": "insert_in_connection", "dry_run": False},
                             ),
                         ),
                         semantic_checks=(
                             {
                                 "kind": "exact_graph_delta",
-                                "delta": by_capability["insert_block"].expected_graph_delta,
+                                "delta": by_capability["insert_in_connection"].expected_graph_delta,
                             },
                             {
                                 "kind": "connection_present",
@@ -878,54 +809,6 @@ def natural_cases() -> list[LiveScenario]:
                                 "delta": by_capability["add_variable"].expected_graph_delta,
                             },
                             {"kind": "variable_equals", "name": "r7_gain", "value": "0.25"},
-                        ),
-                    ),
-                ),
-            ),
-        ),
-        _scenario_if_present(
-            by_capability["save_load"],
-            LiveScenario(
-                category="external_natural_lifecycle",
-                name="selector_save_copy",
-                fixture_name=_source_path("blocks/selector.grc"),
-                release_profile=NATURAL_PROFILE,
-                description=_metadata_description(by_capability["save_load"]),
-                turns=(
-                    LiveTurnSpec(
-                        prompt="Save this copied installed selector graph to {save_path}.",
-                        expected_tool_calls=(
-                            ToolExpectation("save_graph_explicit", arguments={"path": "{save_path}"}),
-                        ),
-                        semantic_checks=(
-                            {"kind": "saved_path_valid", "path": "{save_path}", "copy": True},
-                        ),
-                    ),
-                ),
-            ),
-        ),
-        _scenario_if_present(
-            by_capability["save_load"],
-            LiveScenario(
-                category="external_natural_lifecycle",
-                name="selector_load_copy",
-                fixture_name=_source_path("audio/dial_tone.grc"),
-                target_fixture_name=_source_path("blocks/selector.grc"),
-                release_profile=NATURAL_PROFILE,
-                description=_metadata_description(by_capability["save_load"]),
-                turns=(
-                    LiveTurnSpec(
-                        prompt="Load the copied installed selector graph at {target_path}.",
-                        expected_tool_calls=(
-                            ToolExpectation("load_graph_explicit", arguments={"path": "{target_path}"}),
-                        ),
-                        semantic_checks=(
-                            {
-                                "kind": "tool_result",
-                                "tool": "load_graph_explicit",
-                                "arguments": {"ok": True, "path": "{target_path}", "valid": True},
-                            },
-                            {"kind": "path_equals", "path": "{target_path}"},
                         ),
                     ),
                 ),

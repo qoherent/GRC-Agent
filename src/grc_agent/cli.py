@@ -32,16 +32,11 @@ from grc_agent.dogfood import (
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
-from grc_agent.llama_server import (
-    LlamaServerClient,
-    LlamaServerError,
-    extract_model_context_limit,
-    run_bounded_llama_turn,
-)
-from grc_agent.manual import search_manual
+from grc_agent.llama_probe import LlamaServerError, extract_model_context_limit
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.retrieval.vector import (
     build_vector_index,
+    DEFAULT_EMBEDDING_MODEL,
     prune_vector_collections,
     propose_vector_metadata,
     record_vector_miss,
@@ -53,6 +48,10 @@ from grc_agent.retrieval.vector import (
 )
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
 from grc_agent.session.load import load_grc as load_grc_session
+from grc_agent.toolagents_runtime import (
+    ToolAgentsLlamaProviderConfig,
+    run_bounded_toolagents_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +71,13 @@ FAKE_ACTIONS = [
     },
 ]
 
-_RETRIEVAL_READY_TOOLS = {"search_grc", "describe_block", "propose_edit", "apply_edit"}
+_RETRIEVAL_READY_TOOLS = {"describe_block", "propose_edit", "apply_edit"}
 _INSTALLED_GRAPH_ROOTS = (
     Path("/usr/share/gnuradio/examples"),
     Path("/usr/local/share/gnuradio/examples"),
 )
+AGENTIC_MAX_TOOL_ROUNDS = 24
+AGENTIC_REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
@@ -182,6 +183,19 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         "--api-key",
         help="Optional API key for llama.cpp server authentication",
     )
+    chat_parser.add_argument(
+        "--agentic",
+        action="store_true",
+        help=(
+            "Use a larger bounded tool budget for exploratory turns. "
+            "This does not expose extra tools or bypass validation."
+        ),
+    )
+    chat_parser.add_argument(
+        "--max-tool-rounds",
+        type=_positive_int_arg,
+        help="Override the maximum model tool rounds for this chat session.",
+    )
 
     tool_parser = subparsers.add_parser(
         "tool",
@@ -202,29 +216,6 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="JSON object of tool arguments.",
     )
 
-    manual_parser = subparsers.add_parser(
-        "manual",
-        help="Search the bundled GNU Radio manual corpus without mutating graphs.",
-    )
-    manual_subparsers = manual_parser.add_subparsers(dest="manual_command")
-    manual_subparsers.required = True
-    manual_search_parser = manual_subparsers.add_parser(
-        "search",
-        help="Search cleaned tutorial/manual pages and return cited excerpts.",
-    )
-    manual_search_parser.add_argument("query", help="Manual search query.")
-    manual_search_parser.add_argument(
-        "--k",
-        type=int,
-        default=3,
-        help="Maximum number of cited excerpts to return.",
-    )
-    manual_search_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print the search payload as JSON.",
-    )
-
     vector_parser = subparsers.add_parser(
         "vector",
         help="Build and query the local read-only vector retrieval index.",
@@ -237,6 +228,14 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
     )
     vector_build_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
     vector_build_parser.add_argument("--catalog-root", help="Optional GNU Radio catalog root.")
+    vector_build_parser.add_argument(
+        "--embedding-model",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=(
+            "FastEmbed model to download/cache locally and use for the index. "
+            f"Default: {DEFAULT_EMBEDDING_MODEL}."
+        ),
+    )
     vector_build_parser.add_argument(
         "--docs-only",
         action="store_true",
@@ -291,6 +290,14 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Maximum number of results.",
     )
     vector_search_parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help=(
+            "FastEmbed model to use for the query. Defaults to the model recorded "
+            "in the active vector index manifest."
+        ),
+    )
+    vector_search_parser.add_argument(
         "--json",
         action="store_true",
         help="Print search payload as JSON.",
@@ -312,7 +319,7 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         action="append",
         default=[],
         dest="actual_top_ids",
-        help="Actual top vector/lexical result ID. May be repeated.",
+        help="Actual top vector result ID. May be repeated.",
     )
     vector_miss_parser.add_argument(
         "--observed-top-id",
@@ -535,6 +542,16 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _positive_int_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
@@ -858,9 +875,17 @@ def _run_llama_runtime(
     model: str | None,
     api_key: str | None,
     *,
+    agentic: bool = False,
+    max_tool_rounds: int | None = None,
     verbose: bool = False,
 ) -> int:
     """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
+    effective_max_tool_rounds = _effective_max_tool_rounds(
+        config,
+        agentic=agentic,
+        requested=max_tool_rounds,
+    )
+    effective_request_timeout = _effective_request_timeout(config, agentic=agentic)
     if file_path is not None:
         if _reject_if_original_graph_path(file_path):
             return 1
@@ -883,9 +908,15 @@ def _run_llama_runtime(
         config=config.agent,
         llama_server_url=config.llama.server_url,
         llama_model=config.llama.model,
-        llama_request_timeout_seconds=config.llama.request_timeout_seconds,
+        llama_request_timeout_seconds=effective_request_timeout,
     )
     _print_active_session(agent, verbose=verbose)
+    if agentic or max_tool_rounds is not None:
+        print(
+            "Tool budget: "
+            f"max_tool_rounds={effective_max_tool_rounds}, "
+            f"request_timeout={int(effective_request_timeout)}s"
+        )
     llama_config = config.llama
     launcher = LlamaServerLauncher(
         llama_config,
@@ -901,7 +932,8 @@ def _run_llama_runtime(
         print("\n--- Launcher ---")
         print(str(exc))
         return 1
-    client = launch_result.client
+    provider_config = launch_result.provider_config
+    provider_config.timeout_seconds = effective_request_timeout
 
     if launch_result.status == "started":
         logger.info("server_started url=%s pid=%s", launch_result.server_url, launch_result.pid)
@@ -917,9 +949,43 @@ def _run_llama_runtime(
         )
 
     if user_message is not None:
-        return _run_single_turn(agent, client, user_message, model, config, verbose=verbose)
+        return _run_single_turn(
+            agent,
+            provider_config,
+            user_message,
+            model,
+            config,
+            max_tool_rounds=effective_max_tool_rounds,
+            verbose=verbose,
+        )
 
-    return _run_repl_loop(agent, client, model, config, verbose=verbose)
+    return _run_repl_loop(
+        agent,
+        provider_config,
+        model,
+        config,
+        max_tool_rounds=effective_max_tool_rounds,
+        verbose=verbose,
+    )
+
+
+def _effective_max_tool_rounds(
+    config: AppConfig,
+    *,
+    agentic: bool,
+    requested: int | None,
+) -> int:
+    if requested is not None:
+        return requested
+    if agentic:
+        return AGENTIC_MAX_TOOL_ROUNDS
+    return config.llama.max_tool_rounds
+
+
+def _effective_request_timeout(config: AppConfig, *, agentic: bool) -> float:
+    if not agentic:
+        return config.llama.request_timeout_seconds
+    return max(config.llama.request_timeout_seconds, AGENTIC_REQUEST_TIMEOUT_SECONDS)
 
 
 def _maybe_render_pending_clarification(agent: GrcAgent) -> bool:
@@ -935,28 +1001,31 @@ def _maybe_render_pending_clarification(agent: GrcAgent) -> bool:
 
 def _run_single_turn(
     agent: GrcAgent,
-    client: LlamaServerClient,
+    provider_config: ToolAgentsLlamaProviderConfig,
     user_message: str,
     model: str | None,
     config: AppConfig | None = None,
     *,
+    max_tool_rounds: int | None = None,
     verbose: bool = False,
 ) -> int:
     """Run one bounded llama turn and print the result."""
     if config is None:
         config = load_app_config()
+    round_limit = (
+        config.llama.max_tool_rounds
+        if max_tool_rounds is None
+        else max_tool_rounds
+    )
     try:
         history_start = len(agent.history)
-        result = run_bounded_llama_turn(
+        result = run_bounded_toolagents_turn(
             agent,
-            client,
+            provider_config,
             user_message,
             model=model,
-            advisor_enabled=config.agent.advisor_enabled,
-            advisor_limited_advisory=config.agent.advisor_limited_advisory,
-            advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
             mvp_tool_profile=True,
-            max_tool_rounds=config.llama.max_tool_rounds,
+            max_tool_rounds=round_limit,
         )
     except LlamaServerError as exc:
         print("\n--- Runtime ---")
@@ -983,15 +1052,21 @@ def _run_single_turn(
 
 def _run_repl_loop(
     agent: GrcAgent,
-    client: LlamaServerClient,
+    provider_config: ToolAgentsLlamaProviderConfig,
     model: str | None,
     config: AppConfig | None = None,
     *,
+    max_tool_rounds: int | None = None,
     verbose: bool = False,
 ) -> int:
     """Run an interactive REPL loop over the current agent and session."""
     if config is None:
         config = load_app_config()
+    round_limit = (
+        config.llama.max_tool_rounds
+        if max_tool_rounds is None
+        else max_tool_rounds
+    )
     print("\nInteractive chat. Type /save [path], /history, /quit, or /exit.\n")
     last_exit_code = 0
 
@@ -1047,16 +1122,13 @@ def _run_repl_loop(
 
         try:
             history_start = len(agent.history)
-            result = run_bounded_llama_turn(
+            result = run_bounded_toolagents_turn(
                 agent,
-                client,
+                provider_config,
                 user_input,
                 model=model,
-                advisor_enabled=config.agent.advisor_enabled,
-                advisor_limited_advisory=config.agent.advisor_limited_advisory,
-                advisor_shadow_telemetry=config.agent.advisor_shadow_telemetry,
                 mvp_tool_profile=True,
-                max_tool_rounds=config.llama.max_tool_rounds,
+                max_tool_rounds=round_limit,
             )
         except LlamaServerError as exc:
             print(f"\n--- Runtime Error ---\n{exc}")
@@ -1105,15 +1177,11 @@ def _run_repl_save_command(agent: GrcAgent, user_input: str) -> int:
         return 1
 
     path = paths[0] if paths else None
-    intent = "save"
-    if path:
-        intent = f"save to {path}"
-    agent.init_turn_requirements(intent)
     kwargs: dict[str, Any] = {"overwrite": overwrite}
     if path is not None:
         kwargs["path"] = path
     result = agent.execute_tool(
-        "save_graph_explicit",
+        "save_graph",
         kwargs,
         model_tool_call=False,
     )
@@ -1190,14 +1258,15 @@ def _build_health_report(config: AppConfig) -> dict[str, Any]:
     report["llama_model_ready"] = False
     report["llama_context_verified"] = False
     try:
-        client = LlamaServerClient(
+        from grc_agent.llama_probe import LlamaHealthProbe
+
+        probe = LlamaHealthProbe(
             base_url=config.llama.server_url,
             timeout_seconds=min(config.llama.request_timeout_seconds, 5.0),
-            max_tokens=32,
-            temperature=0.0,
-            enable_thinking=False,
         )
-        props = client.get_server_properties()
+        probe.require_ready()
+        probe.require_model_alias(config.llama.model)
+        props = probe.get_server_properties()
         actual_context = extract_model_context_limit(props)
         report["llama_actual_context_tokens"] = actual_context
         report["llama_model_ready"] = True
@@ -1349,24 +1418,6 @@ def _run_debug_bundle_command(
     written = write_debug_bundle(output_path, payload)
     print(json.dumps(debug_bundle_summary(payload, written), indent=2, sort_keys=True))
     return 0
-
-
-def _run_manual_search_command(query: str, k: int, *, json_output: bool) -> int:
-    payload = search_manual(query, k=k)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"Manual search: {payload.get('query', query)}")
-        for index, result in enumerate(payload.get("results", []), start=1):
-            citation = result.get("citation", {})
-            print(f"\n{index}. {result.get('title')} — {result.get('section')}")
-            print(result.get("excerpt", ""))
-            print(
-                f"Source: {citation.get('path')}:{citation.get('line_start')}"
-            )
-        for warning in payload.get("warnings", []) or []:
-            print(f"Warning: {warning}")
-    return 0 if payload.get("ok") else 1
 
 
 def _print_vector_payload(payload: dict[str, Any], *, json_output: bool) -> None:
@@ -1589,6 +1640,7 @@ def _run_vector_command(args: argparse.Namespace) -> int:
                 index_dir=args.index_dir,
                 catalog_root=args.catalog_root,
                 docs_only=args.docs_only,
+                embedding_model=args.embedding_model,
             )
             _print_vector_payload(payload, json_output=args.json)
             return 0
@@ -1609,6 +1661,7 @@ def _run_vector_command(args: argparse.Namespace) -> int:
                 scope=args.scope,
                 k=args.k,
                 index_dir=args.index_dir,
+                embedding_model=args.embedding_model,
             )
             _print_vector_payload(payload, json_output=args.json)
             return 0 if payload.get("ok") else 1
@@ -1734,6 +1787,8 @@ def main(argv: list[str] | None = None) -> int:
                 app_config.llama.server_url,
                 app_config.llama.model,
                 None,
+                agentic=False,
+                max_tool_rounds=None,
                 verbose=args.verbose,
             )
         parser.print_help()
@@ -1781,6 +1836,8 @@ def main(argv: list[str] | None = None) -> int:
             else args.llama_server_url,
             app_config.llama.model if args.model is None else args.model,
             args.api_key,
+            agentic=args.agentic,
+            max_tool_rounds=args.max_tool_rounds,
             verbose=args.verbose,
         )
 
@@ -1790,14 +1847,6 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         return _run_tool_command(args.tool_name, tool_kwargs, args.file, app_config)
-
-    if args.command == "manual":
-        if args.manual_command == "search":
-            return _run_manual_search_command(
-                args.query,
-                args.k,
-                json_output=args.json,
-            )
 
     if args.command == "vector":
         return _run_vector_command(args)

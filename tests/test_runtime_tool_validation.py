@@ -43,8 +43,8 @@ class RuntimeToolValidationTests(unittest.TestCase):
 
     def test_unsupported_extra_argument_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "search_grc",
-            {"query": "samp_rate", "scope": "session", "unexpected": True},
+            "semantic_search_grc",
+            {"query": "samp_rate", "scope": "catalog", "unexpected": True},
             self._schema_map(),
         )
 
@@ -59,8 +59,8 @@ class RuntimeToolValidationTests(unittest.TestCase):
 
     def test_invalid_argument_type_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "search_grc",
-            {"query": "samp_rate", "scope": "session", "k": "five"},
+            "semantic_search_grc",
+            {"query": "samp_rate", "scope": "catalog", "k": "five"},
             self._schema_map(),
         )
 
@@ -71,7 +71,7 @@ class RuntimeToolValidationTests(unittest.TestCase):
 
     def test_invalid_enum_value_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "search_grc",
+            "semantic_search_grc",
             {"query": "samp_rate", "scope": "everywhere"},
             self._schema_map(),
         )
@@ -81,14 +81,38 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_enum")
         self.assertEqual(result["validation_errors"][0]["field"], "scope")
 
-    def test_too_few_array_items_is_rejected(self) -> None:
+    def test_empty_inspect_params_is_valid(self) -> None:
         result = validate_runtime_tool_call(
             "inspect_graph",
             {"view": "details", "targets": ["analog_sig_source_x_1"], "params": []},
             self._schema_map(),
         )
 
-        assert result is not None
-        self.assertEqual(result["error_type"], "tool_call_invalid")
-        self.assertEqual(result["validation_errors"][0]["code"], "too_few_items")
-        self.assertEqual(result["validation_errors"][0]["field"], "params")
+        self.assertIsNone(result)
+
+    def test_missing_inspect_params_is_valid(self) -> None:
+        result = validate_runtime_tool_call(
+            "inspect_graph",
+            {"view": "details", "targets": ["analog_sig_source_x_1"]},
+            self._schema_map(),
+        )
+
+        self.assertIsNone(result)
+
+    def test_missing_inspect_view_is_valid(self) -> None:
+        result = validate_runtime_tool_call(
+            "inspect_graph",
+            {"targets": ["analog_sig_source_x_1"]},
+            self._schema_map(),
+        )
+
+        self.assertIsNone(result)
+
+    def test_overview_without_filler_arguments_is_valid(self) -> None:
+        result = validate_runtime_tool_call(
+            "inspect_graph",
+            {"view": "overview"},
+            self._schema_map(),
+        )
+
+        self.assertIsNone(result)

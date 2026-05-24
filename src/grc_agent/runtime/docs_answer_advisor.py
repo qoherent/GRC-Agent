@@ -5,10 +5,8 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 import json
-import socket
 import time
 from typing import Any
-from urllib import error, request
 
 
 class DocsAnswerAdvisorError(RuntimeError):
@@ -24,162 +22,9 @@ class DocsAnswerSnippet:
     excerpt: str
 
 
-class DocsAnswerLlamaClient:
-    """Minimal llama.cpp JSON client for docs answer synthesis."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        timeout_seconds: float,
-        max_tokens: int,
-        temperature: float = 0.0,
-    ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.timeout_seconds = timeout_seconds
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-
-    def create_chat_completion(
-        self,
-        *,
-        model: str,
-        messages: list[dict[str, Any]],
-        response_format: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "tools": [],
-            "tool_choice": "none",
-            "parallel_tool_calls": False,
-            "parse_tool_calls": True,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "chat_template_kwargs": {
-                "enable_thinking": False,
-            },
-        }
-        if response_format is not None:
-            payload["response_format"] = response_format
-        return self._request_json("POST", "/v1/chat/completions", payload=payload)
-
-    def create_chat_completion_raw(
-        self,
-        *,
-        model: str,
-        messages: list[dict[str, Any]],
-        response_format: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Return raw chat-completion text and transport timings for diagnostics."""
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "tools": [],
-            "tool_choice": "none",
-            "parallel_tool_calls": False,
-            "parse_tool_calls": True,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "chat_template_kwargs": {
-                "enable_thinking": False,
-            },
-        }
-        if response_format is not None:
-            payload["response_format"] = response_format
-        return self._request_raw("POST", "/v1/chat/completions", payload=payload)
-
-    def _request_json(
-        self,
-        method: str,
-        path: str,
-        *,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        headers = {
-            "Accept": "application/json",
-        }
-        data: bytes | None = None
-        if payload is not None:
-            headers["Content-Type"] = "application/json"
-            data = json.dumps(payload).encode("utf-8")
-        req = request.Request(url, headers=headers, data=data, method=method)
-        try:
-            with request.urlopen(req, timeout=self.timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8")
-            raise DocsAnswerAdvisorError(
-                f"docs advisor HTTP {exc.code}: {body[:300]}"
-            ) from exc
-        except error.URLError as exc:
-            if isinstance(exc.reason, TimeoutError | socket.timeout):
-                raise DocsAnswerAdvisorError("docs advisor request timed out") from exc
-            raise DocsAnswerAdvisorError(
-                f"docs advisor transport failure: {exc.reason}"
-            ) from exc
-        except TimeoutError as exc:
-            raise DocsAnswerAdvisorError("docs advisor request timed out") from exc
-        except socket.timeout as exc:
-            raise DocsAnswerAdvisorError("docs advisor request timed out") from exc
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise DocsAnswerAdvisorError("docs advisor returned non-JSON") from exc
-        if not isinstance(parsed, dict):
-            raise DocsAnswerAdvisorError("docs advisor response must be an object")
-        return parsed
-
-    def _request_raw(
-        self,
-        method: str,
-        path: str,
-        *,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Return raw transport payload with coarse timing breakdown."""
-        url = f"{self.base_url}{path}"
-        headers = {
-            "Accept": "application/json",
-        }
-        data: bytes | None = None
-        if payload is not None:
-            headers["Content-Type"] = "application/json"
-            data = json.dumps(payload).encode("utf-8")
-        req = request.Request(url, headers=headers, data=data, method=method)
-        request_started = time.perf_counter()
-        try:
-            with request.urlopen(req, timeout=self.timeout_seconds) as response:
-                headers_received = time.perf_counter()
-                raw = response.read().decode("utf-8")
-                response_read = time.perf_counter()
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8")
-            raise DocsAnswerAdvisorError(
-                f"docs advisor HTTP {exc.code}: {body[:300]}"
-            ) from exc
-        except error.URLError as exc:
-            if isinstance(exc.reason, TimeoutError | socket.timeout):
-                raise DocsAnswerAdvisorError("docs advisor request timed out") from exc
-            raise DocsAnswerAdvisorError(
-                f"docs advisor transport failure: {exc.reason}"
-            ) from exc
-        except TimeoutError as exc:
-            raise DocsAnswerAdvisorError("docs advisor request timed out") from exc
-        except socket.timeout as exc:
-            raise DocsAnswerAdvisorError("docs advisor request timed out") from exc
-        return {
-            "raw_response_text": raw,
-            "http_request_ms": int((headers_received - request_started) * 1000),
-            "generation_ms": int((response_read - headers_received) * 1000),
-            "roundtrip_ms": int((response_read - request_started) * 1000),
-        }
-
-
 def run_docs_answer_advisor(
     *,
-    client: DocsAnswerLlamaClient,
+    client: Any,
     model: str,
     question: str,
     answer_type: str,
@@ -248,7 +93,7 @@ def run_docs_answer_advisor(
 
 def run_docs_answer_advisor_diagnostic(
     *,
-    client: DocsAnswerLlamaClient,
+    client: Any,
     model: str,
     question: str,
     answer_type: str,
@@ -627,7 +472,6 @@ def _validate_payload(
 
 __all__ = [
     "DocsAnswerAdvisorError",
-    "DocsAnswerLlamaClient",
     "DocsAnswerSnippet",
     "run_docs_answer_advisor_diagnostic",
     "run_docs_answer_advisor",
