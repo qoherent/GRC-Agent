@@ -38,10 +38,9 @@ def _set_param(instance_name: str, param: str, value: str) -> tuple[ToolExpectat
         ToolExpectation(
             "change_graph",
             arguments={
-                "operation_kind": "set_param",
-                "instance_name": instance_name,
-                "param_key": param,
-                "param_value": value,
+                "update_params": [
+                    {"instance_name": instance_name, "params": {param: value}}
+                ],
             },
         ),
     )
@@ -52,9 +51,9 @@ def _set_state(instance_name: str, state: str) -> tuple[ToolExpectation, ...]:
         ToolExpectation(
             "change_graph",
             arguments={
-                "operation_kind": "set_state",
-                "instance_name": instance_name,
-                "state": state,
+                "update_states": [
+                    {"instance_name": instance_name, "states": {"state": state}}
+                ],
             },
         ),
     )
@@ -65,9 +64,7 @@ def _add_variable(name: str, value: str) -> tuple[ToolExpectation, ...]:
         ToolExpectation(
             "change_graph",
             arguments={
-                "operation_kind": "add_variable",
-                "variable_name": name,
-                "variable_value": value,
+                "add_variables": [{"instance_name": name, "value": value}],
             },
         ),
     )

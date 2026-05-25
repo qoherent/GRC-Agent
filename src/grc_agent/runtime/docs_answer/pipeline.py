@@ -522,6 +522,12 @@ def ask_grc_docs(
             "focus": focus_text,
             "answer": answer,
             "sources": sources[:source_limit],
+            "allowed_use": "explanation_only",
+            "mutation_authority": False,
+            "confidence": _docs_answer_confidence(
+                source_quality=source_quality,
+                insufficient_evidence=bool(insufficient_evidence),
+            ),
             "insufficient_evidence": bool(insufficient_evidence),
             "fallback_used": bool(fallback_used or degraded_retrieval),
             "degraded_retrieval": bool(degraded_retrieval),
@@ -557,6 +563,21 @@ def _docs_retrieval_queries(question_text: str, retrieval_query: str) -> list[st
     if not expanded or _docs_query_key(raw) == _docs_query_key(expanded):
         return [raw]
     return [raw, expanded]
+
+
+def _docs_answer_confidence(
+    *,
+    source_quality: dict[str, Any],
+    insufficient_evidence: bool,
+) -> str:
+    if insufficient_evidence:
+        return "low"
+    quality = str(source_quality.get("quality") or "").strip().lower()
+    if quality == "strong":
+        return "high"
+    if quality == "moderate":
+        return "medium"
+    return "low"
 
 
 def _docs_query_key(query: str) -> str:

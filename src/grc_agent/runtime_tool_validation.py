@@ -92,7 +92,7 @@ def _schema_repair_instruction(
         for issue in issues
         if issue.get("code") != "missing_required" and isinstance(issue.get("field"), str)
     ]
-    return {
+    instruction = {
         "tool": tool_name,
         "no_tool_ran": True,
         "missing_fields": missing,
@@ -104,6 +104,15 @@ def _schema_repair_instruction(
             "mutation targets, or mutation values."
         ),
     }
+    if tool_name == "change_graph":
+        instruction["change_graph_hint"] = (
+            "For existing variables shown by inspect_graph, use "
+            "update_variables=[{'instance_name':'samp_rate','value':'48000'}]. "
+            "For existing block parameters, use "
+            "update_params=[{'instance_name':'...', 'params': {'param_id':'value'}}]. "
+            "Do not put graph instance names into block_id."
+        )
+    return instruction
 
 
 def _validate_object(

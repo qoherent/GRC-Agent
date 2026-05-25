@@ -89,6 +89,7 @@ Args:
 Expected output:
 
 - compact ranked block candidates with `block_id`, title/name, match type, and a short factual excerpt
+- exact block-ID queries may include compact catalog details: params, defaults, options, option labels, inputs, and outputs, so generic transactions can be planned from installed metadata
 - no raw vector scores in model-visible output
 - no mutation payloads or edit authority
 
@@ -115,6 +116,9 @@ Expected output:
 
 - concise answer
 - source list
+- `allowed_use=explanation_only`
+- `mutation_authority=false`
+- confidence derived from source quality and insufficient-evidence state
 - `insufficient_evidence` when local docs do not support an answer
 - instruction-like retrieved text is stripped before it reaches model-visible answers/sources
 - no mutation payloads
@@ -130,66 +134,48 @@ Internal subtools/data:
 
 Purpose: the only model-facing graph-content mutation wrapper.
 
-Required args:
+The model-facing schema is a flat batch interface. The model does not provide
+`op`, `args`, `dry_run`, `user_goal`, `state_revision`, or `preview_token`.
+Runtime injects turn intent, stale-state guards, active-file integrity checks,
+transaction ordering, rollback, validation, and autosave internally.
 
-- `dry_run`
-- `op`
-- `user_goal`
+Supported flat fields:
 
-Common args:
+- `add_blocks`: add GNU blocks by exact `block_id` and `instance_name`, with optional initial `params` and `states`
+- `remove_blocks`: remove existing blocks by `instance_name` or guarded `target_ref`; runtime auto-detaches incident connections and reports them
+- `update_params`: update multiple params on one existing block per item, with optional `expected_params`
+- `update_states`: update supported state fields on one existing block per item
+- `add_connections`: add exact source/destination endpoint pairs
+- `remove_connections`: remove exact `connection_id` strings from `inspect_graph`
+- `rewire_connections`: generic helper that expands one old `connection_id` plus a new endpoint into remove/add connection operations
+- `insert_blocks_on_connections`: generic helper that inserts one GNU block into one exact existing connection
+- `add_variables`, `update_variables`, `remove_variables`: first-class variable edits, normalized internally to variable-block transactions
+- `force`: optional validation override, default `false`
 
-- `target_ref`
-- `state_revision`
-- `args`
-- `debug`
+At least one edit list must be non-empty. Runtime normalizes the flat fields into
+internal transaction operations in fixed order: remove connections, remove
+blocks, add blocks/variables, update params/variables, update states, insert
+blocks on connections, then add connections. The model is not responsible for
+low-level transaction ordering.
 
-The model-facing schema is a compact envelope. Runtime validates and compiles `op + args` into internal transaction operations; raw YAML patches, arbitrary GNU `FlowGraph` calls, and lifecycle actions are not accepted as `args`.
-`dry_run=true` is always preview-only. If the user asked to commit but the model previews, the loop may allow one bounded repair call; the wrapper must not silently turn a preview into a commit.
+`force=true` may only bypass final native/`grcc` validation failure after schema,
+graph refs, catalog/GNU block IDs, params, ports, connection IDs, copied-file
+integrity, and candidate apply have all succeeded. It never bypasses unknown GNU
+facts, ambiguity, stale refs, path safety, or save/autosave errors. Forced
+success returns `committed=true`, `validation_ok=false`, and a concise message:
+`change done, but validation error appeared: ...`.
 
-Supported `op` values:
-
-- `set_param`
-- `set_state`
-- `add_variable`
-- `disconnect`
-- `rewire`
-- `insert_in_connection`
-- `add_signal_source_to_sum`
-- `remove_block`
-- `clarify`
-- `unsupported`
-
-`set_param` `args`:
-
-- `instance_name` or guarded `target_ref`
-- `param_key`
-- `param_value`
-- optional `expected_old_value`
-
-Natural `set_param` resolution is graph-local and metadata-driven only. It may resolve through loaded graph instance names, block types, catalog labels, parameter keys/labels, current values, and explicit old-value guards. It does not use phrase dictionaries, docs/RAG, tutorials, hidden retries, or raw YAML. If zero or multiple candidates match, it clarifies. If `expected_old_value` does not match the active graph, it refuses without mutation.
-
-Other operation `args`:
-
-- `set_state`: `instance_name` or `target_ref`, `state`
-- `add_variable`: `variable_name`, `variable_value`
-- `disconnect`: exact `connection_id` or uniquely resolved endpoints
-- `rewire`: `connection_id`, top-level `state_revision`, `new_src_block`, `new_src_port`, `new_dst_block`, `new_dst_port`
-- `insert_in_connection`: `connection_id`, `block_id`, `instance_name`, optional `insert_params`
-- `add_signal_source_to_sum`: `block_id`, `freq`, optional `dst_block` or `target_ref`; commits require top-level `state_revision` or `target_ref.base_state_revision` plus the `preview_token` from a matching dry-run preview; runtime infers the summing target only when exactly one graph-local target is supported by existing source edges, additive/summing catalog semantics, and GNU catalog multiplicity metadata
-- `remove_block`: `instance_name` or `target_ref`, optional explicit detach controls
-
-Generic `add_block`, `connect`, and `add_connected_block` remain internal transaction primitives, not model-facing `op` values. Live traces showed they made the small model choose detached or underspecified edits for requests like "add another source and connect it"; the model-facing grammar should use a specific composite operation when the runtime can expand it safely.
-For `add_signal_source_to_sum`, inherited source params such as sample rate, waveform, amplitude, and type must agree across existing sources unless the user/model supplies an explicit override; disagreement clarifies instead of falling through to catalog defaults.
-When the user explicitly confirms a pending structural preview, runtime normalization may fill only the preview guard fields (`state_revision`, `preview_token`) from the stored preview. It must not invent operation args such as block IDs, frequency, target, or params.
-Unsupported generic mutation ops return structured errors for model repair. The runtime must not silently rewrite `add_block`, `connect`, or `add_connected_block` into supported ops; raw requested calls remain in trace history.
+There are no model-facing block-specific macros. Workflows such as rewire,
+insert-in-path, add-source-and-connect, or source-to-sum are expressed by the
+flat generic buckets and validated through graph/catalog evidence. Internal
+helpers may still lower generic batches into existing transaction primitives.
 
 Expected output:
 
-- `ok`, `dry_run`, `committed`, operation kind, `state_revision`
-- compact `effect`/`effects` or preview `plan` describing the exact graph fact changed or planned
+- `ok`, `committed`, current state revision
+- compact `effect`/`effects` describing the exact graph fact changed
 - compact graph delta when applicable
-- validation result for committed mutations
-- autosave result for committed mutations
+- validation result and autosave result for committed mutations
 - stale file-integrity refusal when the active file hash no longer matches the last loaded/saved hash
 - clarification payload for ambiguous or underspecified requests
 - rollback/refusal details for failed validation
@@ -197,7 +183,6 @@ Expected output:
 
 Internal subtools/data:
 
-- `propose_edit` for preview
 - `apply_edit` for committed mutation
 - transaction normalizer
 - validation rules and preflight checks
@@ -207,12 +192,12 @@ Internal subtools/data:
 Current mutation-wrapper status:
 
 - Keep one model-facing mutation wrapper for now.
-- Keep internal implementation organized by operation kind: `set_param`, `set_state`, `add_variable`, `disconnect`, `rewire`, `insert_in_connection`, `add_signal_source_to_sum`, `remove_block`, `clarify`, `unsupported`.
-- Return compact model-visible results with exact effect or preview plan, committed status, state revision, validation, autosave, and concise refusal evidence.
+- Keep model-facing edits generic through flat edit buckets; do not restore block-specific macros.
+- Return compact model-visible results with exact effect/effects, committed status, state revision, validation, autosave, and concise refusal evidence.
 - Require graph-local authority for edits: exact identifiers, guarded target refs, or uniquely resolved metadata candidates from the active graph.
 - Preserve existing safety: no docs/RAG authority, no raw YAML, no hidden retries, no first-match mutation, and rollback on failed validation.
 - Remaining follow-up work should focus on live eval quality for mutation phrasing and operation-specific edge cases, not expanding the model-facing tool surface.
-- Deprecated model-facing compatibility aliases such as `operation_kind`, `candidate_id`, `insert_block`, and `auto_insert` must not be restored without eval evidence.
+- Deprecated model-facing compatibility fields such as `op`, `args`, `dry_run`, `user_goal`, `preview_token`, `operation_kind`, `candidate_id`, `insert_block`, and `auto_insert` must not be restored without eval evidence.
 
 ## Internal Tool Boundary
 
@@ -244,6 +229,9 @@ If the assistant returns final text that says it needs inspection/search, or
 answers a graph-local fact question without any tool evidence, the runtime adds
 one reminder and continues the same bounded turn. This is a missed-tool nudge,
 not a free-text fallback parser, hidden repair path, or permission bypass.
+For mutation requests, reminders force the next step to `change_graph`. If the
+model responds with text instead of the forced tool call, the runtime retries
+once and then fails closed with no mutation.
 
 Vague graph-edit requests are allowed into the model/tool loop so the model can
 inspect and clarify. Mutation safety remains enforced by wrapper schemas, route
@@ -295,7 +283,7 @@ Commit path:
 8. atomic commit or rollback
 9. autosave to the active copied graph path when safe and writable
 
-Preview path uses proposal/candidate logic and must leave the live graph unchanged.
+Autosave and manual `/save` share the same session save path. Save takes an advisory lock under `.grc_agent`, rejects symlink or hard-linked targets, rechecks the active file hash under the lock before replace, writes a content-addressed backup under `.grc_agent/backups/`, writes through a temp file plus `os.replace`, fsyncs the directory, then re-reads and verifies the persisted hash before clearing dirty state.
 
 The model has no lifecycle tools. `/save` in the CLI bypasses the model and calls the internal save path directly after validation.
 
@@ -325,15 +313,13 @@ Deterministic gates:
 
 Live dashboards exercise llama.cpp routing and behavior by suite. They preserve raw requested/executed tool calls, separate task success from runtime safety, and fail closed on forbidden raw/internal tool history.
 
-Production gameplay harnesses run copied graphs only, record full artifacts, apply deterministic local judging, and keep Ollama/dummy users out of mutation authority and judging.
-
-The full `unittest` discovery currently contains about 950 tests and is slow because it includes integration-style graph loading, `grcc` validation, eval harness logic, CLI loops, and production gameplay tests. Use targeted tests during iteration and reserve full runs for release candidates.
+The full `unittest` discovery is slow because it includes integration-style graph loading, `grcc` validation, eval harness logic, and CLI loops. Use targeted tests during iteration and reserve full runs for release candidates.
 
 ## Docs And Retrieval
 
 `docs/wiki_gnuradio_org/` is a local explanation corpus. It can support user education and docs QA, but it cannot authorize mutations, infer active graph semantics, or provide hidden graph recipes.
 
-Catalog metadata and active graph inspection own block semantics, ports, parameters, current values, and edit targets. ToolAgents RAG examples are useful research material for simplifying explanation retrieval, but adopting them must not move mutation authority into retrieval.
+Catalog metadata and active graph inspection own block semantics, ports, parameters, current values, and edit targets. Retrieval is explanation-scoped and must not become mutation authority.
 
 Docs-answer quality is evaluated separately from mutation safety. Groundedness and relevance matter; misleading answers and mutation leakage must remain zero.
 
@@ -359,6 +345,7 @@ End-to-end runtime readiness requires:
 - embedding model available in the user's local cache or downloadable during explicit vector build
 - llama.cpp reachable
 - actual llama context verified
+- llama.cpp server-side built-in tools not detected in `/props`
 - four MVP model-facing wrappers only
 
 CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
@@ -368,9 +355,6 @@ CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local 
 Durable docs kept under `docs/`:
 
 - `BLUEPRINT.md`: architecture and safety contract
+- `MODEL_CONTEXT_BIBLE.md`: generated exact model-facing prompt and wrapper schemas
 - `QUICKSTART.md`: setup and use
-- `ISSUE_INTAKE.md`: report template
-- `DEMO_VIDEO.md`: demo workflow
-- `HANDOFF.md`: current implementation handoff and verification checklist
-- `capability_classification.json`: current capability labels
 - `wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus

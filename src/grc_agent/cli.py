@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+from importlib import metadata
 import json
 import logging
 from pathlib import Path
@@ -32,7 +33,11 @@ from grc_agent.dogfood import (
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
-from grc_agent.llama_probe import LlamaServerError, extract_model_context_limit
+from grc_agent.llama_probe import (
+    LlamaServerError,
+    extract_enabled_builtin_tools,
+    extract_model_context_limit,
+)
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.retrieval.vector import (
     build_vector_index,
@@ -60,13 +65,14 @@ FAKE_USER_MESSAGE = "Please change the samp_rate to 48000 and validate the graph
 FAKE_ACTIONS = [
     {"text": "I'll do that right away."},
     {
-        "tool": "apply_edit",
+        "tool": "change_graph",
         "kwargs": {
-            "transaction": {
-                "op_type": "update_params",
-                "instance_name": "samp_rate",
-                "params": {"value": "48000"},
-            }
+            "update_variables": [
+                {
+                    "instance_name": "samp_rate",
+                    "value": "48000",
+                }
+            ]
         },
     },
 ]
@@ -555,7 +561,19 @@ def _positive_int_arg(value: str) -> int:
 
 
 def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
-    if not argv or argv[0] in {"fake", "chat", "tool"}:
+    command_names = {
+        "doctor",
+        "health",
+        "release-manifest",
+        "debug-bundle",
+        "fake",
+        "chat",
+        "tool",
+        "vector",
+        "dogfood",
+        "history",
+    }
+    if not argv or any(arg in command_names for arg in argv):
         return argv
 
     if "--fake" in argv:
@@ -563,7 +581,22 @@ def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
         return ["fake", *translated]
 
     if "--message" in argv:
-        return ["chat", *argv]
+        prefix: list[str] = []
+        remainder = list(argv)
+        while remainder:
+            head = remainder[0]
+            if head in {"--verbose", "-v"}:
+                prefix.append(remainder.pop(0))
+                continue
+            if head == "--config" and len(remainder) >= 2:
+                prefix.extend(remainder[:2])
+                del remainder[:2]
+                continue
+            if head.startswith("--config="):
+                prefix.append(remainder.pop(0))
+                continue
+            break
+        return [*prefix, "chat", *remainder]
 
     return argv
 
@@ -672,9 +705,8 @@ def _print_turn_operations(agent: GrcAgent, *, start_index: int) -> None:
 
 def _tool_detail_from_args(payload: dict[str, Any]) -> str:
     mode = payload.get("mode")
-    operation_kind = payload.get("operation_kind")
     operation_summary = payload.get("operation_summary")
-    detail = mode or operation_kind or operation_summary
+    detail = mode or operation_summary
     return f"[{detail}]" if isinstance(detail, str) and detail else ""
 
 
@@ -1269,8 +1301,15 @@ def _build_health_report(config: AppConfig) -> dict[str, Any]:
         props = probe.get_server_properties()
         actual_context = extract_model_context_limit(props)
         report["llama_actual_context_tokens"] = actual_context
+        report["llama_build_info"] = props.get("build_info")
+        report["llama_chat_template_caps"] = props.get("chat_template_caps")
+        builtin_tools = sorted(extract_enabled_builtin_tools(props))
+        report["llama_builtin_tools_enabled"] = builtin_tools
+        report["llama_builtin_tools_disabled"] = not builtin_tools
         report["llama_model_ready"] = True
         report["llama_context_verified"] = actual_context is not None
+        if builtin_tools:
+            status_reasons.append("llama_builtin_tools_enabled")
         if actual_context is None:
             status_reasons.append("llama_context_unknown")
         elif actual_context < config.llama.desired_context_tokens:
@@ -1284,6 +1323,10 @@ def _build_health_report(config: AppConfig) -> dict[str, Any]:
         status_reasons.append("agent_core_not_ready")
     if not report.get("retrieval_ready"):
         status_reasons.append("retrieval_not_ready")
+    try:
+        report["toolagents_version"] = metadata.version("ToolAgents")
+    except metadata.PackageNotFoundError:
+        report["toolagents_version"] = None
 
     unique_reasons = list(dict.fromkeys(status_reasons))
     if "llama_unreachable" in unique_reasons or "agent_core_not_ready" in unique_reasons:

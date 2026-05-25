@@ -6,13 +6,17 @@ unsupported fields.
 """
 
 from collections import defaultdict, deque
+from contextlib import contextmanager
 import copy
+import fcntl
 import hashlib
 import logging
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any
 
 import yaml
@@ -233,7 +237,7 @@ class FlowgraphSession:
         logger.info("create graph_id=%s", graph_id)
         return session
 
-    def save(self, path: str | Path | None = None) -> None:
+    def save(self, path: str | Path | None = None, *, validate: bool = True) -> None:
         """Write the current in-memory graph to disk."""
         # Refuse to save if no flowgraph has been loaded yet.
         if self.flowgraph is None:
@@ -246,8 +250,11 @@ class FlowgraphSession:
 
         # Save only a graph version that has passed grcc validation.
         if (
+            validate
+            and (
             self.last_validation_ok is not True
             or self.last_validation_revision != self._state_revision
+            )
         ):
             if not self.validate():
                 raise ValueError(
@@ -261,8 +268,24 @@ class FlowgraphSession:
         # Serialize the current YAML once so save and validate stay consistent.
         serialized = self._serialize_raw_data(self.flowgraph.raw_data)
 
-        self._atomic_write_text(target_path, serialized)
-        self._persisted_file_sha256 = self._sha256_text(serialized)
+        serialized_hash = self._sha256_text(serialized)
+        with self._save_file_lock(target_path):
+            self._refuse_ambiguous_save_target(target_path)
+            if target_path == self.path and self._persisted_file_sha256 is not None:
+                current_hash = self._read_file_sha256_if_available(target_path)
+                if current_hash != self._persisted_file_sha256:
+                    raise OSError(
+                        "Refusing to save flowgraph because the active file changed "
+                        "on disk since it was loaded or saved. Reload before saving."
+                    )
+            self._write_save_backup(target_path)
+            self._atomic_write_text(target_path, serialized)
+            persisted_hash = self._read_file_sha256_if_available(target_path)
+            if persisted_hash != serialized_hash:
+                raise OSError(
+                    "Failed to verify saved flowgraph contents after atomic replace."
+                )
+            self._persisted_file_sha256 = persisted_hash
 
         path_changed = target_path != self.path
 
@@ -288,6 +311,74 @@ class FlowgraphSession:
             return hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
             return None
+
+    @staticmethod
+    @contextmanager
+    def _save_file_lock(target_path: Path) -> Any:
+        control_dir = target_path.parent / ".grc_agent"
+        try:
+            control_dir.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise OSError(
+                f"Could not create save lock directory for {target_path}: {exc}"
+            ) from exc
+        lock_path = control_dir / f"{target_path.name}.lock"
+        try:
+            with lock_path.open("a", encoding="utf-8") as lock_file:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                except OSError as exc:
+                    raise OSError(
+                        f"Could not lock active graph before saving {target_path}: {exc}"
+                    ) from exc
+                try:
+                    yield
+                finally:
+                    try:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        logger.warning("save_lock_release_failed path=%s", lock_path)
+        except OSError:
+            raise
+
+    @staticmethod
+    def _refuse_ambiguous_save_target(target_path: Path) -> None:
+        if not target_path.exists():
+            return
+        if target_path.is_symlink():
+            raise OSError(f"Refusing to save through symlink: {target_path}")
+        try:
+            stat_result = target_path.stat()
+        except OSError as exc:
+            raise OSError(f"Could not stat save target {target_path}: {exc}") from exc
+        if stat_result.st_nlink > 1:
+            raise OSError(f"Refusing to save hard-linked graph file: {target_path}")
+
+    @staticmethod
+    def _write_save_backup(target_path: Path) -> Path | None:
+        if not target_path.exists():
+            return None
+        old_hash = FlowgraphSession._read_file_sha256_if_available(target_path)
+        if old_hash is None:
+            raise OSError(f"Could not hash existing save target: {target_path}")
+        backup_dir = target_path.parent / ".grc_agent" / "backups"
+        try:
+            backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(
+                f"Could not create save backup directory for {target_path}: {exc}"
+            ) from exc
+        timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
+        if backup_path.exists():
+            backup_path = backup_dir / (
+                f"{timestamp}-{old_hash[:16]}-{time.time_ns()}{target_path.suffix}"
+            )
+        try:
+            shutil.copy2(target_path, backup_path)
+        except OSError as exc:
+            raise OSError(f"Could not create save backup for {target_path}: {exc}") from exc
+        return backup_path
 
     def file_integrity_state(self) -> dict[str, Any]:
         """Return whether the active file still matches the loaded/saved version."""

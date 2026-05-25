@@ -6,6 +6,7 @@ read-only candidate evidence.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import sys
@@ -34,6 +35,7 @@ EVAL_DIMENSIONS: tuple[str, ...] = (
 )
 _INDEX_BUSY_RETRY_ATTEMPTS = 5
 _INDEX_BUSY_RETRY_SLEEP_SECONDS = 0.05
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -478,7 +480,13 @@ def run_eval(
     *,
     eval_cases: tuple[RetrievalEvalCase, ...] = EVAL_CASES,
     vector_search_fn: Any = semantic_search_grc,
+    progress_callback: ProgressCallback | None = None,
+    progress_interval: int = 25,
 ) -> dict[str, Any]:
+    _notify_progress(
+        progress_callback,
+        {"phase": "waiting_for_lock", "lock_name": "vector_regression"},
+    )
     with acquire_retrieval_eval_lock("vector_regression"):
         started = time.perf_counter()
         case_results: list[dict[str, Any]] = []
@@ -486,12 +494,21 @@ def run_eval(
         safety_count = 0
         provenance_count = 0
         false_positive_count = 0
+        total = len(eval_cases)
+        _notify_progress(
+            progress_callback,
+            {
+                "phase": "start",
+                "total_cases": total,
+                "progress_interval": progress_interval,
+            },
+        )
         effective_vector_search = (
             _semantic_search_with_retry
             if vector_search_fn is semantic_search_grc
             else vector_search_fn
         )
-        for case in eval_cases:
+        for index, case in enumerate(eval_cases, start=1):
             before = time.perf_counter()
             vector_payload = effective_vector_search(case.query, scope=case.scope, k=5)
             latency_ms = round((time.perf_counter() - before) * 1000, 3)
@@ -544,17 +561,40 @@ def run_eval(
                     "top_vector_results": [_vector_result_summary(result) for result in vector_results[:5]],
                 }
             )
+            if _should_report_progress(index, total, progress_interval):
+                _notify_progress(
+                    progress_callback,
+                    {
+                        "phase": "case_complete",
+                        "completed_cases": index,
+                        "total_cases": total,
+                        "case_name": case.name,
+                        "latency_ms": latency_ms,
+                    },
+                )
         miss_analysis = _build_miss_analysis(case_results)
+        _notify_progress(
+            progress_callback,
+            {"phase": "deterministic_rebuild", "total_cases": total},
+        )
         deterministic_rebuild_pass = _deterministic_rebuild_pass()
         for case_result in case_results:
             case_result["deterministic_rebuild_pass"] = deterministic_rebuild_pass
-        total = len(case_results)
         ok = (
             total > 0
             and safety_count == total
             and provenance_count == total
             and false_positive_count == total
             and deterministic_rebuild_pass
+        )
+        duration_ms = round((time.perf_counter() - started) * 1000, 3)
+        _notify_progress(
+            progress_callback,
+            {
+                "phase": "done",
+                "total_cases": total,
+                "duration_ms": duration_ms,
+            },
         )
         return {
             "ok": ok,
@@ -567,10 +607,22 @@ def run_eval(
                 "provenance_passes": provenance_count,
                 "false_positive_passes": false_positive_count,
                 "deterministic_rebuild_pass": deterministic_rebuild_pass,
-                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                "duration_ms": duration_ms,
             },
             "miss_analysis": miss_analysis,
         }
+
+
+def _notify_progress(
+    progress_callback: ProgressCallback | None,
+    event: dict[str, Any],
+) -> None:
+    if progress_callback is not None:
+        progress_callback(event)
+
+
+def _should_report_progress(index: int, total: int, progress_interval: int) -> bool:
+    return index == total or (progress_interval > 0 and index % progress_interval == 0)
 
 
 def _semantic_search_with_retry(query: str, *, scope: str, k: int) -> dict[str, Any]:

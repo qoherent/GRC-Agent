@@ -17,6 +17,7 @@ Example
 from __future__ import annotations
 
 import functools
+import copy
 import logging
 import os
 from typing import Any
@@ -113,6 +114,36 @@ def extract_connections_from_yaml(raw_data: dict[str, Any]) -> list[Connection]:
         raise RuntimeError("GNU Radio Platform is not available")
     extractor = _GnuConnectionExtractor(platform)
     return extractor.from_yaml_dict(raw_data)
+
+
+def validate_raw_flowgraph(raw_data: dict[str, Any]) -> dict[str, Any]:
+    """Validate raw `.grc` data through GNU Radio's headless FlowGraph API."""
+    platform = _ensure_platform()
+    if platform is None:
+        return {
+            "ok": False,
+            "available": False,
+            "valid": None,
+            "errors": ["GNU Radio Platform is not available."],
+        }
+    try:
+        fg = platform.make_flow_graph()
+        fg.import_data(copy.deepcopy(raw_data))
+        fg.validate()
+        errors = [str(message) for message in fg.get_error_messages()]
+        return {
+            "ok": True,
+            "available": True,
+            "valid": bool(fg.is_valid()),
+            "errors": errors,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "available": True,
+            "valid": False,
+            "errors": [str(exc)],
+        }
 
 
 def _gnu_conn_to_model(gnu_conn: Any) -> Connection:

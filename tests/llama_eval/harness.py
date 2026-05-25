@@ -54,35 +54,17 @@ REPORT_DIMENSIONS = (
 MVP_RELEASE_MODEL_TOOLS = frozenset(MVP_MODEL_TOOL_NAMES)
 MUTATION_TOOL_NAMES = frozenset(
     {
-        "new_grc",
-        "load_grc",
-        "apply_edit",
-        "insert_block_on_connection",
-        "auto_insert_block",
-        "remove_connection",
-        "rewire_connection",
-        "save_graph",
+        "change_graph",
     }
 )
 RECOVERY_MUTATION_RETRY_TOOL_NAMES = frozenset(
     {
-        "new_grc",
-        "load_grc",
-        "apply_edit",
-        "insert_block_on_connection",
-        "auto_insert_block",
-        "remove_connection",
-        "rewire_connection",
-        "save_graph",
+        "change_graph",
     }
 )
 PRE_TURN_SETUP_TOOL_NAMES = frozenset(
     {
-        "apply_edit",
-        "insert_block_on_connection",
-        "auto_insert_block",
-        "remove_connection",
-        "rewire_connection",
+        "change_graph",
     }
 )
 
@@ -1474,19 +1456,6 @@ def _normalize_failed_call_for_recovery(
         normalized_payload["validation"] = normalized_payload["validation_result"]
     if tool_name != "change_graph":
         return tool_name, normalized_payload
-    operation_kind = str(normalized_payload.get("operation_kind") or "").strip()
-    if operation_kind == "disconnect":
-        return "remove_connection", normalized_payload
-    if operation_kind in {
-        "set_param",
-        "set_state",
-        "add_variable",
-        "insert_in_connection",
-        "add_signal_source_to_sum",
-        "remove_block",
-        "rewire",
-    }:
-        return "apply_edit", normalized_payload
     return tool_name, normalized_payload
 
 

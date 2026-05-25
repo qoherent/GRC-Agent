@@ -12,6 +12,7 @@ from unittest import mock
 from grc_agent.agent import GrcAgent
 import grc_agent.agent as agent_module
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.runtime.tool_context import tool_history_content_as_text
 from grc_agent.runtime.docs_answer.selection import normalized_docs_retrieval_query
 from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
 import grc_agent.runtime.wrappers.search_blocks as search_blocks_module
@@ -93,13 +94,14 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertLess(len(prompt), 700)
         for name in MVP_MODEL_TOOL_NAMES:
             self.assertIn(name, prompt)
-        self.assertIn("continue using tools", prompt)
+        self.assertIn("keep going", prompt)
+        self.assertIn("wireless communications expert", prompt)
         self.assertNotIn("Use one tool call", prompt)
         for forbidden in ("apply_edit", "propose_edit", "semantic_search_grc", "save_graph"):
             self.assertNotIn(forbidden, prompt)
 
         schema_chars = sum(len(str(schema)) for schema in agent.get_tool_schemas())
-        self.assertLess(schema_chars, 5200)
+        self.assertLess(schema_chars, 8000)
         for schema in agent.get_tool_schemas():
             self.assertNotIn("debug", schema["function"]["parameters"]["properties"])
         change_schema = next(
@@ -108,22 +110,44 @@ class MvpToolProfileTests(unittest.TestCase):
             if schema["function"]["name"] == "change_graph"
         )
         change_props = change_schema["function"]["parameters"]["properties"]
-        self.assertLess(len(str(change_schema)), 1500)
-        self.assertIn("op", change_props)
-        self.assertIn("args", change_props)
-        self.assertNotIn("operation_kind", change_props)
-        self.assertNotIn("candidate_id", change_props)
-        self.assertNotIn("insert_block", change_props)
-        self.assertNotIn("insert_block", change_props["op"]["enum"])
-        self.assertIn("insert_in_connection", change_props["op"]["enum"])
-        self.assertIn("add_signal_source_to_sum", change_props["op"]["enum"])
-        self.assertNotIn("add_block", change_props["op"]["enum"])
-        self.assertNotIn("connect", change_props["op"]["enum"])
-        self.assertNotIn("add_connected_block", change_props["op"]["enum"])
-        self.assertNotIn(
-            "auto_insert",
-            change_props["op"]["enum"],
+        self.assertLess(len(str(change_schema)), 6000)
+        self.assertIn("add_blocks", change_props)
+        self.assertIn("update_params", change_props)
+        self.assertIn("add_connections", change_props)
+        self.assertIn("remove_connections", change_props)
+        self.assertIn("rewire_connections", change_props)
+        self.assertIn("insert_blocks_on_connections", change_props)
+        self.assertIn("add_variables", change_props)
+        self.assertIn("force", change_props)
+        for removed in (
+            "op",
+            "args",
+            "dry_run",
+            "user_goal",
+            "state_revision",
+            "preview_token",
+            "operation_kind",
+            "candidate_id",
+        ):
+            self.assertNotIn(removed, change_props)
+        update_params_required = (
+            change_props["update_params"]["items"]["required"]
         )
+        self.assertIn("instance_name", update_params_required)
+        self.assertIn("params", update_params_required)
+        update_states_required = (
+            change_props["update_states"]["items"]["required"]
+        )
+        self.assertIn("instance_name", update_states_required)
+        self.assertIn("states", update_states_required)
+        add_variables_required = change_props["add_variables"]["items"]["required"]
+        self.assertIn("instance_name", add_variables_required)
+        self.assertNotIn("name", add_variables_required)
+        update_variables_required = (
+            change_props["update_variables"]["items"]["required"]
+        )
+        self.assertIn("instance_name", update_variables_required)
+        self.assertIn("value", update_variables_required)
 
     def test_inspect_graph_overview_and_details_are_read_only(self) -> None:
         agent = self._load_agent()
@@ -143,8 +167,19 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(details["ok"], details)
         self.assertEqual(details["view"], "details")
         self.assertNotIn("active_session", details)
+        self.assertEqual(overview["summary"]["blocks"][0]["instance_name"], "samp_rate")
+        self.assertEqual(overview["summary"]["blocks"][0]["block_type"], "variable")
+        rendered_overview = tool_history_content_as_text(
+            overview,
+            tool_name="inspect_graph",
+            semantic_search_result_preview=lambda _results: [],
+        )
+        self.assertIn("instance_name=samp_rate", rendered_overview)
+        self.assertIn("block_type=variable", rendered_overview)
         self.assertEqual(details["targets"][0]["name"], "samp_rate")
+        self.assertEqual(details["targets"][0]["instance_name"], "samp_rate")
         self.assertEqual(details["targets"][0]["parameters"][0]["name"], "value")
+        self.assertEqual(details["targets"][0]["parameters"][0]["param_id"], "value")
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
 
@@ -244,7 +279,28 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["block_id"], "blocks_throttle2")
         self.assertEqual(result["results"][0]["name"], "Throttle")
         self.assertIn("match_type", result["results"][0])
+        self.assertIn("why", result["results"][0])
         self.assertLess(len(str(result)), 1300)
+
+    def test_search_blocks_explains_catalog_option_label_match(self) -> None:
+        agent = self._load_agent()
+
+        with mock.patch.object(
+            agent_module,
+            "semantic_search_grc",
+            return_value={"ok": False, "error_type": "missing_index"},
+        ):
+            result = agent.execute_tool(
+                "search_blocks",
+                {"query": "sine wave source", "k": 3},
+                model_tool_call=True,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertGreaterEqual(len(result["results"]), 1)
+        first = result["results"][0]
+        self.assertEqual(first["block_id"], "analog_sig_source_x")
+        self.assertIn("Sine", first.get("why", ""), result)
 
     def test_search_blocks_exact_catalog_match_works_without_vector_index(self) -> None:
         agent = self._load_agent()
@@ -554,6 +610,9 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(result["retrieval_mode"], "semantic_docs")
         self.assertEqual(semantic_search.call_count, 4)
         self.assertIn("answer", result)
+        self.assertEqual(result.get("allowed_use"), "explanation_only")
+        self.assertIs(result.get("mutation_authority"), False)
+        self.assertIn(result.get("confidence"), {"high", "medium", "low"})
         self.assertEqual(sorted(result["sources"][0].keys()), ["excerpt", "source", "title"])
         self.assertNotIn("transaction", result)
         self.assertNotIn("insert_tool_args", result)
@@ -695,64 +754,42 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
 
-    def test_change_graph_preview_does_not_mutate_and_commit_updates_param(self) -> None:
+    def test_change_graph_flat_batch_updates_params_and_autosaves(self) -> None:
         agent = self._load_temp_agent()
         before_revision = agent.session.state_revision
-        before_value = self._block_param_value(agent, "samp_rate", "value")
 
-        preview = agent.execute_tool(
+        result = agent.execute_tool(
             "change_graph",
             {
-                "dry_run": True,
-                "user_goal": "Preview setting samp_rate to 48000.",
-                "op": "set_param",
-                "args": {
-                    "instance_name": "samp_rate",
-                    "param_key": "value",
-                    "param_value": "48000",
-                },
+                "update_params": [
+                    {
+                        "instance_name": "samp_rate",
+                        "params": {"value": "48000"},
+                        "expected_params": {"value": "32000"},
+                    }
+                ]
             },
         )
-        self.assertTrue(preview["ok"], preview)
-        self.assertNotIn("active_session", preview)
-        preview_text = agent._tool_history_content_as_text(
-            preview,
-            tool_name="change_graph",
-        )
-        self.assertLess(len(preview_text), 260)
-        self.assertIn("samp_rate.value=48000", preview_text)
-        self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), before_value)
-        self.assertEqual(agent.session.state_revision, before_revision)
 
-        commit = agent.execute_tool(
-            "change_graph",
-            {
-                "dry_run": False,
-                "user_goal": "Set samp_rate to 48000.",
-                "op": "set_param",
-                "args": {
-                    "instance_name": "samp_rate",
-                    "param_key": "value",
-                    "param_value": "48000",
-                },
-            },
-        )
-        self.assertTrue(commit["ok"], commit)
-        self.assertEqual(commit["operation_kind"], "set_param")
-        self.assertTrue(commit["committed"], commit)
-        self.assertNotIn("active_session", commit)
-        commit_text = agent._tool_history_content_as_text(
-            commit,
-            tool_name="change_graph",
-        )
-        self.assertLess(len(commit_text), 360)
-        self.assertIn("samp_rate.value=48000", commit_text)
-        self.assertIn("validation=valid", commit_text)
-        self.assertIn("autosave=ok", commit_text)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["committed"], result)
+        self.assertNotIn("dry_run", result)
+        self.assertNotIn("operation_kind", result)
+        self.assertNotIn("active_session", result)
+        self.assertIn("samp_rate.value:32000->48000", result.get("effect", ""))
         self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), "48000")
         self.assertGreater(agent.session.state_revision, before_revision)
+        self.assertEqual(result.get("autosave", {}).get("ok"), True)
 
-    def test_change_graph_commit_refuses_externally_modified_active_file(self) -> None:
+        reloaded = FlowgraphSession()
+        assert agent.session.path is not None
+        reloaded.load(agent.session.path)
+        self.assertEqual(
+            self._block_param_value(GrcAgent(reloaded), "samp_rate", "value"),
+            "48000",
+        )
+
+    def test_change_graph_flat_batch_refuses_externally_modified_active_file(self) -> None:
         agent = self._load_temp_agent()
         assert agent.session.path is not None
         before_revision = agent.session.state_revision
@@ -764,61 +801,25 @@ class MvpToolProfileTests(unittest.TestCase):
 
         result = agent.execute_tool(
             "change_graph",
-            {
-                "dry_run": False,
-                "op": "set_param",
-                "user_goal": "set samp_rate to 48000",
-                "args": {
-                    "instance_name": "samp_rate",
-                    "param_key": "value",
-                    "param_value": "48000",
-                },
-            },
+            {"update_params": [{"instance_name": "samp_rate", "params": {"value": "48000"}}]},
         )
 
         self.assertFalse(result["ok"], result)
+        self.assertFalse(result["committed"], result)
         self.assertEqual(result["error_type"], "stale_revision")
         self.assertEqual(result["file_integrity"]["status"], "modified")
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), before_value)
 
-    def test_change_graph_commit_refuses_missing_active_file(self) -> None:
+    def test_change_graph_rejects_legacy_model_facing_shape(self) -> None:
         agent = self._load_temp_agent()
-        assert agent.session.path is not None
         before_revision = agent.session.state_revision
-        before_value = self._block_param_value(agent, "samp_rate", "value")
-        agent.session.path.unlink()
 
         result = agent.execute_tool(
             "change_graph",
             {
                 "dry_run": False,
                 "op": "set_param",
-                "user_goal": "set samp_rate to 48000",
-                "args": {
-                    "instance_name": "samp_rate",
-                    "param_key": "value",
-                    "param_value": "48000",
-                },
-            },
-        )
-
-        self.assertFalse(result["ok"], result)
-        self.assertEqual(result["error_type"], "stale_revision")
-        self.assertEqual(result["file_integrity"]["status"], "missing")
-        self.assertEqual(agent.session.state_revision, before_revision)
-        self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), before_value)
-
-    def test_change_graph_requires_explicit_mutation_kind_and_old_value_guard(self) -> None:
-        agent = self._load_temp_agent()
-        before_revision = agent.session.state_revision
-        before_value = self._block_param_value(agent, "samp_rate", "value")
-
-        missing_kind = agent.execute_tool(
-            "change_graph",
-            {
-                "dry_run": False,
-                "user_goal": "Set samp_rate to 48000.",
                 "args": {
                     "instance_name": "samp_rate",
                     "param_key": "value",
@@ -827,106 +828,72 @@ class MvpToolProfileTests(unittest.TestCase):
             },
             model_tool_call=True,
         )
-        self.assertFalse(missing_kind["ok"], missing_kind)
-        self.assertEqual(missing_kind["error_type"], "tool_call_invalid")
 
-        stale_old_value = agent.execute_tool(
-            "change_graph",
-            {
-                "dry_run": False,
-                "user_goal": "Set samp_rate from 1 to 48000.",
-                "op": "set_param",
-                "args": {
-                    "instance_name": "samp_rate",
-                    "param_key": "value",
-                    "param_value": "48000",
-                    "expected_old_value": "1",
-                },
-            },
-        )
-        self.assertFalse(stale_old_value["ok"], stale_old_value)
-        self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), before_value)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(agent.session.state_revision, before_revision)
 
-    def test_change_graph_rejects_args_that_do_not_belong_to_selected_op(self) -> None:
-        agent = self._load_temp_agent()
-        before_revision = agent.session.state_revision
-        before_value = self._block_param_value(agent, "samp_rate", "value")
+    def test_change_graph_flat_batch_adds_block_params_and_connection(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fixture = (
+            Path(__file__).resolve().parents[1]
+            / "playground"
+            / "grc_agent_interactive"
+            / "dial_tone_interactive.grc"
+        )
+        destination = Path(tmp.name) / "dial_tone_interactive.grc"
+        shutil.copy2(fixture, destination)
+        agent = self._load_agent_from_path(destination)
+        before_connections = set(self._connection_ids(agent))
 
         result = agent.execute_tool(
             "change_graph",
             {
-                "dry_run": False,
-                "op": "set_param",
-                "user_goal": "set samp_rate to 48000",
-                "args": {
-                    "instance_name": "samp_rate",
-                    "param_key": "value",
-                    "param_value": "48000",
-                    "connection_id": "blocks_a:0->blocks_b:0",
-                },
+                "update_params": [
+                    {
+                        "instance_name": "blocks_add_xx",
+                        "params": {"num_inputs": "4"},
+                        "expected_params": {"num_inputs": "3"},
+                    }
+                ],
+                "add_blocks": [
+                    {
+                        "block_id": "analog_sig_source_x",
+                        "instance_name": "analog_sig_source_x_2",
+                        "params": {
+                            "type": "float",
+                            "samp_rate": "samp_rate",
+                            "waveform": "analog.GR_SIN_WAVE",
+                            "freq": "1000",
+                            "amp": "ampl",
+                            "offset": "0",
+                        },
+                    }
+                ],
+                "add_connections": [
+                    {
+                        "src": {"block": "analog_sig_source_x_2", "port": 0},
+                        "dst": {"block": "blocks_add_xx", "port": 3},
+                    }
+                ],
             },
         )
 
-        self.assertFalse(result["ok"], result)
-        self.assertEqual(result["error_type"], "invalid_request")
-        self.assertIn("connection_id", result["message"])
-        self.assertEqual(agent.session.state_revision, before_revision)
-        self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), before_value)
-
-    def test_change_graph_insert_in_connection_rejects_source_macro_args(self) -> None:
-        agent = self._load_temp_agent()
-
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "dry_run": True,
-                "op": "insert_in_connection",
-                "user_goal": "insert a source into a connection",
-                "args": {
-                    "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
-                    "block_id": "analog_sig_source_x",
-                    "instance_name": "analog_sig_source_x_0",
-                    "freq": 1000,
-                },
-            },
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["committed"], result)
+        self.assertEqual(
+            set(self._connection_ids(agent)) - before_connections,
+            {"analog_sig_source_x_2:0->blocks_add_xx:3"},
         )
-
-        self.assertFalse(result["ok"], result)
-        self.assertEqual(result["error_type"], "invalid_request")
-        self.assertIn("freq", result["message"])
-
-    def test_change_graph_rejects_raw_transaction_and_model_facing_internal_tool(self) -> None:
-        agent = self._load_temp_agent()
-
-        raw_transaction = agent.execute_tool(
-            "change_graph",
-            {
-                "dry_run": False,
-                "user_goal": "Set samp_rate to 48000.",
-                "transaction": {
-                    "op_type": "update_params",
-                    "instance_name": "samp_rate",
-                    "params": {"value": "48000"},
-                },
-            },
+        added = next(
+            block
+            for block in agent.session.flowgraph.blocks
+            if block.instance_name == "analog_sig_source_x_2"
         )
-        self.assertFalse(raw_transaction["ok"], raw_transaction)
-        self.assertEqual(raw_transaction["error_type"], "tool_call_invalid")
-
-        internal_tool = agent.execute_tool(
-            "apply_edit",
-            {
-                "transaction": {
-                    "op_type": "update_params",
-                    "instance_name": "samp_rate",
-                    "params": {"value": "48000"},
-                },
-            },
-            model_tool_call=True,
-        )
-        self.assertFalse(internal_tool["ok"], internal_tool)
-        self.assertEqual(internal_tool["error_type"], "tool_not_allowed_for_surface")
+        self.assertEqual(added.params["parameters"]["waveform"], "analog.GR_SIN_WAVE")
+        self.assertEqual(added.params["parameters"]["freq"], "1000")
+        self.assertEqual(self._block_param_value(agent, "blocks_add_xx", "num_inputs"), "4")
 
     def test_change_graph_invalid_commit_rolls_back(self) -> None:
         agent = self._load_temp_agent()
@@ -937,12 +904,7 @@ class MvpToolProfileTests(unittest.TestCase):
 
         result = agent.execute_tool(
             "change_graph",
-            {
-                "dry_run": False,
-                "user_goal": "Disconnect sink edge.",
-                "op": "disconnect",
-                "args": {"connection_id": target_connection},
-            },
+            {"remove_connections": [target_connection]},
         )
 
         self.assertFalse(result["ok"], result)

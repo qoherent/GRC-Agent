@@ -23,7 +23,7 @@ VALID_VIEWS = {"overview", "details"}
 MAX_TARGETS = 5
 MAX_PARAMS = 12
 MAX_PARAMS_PER_BLOCK = 12
-MAX_ALL_DETAIL_PARAMS = 8
+MAX_ALL_DETAIL_PARAMS = 16
 MAX_DEFAULT_DETAIL_PARAMS = 8
 MAX_CONNECTIONS_PER_BLOCK = 12
 MAX_OVERVIEW_CONNECTIONS = 8
@@ -588,6 +588,8 @@ def _block_details_row(
     row: dict[str, Any] = {
         "request": requested,
         "matched_by": matched_by,
+        "instance_name": block.instance_name,
+        "block_type": block.block_type,
         "name": block.instance_name,
         "type": block.block_type,
         "catalog_label": _block_label(candidates),
@@ -617,6 +619,7 @@ def _parameter_payload(
 ) -> dict[str, Any]:
     value = _compact_value(candidate.current_value)
     payload: dict[str, Any] = {
+        "param_id": candidate.param_key,
         "name": candidate.param_key,
         "label": candidate.param_label,
         "dtype": candidate.param_dtype,
@@ -784,6 +787,8 @@ def _connection_summaries(
 def _candidate_payloads(blocks: list[Block]) -> list[dict[str, Any]]:
     return [
         {
+            "instance_name": block.instance_name,
+            "block_type": block.block_type,
             "name": block.instance_name,
             "kind": "block",
             "type": block.block_type,
@@ -819,6 +824,8 @@ def _overview_block_rows(
     for block in blocks:
         semantics = semantics_by_type.get(block.block_type, {})
         row = {
+            "instance_name": block.instance_name,
+            "block_type": block.block_type,
             "name": block.instance_name,
             "type": block.block_type,
             "catalog_label": semantics.get("label"),

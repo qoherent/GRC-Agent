@@ -7,93 +7,79 @@ import time
 from typing import Any
 
 from grc_agent._payload import ErrorCode
-from grc_agent.runtime.capabilities import (
-    CAPABILITY_SPECS,
-    EXPERIMENTAL_OPERATION_SPECS,
-    CONTROL_OUTCOME_KINDS,
-    change_graph_operation_kinds,
-    get_capability_spec,
-)
-from grc_agent.runtime.editable_parameters import resolve_set_param_candidate
 from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
-
-from .context import ChangeGraphOperationContext
-from .disconnect import handle_disconnect_by_connection_id, handle_disconnect_by_endpoints
-from .insert import handle_insert_block_on_connection
-from .param import handle_set_param
-from .remove import handle_remove_block
-from .rewire import handle_rewire
-from .source_to_sum import handle_add_signal_source_to_sum
-from .state import handle_set_state
-from .variable import handle_add_variable
 
 ToolResult = dict[str, Any]
 
 
-def dispatch_change_graph(
+def _parse_transaction_endpoint(value: Any) -> tuple[str, int | str] | None:
+    if isinstance(value, str):
+        text = value.strip()
+        if ":" not in text:
+            return None
+        block, port = text.rsplit(":", 1)
+        block = block.strip()
+        port = port.strip()
+        if not block or not port:
+            return None
+        return block, int(port) if port.isdigit() else port
+    if isinstance(value, dict):
+        block = value.get("block")
+        port = value.get("port")
+        if not isinstance(block, str) or not block.strip():
+            return None
+        if isinstance(port, int) and not isinstance(port, bool) and port >= 0:
+            return block.strip(), port
+        if isinstance(port, str) and port.strip():
+            port_text = port.strip()
+            return block.strip(), int(port_text) if port_text.isdigit() else port_text
+    return None
+
+
+_FLAT_BATCH_FIELDS = {
+    "add_blocks",
+    "remove_blocks",
+    "update_params",
+    "update_states",
+    "add_connections",
+    "remove_connections",
+    "rewire_connections",
+    "insert_blocks_on_connections",
+    "add_variables",
+    "update_variables",
+    "remove_variables",
+}
+
+
+def has_flat_change_graph_batch(kwargs: dict[str, Any]) -> bool:
+    """Return true when args use the new flat model-facing batch surface."""
+    return any(key in kwargs for key in _FLAT_BATCH_FIELDS)
+
+
+def dispatch_flat_change_graph_batch(
     agent: Any,
     *,
-    dry_run: bool,
-    user_goal: str,
-    operation_kind: str | None = None,
-    target_ref: dict[str, Any] | None = None,
-    block_id: str | None = None,
-    instance_name: str | None = None,
-    connection_id: str | None = None,
-    src_block: str | None = None,
-    src_port: int | str | None = None,
-    dst_block: str | None = None,
-    dst_port: int | str | None = None,
-    state_revision: int | None = None,
-    new_src_block: str | None = None,
-    new_src_port: int | str | None = None,
-    new_dst_block: str | None = None,
-    new_dst_port: int | str | None = None,
-    insert_params: dict[str, Any] | None = None,
-    operation_args: dict[str, Any] | None = None,
-    detach_connections: bool | None = None,
-    detach_connection_ids: list[str] | None = None,
-    param_key: str | None = None,
-    param_value: Any = None,
-    expected_old_value: Any = None,
-    state: str | None = None,
-    variable_name: str | None = None,
-    variable_value: Any = None,
+    add_blocks: Any = None,
+    remove_blocks: Any = None,
+    update_params: Any = None,
+    update_states: Any = None,
+    add_connections: Any = None,
+    remove_connections: Any = None,
+    rewire_connections: Any = None,
+    insert_blocks_on_connections: Any = None,
+    add_variables: Any = None,
+    update_variables: Any = None,
+    remove_variables: Any = None,
+    force: bool = False,
     debug: bool = False,
 ) -> ToolResult:
-    """Execute the existing change_graph wrapper behavior via extracted dispatcher."""
-
+    """Execute the flat model-facing batch edit surface."""
     started = time.monotonic()
     before_revision = agent.session.state_revision
     before_dirty = agent.session.is_dirty
+    before_block_names = _flat_block_names_snapshot(agent)
+    before_connection_ids = _flat_connection_ids_snapshot(agent)
 
-    def _block_names_snapshot() -> set[str]:
-        flowgraph = agent.session.flowgraph
-        if flowgraph is None:
-            return set()
-        return {
-            block.instance_name
-            for block in flowgraph.blocks
-            if isinstance(block.instance_name, str)
-        }
-
-    def _connection_ids_snapshot() -> set[str]:
-        flowgraph = agent.session.flowgraph
-        if flowgraph is None:
-            return set()
-        return {
-            render_connection_id(
-                conn.src_block,
-                conn.src_port,
-                conn.dst_block,
-                conn.dst_port,
-            )
-            for conn in flowgraph.connections
-        }
-
-    before_block_names = _block_names_snapshot()
-    before_connection_ids = _connection_ids_snapshot()
-    handlers: list[str] = []
     missing_session = agent._missing_session_result("change_graph")
     if missing_session is not None:
         return agent._attach_wrapper_dispatch_telemetry(
@@ -108,844 +94,591 @@ def dispatch_change_graph(
             validation_run=False,
             output_truncated=False,
         )
-    if not isinstance(user_goal, str) or not user_goal.strip():
-        result = agent._tool_result(
-            "change_graph",
-            ok=False,
-            message="user_goal must be non-empty.",
-            error_type=ErrorCode.INVALID_REQUEST,
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="invalid_request",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
-        )
-    allowed_operation_kinds = set(change_graph_operation_kinds())
-    resolved_operation_kind = (
-        operation_kind.strip() if isinstance(operation_kind, str) else None
-    )
-    if resolved_operation_kind == "":
-        resolved_operation_kind = None
-    if (
-        resolved_operation_kind is not None
-        and resolved_operation_kind not in allowed_operation_kinds
-    ):
-        result = agent._tool_result(
-            "change_graph",
-            ok=False,
-            message=f"Unsupported change_graph op: {resolved_operation_kind!r}",
-            error_type=ErrorCode.INVALID_REQUEST,
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="invalid_operation_kind",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
-        )
-    if resolved_operation_kind in CAPABILITY_SPECS:
-        # Mutable capability lookup is metadata-only and intentionally side-effect free.
-        _ = get_capability_spec(resolved_operation_kind)
-    elif (
-        resolved_operation_kind is not None
-        and resolved_operation_kind not in CONTROL_OUTCOME_KINDS
-        and resolved_operation_kind in EXPERIMENTAL_OPERATION_SPECS
-    ):
-        # Internal non-gating operation metadata path.
-        _ = EXPERIMENTAL_OPERATION_SPECS[resolved_operation_kind]
-    operation_args = operation_args if isinstance(operation_args, dict) else {}
-    if resolved_operation_kind == "insert_in_connection":
-        if isinstance(insert_params, dict):
-            normalized_insert_params: dict[str, Any] = {}
-            for key, value in insert_params.items():
-                key_text = str(key).strip()
-                if not key_text:
-                    continue
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    normalized_insert_params[key_text] = str(value)
-                else:
-                    normalized_insert_params[key_text] = value
-            insert_params = normalized_insert_params
-        if isinstance(connection_id, str) and connection_id.strip():
-            normalized_connection_id = connection_id.strip()
-            if parse_connection_id(normalized_connection_id) is None and "->" in normalized_connection_id:
-                left, right = normalized_connection_id.split("->", 1)
-                src_block = ""
-                src_port_value: int | str | None = None
-                if ":" in left:
-                    src_block, src_port_token = left.split(":", 1)
-                    src_block = src_block.strip()
-                    src_port_token = src_port_token.strip()
-                    if src_port_token:
-                        if src_port_token.isdigit():
-                            src_port_value = int(src_port_token)
-                        else:
-                            src_port_value = src_port_token
-                dst_block_hint = right.strip()
-                if src_block and src_port_value is not None and dst_block_hint and ":" not in dst_block_hint:
-                    candidates_payload = agent.session.find_connection_candidates(
-                        src_block=src_block,
-                        src_port=src_port_value,
-                        dst_block=dst_block_hint,
-                        dst_port=None,
-                    )
-                    candidates = candidates_payload.get("candidates", [])
-                    if len(candidates) == 1:
-                        candidate = candidates[0]
-                        connection_id = render_connection_id(
-                            candidate["src_block"],
-                            candidate["src_port"],
-                            candidate["dst_block"],
-                            candidate["dst_port"],
-                        )
-    target_resolution: dict[str, Any] | None = None
-    set_param_resolution = resolve_set_param_candidate(
-        user_text=user_goal,
-        session=agent.session,
-        catalog_root=agent.catalog_root,
-        operation_kind=resolved_operation_kind,
-        instance_name=instance_name,
-        param_key=param_key,
-        param_value=param_value,
-        target_ref=target_ref,
-        expected_old_value=expected_old_value,
-    )
-    instance_name = set_param_resolution.instance_name
-    param_key = set_param_resolution.param_key
-    param_value = set_param_resolution.param_value
-    target_ref = set_param_resolution.target_ref
-    expected_old_value = set_param_resolution.expected_old_value
-    target_resolution = set_param_resolution.target_resolution
-    if set_param_resolution.clarification is not None:
-        clarification_payload = copy.deepcopy(set_param_resolution.clarification)
-        clarification_payload["dry_run"] = bool(dry_run)
-        clarification_payload["operation_kind"] = resolved_operation_kind
-        if target_resolution is not None:
-            clarification_payload["target_resolution"] = copy.deepcopy(target_resolution)
-        result = agent._payload_result("change_graph", clarification_payload)
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="target_resolution_clarification",
-            internal_handlers=["editable_parameter_resolution"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
-        )
-    canonical_target_ref, target_ref_error = agent._canonicalize_change_graph_target_ref(
-        dry_run=bool(dry_run),
-        operation_kind=resolved_operation_kind,
-        target_ref=target_ref,
-    )
-    if target_ref_error is not None:
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="invalid_operation_args",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=target_ref_error,
-            validation_run=False,
-            output_truncated=False,
-        )
-    target_ref = canonical_target_ref
-    operation_args_error = agent._validate_change_graph_operation_args(
-        dry_run=bool(dry_run),
-        operation_kind=resolved_operation_kind,
-        target_ref=target_ref,
-        block_id=block_id,
-        instance_name=instance_name,
-        connection_id=connection_id,
-        src_block=src_block,
-        src_port=src_port,
-        dst_block=dst_block,
-        dst_port=dst_port,
-        new_src_block=new_src_block,
-        new_src_port=new_src_port,
-        new_dst_block=new_dst_block,
-        new_dst_port=new_dst_port,
-        insert_params=insert_params,
-        operation_args=operation_args,
-        detach_connections=detach_connections,
-        detach_connection_ids=detach_connection_ids,
-        param_key=param_key,
-        param_value=param_value,
-        state=state,
-        variable_name=variable_name,
-        variable_value=variable_value,
-    )
-    if operation_args_error is not None:
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="invalid_operation_args",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=operation_args_error,
-            validation_run=False,
-            output_truncated=False,
-        )
-    if state_revision is not None:
-        if not isinstance(state_revision, int) or isinstance(state_revision, bool):
-            stale_result = agent._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": resolved_operation_kind,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "state_revision must be an integer when provided.",
-                },
-            )
-            return agent._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="change_graph",
-                wrapper_action="invalid_operation_args",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=stale_result,
-                validation_run=False,
-                output_truncated=False,
-            )
-        if state_revision != agent.session.state_revision:
-            stale_result = agent._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": resolved_operation_kind,
-                    "error_type": ErrorCode.STALE_REVISION,
-                    "message": (
-                        "state_revision is stale for the current graph. "
-                        f"Provided {state_revision}, current is {agent.session.state_revision}."
-                    ),
-                    "state_revision": agent.session.state_revision,
-                },
-            )
-            return agent._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="change_graph",
-                wrapper_action="stale_revision",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=stale_result,
-                validation_run=False,
-                output_truncated=False,
-            )
-    if isinstance(target_ref, dict):
-        target_ref_revision = target_ref.get("base_state_revision")
-        if isinstance(target_ref_revision, int) and target_ref_revision != agent.session.state_revision:
-            stale_result = agent._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": resolved_operation_kind,
-                    "error_type": ErrorCode.STALE_REVISION,
-                    "message": (
-                        "target_ref.base_state_revision is stale for the current graph. "
-                        f"Provided {target_ref_revision}, current is {agent.session.state_revision}."
-                    ),
-                    "state_revision": agent.session.state_revision,
-                },
-            )
-            return agent._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="change_graph",
-                wrapper_action="stale_revision",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=stale_result,
-                validation_run=False,
-                output_truncated=False,
-            )
-    if resolved_operation_kind == "rewire" and state_revision is None:
+
+    file_integrity = agent.session.file_integrity_state()
+    if file_integrity.get("externally_modified"):
         stale_result = agent._payload_result(
             "change_graph",
             {
                 "ok": False,
-                "dry_run": bool(dry_run),
-                "operation_kind": resolved_operation_kind,
-                "error_type": ErrorCode.INVALID_REQUEST,
+                "committed": False,
+                "error_type": ErrorCode.STALE_REVISION,
                 "message": (
-                    "rewire requires state_revision to guard against stale-edge execution. "
-                    "Provide the current active state_revision from inspect_graph."
+                    "The active graph file changed on disk after this session "
+                    "loaded or saved it. Reload the graph before committing."
                 ),
-            },
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="invalid_operation_args",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=stale_result,
-            validation_run=False,
-            output_truncated=False,
-        )
-    target_ref_revision = (
-        target_ref.get("base_state_revision") if isinstance(target_ref, dict) else None
-    )
-    if (
-        resolved_operation_kind == "add_signal_source_to_sum"
-        and not dry_run
-        and state_revision is None
-        and not isinstance(target_ref_revision, int)
-    ):
-        stale_result = agent._payload_result(
-            "change_graph",
-            {
-                "ok": False,
-                "dry_run": bool(dry_run),
-                "operation_kind": resolved_operation_kind,
-                "error_type": ErrorCode.INVALID_REQUEST,
-                "message": (
-                    "add_signal_source_to_sum commits require state_revision or a "
-                    "target_ref.base_state_revision to guard against stale structural edits. "
-                    "Use the current state_revision from inspect_graph or a preview result."
-                ),
+                "file_integrity": _compact_file_integrity(file_integrity),
                 "state_revision": agent.session.state_revision,
             },
         )
         return agent._attach_wrapper_dispatch_telemetry(
             debug=debug,
             wrapper_name="change_graph",
-            wrapper_action="invalid_operation_args",
-            internal_handlers=["none"],
+            wrapper_action="external_file_changed",
+            internal_handlers=["file_integrity_guard"],
             started=started,
             before_revision=before_revision,
             before_dirty=before_dirty,
             result=stale_result,
             validation_run=False,
             output_truncated=False,
-            )
-    if not dry_run:
-        file_integrity = agent.session.file_integrity_state()
-        if file_integrity.get("externally_modified"):
-            stale_result = agent._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": resolved_operation_kind,
-                    "error_type": ErrorCode.STALE_REVISION,
-                    "message": (
-                        "The active graph file changed on disk after this session "
-                        "loaded or saved it. Reload the graph before committing."
-                    ),
-                    "file_integrity": _compact_file_integrity(file_integrity),
-                    "state_revision": agent.session.state_revision,
-                },
-            )
-            return agent._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="change_graph",
-                wrapper_action="external_file_changed",
-                internal_handlers=["file_integrity_guard"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=stale_result,
-                validation_run=False,
-                output_truncated=False,
-            )
-    lower_goal = user_goal.lower()
-    if not dry_run and resolved_operation_kind is None:
-        has_structured_mutation_args = any(
-            (
-                isinstance(target_ref, dict),
-                isinstance(block_id, str) and bool(block_id.strip()),
-                isinstance(instance_name, str) and bool(instance_name.strip()),
-                isinstance(connection_id, str) and bool(connection_id.strip()),
-                isinstance(src_block, str) and bool(src_block.strip()),
-                src_port is not None,
-                isinstance(dst_block, str) and bool(dst_block.strip()),
-                dst_port is not None,
-                isinstance(new_src_block, str) and bool(new_src_block.strip()),
-                new_src_port is not None,
-                isinstance(new_dst_block, str) and bool(new_dst_block.strip()),
-                new_dst_port is not None,
-                isinstance(param_key, str) and bool(param_key.strip()),
-                param_value is not None,
-                isinstance(state, str) and bool(state.strip()),
-                isinstance(variable_name, str) and bool(variable_name.strip()),
-                variable_value is not None,
-            )
-        )
-        if has_structured_mutation_args:
-            result = agent._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "error_type": "clarification_required",
-                    "message": (
-                        "Committed mutation requires op. "
-                        "Provide one of: set_param, set_state, add_variable, "
-                            "disconnect, rewire, insert_in_connection, remove_block."
-                    ),
-                    "clarification_options": [
-                        (
-                            "Retry with op set to the intended mutation class "
-                            "and preserve all exact fields from this call, including "
-                            "connection_id, block_id, instance_name, and insert_params "
-                            "when they were supplied."
-                        ),
-                        "Or set dry_run=true for a preview-only request.",
-                    ],
-                },
-            )
-            return agent._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="change_graph",
-                wrapper_action="missing_operation_kind",
-                internal_handlers=["none"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-    if any(token in lower_goal for token in ("yaml", "undo", "redo", "export python", "source text")):
-        resolved_operation_kind = resolved_operation_kind or "unsupported"
-    if resolved_operation_kind == "unsupported":
-        result = agent._payload_result(
-            "change_graph",
-            {
-                "ok": False,
-                "dry_run": bool(dry_run),
-                "error_type": ErrorCode.UNSUPPORTED_OP,
-                "message": "Unsupported workflow for change_graph.",
-            },
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="unsupported",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
-        )
-    if resolved_operation_kind == "clarify":
-        result = agent._payload_result(
-            "change_graph",
-            {
-                "ok": False,
-                "dry_run": bool(dry_run),
-                "operation_kind": resolved_operation_kind,
-                "error_type": "clarification_required",
-                "message": "Clarification required before changing the graph.",
-                "clarification_options": [
-                    "Provide exact instance_name + param_key + param_value for param edits.",
-                    "Provide exact connection_id (preferred) or endpoint hints for disconnect.",
-                    "Provide exact block_id and placement details for add/insert operations.",
-                ],
-            },
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="clarify",
-            internal_handlers=["clarification"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
-        )
-    if "save" in lower_goal or "write out" in lower_goal:
-        result = agent._payload_result(
-            "change_graph",
-            {
-                "ok": False,
-                "dry_run": bool(dry_run),
-                "error_type": ErrorCode.UNSUPPORTED_OP,
-                "message": (
-                    "change_graph is mutation-only. The CLI /save command handles "
-                    "manual saves outside the model tool surface."
-                ),
-            },
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="change_graph",
-            wrapper_action="unsupported",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
         )
 
-    tx_tool = agent._propose_edit if dry_run else agent._apply_edit
-    operation_summary = "clarification_required"
-    result: dict[str, Any]
-    operation_ctx = ChangeGraphOperationContext(
-        agent=agent,
-        debug=debug,
-        started=started,
-        before_revision=before_revision,
-        before_dirty=before_dirty,
-        dry_run=bool(dry_run),
-        resolved_operation_kind=resolved_operation_kind,
-        handlers=handlers,
+    normalized_operations, errors = _normalize_flat_change_graph_batch(
+        agent,
+        add_blocks=add_blocks,
+        remove_blocks=remove_blocks,
+        update_params=update_params,
+        update_states=update_states,
+        add_connections=add_connections,
+        remove_connections=remove_connections,
+        rewire_connections=rewire_connections,
+        insert_blocks_on_connections=insert_blocks_on_connections,
+        add_variables=add_variables,
+        update_variables=update_variables,
+        remove_variables=remove_variables,
     )
-
-    def _kind_allows(*allowed: str) -> bool:
-        return resolved_operation_kind is None or resolved_operation_kind in allowed
-
-    def _kind_mismatch_result(*allowed: str) -> ToolResult | None:
-        if _kind_allows(*allowed):
-            return None
-        return agent._payload_result(
+    if errors:
+        result = agent._payload_result(
             "change_graph",
             {
                 "ok": False,
-                "dry_run": bool(dry_run),
-                "operation_kind": resolved_operation_kind,
+                "committed": False,
                 "error_type": ErrorCode.INVALID_REQUEST,
-                "message": (
-                    f"operation_kind={resolved_operation_kind!r} does not match "
-                    f"the supplied arguments; expected one of {sorted(allowed)!r}."
-                ),
-            },
-        )
-
-    resolved_insert_block_id: str | None = None
-    if isinstance(block_id, str) and block_id.strip():
-        resolved_insert_block_id = block_id.strip()
-
-    rewire_old_hint = any(
-        value is not None and (not isinstance(value, str) or value.strip())
-        for value in (src_block, src_port, dst_block, dst_port)
-    )
-    if resolved_operation_kind == "add_signal_source_to_sum":
-        signal_source_dispatch = handle_add_signal_source_to_sum(
-            ctx=operation_ctx,
-            user_goal=user_goal,
-            target_ref=target_ref,
-            block_id=resolved_insert_block_id,
-            instance_name=instance_name,
-            dst_block=dst_block,
-            dst_port=dst_port,
-            insert_params=insert_params,
-            operation_args=operation_args,
-            tx_tool=tx_tool,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        operation_summary = signal_source_dispatch.operation_summary
-        if signal_source_dispatch.terminal_result is not None:
-            return signal_source_dispatch.terminal_result
-        result = signal_source_dispatch.tool_result if signal_source_dispatch.tool_result is not None else {}
-    elif resolved_operation_kind == "rewire" and (
-        (isinstance(connection_id, str) and connection_id.strip()) or rewire_old_hint
-    ):
-        rewire_dispatch = handle_rewire(
-            ctx=operation_ctx,
-            connection_id=connection_id,
-            src_block=src_block,
-            src_port=src_port,
-            dst_block=dst_block,
-            dst_port=dst_port,
-            new_src_block=new_src_block,
-            new_src_port=new_src_port,
-            new_dst_block=new_dst_block,
-            new_dst_port=new_dst_port,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        operation_summary = rewire_dispatch.operation_summary
-        if rewire_dispatch.terminal_result is not None:
-            return rewire_dispatch.terminal_result
-        result = rewire_dispatch.tool_result if rewire_dispatch.tool_result is not None else {}
-    elif (
-        resolved_operation_kind == "insert_in_connection"
-        and
-        resolved_insert_block_id is not None
-        and isinstance(connection_id, str)
-        and connection_id.strip()
-    ):
-        insert_dispatch = handle_insert_block_on_connection(
-            ctx=operation_ctx,
-            resolved_insert_block_id=resolved_insert_block_id,
-            connection_id=connection_id.strip(),
-            instance_name=instance_name,
-            insert_params=insert_params,
-            tx_tool=tx_tool,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        operation_summary = insert_dispatch.operation_summary
-        if insert_dispatch.terminal_result is not None:
-            return insert_dispatch.terminal_result
-        result = insert_dispatch.tool_result if insert_dispatch.tool_result is not None else {}
-    elif isinstance(connection_id, str) and connection_id.strip():
-        disconnect_dispatch = handle_disconnect_by_connection_id(
-            ctx=operation_ctx,
-            connection_id=connection_id.strip(),
-            tx_tool=tx_tool,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        operation_summary = disconnect_dispatch.operation_summary
-        if disconnect_dispatch.terminal_result is not None:
-            return disconnect_dispatch.terminal_result
-        result = (
-            disconnect_dispatch.tool_result
-            if disconnect_dispatch.tool_result is not None
-            else {}
-        )
-    elif (
-        resolved_operation_kind == "disconnect"
-        and any(
-            value is not None and (not isinstance(value, str) or value.strip())
-            for value in (src_block, src_port, dst_block, dst_port)
-        )
-    ):
-        disconnect_dispatch = handle_disconnect_by_endpoints(
-            ctx=operation_ctx,
-            src_block=src_block,
-            src_port=src_port,
-            dst_block=dst_block,
-            dst_port=dst_port,
-            tx_tool=tx_tool,
-        )
-        operation_summary = disconnect_dispatch.operation_summary
-        result = (
-            disconnect_dispatch.tool_result
-            if disconnect_dispatch.tool_result is not None
-            else {}
-        )
-    elif isinstance(variable_name, str) and variable_name.strip() and variable_value is not None:
-        add_variable_dispatch = handle_add_variable(
-            ctx=operation_ctx,
-            variable_name=variable_name,
-            variable_value=variable_value,
-            tx_tool=tx_tool,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        operation_summary = add_variable_dispatch.operation_summary
-        if add_variable_dispatch.terminal_result is not None:
-            return add_variable_dispatch.terminal_result
-        result = (
-            add_variable_dispatch.tool_result
-            if add_variable_dispatch.tool_result is not None
-            else {}
-        )
-    elif isinstance(param_key, str) and param_key.strip() and param_value is not None:
-        set_param_dispatch = handle_set_param(
-            ctx=operation_ctx,
-            param_key=param_key,
-            param_value=param_value,
-            expected_old_value=expected_old_value,
-            target_ref=target_ref,
-            instance_name=instance_name,
-            tx_tool=tx_tool,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        if set_param_dispatch.handled:
-            operation_summary = set_param_dispatch.operation_summary
-            if set_param_dispatch.terminal_result is not None:
-                return set_param_dispatch.terminal_result
-            result = (
-                set_param_dispatch.tool_result
-                if set_param_dispatch.tool_result is not None
-                else {}
-            )
-    elif isinstance(state, str) and state in {"enabled", "disabled"}:
-        set_state_dispatch = handle_set_state(
-            ctx=operation_ctx,
-            state=state,
-            target_ref=target_ref,
-            instance_name=instance_name,
-            tx_tool=tx_tool,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        if set_state_dispatch.handled:
-            operation_summary = set_state_dispatch.operation_summary
-            if set_state_dispatch.terminal_result is not None:
-                return set_state_dispatch.terminal_result
-            result = (
-                set_state_dispatch.tool_result
-                if set_state_dispatch.tool_result is not None
-                else {}
-            )
-    elif (
-        resolved_operation_kind == "remove_block"
-        and (
-            isinstance(instance_name, str) and instance_name.strip()
-            or isinstance(target_ref, dict)
-        )
-    ):
-        remove_dispatch = handle_remove_block(
-            ctx=operation_ctx,
-            instance_name=instance_name,
-            target_ref=target_ref,
-            detach_connections=detach_connections,
-            detach_connection_ids=detach_connection_ids,
-            tx_tool=tx_tool,
-            kind_mismatch_result=_kind_mismatch_result,
-        )
-        operation_summary = remove_dispatch.operation_summary
-        if remove_dispatch.terminal_result is not None:
-            return remove_dispatch.terminal_result
-        result = remove_dispatch.tool_result if remove_dispatch.tool_result is not None else {}
-    else:
-        wrapper_result = agent._payload_result(
-            "change_graph",
-            {
-                "ok": False,
-                "dry_run": bool(dry_run),
-                "error_type": "clarification_required",
-                "message": "Not enough exact change details to execute safely.",
-                "clarification_options": [
-                    "Provide exact instance_name + param_key + param_value for param edits.",
-                    "Provide exact connection_id (preferred) or endpoint hints for disconnect.",
-                    "Provide exact rewire endpoints for rewiring.",
-                    "Use add_signal_source_to_sum for another compatible source into an existing summing input.",
+                "message": errors[0],
+                "errors": [
+                    {"message": message, "code": "invalid_flat_batch"}
+                    for message in errors
                 ],
+                "state_revision": agent.session.state_revision,
             },
         )
         return agent._attach_wrapper_dispatch_telemetry(
             debug=debug,
             wrapper_name="change_graph",
-            wrapper_action=operation_summary,
-            internal_handlers=handlers or ["clarification"],
+            wrapper_action="invalid_flat_batch",
+            internal_handlers=["flat_batch_normalizer"],
             started=started,
             before_revision=before_revision,
             before_dirty=before_dirty,
-            result=wrapper_result,
+            result=result,
             validation_run=False,
             output_truncated=False,
         )
 
-    validation_result = None
-    if isinstance(result, dict):
-        validation_result = result.get("validation")
+    result = agent._apply_edit(normalized_operations, force_validation=bool(force))
+    validation_result = result.get("validation") if isinstance(result, dict) else None
     graph_delta = result.get("graph_delta") if isinstance(result, dict) else None
-    if (
-        graph_delta is None
-        and isinstance(result, dict)
-        and bool(result.get("ok"))
-        and not bool(dry_run)
-    ):
-        after_block_names = _block_names_snapshot()
-        after_connection_ids = _connection_ids_snapshot()
-        synthesized_delta: dict[str, Any] = {}
-        added_blocks = sorted(after_block_names - before_block_names)
-        removed_blocks = sorted(before_block_names - after_block_names)
-        added_connections = sorted(after_connection_ids - before_connection_ids)
-        removed_connections = sorted(before_connection_ids - after_connection_ids)
-        if added_blocks:
-            synthesized_delta["added_blocks"] = added_blocks
-        if removed_blocks:
-            synthesized_delta["removed_blocks"] = removed_blocks
-        if added_connections:
-            synthesized_delta["added_connections"] = added_connections
-        if removed_connections:
-            synthesized_delta["removed_connections"] = removed_connections
-        synthesized_delta["dirty"] = bool(agent.session.is_dirty)
-        if isinstance(validation_result, dict):
-            status = validation_result.get("status")
-            returncode = validation_result.get("returncode")
-            if status is not None:
-                synthesized_delta["validation_status"] = status
-            if returncode is not None:
-                synthesized_delta["validation_returncode"] = returncode
-        graph_delta = synthesized_delta
     ok = bool(result.get("ok")) if isinstance(result, dict) else False
-    normalized_operations = (
-        result.get("normalized_operations") if isinstance(result, dict) else None
-    )
+    if graph_delta is None and ok:
+        graph_delta = _synthesized_flat_delta(
+            agent,
+            before_block_names=before_block_names,
+            before_connection_ids=before_connection_ids,
+            validation_result=validation_result,
+        )
     operation_effects = _operation_effects(normalized_operations)
     payload: dict[str, Any] = _drop_empty_result_fields(
         {
             "ok": ok,
-            "dry_run": bool(dry_run),
-            "committed": ok and not bool(dry_run),
-            "operation_kind": resolved_operation_kind,
-            "operation_summary": operation_summary,
+            "committed": ok,
+            "operation_summary": "batch",
             "state_revision": agent.session.state_revision,
             "effect": operation_effects[0] if len(operation_effects) == 1 else None,
             "effects": operation_effects if len(operation_effects) > 1 else None,
             "graph_delta": graph_delta,
             "validation_result": validation_result,
+            "validation_ok": result.get("validation_ok") if isinstance(result, dict) else None,
             "autosave": result.get("autosave") if isinstance(result, dict) else None,
-            "assumptions": result.get("assumptions") if isinstance(result, dict) else None,
-            "preview_token": result.get("preview_token") if isinstance(result, dict) else None,
-            "commit_hint": result.get("commit_hint") if isinstance(result, dict) else None,
             "checkpoint_id": result.get("checkpoint_id") if isinstance(result, dict) else None,
             "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
         }
     )
-    if target_resolution is not None:
-        payload["target_resolution"] = copy.deepcopy(target_resolution)
-    if isinstance(result, dict) and result.get("error_type"):
-        payload["error_type"] = result.get("error_type")
-    if isinstance(result, dict) and result.get("clarification_required"):
-        payload["clarification_options"] = result.get("options")
     if isinstance(result, dict):
-        if isinstance(normalized_operations, list) and (bool(dry_run) or not ok):
+        if result.get("forced_validation_failure"):
+            payload["forced_validation_failure"] = result.get("forced_validation_failure")
+        if result.get("error_type"):
+            payload["error_type"] = result.get("error_type")
+        errors_payload = result.get("errors")
+        if isinstance(errors_payload, list) and errors_payload:
+            payload["errors"] = copy.deepcopy(errors_payload)
+        warnings = result.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            payload["warnings"] = copy.deepcopy(warnings)
+        if not ok:
             payload["planned_operations"] = copy.deepcopy(normalized_operations)
-        errors = result.get("errors")
-        if isinstance(errors, list) and errors:
-            payload["errors"] = copy.deepcopy(errors)
-        hint = result.get("hint")
-        if isinstance(hint, str) and hint and not ok:
-            payload["hint"] = hint
+            hint = result.get("hint")
+            if isinstance(hint, str) and hint:
+                payload["hint"] = hint
     wrapper_result = agent._payload_result("change_graph", payload)
-    validation_run = bool(validation_result) or operation_summary in {
-        "update_params",
-        "update_states",
-        "rewire_connection",
-        "insert_block_on_connection",
-        "add_variable",
-        "add_signal_source_to_sum",
-    }
     return agent._attach_wrapper_dispatch_telemetry(
         debug=debug,
         wrapper_name="change_graph",
-        wrapper_action=operation_summary,
-        internal_handlers=handlers,
+        wrapper_action="batch",
+        internal_handlers=["flat_batch_normalizer", "apply_edit"],
         started=started,
         before_revision=before_revision,
         before_dirty=before_dirty,
         result=wrapper_result,
-        validation_run=validation_run,
+        validation_run=True,
         output_truncated=False,
     )
+
+
+def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    errors: list[str] = []
+    operations: list[dict[str, Any]] = []
+    removed_connection_ids: set[str] = set()
+
+    remove_connections = _as_list(batches.get("remove_connections"), "remove_connections", errors)
+    rewire_connections = _as_list(batches.get("rewire_connections"), "rewire_connections", errors)
+    remove_blocks = _as_list(batches.get("remove_blocks"), "remove_blocks", errors)
+    add_blocks = _as_list(batches.get("add_blocks"), "add_blocks", errors)
+    add_variables = _as_list(batches.get("add_variables"), "add_variables", errors)
+    update_params = _as_list(batches.get("update_params"), "update_params", errors)
+    update_variables = _as_list(batches.get("update_variables"), "update_variables", errors)
+    update_states = _as_list(batches.get("update_states"), "update_states", errors)
+    insert_blocks = _as_list(
+        batches.get("insert_blocks_on_connections"),
+        "insert_blocks_on_connections",
+        errors,
+    )
+    add_connections = _as_list(batches.get("add_connections"), "add_connections", errors)
+    remove_variables = _as_list(batches.get("remove_variables"), "remove_variables", errors)
+
+    if errors:
+        return [], errors
+
+    for index, item in enumerate(remove_connections):
+        connection_id = _connection_id_from_remove_item(item)
+        if connection_id is None:
+            errors.append(f"remove_connections[{index}] must be a connection_id string.")
+            continue
+        _append_remove_connection(operations, removed_connection_ids, connection_id, errors, f"remove_connections[{index}]")
+
+    for index, item in enumerate(rewire_connections):
+        if not isinstance(item, dict):
+            errors.append(f"rewire_connections[{index}] must be an object.")
+            continue
+        connection_id = _required_string(item, "connection_id", f"rewire_connections[{index}]", errors)
+        parsed = parse_connection_id(connection_id) if connection_id is not None else None
+        if parsed is None:
+            errors.append(f"rewire_connections[{index}].connection_id is invalid or missing.")
+            continue
+        src_block, src_port, dst_block, dst_port = parsed
+        new_src = item.get("new_src")
+        new_dst = item.get("new_dst")
+        parsed_new_src = _parse_transaction_endpoint(new_src) if new_src is not None else None
+        parsed_new_dst = _parse_transaction_endpoint(new_dst) if new_dst is not None else None
+        if (parsed_new_src is None) == (parsed_new_dst is None):
+            errors.append(f"rewire_connections[{index}] requires exactly one of new_src or new_dst.")
+            continue
+        _append_remove_connection(operations, removed_connection_ids, connection_id, errors, f"rewire_connections[{index}]")
+        if parsed_new_src is not None:
+            src_block, src_port = parsed_new_src
+        if parsed_new_dst is not None:
+            dst_block, dst_port = parsed_new_dst
+        operations.append(
+            {
+                "op_type": "add_connection",
+                "src_block": src_block,
+                "src_port": src_port,
+                "dst_block": dst_block,
+                "dst_port": dst_port,
+            }
+        )
+
+    for index, item in enumerate(remove_blocks):
+        op = _remove_block_operation(item, index=index, field_name="remove_blocks", errors=errors)
+        if op is None:
+            continue
+        block_name = _operation_target_name(op)
+        if block_name:
+            for connection_id in _incident_connection_ids(agent, block_name):
+                _append_remove_connection(
+                    operations,
+                    removed_connection_ids,
+                    connection_id,
+                    errors,
+                    f"remove_blocks[{index}].auto_detach",
+                )
+        operations.append(op)
+
+    for index, item in enumerate(remove_variables):
+        name = item.strip() if isinstance(item, str) else None
+        if not name:
+            errors.append(f"remove_variables[{index}] must be a variable name string.")
+            continue
+        for connection_id in _incident_connection_ids(agent, name):
+            _append_remove_connection(
+                operations,
+                removed_connection_ids,
+                connection_id,
+                errors,
+                f"remove_variables[{index}].auto_detach",
+            )
+        operations.append(
+            {"op_type": "remove_block", "instance_name": name, "block_type": "variable"}
+        )
+
+    for index, item in enumerate(add_blocks):
+        if not isinstance(item, dict):
+            errors.append(f"add_blocks[{index}] must be an object.")
+            continue
+        block_id = _required_string(item, "block_id", f"add_blocks[{index}]", errors)
+        instance_name = _required_string(item, "instance_name", f"add_blocks[{index}]", errors)
+        if block_id is None or instance_name is None:
+            continue
+        params = item.get("params", {})
+        states = item.get("states")
+        if not isinstance(params, dict):
+            errors.append(f"add_blocks[{index}].params must be an object when provided.")
+            continue
+        if states is not None and not isinstance(states, dict):
+            errors.append(f"add_blocks[{index}].states must be an object when provided.")
+            continue
+        op = {
+            "op_type": "add_block",
+            "block_type": block_id,
+            "instance_name": instance_name,
+            "parameters": copy.deepcopy(params),
+        }
+        if states is not None:
+            op["states"] = copy.deepcopy(states)
+        operations.append(op)
+
+    for index, item in enumerate(add_variables):
+        if not isinstance(item, dict):
+            errors.append(f"add_variables[{index}] must be an object.")
+            continue
+        name = _variable_instance_name(item, f"add_variables[{index}]", errors)
+        if name is None or "value" not in item:
+            if "value" not in item:
+                errors.append(f"add_variables[{index}].value is required.")
+            continue
+        operations.append(
+            {
+                "op_type": "add_block",
+                "block_type": "variable",
+                "instance_name": name,
+                "parameters": {"value": copy.deepcopy(item["value"])},
+            }
+        )
+
+    for index, item in enumerate(update_params):
+        op = _update_params_operation(item, index=index, field_name="update_params", errors=errors)
+        if op is not None:
+            operations.append(op)
+
+    for index, item in enumerate(update_variables):
+        if not isinstance(item, dict):
+            errors.append(f"update_variables[{index}] must be an object.")
+            continue
+        name = _variable_instance_name(item, f"update_variables[{index}]", errors)
+        if name is None or "value" not in item:
+            if "value" not in item:
+                errors.append(f"update_variables[{index}].value is required.")
+            continue
+        op: dict[str, Any] = {
+            "op_type": "update_params",
+            "instance_name": name,
+            "block_type": "variable",
+            "params": {"value": copy.deepcopy(item["value"])},
+        }
+        if "expected_value" in item:
+            op["expected_params"] = {"value": copy.deepcopy(item["expected_value"])}
+        operations.append(op)
+
+    for index, item in enumerate(update_states):
+        op = _update_state_operation(item, index=index, field_name="update_states", errors=errors)
+        if op is not None:
+            operations.append(op)
+
+    for index, item in enumerate(insert_blocks):
+        if not isinstance(item, dict):
+            errors.append(f"insert_blocks_on_connections[{index}] must be an object.")
+            continue
+        connection_id = _required_string(
+            item,
+            "connection_id",
+            f"insert_blocks_on_connections[{index}]",
+            errors,
+        )
+        block_id = _required_string(item, "block_id", f"insert_blocks_on_connections[{index}]", errors)
+        instance_name = _required_string(
+            item,
+            "instance_name",
+            f"insert_blocks_on_connections[{index}]",
+            errors,
+        )
+        if connection_id is None or block_id is None or instance_name is None:
+            continue
+        params = item.get("params", {})
+        if not isinstance(params, dict):
+            errors.append(f"insert_blocks_on_connections[{index}].params must be an object when provided.")
+            continue
+        operations.append(
+            {
+                "op_type": "insert_block_on_connection",
+                "connection_id": connection_id,
+                "block_type": block_id,
+                "instance_name": instance_name,
+                "params": copy.deepcopy(params),
+            }
+        )
+
+    for index, item in enumerate(add_connections):
+        if not isinstance(item, dict):
+            errors.append(f"add_connections[{index}] must be an object.")
+            continue
+        src = _parse_transaction_endpoint(item.get("src"))
+        dst = _parse_transaction_endpoint(item.get("dst"))
+        if src is None or dst is None:
+            errors.append(f"add_connections[{index}] requires src and dst endpoints.")
+            continue
+        operations.append(
+            {
+                "op_type": "add_connection",
+                "src_block": src[0],
+                "src_port": src[1],
+                "dst_block": dst[0],
+                "dst_port": dst[1],
+            }
+        )
+
+    if not operations and not errors:
+        errors.append("change_graph requires at least one non-empty edit list.")
+    return operations, errors
+
+
+def _as_list(value: Any, field_name: str, errors: list[str]) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    errors.append(f"{field_name} must be an array when provided.")
+    return []
+
+
+def _required_string(item: dict[str, Any], key: str, field_name: str, errors: list[str]) -> str | None:
+    value = item.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    errors.append(f"{field_name}.{key} must be a non-empty string.")
+    return None
+
+
+def _variable_instance_name(item: dict[str, Any], field_name: str, errors: list[str]) -> str | None:
+    value = item.get("instance_name")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    legacy = item.get("name")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy.strip()
+    errors.append(f"{field_name}.instance_name must be a non-empty string.")
+    return None
+
+
+def _connection_id_from_remove_item(item: Any) -> str | None:
+    if isinstance(item, str) and item.strip():
+        return item.strip()
+    if isinstance(item, dict):
+        value = item.get("connection_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _append_remove_connection(
+    operations: list[dict[str, Any]],
+    seen: set[str],
+    connection_id: str,
+    errors: list[str],
+    field_name: str,
+) -> None:
+    parsed = parse_connection_id(connection_id)
+    if parsed is None:
+        errors.append(f"{field_name} is not a valid connection_id.")
+        return
+    if connection_id in seen:
+        return
+    seen.add(connection_id)
+    operations.append({"op_type": "remove_connection", "connection_id": connection_id})
+
+
+def _remove_block_operation(
+    item: Any,
+    *,
+    index: int,
+    field_name: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        item = {"instance_name": item}
+    if not isinstance(item, dict):
+        errors.append(f"{field_name}[{index}] must be a block name or object.")
+        return None
+    target_ref = item.get("target_ref")
+    instance_name = item.get("instance_name")
+    block_id = item.get("block_id")
+    op: dict[str, Any] = {"op_type": "remove_block"}
+    if isinstance(target_ref, dict) and target_ref:
+        op["target_ref"] = copy.deepcopy(target_ref)
+        if isinstance(target_ref.get("expected_instance_name"), str):
+            op["instance_name"] = target_ref["expected_instance_name"]
+    elif isinstance(instance_name, str) and instance_name.strip():
+        op["instance_name"] = instance_name.strip()
+    else:
+        errors.append(f"{field_name}[{index}] requires instance_name or target_ref.")
+        return None
+    if isinstance(block_id, str) and block_id.strip():
+        op["block_type"] = block_id.strip()
+    return op
+
+
+def _update_params_operation(
+    item: Any,
+    *,
+    index: int,
+    field_name: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        errors.append(f"{field_name}[{index}] must be an object.")
+        return None
+    params = item.get("params")
+    if not isinstance(params, dict) or not params:
+        errors.append(f"{field_name}[{index}].params must be a non-empty object.")
+        return None
+    op: dict[str, Any] = {
+        "op_type": "update_params",
+        "params": copy.deepcopy(params),
+    }
+    target_ref = item.get("target_ref")
+    if isinstance(target_ref, dict) and target_ref:
+        op["target_ref"] = copy.deepcopy(target_ref)
+    else:
+        instance_name = _required_string(item, "instance_name", f"{field_name}[{index}]", errors)
+        if instance_name is None:
+            return None
+        op["instance_name"] = instance_name
+    block_id = item.get("block_id")
+    if isinstance(block_id, str) and block_id.strip():
+        op["block_type"] = block_id.strip()
+    expected_params = item.get("expected_params")
+    if expected_params is not None:
+        if not isinstance(expected_params, dict):
+            errors.append(f"{field_name}[{index}].expected_params must be an object when provided.")
+            return None
+        op["expected_params"] = copy.deepcopy(expected_params)
+    return op
+
+
+def _update_state_operation(
+    item: Any,
+    *,
+    index: int,
+    field_name: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        errors.append(f"{field_name}[{index}] must be an object.")
+        return None
+    states = item.get("states")
+    if not isinstance(states, dict) or not states:
+        errors.append(f"{field_name}[{index}].states must be a non-empty object.")
+        return None
+    state = states.get("state")
+    if state is None and "enabled" in states:
+        state = "enabled" if bool(states.get("enabled")) else "disabled"
+    if state not in {"enabled", "disabled"}:
+        errors.append(f"{field_name}[{index}].states must set state to enabled/disabled.")
+        return None
+    op: dict[str, Any] = {"op_type": "update_states", "state": state}
+    target_ref = item.get("target_ref")
+    if isinstance(target_ref, dict) and target_ref:
+        op["target_ref"] = copy.deepcopy(target_ref)
+    else:
+        instance_name = _required_string(item, "instance_name", f"{field_name}[{index}]", errors)
+        if instance_name is None:
+            return None
+        op["instance_name"] = instance_name
+    block_id = item.get("block_id")
+    if isinstance(block_id, str) and block_id.strip():
+        op["block_type"] = block_id.strip()
+    return op
+
+
+def _incident_connection_ids(agent: Any, block_name: str) -> list[str]:
+    flowgraph = agent.session.flowgraph
+    if flowgraph is None:
+        return []
+    ids: list[str] = []
+    for conn in flowgraph.connections:
+        if conn.src_block == block_name or conn.dst_block == block_name:
+            ids.append(
+                render_connection_id(
+                    conn.src_block,
+                    conn.src_port,
+                    conn.dst_block,
+                    conn.dst_port,
+                )
+            )
+    return ids
+
+
+def _flat_block_names_snapshot(agent: Any) -> set[str]:
+    flowgraph = agent.session.flowgraph
+    if flowgraph is None:
+        return set()
+    return {
+        block.instance_name
+        for block in flowgraph.blocks
+        if isinstance(block.instance_name, str)
+    }
+
+
+def _flat_connection_ids_snapshot(agent: Any) -> set[str]:
+    flowgraph = agent.session.flowgraph
+    if flowgraph is None:
+        return set()
+    return {
+        render_connection_id(conn.src_block, conn.src_port, conn.dst_block, conn.dst_port)
+        for conn in flowgraph.connections
+    }
+
+
+def _synthesized_flat_delta(
+    agent: Any,
+    *,
+    before_block_names: set[str],
+    before_connection_ids: set[str],
+    validation_result: Any,
+) -> dict[str, Any]:
+    after_block_names = _flat_block_names_snapshot(agent)
+    after_connection_ids = _flat_connection_ids_snapshot(agent)
+    delta: dict[str, Any] = {}
+    added_blocks = sorted(after_block_names - before_block_names)
+    removed_blocks = sorted(before_block_names - after_block_names)
+    added_connections = sorted(after_connection_ids - before_connection_ids)
+    removed_connections = sorted(before_connection_ids - after_connection_ids)
+    if added_blocks:
+        delta["added_blocks"] = added_blocks
+    if removed_blocks:
+        delta["removed_blocks"] = removed_blocks
+    if added_connections:
+        delta["added_connections"] = added_connections
+    if removed_connections:
+        delta["removed_connections"] = removed_connections
+    delta["dirty"] = bool(agent.session.is_dirty)
+    if isinstance(validation_result, dict):
+        status = validation_result.get("status")
+        returncode = validation_result.get("returncode")
+        if status is not None:
+            delta["validation_status"] = status
+        if returncode is not None:
+            delta["validation_returncode"] = returncode
+    return delta
 
 
 def _drop_empty_result_fields(payload: dict[str, Any]) -> dict[str, Any]:

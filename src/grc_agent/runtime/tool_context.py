@@ -226,10 +226,10 @@ def _compact_overview_blocks(value: Any) -> list[str]:
     for row in _list(value):
         if not isinstance(row, dict):
             continue
-        name = str(row.get("name") or "").strip()
+        name = str(row.get("instance_name") or row.get("name") or "").strip()
         if not name:
             continue
-        block_type = str(row.get("type") or "unknown").strip() or "unknown"
+        block_type = str(row.get("block_type") or row.get("type") or "unknown").strip() or "unknown"
         role = str(row.get("role") or "unknown").strip() or "unknown"
         label = str(row.get("catalog_label") or "").strip()
         grouped.setdefault((role, block_type, label), []).append(name)
@@ -246,7 +246,10 @@ def _format_overview_block_group(
     names: list[str],
 ) -> str:
     del label
-    return f"{_overview_role_label(role)} {block_type}: {', '.join(names)}"
+    return (
+        f"role={_overview_role_label(role)} block_type={block_type} "
+        f"instance_name={', '.join(names)}"
+    )
 
 
 def _overview_role_label(role: str) -> str:
@@ -269,8 +272,8 @@ def _compact_inspect_targets(targets: Any) -> list[dict[str, Any]]:
             _drop_empty(
                 {
                     "request": row.get("request"),
-                    "name": row.get("name"),
-                    "type": row.get("type"),
+                    "instance_name": row.get("instance_name") or row.get("name"),
+                    "block_type": row.get("block_type") or row.get("type"),
                     "label": row.get("catalog_label"),
                     "target_ref": row.get("target_ref"),
                     "parameters": [
@@ -293,6 +296,7 @@ def _compact_inspect_targets(targets: Any) -> list[dict[str, Any]]:
 def _compact_detail_param(param: dict[str, Any]) -> dict[str, Any]:
     return _drop_empty(
         {
+            "param_id": param.get("param_id") or param.get("name"),
             "name": param.get("name"),
             "label": param.get("label"),
             "value": param.get("value"),
@@ -335,7 +339,8 @@ def _compact_target_matches(value: Any) -> list[dict[str, Any]]:
                     "request": item.get("request"),
                     "status": item.get("status"),
                     "matched_by": item.get("matched_by"),
-                    "name": item.get("resolved_name") or item.get("name"),
+                    "instance_name": item.get("resolved_name") or item.get("instance_name") or item.get("name"),
+                    "block_type": item.get("block_type") or item.get("type"),
                     "candidates": item.get("candidates"),
                 }
             )
@@ -414,11 +419,8 @@ def _render_change_graph_result(
     rendered = list(prefix_lines)
     parts = []
     for key, label in (
-        ("op", "op"),
-        ("dry_run", "dry_run"),
         ("committed", "committed"),
         ("rev", "rev"),
-        ("preview_token", "preview_token"),
         ("validation", "validation"),
         ("autosave", "autosave"),
     ):
@@ -453,9 +455,9 @@ def _compact_search_blocks(content: dict[str, Any]) -> dict[str, Any]:
             _drop_empty(
                 {
                     "block_id": row.get("block_id"),
-                    "name": row.get("name"),
+                    "catalog_label": row.get("catalog_label") or row.get("name"),
                     "match": row.get("match_type"),
-                    "why": _short_text(row.get("summary"), 80),
+                    "why": _short_text(row.get("why") or row.get("summary"), 100),
                 }
             )
             for row in _list(content.get("results"))
@@ -474,6 +476,9 @@ def _compact_ask_grc_docs(content: dict[str, Any]) -> dict[str, Any]:
         "ok": content.get("ok"),
         "error_type": content.get("error_type"),
         "answer": _short_text(content.get("answer"), 360),
+        "allowed_use": content.get("allowed_use"),
+        "mutation_authority": content.get("mutation_authority"),
+        "confidence": content.get("confidence"),
         "insufficient_evidence": content.get("insufficient_evidence"),
         "sources": [
             _drop_empty(
@@ -500,22 +505,19 @@ def _compact_change_graph(content: dict[str, Any]) -> dict[str, Any]:
     effects = content.get("effects")
     result = {
         "ok": ok,
-        "op": content.get("operation_kind") or content.get("operation_summary"),
-        "dry_run": content.get("dry_run"),
         "committed": content.get("committed"),
         "rev": content.get("state_revision"),
-        "preview_token": content.get("preview_token"),
         "effect": effect,
         "effects": effects,
-        "plan": _operation_plan(content)
-        if content.get("dry_run") is True and not (effect or effects)
-        else None,
+        "plan": _operation_plan(content) if not (effect or effects) else None,
         "validation": _validation_status_value(content.get("validation_result")),
         "autosave": _autosave_status_value(content.get("autosave")),
         "error_type": content.get("error_type"),
         "message": _short_text(content.get("message"), 180) if ok is False else None,
         "needs": _compact_change_needs(content),
         "errors": _compact_error_rows(content.get("errors")),
+        "validation_errors": _compact_error_rows(content.get("validation_errors")),
+        "repair": _compact_schema_repair(content.get("schema_repair_instruction")),
     }
     return _drop_empty(result)
 
@@ -539,13 +541,25 @@ def _compact_change_needs(content: dict[str, Any]) -> Any:
     ]
 
 
+def _compact_schema_repair(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return _drop_empty(
+        {
+            "missing_fields": value.get("missing_fields"),
+            "invalid_fields": value.get("invalid_fields"),
+            "hint": _short_text(value.get("change_graph_hint"), 240),
+        }
+    )
+
+
 def _operation_plan(content: dict[str, Any]) -> list[str]:
     effects = content.get("effects")
     if isinstance(effects, list):
         return [str(item) for item in effects if str(item)]
     effect = content.get("effect")
     if isinstance(effect, str) and effect:
-        return [effect] if content.get("dry_run") is True else []
+        return [effect]
     rows: list[str] = []
     for operation in _list(content.get("planned_operations")):
         if isinstance(operation, dict):

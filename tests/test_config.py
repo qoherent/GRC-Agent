@@ -6,7 +6,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from grc_agent.cli import _build_parser
+from grc_agent.cli import _build_parser, _maybe_translate_legacy_args
 from grc_agent.config import (
     CONFIG_ENV_VAR,
     ConfigError,
@@ -72,6 +72,28 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertTrue(args.agentic)
         self.assertEqual(args.max_tool_rounds, 24)
+
+    def test_legacy_message_translation_preserves_global_options(self) -> None:
+        translated = _maybe_translate_legacy_args(
+            ["--verbose", "--message", "Summarize it.", "fixture.grc"]
+        )
+
+        self.assertEqual(
+            translated,
+            ["--verbose", "chat", "--message", "Summarize it.", "fixture.grc"],
+        )
+
+    def test_legacy_message_translation_does_not_rewrite_modern_chat(self) -> None:
+        argv = [
+            "--verbose",
+            "chat",
+            "--agentic",
+            "--message",
+            "Summarize it.",
+            "fixture.grc",
+        ]
+
+        self.assertEqual(_maybe_translate_legacy_args(argv), argv)
 
     def test_load_app_config_falls_back_to_builtin_defaults_when_no_file_exists(
         self,

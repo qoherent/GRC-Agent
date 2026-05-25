@@ -17,11 +17,17 @@ def build_apply_success_payload(
     warnings: list[dict[str, Any]],
     affected_changes: AffectedChanges,
     state_revision_before: int,
+    forced_validation_failure: bool = False,
 ) -> dict[str, Any]:
     """Build the public success payload for `apply_edit(...)`."""
     payload: dict[str, Any] = {
         "ok": True,
-        "message": "Applied transaction and validated the graph successfully.",
+        "message": (
+            "change done, but validation error appeared: "
+            + _validation_error_summary(session.validation_state())
+            if forced_validation_failure
+            else "Applied transaction and validated the graph successfully."
+        ),
         "applied": True,
         "dirty": session.is_dirty,
         "commit_eligible": True,
@@ -35,9 +41,26 @@ def build_apply_success_payload(
         "error_count": 0,
         "state_revision_before": state_revision_before,
         "state_revision_after": session.state_revision,
+        "validation_ok": not forced_validation_failure,
     }
+    if forced_validation_failure:
+        payload["forced_validation_failure"] = True
     payload.update(affected_changes.to_payload())
     return payload
+
+
+def _validation_error_summary(validation: dict[str, Any]) -> str:
+    message = validation.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    stderr = validation.get("stderr")
+    if isinstance(stderr, str) and stderr.strip():
+        return " ".join(stderr.strip().split())[:300]
+    stdout = validation.get("stdout")
+    if isinstance(stdout, str) and stdout.strip():
+        return " ".join(stdout.strip().split())[:300]
+    status = validation.get("status")
+    return str(status or "unknown validation failure")
 
 
 def build_apply_failure_payload(

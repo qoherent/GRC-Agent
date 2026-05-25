@@ -275,12 +275,26 @@ def search_blocks(
     limited = candidates[:limit]
     output_truncated = len(candidates) > len(limited)
     if not debug:
+        for item in limited:
+            block_id = str(item.get("block_id", ""))
+            name = str(item.get("name", ""))
+            if _is_exact_catalog_query(q, block_id=block_id, name=name):
+                details = _compact_catalog_details(block_id)
+                if details:
+                    item["catalog"] = details
         limited = [
             {
                 "block_id": str(item.get("block_id", "")),
+                "catalog_label": str(item.get("name", "")),
                 "name": str(item.get("name", "")),
                 "summary": str(item.get("summary", "")),
                 "match_type": str(item.get("match_type", "")),
+                "why": str(item.get("why", "")),
+                **(
+                    {"catalog": item["catalog"]}
+                    if isinstance(item.get("catalog"), dict)
+                    else {}
+                ),
             }
             for item in limited
         ]
@@ -354,6 +368,9 @@ def _lexical_catalog_candidates(
         if score > 0:
             item = dict(entry.item)
             item["match_type"] = match_type
+            evidence = _catalog_match_evidence(query_terms, entry)
+            if evidence:
+                item["why"] = "matched catalog metadata: " + ", ".join(evidence[:6])
             scored_by_id[entry.block_id] = (float(score), match_type, item)
 
     fts_ranked, fts_error = _fts5_catalog_rank(
@@ -521,6 +538,65 @@ def _merge_catalog_candidates(
     return sorted(merged.values(), key=sort_key)
 
 
+def _is_exact_catalog_query(query: str, *, block_id: str, name: str) -> bool:
+    import grc_agent.agent as agent_module
+
+    query_raw = query.casefold()
+    query_norm = agent_module._normalize_alias_key(query)
+    return (
+        bool(block_id)
+        and query_raw in {block_id.casefold(), f"catalog:block:{block_id}".casefold()}
+        or bool(query_norm)
+        and query_norm
+        in {
+            agent_module._normalize_alias_key(block_id),
+            agent_module._normalize_alias_key(name),
+        }
+    )
+
+
+def _compact_catalog_details(block_id: str) -> dict[str, Any]:
+    details = describe_block(block_id)
+    if details.get("ok") is not True:
+        return {}
+    params = []
+    for raw_param in details.get("parameters", [])[:10]:
+        if not isinstance(raw_param, dict):
+            continue
+        param = {
+            key: raw_param.get(key)
+            for key in ("id", "label", "dtype", "default")
+            if raw_param.get(key) not in (None, "", [], {})
+        }
+        options = raw_param.get("options")
+        if isinstance(options, list) and options:
+            param["options"] = options[:8]
+        labels = raw_param.get("option_labels")
+        if isinstance(labels, list) and labels:
+            param["option_labels"] = labels[:8]
+        params.append(param)
+    ports = {}
+    for direction in ("inputs", "outputs"):
+        compact_ports = []
+        for raw_port in details.get(direction, [])[:8]:
+            if not isinstance(raw_port, dict):
+                continue
+            compact_ports.append(
+                {
+                    key: raw_port.get(key)
+                    for key in ("id", "domain", "dtype", "optional")
+                    if raw_port.get(key) not in (None, "", [], {})
+                }
+            )
+        if compact_ports:
+            ports[direction] = compact_ports
+    return {
+        key: value
+        for key, value in {"params": params, **ports}.items()
+        if value not in (None, "", [], {})
+    }
+
+
 def _lexical_score(
     *,
     query: str,
@@ -567,6 +643,39 @@ def _lexical_score(
             score += 360
             match_type = "metadata"
     return score, match_type
+
+
+def _catalog_match_evidence(
+    query_terms: set[str],
+    entry: _CatalogSearchEntry,
+) -> list[str]:
+    if not query_terms:
+        return []
+    values = [entry.label, *entry.params, *entry.ports]
+    evidence: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        value_terms = _search_terms(value)
+        if not value_terms or not _search_terms_overlap(query_terms, value_terms):
+            continue
+        text = " ".join(str(value).split())
+        key = text.casefold()
+        if text and key not in seen:
+            evidence.append(text)
+            seen.add(key)
+    return evidence
+
+
+def _search_terms_overlap(left: set[str], right: set[str]) -> bool:
+    if left & right:
+        return True
+    for left_term in left:
+        if len(left_term) < 3:
+            continue
+        for right_term in right:
+            if right_term.startswith(left_term):
+                return True
+    return False
 
 
 def _fts5_catalog_rank(

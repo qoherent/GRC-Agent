@@ -1,10 +1,8 @@
-"""Operation helpers for the change_graph wrapper."""
+"""Flat model-facing change_graph batch dispatcher."""
 
-from .context import ChangeGraphOperationContext, ChangeGraphOperationResult
-from .dispatcher import dispatch_change_graph
+from .dispatcher import dispatch_flat_change_graph_batch, has_flat_change_graph_batch
 
 __all__ = [
-    "ChangeGraphOperationContext",
-    "ChangeGraphOperationResult",
-    "dispatch_change_graph",
+    "dispatch_flat_change_graph_batch",
+    "has_flat_change_graph_batch",
 ]

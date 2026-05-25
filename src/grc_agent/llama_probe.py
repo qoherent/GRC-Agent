@@ -75,12 +75,15 @@ class LlamaHealthProbe:
         actual_context = extract_model_context_limit(props)
         if actual_context is None:
             raise LlamaServerError("llama.cpp server context is unknown from /props.")
+        builtin_tools = extract_enabled_builtin_tools(props)
         return {
             "llama_server_url": self.base_url,
             "llama_model": expected_alias,
             "llama_actual_context_tokens": actual_context,
             "llama_context_verified": True,
             "llama_model_ready": True,
+            "llama_builtin_tools_enabled": sorted(builtin_tools),
+            "llama_builtin_tools_disabled": not builtin_tools,
         }
 
     def _request_json(
@@ -170,6 +173,59 @@ def extract_model_context_limit(props: dict[str, Any]) -> int | None:
     return None
 
 
+_LLAMA_BUILTIN_TOOL_NAMES = frozenset(
+    {
+        "read_file",
+        "file_glob_search",
+        "grep_search",
+        "exec_shell_command",
+        "write_file",
+        "edit_file",
+        "apply_diff",
+        "get_datetime",
+    }
+)
+
+
+def extract_enabled_builtin_tools(props: dict[str, Any]) -> set[str]:
+    """Extract llama.cpp server-side built-in tools from `/props` when exposed.
+
+    llama.cpp's built-in tools are controlled by server flags and are separate
+    from the ToolAgents registry. Older or stripped `/props` payloads may omit
+    the field entirely; omission is treated as no evidence of enabled tools.
+    """
+    if not isinstance(props, dict):
+        return set()
+    candidates: list[Any] = []
+    for key in ("tools", "enabled_tools", "builtin_tools"):
+        candidates.append(props.get(key))
+    for section_key in ("settings", "default_generation_settings", "ui_settings"):
+        section = props.get(section_key)
+        if isinstance(section, dict):
+            for key in ("tools", "enabled_tools", "builtin_tools"):
+                candidates.append(section.get(key))
+            params = section.get("params")
+            if isinstance(params, dict):
+                for key in ("tools", "enabled_tools", "builtin_tools"):
+                    candidates.append(params.get(key))
+    enabled: set[str] = set()
+    for value in candidates:
+        enabled.update(_parse_builtin_tools_value(value))
+    if "all" in enabled:
+        return set(_LLAMA_BUILTIN_TOOL_NAMES)
+    return {tool for tool in enabled if tool in _LLAMA_BUILTIN_TOOL_NAMES}
+
+
+def _parse_builtin_tools_value(value: Any) -> set[str]:
+    if value in (None, "", False, [], {}, "none", "None", "false", "False"):
+        return set()
+    if isinstance(value, str):
+        return {part.strip() for part in value.split(",") if part.strip()}
+    if isinstance(value, list | tuple | set):
+        return {str(part).strip() for part in value if str(part).strip()}
+    return set()
+
+
 def _format_http_error(status_code: int, raw_body: str) -> str:
     body = raw_body.strip()
     if len(body) > 500:
@@ -181,4 +237,9 @@ def _is_timeout_reason(reason: Any) -> bool:
     return isinstance(reason, TimeoutError | socket.timeout)
 
 
-__all__ = ["LlamaHealthProbe", "LlamaServerError", "extract_model_context_limit"]
+__all__ = [
+    "LlamaHealthProbe",
+    "LlamaServerError",
+    "extract_enabled_builtin_tools",
+    "extract_model_context_limit",
+]

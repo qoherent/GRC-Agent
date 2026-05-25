@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from grc_agent import FlowgraphSession, apply_edit
 from grc_agent.transaction.rollback import capture_session_state, restore_session_state
@@ -57,6 +58,36 @@ class TransactionRollbackTests(unittest.TestCase):
         assert session.flowgraph is not None
         self.assertEqual(session.flowgraph.raw_data, original_raw)
         self.assertIsNone(session.last_validation_ok)
+
+    def test_apply_edit_commit_swap_failure_leaves_live_state_unchanged(self) -> None:
+        session = self._load_session()
+        assert session.flowgraph is not None
+        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_revision = session.state_revision
+        original_dirty = session.is_dirty
+
+        with mock.patch(
+            "grc_agent.transaction.apply.commit_candidate_session",
+            side_effect=RuntimeError("injected commit swap failure"),
+        ):
+            payload = apply_edit(
+                session,
+                {
+                    "op_type": "update_params",
+                    "instance_name": "samp_rate",
+                    "params": {"value": "48000"},
+                },
+            )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["applied"])
+        self.assertEqual(payload["error_type"], "internal_error")
+        self.assertIn("injected commit swap failure", payload["message"])
+        self.assertEqual(payload["state_revision_after"], original_revision)
+        self.assertEqual(session.state_revision, original_revision)
+        self.assertEqual(session.is_dirty, original_dirty)
+        assert session.flowgraph is not None
+        self.assertEqual(session.flowgraph.raw_data, original_raw)
 
 
 if __name__ == "__main__":

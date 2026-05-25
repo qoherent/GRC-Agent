@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from typing import Any, TextIO
 
 from tests.retrieval_eval.vector_retrieval import run_eval
 
 
+VECTOR_REGRESSION_PROGRESS_INTERVAL = 25
 VECTOR_BASELINE_V1_THRESHOLDS: dict[str, int] = {
     "minimum_vector_top_k_hits": 276,
     "exact_id_miss_count": 0,
@@ -93,9 +94,19 @@ def _int_value(value: Any) -> int:
     return value if isinstance(value, int) else 0
 
 
-def main() -> int:
+def main(
+    *,
+    eval_runner: Any = run_eval,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+) -> int:
     try:
-        report = evaluate_vector_regression(run_eval())
+        report = evaluate_vector_regression(
+            eval_runner(
+                progress_callback=lambda event: _print_progress_event(event, stderr),
+                progress_interval=VECTOR_REGRESSION_PROGRESS_INTERVAL,
+            )
+        )
     except RuntimeError as exc:
         print(
             json.dumps(
@@ -106,11 +117,35 @@ def main() -> int:
                 },
                 indent=2,
                 sort_keys=True,
-            )
+            ),
+            file=stdout,
         )
         return 2
-    print(json.dumps(report, indent=2, sort_keys=True))
+    print(json.dumps(report, indent=2, sort_keys=True), file=stdout)
     return 0 if report["ok"] else 1
+
+
+def _print_progress_event(event: dict[str, Any], stream: TextIO) -> None:
+    phase = event.get("phase")
+    if phase == "waiting_for_lock":
+        message = "waiting for retrieval eval lock"
+    elif phase == "start":
+        message = f"starting {event.get('total_cases')} retrieval cases"
+    elif phase == "case_complete":
+        message = (
+            f"completed {event.get('completed_cases')}/{event.get('total_cases')} cases "
+            f"(last={event.get('case_name')}, latency_ms={event.get('latency_ms')})"
+        )
+    elif phase == "deterministic_rebuild":
+        message = "checking deterministic rebuild"
+    elif phase == "done":
+        message = (
+            f"finished eval loop in {event.get('duration_ms')} ms "
+            f"for {event.get('total_cases')} cases"
+        )
+    else:
+        message = f"progress event: {phase}"
+    print(f"[vector_regression] {message}", file=stream, flush=True)
 
 
 if __name__ == "__main__":

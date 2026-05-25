@@ -433,6 +433,7 @@ def build_tool_schemas(
                 },
             },
             required=["query"],
+            strict=True,
         ),
         _schema(
             "ask_grc_docs",
@@ -452,55 +453,247 @@ def build_tool_schemas(
                 },
             },
             required=["question"],
+            strict=True,
         ),
         _schema(
             "change_graph",
-            "Preview or commit one graph edit. Use clear ops; validates, rolls back, autosaves valid commits.",
+            "Apply one bounded batch of GNU Radio graph edits. "
+            "Use inspect_graph/search_blocks first. For existing graph blocks copy "
+            "instance_name and param_id/port/connection_id from inspect_graph. For new "
+            "blocks copy block_id and params from search_blocks. For existing variables "
+            "prefer update_variables. Omitted lists mean no edits of that kind.",
             {
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "true=preview, false=commit.",
+                "add_blocks": {
+                    "type": "array",
+                    "description": "Blocks to add, with initial params/states.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "block_id": {
+                                "type": "string",
+                                "description": "Installed GNU Radio catalog block ID.",
+                            },
+                            "instance_name": {
+                                "type": "string",
+                                "description": "New unique graph instance name.",
+                            },
+                            "params": {
+                                "type": "object",
+                                "description": "Initial parameter values keyed by GNU parameter ID.",
+                            },
+                            "states": {
+                                "type": "object",
+                                "description": "Initial state values such as {'state':'enabled'}.",
+                            },
+                        },
+                        "required": ["block_id", "instance_name"],
+                    },
                 },
-                "op": {
-                    "type": "string",
-                    "enum": [
-                        "set_param",
-                        "set_state",
-                        "add_variable",
-                        "disconnect",
-                        "rewire",
-                        "insert_in_connection",
-                        "add_signal_source_to_sum",
-                        "remove_block",
-                        "clarify",
-                        "unsupported",
-                    ],
-                    "description": "Edit kind.",
+                "remove_blocks": {
+                    "type": "array",
+                    "description": "Existing blocks to remove; incident edges are detached by the runtime.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "instance_name": {"type": "string"},
+                            "block_id": {
+                                "type": "string",
+                                "description": "Optional block ID disambiguator.",
+                            },
+                            "target_ref": {
+                                "type": "object",
+                                "description": "Optional guarded ref copied from inspect_graph.",
+                            },
+                        },
+                    },
                 },
-                "user_goal": {
-                    "type": "string",
-                    "description": "Short user intent.",
-                },
-                "state_revision": {
-                    "type": "integer",
-                    "description": "Revision guard; required for structural commits.",
-                },
-                "preview_token": {
-                    "type": "string",
-                    "description": "Token returned by a matching structural dry_run preview.",
-                },
-                "target_ref": {
-                    "type": "object",
-                    "description": "Guarded ref from inspect_graph.",
-                },
-                "args": {
-                    "type": "object",
+                "update_params": {
+                    "type": "array",
                     "description": (
-                        "Op args: set_param instance_name/target_ref,param_key,param_value; "
-                        "insert_in_connection connection_id,block_id,instance_name,insert_params; "
-                        "add_signal_source_to_sum block_id,freq,preview_token for commit,target/dst optional; "
-                        "disconnect connection_id or endpoints; rewire connection_id,new_* endpoints; "
-                        "remove_block instance_name/target_ref; add_variable variable_name,variable_value."
+                        "Batch parameter updates, one existing block per item. "
+                        "Use instance_name from inspect_graph and params keyed by param_id. "
+                        "For variable values such as samp_rate, prefer update_variables."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "instance_name": {
+                                "type": "string",
+                                "description": "Existing graph instance_name copied from inspect_graph.",
+                            },
+                            "block_id": {
+                                "type": "string",
+                                "description": "Optional block ID disambiguator.",
+                            },
+                            "target_ref": {
+                                "type": "object",
+                                "description": "Optional guarded ref copied from inspect_graph.",
+                            },
+                            "params": {
+                                "type": "object",
+                                "description": "Parameter updates keyed by GNU param_id from inspect_graph/search_blocks.",
+                            },
+                            "expected_params": {
+                                "type": "object",
+                                "description": "Optional old-value guards keyed by parameter ID.",
+                            },
+                        },
+                        "required": ["instance_name", "params"],
+                    },
+                },
+                "update_states": {
+                    "type": "array",
+                    "description": "Batch state updates, one existing block per item.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "instance_name": {
+                                "type": "string",
+                                "description": "Existing graph instance_name copied from inspect_graph.",
+                            },
+                            "block_id": {
+                                "type": "string",
+                                "description": "Optional block ID disambiguator.",
+                            },
+                            "target_ref": {
+                                "type": "object",
+                                "description": "Optional guarded ref copied from inspect_graph.",
+                            },
+                            "states": {
+                                "type": "object",
+                                "description": "State updates such as {'state':'disabled'} or {'enabled':false}.",
+                            },
+                        },
+                        "required": ["instance_name", "states"],
+                    },
+                },
+                "add_connections": {
+                    "type": "array",
+                    "description": "Connections to add with exact source/destination endpoints.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "src": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "block": {"type": "string"},
+                                    "port": {"type": ["integer", "string"]},
+                                },
+                                "required": ["block", "port"],
+                            },
+                            "dst": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "block": {"type": "string"},
+                                    "port": {"type": ["integer", "string"]},
+                                },
+                                "required": ["block", "port"],
+                            },
+                        },
+                        "required": ["src", "dst"],
+                    },
+                },
+                "remove_connections": {
+                    "type": "array",
+                    "description": "Exact connection_id strings from inspect_graph to remove.",
+                    "items": {"type": "string"},
+                },
+                "rewire_connections": {
+                    "type": "array",
+                    "description": "Generic endpoint rewires by exact old connection_id.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "connection_id": {"type": "string"},
+                            "new_src": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "block": {"type": "string"},
+                                    "port": {"type": ["integer", "string"]},
+                                },
+                                "required": ["block", "port"],
+                            },
+                            "new_dst": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "block": {"type": "string"},
+                                    "port": {"type": ["integer", "string"]},
+                                },
+                                "required": ["block", "port"],
+                            },
+                        },
+                        "required": ["connection_id"],
+                    },
+                },
+                "insert_blocks_on_connections": {
+                    "type": "array",
+                    "description": "Generic insertion of one block into an exact existing connection.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "connection_id": {"type": "string"},
+                            "block_id": {"type": "string"},
+                            "instance_name": {"type": "string"},
+                            "params": {"type": "object"},
+                            "states": {"type": "object"},
+                        },
+                        "required": ["connection_id", "block_id", "instance_name"],
+                    },
+                },
+                "add_variables": {
+                    "type": "array",
+                    "description": "Variables to add by new instance_name and value.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "instance_name": {"type": "string"},
+                            "value": {"type": ["string", "number", "boolean"]},
+                        },
+                        "required": ["instance_name", "value"],
+                    },
+                },
+                "update_variables": {
+                    "type": "array",
+                    "description": (
+                        "Existing variable values to update. Use this for graph variables "
+                        "shown by inspect_graph, for example samp_rate."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "instance_name": {
+                                "type": "string",
+                                "description": "Existing variable instance_name copied from inspect_graph.",
+                            },
+                            "value": {"type": ["string", "number", "boolean"]},
+                            "expected_value": {"type": ["string", "number", "boolean"]},
+                        },
+                        "required": ["instance_name", "value"],
+                    },
+                },
+                "remove_variables": {
+                    "type": "array",
+                    "description": "Variable instance_name strings to remove.",
+                    "items": {"type": "string"},
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": (
+                        "Only bypass final validation failure after a GNU-grounded candidate applies; "
+                        "never bypass unknown blocks, params, ports, stale files, or save failures."
                     ),
                 },
                 "debug": {
@@ -508,7 +701,8 @@ def build_tool_schemas(
                     "description": "When true, include wrapper dispatch telemetry for eval/debug.",
                 },
             },
-            required=["dry_run", "op", "user_goal"],
+            required=[],
+            strict=True,
         ),
     ]
     all_schemas = [*internal_schemas, *mvp_schemas]

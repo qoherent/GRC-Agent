@@ -111,7 +111,9 @@ from grc_agent.runtime.wrappers.search_blocks import (
 from grc_agent.runtime.wrappers.get_grc_context_internal import (
     get_grc_context_internal as get_grc_context_internal_wrapper,
 )
-from grc_agent.runtime.wrappers.change_graph.dispatcher import dispatch_change_graph
+from grc_agent.runtime.wrappers.change_graph.dispatcher import (
+    dispatch_flat_change_graph_batch,
+)
 from grc_agent.runtime.wrappers.change_graph.disconnect_resolution import (
     resolve_disconnect_connection_id,
 )
@@ -125,10 +127,6 @@ from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
     rewire_new_endpoint_candidates as rewire_new_endpoint_candidates_wrapper,
     rewire_new_endpoint_is_exact as rewire_new_endpoint_is_exact_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph_validation import (
-    canonicalize_change_graph_target_ref,
-    validate_change_graph_operation_args,
 )
 from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime_tool_validation import (
@@ -161,176 +159,6 @@ _JOURNALED_MUTATION_TOOLS = {
     "auto_insert_block",
     "change_graph",
 }
-_CHANGE_GRAPH_COMMON_ENVELOPE_KEYS = {
-    "dry_run",
-    "op",
-    "user_goal",
-    "state_revision",
-    "preview_token",
-    "target_ref",
-    "args",
-    "debug",
-}
-_CHANGE_GRAPH_ARG_KEYS = {
-    "block_id",
-    "block_type",
-    "source_block_id",
-    "instance_name",
-    "connection_id",
-    "src_block",
-    "src_port",
-    "dst_block",
-    "dst_port",
-    "new_src_block",
-    "new_src_port",
-    "new_dst_block",
-    "new_dst_port",
-    "insert_params",
-    "parameters",
-    "freq",
-    "frequency",
-    "preview_token",
-    "sample_rate",
-    "samp_rate",
-    "waveform",
-    "amplitude",
-    "amp",
-    "offset",
-    "phase",
-    "allow_increase_num_inputs",
-    "connect_to",
-    "destination_block",
-    "detach_connections",
-    "detach_connection_ids",
-    "param_key",
-    "param_value",
-    "expected_old_value",
-    "state",
-    "variable_name",
-    "variable_value",
-}
-_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS = {
-    "options",
-    "question",
-    "reason",
-}
-_CHANGE_GRAPH_ARG_KEYS_BY_OP = {
-    "set_param": {
-        "instance_name",
-        "target_ref",
-        "param_key",
-        "param_value",
-        "expected_old_value",
-    },
-    "set_state": {"instance_name", "target_ref", "state"},
-    "add_variable": {"variable_name", "variable_value"},
-    "disconnect": {"connection_id", "src_block", "src_port", "dst_block", "dst_port"},
-    "rewire": {
-        "connection_id",
-        "src_block",
-        "src_port",
-        "dst_block",
-        "dst_port",
-        "new_src_block",
-        "new_src_port",
-        "new_dst_block",
-        "new_dst_port",
-    },
-    "insert_in_connection": {
-        "connection_id",
-        "block_id",
-        "instance_name",
-        "insert_params",
-    },
-    "add_signal_source_to_sum": {
-        "block_id",
-        "source_block_id",
-        "instance_name",
-        "freq",
-        "frequency",
-        "preview_token",
-        "insert_params",
-        "sample_rate",
-        "samp_rate",
-        "waveform",
-        "amplitude",
-        "amp",
-        "offset",
-        "phase",
-        "allow_increase_num_inputs",
-        "connect_to",
-        "dst_block",
-        "dst_port",
-        "target_ref",
-    },
-    "remove_block": {
-        "instance_name",
-        "target_ref",
-        "detach_connections",
-        "detach_connection_ids",
-    },
-    "clarify": set(_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS),
-    "unsupported": set(_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS),
-}
-_CHANGE_GRAPH_NESTED_OP_KEYS = {
-    "set_param",
-    "set_state",
-    "add_variable",
-    "disconnect",
-    "rewire",
-    "insert_in_connection",
-    "add_signal_source_to_sum",
-    "remove_block",
-    "clarify",
-    "unsupported",
-}
-
-
-def _normalize_change_graph_operation_args_payload(
-    op: str | None,
-    args: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Normalize common model shapes inside the compact change_graph args object."""
-    if not isinstance(args, dict):
-        return {}
-    normalized: dict[str, Any] = {}
-    for raw_key, value in args.items():
-        key = str(raw_key).strip().strip("\"'").strip()
-        if op and key == op and isinstance(value, dict):
-            normalized.update(_normalize_change_graph_operation_args_payload(None, value))
-            continue
-        if op and key in _CHANGE_GRAPH_NESTED_OP_KEYS and isinstance(value, dict):
-            continue
-        if key == "block_type":
-            key = "block_id"
-        elif key == "parameters":
-            key = "insert_params"
-        elif key == "destination_block":
-            key = "dst_block"
-        elif key in {"target", "destination"}:
-            key = "dst_block"
-        normalized[key] = value
-    return normalized
-
-
-def _looks_like_preview_commit_confirmation(text: str) -> bool:
-    if not isinstance(text, str):
-        return False
-    lowered = " ".join(text.lower().split())
-    if not lowered:
-        return False
-    commit_terms = (
-        "commit",
-        "apply",
-        "confirm",
-        "do it",
-        "go ahead",
-        "yes",
-        "proceed",
-    )
-    return any(term in lowered for term in commit_terms)
-
-
 def _normalize_alias_key(value: str) -> str:
     normalized = " ".join(value.split()).strip().lower()
     if not normalized:
@@ -367,6 +195,22 @@ def _compact_block_summary(summary: Any) -> str:
     if len(compact) <= _SEARCH_BLOCK_SUMMARY_MAX_CHARS:
         return compact
     return compact[: _SEARCH_BLOCK_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+
+
+def _compact_save_file_integrity(file_integrity: dict[str, Any]) -> dict[str, Any]:
+    def _short_hash(value: Any) -> str | None:
+        return value[:12] if isinstance(value, str) and value else None
+
+    compact: dict[str, Any] = {
+        "status": file_integrity.get("status"),
+        "path": file_integrity.get("path"),
+        "persisted_sha256": _short_hash(file_integrity.get("persisted_sha256")),
+        "current_sha256": _short_hash(file_integrity.get("current_sha256")),
+    }
+    error = file_integrity.get("error")
+    if isinstance(error, str) and error:
+        compact["error"] = error
+    return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
 
 
 @lru_cache(maxsize=4)
@@ -491,7 +335,6 @@ class GrcAgent:
         self._transaction_normalizer = TransactionNormalizer(session=self.session)
         self._pending_clarification: dict[str, Any] | None = None
         self._pending_clarification_revision: int | None = None
-        self._pending_change_previews: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._docs_advisor_probe_at: float = 0.0
         self._docs_advisor_reachable: bool = True
         self._last_docs_advisor_meta: dict[str, Any] = {
@@ -680,77 +523,8 @@ class GrcAgent:
         *,
         model_tool_call: bool,
     ) -> dict[str, Any]:
-        """Normalize legacy direct calls into the compact model-facing envelope."""
-        if model_tool_call:
-            normalized = self._normalize_model_change_graph_envelope(kwargs)
-            return self._normalize_model_change_graph_confirmation(normalized)
-        if "op" in kwargs or "args" in kwargs:
-            return kwargs
-        if "operation_kind" not in kwargs and not (
-            set(kwargs) & _CHANGE_GRAPH_ARG_KEYS
-        ):
-            return kwargs
-
-        envelope = {
-            key: value
-            for key, value in kwargs.items()
-            if key in _CHANGE_GRAPH_COMMON_ENVELOPE_KEYS
-        }
-        operation_kind = kwargs.get("operation_kind")
-        if operation_kind is not None:
-            envelope["op"] = operation_kind
-        operation_args = {
-            key: value for key, value in kwargs.items() if key in _CHANGE_GRAPH_ARG_KEYS
-        }
-        if operation_args:
-            envelope["args"] = operation_args
-        return envelope
-
-    @staticmethod
-    def _normalize_model_change_graph_envelope(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Lift envelope fields when a small model nests them inside args."""
-        normalized = dict(kwargs)
-        args = normalized.get("args")
-        if not isinstance(args, dict):
-            return normalized
-        lifted_args = dict(args)
-        changed = False
-        for key in (
-            "dry_run",
-            "op",
-            "user_goal",
-            "state_revision",
-            "preview_token",
-            "target_ref",
-        ):
-            if key not in normalized and key in lifted_args:
-                normalized[key] = lifted_args.pop(key)
-                changed = True
-        if changed:
-            normalized["args"] = lifted_args
-        return normalized
-
-    def _normalize_model_change_graph_confirmation(
-        self,
-        kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Fill preview guard fields only after explicit user confirmation."""
-        if kwargs.get("op") != "add_signal_source_to_sum":
-            return kwargs
-        if kwargs.get("dry_run") is not False:
-            return kwargs
-        if kwargs.get("state_revision") is not None and kwargs.get("preview_token") is not None:
-            return kwargs
-        if not _looks_like_preview_commit_confirmation(self._turn_user_message):
-            return kwargs
-        latest = self._latest_change_graph_preview("add_signal_source_to_sum")
-        if latest is None:
-            return kwargs
-        token, preview = latest
-        normalized = dict(kwargs)
-        normalized.setdefault("state_revision", preview.get("state_revision"))
-        normalized.setdefault("preview_token", token)
-        return normalized
+        """Return flat change_graph args unchanged; schema validation rejects legacy shapes."""
+        return kwargs
 
     def _normalize_inspect_graph_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         """Fill safe read-only inspect defaults without hiding unsupported syntax."""
@@ -1150,7 +924,7 @@ class GrcAgent:
                     "assistant_text": (
                         "Raw .grc YAML editing is unsupported. "
                         "Use the approved model-facing wrappers instead: change_graph for "
-                        "validated graph changes and dry_run previews."
+                        "validated graph changes."
                     ),
                 }
         unsupported_operations: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -1518,7 +1292,7 @@ class GrcAgent:
         if tool_name == "propose_edit":
             return
         if tool_name == "change_graph":
-            if result.get("ok") and not bool(result.get("dry_run")):
+            if result.get("committed") is True:
                 self._record_accepted_checkpoint(tool_name, result, before)
             elif not result.get("ok"):
                 self._record_failure_journal(tool_name, result, before)
@@ -1613,8 +1387,6 @@ class GrcAgent:
             include_active_session = tool_name != "change_graph"
         if tool_name == "change_graph":
             result.setdefault("state_revision", self.session.state_revision)
-            if "committed" not in result and isinstance(result.get("dry_run"), bool):
-                result["committed"] = bool(result.get("ok") and not result.get("dry_run"))
         if include_active_session:
             result["active_session"] = self.active_session_snapshot()
         return result
@@ -1635,8 +1407,6 @@ class GrcAgent:
             include_active_session = tool_name != "change_graph"
         if tool_name == "change_graph":
             result.setdefault("state_revision", self.session.state_revision)
-            if "committed" not in result and isinstance(result.get("dry_run"), bool):
-                result["committed"] = bool(result.get("ok") and not result.get("dry_run"))
         if include_active_session:
             result["active_session"] = self.active_session_snapshot()
         result = self._enforce_tool_output_budget(result)
@@ -2101,273 +1871,38 @@ class GrcAgent:
     def _probe_docs_advisor_server(self) -> bool:
         return probe_docs_advisor_server(self)
 
-    def _validate_change_graph_operation_args(
-        self,
-        *,
-        dry_run: bool,
-        operation_kind: str | None,
-        target_ref: dict[str, Any] | None,
-        block_id: str | None,
-        instance_name: str | None,
-        connection_id: str | None,
-        src_block: str | None,
-        src_port: int | str | None,
-        dst_block: str | None,
-        dst_port: int | str | None,
-        new_src_block: str | None,
-        new_src_port: int | str | None,
-        new_dst_block: str | None,
-        new_dst_port: int | str | None,
-        insert_params: dict[str, Any] | None,
-        operation_args: dict[str, Any] | None = None,
-        detach_connections: bool | None,
-        detach_connection_ids: list[str] | None,
-        param_key: str | None,
-        param_value: Any,
-        state: str | None,
-        variable_name: str | None,
-        variable_value: Any,
-    ) -> ToolResult | None:
-        return validate_change_graph_operation_args(
-            self,
-            dry_run=dry_run,
-            operation_kind=operation_kind,
-            target_ref=target_ref,
-            block_id=block_id,
-            instance_name=instance_name,
-            connection_id=connection_id,
-            src_block=src_block,
-            src_port=src_port,
-            dst_block=dst_block,
-            dst_port=dst_port,
-            new_src_block=new_src_block,
-            new_src_port=new_src_port,
-            new_dst_block=new_dst_block,
-            new_dst_port=new_dst_port,
-            insert_params=insert_params,
-            operation_args=copy.deepcopy(operation_args),
-            detach_connections=detach_connections,
-            detach_connection_ids=detach_connection_ids,
-            param_key=param_key,
-            param_value=param_value,
-            state=state,
-            variable_name=variable_name,
-            variable_value=variable_value,
-        )
-
-    def _canonicalize_change_graph_target_ref(
-        self,
-        *,
-        dry_run: bool,
-        operation_kind: str | None,
-        target_ref: dict[str, Any] | None,
-    ) -> tuple[dict[str, Any] | None, ToolResult | None]:
-        return canonicalize_change_graph_target_ref(
-            self,
-            dry_run=dry_run,
-            operation_kind=operation_kind,
-            target_ref=target_ref,
-        )
-
     def _change_graph(
         self,
-        dry_run: bool,
-        user_goal: str,
-        op: str | None = None,
-        args: dict[str, Any] | None = None,
-        target_ref: dict[str, Any] | None = None,
-        state_revision: int | None = None,
-        preview_token: str | None = None,
+        add_blocks: list[Any] | None = None,
+        remove_blocks: list[Any] | None = None,
+        update_params: list[Any] | None = None,
+        update_states: list[Any] | None = None,
+        add_connections: list[Any] | None = None,
+        remove_connections: list[Any] | None = None,
+        rewire_connections: list[Any] | None = None,
+        insert_blocks_on_connections: list[Any] | None = None,
+        add_variables: list[Any] | None = None,
+        update_variables: list[Any] | None = None,
+        remove_variables: list[Any] | None = None,
+        force: bool = False,
         debug: bool = False,
     ) -> ToolResult:
-        operation_args = _normalize_change_graph_operation_args_payload(op, args)
-        duplicate_error = self._change_graph_duplicate_common_arg_error(
-            dry_run=bool(dry_run),
-            operation_kind=op,
-            operation_args=operation_args,
-            state_revision=state_revision,
-            preview_token=preview_token,
-            target_ref=target_ref,
-        )
-        if duplicate_error is not None:
-            return duplicate_error
-        if target_ref is None and isinstance(operation_args.get("target_ref"), dict):
-            target_ref = operation_args.pop("target_ref")
-        else:
-            operation_args.pop("target_ref", None)
-        if isinstance(target_ref, dict) and not target_ref:
-            target_ref = None
-        if state_revision is None and "state_revision" in operation_args:
-            state_revision = operation_args.pop("state_revision")
-        else:
-            operation_args.pop("state_revision", None)
-        if preview_token is None and "preview_token" in operation_args:
-            preview_token = operation_args.pop("preview_token")
-        else:
-            operation_args.pop("preview_token", None)
-        if preview_token is not None:
-            operation_args["preview_token"] = preview_token
-
-        allowed_arg_keys = set(_CHANGE_GRAPH_ARG_KEYS)
-        if op in {"clarify", "unsupported"}:
-            allowed_arg_keys.update(_CHANGE_GRAPH_NON_MUTATION_ARG_KEYS)
-        if isinstance(op, str) and op in _CHANGE_GRAPH_ARG_KEYS_BY_OP:
-            allowed_arg_keys = set(_CHANGE_GRAPH_ARG_KEYS_BY_OP[op])
-        unsupported_args = sorted(key for key in operation_args if key not in allowed_arg_keys)
-        if unsupported_args:
-            return self._payload_result(
-                "change_graph",
-                {
-                    "ok": False,
-                    "dry_run": bool(dry_run),
-                    "operation_kind": op,
-                    "error_type": ErrorCode.INVALID_REQUEST,
-                    "message": "Unsupported change_graph args field(s): "
-                    + ", ".join(unsupported_args),
-                },
-            )
-
-        return dispatch_change_graph(
+        return dispatch_flat_change_graph_batch(
             self,
-            dry_run=dry_run,
-            user_goal=user_goal,
-            operation_kind=op,
-            target_ref=target_ref,
-            block_id=operation_args.get("block_id"),
-            instance_name=operation_args.get("instance_name"),
-            connection_id=operation_args.get("connection_id"),
-            src_block=operation_args.get("src_block"),
-            src_port=operation_args.get("src_port"),
-            dst_block=operation_args.get("dst_block"),
-            dst_port=operation_args.get("dst_port"),
-            state_revision=state_revision,
-            new_src_block=operation_args.get("new_src_block"),
-            new_src_port=operation_args.get("new_src_port"),
-            new_dst_block=operation_args.get("new_dst_block"),
-            new_dst_port=operation_args.get("new_dst_port"),
-            insert_params=operation_args.get("insert_params"),
-            operation_args=operation_args,
-            detach_connections=operation_args.get("detach_connections"),
-            detach_connection_ids=operation_args.get("detach_connection_ids"),
-            param_key=operation_args.get("param_key"),
-            param_value=operation_args.get("param_value"),
-            expected_old_value=operation_args.get("expected_old_value"),
-            state=operation_args.get("state"),
-            variable_name=operation_args.get("variable_name"),
-            variable_value=operation_args.get("variable_value"),
+            add_blocks=add_blocks,
+            remove_blocks=remove_blocks,
+            update_params=update_params,
+            update_states=update_states,
+            add_connections=add_connections,
+            remove_connections=remove_connections,
+            rewire_connections=rewire_connections,
+            insert_blocks_on_connections=insert_blocks_on_connections,
+            add_variables=add_variables,
+            update_variables=update_variables,
+            remove_variables=remove_variables,
+            force=bool(force),
             debug=debug,
         )
-
-    def _change_graph_duplicate_common_arg_error(
-        self,
-        *,
-        dry_run: bool,
-        operation_kind: str | None,
-        operation_args: dict[str, Any],
-        state_revision: int | None,
-        preview_token: str | None,
-        target_ref: dict[str, Any] | None,
-    ) -> ToolResult | None:
-        duplicate_fields: list[str] = []
-        if state_revision is not None and "state_revision" in operation_args:
-            duplicate_fields.append("state_revision")
-        if preview_token is not None and "preview_token" in operation_args:
-            duplicate_fields.append("preview_token")
-        if target_ref is not None and "target_ref" in operation_args:
-            duplicate_fields.append("target_ref")
-        if not duplicate_fields:
-            return None
-        return self._payload_result(
-            "change_graph",
-            {
-                "ok": False,
-                "dry_run": dry_run,
-                "operation_kind": operation_kind,
-                "error_type": ErrorCode.INVALID_REQUEST,
-                "message": (
-                    "Put common change_graph fields at the top level, not also in args: "
-                    + ", ".join(duplicate_fields)
-                ),
-            },
-        )
-
-    def _register_change_graph_preview(
-        self,
-        *,
-        operation_summary: str,
-        operations: list[dict[str, Any]],
-    ) -> str:
-        fingerprint = self._change_graph_preview_fingerprint(
-            operation_summary=operation_summary,
-            operations=operations,
-        )
-        token = f"pt_{fingerprint[:16]}"
-        self._pending_change_previews[token] = {
-            "fingerprint": fingerprint,
-            "operation_summary": operation_summary,
-            "state_revision": self.session.state_revision,
-            "created_at": time.time(),
-        }
-        while len(self._pending_change_previews) > 16:
-            self._pending_change_previews.popitem(last=False)
-        return token
-
-    def _validate_change_graph_preview_token(
-        self,
-        *,
-        preview_token: str | None,
-        operation_summary: str,
-        operations: list[dict[str, Any]],
-    ) -> str | None:
-        if not isinstance(preview_token, str) or not preview_token.strip():
-            return (
-                f"{operation_summary} commits require args.preview_token from a "
-                "matching dry_run preview."
-            )
-        preview = self._pending_change_previews.get(preview_token.strip())
-        if not isinstance(preview, dict):
-            return (
-                "preview_token was not found in this session. Run a dry_run preview "
-                "and commit using the returned preview_token."
-            )
-        current_fingerprint = self._change_graph_preview_fingerprint(
-            operation_summary=operation_summary,
-            operations=operations,
-        )
-        if preview.get("fingerprint") != current_fingerprint:
-            return (
-                "preview_token does not match the current graph state or resolved "
-                "edit plan. Run a fresh dry_run preview before committing."
-            )
-        return None
-
-    def _latest_change_graph_preview(
-        self,
-        operation_summary: str,
-    ) -> tuple[str, dict[str, Any]] | None:
-        for token, preview in reversed(self._pending_change_previews.items()):
-            if preview.get("operation_summary") == operation_summary:
-                return token, preview
-        return None
-
-    def _change_graph_preview_fingerprint(
-        self,
-        *,
-        operation_summary: str,
-        operations: list[dict[str, Any]],
-    ) -> str:
-        try:
-            graph_id = self.session.graph_id()
-        except Exception:
-            graph_id = None
-        payload = {
-            "graph_id": graph_id,
-            "operation_summary": operation_summary,
-            "operations": operations,
-            "state_revision": self.session.state_revision,
-        }
-        encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _compact_inspect_payload(mode: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2430,7 +1965,6 @@ class GrcAgent:
             "wrapper_name": wrapper_name,
             "wrapper_action": wrapper_action,
             "internal_handler_called": list(dict.fromkeys(internal_handlers)) or ["none"],
-            "dry_run": bool(result.get("dry_run")),
             "graph_mutated": graph_mutated,
             "validation_run": bool(validation_run),
             "checkpoint_created": checkpoint_created,
@@ -2941,7 +2475,7 @@ class GrcAgent:
             )
         return result
 
-    def _autosave_after_validated_mutation(self) -> dict[str, Any]:
+    def _autosave_after_validated_mutation(self, *, allow_invalid: bool = False) -> dict[str, Any]:
         """Persist a successfully validated committed mutation when possible."""
         if self.session.path is None:
             return {
@@ -2950,7 +2484,7 @@ class GrcAgent:
                 "error_type": "SAVE_PATH_REQUIRED",
                 "message": "Autosave skipped because this graph has no file path.",
             }
-        save_result = self._save_graph()
+        save_result = self._save_graph(allow_invalid=allow_invalid)
         return {
             "ok": save_result.get("ok") is True,
             "skipped": False,
@@ -2966,7 +2500,7 @@ class GrcAgent:
     ) -> dict[str, Any] | None:
         return duplicate_block_clarification_payload_wrapper(self, payload)
 
-    def _apply_edit(self, transaction: Any) -> ToolResult:
+    def _apply_edit(self, transaction: Any, *, force_validation: bool = False) -> ToolResult:
         missing_session = self._missing_session_result("apply_edit")
         if missing_session is not None:
             return missing_session
@@ -2974,21 +2508,30 @@ class GrcAgent:
             self.session,
             self._transaction_normalizer.normalize_transaction_instance_names(transaction),
             self.catalog_root,
+            force_validation=force_validation,
         )
-        if payload.get("ok"):
+        if payload.get("ok") and not payload.get("forced_validation_failure"):
             self._record_successful_validation()
         elif clarification := self._duplicate_block_clarification_payload(payload):
             self._store_pending_clarification(clarification)
             return self._payload_result("apply_edit", clarification)
         result = self._payload_result("apply_edit", payload)
         if result.get("ok"):
-            autosave = self._autosave_after_validated_mutation()
+            autosave = self._autosave_after_validated_mutation(
+                allow_invalid=bool(result.get("forced_validation_failure"))
+            )
             result["autosave"] = autosave
             if autosave.get("ok"):
-                result["hint"] = (
-                    "Edit applied, validated, and autosaved. "
-                    "Do not repeat the same change."
-                )
+                if result.get("forced_validation_failure"):
+                    result["hint"] = (
+                        "Edit applied and autosaved, but validation failed. "
+                        "Do not repeat the same change; continue repairing the graph."
+                    )
+                else:
+                    result["hint"] = (
+                        "Edit applied, validated, and autosaved. "
+                        "Do not repeat the same change."
+                    )
             else:
                 result["hint"] = (
                     "Edit applied and validated, but autosave did not write the graph: "
@@ -3053,7 +2596,13 @@ class GrcAgent:
             result["hint"] = "Validation passed."
         return result
 
-    def _save_graph(self, path: str | None = None, overwrite: bool = False) -> ToolResult:
+    def _save_graph(
+        self,
+        path: str | None = None,
+        overwrite: bool = False,
+        *,
+        allow_invalid: bool = False,
+    ) -> ToolResult:
         missing_session = self._missing_session_result("save_graph")
         if missing_session is not None:
             return missing_session
@@ -3101,9 +2650,27 @@ class GrcAgent:
                     error_type=ErrorCode.SAVE_REFUSED,
                     path=str(resolved_target),
                 )
+            if current_path is not None and resolved_target == current_path:
+                file_integrity = self.session.file_integrity_state()
+                if file_integrity.get("externally_modified"):
+                    return self._tool_result(
+                        tool_name="save_graph",
+                        ok=False,
+                        message=(
+                            "Refusing to save because the active graph file changed "
+                            "on disk after this session loaded or saved it. Reload "
+                            "the graph before saving."
+                        ),
+                        error_type=ErrorCode.STALE_REVISION,
+                        path=str(resolved_target),
+                        file_integrity=_compact_save_file_integrity(file_integrity),
+                    )
         if (
+            not allow_invalid
+            and (
             not self._last_validation_ok
             or self._last_validated_state_revision != self.session.state_revision
+            )
         ):
             validation = self._validate_graph()
             if validation.get("ok") is not True or not bool(validation.get("valid")):
@@ -3121,8 +2688,11 @@ class GrcAgent:
                 )
 
         if (
+            not allow_invalid
+            and (
             not self._last_validation_ok
             or self._last_validated_state_revision != self.session.state_revision
+            )
         ):
             return self._tool_result(
                 tool_name="save_graph",
@@ -3137,7 +2707,7 @@ class GrcAgent:
             )
 
         try:
-            self.session.save(path)
+            self.session.save(path, validate=not allow_invalid)
         except Exception as exc:
             return self._tool_result(
                 tool_name="save_graph",
@@ -3146,6 +2716,9 @@ class GrcAgent:
                 error_type=ErrorCode.INTERNAL_ERROR,
             )
         self._reset_validation_tracking()
+        if allow_invalid:
+            self._last_validation_ok = False
+            self._last_validated_state_revision = None
         saved_path = str(self.session.path) if self.session.path is not None else None
         return self._tool_result(
             tool_name="save_graph",

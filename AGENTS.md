@@ -26,10 +26,8 @@ Autonomy must come from typed state, explicit wrappers, deterministic validation
 - `change_graph` is the only model-facing graph-content mutation wrapper.
 - The model has no lifecycle tools. `/save` is a CLI command; graph loading happens when the CLI session starts.
 - Successful committed mutations validate, then autosave to the active copied graph path when that path is safe and writable.
-- Preview must never mutate.
-- `dry_run=true` must stay preview-only. Do not silently convert preview tool calls into commits; use a bounded retry or clarification instead.
 - Committed mutations must refuse if the active copied graph file changed on disk since the session last loaded or saved it. Reload before committing across an external edit.
-- Failed schema validation, preflight, or `grcc` validation must not commit.
+- Failed schema validation, preflight, or `grcc` validation must not commit unless the user/model explicitly uses `force=true` and the candidate already passed GNU-grounded schema/ref/catalog/apply checks.
 - Failed edits must roll back atomically.
 - Manual `/save` requires explicit user intent and validation of the current graph revision.
 - Loading validates before creating the active session.
@@ -93,17 +91,14 @@ Read-only grounded docs answering.
 
 The only model-facing graph-content mutation wrapper.
 
-- Requires `dry_run`, `op`, and `user_goal`; operation-specific fields go inside `args`.
-- Supported operation kinds include `set_param`, `set_state`, `add_variable`, `disconnect`, `rewire`, `insert_in_connection`, `add_signal_source_to_sum`, `remove_block`, `clarify`, and `unsupported`.
-- Do not expose generic `add_block`, `connect`, or `add_connected_block` as model-facing `op` values. Live traces showed they pull the small model away from the safer composite operation grammar; keep raw add/connect transaction primitives internal.
-- `add_signal_source_to_sum` is a structural macro, not a fixture shortcut. Commits require `state_revision` or `target_ref.base_state_revision` plus the `preview_token` returned by a matching dry-run preview. The destination must be catalog-identified as additive/summing, and inherited source params such as sample rate, waveform, amplitude, and type must agree across existing sources unless the user/model supplies an explicit override.
-- When the user explicitly confirms a pending structural preview, the runtime may fill only the preview guard fields (`state_revision`, `preview_token`) from the stored pending preview. It must not invent operation args such as block IDs, frequency, target, or params.
-- Unsupported generic mutation ops must return structured errors for model repair. Do not silently rewrite `add_block`, `connect`, or `add_connected_block` into supported ops; preserve raw requested calls in trace history.
-- `set_param` may use graph-local metadata-driven natural resolution only when exactly one candidate matches and a new value is explicit.
-- `expected_old_value`, when supplied, must match the current graph value before mutation.
-- Committed mutations autosave after successful validation; autosave failure is surfaced in the structured result and must not hide mutation/validation evidence.
-- Model-visible results must be compact and operation-specific: include committed/preview status, state revision, exact effect or plan, validation, autosave, and concise refusal/clarification evidence. Do not expose full `active_session` dumps.
-- Model-facing compatibility aliases such as `operation_kind`, `candidate_id`, `insert_block`, and `auto_insert` are removed; use `op` plus `args.block_id` for insertions.
+- Uses a flat batch schema: `add_blocks`, `remove_blocks`, `update_params`, `update_states`, `add_connections`, `remove_connections`, `rewire_connections`, `insert_blocks_on_connections`, `add_variables`, `update_variables`, `remove_variables`, and `force`.
+- Does not expose model-facing `op`, `args`, `dry_run`, `user_goal`, `state_revision`, `preview_token`, or block-specific macros such as `add_signal_source_to_sum`.
+- Block adds may include all initial params/states and connections in the same call.
+- Param updates are batched per block; connection add/remove operations are batched by endpoint or exact `connection_id`.
+- `remove_blocks` auto-detaches incident edges and reports them; unresolved references elsewhere still refuse.
+- Runtime owns ordering, stale-state guards, active file hash checks, transaction normalization, rollback, native GNU candidate validation, `grcc`, and autosave.
+- `force=true` may only bypass final graph validation failure after schema, graph refs, catalog/GNU block IDs, params, ports, connection IDs, copied-file integrity, and candidate apply have succeeded.
+- Model-visible results must be compact and operation-specific: include committed status, state revision, exact effect/effects, validation, autosave, and concise refusal/clarification evidence. Do not expose full `active_session` dumps.
 - No docs/RAG authority, hidden retries, raw YAML, broad phrase dictionaries, or tutorial-derived recipes.
 
 ## Data Authority
@@ -174,9 +169,7 @@ Fallback free-text parsing is disabled. Invalid tool calls fail closed or produc
 
 - `docs/BLUEPRINT.md` is the source of truth for architecture, wrappers, safety, context, evals, and runtime status.
 - `docs/QUICKSTART.md` is procedural setup/use guidance.
-- `docs/ISSUE_INTAKE.md` is the support/debug report template.
-- `docs/DEMO_VIDEO.md` documents the reproducible demo workflow.
-- `docs/HANDOFF.md` is the current implementation handoff for the next agent; keep it blunt, current, and verification-first.
+- `docs/MODEL_CONTEXT_BIBLE.md` is generated from the actual injected prompt and model-facing tool schemas.
 - Update docs when wrapper contracts, safety boundaries, eval gates, runtime requirements, or capability labels change.
 
 ## Mutation Wrapper Focus
