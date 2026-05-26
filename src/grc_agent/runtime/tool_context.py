@@ -438,6 +438,7 @@ def _render_change_graph_result(
             "changed": compact.get("changed"),
             "needs": compact.get("needs"),
             "errors": compact.get("errors"),
+            "native_errors": compact.get("native_errors"),
             "error_type": compact.get("error_type"),
         }
     )
@@ -458,9 +459,10 @@ def _compact_search_blocks(content: dict[str, Any]) -> dict[str, Any]:
                     "catalog_label": row.get("catalog_label") or row.get("name"),
                     "match": row.get("match_type"),
                     "why": _short_text(row.get("why") or row.get("summary"), 100),
+                    "catalog": _compact_catalog_facts(row.get("catalog"), index=index),
                 }
             )
-            for row in _list(content.get("results"))
+            for index, row in enumerate(_list(content.get("results")))
             if isinstance(row, dict)
         ],
     }
@@ -514,12 +516,55 @@ def _compact_change_graph(content: dict[str, Any]) -> dict[str, Any]:
         "autosave": _autosave_status_value(content.get("autosave")),
         "error_type": content.get("error_type"),
         "message": _short_text(content.get("message"), 180) if ok is False else None,
+        "hint": _short_text(content.get("hint"), 260),
         "needs": _compact_change_needs(content),
         "errors": _compact_error_rows(content.get("errors")),
         "validation_errors": _compact_error_rows(content.get("validation_errors")),
+        "native_errors": _compact_native_validation_errors(content.get("validation_result")),
         "repair": _compact_schema_repair(content.get("schema_repair_instruction")),
     }
     return _drop_empty(result)
+
+
+def _compact_catalog_facts(value: Any, *, index: int) -> dict[str, Any]:
+    """Keep just enough catalog truth for grounded add-block arguments."""
+    if not isinstance(value, dict) or index > 1:
+        return {}
+    params = []
+    for raw_param in _list(value.get("params"))[:6]:
+        if not isinstance(raw_param, dict):
+            continue
+        param = _drop_empty(
+            {
+                "id": raw_param.get("id"),
+                "label": raw_param.get("label"),
+                "dtype": raw_param.get("dtype"),
+                "default": raw_param.get("default"),
+                "options": raw_param.get("options")[:6]
+                if isinstance(raw_param.get("options"), list)
+                else None,
+            }
+        )
+        if param:
+            params.append(param)
+    ports = {}
+    for direction in ("inputs", "outputs"):
+        rows = []
+        for raw_port in _list(value.get(direction))[:4]:
+            if not isinstance(raw_port, dict):
+                continue
+            port = _drop_empty(
+                {
+                    "id": raw_port.get("id"),
+                    "domain": raw_port.get("domain"),
+                    "dtype": raw_port.get("dtype"),
+                }
+            )
+            if port:
+                rows.append(port)
+        if rows:
+            ports[direction] = rows
+    return _drop_empty({"params": params, **ports})
 
 
 def _compact_change_needs(content: dict[str, Any]) -> Any:
@@ -551,6 +596,18 @@ def _compact_schema_repair(value: Any) -> dict[str, Any]:
             "hint": _short_text(value.get("change_graph_hint"), 240),
         }
     )
+
+
+def _compact_native_validation_errors(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    native = value.get("native")
+    if not isinstance(native, dict):
+        return []
+    errors = native.get("errors")
+    if not isinstance(errors, list):
+        return []
+    return [_short_text(str(error), 220) for error in errors[:3] if str(error)]
 
 
 def _operation_plan(content: dict[str, Any]) -> list[str]:

@@ -405,13 +405,11 @@ class TransactionNormalizer:
     @staticmethod
     def transaction_hint() -> str:
         return (
-            "Use supported transactions only. "
+            "Use the flat change_graph fields only. "
             "For parameter edits use update_params with instance_name and params. "
-            "For remove_block use instance_name, not block_id. "
-            "For add_block use block_type from the GNU catalog, instance_name, and parameters (not params). "
-            "For inserting into an existing wire, use insert_block_on_connection with connection_id, block_type, instance_name, and params. "
-            "Use bare parameter keys like nconnections, srate, and value. "
-            "For disconnects include src_block, src_port, dst_block, and dst_port."
+            "For block adds use add_blocks with block_id from search_blocks, instance_name, and params keyed by catalog param_id. "
+            "For insertion use insert_blocks_on_connections with connection_id, block_id, instance_name, and params. "
+            "For connections use add_connections[].src/dst and remove_connections[] exact connection_id values."
         )
 
     @staticmethod

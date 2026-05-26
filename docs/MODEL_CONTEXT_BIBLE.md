@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-05-25-agentic-direct-edit-v2`
+Prompt version: `2026-05-25-agentic-direct-edit-v3`
 
 ## Model-Facing Surface
 
@@ -28,10 +28,13 @@ The model does not see lifecycle tools, shell/filesystem tools, raw YAML tools, 
 ```text
 You are a wireless communications expert and GRC graph agent.
 Work on one loaded graph through tools; keep going until done or blocked.
-Use inspect_graph first; copy instance_name, param_id, ports, and connection_id exactly.
-Use search_blocks for new GNU block_id/params; ask_grc_docs is concepts only.
+Use inspect_graph before answering graph questions or editing existing graph objects.
+For parameter changes, inspect the exact block details first and copy param_id exactly.
+For new blocks, search_blocks first and copy the installed block_id and param_ids exactly.
+Use ask_grc_docs for concepts only; docs do not provide edit arguments.
 Use update_variables with instance_name/value for variables; use update_params with instance_name and params keyed by param_id.
 Use change_graph flat batches; add blocks with initial params/states and connections together.
+If change_graph is rejected, use the error message to inspect/search and retry once when the fix is clear.
 Never fabricate targets, params, ports, connection_id, block_id, or target_ref.
 Answer briefly from tool evidence; never claim an edit unless change_graph committed=true.
 ```
@@ -135,13 +138,13 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "change_graph",
-      "description": "Apply one bounded batch of GNU Radio graph edits. Use inspect_graph/search_blocks first. For existing graph blocks copy instance_name and param_id/port/connection_id from inspect_graph. For new blocks copy block_id and params from search_blocks. For existing variables prefer update_variables. Omitted lists mean no edits of that kind.",
+      "description": "Apply one bounded batch of GNU Radio graph edits. Before existing-block edits, inspect_graph details and copy instance_name, param_id, ports, and connection_id exactly. Before adding new blocks, search_blocks and copy installed block_id plus param_ids exactly. If rejected, inspect/search using the error hint, then retry once. For existing variables prefer update_variables. Omitted lists mean no edits of that kind.",
       "parameters": {
         "type": "object",
         "properties": {
           "add_blocks": {
             "type": "array",
-            "description": "Blocks to add, with initial params/states.",
+            "description": "Blocks to add, with initial params/states. Use only installed block_id and param IDs discovered by search_blocks.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -160,7 +163,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
                 },
                 "states": {
                   "type": "object",
-                  "description": "Initial state values such as {'state':'enabled'}."
+                  "description": "Initial state values such as {'state':'enabled'} or {'disabled':true}."
                 }
               },
               "required": [
@@ -181,7 +184,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
                 },
                 "block_id": {
                   "type": "string",
-                  "description": "Optional block ID disambiguator."
+                  "description": "Optional installed GNU catalog block ID disambiguator."
                 },
                 "target_ref": {
                   "type": "object",
@@ -192,7 +195,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
           },
           "update_params": {
             "type": "array",
-            "description": "Batch parameter updates, one existing block per item. Use instance_name from inspect_graph and params keyed by param_id. For variable values such as samp_rate, prefer update_variables.",
+            "description": "Batch parameter updates, one existing block per item. Inspect the target block details first. Use instance_name from inspect_graph and params keyed by exact GNU param_id, not human labels like frequency/amplitude. For variable values such as samp_rate, prefer update_variables.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -201,17 +204,13 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
                   "type": "string",
                   "description": "Existing graph instance_name copied from inspect_graph."
                 },
-                "block_id": {
-                  "type": "string",
-                  "description": "Optional block ID disambiguator."
-                },
                 "target_ref": {
                   "type": "object",
                   "description": "Optional guarded ref copied from inspect_graph."
                 },
                 "params": {
                   "type": "object",
-                  "description": "Parameter updates keyed by GNU param_id from inspect_graph/search_blocks."
+                  "description": "Parameter updates keyed by exact GNU param_id from inspect_graph/search_blocks."
                 },
                 "expected_params": {
                   "type": "object",
@@ -245,7 +244,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
                 },
                 "states": {
                   "type": "object",
-                  "description": "State updates such as {'state':'disabled'} or {'enabled':false}."
+                  "description": "State updates such as {'state':'disabled'}, {'enabled':false}, or {'disabled':true}."
                 }
               },
               "required": [
@@ -256,7 +255,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
           },
           "add_connections": {
             "type": "array",
-            "description": "Connections to add with exact source/destination endpoints.",
+            "description": "Connections to add with exact source/destination instance_name endpoints. For a block added in this same call, use its new instance_name.",
             "items": {
               "type": "object",
               "additionalProperties": false,

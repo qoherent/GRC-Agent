@@ -458,14 +458,15 @@ def build_tool_schemas(
         _schema(
             "change_graph",
             "Apply one bounded batch of GNU Radio graph edits. "
-            "Use inspect_graph/search_blocks first. For existing graph blocks copy "
-            "instance_name and param_id/port/connection_id from inspect_graph. For new "
-            "blocks copy block_id and params from search_blocks. For existing variables "
-            "prefer update_variables. Omitted lists mean no edits of that kind.",
+            "Before existing-block edits, inspect_graph details and copy "
+            "instance_name, param_id, ports, and connection_id exactly. Before adding "
+            "new blocks, search_blocks and copy installed block_id plus param_ids exactly. "
+            "If rejected, inspect/search using the error hint, then retry once. "
+            "For existing variables prefer update_variables. Omitted lists mean no edits of that kind.",
             {
                 "add_blocks": {
                     "type": "array",
-                    "description": "Blocks to add, with initial params/states.",
+                    "description": "Blocks to add, with initial params/states. Use only installed block_id and param IDs discovered by search_blocks.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -484,7 +485,7 @@ def build_tool_schemas(
                             },
                             "states": {
                                 "type": "object",
-                                "description": "Initial state values such as {'state':'enabled'}.",
+                                "description": "Initial state values such as {'state':'enabled'} or {'disabled':true}.",
                             },
                         },
                         "required": ["block_id", "instance_name"],
@@ -500,7 +501,7 @@ def build_tool_schemas(
                             "instance_name": {"type": "string"},
                             "block_id": {
                                 "type": "string",
-                                "description": "Optional block ID disambiguator.",
+                                "description": "Optional installed GNU catalog block ID disambiguator.",
                             },
                             "target_ref": {
                                 "type": "object",
@@ -513,7 +514,8 @@ def build_tool_schemas(
                     "type": "array",
                     "description": (
                         "Batch parameter updates, one existing block per item. "
-                        "Use instance_name from inspect_graph and params keyed by param_id. "
+                        "Inspect the target block details first. Use instance_name from inspect_graph "
+                        "and params keyed by exact GNU param_id, not human labels like frequency/amplitude. "
                         "For variable values such as samp_rate, prefer update_variables."
                     ),
                     "items": {
@@ -524,17 +526,13 @@ def build_tool_schemas(
                                 "type": "string",
                                 "description": "Existing graph instance_name copied from inspect_graph.",
                             },
-                            "block_id": {
-                                "type": "string",
-                                "description": "Optional block ID disambiguator.",
-                            },
                             "target_ref": {
                                 "type": "object",
                                 "description": "Optional guarded ref copied from inspect_graph.",
                             },
                             "params": {
                                 "type": "object",
-                                "description": "Parameter updates keyed by GNU param_id from inspect_graph/search_blocks.",
+                                "description": "Parameter updates keyed by exact GNU param_id from inspect_graph/search_blocks.",
                             },
                             "expected_params": {
                                 "type": "object",
@@ -565,7 +563,7 @@ def build_tool_schemas(
                             },
                             "states": {
                                 "type": "object",
-                                "description": "State updates such as {'state':'disabled'} or {'enabled':false}.",
+                                "description": "State updates such as {'state':'disabled'}, {'enabled':false}, or {'disabled':true}.",
                             },
                         },
                         "required": ["instance_name", "states"],
@@ -573,7 +571,7 @@ def build_tool_schemas(
                 },
                 "add_connections": {
                     "type": "array",
-                    "description": "Connections to add with exact source/destination endpoints.",
+                    "description": "Connections to add with exact source/destination instance_name endpoints. For a block added in this same call, use its new instance_name.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,

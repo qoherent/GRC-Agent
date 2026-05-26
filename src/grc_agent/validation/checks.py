@@ -1325,6 +1325,13 @@ def _require_unique_block(
         message = f"Block not found: {instance_name}"
         if block_type:
             message += f" (type: {block_type})"
+        hint = None
+        if op_type == "add_connection":
+            hint = (
+                "The endpoint must be an existing graph instance_name. "
+                "For a new sink/source, include add_blocks and add_connections in the same "
+                "change_graph call, and connect to the new instance_name, not the catalog block_id."
+            )
         return None, None, None, [
             make_issue(
                 op_index=op_index,
@@ -1332,6 +1339,7 @@ def _require_unique_block(
                 field=field,
                 code="block_not_found",
                 message=message,
+                hint=hint,
             )
         ]
 
@@ -1534,6 +1542,11 @@ def _require_block_rules(
         field=field,
         code=code,
         message=lookup.message or f"Could not resolve block type: {block_type}",
+        hint=(
+            "Run search_blocks for the block concept and retry with the exact installed GNU block_id."
+        )
+        if code == "unknown_block_id"
+        else None,
     )
 
 
@@ -1558,6 +1571,10 @@ def _validate_parameter_updates(
                     field=f"{field_prefix}.{parameter_id}",
                     code="parameter_not_found",
                     message=f"Unknown parameter for block type {block_type}: {parameter_id}",
+                    hint=(
+                        "Inspect the target block details and retry with an exact param_id. "
+                        f"Known param_ids include: {', '.join(sorted(allowed_parameter_ids)[:12])}."
+                    ),
                 )
             )
             continue
@@ -1640,6 +1657,10 @@ def _validate_port_index(
         message=(
             f"{direction.capitalize()} port {port_index} is out of range for {block_name} "
             f"(available: {format_port_range(len(ports))})."
+        ),
+        hint=(
+            "Inspect the source/destination block details and retry with an existing port. "
+            "If adding a new input to a variable-input block, include the required parameter update in the same batch."
         ),
     )
 

@@ -18,6 +18,8 @@ from grc_agent.toolagents_runtime import (
     ToolAgentsRegistryBuilder,
     ToolAgentsToolDelegate,
     _function_tool_from_openai_tool,
+    _is_missing_graph_evidence_response,
+    _is_terminal_change_graph_failure,
 )
 
 
@@ -156,6 +158,63 @@ class ToolAgentsHistoryTests(unittest.TestCase):
 
         self.assertEqual(message.role, ChatMessageRole.Assistant)
         self.assertEqual(len(message.content), 1)
+
+
+class ToolAgentsRepairClassificationTests(unittest.TestCase):
+    def test_unknown_param_preflight_is_repairable_evidence_failure(self) -> None:
+        result = {
+            "ok": False,
+            "error_type": "preflight_rejected",
+            "message": "Transaction failed preflight validation.",
+            "errors": [
+                {
+                    "code": "parameter_not_found",
+                    "message": "Unknown parameter for block type analog_sig_source_x: frequency",
+                    "hint": "Inspect the target block details and retry with an exact param_id.",
+                }
+            ],
+        }
+
+        self.assertTrue(_is_missing_graph_evidence_response(result))
+        self.assertFalse(_is_terminal_change_graph_failure(result))
+
+    def test_unknown_block_preflight_is_repairable_evidence_failure(self) -> None:
+        result = {
+            "ok": False,
+            "error_type": "preflight_rejected",
+            "message": "Transaction failed preflight validation.",
+            "errors": [
+                {
+                    "code": "unknown_block_id",
+                    "message": "Could not resolve block type: null_sink",
+                    "hint": "Run search_blocks for the block concept and retry.",
+                }
+            ],
+        }
+
+        self.assertTrue(_is_missing_graph_evidence_response(result))
+        self.assertFalse(_is_terminal_change_graph_failure(result))
+
+    def test_missing_added_connection_endpoint_is_repairable(self) -> None:
+        result = {
+            "ok": False,
+            "error_type": "preflight_rejected",
+            "message": "Transaction failed preflight validation.",
+            "errors": [
+                {
+                    "code": "block_not_found",
+                    "message": "Block not found: blocks_null_sink",
+                    "hint": (
+                        "The endpoint must be an existing graph instance_name. "
+                        "For a new sink/source, include add_blocks and add_connections in the same "
+                        "change_graph call, and connect to the new instance_name, not the catalog block_id."
+                    ),
+                }
+            ],
+        }
+
+        self.assertTrue(_is_missing_graph_evidence_response(result))
+        self.assertFalse(_is_terminal_change_graph_failure(result))
 
 
 if __name__ == "__main__":

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import re
 import time
 from typing import Any
 
 from grc_agent._payload import ErrorCode
+from grc_agent.catalog import describe_block
 from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
 
 ToolResult = dict[str, Any]
@@ -207,7 +209,14 @@ def dispatch_flat_change_graph_batch(
             payload["warnings"] = copy.deepcopy(warnings)
         if not ok:
             payload["planned_operations"] = copy.deepcopy(normalized_operations)
-            hint = result.get("hint")
+            hint = (
+                _repair_hint_for_validation_failure(
+                    normalized_operations,
+                    validation_result,
+                )
+                or _first_error_hint(errors_payload)
+                or _flat_change_graph_hint()
+            )
             if isinstance(hint, str) and hint:
                 payload["hint"] = hint
     wrapper_result = agent._payload_result("change_graph", payload)
@@ -229,6 +238,7 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
     errors: list[str] = []
     operations: list[dict[str, Any]] = []
     removed_connection_ids: set[str] = set()
+    added_block_aliases: dict[str, str | None] = {}
 
     remove_connections = _as_list(batches.get("remove_connections"), "remove_connections", errors)
     rewire_connections = _as_list(batches.get("rewire_connections"), "rewire_connections", errors)
@@ -346,6 +356,10 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
         if states is not None:
             op["states"] = copy.deepcopy(states)
         operations.append(op)
+        if block_id in added_block_aliases:
+            added_block_aliases[block_id] = None
+        else:
+            added_block_aliases[block_id] = instance_name
 
     for index, item in enumerate(add_variables):
         if not isinstance(item, dict):
@@ -436,6 +450,8 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
         if src is None or dst is None:
             errors.append(f"add_connections[{index}] requires src and dst endpoints.")
             continue
+        src = _resolve_added_block_endpoint_alias(src, added_block_aliases)
+        dst = _resolve_added_block_endpoint_alias(dst, added_block_aliases)
         operations.append(
             {
                 "op_type": "add_connection",
@@ -449,6 +465,194 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
     if not operations and not errors:
         errors.append("change_graph requires at least one non-empty edit list.")
     return operations, errors
+
+
+def _first_error_hint(errors_payload: Any) -> str | None:
+    if not isinstance(errors_payload, list):
+        return None
+    for row in errors_payload:
+        if not isinstance(row, dict):
+            continue
+        hint = row.get("hint")
+        if isinstance(hint, str) and hint.strip():
+            return hint.strip()
+    return None
+
+
+def _flat_change_graph_hint() -> str:
+    return (
+        "Use the flat change_graph fields: add_blocks[].block_id, "
+        "add_blocks[].instance_name, add_blocks[].params, update_params[].params, "
+        "add_connections[].src/dst, remove_connections[]."
+    )
+
+
+def _repair_hint_for_validation_failure(
+    operations: list[dict[str, Any]],
+    validation_result: Any,
+) -> str | None:
+    if not isinstance(validation_result, dict):
+        return None
+    if str(validation_result.get("status") or "").lower() not in {"invalid", "failed"}:
+        return None
+    native_errors = _native_validation_error_text(validation_result)
+    if not native_errors:
+        return None
+    dtype_pair = _first_dtype_mismatch(native_errors)
+    if dtype_pair is None:
+        return (
+            "Native GNU validation failed: "
+            f"{native_errors[0]} Retry only after fixing the candidate edit."
+        )
+    source_dtype, destination_dtype = dtype_pair
+    param_hint = _configurable_dtype_param_hint(
+        operations,
+        source_dtype=source_dtype,
+        destination_dtype=destination_dtype,
+    )
+    if param_hint:
+        return param_hint
+    return (
+        "Native GNU validation found a stream dtype mismatch "
+        f"({source_dtype} -> {destination_dtype}). Retry with compatible block "
+        "parameters or add a converter block."
+    )
+
+
+def _native_validation_error_text(validation_result: dict[str, Any]) -> list[str]:
+    native = validation_result.get("native")
+    if not isinstance(native, dict):
+        return []
+    errors = native.get("errors")
+    if not isinstance(errors, list):
+        return []
+    return [" ".join(str(error).split()) for error in errors if str(error).strip()]
+
+
+def _first_dtype_mismatch(errors: list[str]) -> tuple[str, str] | None:
+    pattern = re.compile(
+        r'Source IO type "([^"]+)" does not match sink IO type "([^"]+)"'
+    )
+    for error in errors:
+        match = pattern.search(error)
+        if match:
+            return match.group(1), match.group(2)
+    return None
+
+
+def _configurable_dtype_param_hint(
+    operations: list[dict[str, Any]],
+    *,
+    source_dtype: str,
+    destination_dtype: str,
+) -> str | None:
+    added_blocks = {
+        str(op.get("instance_name")): op
+        for op in operations
+        if isinstance(op, dict)
+        and op.get("op_type") == "add_block"
+        and isinstance(op.get("instance_name"), str)
+    }
+    for operation in operations:
+        if not isinstance(operation, dict) or operation.get("op_type") != "add_connection":
+            continue
+        dst_block = operation.get("dst_block")
+        dst_port = operation.get("dst_port")
+        if isinstance(dst_block, str) and dst_block in added_blocks:
+            hint = _dtype_param_hint_for_added_block(
+                added_blocks[dst_block],
+                port_direction="inputs",
+                port_id=dst_port,
+                desired_dtype=source_dtype,
+                mismatch=f"{source_dtype} -> {destination_dtype}",
+            )
+            if hint:
+                return hint
+        src_block = operation.get("src_block")
+        src_port = operation.get("src_port")
+        if isinstance(src_block, str) and src_block in added_blocks:
+            hint = _dtype_param_hint_for_added_block(
+                added_blocks[src_block],
+                port_direction="outputs",
+                port_id=src_port,
+                desired_dtype=destination_dtype,
+                mismatch=f"{source_dtype} -> {destination_dtype}",
+            )
+            if hint:
+                return hint
+    return None
+
+
+def _dtype_param_hint_for_added_block(
+    operation: dict[str, Any],
+    *,
+    port_direction: str,
+    port_id: Any,
+    desired_dtype: str,
+    mismatch: str,
+) -> str | None:
+    block_type = operation.get("block_type")
+    instance_name = operation.get("instance_name")
+    if not isinstance(block_type, str) or not isinstance(instance_name, str):
+        return None
+    catalog = describe_block(block_type)
+    if catalog.get("ok") is False:
+        return None
+    port = _catalog_port(catalog.get(port_direction), port_id)
+    dtype = port.get("dtype") if isinstance(port, dict) else None
+    param_id = _template_param_id(dtype)
+    if param_id is None:
+        return None
+    param = _catalog_param(catalog.get("parameters"), param_id)
+    options = param.get("options") if isinstance(param, dict) else None
+    if isinstance(options, list) and desired_dtype not in {str(option) for option in options}:
+        return None
+    existing_params = operation.get("parameters")
+    if isinstance(existing_params, dict) and str(existing_params.get(param_id)) == desired_dtype:
+        return None
+    return (
+        f"Native GNU validation found a stream dtype mismatch ({mismatch}). "
+        f"The newly added `{instance_name}` uses catalog param `{param_id}` "
+        f"for its {port_direction[:-1]} dtype; retry with "
+        f"add_blocks[].params.{param_id}=\"{desired_dtype}\"."
+    )
+
+
+def _catalog_port(ports: Any, port_id: Any) -> dict[str, Any]:
+    rows = [row for row in ports if isinstance(row, dict)] if isinstance(ports, list) else []
+    if isinstance(port_id, int) and 0 <= port_id < len(rows):
+        return rows[port_id]
+    text = str(port_id)
+    for row in rows:
+        if str(row.get("id")) == text:
+            return row
+    return {}
+
+
+def _catalog_param(params: Any, param_id: str) -> dict[str, Any]:
+    rows = [row for row in params if isinstance(row, dict)] if isinstance(params, list) else []
+    for row in rows:
+        if row.get("id") == param_id:
+            return row
+    return {}
+
+
+def _template_param_id(dtype: Any) -> str | None:
+    if not isinstance(dtype, str):
+        return None
+    match = re.fullmatch(r"\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}", dtype.strip())
+    return match.group(1) if match else None
+
+
+def _resolve_added_block_endpoint_alias(
+    endpoint: tuple[str, int | str],
+    aliases: dict[str, str | None],
+) -> tuple[str, int | str]:
+    block, port = endpoint
+    alias = aliases.get(block)
+    if alias:
+        return alias, port
+    return endpoint
 
 
 def _as_list(value: Any, field_name: str, errors: list[str]) -> list[Any]:
@@ -531,8 +735,9 @@ def _remove_block_operation(
     else:
         errors.append(f"{field_name}[{index}] requires instance_name or target_ref.")
         return None
-    if isinstance(block_id, str) and block_id.strip():
-        op["block_type"] = block_id.strip()
+    block_id = _optional_catalog_block_id(block_id)
+    if block_id is not None:
+        op["block_type"] = block_id
     return op
 
 
@@ -562,9 +767,9 @@ def _update_params_operation(
         if instance_name is None:
             return None
         op["instance_name"] = instance_name
-    block_id = item.get("block_id")
-    if isinstance(block_id, str) and block_id.strip():
-        op["block_type"] = block_id.strip()
+    block_id = _optional_catalog_block_id(item.get("block_id"))
+    if block_id is not None:
+        op["block_type"] = block_id
     expected_params = item.get("expected_params")
     if expected_params is not None:
         if not isinstance(expected_params, dict):
@@ -591,6 +796,8 @@ def _update_state_operation(
     state = states.get("state")
     if state is None and "enabled" in states:
         state = "enabled" if bool(states.get("enabled")) else "disabled"
+    if state is None and "disabled" in states:
+        state = "disabled" if bool(states.get("disabled")) else "enabled"
     if state not in {"enabled", "disabled"}:
         errors.append(f"{field_name}[{index}].states must set state to enabled/disabled.")
         return None
@@ -603,10 +810,20 @@ def _update_state_operation(
         if instance_name is None:
             return None
         op["instance_name"] = instance_name
-    block_id = item.get("block_id")
-    if isinstance(block_id, str) and block_id.strip():
-        op["block_type"] = block_id.strip()
+    block_id = _optional_catalog_block_id(item.get("block_id"))
+    if block_id is not None:
+        op["block_type"] = block_id
     return op
+
+
+def _optional_catalog_block_id(value: Any) -> str | None:
+    """Return a catalog block id, ignoring inspected block UID values."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.startswith("block:"):
+        return None
+    return text
 
 
 def _incident_connection_ids(agent: Any, block_name: str) -> list[str]:

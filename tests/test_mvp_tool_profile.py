@@ -278,9 +278,25 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertGreaterEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["block_id"], "blocks_throttle2")
         self.assertEqual(result["results"][0]["name"], "Throttle")
+
+    def test_search_blocks_model_context_includes_top_catalog_params_and_ports(self) -> None:
+        agent = self._load_agent()
+
+        result = agent.execute_tool("search_blocks", {"query": "null sink", "k": 3})
+        rendered = tool_history_content_as_text(
+            result,
+            tool_name="search_blocks",
+            semantic_search_result_preview=lambda _results: [],
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn('"block_id":"blocks_null_sink"', rendered)
+        self.assertIn('"id":"type"', rendered)
+        self.assertIn('"options":["complex","float"', rendered)
+        self.assertIn('"dtype":"${ type }"', rendered)
         self.assertIn("match_type", result["results"][0])
         self.assertIn("why", result["results"][0])
-        self.assertLess(len(str(result)), 1300)
+        self.assertLess(len(str(result)), 1800)
 
     def test_search_blocks_explains_catalog_option_label_match(self) -> None:
         agent = self._load_agent()

@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 _AGENTIC_TOOL_REMINDER = (
     "Runtime reminder: you need current tool evidence for this answer. "
     "Do not ask the user for permission to inspect or search. "
-    "Call the relevant available tool now, or answer only if current tool evidence is sufficient."
+    "Call the relevant available tool now, or answer only if current tool evidence is sufficient. "
+    "For parameter edits, inspect_graph details gives exact param_id values. "
+    "For adding blocks, search_blocks gives exact installed block_id and param_ids."
 )
 _MUTATION_TOOL_REMINDER = (
     "Runtime reminder: the user asked to change the active graph. "
@@ -906,21 +908,45 @@ def _is_repairable_insert_in_connection_response(result: dict[str, Any]) -> bool
 def _is_missing_graph_evidence_response(result: dict[str, Any]) -> bool:
     if result.get("ok") is True:
         return False
-    if result.get("error_type") != "clarification_required":
+    if result.get("error_type") not in {
+        "clarification_required",
+        ErrorCode.PREFLIGHT_REJECTED,
+        ErrorCode.INVALID_REQUEST,
+    }:
         return False
     haystack_parts = [str(result.get("message") or "")]
     options = result.get("clarification_options")
     if isinstance(options, list):
         haystack_parts.extend(str(option) for option in options)
+    for key in ("errors", "validation_errors"):
+        rows = result.get(key)
+        if isinstance(rows, list):
+            haystack_parts.extend(str(row) for row in rows[:6])
+    hint = result.get("hint")
+    if isinstance(hint, str):
+        haystack_parts.append(hint)
     haystack = " ".join(haystack_parts).lower()
     return (
         "no editable parameter target matched" in haystack
         or "inspect parameters/details" in haystack
+        or "inspect the target block details" in haystack
+        or "run search_blocks" in haystack
+        or "unknown_block_id" in haystack
+        or "parameter_not_found" in haystack
+        or "port_out_of_range" in haystack
+        or (
+            "block_not_found" in haystack
+            and "include add_blocks and add_connections in the same" in haystack
+        )
     )
 
 
 def _is_terminal_change_graph_failure(result: dict[str, Any]) -> bool:
+    if _is_missing_graph_evidence_response(result):
+        return False
     error_type = result.get("error_type")
+    if error_type == ErrorCode.GNU_VALIDATION_FAILED and _has_clear_change_graph_repair(result):
+        return False
     if error_type in {
         ErrorCode.PREFLIGHT_REJECTED,
         ErrorCode.GNU_VALIDATION_FAILED,
@@ -938,6 +964,14 @@ def _is_terminal_change_graph_failure(result: dict[str, Any]) -> bool:
         if status and status not in {"valid", "pass", "ok"}:
             return True
     return False
+
+
+def _has_clear_change_graph_repair(result: dict[str, Any]) -> bool:
+    hint = result.get("hint")
+    if not isinstance(hint, str):
+        return False
+    lowered = hint.lower()
+    return "retry with" in lowered and "add_blocks" in lowered and ".params." in lowered
 
 
 def _assistant_says_tool_needed(text: str) -> bool:

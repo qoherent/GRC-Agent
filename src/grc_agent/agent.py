@@ -523,8 +523,19 @@ class GrcAgent:
         *,
         model_tool_call: bool,
     ) -> dict[str, Any]:
-        """Return flat change_graph args unchanged; schema validation rejects legacy shapes."""
-        return kwargs
+        """Normalize common exact-identifier slips before schema validation."""
+        normalized = copy.deepcopy(kwargs)
+        for field_name in ("update_params", "update_states"):
+            rows = normalized.get(field_name)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                block_id = row.get("block_id")
+                if isinstance(block_id, str) and block_id.strip().startswith("block:"):
+                    row.pop("block_id", None)
+        return normalized
 
     def _normalize_inspect_graph_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         """Fill safe read-only inspect defaults without hiding unsupported syntax."""
