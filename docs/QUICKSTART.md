@@ -45,6 +45,11 @@ uv run grc-agent doctor --start-llama
 uv run grc-agent health
 ```
 
+For native NVIDIA CUDA, make sure `llama-server --list-devices` shows `CUDA0`.
+Gemma 4 GGUF repos also publish multimodal projector files; use
+`[llama].model_path` for the local text `.gguf` when you want text-only startup
+without downloading `mmproj` assets.
+
 ## Retrieval Index
 
 Optional, for vector-backed retrieval:
@@ -71,4 +76,14 @@ Add a sine source at 1000 Hz and connect it to the adder.
 
 ## Safety
 
-The model sees only `inspect_graph`, `search_blocks`, `ask_grc_docs`, and `change_graph`. It cannot directly save/load, edit raw YAML, or use shell/filesystem tools. Mutations go through validation, `grcc`, rollback, and autosave to the active copied graph.
+The model sees only `inspect_graph`, `search_blocks`, `ask_grc_docs`, and
+`change_graph`. It cannot directly save/load, edit raw YAML, or use
+shell/filesystem tools. Mutations go through schema checks, graph-reference
+checks, preflight, validation, rollback, and autosave to the active copied
+graph. If the user explicitly wants an invalid intermediate graph, the model may
+use `force=true`; failed schema/preflight/reference checks still never commit.
+
+Ambiguous edit requests should end in clarification, not a guessed mutation.
+For example, if a graph has two matching sinks or two candidate message debug
+blocks, the correct result is to ask which exact instance/connection to edit and
+leave the copied graph unchanged.

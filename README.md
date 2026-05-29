@@ -23,8 +23,15 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
 - Low-level tools remain internal implementation primitives and are not
   model-facing.
 - The model cannot save or load directly. `/save` is a CLI command; graph loading happens when the CLI session starts.
-- All meaningful mutations go through verified tools, validate before commit, and autosave after successful validation when the active copied graph path is safe and writable.
+- All meaningful mutations go through verified tools. Valid edits validate
+  before commit and autosave when the active copied graph path is safe and
+  writable. Invalid intermediate commits require explicit `force=true` and
+  still must pass schema, graph-reference, catalog, preflight, apply, and save
+  checks.
 - Vague or under-specified mutation requests clarify before execution.
+- Runtime reminders must not force a mutation after the model asks a
+  graph-evidence-backed clarification; ambiguous edits must leave the graph
+  unchanged.
 - Raw `.grc` YAML editing, undo/redo, and Python export/code-generation requests are refused.
 - `ask_grc_docs` is explanation-only: it retrieves local manual/tutorial snippets and
   returns concise grounded answers with sources when evidence is strong. The
@@ -33,7 +40,8 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
   evidence is weak. DocsAnswerAdvisor synthesis is optional research-only and is
   not part of the critical runtime path.
 - `grcc` remains final graph-validity authority.
-- Default local backend is `unsloth/gemma-4-E2B-it-GGUF` through llama.cpp.
+- Default local backend in this workspace is `unsloth/gemma-4-E4B-it-GGUF`
+  through a local text-only GGUF path and llama.cpp.
 - Current deterministic safety coverage is strong; live evals are routing/behavior evidence, not proof of production autonomy.
 
 ## Context And Budget Policy
@@ -85,7 +93,7 @@ Prerequisites:
 - GNU Radio 3.10.x with `grcc` on `PATH`
 - CUDA-enabled llama.cpp `llama-server` on `PATH` for model-backed chat on NVIDIA machines
 
-The CLI can auto-start a configured local llama.cpp server for normal `chat` use when `llama-server` is installed. The configured default is explicit CUDA device `CUDA0` with `gpu_layers=999`; `llama-server --list-devices` must show `CUDA0`. `doctor` is passive by default; use `uv run grc-agent doctor --start-llama` when you explicitly want it to start or reuse llama.cpp during environment checks.
+The CLI can auto-start a configured local llama.cpp server for normal `chat` use when `llama-server` is installed. The configured default is explicit CUDA device `CUDA0` with `gpu_layers=999`; `llama-server --list-devices` must show `CUDA0`. For Gemma 4 GGUF repos that also publish multimodal projector files, set `[llama].model_path` to the local text `.gguf` so startup uses `-m` instead of `-hf` and does not fetch `mmproj` assets. `doctor` is passive by default; use `uv run grc-agent doctor --start-llama` when you explicitly want it to start or reuse llama.cpp during environment checks.
 
 `uv sync --locked` installs Python dependencies including ToolAgents and Qdrant/FastEmbed vector search. It does not install GNU Radio, llama.cpp, chat models, or embedding model files. `uv run grc-agent vector build` explicitly builds the local vector index and may download the FastEmbed embedding model into the user's local cache on first run.
 

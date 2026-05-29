@@ -21,6 +21,7 @@ import time
 def _parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("-hf")
+    parser.add_argument("-m")
     parser.add_argument("--alias", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True, type=int)

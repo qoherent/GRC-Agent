@@ -22,7 +22,9 @@ Chat transport lives in ToolAgents; this repo keeps only non-chat health/probe H
 - Never edit raw `.grc` YAML directly.
 - Never mutate originals under installed example paths; copy graphs first.
 - Preview must never mutate.
-- Failed schema validation, preflight, or `grcc` validation must not commit.
+- Failed schema validation or preflight must not commit. Final native/`grcc`
+  validation failure must not commit unless the user intent supports an
+  invalid intermediate graph and the model explicitly uses `force=true`.
 - The model cannot save or load directly.
 - Successful committed mutations validate, then autosave to the active copied graph path when that path is safe and writable.
 - Committed mutations refuse when the active copied graph file changed on disk since the session last loaded or saved it.
@@ -147,8 +149,6 @@ Supported flat fields:
 - `update_states`: update supported state fields on one existing block per item
 - `add_connections`: add exact source/destination endpoint pairs
 - `remove_connections`: remove exact `connection_id` strings from `inspect_graph`
-- `rewire_connections`: generic helper that expands one old `connection_id` plus a new endpoint into remove/add connection operations
-- `insert_blocks_on_connections`: generic helper that inserts one GNU block into one exact existing connection
 - `add_variables`, `update_variables`, `remove_variables`: first-class variable edits, normalized internally to variable-block transactions
 - `force`: optional validation override, default `false`
 
@@ -162,8 +162,8 @@ low-level transaction ordering.
 graph refs, catalog/GNU block IDs, params, ports, connection IDs, copied-file
 integrity, and candidate apply have all succeeded. It never bypasses unknown GNU
 facts, ambiguity, stale refs, path safety, or save/autosave errors. Forced
-success returns `committed=true`, `validation_ok=false`, and a concise message:
-`change done, but validation error appeared: ...`.
+success returns `committed=true`, `validation_ok=false`, a validation warning,
+and an autosave result for the invalid intermediate working copy.
 
 There are no model-facing block-specific macros. Workflows such as rewire,
 insert-in-path, add-source-and-connect, or source-to-sum are expressed by the
@@ -229,9 +229,10 @@ If the assistant returns final text that says it needs inspection/search, or
 answers a graph-local fact question without any tool evidence, the runtime adds
 one reminder and continues the same bounded turn. This is a missed-tool nudge,
 not a free-text fallback parser, hidden repair path, or permission bypass.
-For mutation requests, reminders force the next step to `change_graph`. If the
-model responds with text instead of the forced tool call, the runtime retries
-once and then fails closed with no mutation.
+For mutation requests, reminders may require `change_graph` only when enough
+tool evidence exists and the model is not asking a clarification. If the model
+asks a graph-evidence-backed clarification, the turn may end with no mutation.
+This prevents reminder pressure from turning ambiguity into first-match edits.
 
 Vague graph-edit requests are allowed into the model/tool loop so the model can
 inspect and clarify. Mutation safety remains enforced by wrapper schemas, route
@@ -349,6 +350,10 @@ End-to-end runtime readiness requires:
 - four MVP model-facing wrappers only
 
 CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
+When `[llama].model_path` is configured, the launcher uses `llama-server -m`
+with that local text GGUF instead of `-hf`. Use this for Gemma 4 text-only
+startup because the Hugging Face GGUF repos also contain multimodal projector
+files.
 
 ## Documentation Set
 

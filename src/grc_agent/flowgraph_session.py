@@ -1108,6 +1108,10 @@ class FlowgraphSession:
             raise ValueError(
                 f"Raw block parameters section is invalid for: {instance_name}"
             )
+
+        if parameters.get(parameter_key) == value:
+            return
+
         parameters[parameter_key] = value
         raw_parameters[parameter_key] = value
 
@@ -1149,6 +1153,10 @@ class FlowgraphSession:
             raise ValueError(
                 f"Raw block parameters section is invalid for: {block.instance_name}"
             )
+
+        if parameters.get(parameter_key) == value:
+            return
+
         parameters[parameter_key] = value
         raw_parameters[parameter_key] = value
 
@@ -1213,6 +1221,9 @@ class FlowgraphSession:
         if not isinstance(raw_states, dict):
             raise ValueError(f"Raw block states section is invalid for: {instance_name}")
 
+        if states.get("state") == state:
+            return
+
         states["state"] = state
         raw_states["state"] = state
 
@@ -1250,6 +1261,9 @@ class FlowgraphSession:
         raw_states = raw_block.setdefault("states", {})
         if not isinstance(raw_states, dict):
             raise ValueError(f"Raw block states section is invalid for: {block.instance_name}")
+
+        if states.get("state") == state:
+            return
 
         states["state"] = state
         raw_states["state"] = state
@@ -1647,12 +1661,12 @@ class FlowgraphSession:
             raise ValueError("No flowgraph loaded.")
 
         if any(block.instance_name == instance_name for block in self.flowgraph.blocks):
-            raise ValueError(f"Block already exists: {instance_name}")
+            raise ValueError(f"Block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.")
         if any(
             isinstance(entry, dict) and entry.get("name") == instance_name
             for entry in raw_blocks
         ):
-            raise ValueError(f"Raw block already exists: {instance_name}")
+            raise ValueError(f"Raw block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.")
 
     def _require_unique_parsed_block(
         self,

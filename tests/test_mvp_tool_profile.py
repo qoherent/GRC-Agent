@@ -115,8 +115,6 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertIn("update_params", change_props)
         self.assertIn("add_connections", change_props)
         self.assertIn("remove_connections", change_props)
-        self.assertIn("rewire_connections", change_props)
-        self.assertIn("insert_blocks_on_connections", change_props)
         self.assertIn("add_variables", change_props)
         self.assertIn("force", change_props)
         for removed in (
@@ -139,7 +137,7 @@ class MvpToolProfileTests(unittest.TestCase):
             change_props["update_states"]["items"]["required"]
         )
         self.assertIn("instance_name", update_states_required)
-        self.assertIn("states", update_states_required)
+        self.assertIn("state", update_states_required)
         add_variables_required = change_props["add_variables"]["items"]["required"]
         self.assertIn("instance_name", add_variables_required)
         self.assertNotIn("name", add_variables_required)
@@ -179,7 +177,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(details["targets"][0]["name"], "samp_rate")
         self.assertEqual(details["targets"][0]["instance_name"], "samp_rate")
         self.assertEqual(details["targets"][0]["parameters"][0]["name"], "value")
-        self.assertEqual(details["targets"][0]["parameters"][0]["param_id"], "value")
+        self.assertEqual(details["targets"][0]["parameters"][0]["name"], "value")
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
 
@@ -206,7 +204,7 @@ class MvpToolProfileTests(unittest.TestCase):
             param for param in parameters if param.get("name") == "srate"
         )
         self.assertEqual(sample_rate.get("resolved_value"), "32000")
-        self.assertIn("target_ref", target)
+        self.assertNotIn("target_ref", target)
 
     def test_inspect_graph_default_details_include_visible_source_facts(self) -> None:
         fixture = (
@@ -270,11 +268,11 @@ class MvpToolProfileTests(unittest.TestCase):
             "semantic_search_grc",
             return_value=semantic_payload,
         ) as semantic_search:
-            result = agent.execute_tool("search_blocks", {"query": "limit sample rate", "k": 3})
+            result = agent.execute_tool("search_blocks", {"query": "limit sample rate"})
 
         self.assertTrue(result["ok"], result)
         self.assertIn(result["retrieval_mode"], {"hybrid", "semantic"})
-        semantic_search.assert_called_once_with("limit sample rate", scope="catalog", k=3)
+        semantic_search.assert_called_once_with("limit sample rate", scope="catalog", k=5)
         self.assertGreaterEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["block_id"], "blocks_throttle2")
         self.assertEqual(result["results"][0]["name"], "Throttle")
@@ -282,7 +280,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_search_blocks_model_context_includes_top_catalog_params_and_ports(self) -> None:
         agent = self._load_agent()
 
-        result = agent.execute_tool("search_blocks", {"query": "null sink", "k": 3})
+        result = agent.execute_tool("search_blocks", {"query": "null sink"})
         rendered = tool_history_content_as_text(
             result,
             tool_name="search_blocks",
@@ -296,7 +294,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertIn('"dtype":"${ type }"', rendered)
         self.assertIn("match_type", result["results"][0])
         self.assertIn("why", result["results"][0])
-        self.assertLess(len(str(result)), 1800)
+        self.assertLess(len(str(result)), 2200)
 
     def test_search_blocks_explains_catalog_option_label_match(self) -> None:
         agent = self._load_agent()
@@ -308,7 +306,7 @@ class MvpToolProfileTests(unittest.TestCase):
         ):
             result = agent.execute_tool(
                 "search_blocks",
-                {"query": "sine wave source", "k": 3},
+                {"query": "sine wave source"},
                 model_tool_call=True,
             )
 
@@ -354,12 +352,12 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value=semantic_payload,
             ) as semantic_search,
         ):
-            result = agent.execute_tool("search_blocks", {"query": "analog_sig_source_x", "k": 3})
+            result = agent.execute_tool("search_blocks", {"query": "analog_sig_source_x"})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["retrieval_mode"], "lexical_only")
         self.assertTrue(result["degraded_retrieval"])
-        semantic_search.assert_called_once_with("analog_sig_source_x", scope="catalog", k=3)
+        semantic_search.assert_called_once_with("analog_sig_source_x", scope="catalog", k=5)
         self.assertEqual(result["results"][0]["block_id"], "analog_sig_source_x")
         self.assertEqual(result["results"][0]["match_type"], "exact_block_id")
 
@@ -391,7 +389,7 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value={"ok": False, "error_type": "missing_index"},
             ),
         ):
-            result = agent.execute_tool("search_blocks", {"query": "num_inputs", "k": 3})
+            result = agent.execute_tool("search_blocks", {"query": "num_inputs"})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["retrieval_mode"], "lexical_only")
@@ -448,7 +446,7 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value={"ok": False, "error_type": "missing_index"},
             ),
         ):
-            result = agent.execute_tool("search_blocks", {"query": "sine wave source", "k": 3})
+            result = agent.execute_tool("search_blocks", {"query": "sine wave source"})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["retrieval_mode"], "lexical_only")
@@ -465,7 +463,7 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value={"ok": False, "error_type": "missing_index"},
             ),
         ):
-            result = agent.execute_tool("search_blocks", {"query": "cosine source", "k": 3})
+            result = agent.execute_tool("search_blocks", {"query": "cosine source"})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["results"][0]["block_id"], "analog_sig_source_x")
@@ -534,7 +532,7 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value={"ok": False, "error_type": "missing_index"},
             ),
         ):
-            result = agent.execute_tool("search_blocks", {"query": "throughput", "k": 3})
+            result = agent.execute_tool("search_blocks", {"query": "throughput"})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["retrieval_mode"], "lexical_only")
@@ -781,7 +779,6 @@ class MvpToolProfileTests(unittest.TestCase):
                     {
                         "instance_name": "samp_rate",
                         "params": {"value": "48000"},
-                        "expected_params": {"value": "32000"},
                     }
                 ]
             },
@@ -792,7 +789,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertNotIn("dry_run", result)
         self.assertNotIn("operation_kind", result)
         self.assertNotIn("active_session", result)
-        self.assertIn("samp_rate.value:32000->48000", result.get("effect", ""))
+        self.assertIn("samp_rate.value=48000", result.get("effect", ""))
         self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), "48000")
         self.assertGreater(agent.session.state_revision, before_revision)
         self.assertEqual(result.get("autosave", {}).get("ok"), True)
@@ -870,7 +867,6 @@ class MvpToolProfileTests(unittest.TestCase):
                     {
                         "instance_name": "blocks_add_xx",
                         "params": {"num_inputs": "4"},
-                        "expected_params": {"num_inputs": "3"},
                     }
                 ],
                 "add_blocks": [

@@ -108,6 +108,7 @@ def _schema_repair_instruction(
         instruction["change_graph_hint"] = (
             "For existing variables shown by inspect_graph, use "
             "update_variables=[{'instance_name':'samp_rate','value':'48000'}]. "
+            "To remove variables, use remove_variables=['unused_var']. "
             "For existing block parameters, use "
             "update_params=[{'instance_name':'...', 'params': {'param_id':'value'}}]. "
             "Do not put graph instance names into block_id."

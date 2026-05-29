@@ -57,10 +57,6 @@ class ValidationOperation:
                 res["instance_name"] = self.payload["instance_name"]
             if "block_type" in self.payload:
                 res["block_type"] = self.payload["block_type"]
-            if "target_ref" in self.payload:
-                res["target_ref"] = copy.deepcopy(self.payload["target_ref"])
-            if "expected_params" in self.payload:
-                res["expected_params"] = copy.deepcopy(self.payload["expected_params"])
             return res
         if self.op_type == "update_states":
             res = {
@@ -71,8 +67,6 @@ class ValidationOperation:
                 res["instance_name"] = self.payload["instance_name"]
             if "block_type" in self.payload:
                 res["block_type"] = self.payload["block_type"]
-            if "target_ref" in self.payload:
-                res["target_ref"] = copy.deepcopy(self.payload["target_ref"])
             return res
         if self.op_type in {"add_connection", "remove_connection"}:
             res = {
@@ -101,8 +95,6 @@ class ValidationOperation:
                 res["instance_name"] = self.payload["instance_name"]
             if "block_type" in self.payload:
                 res["block_type"] = self.payload["block_type"]
-            if "target_ref" in self.payload:
-                res["target_ref"] = copy.deepcopy(self.payload["target_ref"])
             return res
 
         rendered = {
@@ -393,11 +385,9 @@ def _normalize_operation(
             "op_type",
             "instance_name",
             "params",
-            "expected_params",
             "block_type",
-            "target_ref",
         ),
-        "update_states": ("op_type", "instance_name", "state", "block_type", "target_ref"),
+        "update_states": ("op_type", "instance_name", "state", "block_type"),
         "add_connection": ("op_type", "src_block", "src_port", "dst_block", "dst_port"),
         "remove_connection": (
             "op_type",
@@ -407,7 +397,7 @@ def _normalize_operation(
             "dst_block",
             "dst_port",
         ),
-        "remove_block": ("op_type", "instance_name", "block_type", "target_ref"),
+        "remove_block": ("op_type", "instance_name", "block_type"),
         "add_block": ("op_type", "instance_name", "block_type", "parameters", "states"),
         "insert_block_on_connection": ("op_type", "connection_id", "block_type", "instance_name", "params"),
     }
@@ -452,39 +442,8 @@ def _normalize_operation(
     payload: dict[str, Any] = {}
 
     if op_type in {"update_params", "update_states", "remove_block", "add_block"}:
-        target_ref = candidate.get("target_ref")
-        if target_ref is not None:
-            if op_type == "add_block":
-                issues.append(
-                    make_issue(
-                        op_index=op_index,
-                        op_type=op_type,
-                        field="target_ref",
-                        code="unexpected_field",
-                        message="target_ref is not supported for add_block.",
-                    )
-                )
-            elif not isinstance(target_ref, dict):
-                issues.append(
-                    make_issue(
-                        op_index=op_index,
-                        op_type=op_type,
-                        field="target_ref",
-                        code="invalid_field_type",
-                        message="target_ref must be a mapping.",
-                    )
-                )
-            else:
-                payload["target_ref"] = copy.deepcopy(target_ref)
-                expected_name = target_ref.get("expected_instance_name")
-                expected_type = target_ref.get("expected_block_type")
-                if isinstance(expected_name, str) and expected_name.strip():
-                    payload.setdefault("instance_name", expected_name.strip())
-                if isinstance(expected_type, str) and expected_type.strip():
-                    payload.setdefault("block_type", expected_type.strip())
-
         instance_name = candidate.get("instance_name")
-        if target_ref is None and (not isinstance(instance_name, str) or not instance_name.strip()):
+        if not isinstance(instance_name, str) or not instance_name.strip():
             issues.append(
                 make_issue(
                     op_index=op_index,
@@ -639,28 +598,6 @@ def _normalize_operation(
             issues.extend(parameter_issues)
             if not parameter_issues:
                 payload["params"] = copy.deepcopy(params)
-        expected_params = candidate.get("expected_params")
-        if expected_params is not None:
-            if not isinstance(expected_params, dict):
-                issues.append(
-                    make_issue(
-                        op_index=op_index,
-                        op_type=op_type,
-                        field="expected_params",
-                        code="invalid_field_type",
-                        message="expected_params must be a mapping when provided.",
-                    )
-                )
-            else:
-                expected_issues = _validate_parameter_mapping(
-                    op_index=op_index,
-                    op_type=op_type,
-                    field="expected_params",
-                    parameters=expected_params,
-                )
-                issues.extend(expected_issues)
-                if not expected_issues:
-                    payload["expected_params"] = copy.deepcopy(expected_params)
 
     if op_type == "update_states":
         state = candidate.get("state")
@@ -930,6 +867,18 @@ def _coerce_parameter_value(value: Any, rule: ParameterRule) -> Any:
     if rule.dtype == "bool":
         coerced = _coerce_bool_literal(value)
         return coerced if coerced is not None else value
+
+    if rule.dtype is None or rule.dtype not in {"string", "enum", "gui_hint", "comment"}:
+        coerced_int = _coerce_int_literal(value)
+        if coerced_int is not None:
+            return coerced_int
+        coerced_float = _coerce_float_literal(value)
+        if coerced_float is not None:
+            return coerced_float
+        coerced_bool = _coerce_bool_literal(value)
+        if coerced_bool is not None:
+            return coerced_bool
+
     return value
 
 

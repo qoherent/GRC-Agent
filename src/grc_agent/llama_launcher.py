@@ -73,6 +73,7 @@ class _LauncherState:
     base_url: str
     model_alias: str
     hf_model: str
+    model_path: str | None
     pid: int
     log_path: str
 
@@ -123,6 +124,7 @@ class LlamaServerLauncher:
                 base_url=self.server_url,
                 model_alias=self.model_alias,
                 hf_model=self.config.hf_model,
+                model_path=self.config.model_path,
                 pid=process.pid,
                 log_path=str(log_path),
             )
@@ -190,10 +192,11 @@ class LlamaServerLauncher:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"llama-server-{host.replace('.', '_')}-{port}.log"
 
+        model_arg_name, model_arg_value = self._model_argument()
         args = [
             binary,
-            "-hf",
-            self.config.hf_model,
+            model_arg_name,
+            model_arg_value,
             "--alias",
             self.model_alias,
             "--host",
@@ -336,6 +339,11 @@ class LlamaServerLauncher:
                 base_url=str(payload["base_url"]),
                 model_alias=str(payload["model_alias"]),
                 hf_model=str(payload["hf_model"]),
+                model_path=(
+                    str(payload["model_path"])
+                    if payload.get("model_path") is not None
+                    else None
+                ),
                 pid=int(payload["pid"]),
                 log_path=str(payload["log_path"]),
             )
@@ -347,6 +355,7 @@ class LlamaServerLauncher:
             state.base_url != self.server_url
             or state.model_alias != self.model_alias
             or state.hf_model != self.config.hf_model
+            or state.model_path != self.config.model_path
         ):
             return None
         return state
@@ -368,6 +377,7 @@ class LlamaServerLauncher:
                     "base_url": state.base_url,
                     "model_alias": state.model_alias,
                     "hf_model": state.hf_model,
+                    "model_path": state.model_path,
                     "pid": state.pid,
                     "log_path": state.log_path,
                 },
@@ -413,13 +423,25 @@ class LlamaServerLauncher:
             return False
         if not any(Path(argument).name == "llama-server" for argument in cmdline[:2]):
             return False
+        model_arg_name, model_arg_value = self._state_model_argument(state)
         return (
-            self._argument_value(cmdline, "-hf") == state.hf_model
+            self._argument_value(cmdline, model_arg_name) == model_arg_value
             and self._argument_value(cmdline, "--alias") == state.model_alias
             and self._argument_value(cmdline, "--host") == self._parsed_url.hostname
             and self._argument_value(cmdline, "--port") == str(self._parsed_url.port)
             and ("--no-mmproj" in cmdline) == _get_mmproj_support()
         )
+
+    def _model_argument(self) -> tuple[str, str]:
+        if self.config.model_path is not None:
+            return "-m", self.config.model_path
+        return "-hf", self.config.hf_model
+
+    @staticmethod
+    def _state_model_argument(state: _LauncherState) -> tuple[str, str]:
+        if state.model_path is not None:
+            return "-m", state.model_path
+        return "-hf", state.hf_model
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[Any]) -> None:

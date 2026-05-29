@@ -60,7 +60,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                     {
                         "instance_name": "samp_rate",
                         "params": {"value": "48000"},
-                        "expected_params": {"value": "32000"},
                     }
                 ]
             },
@@ -108,7 +107,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                     {
                         "instance_name": "samp_rate",
                         "value": "48000",
-                        "expected_value": "32000",
                     }
                 ]
             },
@@ -230,6 +228,48 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertIn("complex", rendered)
         self.assertIn('add_blocks[].params.type="float"', rendered)
 
+    def test_native_validation_failure_reports_unchanged_graph_facts(self) -> None:
+        tmp, _path, agent = self._load_temp_agent()
+        self.addCleanup(tmp.cleanup)
+        before_blocks = self._block_names(agent.session)
+        before_connections = self._connection_ids(agent.session)
+        before_revision = agent.session.state_revision
+        before_dirty = agent.session.is_dirty
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "update_states": [
+                    {
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "state": "disabled",
+                    }
+                ]
+            },
+            model_tool_call=True,
+        )
+        rendered = tool_history_content_as_text(
+            result,
+            tool_name="change_graph",
+            semantic_search_result_preview=lambda _results: [],
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(result.get("committed", True), result)
+        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
+        self.assertTrue(result.get("graph_unchanged"), result)
+        self.assertEqual(result.get("rollback"), "complete")
+        self.assertEqual(result.get("rejected_phase"), "native_grc_validation")
+        self.assertIn("Source - out(0): Port is not connected.", result.get("native_validation_errors", []))
+        self.assertEqual(self._block_names(agent.session), before_blocks)
+        self.assertEqual(self._connection_ids(agent.session), before_connections)
+        self.assertEqual(agent.session.state_revision, before_revision)
+        self.assertEqual(agent.session.is_dirty, before_dirty)
+        self.assertIn("no changes committed", rendered)
+        self.assertIn('"graph_unchanged":true', rendered)
+        self.assertIn('"rollback":"complete"', rendered)
+        self.assertIn("Source - out(0): Port is not connected.", rendered)
+
     def test_same_batch_connection_can_reference_unique_added_block_type_alias(self) -> None:
         tmp, _path, agent = self._load_temp_agent()
         self.addCleanup(tmp.cleanup)
@@ -282,7 +322,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["committed"], result)
         self.assertFalse(result["validation_ok"], result)
-        self.assertIn("validation error appeared", result["message"])
+        self.assertIn("validation warnings", result["message"])
         self.assertNotIn("qtgui_time_sink_x_0", self._block_names(agent.session))
         self.assertNotIn(
             "blocks_char_to_float_0:0->qtgui_time_sink_x_0:0",
@@ -331,7 +371,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                 "update_states": [
                     {
                         "instance_name": "blocks_throttle2_0",
-                        "states": {"disabled": True},
+                        "state": "disabled",
                     }
                 ],
                 "force": True,
@@ -351,6 +391,58 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
             for block in reloaded.flowgraph.blocks
         }
         self.assertEqual(state_by_name["blocks_throttle2_0"], "disabled")
+
+    def test_noop_state_update_returns_already_disabled_message(self) -> None:
+        tmp, path, agent = self._load_temp_agent("random_bit_generator_dual_sink_sink1_disabled.grc")
+        self.addCleanup(tmp.cleanup)
+        before_sha = path.read_bytes()
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "update_states": [
+                    {
+                        "instance_name": "qtgui_time_sink_x_1",
+                        "state": "disabled",
+                    }
+                ]
+            },
+            model_tool_call=True,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["committed"], result)
+        self.assertFalse(result.get("dirty"), result)
+        self.assertEqual(result.get("message"), "already disabled; graph unchanged.")
+        self.assertIn("skipped", result.get("autosave", {}))
+        self.assertTrue(result["autosave"]["skipped"])
+        self.assertEqual(path.read_bytes(), before_sha)
+
+    def test_noop_param_update_returns_already_val_message(self) -> None:
+        tmp, path, agent = self._load_temp_agent("random_bit_generator.grc")
+        self.addCleanup(tmp.cleanup)
+        before_sha = path.read_bytes()
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "update_params": [
+                    {
+                        "instance_name": "samp_rate",
+                        "params": {"value": "32000"},
+                    }
+                ]
+            },
+            model_tool_call=True,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["committed"], result)
+        self.assertFalse(result.get("dirty"), result)
+        self.assertEqual(result.get("message"), "already 32000; graph unchanged.")
+        self.assertIn("skipped", result.get("autosave", {}))
+        self.assertTrue(result["autosave"]["skipped"])
+        self.assertEqual(path.read_bytes(), before_sha)
 
 
 if __name__ == "__main__":

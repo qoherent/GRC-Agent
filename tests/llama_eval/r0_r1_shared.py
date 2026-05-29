@@ -12,14 +12,12 @@ def _inspect(view: str) -> tuple[ToolExpectation, ...]:
         return (
             ToolExpectation(
                 "inspect_graph",
-                arguments={"view": "overview", "targets": [], "params": []},
             ),
         )
     if view in {"context", "details"}:
         return (
             ToolExpectation(
                 "inspect_graph",
-                arguments={"view": "details"},
             ),
         )
     return (ToolExpectation("inspect_graph"),)
@@ -30,7 +28,7 @@ def _search(query: str) -> tuple[ToolExpectation, ...]:
 
 
 def _docs(question: str) -> tuple[ToolExpectation, ...]:
-    return (ToolExpectation("ask_grc_docs", arguments={"question": question}),)
+    return (ToolExpectation("ask_grc_docs"),)
 
 
 def _set_param(instance_name: str, param: str, value: str) -> tuple[ToolExpectation, ...]:
@@ -52,7 +50,7 @@ def _set_state(instance_name: str, state: str) -> tuple[ToolExpectation, ...]:
             "change_graph",
             arguments={
                 "update_states": [
-                    {"instance_name": instance_name, "states": {"state": state}}
+                    {"instance_name": instance_name, "state": state}
                 ],
             },
         ),

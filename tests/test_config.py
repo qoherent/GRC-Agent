@@ -26,8 +26,12 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertTrue(default_config_path().is_file())
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:8080")
-        self.assertEqual(config.llama.model, "unsloth/gemma-4-E2B-it-GGUF")
-        self.assertEqual(config.llama.hf_model, "unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL")
+        self.assertEqual(config.llama.model, "unsloth/gemma-4-E4B-it-GGUF")
+        self.assertEqual(config.llama.hf_model, "unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL")
+        self.assertEqual(
+            config.llama.model_path,
+            "/home/mahmoud/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-GGUF/snapshots/653803f092503c04a65164346f3208a36e707693/gemma-4-E4B-it-UD-Q4_K_XL.gguf",
+        )
         self.assertEqual(config.llama.desired_context_tokens, 120000)
         self.assertEqual(config.llama.startup_timeout_seconds, 300.0)
         self.assertEqual(config.llama.max_tokens, 4096)
@@ -114,6 +118,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     'server_url = "http://127.0.0.1:9000"\n'
                     'model = "custom-model"\n'
                     'hf_model = "custom/model:Q4"\n'
+                    'model_path = "/models/custom.gguf"\n'
                     "desired_context_tokens = 120000\n"
                     "startup_timeout_seconds = 120.0\n"
                     "max_tokens = 2048\n"
@@ -139,6 +144,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:9000")
         self.assertEqual(config.llama.model, "custom-model")
+        self.assertEqual(config.llama.model_path, "/models/custom.gguf")
         self.assertTrue(config.llama.enable_thinking)
         self.assertEqual(config.llama.max_tool_rounds, 42)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 512)

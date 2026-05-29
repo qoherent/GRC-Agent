@@ -18,6 +18,7 @@ def render_model_messages(
     *,
     system_prompt_provider: PromptProvider,
     semantic_search_result_preview: PreviewCallback,
+    reminder: str | None = None,
 ) -> list[HistoryEntry]:
     """Render runtime history into chat-completions messages."""
     messages: list[HistoryEntry] = [
@@ -59,6 +60,14 @@ def render_model_messages(
         if role == "assistant" and "tool_calls" in turn:
             message["tool_calls"] = turn["tool_calls"]
         messages.append(message)
+
+    if reminder:
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Runtime reminder: {reminder}",
+            }
+        )
 
     return messages
 

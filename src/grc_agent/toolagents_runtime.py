@@ -38,35 +38,24 @@ _AGENTIC_TOOL_REMINDER = (
     "For adding blocks, search_blocks gives exact installed block_id and param_ids."
 )
 _MUTATION_TOOL_REMINDER = (
-    "Runtime reminder: the user asked to change the active graph. "
-    "Use change_graph now with flat batch fields such as add_blocks, update_params, "
-    "add_connections, remove_connections, rewire_connections, or insert_blocks_on_connections. "
-    "When adding a block, include initial params/states and known connections in the same call. "
-    "If exact details are missing, inspect/search first or ask one concise clarification. "
-    "Do not give manual GNU Radio Companion steps or claim you cannot edit without "
-    "a change_graph result."
+    "Runtime reminder: the user asked to change the active graph. Use change_graph now. "
+    "For adding a block, use add_blocks. For inserting a block on a wire, use remove_connections "
+    "+ add_blocks + add_connections in the same call. Provide all initial params in the same call."
 )
 _INVALID_CHANGE_GRAPH_REMINDER = (
     "Runtime reminder: your previous change_graph call had invalid or missing args. "
-    "Retry change_graph with one or more flat edit lists. For existing variables "
-    "like samp_rate, use update_variables=[{instance_name, value}]. For existing block "
-    "parameters, use update_params=[{instance_name, params:{param_id:value}}]. "
-    "block_id is for GNU catalog block types, not graph instance names."
+    "Retry change_graph. For existing variables, use update_variables. "
+    "For block parameters, use update_params. block_id is the catalog type."
 )
 _MUTATION_NOT_COMMITTED_REMINDER = (
-    "Runtime reminder: the user asked for a graph edit, but no validated "
-    "change_graph commit has succeeded in this turn. If enough graph/catalog "
-    "evidence is available, call change_graph with the relevant flat edit lists. "
-    "If the edit is ambiguous, ask one concise clarification using graph candidates."
+    "Runtime reminder: the user asked for a graph edit, but no change_graph has succeeded. "
+    "Call change_graph now with add_blocks, remove_connections, add_connections or other edit lists. "
+    "Ensure all block parameters (like type, cutoff_freq, width) are fully specified."
 )
 _WRONG_INSERT_REPAIR_REMINDER = (
-    "Runtime reminder: inserting into an existing wire uses insert_blocks_on_connections. "
-    "Adding a parallel path or source uses add_blocks plus add_connections in the same call."
-)
-_FORCED_CHANGE_GRAPH_REMINDER = (
-    "Runtime reminder: this response must be a change_graph tool call, not "
-    "assistant text. Use the flat edit lists; if exact graph/catalog evidence is "
-    "missing, inspect or search first."
+    "Runtime reminder: inserting into an existing wire uses remove_connections "
+    "+ add_blocks + add_connections in the same change_graph call. "
+    "Adding a parallel path or source uses add_blocks + add_connections."
 )
 _TOOL_NEED_PATTERNS = (
     re.compile(
@@ -265,10 +254,12 @@ class ToolAgentsHistoryAdapter:
     """Convert rendered GRC history dictionaries to ToolAgents messages."""
 
     @staticmethod
-    def model_messages_from_agent(agent: GrcAgent) -> list[ChatMessage]:
+    def model_messages_from_agent(
+        agent: GrcAgent, *, reminder: str | None = None
+    ) -> list[ChatMessage]:
         return [
             ToolAgentsHistoryAdapter.from_openai_message(message)
-            for message in agent.get_model_messages()
+            for message in agent.get_model_messages(reminder=reminder)
         ]
 
     @staticmethod
@@ -517,44 +508,33 @@ class ToolAgentsRunner:
         change_graph_control_response = False
         change_graph_wrong_insert_pending = False
         change_graph_missing_evidence_pending = False
+        graph_ambiguity_pending = False
         tool_context_chars = 0
         truncated_tool_output = False
-        forced_next_tool_name: str | None = None
+        pending_reminder: str | None = None
 
         logger.info("turn_start model=%s message=%s", resolved_model, user_message[:80])
         active_allowed_tools = set(MVP_TOOL_SURFACE.model_tool_names)
 
         while True:
-            forced_tool_for_step = forced_next_tool_name
-            step_allowed_tools = (
-                {forced_next_tool_name}
-                if forced_next_tool_name is not None
-                else active_allowed_tools
-            )
-            tool_choice: str | dict[str, Any]
-            if forced_next_tool_name is None:
-                tool_choice = "auto"
-            else:
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": forced_next_tool_name},
-                }
             settings = self.provider_config.create_settings(
                 self.provider,
-                tool_choice=tool_choice,
+                tool_choice="auto",
             )
             registry_builder = ToolAgentsRegistryBuilder(
                 agent,
                 wrapper_eval_telemetry=wrapper_eval_telemetry,
             )
-            registry = registry_builder.build(step_allowed_tools)
-            messages = ToolAgentsHistoryAdapter.model_messages_from_agent(agent)
+            registry = registry_builder.build(active_allowed_tools)
+            messages = ToolAgentsHistoryAdapter.model_messages_from_agent(
+                agent, reminder=pending_reminder
+            )
+            pending_reminder = None
             assistant_message = self.chat_agent.step(
                 messages,
                 tool_registry=registry,
                 settings=settings,
             )
-            forced_next_tool_name = None
             assistant_turns += 1
             tool_calls = assistant_message.get_tool_calls()
             tool_calls_requested += len(tool_calls)
@@ -582,7 +562,6 @@ class ToolAgentsRunner:
             if tool_calls:
                 tool_rounds_used += 1
                 stopping_failure: dict[str, Any] | None = None
-                committed_change_result: dict[str, Any] | None = None
                 for tool_call in tool_calls:
                     tool_name = tool_call.tool_call_name
                     logger.info(
@@ -603,7 +582,7 @@ class ToolAgentsRunner:
                     else:
                         delegate_result = delegate.invoke(
                             tool_call.tool_call_arguments,
-                            allowed_tool_names=step_allowed_tools,
+                            allowed_tool_names=active_allowed_tools,
                         )
                         result = delegate_result.result
                         executed = delegate_result.executed
@@ -613,7 +592,6 @@ class ToolAgentsRunner:
                             if isinstance(result, dict):
                                 if result.get("ok") is True and result.get("committed") is True:
                                     change_graph_committed = True
-                                    committed_change_result = result
                                 error_type = result.get("error_type")
                                 wrong_insert = _is_repairable_insert_in_connection_response(
                                     result
@@ -632,6 +610,9 @@ class ToolAgentsRunner:
                                     )
                                 ):
                                     change_graph_control_response = True
+                                    if _is_terminal_change_graph_failure(result):
+                                        stopping_failure = result
+                                        break
                                 if _is_missing_graph_evidence_response(result):
                                     change_graph_missing_evidence_pending = True
                         elif isinstance(result, dict) and result.get("ok") is False:
@@ -642,6 +623,8 @@ class ToolAgentsRunner:
                         truncated_tool_output = truncated_tool_output or bool(
                             result.get("output_truncated")
                         )
+                        if isinstance(result, dict) and _is_ambiguous_tool_result(result):
+                            graph_ambiguity_pending = True
                     agent.history.append(
                         {
                             "role": "tool",
@@ -652,8 +635,6 @@ class ToolAgentsRunner:
                     )
                     if agent.should_stop_batch_after_result(tool_name, result):
                         stopping_failure = result
-                        break
-                    if committed_change_result is result:
                         break
                 if stopping_failure is not None:
                     assistant_text = _tool_failure_text(stopping_failure)
@@ -667,74 +648,10 @@ class ToolAgentsRunner:
                         "tool_calls_executed": tool_calls_executed,
                         "assistant_text": assistant_text,
                         "error_type": stopping_failure.get("error_type"),
-                        "message": stopping_failure.get("message", assistant_text),
+                        "message": assistant_text,
                         "correction_retries_used": correction_retries_used,
                     }
-                if committed_change_result is not None:
-                    assistant_text = _committed_change_text(committed_change_result)
-                    agent.history.append({"role": "assistant", "content": assistant_text})
-                    return _attach_context_budget_telemetry(
-                        {
-                            "ok": True,
-                            "model": resolved_model,
-                            "steps": assistant_turns,
-                            "tool_rounds_used": tool_rounds_used,
-                            "tool_calls_requested": tool_calls_requested,
-                            "tool_calls_executed": tool_calls_executed,
-                            "correction_retries_used": correction_retries_used,
-                            "assistant_text": assistant_text,
-                        },
-                        enabled=wrapper_eval_telemetry,
-                        model_context_limit=None,
-                        history_chars=post_compact_chars,
-                        tool_context_chars=tool_context_chars,
-                        truncated_history=history_truncated,
-                        truncated_tool_output=truncated_tool_output,
-                    )
                 continue
-
-            if forced_tool_for_step is not None:
-                retry_key = f"forced_{forced_tool_for_step}_missing"
-                if (
-                    retry_key not in retry_reminders_used
-                    and tool_rounds_used < max_tool_rounds
-                ):
-                    retry_reminders_used.add(retry_key)
-                    correction_retries_used += 1
-                    forced_next_tool_name = forced_tool_for_step
-                    agent.history.append({"role": "user", "content": _FORCED_CHANGE_GRAPH_REMINDER})
-                    logger.info(
-                        "forced_tool_retry tool=%s retries=%d message=%s",
-                        forced_tool_for_step,
-                        correction_retries_used,
-                        user_message[:80],
-                    )
-                    continue
-                assistant_text = (
-                    f"The model did not emit the required {forced_tool_for_step} "
-                    "tool call. No graph change was made."
-                )
-                agent.history[-1]["content"] = assistant_text
-                return _attach_context_budget_telemetry(
-                    {
-                        "ok": False,
-                        "model": resolved_model,
-                        "steps": assistant_turns,
-                        "tool_rounds_used": tool_rounds_used,
-                        "tool_calls_requested": tool_calls_requested,
-                        "tool_calls_executed": tool_calls_executed,
-                        "correction_retries_used": correction_retries_used,
-                        "assistant_text": assistant_text,
-                        "message": assistant_text,
-                        "error_type": ErrorCode.TOOL_CALL_INVALID,
-                    },
-                    enabled=wrapper_eval_telemetry,
-                    model_context_limit=None,
-                    history_chars=post_compact_chars,
-                    tool_context_chars=tool_context_chars,
-                    truncated_history=history_truncated,
-                    truncated_tool_output=truncated_tool_output,
-                )
 
             assistant_text = _resolve_final_assistant_text(agent.history, _message_text(assistant_message))
             agent.history[-1]["content"] = assistant_text
@@ -749,6 +666,7 @@ class ToolAgentsRunner:
                 change_graph_control_response=change_graph_control_response,
                 change_graph_wrong_insert_pending=change_graph_wrong_insert_pending,
                 change_graph_missing_evidence_pending=change_graph_missing_evidence_pending,
+                graph_ambiguity_pending=graph_ambiguity_pending,
             )
             retry_key = _retry_reminder_key(retry_reminder)
             if (
@@ -758,8 +676,7 @@ class ToolAgentsRunner:
             ):
                 retry_reminders_used.add(retry_key)
                 correction_retries_used += 1
-                forced_next_tool_name = _forced_tool_for_retry_reminder(retry_reminder)
-                agent.history.append({"role": "user", "content": retry_reminder})
+                pending_reminder = retry_reminder
                 logger.info(
                     "tool_evidence_retry retries=%d message=%s",
                     correction_retries_used,
@@ -804,7 +721,22 @@ def _tool_retry_reminder(
     change_graph_control_response: bool,
     change_graph_wrong_insert_pending: bool,
     change_graph_missing_evidence_pending: bool,
+    graph_ambiguity_pending: bool,
 ) -> str | None:
+    if (
+        graph_ambiguity_pending
+        and not change_graph_committed
+        and _looks_like_graph_mutation_request(user_message)
+        and _assistant_asks_for_clarification(assistant_text)
+    ):
+        return None
+    if (
+        tool_calls_executed > 0
+        and not change_graph_committed
+        and _looks_like_graph_mutation_request(user_message)
+        and _assistant_asks_for_clarification(assistant_text)
+    ):
+        return None
     if (
         change_graph_missing_evidence_pending
         and not change_graph_committed
@@ -830,6 +762,12 @@ def _tool_retry_reminder(
     ):
         return _MUTATION_NOT_COMMITTED_REMINDER
     if (
+        tool_calls_executed == 0
+        and _looks_like_graph_mutation_request(user_message)
+        and _assistant_asks_for_clarification(assistant_text)
+    ):
+        return _AGENTIC_TOOL_REMINDER
+    if (
         "change_graph" not in tool_names_requested
         and _looks_like_graph_mutation_request(user_message)
     ):
@@ -847,21 +785,29 @@ def _tool_retry_reminder(
     return None
 
 
-def _committed_change_text(result: dict[str, Any]) -> str:
-    lines = ["Committed the graph change and validated it successfully."]
-    effects = result.get("effects")
-    if isinstance(effects, list) and effects:
-        lines.append("Applied changes:")
-        lines.extend(f"- {effect}" for effect in effects[:6] if str(effect))
-    autosave = result.get("autosave")
-    if isinstance(autosave, dict):
-        if autosave.get("ok") is True:
-            path = autosave.get("path")
-            lines.append(f"Autosaved to {path}." if path else "Autosave succeeded.")
-        elif autosave.get("skipped") is not True:
-            message = autosave.get("message")
-            lines.append(f"Autosave failed: {message}" if message else "Autosave failed.")
-    return "\n".join(lines)
+def _is_ambiguous_tool_result(result: dict[str, Any]) -> bool:
+    ambiguity = result.get("ambiguity")
+    if isinstance(ambiguity, dict) and ambiguity.get("has_ambiguity") is True:
+        return True
+    for key in ("errors", "validation_errors"):
+        rows = result.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("code") or "").startswith("ambiguous"):
+                return True
+    return False
+
+
+def _assistant_asks_for_clarification(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "?" in text
+        or "please specify" in lowered
+        or "please provide" in lowered
+        or "which " in lowered
+        or "clarify" in lowered
+    )
 
 
 def _retry_reminder_key(reminder: str | None) -> str:
@@ -878,17 +824,6 @@ def _retry_reminder_key(reminder: str | None) -> str:
     if reminder == _WRONG_INSERT_REPAIR_REMINDER:
         return "wrong_insert_operation"
     return reminder
-
-
-def _forced_tool_for_retry_reminder(reminder: str | None) -> str | None:
-    if reminder in {
-        _MUTATION_TOOL_REMINDER,
-        _INVALID_CHANGE_GRAPH_REMINDER,
-        _MUTATION_NOT_COMMITTED_REMINDER,
-        _WRONG_INSERT_REPAIR_REMINDER,
-    }:
-        return "change_graph"
-    return None
 
 
 def _is_repairable_insert_in_connection_response(result: dict[str, Any]) -> bool:
@@ -942,14 +877,14 @@ def _is_missing_graph_evidence_response(result: dict[str, Any]) -> bool:
 
 
 def _is_terminal_change_graph_failure(result: dict[str, Any]) -> bool:
+    if result.get("ok") is True or result.get("committed") is True:
+        return False
     if _is_missing_graph_evidence_response(result):
         return False
     error_type = result.get("error_type")
     if error_type == ErrorCode.GNU_VALIDATION_FAILED and _has_clear_change_graph_repair(result):
         return False
     if error_type in {
-        ErrorCode.PREFLIGHT_REJECTED,
-        ErrorCode.GNU_VALIDATION_FAILED,
         ErrorCode.VALIDATION_ERROR,
         ErrorCode.VALIDATION_TIMEOUT,
         ErrorCode.STALE_REVISION,
@@ -962,7 +897,7 @@ def _is_terminal_change_graph_failure(result: dict[str, Any]) -> bool:
     if isinstance(validation_result, dict):
         status = str(validation_result.get("status") or "").lower()
         if status and status not in {"valid", "pass", "ok"}:
-            return True
+            return False
     return False
 
 
@@ -1303,6 +1238,24 @@ def _maybe_enable_wrapper_eval_telemetry(
 
 
 def _tool_failure_text(result: dict[str, Any]) -> str:
+    if _is_native_validation_refusal(result):
+        lines = [
+            "I attempted the requested edit, but did not commit it because "
+            "native GRC validation rejected the candidate graph."
+        ]
+        if result.get("graph_unchanged") is True:
+            lines.append("The graph is unchanged.")
+        else:
+            lines.append("No changes were committed.")
+        native_errors = _native_validation_errors_from_result(result)
+        if native_errors:
+            lines.append("Native GRC validation reported:")
+            lines.extend(f"- {error}" for error in native_errors[:3] if str(error))
+        lines.append(
+            "Please choose the intended next step: adjust related graph objects "
+            "to keep the graph valid, or explicitly force an invalid intermediate graph."
+        )
+        return "\n".join(lines)
     message = result.get("message")
     if isinstance(message, str) and message.strip():
         return message
@@ -1310,6 +1263,42 @@ def _tool_failure_text(result: dict[str, Any]) -> str:
     if isinstance(error_type, str) and error_type.strip():
         return f"Tool call failed: {error_type}."
     return "I could not complete that request with the available tools."
+
+
+def _is_native_validation_refusal(result: dict[str, Any]) -> bool:
+    return bool(
+        result.get("committed") is False
+        and (
+            result.get("rejected_phase") == "native_grc_validation"
+            or result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED
+        )
+    )
+
+
+def _native_validation_errors_from_result(result: dict[str, Any]) -> list[str]:
+    errors = _string_list(result.get("native_validation_errors"))
+    if errors:
+        return errors
+
+    for key in ("validation_result", "validation"):
+        validation = result.get(key)
+        if not isinstance(validation, dict):
+            continue
+        native = validation.get("native")
+        if isinstance(native, dict):
+            errors = _string_list(native.get("errors"))
+            if errors:
+                return errors
+        errors = _string_list(validation.get("errors"))
+        if errors:
+            return errors
+    return []
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _resolve_final_assistant_text(

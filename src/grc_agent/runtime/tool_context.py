@@ -275,7 +275,6 @@ def _compact_inspect_targets(targets: Any) -> list[dict[str, Any]]:
                     "instance_name": row.get("instance_name") or row.get("name"),
                     "block_type": row.get("block_type") or row.get("type"),
                     "label": row.get("catalog_label"),
-                    "target_ref": row.get("target_ref"),
                     "parameters": [
                         _compact_detail_param(param)
                         for param in _list(row.get("parameters"))
@@ -435,7 +434,9 @@ def _render_change_graph_result(
             "effect": compact.get("effect"),
             "effects": compact.get("effects"),
             "plan": compact.get("plan"),
-            "changed": compact.get("changed"),
+            "graph_unchanged": compact.get("graph_unchanged"),
+            "rollback": compact.get("rollback"),
+            "rejected_phase": compact.get("rejected_phase"),
             "needs": compact.get("needs"),
             "errors": compact.get("errors"),
             "native_errors": compact.get("native_errors"),
@@ -520,7 +521,14 @@ def _compact_change_graph(content: dict[str, Any]) -> dict[str, Any]:
         "needs": _compact_change_needs(content),
         "errors": _compact_error_rows(content.get("errors")),
         "validation_errors": _compact_error_rows(content.get("validation_errors")),
-        "native_errors": _compact_native_validation_errors(content.get("validation_result")),
+        "native_errors": _compact_native_validation_errors(
+            content.get("native_validation_errors")
+            if content.get("native_validation_errors")
+            else content.get("validation_result")
+        ),
+        "graph_unchanged": content.get("graph_unchanged"),
+        "rollback": content.get("rollback"),
+        "rejected_phase": content.get("rejected_phase"),
         "repair": _compact_schema_repair(content.get("schema_repair_instruction")),
     }
     return _drop_empty(result)
@@ -599,6 +607,8 @@ def _compact_schema_repair(value: Any) -> dict[str, Any]:
 
 
 def _compact_native_validation_errors(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [_short_text(str(error), 220) for error in value[:3] if str(error)]
     if not isinstance(value, dict):
         return []
     native = value.get("native")

@@ -24,6 +24,7 @@ class LlamaConfig:
     server_url: str
     model: str
     hf_model: str
+    model_path: str | None
     device: str
     gpu_layers: int
     desired_context_tokens: int
@@ -164,6 +165,7 @@ def default_app_config() -> AppConfig:
             server_url="http://127.0.0.1:8080",
             model="unsloth/gemma-4-E2B-it-GGUF",
             hf_model="unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL",
+            model_path=None,
             device="CUDA0",
             gpu_layers=999,
             desired_context_tokens=120000,
@@ -263,6 +265,12 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
             model=_require_non_empty_string(llama_table, "model", context="[llama]"),
             hf_model=_require_non_empty_string(
                 llama_table, "hf_model", context="[llama]"
+            ),
+            model_path=_optional_nullable_non_empty_string(
+                llama_table,
+                "model_path",
+                default=defaults.llama.model_path,
+                context="[llama]",
             ),
             device=_optional_non_empty_string(
                 llama_table,
@@ -419,6 +427,21 @@ def _optional_non_empty_string(
 ) -> str:
     if key not in payload:
         return default
+    return _require_non_empty_string(payload, key, context=context)
+
+
+def _optional_nullable_non_empty_string(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: str | None,
+    context: str,
+) -> str | None:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if value is None:
+        return None
     return _require_non_empty_string(payload, key, context=context)
 
 

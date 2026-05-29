@@ -145,22 +145,6 @@ class TransactionNormalizerGuardTests(unittest.TestCase):
         self.assertNotIn("instance_name", result)
         self.assertEqual(result["block_uid"], "block:not-a-mutation-handle")
 
-    def test_normalizer_does_not_synthesize_uid_target_ref(self) -> None:
-        normalizer = TransactionNormalizer()
-
-        result = normalizer.normalize_transaction_instance_names(
-            {
-                "op_type": "update_params",
-                "instance_name": "dup",
-                "block_uid": "block:0123456789abcdef",
-                "params": {"value": "1"},
-            }
-        )
-
-        self.assertEqual(result["instance_name"], "dup")
-        self.assertEqual(result["block_uid"], "block:0123456789abcdef")
-        self.assertNotIn("target_ref", result)
-
     def test_route_validation_does_not_mutate_or_normalize_operation(self) -> None:
         agent, session = _load_agent()
         before = _raw_snapshot(session)

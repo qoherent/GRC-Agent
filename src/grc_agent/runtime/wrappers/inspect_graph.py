@@ -248,11 +248,12 @@ def _details(
             )
             continue
         if match.status == "not_found" or match.block is None:
+            message = match.message or f"Target {requested_target!r} did not match any active block instance or connection in the graph."
+            message += f" If you want to search the catalog of available GNU Radio block types (e.g. to discover parameter IDs or block names like '{requested_target}'), you MUST use the 'search_blocks' tool instead."
             errors.append(
                 {
                     "code": "target_not_found",
-                    "message": match.message
-                    or f"Target {requested_target!r} did not match the active graph.",
+                    "message": message,
                 }
             )
             continue
@@ -574,11 +575,6 @@ def _block_details_row(
         _parameter_payload(candidate, variable_values=variable_values)
         for candidate in returned_candidates
     ]
-    target_ref = (
-        returned_candidates[0].target_ref
-        if returned_candidates
-        else _block_target_ref(block, state_revision=state_revision)
-    )
     available_param_count = len(candidates)
     returned_param_count = len(returned_candidates)
     omitted_param_count = max(0, len(selected_candidates) - returned_param_count)
@@ -593,7 +589,6 @@ def _block_details_row(
         "name": block.instance_name,
         "type": block.block_type,
         "catalog_label": _block_label(candidates),
-        "target_ref": target_ref,
     }
     if parameters:
         row["parameters"] = parameters
@@ -619,7 +614,6 @@ def _parameter_payload(
 ) -> dict[str, Any]:
     value = _compact_value(candidate.current_value)
     payload: dict[str, Any] = {
-        "param_id": candidate.param_key,
         "name": candidate.param_key,
         "label": candidate.param_label,
         "dtype": candidate.param_dtype,
@@ -646,15 +640,6 @@ def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:
         if block.block_type == "variable" or block.block_type.startswith("variable_"):
             values[block.instance_name] = params.get("value")
     return values
-
-
-def _block_target_ref(block: Block, *, state_revision: int) -> dict[str, Any]:
-    return {
-        "block_uid": block.block_uid,
-        "expected_instance_name": block.instance_name,
-        "expected_block_type": block.block_type,
-        "base_state_revision": state_revision,
-    }
 
 
 def _matched_param_requests(
@@ -826,8 +811,6 @@ def _overview_block_rows(
         row = {
             "instance_name": block.instance_name,
             "block_type": block.block_type,
-            "name": block.instance_name,
-            "type": block.block_type,
             "catalog_label": semantics.get("label"),
             "role": _block_role(
                 block,

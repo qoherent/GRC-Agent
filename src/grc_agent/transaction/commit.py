@@ -18,13 +18,15 @@ def build_apply_success_payload(
     affected_changes: AffectedChanges,
     state_revision_before: int,
     forced_validation_failure: bool = False,
+    validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public success payload for `apply_edit(...)`."""
+    validation_state = validation if validation is not None else session.validation_state()
     payload: dict[str, Any] = {
         "ok": True,
         "message": (
-            "change done, but validation error appeared: "
-            + _validation_error_summary(session.validation_state())
+            "Change committed with validation warnings: "
+            + _validation_error_summary(validation_state)
             if forced_validation_failure
             else "Applied transaction and validated the graph successfully."
         ),
@@ -33,7 +35,7 @@ def build_apply_success_payload(
         "commit_eligible": True,
         "path": str(session.path) if session.path is not None else None,
         "graph_id": session.graph_id(),
-        "validation": session.validation_state(),
+        "validation": validation_state,
         "normalized_operations": copy.deepcopy(normalized_operations),
         "warnings": copy.deepcopy(warnings),
         "warning_count": len(warnings),

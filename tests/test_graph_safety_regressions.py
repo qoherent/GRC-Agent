@@ -73,16 +73,19 @@ class GraphSafetyRegressionTests(unittest.TestCase):
         self.assertNotIn("strobe_0:strobe->debug_0:print", _connection_ids(reloaded))
         self.assertIn("strobe_0:strobe->pdu_0:generate", _connection_ids(reloaded))
 
-    def test_insert_in_connection_commits_valid_stream_insert_and_autosaves(self) -> None:
+    def test_insert_on_connection_using_primitives_succeeds(self) -> None:
+        """Block insertion on a stream connection using add_blocks + remove_connections + add_connections."""
         agent = self._load_temp_agent(RANDOM_FIXTURE)
         assert agent.session.path is not None
 
         result = agent.execute_tool(
             "change_graph",
             {
-                "insert_blocks_on_connections": [
+                "remove_connections": [
+                    "analog_random_source_x_0:0->blocks_throttle2_0:0"
+                ],
+                "add_blocks": [
                     {
-                        "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
                         "block_id": "blocks_throttle2",
                         "instance_name": "blocks_throttle2_inserted",
                         "params": {
@@ -90,7 +93,13 @@ class GraphSafetyRegressionTests(unittest.TestCase):
                             "type": "byte",
                         },
                     }
-                ]
+                ],
+                "add_connections": [
+                    {"src": {"block": "analog_random_source_x_0", "port": 0},
+                     "dst": {"block": "blocks_throttle2_inserted", "port": 0}},
+                    {"src": {"block": "blocks_throttle2_inserted", "port": 0},
+                     "dst": {"block": "blocks_throttle2_0", "port": 0}},
+                ],
             },
         )
 
@@ -116,76 +125,7 @@ class GraphSafetyRegressionTests(unittest.TestCase):
             _connection_ids(reloaded),
         )
 
-    def test_insert_in_connection_rejects_message_connection_without_mutation(self) -> None:
-        agent = _load_agent(MESSAGE_FIXTURE)
-        before_revision = agent.session.state_revision
-        before_ids = _connection_ids(agent.session)
 
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "insert_blocks_on_connections": [
-                    {
-                        "connection_id": "strobe_0:strobe->debug_0:print",
-                        "block_id": "blocks_copy",
-                        "instance_name": "blocks_copy_message",
-                        "params": {},
-                    }
-                ]
-            },
-        )
-
-        self.assertFalse(result.get("ok"), result)
-        self.assertFalse(result.get("committed"), result)
-        self.assertEqual(
-            result.get("errors", [{}])[0].get("code"),
-            "message_connection_not_supported",
-        )
-        self.assertEqual(agent.session.state_revision, before_revision)
-        self.assertEqual(_connection_ids(agent.session), before_ids)
-
-    def test_stale_target_ref_refuses_before_mutation(self) -> None:
-        agent = _load_agent(RANDOM_FIXTURE)
-        assert agent.session.flowgraph is not None
-        target = next(b for b in agent.session.flowgraph.blocks if b.instance_name == "samp_rate")
-        target_ref = {
-            "block_uid": target.block_uid,
-            "expected_instance_name": target.instance_name,
-            "expected_block_type": target.block_type,
-            "base_state_revision": agent.session.state_revision,
-        }
-        before_value = target.params["parameters"]["value"]
-
-        first = agent.execute_tool(
-            "change_graph",
-            {"update_params": [{"instance_name": "samp_rate", "params": {"value": "48000"}}]},
-        )
-        self.assertTrue(first.get("ok"), first)
-        # Dry-run must not stale the target ref; make a real in-memory revision change.
-        agent.session.set_param("samp_rate", "value", "32000")
-
-        stale = agent.execute_tool(
-            "change_graph",
-            {
-                "update_params": [
-                    {
-                        "instance_name": "samp_rate",
-                        "target_ref": target_ref,
-                        "params": {"value": "48000"},
-                    }
-                ]
-            },
-        )
-
-        self.assertFalse(stale.get("ok"), stale)
-        self.assertEqual(stale.get("error_type"), "preflight_rejected")
-        self.assertEqual(
-            next(
-                b for b in agent.session.flowgraph.blocks if b.instance_name == "samp_rate"
-            ).params["parameters"]["value"],
-            "32000",
-        )
-        self.assertNotEqual(before_value, "48000")
 
     def test_pending_clarification_invalid_and_custom_replies_do_not_mutate(self) -> None:
         agent = _load_agent(MESSAGE_FIXTURE)
@@ -241,7 +181,7 @@ class GraphSafetyRegressionTests(unittest.TestCase):
             ],
         ).to_dict()
         agent._store_pending_clarification(payload)
-        agent.session.set_param("samp_rate", "value", "32000")
+        agent.session.set_param("samp_rate", "value", "48000")
 
         expired = agent.resolve_pending_clarification("A")
 

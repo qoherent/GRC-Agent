@@ -31,6 +31,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
             server_url=f"http://127.0.0.1:{port}",
             model=model,
             hf_model="stub/model:Q4_K_M",
+            model_path=None,
             device="CUDA0",
             gpu_layers=999,
             desired_context_tokens=120000,
@@ -112,6 +113,46 @@ class LlamaServerLauncherTests(unittest.TestCase):
             self.assertIn("--gpu-layers\x00999", cmdline)
             self.assertEqual(second.status, "reused")
             self.assertEqual(second.pid, first.pid)
+
+    def test_launcher_uses_local_model_path_when_configured(self) -> None:
+        port = reserve_free_port()
+        config = LlamaConfig(
+            server_url=f"http://127.0.0.1:{port}",
+            model="test-llama-model",
+            hf_model="stub/model:Q4_K_M",
+            model_path="/tmp/text-only-model.gguf",
+            device="CUDA0",
+            gpu_layers=999,
+            desired_context_tokens=120000,
+            startup_timeout_seconds=5.0,
+            max_tokens=256,
+            max_tool_rounds=8,
+            temperature=0.0,
+            enable_thinking=False,
+            request_timeout_seconds=2.0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = Path(tmpdir)
+            write_stub_llama_server(temp_path)
+            launcher = LlamaServerLauncher(
+                config,
+                state_path=temp_path / "launcher-state.json",
+                log_dir=temp_path / "logs",
+            )
+            env = {"PATH": f"{temp_path}:{os.environ['PATH']}"}
+
+            with mock.patch.dict(os.environ, env, clear=False):
+                result = launcher.ensure_server_ready()
+                self.addCleanup(terminate_pid, result.pid)
+
+            assert result.pid is not None
+            cmdline = Path(f"/proc/{result.pid}/cmdline").read_bytes().decode(
+                "utf-8",
+                errors="ignore",
+            )
+            self.assertIn("-m\x00/tmp/text-only-model.gguf", cmdline)
+            self.assertNotIn("-hf\x00stub/model:Q4_K_M", cmdline)
 
     def test_launcher_fails_with_explicit_alias_mismatch(self) -> None:
         port = reserve_free_port()

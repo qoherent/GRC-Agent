@@ -408,7 +408,7 @@ class TransactionNormalizer:
             "Use the flat change_graph fields only. "
             "For parameter edits use update_params with instance_name and params. "
             "For block adds use add_blocks with block_id from search_blocks, instance_name, and params keyed by catalog param_id. "
-            "For insertion use insert_blocks_on_connections with connection_id, block_id, instance_name, and params. "
+            "For insertion use remove_connections + add_blocks + add_connections in a single batch. "
             "For connections use add_connections[].src/dst and remove_connections[] exact connection_id values."
         )
 

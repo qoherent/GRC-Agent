@@ -148,22 +148,14 @@ def _apply_update_params(
     block_type = operation.payload.get("block_type")
     params = operation.payload["params"]
 
-    if "target_ref" in operation.payload:
-        block, raw_block, _raw_index, issues = _require_block_target_ref(
-            snapshot,
-            operation,
-            op_index=op_index,
-            field="target_ref",
-        )
-    else:
-        block, raw_block, _raw_index, issues = _require_unique_block(
-            snapshot,
-            instance_name,
-            block_type=block_type,
-            op_index=op_index,
-            op_type=op_type,
-            field="instance_name",
-        )
+    block, raw_block, _raw_index, issues = _require_unique_block(
+        snapshot,
+        instance_name,
+        block_type=block_type,
+        op_index=op_index,
+        op_type=op_type,
+        field="instance_name",
+    )
     if issues:
         return issues, []
     assert block is not None
@@ -206,34 +198,6 @@ def _apply_update_params(
             )
         ], []
 
-    expected_params = operation.payload.get("expected_params")
-    if expected_params is not None:
-        if not isinstance(expected_params, dict):
-            return [
-                make_issue(
-                    op_index=op_index,
-                    op_type=op_type,
-                    field="expected_params",
-                    code="invalid_expected_params",
-                    message="expected_params must be a mapping when provided.",
-                )
-            ], []
-        for parameter_id, expected_value in expected_params.items():
-            current_value = raw_parameters.get(parameter_id)
-            if str(current_value) != str(expected_value):
-                return [
-                    make_issue(
-                        op_index=op_index,
-                        op_type=op_type,
-                        field=f"expected_params.{parameter_id}",
-                        code="expected_param_mismatch",
-                        message=(
-                            f"Current value for {instance_name}.{parameter_id} "
-                            f"does not match expected_old_value."
-                        ),
-                    )
-                ], []
-
     for parameter_id, value in params.items():
         raw_parameters[parameter_id] = copy.deepcopy(value)
     snapshot.refresh()
@@ -251,22 +215,14 @@ def _apply_update_states(
     block_type = operation.payload.get("block_type")
     state = operation.payload["state"]
 
-    if "target_ref" in operation.payload:
-        _block, raw_block, _raw_index, issues = _require_block_target_ref(
-            snapshot,
-            operation,
-            op_index=op_index,
-            field="target_ref",
-        )
-    else:
-        _block, raw_block, _raw_index, issues = _require_unique_block(
-            snapshot,
-            instance_name,
-            block_type=block_type,
-            op_index=op_index,
-            op_type=op_type,
-            field="instance_name",
-        )
+    _block, raw_block, _raw_index, issues = _require_unique_block(
+        snapshot,
+        instance_name,
+        block_type=block_type,
+        op_index=op_index,
+        op_type=op_type,
+        field="instance_name",
+    )
     if issues:
         return issues, []
     assert raw_block is not None
@@ -646,22 +602,14 @@ def _apply_remove_block(
     instance_name = operation.payload["instance_name"]
     block_type = operation.payload.get("block_type")
 
-    if "target_ref" in operation.payload:
-        block, _raw_block, raw_index, issues = _require_block_target_ref(
-            snapshot,
-            operation,
-            op_index=op_index,
-            field="target_ref",
-        )
-    else:
-        block, _raw_block, raw_index, issues = _require_unique_block(
-            snapshot,
-            instance_name,
-            block_type=block_type,
-            op_index=op_index,
-            op_type=op_type,
-            field="instance_name",
-        )
+    block, _raw_block, raw_index, issues = _require_unique_block(
+        snapshot,
+        instance_name,
+        block_type=block_type,
+        op_index=op_index,
+        op_type=op_type,
+        field="instance_name",
+    )
     if issues:
         return issues, []
     assert block is not None
@@ -999,6 +947,34 @@ def _apply_add_connection(
         and destination_port.dtype is not None
         and source_port.dtype != destination_port.dtype
     ):
+        specific_hint = _preflight_dtype_param_hint(
+            dst_block,
+            port_direction="inputs",
+            port_id=dst_port,
+            desired_dtype=source_port.dtype,
+            catalog_root=catalog_root,
+        )
+        if not specific_hint:
+            specific_hint = _preflight_dtype_param_hint(
+                src_block,
+                port_direction="outputs",
+                port_id=src_port,
+                desired_dtype=destination_port.dtype,
+                catalog_root=catalog_root,
+            )
+        if specific_hint:
+            hint_text = (
+                f"Ensure both blocks are configured with matching IO/parameter types (e.g., "
+                f"{specific_hint} to match the data type of the connection), or insert an "
+                f"appropriate block from Type Converters between these ports."
+            )
+        else:
+            hint_text = (
+                "Ensure both blocks are configured with matching IO/parameter types "
+                "(e.g., set the 'type' parameter of the filter/source/sink to match "
+                "the data type of the connection), or insert an appropriate block from "
+                "Type Converters between these ports."
+            )
         return [
             make_issue(
                 op_index=op_index,
@@ -1010,9 +986,7 @@ def _apply_add_connection(
                     f"({source_port.dtype}) to {format_endpoint(dst_block_name, dst_port)} "
                     f"({destination_port.dtype})."
                 ),
-                hint=(
-                    "Insert an appropriate block from Type Converters between these ports."
-                ),
+                hint=hint_text,
             )
         ], warnings
 
@@ -1361,160 +1335,6 @@ def _require_unique_block(
     return parsed_matches[0], raw_entry, raw_index, []
 
 
-def _require_block_target_ref(
-    snapshot: SessionSnapshot,
-    operation: ValidationOperation,
-    *,
-    op_index: int,
-    field: str,
-) -> tuple[Block | None, dict[str, Any] | None, int | None, list[ValidationIssue]]:
-    op_type = operation.op_type
-    target_ref = operation.payload.get("target_ref")
-    if not isinstance(target_ref, dict):
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field=field,
-                code="invalid_target_ref",
-                message="target_ref must be a mapping.",
-            )
-        ]
-
-    block_uid = target_ref.get("block_uid")
-    expected_name = target_ref.get("expected_instance_name")
-    expected_type = target_ref.get("expected_block_type")
-    base_revision = target_ref.get("base_state_revision")
-    if not isinstance(block_uid, str) or not _is_full_block_uid(block_uid):
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.block_uid",
-                code="invalid_block_uid",
-                message="target_ref.block_uid must be a full block_uid value.",
-            )
-        ]
-    if not isinstance(expected_name, str) or not expected_name.strip():
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.expected_instance_name",
-                code="invalid_target_ref",
-                message="target_ref.expected_instance_name must be a non-empty string.",
-            )
-        ]
-    if not isinstance(expected_type, str) or not expected_type.strip():
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.expected_block_type",
-                code="invalid_target_ref",
-                message="target_ref.expected_block_type must be a non-empty string.",
-            )
-        ]
-    if not isinstance(base_revision, int) or isinstance(base_revision, bool):
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.base_state_revision",
-                code="invalid_target_ref",
-                message="target_ref.base_state_revision must be the integer state_revision.",
-            )
-        ]
-    if snapshot.state_revision is None or base_revision != snapshot.state_revision:
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.base_state_revision",
-                code="stale_state_revision",
-                message="target_ref.base_state_revision is stale for the current graph.",
-            )
-        ]
-
-    parsed_matches = [
-        (index, block)
-        for index, block in enumerate(snapshot.blocks)
-        if block.block_uid == block_uid
-    ]
-    if len(parsed_matches) != 1:
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.block_uid",
-                code="block_uid_not_found",
-                message=f"block_uid did not resolve to exactly one current block: {block_uid}",
-            )
-        ]
-
-    raw_blocks = snapshot.raw_blocks()
-    parsed_index, block = parsed_matches[0]
-    raw_block = raw_blocks[parsed_index] if parsed_index < len(raw_blocks) else None
-    if not isinstance(raw_block, dict):
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.block_uid",
-                code="block_uid_not_found",
-                message=f"block_uid raw block mapping is unavailable: {block_uid}",
-            )
-        ]
-
-    if block.instance_name != expected_name:
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.expected_instance_name",
-                code="block_uid_instance_mismatch",
-                message="target_ref.expected_instance_name does not match the resolved block.",
-            )
-        ]
-    if block.block_type != expected_type:
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="target_ref.expected_block_type",
-                code="block_uid_type_mismatch",
-                message="target_ref.expected_block_type does not match the resolved block.",
-            )
-        ]
-
-    explicit_name = operation.payload.get("instance_name")
-    explicit_type = operation.payload.get("block_type")
-    if isinstance(explicit_name, str) and explicit_name and explicit_name != block.instance_name:
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="instance_name",
-                code="block_uid_instance_mismatch",
-                message="instance_name does not match target_ref.",
-            )
-        ]
-    if isinstance(explicit_type, str) and explicit_type and explicit_type != block.block_type:
-        return None, None, None, [
-            make_issue(
-                op_index=op_index,
-                op_type=op_type,
-                field="block_type",
-                code="block_uid_type_mismatch",
-                message="block_type does not match target_ref.",
-            )
-        ]
-
-    operation.payload["instance_name"] = block.instance_name
-    operation.payload["block_type"] = block.block_type
-    return block, raw_block, parsed_index, []
-
-
 def _is_full_block_uid(value: str) -> bool:
     if not value.startswith("block:") or len(value) != len("block:") + 16:
         return False
@@ -1614,7 +1434,7 @@ def _assert_new_block_name_available(
                 op_type=op_type,
                 field="instance_name",
                 code="duplicate_block_name",
-                message=f"Block already exists: {instance_name}",
+                message=f"Block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.",
             )
         ]
 
@@ -1628,7 +1448,7 @@ def _assert_new_block_name_available(
                 op_type=op_type,
                 field="instance_name",
                 code="duplicate_block_name",
-                message=f"Raw block already exists: {instance_name}",
+                message=f"Raw block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.",
             )
         ]
     return []
@@ -1713,3 +1533,85 @@ def _validate_enabled_symbol_uniqueness(
         code="duplicate_enabled_symbol_id",
         message=f"Enabled block name is not unique: {duplicates[0]}",
     )
+
+
+def _preflight_dtype_param_hint(
+    block: Block,
+    *,
+    port_direction: str,
+    port_id: Any,
+    desired_dtype: str,
+    catalog_root: str | Path | None = None,
+) -> str | None:
+    import re
+    from .rules import build_parameter_context, _resolve_port_multiplicity
+
+    block_type = block.block_type
+    instance_name = block.instance_name
+    rules_lookup = get_block_rules(block_type, catalog_root=catalog_root)
+    if not rules_lookup.ok or rules_lookup.rules is None:
+        return None
+    rules = rules_lookup.rules
+
+    ports_list = rules.inputs if port_direction == "inputs" else rules.outputs
+    if not isinstance(ports_list, (list, tuple)):
+        return None
+
+    try:
+        port_idx = int(port_id)
+    except (ValueError, TypeError):
+        return None
+
+    context = build_parameter_context(block.params, block_rules=rules)
+    current_idx = 0
+    port_rule = None
+    for rule in ports_list:
+        multiplicity = _resolve_port_multiplicity(rule.multiplicity, context)
+        if multiplicity is None:
+            multiplicity = 1
+        if multiplicity < 0:
+            multiplicity = 0
+        if current_idx <= port_idx < current_idx + multiplicity:
+            port_rule = rule
+            break
+        current_idx += multiplicity
+
+    if port_rule is None and len(ports_list) == 1:
+        port_rule = ports_list[0]
+
+    if port_rule is None:
+        return None
+
+    dtype = port_rule.dtype
+    if not isinstance(dtype, str):
+        return None
+
+    match_id = re.search(r"\$\{\s*([A-Za-z_][A-Za-z0-9_]*)", dtype.strip())
+    param_id = match_id.group(1) if match_id else None
+    if param_id is None:
+        return None
+
+    param_rule = rules.parameters.get(param_id)
+    if param_rule is None:
+        return None
+
+    options = param_rule.options
+    suggested_val = None
+    if isinstance(options, (list, tuple)):
+        if desired_dtype in {str(option) for option in options}:
+            suggested_val = desired_dtype
+        else:
+            match_attr = re.search(r"\$\{\s*[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)", dtype.strip())
+            attr = match_attr.group(1) if match_attr else None
+            option_attributes = param_rule.option_attributes
+            if attr and isinstance(option_attributes, dict):
+                attrs = option_attributes.get(attr)
+                if isinstance(attrs, (list, tuple)):
+                    matching = [options[i] for i, val in enumerate(attrs) if str(val) == desired_dtype and i < len(options)]
+                    if matching:
+                        suggested_val = matching[0]
+
+    if suggested_val is None:
+        return None
+
+    return f"set the '{param_id}' parameter of '{instance_name}' to '{suggested_val}'"

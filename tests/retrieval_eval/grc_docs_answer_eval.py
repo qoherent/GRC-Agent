@@ -652,7 +652,7 @@ def run_eval(
 def _avg_answer_chars(rows: list[EvalRow], agent: GrcAgent) -> int:
     lengths: list[int] = []
     for row in rows[: min(len(rows), 20)]:
-        result = agent.execute_tool("ask_grc_docs", {"question": row.question, "k": 3})
+        result = agent.execute_tool("ask_grc_docs", {"question": row.question})
         answer = str(result.get("answer") or "")
         lengths.append(len(answer))
     return int(sum(lengths) / len(lengths)) if lengths else 0

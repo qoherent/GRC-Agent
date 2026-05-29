@@ -212,18 +212,6 @@ def duplicate_block_clarification_payload(
         transaction = copy.deepcopy(operation)
         if block_types_are_unique:
             transaction["block_type"] = block_type
-        else:
-            block_uid = candidate.get("block_uid")
-            if not isinstance(block_uid, str) or not block_uid:
-                return None
-            transaction.pop("instance_name", None)
-            transaction.pop("block_type", None)
-            transaction["target_ref"] = {
-                "block_uid": block_uid,
-                "expected_instance_name": instance_name,
-                "expected_block_type": block_type,
-                "base_state_revision": revision,
-            }
         options.append(
             ClarificationOption(
                 label=label,

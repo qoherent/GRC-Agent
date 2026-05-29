@@ -69,38 +69,17 @@ def apply_operations(
             instance_name = operation["instance_name"]
             affected_blocks.add(instance_name)
             for parameter_key, value in operation["params"].items():
-                target_ref = operation.get("target_ref")
-                if isinstance(target_ref, dict):
-                    session.set_param_by_uid(
-                        target_ref["block_uid"],
-                        parameter_key,
-                        copy.deepcopy(value),
-                        expected_instance_name=target_ref["expected_instance_name"],
-                        expected_block_type=target_ref["expected_block_type"],
-                    )
-                else:
-                    session.set_param(
-                        instance_name,
-                        parameter_key,
-                        copy.deepcopy(value),
-                        block_type=block_type,
-                    )
+                session.set_param(
+                    instance_name,
+                    parameter_key,
+                    copy.deepcopy(value),
+                    block_type=block_type,
+                )
             continue
 
         if op_type == "update_states":
             instance_name = operation["instance_name"]
-            target_ref = operation.get("target_ref")
-            if isinstance(target_ref, dict):
-                session.set_block_state_by_uid(
-                    target_ref["block_uid"],
-                    operation["state"],
-                    expected_instance_name=target_ref["expected_instance_name"],
-                    expected_block_type=target_ref["expected_block_type"],
-                )
-            else:
-                session.set_block_state(
-                    instance_name, operation["state"], block_type=block_type
-                )
+            session.set_block_state(instance_name, operation["state"], block_type=block_type)
             affected_blocks.add(instance_name)
             continue
 
@@ -130,15 +109,7 @@ def apply_operations(
 
         if op_type == "remove_block":
             instance_name = operation["instance_name"]
-            target_ref = operation.get("target_ref")
-            if isinstance(target_ref, dict):
-                session.remove_block_by_uid(
-                    target_ref["block_uid"],
-                    expected_instance_name=target_ref["expected_instance_name"],
-                    expected_block_type=target_ref["expected_block_type"],
-                )
-            else:
-                session.remove_block(instance_name, block_type=block_type)
+            session.remove_block(instance_name, block_type=block_type)
             affected_blocks.add(instance_name)
             continue
 

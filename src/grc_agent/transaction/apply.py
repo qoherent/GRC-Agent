@@ -67,7 +67,14 @@ def apply_edit(
                 error_type=ErrorCode.GNU_VALIDATION_FAILED,
             )
 
-        if not candidate.validate() and not force_validation:
+        candidate_valid = candidate.validate()
+        final_validation = candidate.validation_state()
+        if native_validation.get("valid") is False:
+            final_validation = {
+                **final_validation,
+                "native": native_validation,
+            }
+        if not candidate_valid and not force_validation:
             error_type = (
                 ErrorCode.VALIDATION_TIMEOUT
                 if candidate.last_validation_returncode == -2
@@ -113,4 +120,5 @@ def apply_edit(
         affected_changes=affected_changes,
         state_revision_before=state_revision_before,
         forced_validation_failure=forced_validation_failure,
+        validation=final_validation if forced_validation_failure else None,
     )

@@ -747,8 +747,12 @@ class GrcAgent:
             kwargs,
             model_tool_call=model_tool_call,
         )
+        validation_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k != "view"
+        }
         validation_error = validate_runtime_tool_call(
-            tool_name, kwargs, self._tool_schema_map
+            tool_name, validation_kwargs, self._tool_schema_map
         )
         if validation_error is None:
             return None
@@ -1059,11 +1063,12 @@ class GrcAgent:
                     }
                 )
 
-    def get_model_messages(self) -> list[HistoryEntry]:
+    def get_model_messages(self, *, reminder: str | None = None) -> list[HistoryEntry]:
         return render_model_messages(
             self.history,
             system_prompt_provider=self.get_system_prompt,
             semantic_search_result_preview=self._semantic_search_result_preview,
+            reminder=reminder,
         )
 
     # ------------------------------------------------------------------- #
@@ -1890,8 +1895,6 @@ class GrcAgent:
         update_states: list[Any] | None = None,
         add_connections: list[Any] | None = None,
         remove_connections: list[Any] | None = None,
-        rewire_connections: list[Any] | None = None,
-        insert_blocks_on_connections: list[Any] | None = None,
         add_variables: list[Any] | None = None,
         update_variables: list[Any] | None = None,
         remove_variables: list[Any] | None = None,
@@ -1906,8 +1909,6 @@ class GrcAgent:
             update_states=update_states,
             add_connections=add_connections,
             remove_connections=remove_connections,
-            rewire_connections=rewire_connections,
-            insert_blocks_on_connections=insert_blocks_on_connections,
             add_variables=add_variables,
             update_variables=update_variables,
             remove_variables=remove_variables,
@@ -2495,6 +2496,14 @@ class GrcAgent:
                 "error_type": "SAVE_PATH_REQUIRED",
                 "message": "Autosave skipped because this graph has no file path.",
             }
+        if not self.session.is_dirty:
+            return {
+                "ok": True,
+                "skipped": True,
+                "path": str(self.session.path),
+                "dirty": False,
+                "message": "Autosave skipped because graph is unchanged.",
+            }
         save_result = self._save_graph(allow_invalid=allow_invalid)
         return {
             "ok": save_result.get("ok") is True,
@@ -2533,7 +2542,24 @@ class GrcAgent:
             )
             result["autosave"] = autosave
             if autosave.get("ok"):
-                if result.get("forced_validation_failure"):
+                if autosave.get("skipped") and not result.get("dirty"):
+                    msg = "already set to target values; graph unchanged."
+                    hint = "The requested changes are already applied. Graph unchanged."
+                    if isinstance(result.get("normalized_operations"), list) and len(result["normalized_operations"]) == 1:
+                        op = result["normalized_operations"][0]
+                        if op.get("op_type") == "update_states":
+                            state = op.get("state")
+                            msg = f"already {state}; graph unchanged."
+                            hint = f"Block already {state}. Graph unchanged."
+                        elif op.get("op_type") == "update_params":
+                            params = op.get("params")
+                            if isinstance(params, dict) and len(params) == 1:
+                                val = list(params.values())[0]
+                                msg = f"already {val}; graph unchanged."
+                                hint = f"Parameter already set to {val}. Graph unchanged."
+                    result["message"] = msg
+                    result["hint"] = hint
+                elif result.get("forced_validation_failure"):
                     result["hint"] = (
                         "Edit applied and autosaved, but validation failed. "
                         "Do not repeat the same change; continue repairing the graph."

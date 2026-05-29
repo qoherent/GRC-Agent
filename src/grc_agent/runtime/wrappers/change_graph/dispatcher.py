@@ -45,8 +45,6 @@ _FLAT_BATCH_FIELDS = {
     "update_states",
     "add_connections",
     "remove_connections",
-    "rewire_connections",
-    "insert_blocks_on_connections",
     "add_variables",
     "update_variables",
     "remove_variables",
@@ -67,8 +65,6 @@ def dispatch_flat_change_graph_batch(
     update_states: Any = None,
     add_connections: Any = None,
     remove_connections: Any = None,
-    rewire_connections: Any = None,
-    insert_blocks_on_connections: Any = None,
     add_variables: Any = None,
     update_variables: Any = None,
     remove_variables: Any = None,
@@ -97,6 +93,7 @@ def dispatch_flat_change_graph_batch(
             output_truncated=False,
         )
 
+    before_graph_id = agent.session.graph_id()
     file_integrity = agent.session.file_integrity_state()
     if file_integrity.get("externally_modified"):
         stale_result = agent._payload_result(
@@ -134,8 +131,6 @@ def dispatch_flat_change_graph_batch(
         update_states=update_states,
         add_connections=add_connections,
         remove_connections=remove_connections,
-        rewire_connections=rewire_connections,
-        insert_blocks_on_connections=insert_blocks_on_connections,
         add_variables=add_variables,
         update_variables=update_variables,
         remove_variables=remove_variables,
@@ -209,6 +204,27 @@ def dispatch_flat_change_graph_batch(
             payload["warnings"] = copy.deepcopy(warnings)
         if not ok:
             payload["planned_operations"] = copy.deepcopy(normalized_operations)
+            after_graph_id = agent.session.graph_id()
+            graph_unchanged = (
+                after_graph_id == before_graph_id
+                and agent.session.state_revision == before_revision
+                and agent.session.is_dirty == before_dirty
+            )
+            payload["graph_unchanged"] = graph_unchanged
+            payload["rollback"] = "complete" if graph_unchanged else "unknown"
+            if result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED:
+                payload["rejected_phase"] = "native_grc_validation"
+                payload["message"] = (
+                    "Candidate graph rejected by native GRC validation; "
+                    "no changes committed."
+                )
+            native_errors = (
+                _native_validation_error_text(validation_result)
+                if isinstance(validation_result, dict)
+                else []
+            )
+            if native_errors:
+                payload["native_validation_errors"] = native_errors
             hint = (
                 _repair_hint_for_validation_failure(
                     normalized_operations,
@@ -241,18 +257,12 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
     added_block_aliases: dict[str, str | None] = {}
 
     remove_connections = _as_list(batches.get("remove_connections"), "remove_connections", errors)
-    rewire_connections = _as_list(batches.get("rewire_connections"), "rewire_connections", errors)
     remove_blocks = _as_list(batches.get("remove_blocks"), "remove_blocks", errors)
     add_blocks = _as_list(batches.get("add_blocks"), "add_blocks", errors)
     add_variables = _as_list(batches.get("add_variables"), "add_variables", errors)
     update_params = _as_list(batches.get("update_params"), "update_params", errors)
     update_variables = _as_list(batches.get("update_variables"), "update_variables", errors)
     update_states = _as_list(batches.get("update_states"), "update_states", errors)
-    insert_blocks = _as_list(
-        batches.get("insert_blocks_on_connections"),
-        "insert_blocks_on_connections",
-        errors,
-    )
     add_connections = _as_list(batches.get("add_connections"), "add_connections", errors)
     remove_variables = _as_list(batches.get("remove_variables"), "remove_variables", errors)
 
@@ -265,38 +275,6 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
             errors.append(f"remove_connections[{index}] must be a connection_id string.")
             continue
         _append_remove_connection(operations, removed_connection_ids, connection_id, errors, f"remove_connections[{index}]")
-
-    for index, item in enumerate(rewire_connections):
-        if not isinstance(item, dict):
-            errors.append(f"rewire_connections[{index}] must be an object.")
-            continue
-        connection_id = _required_string(item, "connection_id", f"rewire_connections[{index}]", errors)
-        parsed = parse_connection_id(connection_id) if connection_id is not None else None
-        if parsed is None:
-            errors.append(f"rewire_connections[{index}].connection_id is invalid or missing.")
-            continue
-        src_block, src_port, dst_block, dst_port = parsed
-        new_src = item.get("new_src")
-        new_dst = item.get("new_dst")
-        parsed_new_src = _parse_transaction_endpoint(new_src) if new_src is not None else None
-        parsed_new_dst = _parse_transaction_endpoint(new_dst) if new_dst is not None else None
-        if (parsed_new_src is None) == (parsed_new_dst is None):
-            errors.append(f"rewire_connections[{index}] requires exactly one of new_src or new_dst.")
-            continue
-        _append_remove_connection(operations, removed_connection_ids, connection_id, errors, f"rewire_connections[{index}]")
-        if parsed_new_src is not None:
-            src_block, src_port = parsed_new_src
-        if parsed_new_dst is not None:
-            dst_block, dst_port = parsed_new_dst
-        operations.append(
-            {
-                "op_type": "add_connection",
-                "src_block": src_block,
-                "src_port": src_port,
-                "dst_block": dst_block,
-                "dst_port": dst_port,
-            }
-        )
 
     for index, item in enumerate(remove_blocks):
         op = _remove_block_operation(item, index=index, field_name="remove_blocks", errors=errors)
@@ -399,47 +377,12 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
             "block_type": "variable",
             "params": {"value": copy.deepcopy(item["value"])},
         }
-        if "expected_value" in item:
-            op["expected_params"] = {"value": copy.deepcopy(item["expected_value"])}
         operations.append(op)
 
     for index, item in enumerate(update_states):
         op = _update_state_operation(item, index=index, field_name="update_states", errors=errors)
         if op is not None:
             operations.append(op)
-
-    for index, item in enumerate(insert_blocks):
-        if not isinstance(item, dict):
-            errors.append(f"insert_blocks_on_connections[{index}] must be an object.")
-            continue
-        connection_id = _required_string(
-            item,
-            "connection_id",
-            f"insert_blocks_on_connections[{index}]",
-            errors,
-        )
-        block_id = _required_string(item, "block_id", f"insert_blocks_on_connections[{index}]", errors)
-        instance_name = _required_string(
-            item,
-            "instance_name",
-            f"insert_blocks_on_connections[{index}]",
-            errors,
-        )
-        if connection_id is None or block_id is None or instance_name is None:
-            continue
-        params = item.get("params", {})
-        if not isinstance(params, dict):
-            errors.append(f"insert_blocks_on_connections[{index}].params must be an object when provided.")
-            continue
-        operations.append(
-            {
-                "op_type": "insert_block_on_connection",
-                "connection_id": connection_id,
-                "block_type": block_id,
-                "instance_name": instance_name,
-                "params": copy.deepcopy(params),
-            }
-        )
 
     for index, item in enumerate(add_connections):
         if not isinstance(item, dict):
@@ -498,15 +441,28 @@ def _repair_hint_for_validation_failure(
     native_errors = _native_validation_error_text(validation_result)
     if not native_errors:
         return None
+    # Check for invalid parameter expressions in native errors
+    param_pattern = re.compile(r"Param - [^(]+\(([^)]+)\):\s*Expression[\s\S]*?is\s+invalid", re.IGNORECASE)
+    for error in native_errors:
+        param_match = param_pattern.search(error)
+        if param_match:
+            param_name = param_match.group(1)
+            return (
+                f"No change committed; graph unchanged. Native GNU validation error: "
+                f"The parameter '{param_name}' has an invalid or missing value. "
+                f"Please specify a valid value for '{param_name}' in your parameter dictionary."
+            )
+
     dtype_pair = _first_dtype_mismatch(native_errors)
     if dtype_pair is None:
         return (
-            "Native GNU validation failed: "
-            f"{native_errors[0]} Retry only after fixing the candidate edit."
+            "No change committed; graph unchanged. Native GNU validation error: "
+            f"{native_errors[0]} Ask the user for the intended valid edit or explicit force."
         )
     source_dtype, destination_dtype = dtype_pair
     param_hint = _configurable_dtype_param_hint(
         operations,
+        native_errors=native_errors,
         source_dtype=source_dtype,
         destination_dtype=destination_dtype,
     )
@@ -543,6 +499,7 @@ def _first_dtype_mismatch(errors: list[str]) -> tuple[str, str] | None:
 def _configurable_dtype_param_hint(
     operations: list[dict[str, Any]],
     *,
+    native_errors: list[str],
     source_dtype: str,
     destination_dtype: str,
 ) -> str | None:
@@ -550,9 +507,53 @@ def _configurable_dtype_param_hint(
         str(op.get("instance_name")): op
         for op in operations
         if isinstance(op, dict)
-        and op.get("op_type") == "add_block"
+        and op.get("op_type") in {"add_block", "insert_block_on_connection"}
         and isinstance(op.get("instance_name"), str)
     }
+    if not added_blocks:
+        return None
+
+    block_pat = re.compile(
+        r"Block - ([a-zA-Z0-9_]+) - [^(]+\([^)]+\)\s+(Source|Sink) - ([a-zA-Z0-9_]+)\((\d+)\)"
+    )
+    type_pat = re.compile(
+        r"Source IO type \"([^\"]+)\" does not match sink IO type \"([^\"]+)\""
+    )
+
+    for error in native_errors:
+        block_matches = block_pat.findall(error)
+        type_match = type_pat.search(error)
+        if len(block_matches) == 2 and type_match:
+            src_name, src_dir, src_port, src_idx_str = block_matches[0]
+            dst_name, dst_dir, dst_port, dst_idx_str = block_matches[1]
+            src_idx = int(src_idx_str)
+            dst_idx = int(dst_idx_str)
+            src_dt = type_match.group(1)
+            dst_dt = type_match.group(2)
+
+            if dst_name in added_blocks:
+                hint = _dtype_param_hint_for_added_block(
+                    added_blocks[dst_name],
+                    port_direction="inputs",
+                    port_id=dst_idx,
+                    desired_dtype=src_dt,
+                    mismatch=f"{src_dt} -> {dst_dt}",
+                )
+                if hint:
+                    return hint
+
+            if src_name in added_blocks:
+                hint = _dtype_param_hint_for_added_block(
+                    added_blocks[src_name],
+                    port_direction="outputs",
+                    port_id=src_idx,
+                    desired_dtype=dst_dt,
+                    mismatch=f"{src_dt} -> {dst_dt}",
+                )
+                if hint:
+                    return hint
+
+    # Fallback to the original logic
     for operation in operations:
         if not isinstance(operation, dict) or operation.get("op_type") != "add_connection":
             continue
@@ -605,16 +606,40 @@ def _dtype_param_hint_for_added_block(
         return None
     param = _catalog_param(catalog.get("parameters"), param_id)
     options = param.get("options") if isinstance(param, dict) else None
-    if isinstance(options, list) and desired_dtype not in {str(option) for option in options}:
+
+    suggested_val = None
+    if isinstance(options, list):
+        if desired_dtype in {str(option) for option in options}:
+            suggested_val = desired_dtype
+        else:
+            attr = _template_param_attr(dtype)
+            option_attributes = param.get("option_attributes") if isinstance(param, dict) else None
+            if attr and isinstance(option_attributes, dict):
+                attrs = option_attributes.get(attr)
+                if isinstance(attrs, list):
+                    matching = [options[i] for i, val in enumerate(attrs) if str(val) == desired_dtype and i < len(options)]
+                    if matching:
+                        suggested_val = matching[0]
+
+    if suggested_val is None:
         return None
-    existing_params = operation.get("parameters")
-    if isinstance(existing_params, dict) and str(existing_params.get(param_id)) == desired_dtype:
+
+    existing_params = operation.get("parameters") or operation.get("params")
+    if isinstance(existing_params, dict) and str(existing_params.get(param_id)) == suggested_val:
         return None
+    op_type = operation.get("op_type")
+    if op_type == "insert_block_on_connection":
+        return (
+            f"Native GNU validation found a stream dtype mismatch ({mismatch}). "
+            f"The newly inserted `{instance_name}` uses catalog param `{param_id}` "
+            f"for its {port_direction[:-1]} dtype; retry with "
+            f"add_blocks[].params.{param_id}=\"{suggested_val}\"."
+        )
     return (
         f"Native GNU validation found a stream dtype mismatch ({mismatch}). "
         f"The newly added `{instance_name}` uses catalog param `{param_id}` "
         f"for its {port_direction[:-1]} dtype; retry with "
-        f"add_blocks[].params.{param_id}=\"{desired_dtype}\"."
+        f"add_blocks[].params.{param_id}=\"{suggested_val}\"."
     )
 
 
@@ -640,7 +665,14 @@ def _catalog_param(params: Any, param_id: str) -> dict[str, Any]:
 def _template_param_id(dtype: Any) -> str | None:
     if not isinstance(dtype, str):
         return None
-    match = re.fullmatch(r"\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}", dtype.strip())
+    match = re.search(r"\$\{\s*([A-Za-z_][A-Za-z0-9_]*)", dtype.strip())
+    return match.group(1) if match else None
+
+
+def _template_param_attr(dtype: Any) -> str | None:
+    if not isinstance(dtype, str):
+        return None
+    match = re.search(r"\$\{\s*[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)", dtype.strip())
     return match.group(1) if match else None
 
 
@@ -722,18 +754,13 @@ def _remove_block_operation(
     if not isinstance(item, dict):
         errors.append(f"{field_name}[{index}] must be a block name or object.")
         return None
-    target_ref = item.get("target_ref")
     instance_name = item.get("instance_name")
     block_id = item.get("block_id")
     op: dict[str, Any] = {"op_type": "remove_block"}
-    if isinstance(target_ref, dict) and target_ref:
-        op["target_ref"] = copy.deepcopy(target_ref)
-        if isinstance(target_ref.get("expected_instance_name"), str):
-            op["instance_name"] = target_ref["expected_instance_name"]
-    elif isinstance(instance_name, str) and instance_name.strip():
+    if isinstance(instance_name, str) and instance_name.strip():
         op["instance_name"] = instance_name.strip()
     else:
-        errors.append(f"{field_name}[{index}] requires instance_name or target_ref.")
+        errors.append(f"{field_name}[{index}] requires instance_name.")
         return None
     block_id = _optional_catalog_block_id(block_id)
     if block_id is not None:
@@ -759,23 +786,13 @@ def _update_params_operation(
         "op_type": "update_params",
         "params": copy.deepcopy(params),
     }
-    target_ref = item.get("target_ref")
-    if isinstance(target_ref, dict) and target_ref:
-        op["target_ref"] = copy.deepcopy(target_ref)
-    else:
-        instance_name = _required_string(item, "instance_name", f"{field_name}[{index}]", errors)
-        if instance_name is None:
-            return None
-        op["instance_name"] = instance_name
+    instance_name = _required_string(item, "instance_name", f"{field_name}[{index}]", errors)
+    if instance_name is None:
+        return None
+    op["instance_name"] = instance_name
     block_id = _optional_catalog_block_id(item.get("block_id"))
     if block_id is not None:
         op["block_type"] = block_id
-    expected_params = item.get("expected_params")
-    if expected_params is not None:
-        if not isinstance(expected_params, dict):
-            errors.append(f"{field_name}[{index}].expected_params must be an object when provided.")
-            return None
-        op["expected_params"] = copy.deepcopy(expected_params)
     return op
 
 
@@ -789,28 +806,31 @@ def _update_state_operation(
     if not isinstance(item, dict):
         errors.append(f"{field_name}[{index}] must be an object.")
         return None
-    states = item.get("states")
-    if not isinstance(states, dict) or not states:
-        errors.append(f"{field_name}[{index}].states must be a non-empty object.")
-        return None
-    state = states.get("state")
-    if state is None and "enabled" in states:
-        state = "enabled" if bool(states.get("enabled")) else "disabled"
-    if state is None and "disabled" in states:
-        state = "disabled" if bool(states.get("disabled")) else "enabled"
-    if state not in {"enabled", "disabled"}:
-        errors.append(f"{field_name}[{index}].states must set state to enabled/disabled.")
+    state = item.get("state")
+    if isinstance(state, str):
+        pass
+    else:
+        states = item.get("states")
+        if not isinstance(states, dict) or not states:
+            errors.append(f"{field_name}[{index}].state must be an enum or .states must be a non-empty object.")
+            return None
+        state = states.get("state")
+        if state is None and "enabled" in states:
+            state = "enabled" if bool(states.get("enabled")) else "disabled"
+        if state is None and "disabled" in states:
+            state = "disabled" if bool(states.get("disabled")) else "enabled"
+    if state not in {"enabled", "disabled", "bypass"}:
+        errors.append(f"{field_name}[{index}].state must be enabled/disabled/bypass.")
         return None
     op: dict[str, Any] = {"op_type": "update_states", "state": state}
-    target_ref = item.get("target_ref")
-    if isinstance(target_ref, dict) and target_ref:
-        op["target_ref"] = copy.deepcopy(target_ref)
-    else:
-        instance_name = _required_string(item, "instance_name", f"{field_name}[{index}]", errors)
-        if instance_name is None:
-            return None
-        op["instance_name"] = instance_name
+    instance_name = _required_string(item, "instance_name", f"{field_name}[{index}]", errors)
+    if instance_name is None:
+        return None
+    op["instance_name"] = instance_name
     block_id = _optional_catalog_block_id(item.get("block_id"))
+    if block_id is not None:
+        op["block_type"] = block_id
+    return op
     if block_id is not None:
         op["block_type"] = block_id
     return op
@@ -937,14 +957,8 @@ def _operation_effect(operation: dict[str, Any]) -> str | None:
     if op_type == "update_params":
         target = _operation_target_name(operation)
         params = operation.get("params")
-        expected = operation.get("expected_params")
         if target and isinstance(params, dict) and params:
-            parts = []
-            for key, value in params.items():
-                if isinstance(expected, dict) and key in expected:
-                    parts.append(f"{target}.{key}:{expected[key]}->{value}")
-                else:
-                    parts.append(f"{target}.{key}={value}")
+            parts = [f"{target}.{key}={value}" for key, value in params.items()]
             return "; ".join(parts)
     if op_type == "update_states":
         target = _operation_target_name(operation)
@@ -986,11 +1000,6 @@ def _operation_target_name(operation: dict[str, Any]) -> str | None:
     instance_name = operation.get("instance_name")
     if isinstance(instance_name, str) and instance_name:
         return instance_name
-    target_ref = operation.get("target_ref")
-    if isinstance(target_ref, dict):
-        expected_name = target_ref.get("expected_instance_name")
-        if isinstance(expected_name, str) and expected_name:
-            return expected_name
     return None
 
 

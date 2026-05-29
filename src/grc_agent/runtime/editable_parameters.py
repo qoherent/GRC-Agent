@@ -35,15 +35,6 @@ class EditableParameterCandidate:
     incoming_connections: tuple[str, ...]
     outgoing_connections: tuple[str, ...]
 
-    @property
-    def target_ref(self) -> dict[str, Any]:
-        return {
-            "block_uid": self.block_uid,
-            "expected_instance_name": self.instance_name,
-            "expected_block_type": self.block_type,
-            "base_state_revision": self.state_revision,
-        }
-
     def handle(self) -> dict[str, Any]:
         return {
             "instance_name": self.instance_name,
@@ -58,14 +49,12 @@ class EditableParameterCandidate:
             "param_option_labels": list(self.param_option_labels),
             "param_hide": self.param_hide,
             "current_value": self.current_value,
-            "target_ref": self.target_ref,
             "state_revision": self.state_revision,
         }
 
     def to_payload(
         self,
         *,
-        include_target_refs: bool,
         include_connections: bool,
     ) -> dict[str, Any]:
         payload = {
@@ -78,8 +67,6 @@ class EditableParameterCandidate:
             "current_value": self.current_value,
             "state_revision": self.state_revision,
         }
-        if include_target_refs:
-            payload["target_ref"] = self.target_ref
         if include_connections:
             payload["incoming_connections"] = list(self.incoming_connections)
             payload["outgoing_connections"] = list(self.outgoing_connections)
