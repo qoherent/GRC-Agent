@@ -395,6 +395,8 @@ class GrcAgent:
             return None
         if tool_name in MVP_MODEL_TOOL_NAMES:
             return None
+        if tool_name in self._tools:
+            return None
         return self._tool_result(
             tool_name=tool_name,
             ok=False,
@@ -1225,15 +1227,18 @@ class GrcAgent:
             "propose_edit": self._propose_edit,
             "validate_graph": self._validate_graph,
             "save_graph": self._save_graph,
+            "search_blocks": self._search_blocks,
+            "ask_grc_docs": self._ask_grc_docs,
         }
 
     def _build_mvp_tool_registry(self) -> dict[str, ToolCallable]:
         """Return the simplified model-facing MVP tool surface."""
         return {
             "inspect_graph": self._inspect_graph,
+            "query_knowledge": self._query_knowledge,
+            "change_graph": self._change_graph,
             "search_blocks": self._search_blocks,
             "ask_grc_docs": self._ask_grc_docs,
-            "change_graph": self._change_graph,
         }
 
     # ------------------------------------------------------------------- #
@@ -1582,6 +1587,15 @@ class GrcAgent:
         while len(self._ask_grc_docs_cache) > self._docs_answer_cfg.answer_cache_size:
             self._ask_grc_docs_cache.popitem(last=False)
 
+    def _query_knowledge(
+        self,
+        query: str,
+        domain: str,
+        debug: bool = False,
+    ) -> ToolResult:
+        from grc_agent.runtime.wrappers.query_knowledge import query_knowledge as _qk
+        return _qk(self, query=query, domain=domain, debug=debug)
+
     def _search_blocks(
         self,
         query: str,
@@ -1889,15 +1903,13 @@ class GrcAgent:
 
     def _change_graph(
         self,
+        reasoning: str = "",
         add_blocks: list[Any] | None = None,
         remove_blocks: list[Any] | None = None,
         update_params: list[Any] | None = None,
         update_states: list[Any] | None = None,
         add_connections: list[Any] | None = None,
         remove_connections: list[Any] | None = None,
-        add_variables: list[Any] | None = None,
-        update_variables: list[Any] | None = None,
-        remove_variables: list[Any] | None = None,
         force: bool = False,
         debug: bool = False,
     ) -> ToolResult:
@@ -1909,13 +1921,11 @@ class GrcAgent:
             update_states=update_states,
             add_connections=add_connections,
             remove_connections=remove_connections,
-            add_variables=add_variables,
-            update_variables=update_variables,
-            remove_variables=remove_variables,
             force=bool(force),
             debug=debug,
         )
 
+    # ------------------------------------------------------------------- #
     @staticmethod
     def _compact_inspect_payload(mode: str, payload: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {

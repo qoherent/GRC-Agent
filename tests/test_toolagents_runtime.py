@@ -82,9 +82,6 @@ class ToolAgentsRegistryTests(unittest.TestCase):
             "update_states",
             "add_connections",
             "remove_connections",
-            "add_variables",
-            "update_variables",
-            "remove_variables",
             "force",
         ):
             self.assertIn(field, props)

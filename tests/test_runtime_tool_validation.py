@@ -69,21 +69,6 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_type")
         self.assertEqual(result["validation_errors"][0]["field"], "k")
 
-    def test_change_graph_remove_variable_shape_hint_is_specific(self) -> None:
-        result = validate_runtime_tool_call(
-            "change_graph",
-            {"remove_variables": [{"instance_name": "unused_var"}]},
-            self._schema_map(),
-        )
-
-        assert result is not None
-        self.assertEqual(result["error_type"], "tool_call_invalid")
-        self.assertEqual(result["validation_errors"][0]["field"], "remove_variables[0]")
-        self.assertIn(
-            "remove_variables=['unused_var']",
-            result["schema_repair_instruction"]["change_graph_hint"],
-        )
-
     def test_invalid_enum_value_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
             "semantic_search_grc",

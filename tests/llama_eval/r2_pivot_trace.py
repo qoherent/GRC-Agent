@@ -90,7 +90,7 @@ def main():
 
         # Turn 1: Change samp_rate to 48000
         print(f"\n{'='*60}")
-        print(f"TURN 1: Change samp_rate to 48000")
+        print("TURN 1: Change samp_rate to 48000")
         print(f"{'='*60}")
         result1, trace1 = _run_turn(agent, provider,
             "Change the sample rate to 48000.")
@@ -101,7 +101,7 @@ def main():
 
         # Turn 2: Change samp_rate to 96000 AND disable throttle
         print(f"\n{'='*60}")
-        print(f"TURN 2: Change samp_rate to 96000 and disable throttle")
+        print("TURN 2: Change samp_rate to 96000 and disable throttle")
         print(f"{'='*60}")
         result2, trace2 = _run_turn(agent, provider,
             "Now change the sample rate to 96000 and disable the blocks_throttle2_0 block.")
@@ -110,7 +110,7 @@ def main():
         for t in trace2:
             print(t)
 
-        print(f"\n=== Final state ===")
+        print("\n=== Final state ===")
         print(f"  variables: {session.get_variable_values()}")
         for b in session.flowgraph.blocks:
             state = b.params.get("states", {}).get("state", "enabled")

@@ -81,7 +81,7 @@ class MvpToolProfileTests(unittest.TestCase):
         names = [schema["function"]["name"] for schema in agent.get_tool_schemas()]
 
         self.assertEqual(names, list(MVP_MODEL_TOOL_NAMES))
-        self.assertEqual(names, ["inspect_graph", "search_blocks", "ask_grc_docs", "change_graph"])
+        self.assertEqual(names[:3], ["inspect_graph", "query_knowledge", "change_graph"])
         for internal_name in PUBLIC_TOOL_NAMES:
             self.assertNotIn(internal_name, names)
         for removed_name in ("save_graph_explicit", "load_graph_explicit"):
@@ -91,8 +91,8 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         prompt = agent.get_system_prompt()
 
-        self.assertLess(len(prompt), 700)
-        for name in MVP_MODEL_TOOL_NAMES:
+        self.assertLess(len(prompt), 1100)
+        for name in ("inspect_graph", "query_knowledge", "change_graph"):
             self.assertIn(name, prompt)
         self.assertIn("keep going", prompt)
         self.assertIn("wireless communications expert", prompt)
@@ -101,7 +101,7 @@ class MvpToolProfileTests(unittest.TestCase):
             self.assertNotIn(forbidden, prompt)
 
         schema_chars = sum(len(str(schema)) for schema in agent.get_tool_schemas())
-        self.assertLess(schema_chars, 8000)
+        self.assertLess(schema_chars, 12000)
         for schema in agent.get_tool_schemas():
             self.assertNotIn("debug", schema["function"]["parameters"]["properties"])
         change_schema = next(
@@ -115,7 +115,6 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertIn("update_params", change_props)
         self.assertIn("add_connections", change_props)
         self.assertIn("remove_connections", change_props)
-        self.assertIn("add_variables", change_props)
         self.assertIn("force", change_props)
         for removed in (
             "op",
@@ -138,14 +137,6 @@ class MvpToolProfileTests(unittest.TestCase):
         )
         self.assertIn("instance_name", update_states_required)
         self.assertIn("state", update_states_required)
-        add_variables_required = change_props["add_variables"]["items"]["required"]
-        self.assertIn("instance_name", add_variables_required)
-        self.assertNotIn("name", add_variables_required)
-        update_variables_required = (
-            change_props["update_variables"]["items"]["required"]
-        )
-        self.assertIn("instance_name", update_variables_required)
-        self.assertIn("value", update_variables_required)
 
     def test_inspect_graph_overview_and_details_are_read_only(self) -> None:
         agent = self._load_agent()

@@ -382,6 +382,27 @@ def build_tool_schemas(
                 },
             },
         ),
+        _schema(
+            "search_blocks",
+            "Internal: search installed GNU Radio catalog for block IDs and params.",
+            {
+                "query": {"type": "string"},
+                "k": {"type": "integer"},
+                "debug": {"type": "boolean"},
+                "enrich": {"type": "boolean"},
+            },
+            required=["query"],
+        ),
+        _schema(
+            "ask_grc_docs",
+            "Internal: answer GNU Radio docs questions with local sources.",
+            {
+                "question": {"type": "string"},
+                "k": {"type": "integer"},
+                "debug": {"type": "boolean"},
+            },
+            required=["question"],
+        ),
     ]
     mvp_schemas = [
         _schema(
@@ -411,41 +432,34 @@ def build_tool_schemas(
             strict=True,
         ),
         _schema(
-            "search_blocks",
-            "Search the installed GNU Radio catalog. Use this to find block types (e.g., 'analog_agc_cc'), default values, and exact parameter IDs. Do NOT use this to check what is in the current graph.",
+            "query_knowledge",
+            "Search GNU Radio knowledge base. Use domain='catalog' to find block IDs, parameters, and defaults. Use domain='docs' for concepts and troubleshooting.",
             {
                 "query": {
                     "type": "string",
-                    "description": "Block capability or block-id query.",
+                    "description": "Block capability, block-id, or concept question.",
+                },
+                "domain": {
+                    "type": "string",
+                    "enum": ["catalog", "docs"],
+                    "description": "'catalog' for block types/params; 'docs' for concepts.",
                 },
                 "debug": {
                     "type": "boolean",
                     "description": "When true, include internal ranking/debug metadata.",
                 },
             },
-            required=["query"],
-            strict=True,
-        ),
-        _schema(
-            "ask_grc_docs",
-            "Answer GNU Radio docs questions with local sources. Explanation-only.",
-            {
-                "question": {
-                    "type": "string",
-                    "description": "GNU Radio concept or troubleshooting question.",
-                },
-                "debug": {
-                    "type": "boolean",
-                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
-                },
-            },
-            required=["question"],
+            required=["query", "domain"],
             strict=True,
         ),
         _schema(
             "change_graph",
-            "Apply one bounded graph edit batch. Always call inspect_graph before change_graph to verify current instance names and connections. Never assume graph state from history or guess connection/instance names. Inspect first; copy only needed exact IDs (instance_name, param_id, ports, connection_id, block_id). Rejected edits do not commit. Prefer update_variables for variables. Omitted lists mean no edits.",
+            "Apply one bounded graph edit batch. Always call inspect_graph before change_graph to verify current instance names and connections. Never assume graph state from history or guess connection/instance names. Inspect first; copy only needed exact IDs (instance_name, param_id, ports, connection_id, block_id). Rejected edits do not commit. Variables are blocks — use add_blocks, update_params, remove_blocks. Omitted lists mean no edits.",
             {
+                "reasoning": {
+                    "type": "string",
+                    "description": "Briefly explain the current graph state and your step-by-step plan for this batch.",
+                },
                 "add_blocks": {
                     "type": "array",
                     "description": "Add blocks with optional initial params/states. Use installed block_id.",
@@ -465,9 +479,10 @@ def build_tool_schemas(
                                 "type": "object",
                                 "description": "Initial parameter values keyed by GNU parameter ID.",
                             },
-                            "states": {
-                                "type": "object",
-                                "description": "Initial states, e.g. {'state':'enabled'}.",
+                            "state": {
+                                "type": "string",
+                                "enum": ["enabled", "disabled", "bypass"],
+                                "description": "Optional initial block state.",
                             },
                         },
                         "required": ["block_id", "instance_name"],
@@ -481,16 +496,12 @@ def build_tool_schemas(
                         "additionalProperties": False,
                         "properties": {
                             "instance_name": {"type": "string"},
-                            "block_id": {
-                                "type": "string",
-                                "description": "Optional block ID disambiguator.",
-                            },
                         },
                     },
                 },
                 "update_params": {
                     "type": "array",
-                    "description": "Update params on existing blocks. Use exact param_id; use update_variables for variables.",
+                    "description": "Update params on existing blocks. Use exact GNU param_id. For variables, use update_params on their instance_name with params={value}.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -517,10 +528,6 @@ def build_tool_schemas(
                             "instance_name": {
                                 "type": "string",
                                 "description": "Existing instance_name from inspect_graph.",
-                            },
-                            "block_id": {
-                                "type": "string",
-                                "description": "Optional block ID disambiguator.",
                             },
                             "state": {
                                 "type": "string",
@@ -565,50 +572,12 @@ def build_tool_schemas(
                     "description": "Exact connection_id strings from inspect_graph to remove.",
                     "items": {"type": "string"},
                 },
-                "add_variables": {
-                    "type": "array",
-                    "description": "Variables to add by new instance_name and value.",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "instance_name": {"type": "string"},
-                            "value": {"type": ["string", "number", "boolean"]},
-                        },
-                        "required": ["instance_name", "value"],
-                    },
-                },
-                "update_variables": {
-                    "type": "array",
-                    "description": "Update existing variables shown by inspect_graph, e.g. samp_rate.",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "instance_name": {
-                                "type": "string",
-                                "description": "Existing variable instance_name.",
-                            },
-                            "value": {"type": ["string", "number", "boolean"]},
-                        },
-                        "required": ["instance_name", "value"],
-                    },
-                },
-                "remove_variables": {
-                    "type": "array",
-                    "description": "Variable instance_name strings to remove.",
-                    "items": {"type": "string"},
-                },
                 "force": {
                     "type": "boolean",
                     "description": "Commit a GNU-grounded candidate despite final validation failure when an invalid intermediate graph fits the user goal.",
                 },
-                "debug": {
-                    "type": "boolean",
-                    "description": "When true, include wrapper dispatch telemetry for eval/debug.",
-                },
             },
-            required=[],
+            required=["reasoning"],
             strict=True,
         ),
     ]

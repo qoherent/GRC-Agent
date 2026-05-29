@@ -103,10 +103,10 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         result = agent.execute_tool(
             "change_graph",
             {
-                "update_variables": [
+                "update_params": [
                     {
                         "instance_name": "samp_rate",
-                        "value": "48000",
+                        "params": {"value": "48000"},
                     }
                 ]
             },
@@ -311,7 +311,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                 "remove_blocks": [
                     {
                         "instance_name": "qtgui_time_sink_x_0",
-                        "block_id": "qtgui_time_sink_x",
                     }
                 ],
                 "force": True,

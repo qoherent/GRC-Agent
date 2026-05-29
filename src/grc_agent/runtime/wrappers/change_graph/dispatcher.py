@@ -45,9 +45,6 @@ _FLAT_BATCH_FIELDS = {
     "update_states",
     "add_connections",
     "remove_connections",
-    "add_variables",
-    "update_variables",
-    "remove_variables",
 }
 
 
@@ -65,9 +62,6 @@ def dispatch_flat_change_graph_batch(
     update_states: Any = None,
     add_connections: Any = None,
     remove_connections: Any = None,
-    add_variables: Any = None,
-    update_variables: Any = None,
-    remove_variables: Any = None,
     force: bool = False,
     debug: bool = False,
 ) -> ToolResult:
@@ -131,9 +125,6 @@ def dispatch_flat_change_graph_batch(
         update_states=update_states,
         add_connections=add_connections,
         remove_connections=remove_connections,
-        add_variables=add_variables,
-        update_variables=update_variables,
-        remove_variables=remove_variables,
     )
     if errors:
         result = agent._payload_result(
@@ -191,6 +182,11 @@ def dispatch_flat_change_graph_batch(
             "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
         }
     )
+    if ok:
+        payload["system_directive"] = (
+            "SUCCESS. The graph has been updated and validated. "
+            "STOP calling tools. Output a final text response explaining what was done."
+        )
     if isinstance(result, dict):
         if result.get("forced_validation_failure"):
             payload["forced_validation_failure"] = result.get("forced_validation_failure")
@@ -216,7 +212,11 @@ def dispatch_flat_change_graph_batch(
                 payload["rejected_phase"] = "native_grc_validation"
                 payload["message"] = (
                     "Candidate graph rejected by native GRC validation; "
-                    "no changes committed."
+                    "no changes committed. "
+                    "Note: change_graph validates the entire graph atomically. "
+                    "If multiple independent errors exist, you must fix all "
+                    "of them in a single batch payload, or use force=true "
+                    "for intermediate steps."
                 )
             native_errors = (
                 _native_validation_error_text(validation_result)
@@ -230,6 +230,8 @@ def dispatch_flat_change_graph_batch(
                     normalized_operations,
                     validation_result,
                 )
+                or _port_discovery_hint(agent, normalized_operations, errors_payload)
+                or _ofdm_carrier_hint(normalized_operations, errors_payload)
                 or _first_error_hint(errors_payload)
                 or _flat_change_graph_hint()
             )
@@ -259,12 +261,9 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
     remove_connections = _as_list(batches.get("remove_connections"), "remove_connections", errors)
     remove_blocks = _as_list(batches.get("remove_blocks"), "remove_blocks", errors)
     add_blocks = _as_list(batches.get("add_blocks"), "add_blocks", errors)
-    add_variables = _as_list(batches.get("add_variables"), "add_variables", errors)
     update_params = _as_list(batches.get("update_params"), "update_params", errors)
-    update_variables = _as_list(batches.get("update_variables"), "update_variables", errors)
     update_states = _as_list(batches.get("update_states"), "update_states", errors)
     add_connections = _as_list(batches.get("add_connections"), "add_connections", errors)
-    remove_variables = _as_list(batches.get("remove_variables"), "remove_variables", errors)
 
     if errors:
         return [], errors
@@ -292,23 +291,6 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
                 )
         operations.append(op)
 
-    for index, item in enumerate(remove_variables):
-        name = item.strip() if isinstance(item, str) else None
-        if not name:
-            errors.append(f"remove_variables[{index}] must be a variable name string.")
-            continue
-        for connection_id in _incident_connection_ids(agent, name):
-            _append_remove_connection(
-                operations,
-                removed_connection_ids,
-                connection_id,
-                errors,
-                f"remove_variables[{index}].auto_detach",
-            )
-        operations.append(
-            {"op_type": "remove_block", "instance_name": name, "block_type": "variable"}
-        )
-
     for index, item in enumerate(add_blocks):
         if not isinstance(item, dict):
             errors.append(f"add_blocks[{index}] must be an object.")
@@ -318,12 +300,12 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
         if block_id is None or instance_name is None:
             continue
         params = item.get("params", {})
-        states = item.get("states")
+        state = item.get("state")
         if not isinstance(params, dict):
             errors.append(f"add_blocks[{index}].params must be an object when provided.")
             continue
-        if states is not None and not isinstance(states, dict):
-            errors.append(f"add_blocks[{index}].states must be an object when provided.")
+        if state is not None and not isinstance(state, str):
+            errors.append(f"add_blocks[{index}].state must be a string when provided.")
             continue
         op = {
             "op_type": "add_block",
@@ -331,53 +313,18 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
             "instance_name": instance_name,
             "parameters": copy.deepcopy(params),
         }
-        if states is not None:
-            op["states"] = copy.deepcopy(states)
+        if isinstance(state, str) and state.strip():
+            op["states"] = {"state": state.strip()}
         operations.append(op)
         if block_id in added_block_aliases:
             added_block_aliases[block_id] = None
         else:
             added_block_aliases[block_id] = instance_name
 
-    for index, item in enumerate(add_variables):
-        if not isinstance(item, dict):
-            errors.append(f"add_variables[{index}] must be an object.")
-            continue
-        name = _variable_instance_name(item, f"add_variables[{index}]", errors)
-        if name is None or "value" not in item:
-            if "value" not in item:
-                errors.append(f"add_variables[{index}].value is required.")
-            continue
-        operations.append(
-            {
-                "op_type": "add_block",
-                "block_type": "variable",
-                "instance_name": name,
-                "parameters": {"value": copy.deepcopy(item["value"])},
-            }
-        )
-
     for index, item in enumerate(update_params):
         op = _update_params_operation(item, index=index, field_name="update_params", errors=errors)
         if op is not None:
             operations.append(op)
-
-    for index, item in enumerate(update_variables):
-        if not isinstance(item, dict):
-            errors.append(f"update_variables[{index}] must be an object.")
-            continue
-        name = _variable_instance_name(item, f"update_variables[{index}]", errors)
-        if name is None or "value" not in item:
-            if "value" not in item:
-                errors.append(f"update_variables[{index}].value is required.")
-            continue
-        op: dict[str, Any] = {
-            "op_type": "update_params",
-            "instance_name": name,
-            "block_type": "variable",
-            "params": {"value": copy.deepcopy(item["value"])},
-        }
-        operations.append(op)
 
     for index, item in enumerate(update_states):
         op = _update_state_operation(item, index=index, field_name="update_states", errors=errors)
@@ -422,6 +369,56 @@ def _first_error_hint(errors_payload: Any) -> str | None:
     return None
 
 
+def _ofdm_carrier_hint(
+    operations: list[dict[str, Any]],
+    errors_payload: Any,
+) -> str | None:
+    """Return a tuple-of-lists hint for OFDM carrier parameter updates."""
+    if not isinstance(errors_payload, list):
+        return None
+    has_carrier_update = any(
+        isinstance(op, dict)
+        and op.get("op_type") == "update_params"
+        and any(
+            key in ("occupied_carriers", "pilot_carriers")
+            for key in (op.get("params") or {}).keys()
+        )
+        for op in operations
+    )
+    if has_carrier_update:
+        return (
+            "GNU Radio OFDM carrier parameters strictly require a tuple of lists. "
+            "Ensure your Python expression is wrapped in parentheses with a trailing comma. "
+            'Example: (list(range(-24, 0)) + list(range(1, 25)),)'
+        )
+    return None
+
+
+def _port_discovery_hint(
+    agent: Any,
+    operations: list[dict[str, Any]],
+    errors_payload: Any,
+) -> str | None:
+    """Return a hint when a connection fails due to port or catalog block issues."""
+    if not isinstance(errors_payload, list):
+        return None
+    has_port_error = any(
+        isinstance(row, dict)
+        and (
+            row.get("code") in ("port_out_of_range", "catalog_block_unavailable", "invalid_port")
+            or "port" in str(row.get("field", "")).lower()
+        )
+        for row in errors_payload
+    )
+    if not has_port_error:
+        return None
+    return (
+        "Connection failed. Message ports use string identifiers (e.g. port='pdus'), "
+        "not integers. Use query_knowledge(catalog) to find the exact port names "
+        "for each block before connecting."
+    )
+
+
 def _flat_change_graph_hint() -> str:
     return (
         "Use the flat change_graph fields: add_blocks[].block_id, "
@@ -455,6 +452,24 @@ def _repair_hint_for_validation_failure(
 
     dtype_pair = _first_dtype_mismatch(native_errors)
     if dtype_pair is None:
+        if _is_disable_disconnect(
+            operations=operations,
+            native_errors=native_errors,
+        ):
+            return (
+                "No change committed; graph unchanged. "
+                "Disabling this block broke its port connections. "
+                "Use update_states with state='bypass' instead of 'disabled' "
+                "to deactivate the block while keeping the graph connected."
+            )
+        if _is_port_occupancy_error(native_errors):
+            return (
+                "No change committed; graph unchanged. "
+                "You attempted to connect to an input port that is already in use. "
+                "GRC input ports accept only one connection. "
+                "Include the exact connection_id in remove_connections to free "
+                "the port before connecting your new block."
+            )
         return (
             "No change committed; graph unchanged. Native GNU validation error: "
             f"{native_errors[0]} Ask the user for the intended valid edit or explicit force."
@@ -494,6 +509,34 @@ def _first_dtype_mismatch(errors: list[str]) -> tuple[str, str] | None:
         if match:
             return match.group(1), match.group(2)
     return None
+
+
+def _is_disable_disconnect(
+    *,
+    operations: list[dict[str, Any]],
+    native_errors: list[str],
+) -> bool:
+    """Return whether the model disabled a block and broke its port connections."""
+    has_disabled = any(
+        isinstance(op, dict)
+        and op.get("op_type") == "update_states"
+        and op.get("state") == "disabled"
+        for op in operations
+    )
+    if not has_disabled:
+        return False
+    return any(
+        "port is not connected" in error.lower()
+        for error in native_errors
+    )
+
+
+def _is_port_occupancy_error(native_errors: list[str]) -> bool:
+    """Return whether the model hit a port occupancy / multi-connection error."""
+    return any(
+        "port is already connected" in error.lower()
+        for error in native_errors
+    )
 
 
 def _configurable_dtype_param_hint(

@@ -669,13 +669,16 @@ def _base_payload(
     truncation: dict[str, Any] | None = None,
     errors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    validation = _validation_status(agent)
     payload: dict[str, Any] = {
         "ok": ok,
         "view": view,
         "state_revision": agent.session.state_revision,
         "complete": complete,
-        "validation_status": _validation_status(agent),
+        "validation_status": validation,
     }
+    if validation.get("errors"):
+        payload["validation_errors"] = validation["errors"]
     if summary is not None:
         payload["summary"] = summary
     if targets:
@@ -710,12 +713,36 @@ def _invalid_request(
 
 
 def _validation_status(agent: "GrcAgent") -> dict[str, Any]:
+    if not agent.session.flowgraph:
+        return {"status": "unknown"}
+    agent.session.validate()
     state = agent.session.validation_state()
-    return {
+    result: dict[str, Any] = {
         "status": state.get("status"),
         "last_checked_revision": state.get("state_revision"),
-        "summary": state.get("stderr") or state.get("stdout"),
     }
+    raw_stderr = state.get("stderr") or ""
+    raw_stdout = state.get("stdout") or ""
+    error_text = raw_stdout or raw_stderr
+    if error_text.strip() and result["status"] == "invalid":
+        result["summary"] = error_text.strip()
+        errors: list[str] = []
+        in_errors = False
+        for line in error_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("*"):
+                continue
+            if "errors from flowgraph" in line:
+                in_errors = True
+                continue
+            if line.startswith(">>>") or "Welcome" in line:
+                continue
+            if in_errors:
+                if line:
+                    errors.append(line.strip("\t"))
+        if errors:
+            result["errors"] = errors[:12]
+    return result
 
 
 def _params_filter(
@@ -819,6 +846,10 @@ def _overview_block_rows(
                 outgoing=outgoing.get(block.instance_name, ()),
             ),
         }
+        if block.block_type == "variable":
+            params = block.params.get("parameters", {})
+            if isinstance(params, dict) and "value" in params:
+                row["value"] = params["value"]
         rows.append({key: value for key, value in row.items() if value not in (None, "", [], {})})
     return rows
 

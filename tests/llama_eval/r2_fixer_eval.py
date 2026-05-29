@@ -122,7 +122,7 @@ def main() -> int:
 
         print(f"\n=== Prompt ({len(prompt)} chars) ===")
         print(f"  {prompt}")
-        print(f"\n=== Running agent turn ===")
+        print("\n=== Running agent turn ===")
 
         result = run_bounded_toolagents_turn(
             agent=agent,
@@ -135,7 +135,7 @@ def main() -> int:
         # Extract trace
         trace = _extract_trace(agent, start_index)
 
-        print(f"\n=== Agent Trace ===")
+        print("\n=== Agent Trace ===")
         print(f"  Assistant text: {result.get('assistant_text', '')[:500]}")
         print(f"  Tool rounds: {result.get('tool_rounds_used', '?')}")
         print(f"  Tool calls executed: {result.get('tool_calls_executed', '?')}")
@@ -156,7 +156,7 @@ def main() -> int:
                     print(f"         message: {step.get('message')[:300]}")
 
         # Check final state
-        print(f"\n=== Post-turn state ===")
+        print("\n=== Post-turn state ===")
         for b in session.flowgraph.blocks:
             print(f"  block: {b.instance_name} ({b.block_type})")
         for c in session.flowgraph.connections:
@@ -167,7 +167,7 @@ def main() -> int:
             for e in v.get('errors', [])[:5]:
                 print(f"    err: {str(e)[:200]}")
         else:
-            print(f"  validation: unavailable")
+            print("  validation: unavailable")
 
     return 0
 

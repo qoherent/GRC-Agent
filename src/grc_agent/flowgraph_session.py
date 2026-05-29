@@ -1169,7 +1169,7 @@ class FlowgraphSession:
         """Update one block's enabled/disabled state in both the model and raw YAML."""
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
-        if state not in {"enabled", "disabled"}:
+        if state not in {"enabled", "disabled", "bypass"}:
             raise ValueError(f"Invalid block state: {state}")
 
         # If duplicate names exist, use block_type to disambiguate.
@@ -1241,7 +1241,7 @@ class FlowgraphSession:
         """Update one block state by verified UID target reference."""
         if self.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
-        if state not in {"enabled", "disabled"}:
+        if state not in {"enabled", "disabled", "bypass"}:
             raise ValueError(f"Invalid block state: {state}")
         _parsed_index, raw_index, block = self._resolve_block_uid_indexes(
             block_uid,

@@ -19,12 +19,13 @@ PUBLIC_TOOL_NAMES: tuple[str, ...] = (
     "propose_edit",
     "validate_graph",
     "save_graph",
+    "search_blocks",
+    "ask_grc_docs",
 )
 
 MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
     "inspect_graph",
-    "search_blocks",
-    "ask_grc_docs",
+    "query_knowledge",
     "change_graph",
 )
 

@@ -60,15 +60,6 @@ class ReliabilityHardeningTests(unittest.TestCase):
         # Must not have change_graph jargon bleeding into the description
         self.assertNotIn("add_blocks", desc)
 
-    def test_search_blocks_schema_has_explicit_do_not_use_boundary(self) -> None:
-        """search_blocks description must explicitly forbid active-graph inspection."""
-        schemas = build_tool_schemas(list(MVP_MODEL_TOOL_NAMES))
-        search_schema = next(
-            s for s in schemas if s["function"]["name"] == "search_blocks"
-        )
-        desc = search_schema["function"]["description"]
-        self.assertIn("catalog", desc.lower(), "Must reference the catalog")
-        self.assertIn("do not use this to check what is in the current graph", desc.lower())
 
     def test_change_graph_schema_mandates_inspect_first(self) -> None:
         """change_graph description must mandate inspect_graph before mutation."""

@@ -613,7 +613,7 @@ def _normalize_operation(
             )
         else:
             normalized_state = state.strip()
-            if normalized_state not in {"enabled", "disabled"}:
+            if normalized_state not in {"enabled", "disabled", "bypass"}:
                 issues.append(
                     make_issue(
                         op_index=op_index,
@@ -621,7 +621,7 @@ def _normalize_operation(
                         field="state",
                         code="invalid_state_value",
                         message=f"Invalid block state: {normalized_state}",
-                        hint="Valid values: enabled, disabled.",
+                        hint="Valid values: enabled, disabled, bypass.",
                     )
                 )
             else:

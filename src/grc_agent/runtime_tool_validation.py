@@ -62,6 +62,9 @@ def validate_runtime_tool_call(
             "schema_repair_instruction": _schema_repair_instruction(tool_name, []),
         }
 
+    if tool_name == "change_graph" and "reasoning" not in arguments:
+        arguments["reasoning"] = ""
+
     issues = _validate_object(arguments, schema_map[tool_name], field_path=None)
     if not issues:
         return None
