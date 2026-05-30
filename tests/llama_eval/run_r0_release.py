@@ -59,7 +59,9 @@ def _render_status(case: LiveScenario, run: dict) -> str:
         f"model_contract={run.get('model_contract_pass')}, "
         f"runtime_safety={run.get('runtime_safety_pass')}, "
         f"end_state={run.get('end_state_pass')}, "
-        f"recovery={run.get('recovery_pass')}"
+        f"recovery={run.get('recovery_pass')}, "
+        f"budget={run.get('budget_pass')}, "
+        f"lint={run.get('lint_pass')}"
     )
     return (
         f"{'PASS' if run.get('matched') else 'FAIL'} "

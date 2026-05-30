@@ -20,6 +20,7 @@ dependencies = [
     # they are not bundled in this package.
     "qdrant-client[fastembed]>=1.14.2",
     "mistralai<2",
+    "ruamel-yaml>=0.19.1",
 ]
 
 [project.scripts]

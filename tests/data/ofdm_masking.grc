@@ -48,19 +48,21 @@ blocks:
     - 12
     rotation: 0
     state: enabled
-- name: analog_random_source_x_0
-  id: analog_random_source_x
+- name: analog_sig_source_x_0
+  id: analog_sig_source_x
   parameters:
     affinity: ''
     alias: ''
+    amp: '1.0'
     comment: ''
-    max: '255'
+    freq: '0'
     maxoutbuf: '0'
-    min: '0'
     minoutbuf: '0'
-    num_samps: '1000'
-    repeat: 'True'
-    type: byte
+    offset: '0'
+    phase: '0'
+    samp_rate: fft_len
+    type: complex
+    waveform: analog.GR_CONST_WAVE
   states:
     bus_sink: false
     bus_source: false
@@ -111,7 +113,7 @@ blocks:
     rotation: 0
     state: enabled
 connections:
-- - analog_random_source_x_0
+- - analog_sig_source_x_0
   - '0'
   - digital_ofdm_carrier_allocator_cvc_0
   - '0'

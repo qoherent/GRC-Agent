@@ -52,13 +52,31 @@ def _make_provider() -> ToolAgentsLlamaProviderConfig:
     )
 
 
+_LIVE_RELIABILITY_AGENTS: list[GrcAgent] = []
+
+
 def _make_temp_agent() -> GrcAgent:
-    tmp = tempfile.mkdtemp(prefix="live_reliability_")
+    tmpdir = tempfile.TemporaryDirectory(prefix="live_reliability_")
+    tmp = tmpdir.name
     dst = Path(tmp) / "test_graph.grc"
     shutil.copy2(FIXTURE, dst)
     session = FlowgraphSession()
     session.load(dst)
-    return GrcAgent(session)
+    agent = GrcAgent(session)
+    agent._live_reliability_tmpdir = tmpdir
+    _LIVE_RELIABILITY_AGENTS.append(agent)
+    return agent
+
+
+def _cleanup_temp_agents() -> None:
+    while _LIVE_RELIABILITY_AGENTS:
+        agent = _LIVE_RELIABILITY_AGENTS.pop()
+        tmpdir = getattr(agent, "_live_reliability_tmpdir", None)
+        if isinstance(tmpdir, tempfile.TemporaryDirectory):
+            try:
+                tmpdir.cleanup()
+            except OSError:
+                pass
 
 
 def _run_turn(agent: GrcAgent, provider: ToolAgentsLlamaProviderConfig, prompt: str) -> dict:
@@ -271,12 +289,16 @@ def main() -> None:
     except Exception as exc:
         print(f"\n  ✗ EXCEPTION in scenario A: {exc}")
         results["scenario_a_tool_confusion"] = False
+    finally:
+        _cleanup_temp_agents()
 
     try:
         results["scenario_b_state_blindness"] = scenario_b_state_blindness(provider)
     except Exception as exc:
         print(f"\n  ✗ EXCEPTION in scenario B: {exc}")
         results["scenario_b_state_blindness"] = False
+    finally:
+        _cleanup_temp_agents()
 
     print(f"\n{SEP}")
     print("SUMMARY")

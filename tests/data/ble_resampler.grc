@@ -117,6 +117,26 @@ blocks:
     - 120.0
     rotation: 0
     state: enabled
+- name: blocks_null_sink_0
+  id: blocks_null_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_inputs: '1'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate:
+    - 840
+    - 120.0
+    rotation: 0
+    state: enabled
 connections:
 - - analog_sig_source_x_0
   - '0'
@@ -125,6 +145,10 @@ connections:
 - - low_pass_filter_0
   - '0'
   - digital_gfsk_demod_0
+  - '0'
+- - digital_gfsk_demod_0
+  - '0'
+  - blocks_null_sink_0
   - '0'
 metadata:
   file_format: 1

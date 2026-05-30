@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from ruamel.yaml import YAML
+
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
@@ -50,6 +52,8 @@ REPORT_DIMENSIONS = (
     "model_contract_pass",
     "end_state_pass",
     "recovery_pass",
+    "budget_pass",
+    "lint_pass",
 )
 MVP_RELEASE_MODEL_TOOLS = frozenset(MVP_MODEL_TOOL_NAMES)
 MUTATION_TOOL_NAMES = frozenset(
@@ -101,6 +105,12 @@ class LiveTurnSpec:
     clarification_response: bool = False
     recovery_enabled: bool = False
     expected_recovery_class: str | None = None
+    max_tool_rounds: int | None = None
+    max_tool_calls: int | None = None
+    max_prompt_tokens: int | None = None
+    max_assistant_chars: int | None = None
+    lint_severity_threshold: str = "error"
+    lint_expected_issues: tuple[dict[str, Any], ...] = ()
 
     @property
     def expected_tools(self) -> list[str]:
@@ -118,10 +128,21 @@ class LiveScenario:
     target_fixture_name: str | None = None
     description: str = ""
     release_profile: str = "BETA_COMPLEX_MUTATION"
+    fuzzed_variables: dict[str, Any] = field(default_factory=dict)
+    param_seed: int | None = None
 
     @property
     def prompt(self) -> str:
         return self.turns[0].prompt if self.turns else ""
+
+
+@dataclass(frozen=True)
+class FuzzedScenario:
+    """A scenario generated from a parameterized DSP fuzz seed."""
+
+    scenario: LiveScenario
+    param_seed: int
+    prompt_vars: dict[str, Any] = field(default_factory=dict)
 
 
 
@@ -665,6 +686,217 @@ def _git_dirty() -> bool | None:
     return bool(output.strip())
 
 
+# ── Budget Evaluation ────────────────────────────────────────────────────────
+
+
+def evaluate_budget_pass(
+    result: dict[str, Any],
+    turn_spec: LiveTurnSpec,
+) -> dict[str, Any]:
+    """Check whether the model turn stayed within configured budget limits.
+
+    Returns a dict with ``budget_pass`` and ``budget_details`` keys.
+    """
+    if not any((
+        turn_spec.max_tool_rounds,
+        turn_spec.max_tool_calls,
+        turn_spec.max_prompt_tokens,
+        turn_spec.max_assistant_chars,
+    )):
+        return {"budget_pass": True, "budget_details": {}}
+
+    details: dict[str, Any] = {}
+    violations: list[str] = []
+
+    used_rounds = result.get("tool_rounds_used", 0)
+    if turn_spec.max_tool_rounds is not None and used_rounds > turn_spec.max_tool_rounds:
+        violations.append(f"tool_rounds {used_rounds} > max {turn_spec.max_tool_rounds}")
+        details["tool_rounds_over"] = used_rounds - turn_spec.max_tool_rounds
+
+    used_calls = result.get("tool_calls_requested", 0)
+    if turn_spec.max_tool_calls is not None and used_calls > turn_spec.max_tool_calls:
+        violations.append(f"tool_calls {used_calls} > max {turn_spec.max_tool_calls}")
+        details["tool_calls_over"] = used_calls - turn_spec.max_tool_calls
+
+    cb = result.get("context_budget", {})
+    used_tokens = cb.get("prompt_tokens_estimated", 0)
+    if turn_spec.max_prompt_tokens is not None and used_tokens > turn_spec.max_prompt_tokens:
+        violations.append(f"prompt_tokens {used_tokens} > max {turn_spec.max_prompt_tokens}")
+        details["prompt_tokens_over"] = used_tokens - turn_spec.max_prompt_tokens
+
+    used_chars = len(result.get("assistant_text", ""))
+    if turn_spec.max_assistant_chars is not None and used_chars > turn_spec.max_assistant_chars:
+        violations.append(f"assistant_chars {used_chars} > max {turn_spec.max_assistant_chars}")
+        details["assistant_chars_over"] = used_chars - turn_spec.max_assistant_chars
+
+    details["limits_exceeded"] = violations
+    return {"budget_pass": len(violations) == 0, "budget_details": details}
+
+
+# ── Semantic Linter ──────────────────────────────────────────────────────────
+
+
+def lint_graph_health(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Inspect a graph snapshot for hygiene issues: orphan blocks, unused
+    variables, disabled-but-connected blocks, and duplicate names."""
+    issues: list[dict[str, Any]] = []
+    issues.extend(_lint_orphan_blocks(snapshot))
+    issues.extend(_lint_unused_variables(snapshot))
+    issues.extend(_lint_disabled_with_connections(snapshot))
+    issues.extend(_lint_duplicate_names(snapshot))
+    return issues
+
+
+def _lint_orphan_blocks(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = _dict_value(snapshot.get("blocks_by_name"))
+    conn_ids = _string_list(snapshot.get("connection_ids"))
+    issues: list[dict[str, Any]] = []
+    for name, info in blocks.items():
+        if not isinstance(info, dict):
+            continue
+        block_type = info.get("type", "")
+        if block_type in ("variable", "variable_struct", "variable_config"):
+            continue
+        in_conn = any(name + ":" in c for c in conn_ids)
+        out_conn = any("->" + name + ":" in c for c in conn_ids)
+        if not in_conn and not out_conn:
+            issues.append({
+                "severity": "warn",
+                "rule": "orphan_block",
+                "block": name,
+                "block_type": block_type,
+                "message": f"Block '{name}' ({block_type}) has no connections.",
+            })
+    return issues
+
+
+def _lint_unused_variables(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = _dict_value(snapshot.get("blocks_by_name"))
+    issues: list[dict[str, Any]] = []
+    variables: dict[str, str] = {}
+    for name, info in blocks.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("type") not in ("variable", "variable_struct", "variable_config"):
+            continue
+        param_value = str(_dict_value(info.get("parameters")).get("value", ""))
+        variables[name] = param_value
+
+    all_param_text = " ".join(
+        str(v)
+        for block_info in blocks.values()
+        if isinstance(block_info, dict)
+        for v in (_dict_value(block_info.get("parameters")).values())
+    )
+
+    for var_name, var_value in variables.items():
+        used_in_param = var_name in all_param_text
+        used_in_conn = any(var_name in c for c in _string_list(snapshot.get("connection_ids")))
+        if not used_in_param and not used_in_conn:
+            issues.append({
+                "severity": "info",
+                "rule": "unused_variable",
+                "block": var_name,
+                "value": var_value,
+                "message": f"Variable '{var_name}' is declared but never referenced.",
+            })
+    return issues
+
+
+def _lint_disabled_with_connections(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = _dict_value(snapshot.get("blocks_by_name"))
+    conn_ids = _string_list(snapshot.get("connection_ids"))
+    issues: list[dict[str, Any]] = []
+    for name, info in blocks.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("state") != "disabled":
+            continue
+        in_conn = any(name + ":" in c for c in conn_ids)
+        out_conn = any("->" + name + ":" in c for c in conn_ids)
+        if in_conn or out_conn:
+            issues.append({
+                "severity": "info",
+                "rule": "disabled_with_connections",
+                "block": name,
+                "block_type": info.get("type", ""),
+                "message": f"Block '{name}' is disabled but still has connections.",
+            })
+    return issues
+
+
+def _lint_duplicate_names(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = snapshot.get("duplicate_block_groups")
+    if not isinstance(groups, dict):
+        return []
+    issues: list[dict[str, Any]] = []
+    for group_key, uids in groups.items():
+        if isinstance(uids, list) and len(uids) > 1:
+            name, block_type = group_key.split("|", 1) if "|" in group_key else (group_key, "?")
+            issues.append({
+                "severity": "error",
+                "rule": "duplicate_name",
+                "block": name,
+                "block_type": block_type,
+                "uid_count": len(uids),
+                "message": f"Block name '{name}' is shared by {len(uids)} blocks (type={block_type}).",
+            })
+    return issues
+
+
+# ── Fixture Fuzzing ──────────────────────────────────────────────────────────
+
+
+def fuzz_fixture(
+    fixture_src: Path,
+    fixture_dst: Path,
+    *,
+    param_seed: int,
+    variables: dict[str, Any],
+) -> None:
+    """Copy a .grc fixture and fuzz specific variable values in-place.
+
+    Uses ruamel.yaml for round-trip-safe YAML mutation — preserves GRC key
+    order, comments, and formatting.
+
+    ``variables`` maps variable instance names to their new fuzzed **string**
+    values (e.g. ``{"samp_rate": "48000"}``).
+    """
+    if fixture_src != fixture_dst:
+        shutil.copy2(fixture_src, fixture_dst)
+
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    yaml.width = 4096
+
+    raw = fixture_dst.read_text(encoding="utf-8")
+    data = yaml.load(raw)
+    if not isinstance(data, dict):
+        raise ValueError(f"Fixture {fixture_src} did not parse as a YAML mapping.")
+
+    blocks = data.get("blocks")
+    if not isinstance(blocks, list):
+        raise ValueError(f"Fixture {fixture_src} has no 'blocks' list.")
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        name = block.get("name", "")
+        block_id = block.get("id", "")
+        if block_id not in ("variable",) and name not in variables:
+            continue
+        if block_id != "variable" and name not in variables:
+            continue
+        params = block.get("parameters")
+        if not isinstance(params, dict):
+            continue
+        if name in variables:
+            params["value"] = str(variables[name])
+
+    with open(fixture_dst, "w", encoding="utf-8") as f:
+        yaml.dump(data, f)
+
+
 def run_live_scenario_once(
     *,
     client: ToolAgentsLlamaProviderConfig,
@@ -687,6 +919,13 @@ def run_live_scenario_once(
             else ""
         )
         save_path = str(workspace / "output.grc")
+
+        if scenario.fuzzed_variables:
+            fuzz_fixture(
+                fixture_path, fixture_path,
+                param_seed=scenario.param_seed or 0,
+                variables=scenario.fuzzed_variables,
+            )
 
         mvp_tool_profile = True
         agent = GrcAgent()
@@ -866,6 +1105,19 @@ def run_live_scenario_once(
             else:
                 turn_result["model_contract_pass"] = True
                 turn_result["runtime_safety_pass"] = True
+            budget_dimensions = evaluate_budget_pass(result, turn)
+            turn_result["budget_pass"] = budget_dimensions["budget_pass"]
+            turn_result["budget_details"] = budget_dimensions["budget_details"]
+            lint_issues = lint_graph_health(after_snapshot)
+            lint_failures = [
+                i for i in lint_issues
+                if i["severity"] in ("error", turn.lint_severity_threshold)
+            ]
+            lint_known = {str(i.get("block")) for i in turn.lint_expected_issues}
+            lint_unexpected = [i for i in lint_failures if i.get("block") not in lint_known]
+            turn_result["lint_pass"] = len(lint_unexpected) == 0
+            turn_result["lint_issues"] = lint_issues
+            turn_result["lint_unexpected"] = lint_unexpected
             turn_result["passed"] = (
                 turn_result["routing_pass"]
                 and turn_result["argument_pass"]
@@ -876,6 +1128,8 @@ def run_live_scenario_once(
                 and turn_result["recovery_pass"]
                 and (turn_result.get("model_contract_pass") is not False)
                 and (turn_result.get("runtime_safety_pass") is not False)
+                and turn_result["budget_pass"]
+                and turn_result["lint_pass"]
             )
             turn_result["trace"] = build_live_eval_turn_trace(
                 prompt=prompt,
@@ -1662,6 +1916,18 @@ def build_phase_parser(
         "--rerun-failed",
         action="store_true",
         help="With --resume, reuse passing runs and rerun failures.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for parameterized DSP fuzzing. Omit for fully random.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Copy final output.grc here for post-mortem inspection.",
     )
     return parser
 
