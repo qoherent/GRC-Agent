@@ -9,6 +9,7 @@ from typing import Any
 
 from grc_agent._payload import ErrorCode
 from grc_agent.catalog import describe_block
+from grc_agent.runtime.block_semantics import _block_semantics
 from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
 
 ToolResult = dict[str, Any]
@@ -225,15 +226,11 @@ def dispatch_flat_change_graph_batch(
             )
             if native_errors:
                 payload["native_validation_errors"] = native_errors
-            hint = (
-                _repair_hint_for_validation_failure(
-                    normalized_operations,
-                    validation_result,
-                )
-                or _port_discovery_hint(agent, normalized_operations, errors_payload)
-                or _ofdm_carrier_hint(normalized_operations, errors_payload)
-                or _first_error_hint(errors_payload)
-                or _flat_change_graph_hint()
+            hint = _aggregate_hints(
+                agent=agent,
+                operations=normalized_operations,
+                validation_result=validation_result,
+                errors_payload=errors_payload,
             )
             if isinstance(hint, str) and hint:
                 payload["hint"] = hint
@@ -369,6 +366,131 @@ def _first_error_hint(errors_payload: Any) -> str | None:
     return None
 
 
+def _aggregate_hints(
+    *,
+    agent: Any,
+    operations: list[dict[str, Any]],
+    validation_result: Any,
+    errors_payload: Any,
+) -> str | None:
+    """Collect all applicable hints instead of short-circuiting on the first match."""
+    hints: list[str] = []
+
+    bypass_hint = _bypass_hint(
+        agent=agent,
+        operations=operations,
+        validation_result=validation_result,
+        errors_payload=errors_payload,
+    )
+    if bypass_hint:
+        hints.append(bypass_hint)
+
+    port_hint = _port_discovery_hint(agent, operations, errors_payload)
+    if port_hint:
+        hints.append(port_hint)
+
+    occupancy_hint = _port_occupancy_hint(errors_payload)
+    if occupancy_hint:
+        hints.append(occupancy_hint)
+
+    ofdm_hint = _ofdm_carrier_hint(operations, errors_payload)
+    if ofdm_hint:
+        hints.append(ofdm_hint)
+
+    repair_hint = _repair_hint_for_validation_failure(operations, validation_result)
+    if repair_hint:
+        hints.append(repair_hint)
+
+    var_hint = _undefined_variable_hint(operations, errors_payload)
+    if var_hint:
+        hints.append(var_hint)
+
+    first = _first_error_hint(errors_payload)
+    if first:
+        hints.append(first)
+
+    if not hints:
+        return _flat_change_graph_hint()
+
+    return " ".join(hints)
+
+
+def _bypass_hint(
+    *,
+    agent: Any,
+    operations: list[dict[str, Any]],
+    validation_result: Any,
+    errors_payload: Any,
+) -> str | None:
+    """Check if model disabled a block — fire on preflight or native errors.
+
+    Only suggests bypass for stream-transform (inline DSP) blocks.
+    For sinks, sources, variables, and blocks flagged with disable_bypass,
+    emits a topology-aware terminal hint instead.
+    """
+    disabled_ops = [
+        op for op in operations
+        if isinstance(op, dict)
+        and op.get("op_type") == "update_states"
+        and op.get("state") == "disabled"
+        and isinstance(op.get("instance_name"), str)
+    ]
+    if not disabled_ops:
+        return None
+
+    native_errors = _native_validation_error_text(validation_result)
+    port_disconnected = any(
+        "port is not connected" in err.lower()
+        for err in native_errors
+    )
+
+    if isinstance(errors_payload, list):
+        for row in errors_payload:
+            if isinstance(row, dict):
+                msg = str(row.get("message", "")).lower()
+                if "port" in msg or "source" in msg:
+                    port_disconnected = True
+                    break
+
+    if not port_disconnected:
+        return None
+
+    all_are_stream_transforms = True
+    session = getattr(agent, "session", None)
+    catalog_root = getattr(agent, "catalog_root", None)
+
+    for op in disabled_ops:
+        instance_name = op["instance_name"]
+        block_type = None
+        if session is not None and session.flowgraph is not None:
+            for block in session.flowgraph.blocks:
+                if block.instance_name == instance_name:
+                    block_type = block.block_type
+                    break
+
+        if block_type is not None:
+            semantics = _block_semantics(block_type, catalog_root)
+            role = semantics.get("role", "")
+            semantic_flags = semantics.get("evidence", {}).get("semantic_flags", [])
+            if role in ("source", "sink", "variable_or_control", "metadata") or "disable_bypass" in semantic_flags:
+                all_are_stream_transforms = False
+        else:
+            all_are_stream_transforms = False
+
+    if all_are_stream_transforms:
+        return (
+            "Disabling this block broke its port connections. "
+            "Use update_states with state='bypass' instead of 'disabled' "
+            "to deactivate the block while keeping the graph connected."
+        )
+
+    return (
+        "This is a terminal/control block that cannot be bypassed. "
+        "To deactivate: remove its connections via remove_connections first, "
+        "then disable; or use force=true for an invalid intermediate state."
+    )
+
+
 def _ofdm_carrier_hint(
     operations: list[dict[str, Any]],
     errors_payload: Any,
@@ -419,6 +541,53 @@ def _port_discovery_hint(
     )
 
 
+def _port_occupancy_hint(errors_payload: Any) -> str | None:
+    """Check for port occupancy errors in preflight."""
+    if not isinstance(errors_payload, list):
+        return None
+    for row in errors_payload:
+        if not isinstance(row, dict):
+            continue
+        msg = str(row.get("message", "")).lower()
+        if "port is already connected" in msg or "already in use" in msg:
+            return (
+                "You attempted to connect to an input port that is already in use. "
+                "GRC input ports accept only one connection. "
+                "Include the exact connection_id in remove_connections to free "
+                "the port before connecting your new block."
+            )
+    return None
+
+
+def _undefined_variable_hint(
+    operations: list[dict[str, Any]],
+    errors_payload: Any,
+) -> str | None:
+    """Return a hint when a variable is created and referenced in the same batch."""
+    if not isinstance(errors_payload, list):
+        return None
+    has_undefined = any(
+        isinstance(row, dict)
+        and row.get("code") in ("block_not_found", "parameter_not_found")
+        for row in errors_payload
+    )
+    if not has_undefined:
+        return None
+    has_added = any(
+        isinstance(op, dict)
+        and op.get("op_type") == "add_block"
+        and op.get("block_type") == "variable"
+        for op in operations
+    )
+    if has_added:
+        return (
+            "You created a variable and referenced it in the same batch. "
+            "Create the variable in one change_graph call, then reference it "
+            "in a second call."
+        )
+    return None
+
+
 def _flat_change_graph_hint() -> str:
     return (
         "Use the flat change_graph fields: add_blocks[].block_id, "
@@ -452,16 +621,6 @@ def _repair_hint_for_validation_failure(
 
     dtype_pair = _first_dtype_mismatch(native_errors)
     if dtype_pair is None:
-        if _is_disable_disconnect(
-            operations=operations,
-            native_errors=native_errors,
-        ):
-            return (
-                "No change committed; graph unchanged. "
-                "Disabling this block broke its port connections. "
-                "Use update_states with state='bypass' instead of 'disabled' "
-                "to deactivate the block while keeping the graph connected."
-            )
         if _is_port_occupancy_error(native_errors):
             return (
                 "No change committed; graph unchanged. "
@@ -509,26 +668,6 @@ def _first_dtype_mismatch(errors: list[str]) -> tuple[str, str] | None:
         if match:
             return match.group(1), match.group(2)
     return None
-
-
-def _is_disable_disconnect(
-    *,
-    operations: list[dict[str, Any]],
-    native_errors: list[str],
-) -> bool:
-    """Return whether the model disabled a block and broke its port connections."""
-    has_disabled = any(
-        isinstance(op, dict)
-        and op.get("op_type") == "update_states"
-        and op.get("state") == "disabled"
-        for op in operations
-    )
-    if not has_disabled:
-        return False
-    return any(
-        "port is not connected" in error.lower()
-        for error in native_errors
-    )
 
 
 def _is_port_occupancy_error(native_errors: list[str]) -> bool:

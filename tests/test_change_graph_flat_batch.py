@@ -443,6 +443,61 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertTrue(result["autosave"]["skipped"])
         self.assertEqual(path.read_bytes(), before_sha)
 
+    def test_disable_sink_returns_terminal_hint_not_bypass(self) -> None:
+        """Disabling a sink block emits topology-aware terminal hint, not bypass."""
+        tmp, _path, agent = self._load_temp_agent()
+        self.addCleanup(tmp.cleanup)
+        before_revision = agent.session.state_revision
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "update_states": [
+                    {
+                        "instance_name": "qtgui_time_sink_x_0",
+                        "state": "disabled",
+                    }
+                ]
+            },
+            model_tool_call=True,
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(result.get("committed", True), result)
+        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        hint = result.get("hint", "")
+        self.assertIn("terminal/control block", hint)
+        self.assertIn("cannot be bypassed", hint)
+        self.assertNotIn("state='bypass'", hint)
+
+    def test_disable_inline_transform_returns_bypass_hint(self) -> None:
+        """Disabling a stream-transform inline block emits bypass hint."""
+        tmp, _path, agent = self._load_temp_agent()
+        self.addCleanup(tmp.cleanup)
+        before_revision = agent.session.state_revision
+
+        result = agent.execute_tool(
+            "change_graph",
+            {
+                "update_states": [
+                    {
+                        "instance_name": "blocks_char_to_float_0",
+                        "state": "disabled",
+                    }
+                ]
+            },
+            model_tool_call=True,
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(result.get("committed", True), result)
+        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
+        self.assertEqual(agent.session.state_revision, before_revision)
+        hint = result.get("hint", "")
+        self.assertIn("bypass", hint.lower())
+        self.assertNotIn("terminal/control block", hint)
+
 
 if __name__ == "__main__":
     unittest.main()
