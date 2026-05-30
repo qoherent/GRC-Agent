@@ -24,11 +24,11 @@ def _inspect(view: str) -> tuple[ToolExpectation, ...]:
 
 
 def _search(query: str) -> tuple[ToolExpectation, ...]:
-    return (ToolExpectation("search_blocks", arguments={"query": query}),)
+    return (ToolExpectation("query_knowledge", arguments={"query": query, "domain": "catalog"}),)
 
 
 def _docs(question: str) -> tuple[ToolExpectation, ...]:
-    return (ToolExpectation("ask_grc_docs"),)
+    return (ToolExpectation("query_knowledge", arguments={"query": question, "domain": "docs"}),)
 
 
 def _set_param(instance_name: str, param: str, value: str) -> tuple[ToolExpectation, ...]:
@@ -62,7 +62,7 @@ def _add_variable(name: str, value: str) -> tuple[ToolExpectation, ...]:
         ToolExpectation(
             "change_graph",
             arguments={
-                "add_variables": [{"instance_name": name, "value": value}],
+                "add_blocks": [{"block_id": "variable", "instance_name": name, "params": {"value": value}}],
             },
         ),
     )

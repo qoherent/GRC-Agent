@@ -1,6 +1,6 @@
 """Native MVP R0 release eval: read-only operations.
 
-Expected tool surface: inspect_graph, search_blocks, ask_grc_docs.
+Expected tool surface: inspect_graph, query_knowledge.
 No change_graph calls. No legacy tool names.
 
 Run:
@@ -187,7 +187,7 @@ R0_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt="What scale factor between floats and 16-bit shorts?",
-                expected_tool_calls=(ToolExpectation("ask_grc_docs"),),
+                expected_tool_calls=(ToolExpectation("query_knowledge", arguments={"query": "float 16-bit short scale factor", "domain": "docs"}),),
                 semantic_checks=READ_ONLY_CHECKS(),
                 allow_safe_text_only=True,
             ),

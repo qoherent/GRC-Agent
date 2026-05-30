@@ -1,6 +1,6 @@
 """Native MVP R1 release eval: parameter and state mutations.
 
-Expected tool surface: inspect_graph, search_blocks, ask_grc_docs, change_graph.
+Expected tool surface: inspect_graph, query_knowledge, change_graph.
 Mutations are topology-only — no coordinate checks.
 
 Semantic checks verify final graph state: variable values, block parameters,
