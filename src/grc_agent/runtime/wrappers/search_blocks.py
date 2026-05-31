@@ -451,6 +451,10 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
                     inputs=inputs,
                     outputs=outputs,
                     categories=categories,
+                    templates_make=(
+                        _string_value(
+                            (payload.get("templates") or {}).get("make"))
+                    ),
                 )
             ),
             "match_type": "catalog",
@@ -743,18 +747,23 @@ def _catalog_summary(
     inputs: list[str],
     outputs: list[str],
     categories: list[str],
+    templates_make: str | None = None,
 ) -> str:
     if documentation:
         return " ".join(documentation.split())
     parts: list[str] = []
     if params:
-        parts.append("params: " + ", ".join(params[:6]))
+        parts.append("params: " + "; ".join(params[:6]))
     if inputs:
         parts.append("inputs: " + ", ".join(inputs[:4]))
     if outputs:
         parts.append("outputs: " + ", ".join(outputs[:4]))
     if categories:
         parts.append("category: " + categories[0])
+    if templates_make:
+        usage = _string_value(templates_make)
+        if usage:
+            parts.append("Usage: " + usage)
     return "; ".join(parts)
 
 
@@ -765,19 +774,30 @@ def _id_label_values(value: Any) -> list[str]:
     for item in value:
         if not isinstance(item, dict):
             continue
-        for key in ("id", "label", "dtype", "default"):
-            text = _string_value(item.get(key))
-            if text:
-                values.append(text)
-        values.extend(_string_list_values(item.get("options")))
-        values.extend(_string_list_values(item.get("option_labels")))
-        option_attributes = item.get("option_attributes")
-        if isinstance(option_attributes, dict):
-            for attribute_value in option_attributes.values():
-                values.extend(_string_list_values(attribute_value))
-                text = _string_value(attribute_value)
-                if text:
-                    values.append(text)
+        param_id = _string_value(item.get("id"))
+        label = _string_value(item.get("label"))
+        dtype = _string_value(item.get("dtype"))
+        default_val = _string_value(item.get("default"))
+
+        desc = param_id or ""
+        if label:
+            desc += f" ({label})"
+        if dtype:
+            desc += f", {dtype}"
+
+        options = _string_list_values(item.get("options"))
+        option_labels = _string_list_values(item.get("option_labels"))
+        if options:
+            if option_labels and len(option_labels) == len(options):
+                pairs = [f"{o} ({l})" for o, l in zip(options, option_labels)]
+                desc += ": " + ", ".join(pairs)
+            else:
+                desc += ": " + "/".join(options)
+        if default_val:
+            desc += f", default: {default_val}"
+
+        if desc:
+            values.append(desc)
     return _dedup(values)
 
 
