@@ -314,6 +314,26 @@ Deterministic gates:
 
 Live dashboards exercise llama.cpp routing and behavior by suite. They preserve raw requested/executed tool calls, separate task success from runtime safety, and fail closed on forbidden raw/internal tool history.
 
+All live evals enforce 11 REPORT_DIMENSIONS: routing_pass, argument_pass, tool_success_pass, semantic_pass, safety_pass, runtime_safety_pass, model_contract_pass, end_state_pass, recovery_pass, budget_pass, lint_pass.
+
+- `budget_pass` — upper-bound thresholds for tool_rounds, tool_calls, assistant_text length. Catches catastrophic thrashing without demanding perfect DSP math from a 4B model.
+- `lint_pass` — graph-hygiene checks after mutation: orphan blocks, unused variables, disabled blocks with connections, duplicate block names. Known fixture-level dirtiness is whitelistable via `lint_expected_issues`.
+
+Live quick gate (model-facing behavior changes):
+
+- `uv run python -m tests.llama_eval.run_r0_release --n-runs 1 --results-path /tmp/r0.json`
+- `uv run python -m tests.llama_eval.run_r1_release --n-runs 1 --results-path /tmp/r1.json`
+- `uv run python -m tests.llama_eval.run_r2_release --n-runs 1 --results-path /tmp/r2.json`
+
+Parameterized DSP Fuzzing Gauntlet:
+
+- `uv run python -m tests.llama_eval.run_dsp_gauntlet --seed 42 --count 30 --quick`
+- Generates scenarios from 8 generators (notch, ble, ofdm, qam, mac, inline_swap, cascade, typo) with isolated `random.Random(seed)`.
+- Each scenario produces a `LiveScenario` with `fuzzed_variables` mapped to prompt and semantic checks (prompt-to-evaluation symmetry).
+- Fixture variables are patched via `ruamel.yaml` round-trip-safe YAML mutation (`fuzz_fixture`).
+- Reports pass/fail per scenario plus aggregate budget and lint metrics.
+- `--seed` for deterministic reproducibility; `--output-dir` for post-mortem graph preservation.
+
 The full `unittest` discovery is slow because it includes integration-style graph loading, `grcc` validation, eval harness logic, and CLI loops. Use targeted tests during iteration and reserve full runs for release candidates.
 
 ## Docs And Retrieval

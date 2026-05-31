@@ -342,30 +342,21 @@ Live quick gate (only when runtime/model-facing behavior changes):
 
 ```bash
 uv run python -m tests.llama_eval.run_r0_release --n-runs 1 --results-path /tmp/r0.json
-uv run python -m tests.llama_eval.run_r1_release --n-runs 1 --results-path /tmp/r1_param.json
-uv run python -m tests.llama_eval.run_r1_set_state --n-runs 1 --results-path /tmp/r1_state.json
-uv run python -m tests.llama_eval.run_r2_disconnect --n-runs 1 --results-path /tmp/r2.json
-uv run python -m tests.llama_eval.run_r3_rewire --n-runs 1 --results-path /tmp/r3.json
-uv run python -m tests.llama_eval.run_r4a_insert --n-runs 1 --results-path /tmp/r4a.json
-uv run python -m tests.llama_eval.run_r4b_remove --n-runs 1 --results-path /tmp/r4b.json
-uv run python -m tests.llama_eval.run_r4c_add_variable --n-runs 1 --results-path /tmp/r4c.json
+uv run python -m tests.llama_eval.run_r1_release --n-runs 1 --results-path /tmp/r1.json
+uv run python -m tests.llama_eval.run_r2_release --n-runs 1 --results-path /tmp/r2.json
+uv run python -m tests.llama_eval.run_dsp_gauntlet --seed 42 --count 30 --results-path /tmp/gauntlet.json
 ```
 
 Release/default-routing evidence sweep:
 
 ```bash
 uv run python -m tests.llama_eval.run_r0_release --n-runs 3 --results-path /tmp/r0_n3.json
-uv run python -m tests.llama_eval.run_r1_release --n-runs 3 --results-path /tmp/r1_param_n3.json
-uv run python -m tests.llama_eval.run_r1_set_state --n-runs 3 --results-path /tmp/r1_state_n3.json
-uv run python -m tests.llama_eval.run_r2_disconnect --n-runs 3 --results-path /tmp/r2_n3.json
-uv run python -m tests.llama_eval.run_r3_rewire --n-runs 3 --results-path /tmp/r3_n3.json
-uv run python -m tests.llama_eval.run_r4a_insert --n-runs 3 --results-path /tmp/r4a_n3.json
-uv run python -m tests.llama_eval.run_r4b_remove --n-runs 3 --results-path /tmp/r4b_n3.json
-uv run python -m tests.llama_eval.run_r4c_add_variable --n-runs 3 --results-path /tmp/r4c_n3.json
-uv run python -m tests.llama_eval.run_r7_exact_external --n-runs 3 --results-path /tmp/r7_exact_n3.json
-uv run python -m tests.llama_eval.run_r7_natural_external --n-runs 3 --results-path /tmp/r7_natural_n3.json
-uv run python -m tests.llama_eval.tier5_adversarial --n-runs 3 --results-path /tmp/tier5_n3.json
+uv run python -m tests.llama_eval.run_r1_release --n-runs 3 --results-path /tmp/r1_n3.json
+uv run python -m tests.llama_eval.run_r2_release --n-runs 3 --results-path /tmp/r2_n3.json
+uv run python -m tests.llama_eval.run_dsp_gauntlet --seed 42 --count 50 --n-runs 3 --results-path /tmp/gauntlet_n3.json
 ```
+
+All live evals enforce 11 REPORT_DIMENSIONS including `budget_pass` (tool-round/call thresholds) and `lint_pass` (graph-hygiene checks for orphan blocks, unused variables, disabled-with-connections, duplicate names). Budget and lint metrics aggregate across scenarios in the gauntlet summary.
 
 Operational reports are generated locally during eval/dogfood runs and are not required to be tracked in git for normal development.
 
@@ -415,9 +406,12 @@ Operational reports are generated locally during eval/dogfood runs and are not r
 - Expand Tier 2 semantic checks beyond the canonical fixture and into more installed GNU examples where available.
 - Keep persisting Tier 2/3/4/5 `--n-runs 3` results and gate release candidates through the dashboard.
 - Keep the four-wrapper model surface small; keep `change_graph` as a compact `op + args` envelope instead of adding broad planners or new chat tools.
+- Formalize budget and lint pass criteria in release gates. Establish P95 token-budget baselines from gauntlet runs and tighten threshold defaults.
+- Expand the DSP fuzzing gauntlet with additional generator categories (AGC, filter cascade, channel model) and increase seed coverage.
 - Run Tier 2, Tier 3, Tier 4, and Tier 5 with `--n-runs 3` before release candidates so stochastic 2B behavior is measured explicitly.
 - Keep the default local retrieval stack lightweight: pyproject-managed dependencies, user-local model/cache downloads, generated local Qdrant state, and no bundled model artifacts.
 - Improve explanation quality through the read-only vector docs path, but keep catalog metadata and `grcc` authoritative for graph edits.
 - Continue real-user/user-graph pilot intake with `grc-agent dogfood record/report`; patch only STOP_THE_LINE issues or repeated generic failures across unrelated graphs, not one-off small-model weirdness.
+- Re-enable `max_prompt_tokens` budget tracking by having `validate_tool_call` explicitly `kwargs.pop("debug", None)` before running its strict schema checks (requires `_maybe_enable_wrapper_eval_telemetry` fix in the runtime).
 
 See `docs/BLUEPRINT.md` for the current design contract and patch criteria.
