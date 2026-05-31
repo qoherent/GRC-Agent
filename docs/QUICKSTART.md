@@ -52,9 +52,8 @@ uv run grc-agent health
 ```
 
 For native NVIDIA CUDA, make sure `llama-server --list-devices` shows `CUDA0`.
-Gemma 4 GGUF repos also publish multimodal projector files; use
-`[llama].model_path` for the local text `.gguf` when you want text-only startup
-without downloading `mmproj` assets.
+The default model is `Qwen3.5-9B-UD-Q4_K_XL.gguf`, loaded directly via `model_path`.
+Set `[llama].model_path` in `grc_agent.toml` to your local `.gguf` path.
 
 ## Retrieval Index
 

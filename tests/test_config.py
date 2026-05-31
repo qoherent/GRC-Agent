@@ -26,11 +26,11 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertTrue(default_config_path().is_file())
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:8080")
-        self.assertEqual(config.llama.model, "unsloth/gemma-4-E4B-it-GGUF")
-        self.assertEqual(config.llama.hf_model, "unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL")
+        self.assertEqual(config.llama.model, "Qwen3.5-9B-UD-Q4_K_XL.gguf")
+        self.assertEqual(config.llama.hf_model, "unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL")
         self.assertEqual(
             config.llama.model_path,
-            "/home/mahmoud/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-GGUF/snapshots/653803f092503c04a65164346f3208a36e707693/gemma-4-E4B-it-UD-Q4_K_XL.gguf",
+            "/home/mahmoud/models/Qwen3.5-9B-UD-Q4_K_XL.gguf",
         )
         self.assertEqual(config.llama.desired_context_tokens, 120000)
         self.assertEqual(config.llama.startup_timeout_seconds, 300.0)

@@ -371,10 +371,10 @@ End-to-end runtime readiness requires:
 - four MVP model-facing wrappers only
 
 CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
-When `[llama].model_path` is configured, the launcher uses `llama-server -m`
-with that local text GGUF instead of `-hf`. Use this for Gemma 4 text-only
-startup because the Hugging Face GGUF repos also contain multimodal projector
-files.
+When `[llama].model_path` is configured, the launcher passes `-m` to
+`llama-server` pointing directly at the local `.gguf`. The Qwen 3.5 GGUF
+file is loaded this way; ensure `--jinja` is used so the embedded ChatML
+template correctly renders tool-call messages.
 
 ## Documentation Set
 

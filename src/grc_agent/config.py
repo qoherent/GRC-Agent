@@ -163,8 +163,8 @@ def default_app_config() -> AppConfig:
     config = AppConfig(
         llama=LlamaConfig(
             server_url="http://127.0.0.1:8080",
-            model="unsloth/gemma-4-E2B-it-GGUF",
-            hf_model="unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL",
+            model="Qwen3.5-9B-UD-Q4_K_XL.gguf",
+            hf_model="unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL",
             model_path=None,
             device="CUDA0",
             gpu_layers=999,

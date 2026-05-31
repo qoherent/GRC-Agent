@@ -1,8 +1,8 @@
 [llama]
 server_url = "http://127.0.0.1:8080"
-model = "unsloth/gemma-4-E4B-it-GGUF"
-hf_model = "unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL"
-model_path = "/home/mahmoud/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-GGUF/snapshots/653803f092503c04a65164346f3208a36e707693/gemma-4-E4B-it-UD-Q4_K_XL.gguf"
+model = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
+hf_model = "unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL"
+model_path = "/home/mahmoud/models/Qwen3.5-9B-UD-Q4_K_XL.gguf"
 device = "CUDA0"
 gpu_layers = 999
 desired_context_tokens = 120000

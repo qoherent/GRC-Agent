@@ -40,7 +40,7 @@ The project optimizes for reliability over cleverness. Autonomy comes from typed
   evidence is weak. DocsAnswerAdvisor synthesis is optional research-only and is
   not part of the critical runtime path.
 - `grcc` remains final graph-validity authority.
-- Default local backend in this workspace is `unsloth/gemma-4-E4B-it-GGUF`
+- Default local backend in this workspace is `Qwen3.5-9B-UD-Q4_K_XL.gguf`.
   through a local text-only GGUF path and llama.cpp.
 - Current deterministic safety coverage is strong; live evals are routing/behavior evidence, not proof of production autonomy.
 
@@ -93,7 +93,7 @@ Prerequisites:
 - GNU Radio 3.10.x with `grcc` on `PATH`
 - CUDA-enabled llama.cpp `llama-server` on `PATH` for model-backed chat on NVIDIA machines
 
-The CLI can auto-start a configured local llama.cpp server for normal `chat` use when `llama-server` is installed. The configured default is explicit CUDA device `CUDA0` with `gpu_layers=999`; `llama-server --list-devices` must show `CUDA0`. For Gemma 4 GGUF repos that also publish multimodal projector files, set `[llama].model_path` to the local text `.gguf` so startup uses `-m` instead of `-hf` and does not fetch `mmproj` assets. `doctor` is passive by default; use `uv run grc-agent doctor --start-llama` when you explicitly want it to start or reuse llama.cpp during environment checks.
+The CLI can auto-start a configured local llama.cpp server for normal `chat` use when `llama-server` is installed. The configured default is explicit CUDA device `CUDA0` with `gpu_layers=999`; `llama-server --list-devices` must show `CUDA0`. The Qwen 3.5 9B GGUF is loaded directly via `model_path`. `doctor` is passive by default; use `uv run grc-agent doctor --start-llama` when you explicitly want it to start or reuse llama.cpp during environment checks.
 
 `uv sync --locked` installs Python dependencies including ToolAgents and Qdrant/FastEmbed vector search. It does not install GNU Radio, llama.cpp, chat models, or embedding model files. `uv run grc-agent vector build` explicitly builds the local vector index and may download the FastEmbed embedding model into the user's local cache on first run.
 
