@@ -89,7 +89,10 @@ AGENTIC_REQUEST_TIMEOUT_SECONDS = 180.0
 def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
     llama_config = config.llama if config is not None else None
 
-    parser = argparse.ArgumentParser(description="GRC Agent CLI")
+    parser = argparse.ArgumentParser(
+        description="GRC Agent CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
@@ -152,16 +155,34 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
     )
     fake_parser.add_argument("file", help="Path to a .grc file to load.")
 
+    chat_epilog = """
+Examples:
+  grc-agent chat mygraph.grc --message "Summarize this graph"
+  grc-agent chat mygraph.grc --message "Change samp_rate to 48000" --json
+  echo "Find an audio sink" | grc-agent chat mygraph.grc --stdin
+"""
     chat_parser = subparsers.add_parser(
         "chat",
         help="Run one or more llama.cpp-backed turns against a loaded graph. "
-        "With --message, runs a single turn; without it, starts an interactive REPL.",
+        "With --message or --stdin, runs a single turn; without it, starts an interactive REPL.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=chat_epilog.strip("\n"),
     )
     chat_parser.add_argument(
         "file",
         nargs="?",
         default=None,
         help="Path to a .grc file to load. Use --new to start from an empty graph.",
+    )
+    chat_parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read the user message from standard input instead of --message.",
+    )
+    chat_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the final chat result as a JSON object to stdout. Suppresses all other stdout logging.",
     )
     chat_parser.add_argument(
         "--new",
@@ -203,9 +224,16 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Override the maximum model tool rounds for this chat session.",
     )
 
+    tool_epilog = """
+Examples:
+  grc-agent tool summarize_graph --file mygraph.grc
+  grc-agent tool apply_edit --args '{"add_blocks": [{"block_id": "analog_sig_source_x", "instance_name": "src"}]}'
+"""
     tool_parser = subparsers.add_parser(
         "tool",
         help="Execute one routed runtime tool directly without a model backend.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=tool_epilog.strip("\n"),
     )
     tool_parser.add_argument(
         "tool_name",
@@ -309,7 +337,8 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Print search payload as JSON.",
     )
     vector_miss_parser = vector_subparsers.add_parser(
-        "miss",
+        "record-miss",
+        aliases=["miss"],
         help="Record a sanitized real-user vector retrieval miss as JSONL evidence.",
     )
     vector_miss_parser.add_argument("query", help="User query that missed expected retrieval.")
@@ -366,7 +395,8 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Print recorded miss payload as JSON.",
     )
     vector_misses_parser = vector_subparsers.add_parser(
-        "misses",
+        "list-misses",
+        aliases=["misses"],
         help="Summarize and deduplicate recorded vector retrieval misses.",
     )
     vector_misses_parser.add_argument(
@@ -379,7 +409,8 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Print miss summary as JSON.",
     )
     vector_proposals_parser = vector_subparsers.add_parser(
-        "proposals",
+        "list-proposals",
+        aliases=["proposals"],
         help="Generate a human-review metadata proposal report from miss clusters.",
     )
     vector_proposals_parser.add_argument(
@@ -910,8 +941,12 @@ def _run_llama_runtime(
     agentic: bool = False,
     max_tool_rounds: int | None = None,
     verbose: bool = False,
+    json_output: bool = False,
 ) -> int:
     """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
+    original_stdout = sys.stdout
+    if json_output:
+        sys.stdout = sys.stderr
     effective_max_tool_rounds = _effective_max_tool_rounds(
         config,
         agentic=agentic,
@@ -989,6 +1024,8 @@ def _run_llama_runtime(
             config,
             max_tool_rounds=effective_max_tool_rounds,
             verbose=verbose,
+            json_output=json_output,
+            original_stdout=original_stdout,
         )
 
     return _run_repl_loop(
@@ -1040,6 +1077,8 @@ def _run_single_turn(
     *,
     max_tool_rounds: int | None = None,
     verbose: bool = False,
+    json_output: bool = False,
+    original_stdout: Any | None = None,
 ) -> int:
     """Run one bounded llama turn and print the result."""
     if config is None:
@@ -1060,25 +1099,62 @@ def _run_single_turn(
             max_tool_rounds=round_limit,
         )
     except LlamaServerError as exc:
-        print("\n--- Runtime ---")
-        print(str(exc))
+        if json_output and original_stdout is not None:
+            sys.stdout = original_stdout
+            print(json.dumps({"ok": False, "message": str(exc)}))
+        else:
+            print("\n--- Runtime ---")
+            print(str(exc))
         return 1
 
-    print(f"Using model {result['model']}")
-    if result["ok"]:
-        print("\nAssistant:")
-        print(result["assistant_text"])
-    else:
-        print("\n--- Runtime ---")
-        print(result["message"])
+    if not json_output:
+        print(f"Using model {result.get('model', '?')}")
+        if result["ok"]:
+            print("\nAssistant:")
+            print(result["assistant_text"])
+        else:
+            print("\n--- Runtime ---")
+            print(result["message"])
 
-    # Check for pending clarification after turn completes
-    _maybe_render_pending_clarification(agent)
+        # Check for pending clarification after turn completes
+        _maybe_render_pending_clarification(agent)
 
-    if verbose:
-        _print_history(agent, verbose=True)
+        if verbose:
+            _print_history(agent, verbose=True)
+        else:
+            _print_turn_operations(agent, start_index=history_start)
     else:
-        _print_turn_operations(agent, start_index=history_start)
+        if original_stdout is not None:
+            sys.stdout = original_stdout
+
+        operations = []
+        for turn in agent.history[history_start:]:
+            if turn.get("role") == "assistant" and turn.get("tool_calls"):
+                for tc in turn["tool_calls"]:
+                    fn = tc.get("function") or {}
+                    name = tc.get("name") or fn.get("name") or "?"
+                    args = tc.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
+                    if not isinstance(args, dict):
+                        args = fn.get("arguments", {})
+                    operations.append({"name": name, "arguments": args})
+
+        final_state = agent.active_session_snapshot() or {}
+        
+        payload = {
+            "ok": result["ok"],
+            "assistant_text": result.get("assistant_text", ""),
+            "message": result.get("message", ""),
+            "operations": operations,
+            "state_revision": final_state.get("state_revision"),
+            "validation_status": final_state.get("validation", {}).get("status"),
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+
     return 0 if result["ok"] else 1
 
 
@@ -1870,9 +1946,21 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         else:
             file_arg = args.file
+
+        message = args.message
+        if getattr(args, "stdin", False):
+            message = sys.stdin.read().strip()
+            if not message:
+                parser.error("--stdin was passed but no data was provided on standard input.")
+                return 2
+
+        if message is None and not sys.stdin.isatty():
+            parser.error("chat requires --message or --stdin when running non-interactively (not attached to a TTY).")
+            return 2
+
         return _run_llama_runtime(
             file_arg,
-            args.message,
+            message,
             app_config,
             app_config.llama.server_url
             if args.llama_server_url is None
@@ -1882,6 +1970,7 @@ def main(argv: list[str] | None = None) -> int:
             agentic=args.agentic,
             max_tool_rounds=args.max_tool_rounds,
             verbose=args.verbose,
+            json_output=getattr(args, "json", False),
         )
 
     if args.command == "tool":

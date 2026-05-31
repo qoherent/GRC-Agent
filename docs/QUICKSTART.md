@@ -36,6 +36,12 @@ For exploratory tool-heavy turns:
 uv run grc-agent chat --agentic playground/grc_agent_interactive/dial_tone_interactive.grc
 ```
 
+For programmatic single-shot execution with JSON output and stdin prompts:
+
+```bash
+echo "Change the sample rate to 48000" | uv run grc-agent chat playground/grc_agent_interactive/dial_tone_interactive.grc --stdin --json
+```
+
 ## llama.cpp
 
 Chat starts or reuses the configured local `llama-server` automatically, then verifies health/model/context. For explicit readiness:

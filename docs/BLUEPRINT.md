@@ -291,6 +291,7 @@ The model has no lifecycle tools. `/save` in the CLI bypasses the model and call
 ## CLI Chat UX
 
 - `uv run grc-agent chat <copy.grc>` starts interactive chat on a copied graph.
+- For programmatic single-shot execution, use `--stdin` to pass prompts and `--json` to force stdout to emit a single, parseable JSON payload.
 - Bare `uv run grc-agent` enters chat only in an interactive TTY; non-interactive use prints help and exits command-safe.
 - Chat startup checks the configured llama.cpp server and starts/reuses it when needed; readiness is still health-verified before model-backed use.
 - `grc-agent health` is passive and reports `not_ready` if llama.cpp is not already reachable. Use `grc-agent doctor --start-llama` or chat startup when you want the launcher to start/reuse llama.cpp.
