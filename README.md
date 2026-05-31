@@ -102,7 +102,7 @@ Packaging policy:
 - `pyproject.toml` is the primary install contract for Python dependencies.
 - Docker is not required for the default local install path. A container/devcontainer can be added later for reproducible development, but it should not become the normal user path unless GNU Radio packaging forces it.
 - Model files are runtime assets, not repo/package assets. Do not commit or bundle GGUF files, FastEmbed/Hugging Face caches, `.grc_agent/vector_index/`, or generated Qdrant state.
-- The current vector default is `BAAI/bge-small-en-v1.5` through FastEmbed. The local cached quantized ONNX package is about 65 MB on disk.
+- The current vector default is `thenlper/gte-base` through FastEmbed. The local cached quantized ONNX package is about 400 MB on disk.
 
 GNU Radio is normally installed outside this Python package. A plain uv virtual
 environment may not automatically see distro-installed GNU Radio Python
@@ -395,7 +395,7 @@ Operational reports are generated locally during eval/dogfood runs and are not r
   invalid rewires roll back without committing a partial disconnect.
 - Live-eval pre-turn setup, where needed, must use public verified tools,
   record the setup calls, and validate the graph before the measured turn.
-- Retrieval eval currently covers 290 deterministic cases; vector search has 276 top-k hits with 0 exact-ID misses, 0 false-positive failures, and 0 source-type misses. A six-model FastEmbed bakeoff kept `BAAI/bge-small-en-v1.5` as the runtime default.
+- Retrieval eval currently covers 290 deterministic cases; vector search has 276 top-k hits with 0 exact-ID misses, 0 false-positive failures, and 0 source-type misses. A six-model FastEmbed bakeoff kept `thenlper/gte-base` as the runtime default.
 - Block catalog search uses exact/catalog lexical metadata lookup, cached in-memory SQLite FTS5 sparse ranking, and vector retrieval when the local index is available, then deterministic merge/rerank. Exact block IDs, parameter IDs, ports, and dtypes must not depend on dense embeddings alone.
 - Vector retrieval baseline evidence is frozen in `tests/data/retrieval/vector_eval_governed_metadata.json`; the no-LLM regression gate is `uv run python -m tests.retrieval_eval.vector_regression`.
 - Any future catalog semantic metadata change must be evidence-backed and must rerun retrieval regression before acceptance.

@@ -1,47 +1,41 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
 
-# Virtual environments
-.venv
-.env
-# Playground / generated artifacts (not tracked)
-playground/
-
-# Cache / eval artifacts
-.ruff_cache/
-.llama_eval/
-.opencode/
-.grc_agent/
-.cache/
-benchmark_outputs/
-tmp/
-
-# Generated eval/report artifacts (not tracked)
-reports/
-
-# Node/Remotion generated artifacts
-node_modules/
-demo/remotion/out/
-demo/remotion/dist/
-demo/video_outputs/
-
-# Frozen governed retrieval baseline artifact (tracked)
-!tests/data/retrieval/vector_eval_governed_metadata.json
-
-# Local copied/smoke graph artifacts
-*.saved.grc
-*.restored.grc
-*.tmp.grc
-
+.antigravitycli/
 # Backups
 *.bak
-
-# grcc output artifacts
-/*.py
-!setup.py
+benchmark_outputs/
+build/
+.cache/
+# Cache / eval artifacts
 !conftest.py
+demo/remotion/dist/
+demo/remotion/out/
+demo/video_outputs/
+dist/
+*.egg-info
+.env
+# Frozen governed retrieval baseline artifact (tracked)
+# Generated eval/report artifacts (not tracked)
+.grc_agent/
+# grcc output artifacts
+.llama_eval/
+# Local copied/smoke graph artifacts
+node_modules/
+# Node/Remotion generated artifacts
+.opencode/
+playground/
+# Playground / generated artifacts (not tracked)
+/*.py
+__pycache__/
+*.py[oc]
+# Python-generated files
+reports/
+*.restored.grc
+.ruff_cache/
+*.saved.grc
+!setup.py
+!tests/data/retrieval/vector_eval_governed_metadata.json
+tmp/
+*.tmp.grc
+.venv
+# Virtual environments
+wheels/

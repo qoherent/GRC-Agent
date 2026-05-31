@@ -19,7 +19,11 @@ dependencies = [
     # downloaded/cached by the user's environment during explicit vector build;
     # they are not bundled in this package.
     "qdrant-client[fastembed]>=1.14.2",
-    "mistralai<2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.9",
     "ruamel-yaml>=0.19.1",
 ]
 

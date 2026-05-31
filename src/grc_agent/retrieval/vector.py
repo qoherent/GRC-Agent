@@ -25,7 +25,7 @@ from grc_agent.catalog.loaders import build_catalog_snapshot, discover_catalog_r
 from grc_agent.catalog.normalize import compact_text
 from grc_agent.manual import DEFAULT_MANUAL_ROOT, clean_manual_page
 
-DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_EMBEDDING_MODEL = "thenlper/gte-base"
 DEFAULT_VECTOR_COLLECTION_ALIAS = "grc_agent_retrieval_v1"
 INDEX_SCHEMA_VERSION = "2026-05-22-vector-v2"
 MISS_INTAKE_SCHEMA_VERSION = "2026-04-28-vector-miss-intake-v1"

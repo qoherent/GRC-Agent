@@ -350,7 +350,7 @@ The default retrieval stack is local and lightweight:
 - Python dependencies come from `pyproject.toml`.
 - The active vector index is generated locally with `grc-agent vector build`.
 - Embedding models are downloaded/cached by the user environment at runtime; they are not bundled, vendored, or committed.
-- The current default embedding model is `BAAI/bge-small-en-v1.5` through FastEmbed. The cached quantized ONNX package is about 65 MB.
+- The default embedding model is `thenlper/gte-base` through FastEmbed. The cached quantized ONNX package is about 400 MB.
 - `search_blocks` combines exact/catalog lexical metadata lookup, cached in-memory SQLite FTS5 sparse ranking, and vector retrieval when the generated index is available. Lexical lookup covers exact block IDs, parameter IDs, port names, dtypes, labels, and categories; FTS5 covers sparse prose matches; vector retrieval covers semantic discovery.
 - Stale index schemas fail closed and tell the user to rebuild.
 
