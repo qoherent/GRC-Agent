@@ -21,7 +21,7 @@ dependencies = [
     "qdrant-client[fastembed]>=1.14.2",
 ]
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     "ruff>=0.15.9",
     "ruamel-yaml>=0.19.1",
@@ -29,11 +29,6 @@ dev = [
 
 [project.scripts]
 grc-agent = "grc_agent.cli:main"
-
-[dependency-groups]
-dev = [
-    "ruff>=0.15.9",
-]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
