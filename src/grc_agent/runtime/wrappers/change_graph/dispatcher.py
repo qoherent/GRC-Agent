@@ -184,10 +184,19 @@ def dispatch_flat_change_graph_batch(
         }
     )
     if ok:
-        payload["system_directive"] = (
-            "SUCCESS. The graph has been updated and validated. "
-            "STOP calling tools. Output a final text response explaining what was done."
-        )
+        validation_ok = bool(result.get("validation_ok")) if isinstance(result, dict) else False
+        if validation_ok:
+            payload["system_directive"] = (
+                "SUCCESS. The graph has been updated and compiles cleanly. "
+                "If all user instructions are complete, STOP calling tools "
+                "and output your final response."
+            )
+        else:
+            payload["system_directive"] = (
+                "COMMITTED WITH ERRORS. The graph was saved but remains "
+                "invalid. CONTINUE calling tools to execute your next steps "
+                "and resolve the unconnected ports/errors."
+            )
     if isinstance(result, dict):
         if result.get("forced_validation_failure"):
             payload["forced_validation_failure"] = result.get("forced_validation_failure")
