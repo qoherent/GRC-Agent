@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -906,6 +907,13 @@ def run_live_scenario_once(
 ) -> dict[str, Any]:
     """Run one declarative live scenario in an isolated fixture workspace."""
     from grc_agent.agent import GrcAgent
+    import grc_agent.runtime.prompt as _runtime_prompt
+
+    # Inject a unique run ID into the system prompt to force a KV cache miss
+    # on llama.cpp across consecutive fuzzed runs (prevents floating-point drift).
+    _test_run_id = uuid.uuid4().hex[:12]
+    _original_build = _runtime_prompt.build_system_prompt
+    _runtime_prompt.build_system_prompt = lambda: _original_build() + f"\n[Test Run ID: {_test_run_id}]"
 
     fixture_names = [scenario.fixture_name]
     if scenario.target_fixture_name:

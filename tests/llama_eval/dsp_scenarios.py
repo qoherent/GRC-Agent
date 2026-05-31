@@ -134,10 +134,11 @@ def generate_notch_scenarios(
             scenario=scenario,
             param_seed=case_seed,
             prompt_vars={
-                "fft_len": fft_len,
-                "n_carriers": n_carriers,
-                "range_low": low_end,
-                "range_high": high_end,
+                "samp_rate": sr,
+                "center_freq": center,
+                "bandwidth": bw,
+                "low_cutoff": low,
+                "high_cutoff": high,
             },
         ))
 

@@ -752,12 +752,12 @@ def _catalog_summary(
     if documentation:
         return " ".join(documentation.split())
     parts: list[str] = []
-    if params:
-        parts.append("params: " + "; ".join(params[:6]))
     if inputs:
         parts.append("inputs: " + ", ".join(inputs[:4]))
     if outputs:
         parts.append("outputs: " + ", ".join(outputs[:4]))
+    if params:
+        parts.append("params: " + "; ".join(params[:4]))
     if categories:
         parts.append("category: " + categories[0])
     if templates_make:

@@ -1041,6 +1041,10 @@ def _apply_add_connection(
 def _is_name_error(e: Exception) -> bool:
     if isinstance(e, NameError):
         return True
+    if isinstance(e, SyntaxError):
+        return True
+    if isinstance(e, TypeError):
+        return True
     if isinstance(getattr(e, "__context__", None), NameError):
         return True
     if isinstance(getattr(e, "__cause__", None), NameError):

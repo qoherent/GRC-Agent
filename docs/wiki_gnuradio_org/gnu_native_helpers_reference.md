@@ -684,6 +684,12 @@ When using the window method, the window type is specified using the enum values
 | `fft.window.WIN_TUKEY` | Window type constant |
 | `fft.window.WIN_WELCH` | Window type constant |
 
+### 2.4 FFT Block Output Type Conversion
+
+The Forward FFT block (`fft_vxx`) is a mathematical transformer. Regardless of whether the input is float or complex, the output of a Forward FFT is **always complex data**. 
+
+Therefore, any downstream blocks (such as a `blocks_null_sink` or `qtgui_freq_sink`) connected to the output of an FFT block must be configured with their type parameter set to `complex` (not float), or GRC validation will fail with a data type mismatch.
+
 ## 3. GNU Radio CLI Utilities
 
 These command-line utilities are part of the installed GNU Radio framework and are used for compiling, designing, or managing GNU Radio applications.
