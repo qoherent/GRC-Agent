@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import time
 from typing import Any
@@ -235,6 +236,20 @@ def dispatch_flat_change_graph_batch(
             )
             if native_errors:
                 payload["native_validation_errors"] = native_errors
+
+            # ── Phase 3: State-aware repeat-payload escalator ──────────────
+            current_ops_hash = json.dumps(normalized_operations, sort_keys=True)
+            if agent.session._last_failed_ops_hash == current_ops_hash:
+                escalation_warning = (
+                    "CRITICAL WARNING: You just submitted this EXACT same "
+                    "payload and it failed. DO NOT repeat your previous values. "
+                    "Read the validation errors carefully, ensure no connections "
+                    "or blocks were accidentally dropped, and try a completely "
+                    "new approach."
+                )
+                payload.setdefault("warnings", []).append(escalation_warning)
+            agent.session._last_failed_ops_hash = current_ops_hash
+
             hint = _aggregate_hints(
                 agent=agent,
                 operations=normalized_operations,

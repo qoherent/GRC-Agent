@@ -80,6 +80,7 @@ class FlowgraphSession:
         self._incoming_connection_cache: dict[str, tuple[Connection, ...]] = {}
         self._outgoing_connection_cache: dict[str, tuple[Connection, ...]] = {}
         self._persisted_file_sha256: str | None = None
+        self._last_failed_ops_hash: str | None = None
 
     # Session lifecycle
 
