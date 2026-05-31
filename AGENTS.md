@@ -144,6 +144,23 @@ history, and wrapper outputs compact by design.
 - Do not delete or weaken safety tests unless they are redundant, stale, or
   checking the wrong contract.
 
+## Agent Behavior
+
+### Ask Before Acting (Medium and Hard Problems)
+
+- **Trivial changes** (typos, single-line fixes, obvious import additions, test
+  regeneration after a prompted change) may be applied directly.
+- **Medium and hard changes** — anything involving architecture, prompt
+  wording, schema changes, new rules, new heuristics, retrieval tuning,
+  eval gate adjustments, or multi-file edits — must be proposed to the user
+  first and approved before any code is written or changed.
+- When a medium/hard problem is identified: **stop, report the root cause,
+  enumerate the candidate solutions with trade-offs, and wait for the user to
+  choose one.**
+- Do not pick a solution, start implementing it, and then report back. Report
+  first, implement only after explicit approval.
+- If in doubt about severity, treat the problem as medium and ask.
+
 ## Durable Docs
 
 - `docs/BLUEPRINT.md`: architecture, wrappers, safety, context, evals, runtime

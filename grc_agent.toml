@@ -20,7 +20,7 @@ history_compact_budget = 100000
 enabled = true
 # Deterministic grounded-answer builder is the primary safety-baseline path.
 # Keep helper synthesis disabled unless running explicit research experiments.
-helper_mode = "never"
+helper_mode = "auto"
 helper_max_output_tokens = 320
 helper_timeout_seconds = 3.5
 helper_max_snippet_chars = 320

@@ -1328,9 +1328,9 @@ def _rerank_score(
             )
         )
     )
-    title_hits = sum(1 for term in terms if term in title_terms)
-    alias_hits = sum(1 for term in terms if term in alias_terms)
-    record_hits = sum(1 for term in terms if term in record_terms)
+    title_hits = sum(1 for term in terms if any(term in t for t in title_terms))
+    alias_hits = sum(1 for term in terms if any(term in a for a in alias_terms))
+    record_hits = sum(1 for term in terms if any(term in r for r in record_terms))
     term_coverage = (record_hits / len(terms)) if terms else 0.0
     all_terms_bonus = 0.05 if terms and record_hits == len(terms) else 0.0
     return (

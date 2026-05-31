@@ -123,151 +123,7 @@ def generate_notch_scenarios(
                     accept_any_tool=True,
                     semantic_checks=(
                         {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
-                        {"kind": "dirty", "value": False},
-                    ),
-                    **_DSP_BUDGET,
-                ),
-            ),
-        )
-        results.append(FuzzedScenario(
-            scenario=scenario,
-            param_seed=case_seed,
-            prompt_vars={
-                "samp_rate": sr,
-                "center_freq": center,
-                "bandwidth": bw,
-                "low_cutoff": low,
-                "high_cutoff": high,
-            },
-        ))
-
-    return results
-
-
-# ── 2. BLE Rational Resampler ───────────────────────────────────────────────
-
-BLE_SOURCE_RATES = (2000000, 4000000, 8000000)
-BLE_TARGET_RATES = (500000, 1000000, 2000000)
-
-
-def generate_ble_scenarios(
-    seed: int = 0,
-    count: int = 5,
-) -> list[FuzzedScenario]:
-    """Generate BLE rate-match rational resampler insertion scenarios.
-
-    Fuzzes source and target sample rates. The agent must compute decim/interp
-    ratio and choose the correct dtype (ccc).
-    """
-    rng = random.Random(seed)
-    results: list[FuzzedScenario] = []
-
-    for i in range(count):
-        case_seed = rng.randint(0, 2**31 - 1)
-        src_rate = rng.choice(BLE_SOURCE_RATES)
-        tgt_rate = rng.choice([r for r in BLE_TARGET_RATES if r < src_rate])
-        decim = src_rate // tgt_rate
-
-        prompt = (
-            f"The signal source is capturing Bluetooth LE at {src_rate} Hz, but "
-            f"the GFSK demodulator strictly requires a {tgt_rate} Hz baseband "
-            "input. Insert a Rational Resampler between the Low Pass Filter and "
-            "the GFSK demodulator to step the sample rate down correctly. "
-            "The signal is complex."
-        )
-
-        scenario = LiveScenario(
-            category="dsp",
-            name=f"ble_sr{src_rate}_tr{tgt_rate}",
-            fixture_name="ble_resampler.grc",
-            description=(
-                f"BLE resampler: {src_rate} Hz -> {tgt_rate} Hz "
-                f"(decim={decim})"
-            ),
-            release_profile="R3_REWIRE",
-            fuzzed_variables={"samp_rate": str(src_rate)},
-            param_seed=case_seed,
-            turns=(
-                LiveTurnSpec(
-                    prompt=prompt,
-                    accept_any_tool=True,
-                    semantic_checks=(
-                        {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
-                        {"kind": "dirty", "value": False},
-                    ),
-                    **_DSP_BUDGET,
-                ),
-            ),
-        )
-        results.append(FuzzedScenario(
-            scenario=scenario,
-            param_seed=case_seed,
-            prompt_vars={
-                "source_rate": src_rate,
-                "target_rate": tgt_rate,
-                "decim": decim,
-            },
-        ))
-
-    return results
-
-
-# ── 3. OFDM Subcarrier Masking ──────────────────────────────────────────────
-
-OFDM_FFT_SIZES = (64, 128, 256)
-OFDM_CARRIER_COUNTS = (48, 52, 96)
-
-
-def generate_ofdm_scenarios(
-    seed: int = 0,
-    count: int = 5,
-) -> list[FuzzedScenario]:
-    """Generate OFDM subcarrier masking scenarios.
-
-    Fuzzes FFT length and data subcarrier count. The agent must compute the
-    correct ``range()`` expressions and keep the DC carrier nulled.
-    """
-    rng = random.Random(seed)
-    results: list[FuzzedScenario] = []
-
-    for i in range(count):
-        case_seed = rng.randint(0, 2**31 - 1)
-        fft_len = rng.choice(OFDM_FFT_SIZES)
-        n_carriers = rng.choice([c for c in OFDM_CARRIER_COUNTS if c < fft_len])
-        half = n_carriers // 2
-        low_end = -half
-        high_start = 1
-        high_end = half + 1
-
-        prompt = (
-            f"We are setting up an OFDM transmitter with {fft_len} subcarriers. "
-            f"We need to comply with a stricter emission mask. Update the carrier "
-            f"allocator to only use {n_carriers} data subcarriers "
-            f"(from index {low_end} to -1, and {high_start} to {high_end - 1}). "
-            "Ensure the DC subcarrier (index 0) remains nulled. "
-            "Do not touch the FFT length."
-        )
-
-        scenario = LiveScenario(
-            category="dsp",
-            name=f"ofdm_fft{fft_len}_car{n_carriers}",
-            fixture_name="ofdm_masking.grc",
-            description=(
-                f"OFDM mask: fft_len={fft_len}, carriers={n_carriers}, "
-                f"range=({low_end},0) and ({high_start},{high_end})"
-            ),
-            release_profile="R1_SET_PARAM_ONLY",
-            fuzzed_variables={"fft_len": str(fft_len)},
-            param_seed=case_seed,
-            turns=(
-                LiveTurnSpec(
-                    prompt=prompt,
-                    accept_any_tool=True,
-                    semantic_checks=(
-                        {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
+                        {"kind": "saved_path_valid", "path": "{after_path}"},
                         {"kind": "dirty", "value": False},
                     ),
                     **_R1_BUDGET,
@@ -312,7 +168,8 @@ def generate_qam_scenarios(
 
         prompt = (
             f"We are upgrading our digital link to support a higher data rate. "
-            f"Upgrade the modulation scheme from QPSK to {order}-QAM. "
+            f"Search the docs for {order}-QAM to discover the native constellation helper function. "
+            f"Then, upgrade the modulation scheme from QPSK to {order}-QAM by updating parameters (do not add/remove any blocks or connections). "
             f"Make sure to update the random data source so it generates "
             f"the correct range of byte values for a {order}-QAM alphabet."
         )
@@ -330,7 +187,7 @@ def generate_qam_scenarios(
                     accept_any_tool=True,
                     semantic_checks=(
                         {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
+                        {"kind": "saved_path_valid", "path": "{after_path}"},
                         {"kind": "dirty", "value": False},
                     ),
                     **_R1_BUDGET,
@@ -387,7 +244,7 @@ def generate_mac_scenarios(
                     accept_any_tool=True,
                     semantic_checks=(
                         {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
+                        {"kind": "saved_path_valid", "path": "{after_path}"},
                         {"kind": "dirty", "value": False},
                     ),
                     lint_expected_issues=_MAC_SNIFFER_EXEMPTIONS,
@@ -443,7 +300,7 @@ def generate_inline_swap_scenarios(
                     accept_any_tool=True,
                     semantic_checks=(
                         {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
+                        {"kind": "saved_path_valid", "path": "{after_path}"},
                         {"kind": "dirty", "value": False},
                     ),
                     **_DSP_BUDGET,
@@ -495,7 +352,7 @@ def generate_cascade_scenarios(
                     accept_any_tool=True,
                     semantic_checks=(
                         {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
+                        {"kind": "saved_path_valid", "path": "{after_path}"},
                         {"kind": "dirty", "value": False},
                     ),
                     **_R1_BUDGET,
@@ -543,7 +400,7 @@ def generate_typo_scenarios(
                     accept_any_tool=True,
                     semantic_checks=(
                         {"kind": "mutation"},
-                        {"kind": "saved_path_valid", "path": "{save_path}"},
+                        {"kind": "saved_path_valid", "path": "{after_path}"},
                         {"kind": "dirty", "value": False},
                     ),
                     **_R1_BUDGET,
@@ -563,8 +420,6 @@ def generate_typo_scenarios(
 
 GENERATOR_REGISTRY: dict[str, callable] = {
     "notch": generate_notch_scenarios,
-    "ble": generate_ble_scenarios,
-    "ofdm": generate_ofdm_scenarios,
     "qam": generate_qam_scenarios,
     "mac": generate_mac_scenarios,
     "inline_swap": generate_inline_swap_scenarios,

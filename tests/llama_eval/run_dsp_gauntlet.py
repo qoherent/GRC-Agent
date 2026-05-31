@@ -122,6 +122,8 @@ def main() -> int:
 
     n_runs = 1 if args.quick else args.n_runs
     cases = build_gauntlet_cases(seed=args.seed, count=args.count)
+    if args.case:
+        cases = [c for c in cases if c.name == args.case]
     print(f"Gauntlet: {len(cases)} scenarios (base_seed={args.seed}, n_runs={n_runs})")
 
     report = run_phase_eval(

@@ -401,6 +401,88 @@ def _aggregate_hints(
     if repair_hint:
         hints.append(repair_hint)
 
+    # Check for preflight incompatible_dtype error to produce the same precise config hint
+    if isinstance(errors_payload, list):
+        for err in errors_payload:
+            if not isinstance(err, dict):
+                continue
+            if err.get("code") == "incompatible_dtype" and err.get("message"):
+                msg = err["message"]
+                match = re.search(
+                    r"Source IO type \"([^\"]+)\" does not match sink IO type \"([^\"]+)\" connecting ([a-zA-Z0-9_]+)\(([^)]+)\) to ([a-zA-Z0-9_]+)\(([^)]+)\)",
+                    msg
+                )
+                if match:
+                    src_dt = match.group(1)
+                    dst_dt = match.group(2)
+                    src_name = match.group(3)
+                    src_port_val = match.group(4)
+                    dst_name = match.group(5)
+                    dst_port_val = match.group(6)
+                else:
+                    match = re.search(
+                        r"Cannot connect ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\) to ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\)",
+                        msg
+                    )
+                    if match:
+                        src_name = match.group(1)
+                        src_port_val = match.group(2)
+                        src_dt = match.group(3)
+                        dst_name = match.group(4)
+                        dst_port_val = match.group(5)
+                        dst_dt = match.group(6)
+                    else:
+                        # Also try matching existing connection invalid pattern
+                        match = re.search(
+                            r"Existing connection became invalid: ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\) -> ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\)",
+                            msg
+                        )
+                        if match:
+                            src_name = match.group(1)
+                            src_port_val = match.group(2)
+                            src_dt = match.group(3)
+                            dst_name = match.group(4)
+                            dst_port_val = match.group(5)
+                            dst_dt = match.group(6)
+                if match:
+                    try:
+                        src_idx = int(src_port_val)
+                    except ValueError:
+                        src_idx = src_port_val
+                        
+                    try:
+                        dst_idx = int(dst_port_val)
+                    except ValueError:
+                        dst_idx = dst_port_val
+
+                    added_blocks = {
+                        str(op.get("instance_name")): op
+                        for op in operations
+                        if isinstance(op, dict)
+                        and op.get("op_type") in {"add_block", "insert_block_on_connection"}
+                        and isinstance(op.get("instance_name"), str)
+                    }
+
+                    preflight_hint = None
+                    if dst_name in added_blocks:
+                        preflight_hint = _dtype_param_hint_for_added_block(
+                            added_blocks[dst_name],
+                            port_direction="inputs",
+                            port_id=dst_idx,
+                            desired_dtype=src_dt,
+                            mismatch=f"{src_dt} -> {dst_dt}",
+                        )
+                    if not preflight_hint and src_name in added_blocks:
+                        preflight_hint = _dtype_param_hint_for_added_block(
+                            added_blocks[src_name],
+                            port_direction="outputs",
+                            port_id=src_idx,
+                            desired_dtype=dst_dt,
+                            mismatch=f"{src_dt} -> {dst_dt}",
+                        )
+                    if preflight_hint:
+                        hints.append(preflight_hint)
+
     var_hint = _undefined_variable_hint(operations, errors_payload)
     if var_hint:
         hints.append(var_hint)

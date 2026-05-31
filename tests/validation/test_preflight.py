@@ -285,6 +285,41 @@ class PreflightTransactionTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["errors"][0]["code"], "duplicate_enabled_symbol_id")
 
+    def test_native_eval_valid_python_expressions_pass_preflight(self) -> None:
+        session = self._load_session()
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "update_params",
+                "instance_name": "samp_rate",
+                "params": {"value": "int(32000 * 2 / 2)"},
+            },
+        )
+        self.assertTrue(payload["ok"])
+
+        payload2 = preflight_transaction(
+            session,
+            {
+                "op_type": "update_params",
+                "instance_name": "samp_rate",
+                "params": {"value": "digital.constellation_16qam()"},
+            },
+        )
+        self.assertTrue(payload2["ok"])
+
+    def test_native_eval_invalid_python_expressions_fail_preflight(self) -> None:
+        session = self._load_session()
+        payload = preflight_transaction(
+            session,
+            {
+                "op_type": "update_params",
+                "instance_name": "samp_rate",
+                "params": {"value": "invalid python code()"},
+            },
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["errors"][0]["code"], "parameter_evaluation_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

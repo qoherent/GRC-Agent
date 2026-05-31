@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from grc_agent._payload import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -463,6 +466,8 @@ def _apply_insert_block_on_connection(
 
     # 10. Resolve inserted-block ports deterministically
     resolved_input_port, resolved_output_port, port_issues = _resolve_single_stream_ports(
+        snapshot=snapshot,
+        instance_name=instance_name,
         block_type=block_type,
         parameters=params,
         catalog_root=catalog_root,
@@ -529,6 +534,8 @@ def _apply_insert_block_on_connection(
 
 
 def _resolve_single_stream_ports(
+    snapshot: SessionSnapshot,
+    instance_name: str,
     *,
     block_type: str,
     parameters: dict[str, Any],
@@ -553,14 +560,19 @@ def _resolve_single_stream_ports(
             )
         ]
 
+    evaluated_parameters_by_block, _ = _evaluate_snapshot_params(snapshot)
+    eval_params = evaluated_parameters_by_block.get(instance_name)
+    if eval_params is None:
+        eval_params = parameters
+
     ins, _warn1 = resolve_port_slots(
         block_rules=lookup.rules,
-        parameters=parameters,
+        parameters=eval_params,
         direction="inputs",
     )
     outs, _warn2 = resolve_port_slots(
         block_rules=lookup.rules,
-        parameters=parameters,
+        parameters=eval_params,
         direction="outputs",
     )
 
@@ -830,8 +842,17 @@ def _apply_add_connection(
     assert src_rules is not None
     assert dst_rules is not None
 
-    src_parameters = src_block.params.get("parameters")
-    dst_parameters = dst_block.params.get("parameters")
+    # Evaluate snapshot parameters to get accurately resolved ports
+    evaluated_parameters_by_block, _ = _evaluate_snapshot_params(snapshot)
+
+    src_parameters = evaluated_parameters_by_block.get(src_block_name)
+    if src_parameters is None:
+        src_parameters = src_block.params.get("parameters")
+
+    dst_parameters = evaluated_parameters_by_block.get(dst_block_name)
+    if dst_parameters is None:
+        dst_parameters = dst_block.params.get("parameters")
+
     if not isinstance(src_parameters, dict) or not isinstance(dst_parameters, dict):
         return [
             make_issue(
@@ -982,9 +1003,8 @@ def _apply_add_connection(
                 field="connection",
                 code="incompatible_dtype",
                 message=(
-                    f"Cannot connect {format_endpoint(src_block_name, src_port)} "
-                    f"({source_port.dtype}) to {format_endpoint(dst_block_name, dst_port)} "
-                    f"({destination_port.dtype})."
+                    f"Source IO type \"{source_port.dtype}\" does not match sink IO type \"{destination_port.dtype}\" "
+                    f"connecting {format_endpoint(src_block_name, src_port)} to {format_endpoint(dst_block_name, dst_port)}."
                 ),
                 hint=hint_text,
             )
@@ -1018,6 +1038,90 @@ def _apply_add_connection(
     return [], warnings
 
 
+def _is_name_error(e: Exception) -> bool:
+    if isinstance(e, NameError):
+        return True
+    if isinstance(getattr(e, "__context__", None), NameError):
+        return True
+    if isinstance(getattr(e, "__cause__", None), NameError):
+        return True
+    err_str = str(e)
+    if "is not defined" in err_str:
+        return True
+    return False
+
+
+def _evaluate_snapshot_params(
+    snapshot: SessionSnapshot,
+    *,
+    affected_block_names: set[str] | None = None,
+    op_index: int = 0,
+) -> tuple[dict[str, dict[str, Any]], list[ValidationIssue]]:
+    """Evaluate block parameters natively using GRC Platform."""
+    evaluated_parameters_by_block = {}
+    errors: list[ValidationIssue] = []
+
+    from gnuradio.grc.core.platform import Platform
+    from gnuradio import gr
+    import gnuradio.digital as digital
+    import gnuradio.filter as filter_mod
+
+    global _cached_platform
+    if "_cached_platform" not in globals():
+        try:
+            _cached_platform = Platform(
+                version=gr.version(),
+                version_parts=(gr.major_version(), gr.api_version(), gr.minor_version()),
+                prefs=gr.prefs()
+            )
+            _cached_platform.build_library()
+        except Exception as e:
+            logger.debug("Failed to initialize GRC Platform for preflight parameter validation: %s", e)
+            _cached_platform = None
+
+    if _cached_platform is not None:
+        try:
+            fg = _cached_platform.make_flow_graph()
+            
+            orig_eval = fg.evaluate
+            def custom_eval(expr, namespace=None, local_namespace=None):
+                fg.namespace["digital"] = digital
+                fg.namespace["filter"] = filter_mod
+                fg.namespace["firdes"] = filter_mod.firdes
+                return orig_eval(expr, namespace, local_namespace)
+            fg.evaluate = custom_eval
+
+            fg.import_data(snapshot.raw_data)
+
+            for grc_block in fg.blocks:
+                block_eval_params = {}
+                for param in grc_block.params.values():
+                    try:
+                        val = param.evaluate()
+                        block_eval_params[param.key] = val
+                    except Exception as e:
+                        # Report evaluation failure if it is a SyntaxError/TypeError etc.
+                        # but IGNORE NameError (which indicates reference to undefined variables)
+                        # so that it gets deferred to final native compiler validation.
+                        if not _is_name_error(e):
+                            if affected_block_names is not None and grc_block.name in affected_block_names:
+                                errors.append(
+                                    make_issue(
+                                        op_index=op_index,
+                                        op_type="transaction",
+                                        field=f"params.{grc_block.name}.{param.key}",
+                                        code="parameter_evaluation_failed",
+                                        message=f"Block {grc_block.name} parameter '{param.key}' failed evaluation: {e}",
+                                    )
+                                )
+                        block_eval_params[param.key] = param.get_value()
+                evaluated_parameters_by_block[grc_block.name] = block_eval_params
+        except Exception as e:
+            logger.debug("Snapshot native evaluation failed: %s", e)
+            
+    return evaluated_parameters_by_block, errors
+
+
 def validate_snapshot_integrity(
     snapshot: SessionSnapshot,
     *,
@@ -1035,6 +1139,18 @@ def validate_snapshot_integrity(
     duplicate_issue = _validate_enabled_symbol_uniqueness(snapshot, op_index=op_index)
     if duplicate_issue is not None:
         return [duplicate_issue], []
+
+    # Native GRC parameter evaluation and validation
+    evaluated_parameters_by_block, eval_errors = _evaluate_snapshot_params(
+        snapshot,
+        affected_block_names=affected_block_names,
+        op_index=op_index,
+    )
+    errors.extend(eval_errors)
+
+    # If we already have evaluation errors, return them immediately
+    if errors:
+        return errors, warnings
 
     connected_neighbors = {
         connection.src_block
@@ -1061,7 +1177,10 @@ def validate_snapshot_integrity(
         if raw_block is None or block is None:
             continue
 
-        parameters = raw_block.get("parameters")
+        parameters = evaluated_parameters_by_block.get(block_name)
+        if parameters is None:
+            parameters = raw_block.get("parameters")
+
         if not isinstance(parameters, dict):
             errors.append(
                 make_issue(

@@ -1035,9 +1035,7 @@ class _SafeExpressionEvaluator(ast.NodeVisitor):
         value = self.visit(node.value)
         if node.attr.startswith("_"):
             raise ValueError("Private attributes are not allowed.")
-        if isinstance(value, EnumChoice):
-            return getattr(value, node.attr)
-        raise ValueError("Unsupported attribute access.")
+        return getattr(value, node.attr)
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
         operand = self.visit(node.operand)

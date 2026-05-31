@@ -32,7 +32,7 @@ def query_knowledge(
         from grc_agent.runtime.wrappers.search_blocks import search_blocks as _search
         result = _search(agent, query=query, debug=debug)
     else:
-        from grc_agent.runtime.wrappers.ask_grc_docs import ask_grc_docs as _docs
+        from grc_agent.runtime.docs_answer import ask_grc_docs as _docs
         result = _docs(agent, question=query, debug=debug)
 
     if isinstance(result, dict):

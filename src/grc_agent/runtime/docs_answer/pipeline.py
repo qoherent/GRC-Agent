@@ -1058,6 +1058,8 @@ def _preferred_docs_source_markers(question: str) -> tuple[str, ...]:
         markers.extend(("streams and vectors", "stream_ports", "message passing", "message_ports"))
     if "options" in lower and ("flowgraph" in lower or "block" in lower):
         markers.extend(("options_blocks", "catalog:options", " options "))
+    if any(k in lower for k in ("helper", "reference", "constellation", "qam", "psk")):
+        markers.extend(("gnu_native_helpers_reference", "helper", "helpers"))
     return tuple(dict.fromkeys(markers))
 
 

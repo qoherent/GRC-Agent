@@ -529,6 +529,8 @@ def helper_eligibility_for_docs_answer(
             return (False, "high_confidence_simple_comparison")
         return (True, "eligible_comparison_synthesis")
     if answer_type == "definition":
+        if any(w in question_lower for w in ("helper", "function", "generator", "class", "reference", "api")):
+            return (True, "helper_function_query_requires_synthesis")
         if typed_insufficient and len(selected_candidates) >= 2:
             return (True, "eligible_definition_recovery")
         if len(selected_candidates) < 2:
