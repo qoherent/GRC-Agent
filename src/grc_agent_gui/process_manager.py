@@ -32,6 +32,10 @@ class ProcessManager(QObject):
         self.run_process = None
         self._current_temp_dir = None
         self.active_session = None
+        # Per-slot kill timers, scoped to the two semantic process slots so
+        # we never index by transient Python/C++ object IDs.
+        self._compile_kill_timer = None
+        self._run_kill_timer = None
 
     def resolve_flowgraph_id(self, session) -> str:
         """Resolve the options block id parameter from the session flowgraph metadata."""
@@ -45,7 +49,7 @@ class ProcessManager(QObject):
         """First stage: Compile `.grc` file via `grcc` into a temporary directory."""
         self.stop()
         self.cleanup_temp_dir()
-        
+
         self.active_session = session
         grc_path = getattr(session, "path", "")
         if not grc_path:
@@ -54,21 +58,30 @@ class ProcessManager(QObject):
 
         # Create persistent temporary directory for this compile/run cycle
         self._current_temp_dir = tempfile.mkdtemp(prefix="grc_agent_run_")
-        
-        # Spawn compilation QProcess
-        self.compile_process = QProcess(self)
-        self.compile_process.setWorkingDirectory(os.path.dirname(grc_path))
-        self.compile_process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
-        
-        # Connect compilation standard outputs, error occurred and finished slots
-        self.compile_process.errorOccurred.connect(self.on_compile_error)
-        self.compile_process.finished.connect(self.on_compilation_finished)
-        self.compile_process.readyReadStandardOutput.connect(self.on_compile_stdout)
-        self.compile_process.readyReadStandardError.connect(self.on_compile_stderr)
-        
+
+        # Spawn compilation QProcess. If construction fails (extremely rare
+        # for QProcess, but possible on exotic platforms), do not leak the
+        # freshly created temp directory.
+        try:
+            self.compile_process = QProcess(self)
+            self.compile_process.setWorkingDirectory(os.path.dirname(grc_path))
+            self.compile_process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
+
+            # Connect compilation standard outputs, error occurred and finished slots
+            self.compile_process.errorOccurred.connect(self.on_compile_error)
+            self.compile_process.finished.connect(self.on_compilation_finished)
+            self.compile_process.readyReadStandardOutput.connect(self.on_compile_stdout)
+            self.compile_process.readyReadStandardError.connect(self.on_compile_stderr)
+        except Exception as e:
+            logger.exception("Failed to construct compile QProcess")
+            self.status_message.emit(f"Failed to spawn compile process: {e}")
+            self.cleanup_temp_dir()
+            self.finished.emit(-1)
+            return
+
         self.status_message.emit(f"Compiling {os.path.basename(grc_path)} with grcc...")
         self.started.emit()
-        
+
         # Execute grcc -o <temp_dir> <grc_path>
         self.compile_process.start("grcc", ["-o", self._current_temp_dir, grc_path])
 
@@ -154,39 +167,85 @@ class ProcessManager(QObject):
     def stop(self) -> None:
         """Initiates a Two-Phase termination sequence for compiling/running flowgraphs."""
         if self.compile_process and self.compile_process.state() == QProcess.ProcessState.Running:
-            self._terminate_with_fallback(self.compile_process, "compilation")
-            
-        if self.run_process and self.run_process.state() == QProcess.ProcessState.Running:
-            self._terminate_with_fallback(self.run_process, "flowgraph execution")
+            self._terminate_with_fallback(self.compile_process, self._compile_kill_timer, "compilation")
 
-    def _terminate_with_fallback(self, proc: QProcess, label: str) -> None:
+        if self.run_process and self.run_process.state() == QProcess.ProcessState.Running:
+            self._terminate_with_fallback(self.run_process, self._run_kill_timer, "flowgraph execution")
+
+    def _terminate_with_fallback(
+        self,
+        proc: QProcess,
+        timer_attr: QTimer | None,
+        label: str,
+    ) -> None:
+        """Send SIGTERM and schedule a 2s SIGKILL fallback.
+
+        ``timer_attr`` is a reference to one of the per-slot timer attributes
+        (``self._compile_kill_timer`` or ``self._run_kill_timer``) and is used
+        to cancel/overwrite any previously-scheduled kill for the same slot.
+        """
         self.status_message.emit(f"Terminating {label} process (Phase 1)...")
         proc.terminate()
-        # Schedule forceful kill fallback after 2000ms
-        QTimer.singleShot(2000, lambda: self._force_kill_process(proc, label))
+
+        # Cancel any existing pending kill for this slot, then schedule a
+        # fresh one bound to the new QProcess.
+        existing = timer_attr
+        if existing is not None:
+            existing.stop()
+            existing.deleteLater()
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(2000)
+        timer.timeout.connect(lambda p=proc, lbl=label: self._force_kill_process(p, lbl))
+        timer.start()
+
+        if label == "compilation":
+            self._compile_kill_timer = timer
+        else:
+            self._run_kill_timer = timer
 
     def _force_kill_process(self, proc: QProcess, label: str) -> None:
         if proc and proc.state() == QProcess.ProcessState.Running:
             self.status_message.emit(f"{label.capitalize()} process failed to terminate. Forcefully killing (Phase 2)...")
             proc.kill()
+        # Always clear the slot timer after firing, regardless of kill outcome.
+        if label == "compilation":
+            self._compile_kill_timer = None
+        else:
+            self._run_kill_timer = None
 
     def shutdown(self) -> None:
-        """Synchronously shutdown running processes on application exit to avoid leaks."""
+        """Best-effort synchronous shutdown on application exit.
+
+        Each waitForFinished is capped at 200ms to avoid blocking the Qt
+        aboutToQuit event loop past Qt's grace period. If a flowgraph
+        refuses SIGTERM within 400ms total, it is hard-killed; the spec
+        requires this to prevent hardware lock leaks.
+        """
         # 1. Compilation process cleanup
         if self.compile_process and self.compile_process.state() == QProcess.ProcessState.Running:
             self.compile_process.terminate()
-            if not self.compile_process.waitForFinished(1000):
+            if not self.compile_process.waitForFinished(200):
                 self.compile_process.kill()
-                self.compile_process.waitForFinished(500)
-                
+                self.compile_process.waitForFinished(200)
+
         # 2. Flowgraph execution process cleanup
         if self.run_process and self.run_process.state() == QProcess.ProcessState.Running:
             self.run_process.terminate()
-            if not self.run_process.waitForFinished(2000):
+            if not self.run_process.waitForFinished(200):
                 self.run_process.kill()
-                self.run_process.waitForFinished(500)
-                
-        # 3. Persistent directory cleanup
+                self.run_process.waitForFinished(200)
+
+        # 3. Cancel any pending per-slot kill timers
+        for attr in ("_compile_kill_timer", "_run_kill_timer"):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                timer.stop()
+                timer.deleteLater()
+                setattr(self, attr, None)
+
+        # 4. Persistent directory cleanup
         self.cleanup_temp_dir()
 
     def cleanup_temp_dir(self) -> None:

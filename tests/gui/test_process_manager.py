@@ -113,32 +113,45 @@ def test_split_stage_execution(mock_qprocess_class, qtbot):
 
 
 def test_two_phase_termination(qtbot):
-    """Assert stop() sends terminate(), schedules a timer, and calls kill() if running."""
+    """Assert stop() sends terminate(), schedules a QTimer fallback, and calls kill() if running."""
     manager = ProcessManager()
-    
+
     # Mock active run process
     mock_run_proc = MagicMock()
     mock_run_proc.state.return_value = QProcess.ProcessState.Running
     manager.run_process = mock_run_proc
-    
-    # Call stop
-    with patch("PySide6.QtCore.QTimer.singleShot") as mock_timer:
+
+    # The R2 fix uses a QTimer instance on the ProcessManager (not
+    # QTimer.singleShot). Patch QTimer so we can assert on interval and
+    # simulate the timeout callback without firing the real timer.
+    with patch("grc_agent_gui.process_manager.QTimer") as mock_qtimer_class:
+        mock_timer_instance = MagicMock()
+        mock_qtimer_class.return_value = mock_timer_instance
+
         manager.stop()
-        
+
         # Verify terminate() was called
         mock_run_proc.terminate.assert_called_once()
-        
-        # Verify 2000ms fallback timer was scheduled
-        mock_timer.assert_called_once()
-        timer_ms, timer_callback = mock_timer.call_args[0]
-        assert timer_ms == 2000
-        
+        # The per-slot QTimer must have been constructed, configured to
+        # single-shot, and started with a 2000ms interval.
+        mock_qtimer_class.assert_called_once()
+        mock_timer_instance.setSingleShot.assert_called_once_with(True)
+        mock_timer_instance.setInterval.assert_called_once_with(2000)
+        mock_timer_instance.start.assert_called_once()
+        # The slot's timer attribute is now populated.
+        assert manager._run_kill_timer is mock_timer_instance
+        # Capture the timeout callback registered on the timer.
+        timeout_args = mock_timer_instance.timeout.connect.call_args
+        timer_callback = timeout_args[0][0]
+
         # Simulate timer timeout callback when process is still running
         mock_run_proc.state.return_value = QProcess.ProcessState.Running
         timer_callback()
-        
+
         # Assert fallback kill() was invoked
         mock_run_proc.kill.assert_called_once()
+        # After the kill, the slot timer is cleared.
+        assert manager._run_kill_timer is None
 
 
 def test_deferred_close_event_with_running_process(qtbot):
@@ -208,13 +221,18 @@ def test_compile_process_has_fallback_kill(qtbot):
     mock_compile_proc = MagicMock()
     mock_compile_proc.state.return_value = QProcess.ProcessState.Running
     manager.compile_process = mock_compile_proc
-    
-    with patch("PySide6.QtCore.QTimer.singleShot") as mock_timer:
+
+    with patch("grc_agent_gui.process_manager.QTimer") as mock_qtimer_class:
+        mock_timer_instance = MagicMock()
+        mock_qtimer_class.return_value = mock_timer_instance
         manager.stop()
         mock_compile_proc.terminate.assert_called_once()
-        mock_timer.assert_called_once()
-        timer_ms, _ = mock_timer.call_args[0]
-        assert timer_ms == 2000
+        mock_qtimer_class.assert_called_once()
+        mock_timer_instance.setInterval.assert_called_once_with(2000)
+        mock_timer_instance.start.assert_called_once()
+        # The compile slot is tracked separately from the run slot.
+        assert manager._compile_kill_timer is mock_timer_instance
+        assert manager._run_kill_timer is None
 
 
 def test_start_execution_finds_missing_py_file(qtbot):
@@ -270,27 +288,108 @@ def test_compile_process_inherits_environment(qtbot):
 def test_shutdown_stops_and_cleans_temp(qtbot):
     """Assert shutdown() terminates running processes and removes current temp directory."""
     manager = ProcessManager()
-    
+
     mock_compile_proc = MagicMock()
     mock_compile_proc.state.return_value = QProcess.ProcessState.Running
     mock_compile_proc.waitForFinished.return_value = True
     manager.compile_process = mock_compile_proc
-    
+
     mock_run_proc = MagicMock()
     mock_run_proc.state.return_value = QProcess.ProcessState.Running
     mock_run_proc.waitForFinished.return_value = True
     manager.run_process = mock_run_proc
-    
+
     manager._current_temp_dir = "/tmp/dummy_temp_dir"
-    
+
     with patch("grc_agent_gui.process_manager.shutil.rmtree") as mock_rmtree, \
          patch("grc_agent_gui.process_manager.os.path.exists") as mock_exists:
         mock_exists.return_value = True
-        
+
         manager.shutdown()
-        
+
         mock_compile_proc.terminate.assert_called_once()
         mock_run_proc.terminate.assert_called_once()
         mock_rmtree.assert_called_once_with("/tmp/dummy_temp_dir", ignore_errors=True)
+
+
+def test_shutdown_caps_wait_at_200ms(qtbot):
+    """R3: shutdown() must cap each waitForFinished at 200ms to avoid blocking the Qt aboutToQuit loop."""
+    manager = ProcessManager()
+    mock_proc = MagicMock()
+    mock_proc.state.return_value = QProcess.ProcessState.Running
+    mock_proc.waitForFinished.return_value = True
+    manager.compile_process = mock_proc
+
+    with patch("grc_agent_gui.process_manager.shutil.rmtree"):
+        manager.shutdown()
+
+    # Each wait must be called with 200ms, not 1000ms.
+    for call in mock_proc.waitForFinished.call_args_list:
+        args, kwargs = call
+        # Accept either positional or keyword arg.
+        actual = kwargs.get("msecs", args[0] if args else None)
+        assert actual == 200, f"waitForFinished called with {actual!r}, expected 200"
+
+
+def test_rapid_stop_does_not_stack_timers(qtbot):
+    """R2: multiple stop() calls in quick succession must overwrite the per-slot kill timer,
+    not stack an unbounded number of QTimer.singleShot callbacks.
+    """
+    manager = ProcessManager()
+    mock_run_proc = MagicMock()
+    mock_run_proc.state.return_value = QProcess.ProcessState.Running
+    manager.run_process = mock_run_proc
+
+    with patch("grc_agent_gui.process_manager.QTimer") as mock_qtimer_class:
+        timer_instances = [MagicMock() for _ in range(5)]
+        mock_qtimer_class.side_effect = timer_instances
+
+        # Call stop() 5 times. Each call must overwrite the prior per-slot timer.
+        for _ in range(5):
+            manager.stop()
+
+        # The current _run_kill_timer must be the last constructed one.
+        assert manager._run_kill_timer is timer_instances[-1]
+        # All prior timers must have been stopped and scheduled for deletion.
+        for prior in timer_instances[:-1]:
+            prior.stop.assert_called_once()
+            prior.deleteLater.assert_called_once()
+        # The most recent timer must be running.
+        timer_instances[-1].start.assert_called_once()
+
+
+def test_compile_spawn_failure_cleans_temp(qtbot):
+    """R10: if QProcess construction fails inside compile_and_run, the freshly created
+    temp directory must be cleaned and finished(-1) must be emitted.
+    """
+    manager = ProcessManager()
+    mock_session = MagicMock()
+    mock_session.path = "/tmp/my_graph.grc"
+
+    finished_codes = []
+    manager.finished.connect(lambda c: finished_codes.append(c))
+
+    with patch("grc_agent_gui.process_manager.QProcess", side_effect=RuntimeError("spawn failed")):
+        manager.compile_and_run(mock_session)
+
+    assert finished_codes == [-1]
+    # The temp dir is not set after cleanup.
+    assert manager._current_temp_dir is None
+
+
+def test_shutdown_cancels_pending_kill_timers(qtbot):
+    """shutdown() must stop and deleteLater() any per-slot kill timers it finds."""
+    manager = ProcessManager()
+    pending = MagicMock()
+    manager._compile_kill_timer = pending
+    manager._run_kill_timer = MagicMock()
+
+    with patch("grc_agent_gui.process_manager.shutil.rmtree"):
+        manager.shutdown()
+
+    pending.stop.assert_called_once()
+    pending.deleteLater.assert_called_once()
+    assert manager._compile_kill_timer is None
+    assert manager._run_kill_timer is None
 
 

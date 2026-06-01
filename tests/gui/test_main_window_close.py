@@ -115,18 +115,83 @@ def test_about_to_quit_triggers_shutdown(qtbot):
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-        
+
     mock_agent = MagicMock()
     mock_provider = MagicMock()
-    
+
     window = MainWindow(mock_agent, mock_provider)
     qtbot.addWidget(window)
     window.show()
-    
+
     # Connect signal just like in app.py
     app.aboutToQuit.connect(window.process_manager.shutdown)
-    
+
     with patch.object(window.process_manager, "shutdown") as mock_shutdown:
         # Emit aboutToQuit
         app.aboutToQuit.emit()
         mock_shutdown.assert_called_once()
+
+
+def test_thread_finished_disconnected_after_cleanup(qtbot):
+    """R4: cleanup_thread must disconnect the thread.finished binding
+    so that on_deferred_close is not invoked against a destroyed QThread.
+    """
+    from unittest.mock import MagicMock
+
+    mock_agent = MagicMock()
+    mock_provider = MagicMock()
+
+    window = MainWindow(mock_agent, mock_provider)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.start_generation("test prompt")
+    assert window.thread is not None
+    assert window.thread.isRunning()
+
+    # Drive a thread that completes its run quickly.
+    qtbot.waitUntil(lambda: window.thread is None or not window.thread.isRunning(), timeout=3000)
+
+    # After cleanup_thread ran, the receiver count for finished -> on_deferred_close
+    # must be zero. Qt raises TypeError if the connection still exists.
+    assert window.thread is None or window.thread.receivers(window.thread.finished) == 0
+
+
+def test_inspector_runnable_does_not_import_unittest_mock():
+    """R5: production code in main_window.py must not import unittest.mock."""
+    import inspect
+    from grc_agent_gui import main_window
+
+    source = inspect.getsource(main_window)
+    assert "unittest.mock" not in source
+    assert "Mock" not in source or "Mock(" not in source
+
+
+def test_stale_graph_warning_fires_on_revision_change(qtbot):
+    """4.6: when a mutation lands while a flowgraph is running, the
+    status bar must surface a stale-graph warning.
+    """
+    from unittest.mock import MagicMock
+    from PySide6.QtCore import QProcess
+
+    mock_agent = MagicMock()
+    mock_agent.session.state_revision = 5
+    mock_provider = MagicMock()
+
+    window = MainWindow(mock_agent, mock_provider)
+    qtbot.addWidget(window)
+    window.show()
+
+    # Mark the run process as active.
+    mock_run_proc = MagicMock()
+    mock_run_proc.state.return_value = QProcess.ProcessState.Running
+    window.process_manager.run_process = mock_run_proc
+
+    # First turn establishes the baseline revision.
+    window.on_turn_finished({"ok": True, "assistant_text": "first"})
+    assert "stale" not in window.status_bar.currentMessage().lower()
+
+    # Second turn advances the on-disk revision while the flowgraph is still running.
+    mock_agent.session.state_revision = 6
+    window.on_turn_finished({"ok": True, "assistant_text": "second"})
+    assert "stale" in window.status_bar.currentMessage().lower()

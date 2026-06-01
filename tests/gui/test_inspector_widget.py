@@ -136,11 +136,102 @@ def test_open_in_grc_is_detached(qtbot):
     """Assert clicking "Open GRC" invokes gnuradio-companion detached."""
     widget = InspectorWidget()
     qtbot.addWidget(widget)
-    
+
     widget.set_grc_file_path("/tmp/test_flowgraph.grc")
-    
+
     with patch("PySide6.QtCore.QProcess.startDetached") as mock_start_detached:
+        # Return (True, pid) so the failure-handling path is not taken.
+        mock_start_detached.return_value = (True, 1234)
         widget.open_in_grc()
-        
+
         # Verify detached process was run with the right path argument
         mock_start_detached.assert_called_once_with("gnuradio-companion", ["/tmp/test_flowgraph.grc"])
+
+
+def test_start_detached_failure_disables_button(qtbot):
+    """5.6: when gnuradio-companion is missing, the button must be disabled
+    and the tooltip must explain the failure.
+    """
+    widget = InspectorWidget()
+    qtbot.addWidget(widget)
+    widget.set_grc_file_path("/tmp/test_flowgraph.grc")
+
+    with patch("PySide6.QtCore.QProcess.startDetached") as mock_start_detached:
+        # Both possible failure return shapes are accepted by the implementation.
+        mock_start_detached.return_value = (False, 0)
+        widget.open_in_grc()
+
+    assert not widget.open_grc_btn.isEnabled()
+    assert "not found" in widget.open_grc_btn.toolTip().lower()
+
+
+def test_expansion_state_uses_user_role(qtbot):
+    """5.2: category expansion state is keyed on Qt.UserRole, not display text."""
+    from PySide6.QtCore import Qt
+    widget = InspectorWidget()
+    qtbot.addWidget(widget)
+
+    payload = {
+        "ok": True,
+        "view": "overview",
+        "state_revision": 1,
+        "summary": {
+            "blocks": [
+                {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"}
+            ]
+        },
+    }
+    widget.update_state(payload)
+    sources_item = None
+    for i in range(widget.blocks_tree.topLevelItemCount()):
+        item = widget.blocks_tree.topLevelItem(i)
+        if item.text(0) == "Sources":
+            sources_item = item
+            break
+    assert sources_item is not None
+    # The UserRole key is the stable "sources" identifier.
+    assert sources_item.data(0, Qt.UserRole) == "sources"
+    sources_item.setExpanded(True)
+
+    # Refresh and confirm expansion survives a render.
+    widget.update_state(payload)
+    for i in range(widget.blocks_tree.topLevelItemCount()):
+        item = widget.blocks_tree.topLevelItem(i)
+        if item.text(0) == "Sources":
+            assert item.isExpanded()
+            break
+
+
+def test_scroll_clamp_on_smaller_range(qtbot):
+    """5.3: scroll restoration must clamp to the new maximum when the range shrinks."""
+    widget = InspectorWidget()
+    qtbot.addWidget(widget)
+
+    # First load with many blocks so the range is large.
+    many_blocks = [
+        {"instance_name": f"src_{i}", "block_type": "analog_sig_source_x", "role": "source"}
+        for i in range(50)
+    ]
+    payload = {
+        "ok": True,
+        "view": "overview",
+        "state_revision": 1,
+        "summary": {"blocks": many_blocks, "connections": []},
+    }
+    widget.update_state(payload)
+    # Simulate the user scrolling to a high value.
+    bar = widget.blocks_tree.verticalScrollBar()
+    bar.setRange(0, 1000)
+    bar.setValue(900)
+
+    # Now refresh with a tiny payload.
+    tiny_payload = {
+        "ok": True,
+        "view": "overview",
+        "state_revision": 2,
+        "summary": {"blocks": [], "connections": []},
+    }
+    widget.update_state(tiny_payload)
+    # Scroll must be clamped to the new maximum (which is now 0 since the
+    # tree is empty).
+    assert 0 <= bar.value() <= bar.maximum()

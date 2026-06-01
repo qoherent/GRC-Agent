@@ -416,3 +416,16 @@ All 11 complex wireless-engineering graph mutation scenarios have been run and s
 ### PySide6 GUI Release (Release 2.0.0)
 The native PySide6 Desktop GUI operates as a lightweight sidekick panel running alongside the GRC editor. It features non-blocking LLM reasoning inside a `QThread`, state-preserving widget updates, split-stage compilation and run processes, and a deferred `closeEvent` sequence to prevent SDR hardware locks upon application exit.
 
+#### Second-pass hardening (M7)
+A 19-item audit of the sidekick GUI was completed after the M6
+remediation. The full list of items, contracts, and test mappings is
+documented in `docs/PYSIDE6_GUI_BLUEPRINT.md` under Milestone 7.
+Highlights: per-slot kill timers (`_compile_kill_timer`,
+`_run_kill_timer`) instead of id-keyed dicts; `shutdown()` waits
+capped at 200ms × 2; layered HTML sanitization (pair-wise tag strip +
+self-closing tag strip + `on*` event attr strip + dangerous URI
+scheme strip); throttled stream via persistent `QTimer` so cancelled
+turns never reach `turn_finished`; explicit `Qt.UserRole` category
+keys; `open_in_grc` no longer fails silently on missing
+`gnuradio-companion`; 59/59 GUI tests green under `xvfb-run`.
+

@@ -208,22 +208,98 @@ def test_thread_lifecycle_on_error(qtbot):
     """Verify that thread is cleaned up even if the worker execution raises an error."""
     mock_agent = MagicMock()
     mock_provider = MagicMock()
-    
+
     window = MainWindow(mock_agent, mock_provider)
     window.show()
     qtbot.addWidget(window)
-    
+
     # We patch ToolAgentsRunner to raise an exception on run_turn
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
         mock_runner.run_turn.side_effect = RuntimeError("Simulated runner crash")
         mock_runner_class.return_value = mock_runner
-        
+
         window.start_generation("test prompt")
-        
+
         # Wait for the thread to finish cleanly
         qtbot.waitUntil(lambda: window.thread is None or not window.thread.isRunning(), timeout=3000)
-        
+
         assert window.thread is None
         assert window.worker is None
+
+
+def test_tool_end_skipped_when_cancelled():
+    """R6: _emit_tool_finished must be a no-op when _is_cancelled is True."""
+    mock_agent = MagicMock()
+    mock_provider = MagicMock()
+    worker = AgentWorker(mock_agent, "test", mock_provider)
+
+    received: list[tuple[str, str]] = []
+    worker.tool_finished.connect(lambda name, result: received.append((name, result)))
+
+    worker._is_cancelled = True
+    worker._emit_tool_finished("inspect_graph", {"ok": True})
+    assert received == []
+
+
+def test_throttled_stream_emits_turn_finished(qtbot):
+    """2.5: after the QTimer-driven stream finishes, the deferred
+    turn_finished signal must fire exactly once with the original result.
+    """
+
+    mock_agent = MagicMock()
+    mock_provider = MagicMock()
+
+    with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
+        mock_runner = MagicMock()
+        mock_runner_class.return_value = mock_runner
+        # 64 chars of text = 4 chunks of 16; emit 5 ticks of the timer.
+        mock_runner.run_turn.return_value = {
+            "ok": True,
+            "assistant_text": "x" * 64,
+        }
+
+        worker = AgentWorker(mock_agent, "test", mock_provider)
+        finished_payloads: list[dict] = []
+        worker.turn_finished.connect(lambda r: finished_payloads.append(r))
+
+        worker.run_turn()
+
+        # Spin the event loop until the streaming timer drains and turn_finished fires.
+        qtbot.waitUntil(lambda: len(finished_payloads) == 1, timeout=2000)
+        assert finished_payloads[0]["assistant_text"] == "x" * 64
+
+
+def test_cancel_drops_pending_turn_finished(qtbot):
+    """2.5: cancel() must drop the pending result so the deferred
+    turn_finished does not fire post-cancel.
+    """
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    mock_agent = MagicMock()
+    mock_provider = MagicMock()
+
+    with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
+        mock_runner = MagicMock()
+        mock_runner_class.return_value = mock_runner
+        mock_runner.run_turn.return_value = {
+            "ok": True,
+            "assistant_text": "abcdefghij" * 10,  # plenty of text to stream
+        }
+        mock_runner.provider.client = MagicMock()
+
+        worker = AgentWorker(mock_agent, "test", mock_provider)
+        finished_payloads: list[dict] = []
+        worker.turn_finished.connect(lambda r: finished_payloads.append(r))
+
+        worker.run_turn()
+        # Cancel before any timer tick can fire.
+        worker.cancel()
+
+        # Allow a couple of timer ticks to happen (they should all be no-ops).
+        loop = QEventLoop()
+        QTimer.singleShot(150, loop.quit)
+        loop.exec()
+
+        assert finished_payloads == []
 

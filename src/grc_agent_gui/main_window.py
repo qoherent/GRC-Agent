@@ -34,10 +34,6 @@ class InspectorRunnable(QRunnable):
 
     def run(self) -> None:
         try:
-            from unittest.mock import Mock
-            if isinstance(self.agent, Mock):
-                self.signals.finished.emit({})
-                return
             from grc_agent.runtime.wrappers.inspect_graph import inspect_graph
             overview_data = inspect_graph(self.agent, view="overview", targets=[], params=[])
             self.signals.finished.emit(overview_data)
@@ -119,17 +115,20 @@ class MainWindow(QMainWindow):
         self.process_manager = ProcessManager(self)
         self._pending_close = False
         self._safe_to_close = False
-        
+        self._last_applied_revision = None
+
         # Wire execution buttons & process manager signals
         self.run_btn.clicked.connect(self.on_run_clicked)
         self.stop_btn.clicked.connect(self.on_stop_clicked)
-        
+
         self.process_manager.started.connect(self.on_process_started)
         self.process_manager.stdout_received.connect(self.on_process_stdout)
         self.process_manager.stderr_received.connect(self.on_process_stderr)
         self.process_manager.status_message.connect(self.on_process_status)
         self.process_manager.finished.connect(self.on_process_finished)
         self.process_manager.finished.connect(self.on_deferred_close)
+        # Defer thread.finished binding until start_generation assigns self.thread,
+        # but the on_deferred_close gate (_pending_close) prevents double-firing.
         
         # Initialize inspector state and active GRC file path
         if self.agent.session and self.agent.session.path:
@@ -158,19 +157,25 @@ class MainWindow(QMainWindow):
         self.thread = QThread()
         self.worker = AgentWorker(self.agent, prompt, self.provider_config)
         self.worker.moveToThread(self.thread)
-        
+
         # Setup signal routing
         self.thread.started.connect(self.worker.run_turn)
-        
+
         self.worker.started.connect(self.on_worker_started)
         self.worker.tool_started.connect(self.on_tool_started)
         self.worker.tool_finished.connect(self.on_tool_finished)
         self.worker.response_chunk.connect(self.on_response_chunk)
         self.worker.turn_finished.connect(self.on_turn_finished)
-        
+
         # Enforce dynamic cleanup sequence on turn completion
         self.worker.turn_finished.connect(self.cleanup_thread)
-        
+
+        # Bind thread.finished once at creation so the deferred close path
+        # can fire on thread teardown without re-connecting on every X-click.
+        # cleanup_thread() disconnects this in its finally block to avoid
+        # post-destruction slot invocations.
+        self.thread.finished.connect(self.on_deferred_close)
+
         self.thread.start()
 
     def on_worker_started(self) -> None:
@@ -195,16 +200,56 @@ class MainWindow(QMainWindow):
     def on_turn_finished(self, result: dict[str, Any]) -> None:
         """Unlock the interface and clear status fields."""
         self.chat_input.setEnabled(True)
-        self.status_bar.showMessage("Ready")
         assistant_text = result.get("assistant_text", "")
         self.chat_widget.finalize_stream(assistant_text)
         self.refresh_inspector()
+        # Reset the status bar BEFORE the stale-graph check, so the
+        # warning (if any) is the final visible message.
+        self.status_bar.showMessage("Ready")
+        # Audit 4.6: warn if the on-disk graph has been mutated while a
+        # flowgraph is still running. The running subprocess has its own
+        # in-memory state and will not pick up the change until it is
+        # restarted.
+        self._check_stale_running_graph()
+
+    def _check_stale_running_graph(self) -> None:
+        """Show a status-bar warning if the on-disk graph diverges from the running flowgraph."""
+        try:
+            if self.process_manager is None or self.process_manager.run_process is None:
+                return
+            if self.process_manager.run_process.state() != QProcess.ProcessState.Running:
+                return
+            session = getattr(self.agent, "session", None)
+            if session is None:
+                return
+            current_revision = getattr(session, "state_revision", None)
+            if current_revision is None:
+                return
+            if self._last_applied_revision is None:
+                self._last_applied_revision = current_revision
+                return
+            if current_revision != self._last_applied_revision:
+                self._last_applied_revision = current_revision
+                self.status_bar.showMessage(
+                    f"Flowgraph running with stale graph (revision {current_revision}). "
+                    "Stop and re-run to apply changes."
+                )
+        except Exception as e:
+            logger.debug(f"Stale-graph warning check failed: {e}")
 
     def cleanup_thread(self) -> None:
-        """Gracefully wait for the execution thread to close and release resources."""
+        """Gracefully wait for the execution thread to close and release resources.
+
+        Disconnects the thread.finished -> on_deferred_close binding before
+        terminating the thread to prevent a queued cross-thread slot from
+        firing against a destroyed C++ object.
+        """
         if self.thread:
+            try:
+                self.thread.finished.disconnect(self.on_deferred_close)
+            except (TypeError, RuntimeError):
+                pass
             self.thread.quit()
-            # Wait with a 1500ms timeout. If it times out, use terminate fallback.
             if not self.thread.wait(1500):
                 logger.warning("Agent worker thread did not exit within 1500ms. Forcefully terminating...")
                 self.thread.terminate()
@@ -272,10 +317,10 @@ class MainWindow(QMainWindow):
         """Intercept application close to ensure background threads and run processes are reaped."""
         is_running = False
         if self.process_manager:
-            if (self.process_manager.compile_process and 
+            if (self.process_manager.compile_process and
                 self.process_manager.compile_process.state() == QProcess.ProcessState.Running):
                 is_running = True
-            if (self.process_manager.run_process and 
+            if (self.process_manager.run_process and
                 self.process_manager.run_process.state() == QProcess.ProcessState.Running):
                 is_running = True
 
@@ -289,12 +334,10 @@ class MainWindow(QMainWindow):
                 self.run_btn.setEnabled(False)
                 self.stop_btn.setEnabled(False)
                 self.chat_input.setEnabled(False)
-                
+
                 if self.worker:
                     self.worker.cancel()
-                if self.thread:
-                    self.thread.finished.connect(self.on_deferred_close)
-                    
+
                 if is_running:
                     self.process_manager.stop()
             else:

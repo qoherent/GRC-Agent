@@ -1,6 +1,6 @@
 # GRC Agent Desktop UI - PySide6 Execution Blueprint (TDD Approach)
 
-**Status**: All Milestones (1, 2, 3, and 4) are fully implemented, release-tested, and verified with 26/26 tests passing.
+**Status**: All Milestones (1, 2, 3, 4, 6, and 7) are fully implemented, release-tested, and verified with 59/59 GUI tests passing.
 
 ## Architecture Overview
 
@@ -141,5 +141,130 @@ To guarantee production-grade stability under intensive usage, a comprehensive s
 
 ### Hardened Regression Test Suite:
 - The GUI test suite was expanded to **40 tests** (and the full project test suite to **309 tests**), covering thread cancellation, process fallbacks, double close-event click sequences, and Pygments parser edge cases under headless `xvfb-run` execution.
+
+---
+
+## Milestone 7: Second-Pass Concurrency, Lifecycle, and HTML-Safety Hardening
+
+A targeted second-pass audit of the sidekick GUI was performed after the M6
+remediation landed. The audit covered runtime safety (R-series), the chat
+widget rendering pipeline (2.x), the inspector widget (5.x), and the
+process-manager shutdown path. Nineteen items were addressed; all
+behavior changes are covered by deterministic regression tests under
+`xvfb-run pytest tests/gui/`.
+
+### Runtime Safety (R-series)
+
+- **R1 — Deferred `closeEvent` deduplication**: The `thread.finished ->
+  on_deferred_close` binding is now established once inside
+  `start_generation` after the new `QThread` and `AgentWorker` are
+  instantiated. The `_pending_close` gate in `closeEvent` already
+  prevented exponential re-connection, but the binding is now co-located
+  with the worker lifecycle so it cannot survive a stale thread.
+- **R2 — Per-slot kill timers (no dict keyed by process id)**: The
+  `ProcessManager` now stores two semantic attributes
+  (`_compile_kill_timer` and `_run_kill_timer`) instead of a dict keyed
+  by transient Python/C++ object ids. `stop()` cancels and reuses the
+  appropriate slot variable, and `_force_kill_process` clears the slot
+  variable after firing. This eliminates the C++-id-reuse bug class.
+- **R3 — Capped synchronous `shutdown()` waits**: `ProcessManager.shutdown`
+  caps each `waitForFinished` call at **200ms**, and a single kill +
+  second 200ms cap. Total worst-case is **~400ms** per process, well
+  within Qt's `aboutToQuit` grace period. Pending per-slot kill timers
+  are also stopped and `deleteLater`'d in the shutdown path.
+- **R4 — `cleanup_thread` disconnects `thread.finished` defensively**:
+  `cleanup_thread` now wraps `self.thread.finished.disconnect(self.on_deferred_close)`
+  in `try/except (TypeError, RuntimeError)` and runs it before
+  `thread.quit()`. This prevents a queued cross-thread slot from
+  firing against a destroyed C++ object.
+- **R5 — No `unittest.mock` in production code**: `InspectorRunnable`
+  no longer imports `unittest.mock` to detect mock agents. Tests
+  patch `inspect_graph` directly via `grc_agent.runtime.wrappers.inspect_graph.inspect_graph`
+  instead. This keeps the GUI runtime importable in production
+  environments where `unittest` is not present.
+- **R6 — Cancel gate on `_emit_tool_finished`**: `AgentWorker._emit_tool_finished`
+  early-returns when `_is_cancelled` is set, matching the behavior
+  already present in `_emit_tool_started`. Prevents stale tool-end
+  events from leaking into the chat history after a user cancel.
+- **R10 — `compile_and_run` constructs `QProcess` defensively**: The
+  `QProcess(self)` construction and signal wiring are wrapped in a
+  `try/except`. On any construction failure the freshly created
+  `mkdtemp` directory is removed and `finished(-1)` is emitted, so the
+  application does not silently hang or leak the temp dir.
+
+### Chat Widget (2.x)
+
+- **2.2 — Per-message HTML memoization**: `ChatWidget._history` now
+  stores a `_rendered` field on each message dict and `_render_chat`
+  joins cached HTML on subsequent re-renders instead of re-parsing
+  markdown and re-highlighting code blocks every turn.
+- **2.3 — Layered HTML sanitization** (`sanitize_html`): The sanitizer
+  no longer relies on a single regex for scripts/iframes. It runs in
+  four passes: pair-wise dangerous tag strip (covers
+  `<script>...</script>`), self-closing dangerous tag strip, `on*` event
+  attribute strip, and `javascript:` / `vbscript:` / `livescript:` /
+  `mocha:` / `data:text/html` URI scheme strip. The dangerous-tag list
+  is the same constant used for the pair-wise and self-closing passes.
+- **2.4 — No more duplicate `Agent:` prefix during stream**: The
+  `chat_display.append("<b>Agent:</b> ")` call was removed from
+  `start_stream`. The prefix is now added exclusively by `_render_chat`
+  on the final pass, eliminating the visible `Agent: Agent:` artifact
+  during the stream-to-finalize transition.
+- **2.5 — Throttled stream via `QTimer`**: `AgentWorker` no longer
+  emits `turn_finished` synchronously at the end of a turn. A
+  persistent `QTimer` (16 chars / 50ms) drains the buffered text as
+  `response_chunk` signals. `turn_finished` is deferred to
+  `_flush_turn_finished`, which runs after the last chunk emits. The
+  `cancel()` method stops the timer and drops the pending result so
+  cancelled turns never reach `turn_finished`.
+
+### Inspector (5.x)
+
+- **5.2 — `Qt.UserRole` for stable category keys**: The blocks tree
+  uses `Qt.UserRole` to store the category key (`variables`,
+  `sources`, etc.) on each top-level `QTreeWidgetItem`. Expansion
+  state restoration reads from the role data so it survives any
+  future rename of the human-readable label.
+- **5.3 — Explicit scroll clamp**: The three vertical scroll bars
+  (tree, table, list) are now restored via an explicit
+  `max(min(), min(old, max()))` clamp, in addition to Qt's internal
+  clamping. The comment in the source documents the intent.
+- **5.4 — Overview-only contract documented**: The `InspectorWidget`
+  docstring explicitly documents that the widget consumes only the
+  `inspect_graph` **overview** payload. Per-block parameter details
+  require the `details` view, which is intentionally out of scope
+  for the sidebar widget.
+- **5.6 — `open_in_grc` failure is no longer silent**:
+  `QProcess.startDetached` return value is captured; on a `False`
+  return the button is disabled and a tooltip surfaces the missing
+  `gnuradio-companion` diagnostic. The path is also re-enabled and
+  the tooltip is reset when `set_grc_file_path` is called with a new
+  valid path.
+
+### Process Manager Lifecycle
+
+- **3.2 — `shutdown` cleans up pending per-slot kill timers**: In
+  addition to the per-process wait cap, `shutdown` now stops and
+  `deleteLater`s any still-pending `_compile_kill_timer` /
+  `_run_kill_timer` so they cannot fire after the application has
+  exited. The temp directory is then removed as the final step.
+- **4.6 — Stale-running-graph warning**: `MainWindow._check_stale_running_graph`
+  runs at the end of `on_turn_finished` and surfaces a status-bar
+  warning if the on-disk `state_revision` diverges from the
+  revision at which the currently-running flowgraph was launched.
+  The status bar is reset to `"Ready"` *before* the check, so the
+  warning is the final visible message when applicable.
+
+### Test Suite
+
+- 59 GUI tests in `tests/gui/` covering thread lifecycle, deferred
+  close, mock-free `InspectorRunnable`, throttled stream + cancel
+  race, layered HTML sanitization, memoized chat render, scroll /
+  expansion state preservation, kill-timer slot reuse, and
+  `shutdown` 200ms cap.
+- All 19 audit items have at least one regression test
+  (R-series → `test_process_manager.py` and `test_main_window_close.py`;
+  2.x → `test_chat_widget.py`; 5.x → `test_inspector_widget.py`).
+- Lint clean (`uv run ruff check src/grc_agent_gui/ tests/gui/`).
 
 
