@@ -285,7 +285,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertIn('"dtype":"${ type }"', rendered)
         self.assertIn("match_type", result["results"][0])
         self.assertIn("why", result["results"][0])
-        self.assertLess(len(str(result)), 2200)
+        self.assertLess(len(str(result)), 2300)
 
     def test_search_blocks_explains_catalog_option_label_match(self) -> None:
         agent = self._load_agent()

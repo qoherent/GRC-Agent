@@ -42,6 +42,24 @@ For programmatic single-shot execution with JSON output and stdin prompts:
 echo "Change the sample rate to 48000" | uv run grc-agent chat playground/grc_agent_interactive/dial_tone_interactive.grc --stdin --json
 ```
 
+## Run GUI (Companion Sidekick)
+
+The desktop GUI operates as a lightweight sidekick panel alongside the native GNU Radio Companion (GRC) editor.
+
+To launch the GUI panel:
+
+```bash
+uv run grc-agent-gui
+```
+
+### Features
+1. **Chat & Mutations**: Send natural language prompts to modify variables, add/remove blocks, and wire connections.
+2. **Dynamic Flowgraph Inspector**: View structured trees of variables, blocks (categorized by role), and active connections in real-time.
+3. **Compile & Run**: Compile the active `.grc` using `grcc` and execute the DSP script asynchronously in a system-inherited process space.
+4. **Console Log**: Real-time log capture of compilation and execution standard output/error streams.
+5. **Open GRC**: Click the "Open in GRC" button to open the active copied graph in the native GNU Radio Companion editor. When you make edits in the chat, saving the `.grc` file will automatically prompt you in GRC to reload.
+6. **Hardware-Safe Termination**: If the GUI window is closed while a flowgraph is running, the application ignores immediate closing, sends a SIGTERM, and waits up to 2000ms before forcefully killing the process to prevent SDR hardware locks.
+
 ## llama.cpp
 
 Chat starts or reuses the configured local `llama-server` automatically, then verifies health/model/context. For explicit readiness:

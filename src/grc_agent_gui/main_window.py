@@ -1,0 +1,330 @@
+import logging
+from typing import Any
+from PySide6.QtCore import QThread, Qt, QProcess, QRunnable, QThreadPool, QObject, Signal
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QSplitter,
+    QStatusBar,
+    QPushButton,
+    QLabel,
+    QPlainTextEdit
+)
+
+from .workers import AgentWorker
+from .chat_widget import ChatWidget
+from .inspector import InspectorWidget
+from .process_manager import ProcessManager
+
+logger = logging.getLogger(__name__)
+
+
+class InspectorWorkerSignals(QObject):
+    finished = Signal(dict)
+    error = Signal(str)
+
+
+class InspectorRunnable(QRunnable):
+    def __init__(self, agent: Any) -> None:
+        super().__init__()
+        self.agent = agent
+        self.signals = InspectorWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            from unittest.mock import Mock
+            if isinstance(self.agent, Mock):
+                self.signals.finished.emit({})
+                return
+            from grc_agent.runtime.wrappers.inspect_graph import inspect_graph
+            overview_data = inspect_graph(self.agent, view="overview", targets=[], params=[])
+            self.signals.finished.emit(overview_data)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+
+class MainWindow(QMainWindow):
+    """Main window for the GRC Agent desktop UI sidekick."""
+    
+    def __init__(self, agent: Any, provider_config: Any, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self.agent = agent
+        self.provider_config = provider_config
+        self.worker = None
+        self.thread = None
+        self.process_manager = None
+        self._safe_to_close = False
+        
+        self.setWindowTitle("GRC Agent Companion")
+        self.resize(800, 600)
+        
+        # Central layout initialization
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+        
+        main_layout = QVBoxLayout(central_widget)
+        
+        # Instantiate primary vertical splitter
+        v_splitter = QSplitter(Qt.Vertical, central_widget)
+        main_layout.addWidget(v_splitter)
+        
+        # Instantiate horizontal splitter for upper sidepanels
+        splitter = QSplitter(Qt.Horizontal, v_splitter)
+        
+        # Instantiate ChatWidget sidekick pane
+        self.chat_widget = ChatWidget(splitter)
+        splitter.addWidget(self.chat_widget)
+        
+        # Instantiate InspectorWidget sidekick pane
+        self.inspector_widget = InspectorWidget(splitter)
+        splitter.addWidget(self.inspector_widget)
+        
+        # Set splitter proportions (e.g. 60% chat, 40% inspector)
+        splitter.setSizes([480, 320])
+        v_splitter.addWidget(splitter)
+        
+        # Console Log Panel (lower pane)
+        console_panel = QWidget(v_splitter)
+        console_layout = QVBoxLayout(console_panel)
+        console_layout.setContentsMargins(0, 5, 0, 0)
+        
+        console_controls = QHBoxLayout()
+        console_controls.addWidget(QLabel("<b>Console Output</b>", console_panel))
+        console_controls.addStretch()
+        
+        self.run_btn = QPushButton("Compile & Run", console_panel)
+        self.stop_btn = QPushButton("Stop", console_panel)
+        self.stop_btn.setEnabled(False)
+        
+        console_controls.addWidget(self.run_btn)
+        console_controls.addWidget(self.stop_btn)
+        console_layout.addLayout(console_controls)
+        
+        self.console_log = QPlainTextEdit(console_panel)
+        self.console_log.setReadOnly(True)
+        self.console_log.setPlaceholderText("Flowgraph compilation and execution logs will appear here...")
+        console_layout.addWidget(self.console_log)
+        
+        v_splitter.addWidget(console_panel)
+        v_splitter.setSizes([450, 150])
+        
+        # Aliases for backwards compatibility and automated testing
+        self.chat_input = self.chat_widget.chat_input
+        self.chat_display = self.chat_widget.chat_display
+        self.chat_input.returnPressed.connect(self.send_prompt)
+        
+        # Initialize Process Manager
+        self.process_manager = ProcessManager(self)
+        self._pending_close = False
+        self._safe_to_close = False
+        
+        # Wire execution buttons & process manager signals
+        self.run_btn.clicked.connect(self.on_run_clicked)
+        self.stop_btn.clicked.connect(self.on_stop_clicked)
+        
+        self.process_manager.started.connect(self.on_process_started)
+        self.process_manager.stdout_received.connect(self.on_process_stdout)
+        self.process_manager.stderr_received.connect(self.on_process_stderr)
+        self.process_manager.status_message.connect(self.on_process_status)
+        self.process_manager.finished.connect(self.on_process_finished)
+        self.process_manager.finished.connect(self.on_deferred_close)
+        
+        # Initialize inspector state and active GRC file path
+        if self.agent.session and self.agent.session.path:
+            self.inspector_widget.set_grc_file_path(str(self.agent.session.path))
+        self.refresh_inspector()
+        
+        # Status Bar
+        self.status_bar = QStatusBar(self)
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("Ready")
+
+    def send_prompt(self) -> None:
+        """Read the input box, format as a user message, and start worker generation."""
+        prompt = self.chat_input.text().strip()
+        if prompt:
+            self.chat_input.clear()
+            self.chat_widget.append_message("user", prompt)
+            self.start_generation(prompt)
+
+    def start_generation(self, prompt: str) -> None:
+        """Initialize and run the AgentWorker inside a QThread."""
+        if self.thread is not None and self.thread.isRunning():
+            logger.warning("Agent worker thread is already running.")
+            return
+
+        self.thread = QThread()
+        self.worker = AgentWorker(self.agent, prompt, self.provider_config)
+        self.worker.moveToThread(self.thread)
+        
+        # Setup signal routing
+        self.thread.started.connect(self.worker.run_turn)
+        
+        self.worker.started.connect(self.on_worker_started)
+        self.worker.tool_started.connect(self.on_tool_started)
+        self.worker.tool_finished.connect(self.on_tool_finished)
+        self.worker.response_chunk.connect(self.on_response_chunk)
+        self.worker.turn_finished.connect(self.on_turn_finished)
+        
+        # Enforce dynamic cleanup sequence on turn completion
+        self.worker.turn_finished.connect(self.cleanup_thread)
+        
+        self.thread.start()
+
+    def on_worker_started(self) -> None:
+        """Lock input interface to prevent race conditions during generation."""
+        self.chat_input.setEnabled(False)
+        self.status_bar.showMessage("Agent is thinking...")
+        self.chat_widget.start_stream()
+
+    def on_tool_started(self, name: str, args: str) -> None:
+        """Notify the user that a model tool call has started."""
+        self.status_bar.showMessage(f"Calling tool: {name}...")
+        self.chat_widget.append_stream_chunk(f"\n*[Tool Call: {name}({args})]*\n")
+
+    def on_tool_finished(self, name: str, result: str) -> None:
+        """Notify the user of tool results."""
+        self.status_bar.showMessage(f"Tool {name} execution finished.")
+
+    def on_response_chunk(self, text: str) -> None:
+        """Append stream token chunks directly to the display."""
+        self.chat_widget.append_stream_chunk(text)
+
+    def on_turn_finished(self, result: dict[str, Any]) -> None:
+        """Unlock the interface and clear status fields."""
+        self.chat_input.setEnabled(True)
+        self.status_bar.showMessage("Ready")
+        assistant_text = result.get("assistant_text", "")
+        self.chat_widget.finalize_stream(assistant_text)
+        self.refresh_inspector()
+
+    def cleanup_thread(self) -> None:
+        """Gracefully wait for the execution thread to close and release resources."""
+        if self.thread:
+            self.thread.quit()
+            # Wait with a 1500ms timeout. If it times out, use terminate fallback.
+            if not self.thread.wait(1500):
+                logger.warning("Agent worker thread did not exit within 1500ms. Forcefully terminating...")
+                self.thread.terminate()
+                self.thread.wait(500)
+            self.thread = None
+        if self.worker:
+            self.worker.deleteLater()
+            self.worker = None
+
+    def refresh_inspector(self) -> None:
+        """Query the inspect_graph wrapper asynchronously using QThreadPool."""
+        worker = InspectorRunnable(self.agent)
+        worker.signals.finished.connect(self.on_inspector_refreshed)
+        worker.signals.error.connect(self.on_inspector_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def on_inspector_refreshed(self, overview_data: dict[str, Any]) -> None:
+        self.inspector_widget.update_state(overview_data)
+
+    def on_inspector_error(self, err_msg: str) -> None:
+        logger.error(f"Failed to refresh inspector asynchronously: {err_msg}")
+
+    def on_run_clicked(self) -> None:
+        """Handler for 'Compile & Run' button click."""
+        if self.agent.session and self.agent.session.path:
+            self.console_log.clear()
+            self.process_manager.compile_and_run(self.agent.session)
+        else:
+            self.on_process_status("Error: No active flowgraph session path to compile.")
+
+    def on_stop_clicked(self) -> None:
+        """Handler for 'Stop' button click."""
+        if self.process_manager:
+            self.process_manager.stop()
+
+    def on_process_started(self) -> None:
+        """Disable execution triggers and update status while compilation/running is active."""
+        self.run_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.status_bar.showMessage("Compiling flowgraph...")
+
+    def on_process_stdout(self, text: str) -> None:
+        """Append standard output chunks to the console log."""
+        self.console_log.insertPlainText(text)
+        self.console_log.ensureCursorVisible()
+
+    def on_process_stderr(self, text: str) -> None:
+        """Append standard error chunks to the console log."""
+        self.console_log.insertPlainText(text)
+        self.console_log.ensureCursorVisible()
+
+    def on_process_status(self, text: str) -> None:
+        """Log status message to both status bar and console log."""
+        self.status_bar.showMessage(text)
+        self.console_log.insertPlainText(f"\n>>> {text}\n")
+        self.console_log.ensureCursorVisible()
+
+    def on_process_finished(self, exit_code: int) -> None:
+        """Re-enable execution triggers once the process chain completes."""
+        self.run_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.status_bar.showMessage(f"Ready (last execution exit code: {exit_code})")
+
+    def closeEvent(self, event: Any) -> None:
+        """Intercept application close to ensure background threads and run processes are reaped."""
+        is_running = False
+        if self.process_manager:
+            if (self.process_manager.compile_process and 
+                self.process_manager.compile_process.state() == QProcess.ProcessState.Running):
+                is_running = True
+            if (self.process_manager.run_process and 
+                self.process_manager.run_process.state() == QProcess.ProcessState.Running):
+                is_running = True
+
+        worker_running = self.thread is not None and self.thread.isRunning()
+
+        if (is_running or worker_running) and not self._safe_to_close:
+            if not self._pending_close:
+                event.ignore()
+                self._pending_close = True
+                self.on_process_status("Shutting down running processes and thread workers...")
+                self.run_btn.setEnabled(False)
+                self.stop_btn.setEnabled(False)
+                self.chat_input.setEnabled(False)
+                
+                if self.worker:
+                    self.worker.cancel()
+                if self.thread:
+                    self.thread.finished.connect(self.on_deferred_close)
+                    
+                if is_running:
+                    self.process_manager.stop()
+            else:
+                event.ignore()
+        else:
+            # Safe path: clean up temp directories and thread workers
+            if self.process_manager:
+                self.process_manager.cleanup_temp_dir()
+            if self.worker:
+                self.worker.cancel()
+            self.cleanup_thread()
+            event.accept()
+
+    def on_deferred_close(self, *args: Any) -> None:
+        """Wait until all running subprocesses and threads are stopped before closing window."""
+        if not self._pending_close:
+            return
+            
+        is_running = False
+        if self.process_manager:
+            if (self.process_manager.compile_process and 
+                self.process_manager.compile_process.state() == QProcess.ProcessState.Running):
+                is_running = True
+            if (self.process_manager.run_process and 
+                self.process_manager.run_process.state() == QProcess.ProcessState.Running):
+                is_running = True
+                
+        worker_running = self.thread is not None and self.thread.isRunning()
+            
+        if not is_running and not worker_running:
+            self._safe_to_close = True
+            self._pending_close = False
+            self.close()

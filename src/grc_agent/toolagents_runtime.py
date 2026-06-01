@@ -9,7 +9,7 @@ import json
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 import uuid
 
 from openai import OpenAI
@@ -363,10 +363,14 @@ class ToolAgentsToolDelegate:
         tool_name: str,
         *,
         wrapper_eval_telemetry: bool = False,
+        on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
+        on_tool_end: Callable[[str, Any], None] | None = None,
     ) -> None:
         self.agent = agent
         self.tool_name = tool_name
         self.wrapper_eval_telemetry = wrapper_eval_telemetry
+        self.on_tool_start = on_tool_start
+        self.on_tool_end = on_tool_end
 
     def __call__(self, **kwargs: Any) -> dict[str, Any]:
         """ToolAgents FunctionTool entry point."""
@@ -406,20 +410,44 @@ class ToolAgentsToolDelegate:
         if validation_result is not None:
             return ToolDelegateResult(result=validation_result, executed=False)
 
+        # Trigger tool start callback
+        if self.on_tool_start:
+            try:
+                self.on_tool_start(self.tool_name, normalized)
+            except Exception as e:
+                logger.error(f"Error in on_tool_start callback: {e}")
+
         result = self.agent.execute_tool(
             self.tool_name,
             normalized,
             model_tool_call=True,
         )
+
+        # Trigger tool end callback
+        if self.on_tool_end:
+            try:
+                self.on_tool_end(self.tool_name, result)
+            except Exception as e:
+                logger.error(f"Error in on_tool_end callback: {e}")
+
         return ToolDelegateResult(result=result, executed=True)
 
 
 class ToolAgentsRegistryBuilder:
     """Build a ToolAgents registry from the current GRC turn schemas."""
 
-    def __init__(self, agent: GrcAgent, *, wrapper_eval_telemetry: bool = False) -> None:
+    def __init__(
+        self,
+        agent: GrcAgent,
+        *,
+        wrapper_eval_telemetry: bool = False,
+        on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
+        on_tool_end: Callable[[str, Any], None] | None = None,
+    ) -> None:
         self.agent = agent
         self.wrapper_eval_telemetry = wrapper_eval_telemetry
+        self.on_tool_start = on_tool_start
+        self.on_tool_end = on_tool_end
         self.delegates: dict[str, ToolAgentsToolDelegate] = {}
 
     def build(
@@ -434,6 +462,8 @@ class ToolAgentsRegistryBuilder:
                 self.agent,
                 name,
                 wrapper_eval_telemetry=self.wrapper_eval_telemetry,
+                on_tool_start=self.on_tool_start,
+                on_tool_end=self.on_tool_end,
             )
             registry.add_tool(_function_tool_from_openai_tool(schema, delegate))
             self.delegates[name] = delegate
@@ -464,6 +494,8 @@ class ToolAgentsRunner:
         mvp_tool_profile: bool = True,
         wrapper_eval_telemetry: bool = False,
         max_tool_rounds: int | None = None,
+        on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
+        on_tool_end: Callable[[str, Any], None] | None = None,
     ) -> dict[str, Any]:
         """Run one bounded ToolAgents-backed model turn."""
         del mvp_tool_profile
@@ -524,6 +556,8 @@ class ToolAgentsRunner:
             registry_builder = ToolAgentsRegistryBuilder(
                 agent,
                 wrapper_eval_telemetry=wrapper_eval_telemetry,
+                on_tool_start=on_tool_start,
+                on_tool_end=on_tool_end,
             )
             registry = registry_builder.build(active_allowed_tools)
             messages = ToolAgentsHistoryAdapter.model_messages_from_agent(

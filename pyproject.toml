@@ -19,16 +19,21 @@ dependencies = [
     # downloaded/cached by the user's environment during explicit vector build;
     # they are not bundled in this package.
     "qdrant-client[fastembed]>=1.14.2",
+    "PySide6>=6.5.0",
+    "Pygments>=2.17.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.15.9",
     "ruamel-yaml>=0.19.1",
+    "pytest>=8.0.0",
+    "pytest-qt>=4.4.0",
 ]
 
 [project.scripts]
 grc-agent = "grc_agent.cli:main"
+grc-agent-gui = "grc_agent_gui.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -427,6 +427,10 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
         payload = raw_block.payload
         label = _string_value(payload.get("label")) or raw_block.block_id
         params = _id_label_values(payload.get("parameters"))
+        raw_param_ids = []
+        for p in (payload.get("parameters") or []):
+            if isinstance(p, dict) and p.get("id"):
+                raw_param_ids.append(str(p.get("id")))
         inputs = _port_values(payload.get("inputs"))
         outputs = _port_values(payload.get("outputs"))
         categories = [
@@ -469,7 +473,7 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
                 field_tokens=field_tokens,
                 doc_tokens=_search_terms(documentation[:1200]),
                 label=label,
-                params=params,
+                params=params + raw_param_ids,
                 ports=[*inputs, *outputs],
             )
         )
@@ -791,7 +795,7 @@ def _id_label_values(value: Any) -> list[str]:
         option_labels = _string_list_values(item.get("option_labels"))
         if options:
             if option_labels and len(option_labels) == len(options):
-                pairs = [f"{o} ({l})" for o, l in zip(options, option_labels)]
+                pairs = [f"{o} ({lbl})" for o, lbl in zip(options, option_labels)]
                 desc += ": " + ", ".join(pairs)
             else:
                 desc += ": " + "/".join(options)

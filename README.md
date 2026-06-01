@@ -163,6 +163,16 @@ cp /path/to/original.grc /tmp/grc-agent-test.grc
 uv run grc-agent chat /tmp/grc-agent-test.grc
 ```
 
+### GUI Sidekick Panel
+
+To launch the PySide6 Desktop GUI sidekick panel to inspect and mutate GRC flowgraphs:
+
+```bash
+uv run grc-agent-gui
+```
+
+The GUI runs as a sidekick panel alongside the native GNU Radio Companion editor. It displays the chat interface, a real-time variables table, a blocks tree, and a connections list. It also includes "Compile & Run" and "Stop" controls with a real-time log console, and uses a Deferred Close sequence to prevent SDR hardware locks on application exit.
+
 Recommended local validation sequence:
 1. `uv run grc-agent doctor`
 2. `uv run grc-agent health`

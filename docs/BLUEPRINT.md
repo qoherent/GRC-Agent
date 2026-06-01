@@ -383,4 +383,36 @@ Durable docs kept under `docs/`:
 - `BLUEPRINT.md`: architecture and safety contract
 - `MODEL_CONTEXT_BIBLE.md`: generated exact model-facing prompt and wrapper schemas
 - `QUICKSTART.md`: setup and use
+- `PYSIDE6_GUI_BLUEPRINT.md`: desktop companion UI design and validation report
 - `wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus
+
+---
+
+## Hardening History & Handoff Summary
+
+The GRC Agent has undergone rigorous behavior hardening to ensure absolute safety and deterministic validation.
+
+### Validation Hardening & Behavioral Rules
+1. **Native Validation Refusal**: Any invalid graph edits (e.g. disabling the only sink in a flowgraph) are rejected by native GRC validation. Rollbacks are performed atomically, leaving the copied graph byte-identical, and quoting GRC errors in the assistant response.
+2. **Forced Invalid Intermediate State**: If the user explicitly accepts an invalid intermediate state, `force=true` permits committing the GRC-invalid graph, but still enforces schema checks, preflight checks, reference checks, and file-write safety.
+3. **Disable vs Remove Disambiguation**: The wrapper schema explicitly distinguishes between disabling a block (which uses `update_states` to set state to `disabled`) and removing a block (which uses `remove_blocks`).
+4. **Variable Removal Repair**: The `remove_variables` argument takes a list of strings (instance-names), with robust validation warning the model against passing dictionary objects.
+5. **Tool Schema Disambiguation**: `inspect_graph` and `search_blocks` descriptions contain strict boundaries to prevent the model from calling inspect tools to search block catalogs.
+
+### Wireless Engineering Scenario Matrix
+All 11 complex wireless-engineering graph mutation scenarios have been run and succeeded:
+*   **LPF insertion on float stream** (dtype mismatch recovery)
+*   **Volume variable + multiply const** (multi-step parameter linking)
+*   **Swap signal source connections** (port-occupancy, atomic rewire ordering)
+*   **Rational Resampler + sink rate update** (concurrent block + param mutations)
+*   **Non-specific HPF insertion** (vague prompt to exact param mapping)
+*   **GUI Range control + LPF linkage** (variable-linked parameter expressions)
+*   **Heterodyne mixer / downconverter** (multi-block add + complex rewiring)
+*   **Bandpass filter + spectrum visualizer** (dual-output routing, Qt GUI block)
+*   **AM SC transmitter** (parallel signal branches)
+*   **AM coherent demodulator/receiver** (shared carrier oscillator multi-fan-out)
+*   **AWGN channel + AGC normalization** (5-block pipeline insert, disconnect + rewire)
+
+### PySide6 GUI Release (Release 2.0.0)
+The native PySide6 Desktop GUI operates as a lightweight sidekick panel running alongside the GRC editor. It features non-blocking LLM reasoning inside a `QThread`, state-preserving widget updates, split-stage compilation and run processes, and a deferred `closeEvent` sequence to prevent SDR hardware locks upon application exit.
+

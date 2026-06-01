@@ -168,8 +168,7 @@ history, and wrapper outputs compact by design.
 - `docs/QUICKSTART.md`: setup and usage.
 - `docs/MODEL_CONTEXT_BIBLE.md`: generated from the actual injected prompt and
   model-facing tool schemas.
-- `docs/HANDOFF.md`: current recent-work handoff, live E4B proof points, known
-  soft issues, and next steps.
+- `docs/PYSIDE6_GUI_BLUEPRINT.md`: companion desktop UI design and validation report.
 
 Update docs when wrapper contracts, safety boundaries, eval gates, runtime
 requirements, or capability labels change.
