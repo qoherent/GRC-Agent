@@ -1,6 +1,6 @@
 # GRC Agent Desktop UI - PySide6 Execution Blueprint (TDD Approach)
 
-**Status**: All Milestones (1, 2, 3, 4, 6, 7, and 8) are fully implemented, release-tested, and verified with 64/64 GUI tests passing.
+**Status**: All Milestones (1, 2, 3, 4, 6, 7, 8, 9, and 10) are fully implemented, release-tested, and verified with 69/69 GUI tests passing.
 
 ## Architecture Overview
 
@@ -287,3 +287,121 @@ behavior changes are covered by deterministic regression tests under
    * Parented the worker's `QThread` to the `MainWindow` to prevent premature Python garbage collection from destroying C++ wrappers out of order.
    * Explicitly scheduled thread deletion via `deleteLater()` during `cleanup_thread()`.
    * Refactored flaky test assertions in `test_agent_thread.py` to wait for the thread reference to become `None` before test teardown, preventing runner timeout and subsequent GC crashes.
+
+---
+
+## Milestone 9: Adversarial GUI Audit (Closed Baseline)
+
+**Objective**: Run a fresh, adversarial, static review of the entire GUI surface area (`src/grc_agent_gui/` and `tests/gui/`) against the standard 4 audit vectors, producing a documented baseline of latent issues, test gaps, and claim-accuracy deltas. **No code remediation is in scope for M9;** M9 is a closed, evidence-only audit. Findings become a backlog for future hardening passes (M10+).
+
+### Audit Approach
+
+The M9 audit used a static, read-only methodology:
+- Read every GUI source module end-to-end (1,374 LoC across 6 files)
+- Read every GUI test module end-to-end (1,506 LoC across 5 files)
+- Ran 20 targeted grep probes across the 4 audit vectors
+- Ran the test suite once to confirm the 64/64 baseline
+- Cross-checked every M6/M7/M8 claim in this document at its cited `file:line` location
+
+### The M9 audit produced **21 items**: 0 CRITICAL / 4 MODERATE / 7 MINOR / 10 TEST-GAP. The audit report (`docs/M9_AUDIT_FINDINGS.md`) has been retired; findings are summarized inline below. Highlights:
+
+#### MODERATE (UI freezes / leaks / memory growth)
+- **M9-04**: `console_log` (`QPlainTextEdit`) at `main_window.py:101` lacks `setMaximumBlockCount` — unbounded memory growth on long-running flowgraphs (24h+ runs can OOM the GUI).
+- **M9-05**: stdout/stderr pipe round-trip at `process_manager.py:161, 166, 239, 244` has no rate cap — a high-volume flowgraph can fill the 64KB OS pipe buffer and stall the subprocess.
+- **M9-08**: `compile_and_run` at `process_manager.py:108-146` is re-entrant; a rapid double-click silently reaps the in-flight compile.
+- **M9-10**: `on_run_clicked` at `main_window.py:276-282` has no file-integrity guard against a concurrent `change_graph` commit.
+
+#### MINOR (UX / robustness / test gaps in production code)
+- **M9-01**: `QTextDocument()` at `chat_widget.py:69` has no parent.
+- **M9-02**: `InspectorWorkerSignals()` at `main_window.py:33` has no parent.
+- **M9-03**: `proc.terminate()` at `process_manager.py:58` is outside the try block in `_disconnect_and_reap`.
+- **M9-06**: Stale-graph warning at `main_window.py:215-238` only fires on `on_turn_finished` and persists past a re-run.
+- **M9-07**: Stale kill-timer cleanup in `stop()` is incomplete.
+- **M9-09**: `open_in_grc` at `inspector.py:105` does not verify file existence.
+- **M9-11**: `_last_applied_revision` initialization logic in `main_window.py:225-235` has a known minor interpretation gap.
+
+#### TEST-GAP (behaviors with no regression test)
+- **M9-TG-01**: Cancel during a tool call (mid-tool) is untested.
+- **M9-TG-02**: stdout/stderr backpressure is untested.
+- **M9-TG-03**: `console_log` unbounded growth is untested.
+- **M9-TG-04**: Re-entrant `compile_and_run` is untested.
+- **M9-TG-05**: Reaping a destroyed `QProcess` is untested.
+- **M9-TG-06**: `chat_widget._render_chat` from a non-GUI thread is untested.
+- **M9-TG-07**: Stale-graph warning reset on re-run is untested.
+- **M9-TG-08**: Concurrent commit + run-click race is untested.
+- **M9-TG-09**: Cancel while a tool-end is pending is untested.
+- **M9-TG-10**: `_pythonToCppCopy` warning in `test_close_event_connected_once` is silenced, not fixed.
+
+### M8 Claim Audit (cross-check)
+
+M9 verified all 23 M6/M7/M8 claims at the cited `file:line` locations. **No retroactive corrections to M8 are required.** The M8 hardening is implemented as described. The M9 audit's value-add is in surfacing behaviors M8's tests do not exercise (long-running-flowgraph memory, stdout backpressure, mid-tool cancel, run-click/write race).
+
+### M9 Reviewer Prompt Evolution
+
+The M9 audit was conducted with a junior-grade prompt. That prompt was upgraded to an **expert-level** version for M10. The expert-level prompt adds:
+- Mandatory 7-step methodology (pre-run, surface map, full read, grep probes, test-gap analysis, claim-accuracy cross-check, self-review)
+- 20 mandatory grep probes with specific patterns
+- 4 mandatory file hotspot groups
+- 12-category test-gap taxonomy
+- Strict output schema (file:line, code paste, 3-step trigger, confidence, M9 cross-ref)
+- Anti-hallucination mechanisms (literal code paste, file:line re-verification, confidence gate, M9 dedup)
+- Self-review checklist with per-finding and document-level checks
+
+The expert-level prompt was used for M10 and then retired with the audit reports.
+
+### Recommended M10 Triage Priorities
+
+The M9 backlog priorities were:
+1. **M9-04** (console_log unbounded) — one-line fix (`setMaximumBlockCount(10000)`) with a regression test.
+2. **M9-05** (stdout backpressure) — requires a small rate-limiting layer; needs a regression test.
+3. **M9-TG-01** (mid-tool cancel) — clarifies user-visible behavior; can be a pure test addition.
+4. **M9-08** (compile_and_run reentrancy) — defensive guard; minor UX fix.
+5. All MINOR findings and remaining TEST-GAP items — backlog for future hardening passes.
+
+M10 triaged the top-priority items (M9-04, M9-06, M9-08, M9-09, M10-01) and added regression coverage; the M9-05 backpressure layer remains an open backlog item.
+
+No CRITICAL findings were identified. The architecture is sound; M9 was a polish pass, not a stability pass.
+
+---
+
+## Milestone 10: Expert-Prompt Audit + Triage (Closed)
+
+**Objective**: Re-run the audit with the expert-level prompt, triage the M9 backlog, fix the high-priority findings, and verify with regression tests. **Code remediation is in scope for M10.**
+
+### Audit Result
+
+The M10 audit produced **1 item**: 0 CRITICAL / 0 MODERATE / 1 MINOR / 0 TEST-GAP. The audit report (`docs/M10_AUDIT_FINDINGS.md`) has been retired; the finding is documented inline.
+
+#### MINOR (UX robustness)
+- **M10-01**: `proc.start()` and `proc.startCommand()` in `process_manager.py` are not wrapped in a `try/except`; on platforms that raise immediately (rare, but possible on `QProcess.FailedToStart` propagation paths) the GUI shows a traceback instead of a status-bar error. Fix: wrap each `start*` call in `try/except (OSError, ValueError)` and surface a status message on failure.
+
+### Triage Fixes Applied (M9 backlog)
+
+| M9 ID | Fix | Regression test |
+|---|---|---|
+| M9-04 | `console_log.setMaximumBlockCount(10000)` in `main_window.py` | `test_console_log_max_block_count` |
+| M9-06 | Reset `_last_applied_revision` and clear stale warning on successful re-run in `main_window.py` | `test_stale_warning_resets_on_rerun` |
+| M9-08 | Re-entrancy guard in `compile_and_run`; second click is a no-op until the first finishes | `test_compile_and_run_reentrancy` |
+| M9-09 | File-existence check before `QDesktopServices.openUrl` in `inspector.open_in_grc` | `test_open_in_grc_missing_file` |
+| M10-01 | `try/except (OSError, ValueError)` around `proc.start*` calls in `process_manager.py` | `test_proc_start_handles_oserror` |
+
+### Test Suite
+
+M10 added 5 regression tests and fixed 2 pre-existing flaky tests. The GUI suite grew from 64 to 69 tests; all 69 pass under `xvfb-run` in ~2.75s.
+
+---
+
+## Milestone Index
+
+| Milestone | Scope | Status |
+|---|---|---|
+| M1 | Application Shell & Agent Integration | Closed |
+| M2 | Secure Chat Rendering & Native Formatting | Closed |
+| M3 | Flowgraph Structure Inspector (Sidekick View) | Closed |
+| M4 | Split-Stage Compilation & Hardware-Safe Execution | Closed |
+| M5 | Implementation & Validation Report | Closed |
+| M6 | GUI Implementation Audit & Concurrency Hardening | Closed |
+| M7 | Second-Pass Concurrency, Lifecycle, and HTML-Safety Hardening | Closed |
+| M8 | Systems Architecture Audit Hardening | Closed |
+| M9 | Adversarial GUI Audit (Closed Baseline, no remediation) | Closed |
+| M10 | Expert-Prompt Audit + M9 Triage | Closed |

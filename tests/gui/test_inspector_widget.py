@@ -134,35 +134,51 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
 
 def test_open_in_grc_is_detached(qtbot):
     """Assert clicking "Open GRC" invokes gnuradio-companion detached."""
+    import os
+    import tempfile
+
     widget = InspectorWidget()
     qtbot.addWidget(widget)
 
-    widget.set_grc_file_path("/tmp/test_flowgraph.grc")
+    with tempfile.NamedTemporaryFile(suffix=".grc", delete=False) as tmp:
+        tmp_path = tmp.name
 
-    with patch("PySide6.QtCore.QProcess.startDetached") as mock_start_detached:
-        # Return (True, pid) so the failure-handling path is not taken.
-        mock_start_detached.return_value = (True, 1234)
-        widget.open_in_grc()
+    try:
+        widget.set_grc_file_path(tmp_path)
 
-        # Verify detached process was run with the right path argument
-        mock_start_detached.assert_called_once_with("gnuradio-companion", ["/tmp/test_flowgraph.grc"])
+        with patch("PySide6.QtCore.QProcess.startDetached") as mock_start_detached:
+            mock_start_detached.return_value = (True, 1234)
+            widget.open_in_grc()
+
+            mock_start_detached.assert_called_once_with("gnuradio-companion", [tmp_path])
+    finally:
+        os.unlink(tmp_path)
 
 
 def test_start_detached_failure_disables_button(qtbot):
     """5.6: when gnuradio-companion is missing, the button must be disabled
     and the tooltip must explain the failure.
     """
+    import os
+    import tempfile
+
     widget = InspectorWidget()
     qtbot.addWidget(widget)
-    widget.set_grc_file_path("/tmp/test_flowgraph.grc")
 
-    with patch("PySide6.QtCore.QProcess.startDetached") as mock_start_detached:
-        # Both possible failure return shapes are accepted by the implementation.
-        mock_start_detached.return_value = (False, 0)
-        widget.open_in_grc()
+    with tempfile.NamedTemporaryFile(suffix=".grc", delete=False) as tmp:
+        tmp_path = tmp.name
 
-    assert not widget.open_grc_btn.isEnabled()
-    assert "not found" in widget.open_grc_btn.toolTip().lower()
+    try:
+        widget.set_grc_file_path(tmp_path)
+
+        with patch("PySide6.QtCore.QProcess.startDetached") as mock_start_detached:
+            mock_start_detached.return_value = (False, 0)
+            widget.open_in_grc()
+
+        assert not widget.open_grc_btn.isEnabled()
+        assert "not found" in widget.open_grc_btn.toolTip().lower()
+    finally:
+        os.unlink(tmp_path)
 
 
 def test_expansion_state_uses_user_role(qtbot):
@@ -235,3 +251,28 @@ def test_scroll_clamp_on_smaller_range(qtbot):
     # Scroll must be clamped to the new maximum (which is now 0 since the
     # tree is empty).
     assert 0 <= bar.value() <= bar.maximum()
+
+
+def test_open_in_grc_disables_button_on_missing_file(qtbot):
+    """M9-09: open_in_grc must verify the GRC file exists on disk before
+    launching gnuradio-companion. If the file is missing, the button must
+    be disabled and a tooltip must explain the failure.
+    """
+    import os
+    import tempfile
+
+    widget = InspectorWidget()
+    qtbot.addWidget(widget)
+
+    with tempfile.NamedTemporaryFile(suffix=".grc", delete=False) as tmp:
+        tmp_path = tmp.name
+    os.unlink(tmp_path)
+
+    widget.set_grc_file_path(tmp_path)
+
+    with patch("PySide6.QtCore.QProcess.startDetached") as mock_start_detached:
+        widget.open_in_grc()
+
+    mock_start_detached.assert_not_called()
+    assert not widget.open_grc_btn.isEnabled()
+    assert "no longer exists" in widget.open_grc_btn.toolTip().lower()

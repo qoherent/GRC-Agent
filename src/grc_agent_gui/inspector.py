@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
@@ -99,6 +100,18 @@ class InspectorWidget(QWidget):
         """
         if not self.grc_file_path:
             logger.warning("No active GRC file path configured to open.")
+            return
+
+        if not os.path.exists(self.grc_file_path):
+            self.open_grc_btn.setEnabled(False)
+            self.open_grc_btn.setToolTip(
+                f"GRC file no longer exists at {self.grc_file_path}. "
+                "Reload the session to refresh the path."
+            )
+            logger.warning(
+                "Cannot launch gnuradio-companion: file not found at %s",
+                self.grc_file_path,
+            )
             return
 
         logger.info(f"Launching gnuradio-companion detached for file: {self.grc_file_path}")

@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QProcess, QProcessEnvironment
@@ -464,5 +465,55 @@ def test_process_failed_to_start_deletes_process_and_emits_finished(qtbot):
     mock_compile.deleteLater.assert_called_once()
     assert manager.compile_process is None
     assert finished_codes == [-1]
+
+
+def test_start_execution_spawn_failure_cleans_temp(qtbot):
+    """M10-01: if QProcess construction fails inside start_execution, the
+    freshly created temp directory must be cleaned and finished(-1) must be
+    emitted. Mirrors the R10 hardening applied to compile_and_run.
+    """
+    manager = ProcessManager()
+    mock_session = MagicMock()
+    mock_session.path = "/tmp/my_graph.grc"
+    mock_session.flowgraph.metadata = {"options": {"parameters": {"id": "my_graph"}}}
+
+    finished_codes = []
+    manager.finished.connect(lambda c: finished_codes.append(c))
+
+    manager.active_session = mock_session
+    manager._current_temp_dir = tempfile.mkdtemp(prefix="grc_agent_run_")
+    py_file = os.path.join(manager._current_temp_dir, "my_graph.py")
+    with open(py_file, "w") as f:
+        f.write("# dummy")
+
+    with patch("grc_agent_gui.process_manager.QProcess", side_effect=RuntimeError("spawn failed")):
+        manager.start_execution()
+
+    assert finished_codes == [-1]
+    assert manager._current_temp_dir is None
+    assert manager.run_process is None
+
+
+def test_compile_and_run_reentrancy_guard(qtbot):
+    """M9-08: calling compile_and_run while a previous compile or run is
+    active must be a no-op (re-entrancy guard). The in-flight process is
+    NOT silently reaped.
+    """
+    manager = ProcessManager()
+
+    mock_compile_proc = MagicMock()
+    mock_compile_proc.state.return_value = QProcess.ProcessState.Running
+    manager.compile_process = mock_compile_proc
+
+    mock_session = MagicMock()
+    mock_session.path = "/tmp/my_graph.grc"
+
+    with patch.object(manager, "_reap_active_processes") as mock_reap, \
+         patch("grc_agent_gui.process_manager.tempfile.mkdtemp") as mock_mkdtemp:
+        manager.compile_and_run(mock_session)
+
+    mock_reap.assert_not_called()
+    mock_mkdtemp.assert_not_called()
+    assert manager.compile_process is mock_compile_proc
 
 

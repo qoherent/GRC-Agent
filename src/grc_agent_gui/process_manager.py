@@ -107,6 +107,12 @@ class ProcessManager(QObject):
 
     def compile_and_run(self, session) -> None:
         """First stage: Compile `.grc` file via `grcc` into a temporary directory."""
+        if (self.compile_process and self.compile_process.state() == QProcess.ProcessState.Running) or \
+           (self.run_process and self.run_process.state() == QProcess.ProcessState.Running):
+            self.status_message.emit("Compile & Run already in progress; ignoring re-entrant request.")
+            logger.warning("Re-entrant compile_and_run ignored while a flowgraph is active.")
+            return
+
         self._reap_active_processes()
         self.cleanup_temp_dir()
 
@@ -210,16 +216,22 @@ class ProcessManager(QObject):
             self.finished.emit(-1)
             return
             
-        # Spawn execution process
-        self.run_process = QProcess(self)
-        self.run_process.setWorkingDirectory(os.path.dirname(grc_path))
-        self.run_process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
-        
-        self.run_process.errorOccurred.connect(self.on_run_error)
-        self.run_process.readyReadStandardOutput.connect(self.on_run_stdout)
-        self.run_process.readyReadStandardError.connect(self.on_run_stderr)
-        self.run_process.finished.connect(self.on_run_finished)
-        
+        try:
+            self.run_process = QProcess(self)
+            self.run_process.setWorkingDirectory(os.path.dirname(grc_path))
+            self.run_process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
+
+            self.run_process.errorOccurred.connect(self.on_run_error)
+            self.run_process.readyReadStandardOutput.connect(self.on_run_stdout)
+            self.run_process.readyReadStandardError.connect(self.on_run_stderr)
+            self.run_process.finished.connect(self.on_run_finished)
+        except Exception as e:
+            logger.exception("Failed to construct run QProcess")
+            self.status_message.emit(f"Failed to spawn run process: {e}")
+            self.cleanup_temp_dir()
+            self.finished.emit(-1)
+            return
+
         self.status_message.emit(f"Running: {sys.executable} {py_file}")
         self.run_process.start(sys.executable, [py_file])
 

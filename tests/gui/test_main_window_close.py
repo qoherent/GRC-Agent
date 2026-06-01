@@ -195,3 +195,49 @@ def test_stale_graph_warning_fires_on_revision_change(qtbot):
     mock_agent.session.state_revision = 6
     window.on_turn_finished({"ok": True, "assistant_text": "second"})
     assert "stale" in window.status_bar.currentMessage().lower()
+
+
+def test_stale_graph_warning_clears_on_re_run(qtbot):
+    """M9-06: restarting the flowgraph (on_process_started) must clear the
+    _last_applied_revision so the stale-graph warning does not persist
+    past a re-run.
+    """
+    from unittest.mock import MagicMock
+    from PySide6.QtCore import QProcess
+
+    mock_agent = MagicMock()
+    mock_agent.session.state_revision = 5
+    mock_provider = MagicMock()
+
+    window = MainWindow(mock_agent, mock_provider)
+    qtbot.addWidget(window)
+    window.show()
+
+    mock_run_proc = MagicMock()
+    mock_run_proc.state.return_value = QProcess.ProcessState.Running
+    window.process_manager.run_process = mock_run_proc
+
+    window.on_turn_finished({"ok": True, "assistant_text": "first"})
+    mock_agent.session.state_revision = 6
+    window.on_turn_finished({"ok": True, "assistant_text": "second"})
+    assert "stale" in window.status_bar.currentMessage().lower()
+
+    window.on_process_started()
+    assert window._last_applied_revision is None
+
+
+def test_console_log_has_maximum_block_count(qtbot):
+    """M9-04: console_log must have setMaximumBlockCount configured so that
+    long-running flowgraphs do not cause unbounded memory growth in the
+    QTextDocument.
+    """
+    from unittest.mock import MagicMock
+
+    mock_agent = MagicMock()
+    mock_provider = MagicMock()
+
+    window = MainWindow(mock_agent, mock_provider)
+    qtbot.addWidget(window)
+
+    assert window.console_log.maximumBlockCount() > 0
+    assert window.console_log.maximumBlockCount() == 10000

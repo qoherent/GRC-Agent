@@ -101,6 +101,7 @@ class MainWindow(QMainWindow):
         self.console_log = QPlainTextEdit(console_panel)
         self.console_log.setReadOnly(True)
         self.console_log.setPlaceholderText("Flowgraph compilation and execution logs will appear here...")
+        self.console_log.setMaximumBlockCount(10000)
         console_layout.addWidget(self.console_log)
         
         v_splitter.addWidget(console_panel)
@@ -291,6 +292,7 @@ class MainWindow(QMainWindow):
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status_bar.showMessage("Compiling flowgraph...")
+        self._last_applied_revision = None
 
     def on_process_stdout(self, text: str) -> None:
         """Append standard output chunks to the console log."""
