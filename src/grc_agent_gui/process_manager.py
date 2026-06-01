@@ -45,9 +45,69 @@ class ProcessManager(QObject):
             logger.warning(f"Could not resolve flowgraph ID from metadata: {e}. Defaulting to 'top_block'.")
             return "top_block"
 
+    def _disconnect_and_reap(self, proc: QProcess, label: str) -> None:
+        """Disconnect all slots from an active process, terminate it, and schedule self-destruction."""
+        try:
+            proc.errorOccurred.disconnect()
+            proc.finished.disconnect()
+            proc.readyReadStandardOutput.disconnect()
+            proc.readyReadStandardError.disconnect()
+        except Exception:
+            pass
+
+        proc.terminate()
+
+        # We need a timer to forcefully kill this specific process if it does not exit.
+        # Since we disconnected it from the manager, we use a single-shot timer that kills it.
+        kill_timer = QTimer(self)
+        kill_timer.setSingleShot(True)
+        kill_timer.setInterval(2000)
+
+        def force_kill_orphaned():
+            try:
+                if proc.state() == QProcess.ProcessState.Running:
+                    logger.warning(f"Orphaned {label} process refused SIGTERM, killing...")
+                    proc.kill()
+            except RuntimeError:
+                pass
+            proc.deleteLater()
+            kill_timer.deleteLater()
+
+        kill_timer.timeout.connect(force_kill_orphaned)
+        kill_timer.start()
+
+        # Also connect proc.finished to its own deleteLater and kill_timer stops to clean up if it exits early.
+        proc.finished.connect(proc.deleteLater)
+        proc.finished.connect(kill_timer.stop)
+        proc.finished.connect(kill_timer.deleteLater)
+
+    def _reap_active_processes(self) -> None:
+        """Disconnect and forcefully reap any active processes before re-starting compile/run."""
+        if self.compile_process:
+            if self.compile_process.state() == QProcess.ProcessState.Running:
+                self._disconnect_and_reap(self.compile_process, "compilation")
+            else:
+                self.compile_process.deleteLater()
+            self.compile_process = None
+            if self._compile_kill_timer is not None:
+                self._compile_kill_timer.stop()
+                self._compile_kill_timer.deleteLater()
+                self._compile_kill_timer = None
+
+        if self.run_process:
+            if self.run_process.state() == QProcess.ProcessState.Running:
+                self._disconnect_and_reap(self.run_process, "flowgraph execution")
+            else:
+                self.run_process.deleteLater()
+            self.run_process = None
+            if self._run_kill_timer is not None:
+                self._run_kill_timer.stop()
+                self._run_kill_timer.deleteLater()
+                self._run_kill_timer = None
+
     def compile_and_run(self, session) -> None:
         """First stage: Compile `.grc` file via `grcc` into a temporary directory."""
-        self.stop()
+        self._reap_active_processes()
         self.cleanup_temp_dir()
 
         self.active_session = session
@@ -88,6 +148,13 @@ class ProcessManager(QObject):
     def on_compile_error(self, error: QProcess.ProcessError) -> None:
         err_msg = self.compile_process.errorString() if self.compile_process else "Unknown error"
         self.status_message.emit(f"Compilation process error occurred: {err_msg}")
+        # Clean up FailedToStart since finished is not emitted in that case.
+        if error == QProcess.ProcessError.FailedToStart:
+            proc = self.compile_process
+            if proc:
+                self.compile_process = None
+                proc.deleteLater()
+            self.finished.emit(-1)
 
     def on_compile_stdout(self) -> None:
         if self.compile_process:
@@ -101,6 +168,17 @@ class ProcessManager(QObject):
 
     def on_compilation_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         """Triggered when compilation process terminates."""
+        # Stop and delete the kill timer if it's running
+        if self._compile_kill_timer is not None:
+            self._compile_kill_timer.stop()
+            self._compile_kill_timer.deleteLater()
+            self._compile_kill_timer = None
+
+        proc = self.compile_process
+        if proc:
+            self.compile_process = None
+            proc.deleteLater()
+
         # Robust comparison to handle patched QProcess in test environments
         is_normal_exit = False
         if exit_status == 0:
@@ -148,6 +226,13 @@ class ProcessManager(QObject):
     def on_run_error(self, error: QProcess.ProcessError) -> None:
         err_msg = self.run_process.errorString() if self.run_process else "Unknown error"
         self.status_message.emit(f"Flowgraph run process error occurred: {err_msg}")
+        # Clean up FailedToStart since finished is not emitted in that case.
+        if error == QProcess.ProcessError.FailedToStart:
+            proc = self.run_process
+            if proc:
+                self.run_process = None
+                proc.deleteLater()
+            self.finished.emit(-1)
 
     def on_run_stdout(self) -> None:
         if self.run_process:
@@ -161,6 +246,17 @@ class ProcessManager(QObject):
 
     def on_run_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         """Triggered when flowgraph run process terminates."""
+        # Stop and delete the kill timer if it's running
+        if self._run_kill_timer is not None:
+            self._run_kill_timer.stop()
+            self._run_kill_timer.deleteLater()
+            self._run_kill_timer = None
+
+        proc = self.run_process
+        if proc:
+            self.run_process = None
+            proc.deleteLater()
+
         self.status_message.emit(f"Flowgraph finished with exit code {exit_code}.")
         self.finished.emit(exit_code)
 
@@ -189,10 +285,16 @@ class ProcessManager(QObject):
 
         # Cancel any existing pending kill for this slot, then schedule a
         # fresh one bound to the new QProcess.
-        existing = timer_attr
-        if existing is not None:
-            existing.stop()
-            existing.deleteLater()
+        if label == "compilation":
+            if self._compile_kill_timer is not None:
+                self._compile_kill_timer.stop()
+                self._compile_kill_timer.deleteLater()
+                self._compile_kill_timer = None
+        else:
+            if self._run_kill_timer is not None:
+                self._run_kill_timer.stop()
+                self._run_kill_timer.deleteLater()
+                self._run_kill_timer = None
 
         timer = QTimer(self)
         timer.setSingleShot(True)
@@ -206,14 +308,22 @@ class ProcessManager(QObject):
             self._run_kill_timer = timer
 
     def _force_kill_process(self, proc: QProcess, label: str) -> None:
-        if proc and proc.state() == QProcess.ProcessState.Running:
-            self.status_message.emit(f"{label.capitalize()} process failed to terminate. Forcefully killing (Phase 2)...")
-            proc.kill()
+        try:
+            if proc and proc.state() == QProcess.ProcessState.Running:
+                self.status_message.emit(f"{label.capitalize()} process failed to terminate. Forcefully killing (Phase 2)...")
+                proc.kill()
+        except RuntimeError:
+            pass
+
         # Always clear the slot timer after firing, regardless of kill outcome.
         if label == "compilation":
-            self._compile_kill_timer = None
+            if self._compile_kill_timer is not None:
+                self._compile_kill_timer.deleteLater()
+                self._compile_kill_timer = None
         else:
-            self._run_kill_timer = None
+            if self._run_kill_timer is not None:
+                self._run_kill_timer.deleteLater()
+                self._run_kill_timer = None
 
     def shutdown(self) -> None:
         """Best-effort synchronous shutdown on application exit.
@@ -224,18 +334,24 @@ class ProcessManager(QObject):
         requires this to prevent hardware lock leaks.
         """
         # 1. Compilation process cleanup
-        if self.compile_process and self.compile_process.state() == QProcess.ProcessState.Running:
-            self.compile_process.terminate()
-            if not self.compile_process.waitForFinished(200):
-                self.compile_process.kill()
-                self.compile_process.waitForFinished(200)
+        if self.compile_process:
+            if self.compile_process.state() == QProcess.ProcessState.Running:
+                self.compile_process.terminate()
+                if not self.compile_process.waitForFinished(200):
+                    self.compile_process.kill()
+                    self.compile_process.waitForFinished(200)
+            self.compile_process.deleteLater()
+            self.compile_process = None
 
         # 2. Flowgraph execution process cleanup
-        if self.run_process and self.run_process.state() == QProcess.ProcessState.Running:
-            self.run_process.terminate()
-            if not self.run_process.waitForFinished(200):
-                self.run_process.kill()
-                self.run_process.waitForFinished(200)
+        if self.run_process:
+            if self.run_process.state() == QProcess.ProcessState.Running:
+                self.run_process.terminate()
+                if not self.run_process.waitForFinished(200):
+                    self.run_process.kill()
+                    self.run_process.waitForFinished(200)
+            self.run_process.deleteLater()
+            self.run_process = None
 
         # 3. Cancel any pending per-slot kill timers
         for attr in ("_compile_kill_timer", "_run_kill_timer"):

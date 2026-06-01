@@ -1,6 +1,6 @@
 # GRC Agent Desktop UI - PySide6 Execution Blueprint (TDD Approach)
 
-**Status**: All Milestones (1, 2, 3, 4, 6, and 7) are fully implemented, release-tested, and verified with 59/59 GUI tests passing.
+**Status**: All Milestones (1, 2, 3, 4, 6, 7, and 8) are fully implemented, release-tested, and verified with 64/64 GUI tests passing.
 
 ## Architecture Overview
 
@@ -257,14 +257,33 @@ behavior changes are covered by deterministic regression tests under
 
 ### Test Suite
 
-- 59 GUI tests in `tests/gui/` covering thread lifecycle, deferred
+- 64 GUI tests in `tests/gui/` covering thread lifecycle, deferred
   close, mock-free `InspectorRunnable`, throttled stream + cancel
   race, layered HTML sanitization, memoized chat render, scroll /
   expansion state preservation, kill-timer slot reuse, and
   `shutdown` 200ms cap.
-- All 19 audit items have at least one regression test
+- All audit items (including Milestone 8 safeties) have regression tests
   (R-series → `test_process_manager.py` and `test_main_window_close.py`;
-  2.x → `test_chat_widget.py`; 5.x → `test_inspector_widget.py`).
+  2.x → `test_chat_widget.py`; 5.x → `test_inspector_widget.py`; 
+  M8 Threading → `test_agent_thread.py`).
 - Lint clean (`uv run ruff check src/grc_agent_gui/ tests/gui/`).
 
+---
 
+## Milestone 8: Systems Architecture Audit Hardening
+
+**Objective**: Address critical PySide6/Qt threading violations, C++/Python garbage collection gaps, and QProcess resource leaks discovered during the external adversarial review.
+
+### Hardening Steps & Implementations
+
+1. **Thread-Safe Cancellation & Timer Operations (C1, C2)**:
+   * Replaced cross-thread timer operations inside `workers.py`. The `cancel()` method now uses `QMetaObject.invokeMethod` with a `QueuedConnection` to trigger `_stop_stream_and_clear()` inside the worker thread's event loop.
+   * Locked slot-level access to the turn emission state, preventing double-emits of the `turn_finished` signal.
+2. **QProcess Leak & Zombie Escape Protection (M2, M3)**:
+   * Implemented `_reap_active_processes()` and `_disconnect_and_reap()` helpers in `process_manager.py` to disconnect and terminate old compile or execution instances before launching new processes.
+   * Wired `deleteLater()` to clean up finished processes, and prevented missing binary resolution hangs by handling `FailedToStart` error states explicitly.
+   * Cleaned up the per-slot kill timers when processes terminate normally to prevent PySide6 wrapper crashes when defunct C++ objects are accessed on timeout.
+3. **Python-C++ GC Lifecycle Synchronization (M4)**:
+   * Parented the worker's `QThread` to the `MainWindow` to prevent premature Python garbage collection from destroying C++ wrappers out of order.
+   * Explicitly scheduled thread deletion via `deleteLater()` during `cleanup_thread()`.
+   * Refactored flaky test assertions in `test_agent_thread.py` to wait for the thread reference to become `None` before test teardown, preventing runner timeout and subsequent GC crashes.

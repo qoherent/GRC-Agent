@@ -221,8 +221,8 @@ def test_thread_lifecycle_on_error(qtbot):
 
         window.start_generation("test prompt")
 
-        # Wait for the thread to finish cleanly
-        qtbot.waitUntil(lambda: window.thread is None or not window.thread.isRunning(), timeout=3000)
+        # Wait for the thread to finish cleanly (ensuring cleanup_thread has run)
+        qtbot.waitUntil(lambda: window.thread is None, timeout=3000)
 
         assert window.thread is None
         assert window.worker is None
@@ -302,4 +302,96 @@ def test_cancel_drops_pending_turn_finished(qtbot):
         loop.exec()
 
         assert finished_payloads == []
+
+
+def test_cancel_timer_safety_cross_thread(qtbot):
+    """C1: cancel() called from main thread must safely stop timer on the worker thread."""
+    import threading
+    from PySide6.QtCore import QThread
+    
+    mock_agent = MagicMock()
+    mock_provider = MagicMock()
+    mock_client = MagicMock()
+    
+    run_started = threading.Event()
+    block_event = threading.Event()
+    
+    def mock_run_turn(*args, **kwargs):
+        run_started.set()
+        block_event.wait(timeout=3)
+        return {
+            "ok": True,
+            "assistant_text": "hello streaming text",
+        }
+
+    with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
+        mock_runner = MagicMock()
+        mock_runner_class.return_value = mock_runner
+        mock_runner.run_turn.side_effect = mock_run_turn
+        mock_runner.provider.client = mock_client
+        
+        thread = QThread()
+        worker = AgentWorker(mock_agent, "test", mock_provider)
+        worker.moveToThread(thread)
+        
+        thread.started.connect(worker.run_turn)
+        
+        try:
+            thread.start()
+            
+            # Wait for run_turn to start executing in the thread
+            assert run_started.wait(timeout=2)
+            
+            # Call cancel from the main thread
+            worker.cancel()
+            
+            # Release the block so run_turn can return
+            block_event.set()
+            
+            # Wait for the thread to finish cleanly
+            thread.quit()
+            assert thread.wait(2000)
+            
+            # Verify client close was called
+            mock_client.close.assert_called_once()
+            
+        finally:
+            block_event.set()
+            thread.quit()
+            thread.wait()
+            worker.deleteLater()
+
+
+def test_no_double_emit_turn_finished(qtbot):
+    """C2: cancel() during streaming must not result in double-emit of turn_finished."""
+    mock_agent = MagicMock()
+    mock_provider = MagicMock()
+    
+    with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
+        mock_runner = MagicMock()
+        mock_runner_class.return_value = mock_runner
+        mock_runner.run_turn.return_value = {
+            "ok": True,
+            "assistant_text": "some streaming words to typewriter out",
+        }
+        
+        worker = AgentWorker(mock_agent, "test", mock_provider)
+        emitted_payloads = []
+        worker.turn_finished.connect(lambda r: emitted_payloads.append(r))
+        
+        # Start turn
+        worker.run_turn()
+        
+        # Let some chunks stream
+        qtbot.wait(100)
+        
+        # Cancel now
+        worker.cancel()
+        
+        # Spin event loop to let any remaining queued events process
+        qtbot.wait(200)
+        
+        # Verify that turn_finished was either never emitted or emitted once (if it finished before cancel)
+        # but certainly not multiple times. Since we cancelled mid-stream, it should be 0.
+        assert len(emitted_payloads) == 0
 

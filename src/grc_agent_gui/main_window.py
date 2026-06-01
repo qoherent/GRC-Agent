@@ -154,7 +154,7 @@ class MainWindow(QMainWindow):
             logger.warning("Agent worker thread is already running.")
             return
 
-        self.thread = QThread()
+        self.thread = QThread(self)
         self.worker = AgentWorker(self.agent, prompt, self.provider_config)
         self.worker.moveToThread(self.thread)
 
@@ -254,6 +254,7 @@ class MainWindow(QMainWindow):
                 logger.warning("Agent worker thread did not exit within 1500ms. Forcefully terminating...")
                 self.thread.terminate()
                 self.thread.wait(500)
+            self.thread.deleteLater()
             self.thread = None
         if self.worker:
             self.worker.deleteLater()

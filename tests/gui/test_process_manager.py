@@ -393,3 +393,76 @@ def test_shutdown_cancels_pending_kill_timers(qtbot):
     assert manager._run_kill_timer is None
 
 
+def test_reap_active_processes_disconnects_and_terminates(qtbot):
+    """M2/M3: _reap_active_processes must disconnect active processes and terminate them."""
+    manager = ProcessManager()
+    
+    mock_compile = MagicMock()
+    mock_compile.state.return_value = QProcess.ProcessState.Running
+    manager.compile_process = mock_compile
+    
+    mock_run = MagicMock()
+    mock_run.state.return_value = QProcess.ProcessState.Running
+    manager.run_process = mock_run
+
+    with patch("grc_agent_gui.process_manager.QTimer") as mock_timer_class:
+        timer_instances = [MagicMock(), MagicMock()]
+        mock_timer_class.side_effect = timer_instances
+
+        manager._reap_active_processes()
+
+        # Both must be disconnected and terminated
+        mock_compile.errorOccurred.disconnect.assert_called_once()
+        mock_compile.finished.disconnect.assert_called_once()
+        mock_compile.terminate.assert_called_once()
+        
+        mock_run.errorOccurred.disconnect.assert_called_once()
+        mock_run.finished.disconnect.assert_called_once()
+        mock_run.terminate.assert_called_once()
+        
+        # References must be set to None
+        assert manager.compile_process is None
+        assert manager.run_process is None
+
+
+def test_process_finished_deletes_process_and_stops_timer(qtbot):
+    """M3: Finished compilation/execution processes must deleteLater themselves and stop/delete kill timers."""
+    manager = ProcessManager()
+    
+    mock_compile = MagicMock()
+    manager.compile_process = mock_compile
+    
+    mock_timer = MagicMock()
+    manager._compile_kill_timer = mock_timer
+
+    # Simulate compilation finish
+    manager.on_compilation_finished(0, QProcess.ExitStatus.NormalExit)
+
+    # Timer must be stopped and deleted
+    mock_timer.stop.assert_called_once()
+    mock_timer.deleteLater.assert_called_once()
+    assert manager._compile_kill_timer is None
+
+    # Process must be set to None and deleteLater called
+    mock_compile.deleteLater.assert_called_once()
+    assert manager.compile_process is None
+
+
+def test_process_failed_to_start_deletes_process_and_emits_finished(qtbot):
+    """FailedToStart process error must clean up process and emit finished."""
+    manager = ProcessManager()
+    
+    mock_compile = MagicMock()
+    manager.compile_process = mock_compile
+    
+    finished_codes = []
+    manager.finished.connect(lambda c: finished_codes.append(c))
+
+    # Simulate FailedToStart error
+    manager.on_compile_error(QProcess.ProcessError.FailedToStart)
+
+    mock_compile.deleteLater.assert_called_once()
+    assert manager.compile_process is None
+    assert finished_codes == [-1]
+
+

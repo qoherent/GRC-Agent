@@ -69,6 +69,7 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
             doc = QTextDocument()
             doc.setMarkdown(part)
             part_html = doc.toHtml()
+            doc.deleteLater()
 
             body_start = part_html.find("<body>")
             body_end = part_html.find("</body>")

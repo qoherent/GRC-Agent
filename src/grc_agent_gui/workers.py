@@ -1,6 +1,6 @@
 import logging
 from typing import Any
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QMetaObject, QObject, QTimer, Signal, Slot, Qt
 
 from grc_agent.toolagents_runtime import ToolAgentsRunner
 
@@ -137,14 +137,19 @@ class AgentWorker(QObject):
             return
         self.tool_finished.emit(name, str(result))
 
+    @Slot()
+    def _stop_stream_and_clear(self) -> None:
+        """Safely stop the stream timer and clear pending results on the worker thread."""
+        self._stop_stream_timer()
+        self._pending_result = None
+
     def cancel(self) -> None:
         """Abort execution cooperatively and forcefully close HTTP client socket connections."""
         self._is_cancelled = True
-        # Stop the throttled stream timer so we don't emit stale chunks
-        # after the worker has been cancelled.
-        self._stop_stream_timer()
-        # Drop any pending turn_finished so it does not fire post-cancel.
-        self._pending_result = None
+        # Safely stop the throttled stream timer and clear the pending result
+        # on the worker thread to avoid cross-thread QTimer stop violations.
+        QMetaObject.invokeMethod(self, "_stop_stream_and_clear", Qt.QueuedConnection)
+
         runner = self.runner
         if runner and hasattr(runner, "provider") and runner.provider:
             try:
