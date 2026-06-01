@@ -382,7 +382,9 @@ Durable docs kept under `docs/`:
 
 - `BLUEPRINT.md`: architecture and safety contract
 - `MODEL_CONTEXT_BIBLE.md`: generated exact model-facing prompt and wrapper schemas
-- `QUICKSTART.md`: setup and use
+- `QUICKSTART.md`: navigation index to the two product quickstarts
+- `CLI_QUICKSTART.md`: CLI workflow (terminal chat, copy graphs, save, history)
+- `GUI_QUICKSTART.md`: GUI workflow (sidekick panel, inspector, compile & run)
 - `PYSIDE6_GUI_BLUEPRINT.md`: desktop companion UI design and validation report
 - `wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus
 
@@ -428,4 +430,37 @@ scheme strip); throttled stream via persistent `QTimer` so cancelled
 turns never reach `turn_finished`; explicit `Qt.UserRole` category
 keys; `open_in_grc` no longer fails silently on missing
 `gnuradio-companion`; 59/59 GUI tests green under `xvfb-run`.
+
+#### Third-pass hardening (M8)
+A systems-architecture audit addressed critical PySide6/Qt threading
+violations, C++/Python GC gaps, and QProcess resource leaks. Full
+items and contracts are documented in `docs/PYSIDE6_GUI_BLUEPRINT.md`
+under Milestone 8. Highlights: thread-safe `cancel()` delegation via
+`QMetaObject.invokeMethod(QueuedConnection)`; `_reap_active_processes`
+disconnects and reaps old QProcess instances before new starts;
+`QThread` parented to `MainWindow` and `deleteLater()`'d in cleanup to
+prevent Python GC from outpacing the C++ event loop; `FailedToStart`
+explicit cleanup; per-slot kill timer reuse to avoid transient-id
+bugs.
+
+#### Adversarial audit (M9, closed baseline)
+A read-only, static, adversarial audit of the entire GUI surface
+(`src/grc_agent_gui/` and `tests/gui/`) was conducted against the
+standard 4 audit vectors. **M9 is a closed, evidence-only audit with no
+code remediation.** The full findings (21 items: 0 CRITICAL / 4
+MODERATE / 7 MINOR / 10 TEST-GAP) have been retired from `docs/`.
+M9 also re-verified all 23 M6/M7/M8 claims at the cited `file:line`
+locations — no claim-accuracy drift was found. Headline findings:
+`console_log` lacks `setMaximumBlockCount` (unbounded memory on
+long-running flowgraphs); stdout/stderr pipe round-trip has no rate
+cap; `compile_and_run` is re-entrant; mid-tool cancel is untested. M9
+is a polish-pass backlog, not a stability pass.
+
+The next audit (M10) was conducted with an **expert-level** reviewer
+prompt (the original junior-grade prompt used for M9 was upgraded in
+place and has been retired with the audit reports). The expert-level
+prompt adds a mandatory 7-step methodology, 20 specific grep probes, 4
+file-hotspot groups, a 12-category test-gap taxonomy, a strict output
+schema with file:line + 3-step trigger + confidence rating, and
+anti-hallucination mechanisms.
 

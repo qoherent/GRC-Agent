@@ -2,6 +2,22 @@
 
 Local GNU Radio Companion `.grc` assistant focused on safe, validated, local-first graph edits.
 
+## Products
+
+GRC Agent ships as two distinct user-facing products that share the same
+runtime. Pick the one that fits your workflow.
+
+- **CLI** — terminal chat, scriptable, single-session per file. See
+  [`docs/CLI_QUICKSTART.md`](docs/CLI_QUICKSTART.md).
+- **GUI** — native PySide6 desktop sidekick panel that runs alongside
+  GNU Radio Companion. See
+  [`docs/GUI_QUICKSTART.md`](docs/GUI_QUICKSTART.md).
+
+Both products use the same four-wrapper model surface
+(`inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`) and
+the same safety contract. The GUI is an additional entry point, not a
+replacement.
+
 ## Vision
 
 GRC Agent is a reliable local assistant for GNU Radio Companion graphs. It inspects the active graph, uses verified tools, mutates only through validated transactions, verifies results, autosaves successful mutations, and asks for clarification when required details are missing.
@@ -73,10 +89,9 @@ beta-validated, and the runtime is not production-ready.
 - `tests/data/random_bit_generator.grc`: canonical fixture graph.
 - `tests/llama_eval/`: live llama.cpp routing and behavior evals.
 - `docs/BLUEPRINT.md`: concise source of truth for architecture, wrappers, harness loop, context handling, safety contract, eval harness, status, and roadmap.
-- `docs/QUICKSTART.md`: setup and common usage.
-- `docs/ISSUE_INTAKE.md`: issue report template and debug-bundle guidance.
-- `docs/DEMO_VIDEO.md`: reproducible demo workflow.
-- `docs/HANDOFF.md`: current handoff for the next implementation/audit agent.
+- `docs/QUICKSTART.md`: navigation index to the two product quickstarts.
+- `docs/CLI_QUICKSTART.md`: CLI workflow (terminal chat, copy graphs, save, history).
+- `docs/GUI_QUICKSTART.md`: GUI workflow (sidekick panel, inspector, compile & run).
 - `docs/wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus for explanation-only retrieval and evals.
 - `tests/data/retrieval/vector_eval_governed_metadata.json`: frozen vector regression baseline artifact.
 
@@ -319,8 +334,8 @@ failures or STOP_THE_LINE safety issues.
 
 When reporting issues, include prompt, expected behavior, actual behavior,
 sanitized copied-graph reference, validation result, and checkpoint result.
-Use `docs/ISSUE_INTAKE.md` for the current report template and attachment
-guidance.
+Bundle the redacted `debug-bundle` output (see below) and a copy of the
+graph under `playground/` so the reproducer is self-contained.
 
 Generate a redacted support bundle:
 

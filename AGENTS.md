@@ -165,7 +165,11 @@ history, and wrapper outputs compact by design.
 
 - `docs/BLUEPRINT.md`: architecture, wrappers, safety, context, evals, runtime
   status.
-- `docs/QUICKSTART.md`: setup and usage.
+- `docs/QUICKSTART.md`: navigation index to the two product quickstarts.
+- `docs/CLI_QUICKSTART.md`: CLI workflow (terminal chat, copy graphs, save,
+  history).
+- `docs/GUI_QUICKSTART.md`: GUI workflow (sidekick panel, inspector, compile &
+  run).
 - `docs/MODEL_CONTEXT_BIBLE.md`: generated from the actual injected prompt and
   model-facing tool schemas.
 - `docs/PYSIDE6_GUI_BLUEPRINT.md`: companion desktop UI design and validation report.
