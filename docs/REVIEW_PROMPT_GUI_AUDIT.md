@@ -25,13 +25,13 @@ the user has explicitly asked you to act as the reviewer.
   - `docs/PYSIDE6_GUI_BLUEPRINT.md` (full Milestones 1-7, including
     the 19-item M7 audit the in-team just completed)
 - **Status the reviewer is told:**
-  - 59/59 GUI tests pass under `xvfb-run uv run pytest tests/gui/`.
+  - 64/64 GUI tests pass under `xvfb-run uv run pytest tests/gui/`.
   - Lint clean: `uv run ruff check src/grc_agent_gui/ tests/gui/`.
-  - M7 audit (19 items) is claimed complete and is the very thing
+  - M8 audit (GC, QTimer thread affinity, QProcess reaping, QThread deleteLater) is claimed complete and is the very thing
     this external review is meant to validate or refute.
 
-The reviewer should be told explicitly that the M7 audit just landed
-and that the whole point of the external review is to find what M7
+The reviewer should be told explicitly that the M8 audit just landed
+and that the whole point of the external review is to find what M8
 missed.
 
 ---
@@ -59,9 +59,9 @@ missed.
 >   `QTextBrowser`, and Graph Inspection via `QTreeWidget` /
 >   `QTableWidget`). It enforces a strict Signal-Only boundary between
 >   the LLM `QThread` and the GUI thread.
-> - **Status:** 59/59 tests pass. It implements throttled UI streaming,
->   deferred window close events, and deterministic temp-directory
->   cleanup.
+> - **Status:** 64/64 tests pass. It implements throttled UI streaming,
+>   deferred window close events, deterministic temp-directory
+>   cleanup, thread-safe cancellation, and QProcess reaping.
 >
 > ### Audit Mandate: Seek and Destroy
 > Inspect the codebase (`src/grc_agent_gui/` and `tests/gui/`)
@@ -107,27 +107,27 @@ missed.
 ## How to Run This Review
 
 1. Open a fresh chat session (or new agent context) with no prior
-   memory of the M7 audit.
+   memory of the M8 audit.
 2. Paste the prompt above verbatim.
 3. Provide the reviewer the absolute paths to the four files listed
    in "Documentation to read first" plus the two source roots
    (`src/grc_agent_gui/` and `tests/gui/`).
-4. Do **not** mention which specific M7 items the in-team addressed.
-   The reviewer is meant to find what M7 missed, not confirm M7.
-5. When the reviewer returns findings, triage them as a new M8
-   backlog. Do not merge findings into M7 retroactively; M7 is the
+4. Do **not** mention which specific M8 items the in-team addressed.
+   The reviewer is meant to find what M8 missed, not confirm M8.
+5. When the reviewer returns findings, triage them as a new M9
+   backlog. Do not merge findings into M8 retroactively; M8 is the
    closed baseline.
 
 ## Reviewer Constraints the In-Team Cares About
 
-- The reviewer should treat the 59/59 test result as a starting
+- The reviewer should treat the 64/64 test result as a starting
   baseline, not as proof of correctness. Coverage gaps and
-  tautological tests are themselves valid findings.
+  tautological/scaffold tests are themselves valid findings.
 - The reviewer should look for **test gaps**, not just code bugs.
   A behavior without a regression test is a finding.
 - The reviewer should specifically look at how the new throttled
   stream (`AgentWorker._start_throttled_stream`,
   `_emit_next_chunk`, `_flush_turn_finished`, `cancel()`) interacts
-  with the existing `closeEvent` and `cleanup_thread` paths. M7 added
-  this code; M7 also added the tests for it. The external review
-  must verify the tests actually exercise the cancel + close race.
+  with the existing `closeEvent` and `cleanup_thread` paths. M8 added
+  thread-safe cancel delegation via QMetaObject and deleteLater QThread/QProcess lifecycles. The external review
+  must verify the tests actually exercise the cancel + close race under concurrency.
