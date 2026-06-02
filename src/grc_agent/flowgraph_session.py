@@ -21,6 +21,8 @@ from typing import Any
 
 import yaml
 
+from grc_agent.runtime.output_policy import is_variable_block
+
 from .models import Block, Connection, Flowgraph
 from .session_ops import (
     block_name_is_referenced_elsewhere as shared_block_name_is_referenced_elsewhere,
@@ -310,7 +312,8 @@ class FlowgraphSession:
     def _read_file_sha256_if_available(path: Path) -> str | None:
         try:
             return hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
+        except OSError as exc:
+            logging.getLogger("grc_agent").debug("hash_file_failed path=%s: %s", path, exc)
             return None
 
     @staticmethod
@@ -544,7 +547,7 @@ class FlowgraphSession:
         snapshot["block_count"] = len(flowgraph.blocks)
         snapshot["connection_count"] = len(flowgraph.connections)
         snapshot["variable_count"] = sum(
-            1 for block in flowgraph.blocks if block.block_type == "variable"
+            1 for block in flowgraph.blocks if is_variable_block(block.block_type)
         )
         variable_preview: list[str] = []
         block_preview: list[str] = []
@@ -561,7 +564,7 @@ class FlowgraphSession:
             )[:8]
         ]
         for block in flowgraph.blocks:
-            if block.block_type == "variable":
+            if is_variable_block(block.block_type):
                 value = block.params.get("parameters", {}).get("value", "")
                 variable_preview.append(f"{block.instance_name}={value}")
                 continue
@@ -586,7 +589,7 @@ class FlowgraphSession:
             raise ValueError("max_blocks must be a positive integer.")
 
         variable_count = sum(
-            1 for block in flowgraph.blocks if block.block_type == "variable"
+            1 for block in flowgraph.blocks if is_variable_block(block.block_type)
         )
         preview_blocks = flowgraph.blocks[:max_blocks]
         preview = ", ".join(
@@ -892,7 +895,7 @@ class FlowgraphSession:
 
         self._assert_new_block_name_available(instance_name, raw_blocks)
 
-        add_default_comment = block_type == "variable"
+        add_default_comment = is_variable_block(block_type)
         raw_block, raw_parameters, raw_states = self._prepare_new_block_payload(
             instance_name=instance_name,
             block_type=block_type,

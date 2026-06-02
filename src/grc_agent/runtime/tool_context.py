@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from grc_agent.runtime.output_policy import is_meaningful, truncate_text
+
 HistoryEntry = dict[str, Any]
 PreviewCallback = Callable[..., list[dict[str, Any]]]
 _MODEL_WRAPPER_NAMES = {
@@ -424,7 +426,7 @@ def _render_change_graph_result(
         ("autosave", "autosave"),
     ):
         value = compact.get(key)
-        if value not in (None, "", [], {}):
+        if is_meaningful(value):
             parts.append(f"{label}={value}")
     if parts:
         rendered.append(" ".join(parts))
@@ -536,7 +538,7 @@ def _compact_change_graph(content: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_catalog_facts(value: Any, *, index: int) -> dict[str, Any]:
     """Keep just enough catalog truth for grounded add-block arguments."""
-    if not isinstance(value, dict) or index > 1:
+    if not isinstance(value, dict):
         return {}
     params = []
     for raw_param in _list(value.get("params"))[:6]:
@@ -759,9 +761,7 @@ def _short_text(value: Any, limit: int) -> str | None:
     if not isinstance(value, str):
         return None
     text = " ".join(value.split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
+    return truncate_text(text, limit)
 
 
 def _list(value: Any) -> list[Any]:
@@ -769,8 +769,4 @@ def _list(value: Any) -> list[Any]:
 
 
 def _drop_empty(value: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: item
-        for key, item in value.items()
-        if item not in (None, "", [], {})
-    }
+    return {key: item for key, item in value.items() if is_meaningful(item)}

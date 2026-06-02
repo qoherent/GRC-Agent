@@ -24,6 +24,7 @@ from grc_agent.history import (
     snapshot_session,
 )
 from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
+from grc_agent.runtime.output_policy import is_meaningful
 from grc_agent.runtime.clarification_state import (
     normalize_pending_clarification,
     parse_clarification_option_label,
@@ -210,7 +211,7 @@ def _compact_save_file_integrity(file_integrity: dict[str, Any]) -> dict[str, An
     error = file_integrity.get("error")
     if isinstance(error, str) and error:
         compact["error"] = error
-    return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
+    return {key: value for key, value in compact.items() if is_meaningful(value)}
 
 
 @lru_cache(maxsize=4)
@@ -1442,6 +1443,8 @@ class GrcAgent:
         try:
             size = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
         except Exception:
+            logger.warning("enforce_tool_output_budget json_serialization_failed, bypassing budget")
+            payload["output_truncated"] = True
             return payload
         if size <= max_bytes:
             return payload

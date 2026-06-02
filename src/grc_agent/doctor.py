@@ -102,21 +102,20 @@ def _check_retrieval() -> dict[str, Any]:
 def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
     try:
         from grc_agent.config import load_app_config as _load
-        from grc_agent.llama_launcher import LlamaServerLauncher
+        from grc_agent.startup import bootstrap_runtime
 
         config = _load(config_path)
-        launcher = LlamaServerLauncher(
-            config.llama,
-            server_url=config.llama.server_url,
-            model_alias=config.llama.model,
-        )
-        result = launcher.ensure_server_ready()
-        actual_context = result.health_evidence.get("llama_actual_context_tokens")
+        result = bootstrap_runtime(config, start_llama=True, init_retrieval=False)
         desired_context = config.llama.desired_context_tokens
+        actual_context = (
+            result.health_evidence.get("llama_actual_context_tokens")
+            if result.health_evidence
+            else None
+        )
         context_ok = (
             actual_context is not None and actual_context >= desired_context
         )
-        detail = f"{result.model_alias} at {result.server_url} ({result.status})"
+        detail = f"{result.model_alias} at {result.server_url} ({result.launch_status})"
         if actual_context is not None:
             detail = (
                 f"{detail}; context desired={desired_context}, actual={actual_context}"

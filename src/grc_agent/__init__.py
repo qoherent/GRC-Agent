@@ -4,6 +4,7 @@
 from .agent import GrcAgent
 from .catalog import describe_block
 from .doctor import run_doctor
+from .startup import RuntimeBootstrapResult, bootstrap_runtime
 from .flowgraph_session import FlowgraphSession
 from .models import Block, Connection, Flowgraph
 from .retrieval import initialize_retrieval
@@ -13,6 +14,7 @@ from .validation import preflight_transaction
 
 __all__ = [
     "Block",
+    "bootstrap_runtime",
     "Connection",
     "describe_block",
     "Flowgraph",
@@ -25,5 +27,6 @@ __all__ = [
     "preflight_transaction",
     "propose_edit",
     "run_doctor",
+    "RuntimeBootstrapResult",
     "summarize_graph",
 ]

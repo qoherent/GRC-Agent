@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 import signal
@@ -20,12 +21,16 @@ from grc_agent.config import LlamaConfig
 from grc_agent.llama_probe import LlamaHealthProbe, LlamaServerError
 from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig
 
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_STARTUP_POLL_SECONDS = 0.5
 _ACTIVE_LAUNCH_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 # Detected once at first use; True if the installed llama.cpp supports --no-mmproj.
 _mmproj_state: dict[str, bool | None] = {"supported": None}
+# Detected once at first use; True if the installed llama.cpp supports --flash-attn.
+_flash_attn_state: dict[str, bool | None] = {"supported": None}
 
 
 def _detect_mmproj_support() -> bool:
@@ -41,7 +46,8 @@ def _detect_mmproj_support() -> bool:
             timeout=5.0,
         )
         return "--no-mmproj" in result.stdout or "--no-mmproj" in result.stderr
-    except Exception:
+    except Exception as exc:
+        logger.debug("_detect_mmproj_support subprocess failed: %s", exc)
         return False
 
 
@@ -50,6 +56,31 @@ def _get_mmproj_support() -> bool:
     if _mmproj_state["supported"] is None:
         _mmproj_state["supported"] = _detect_mmproj_support()
     return bool(_mmproj_state["supported"])
+
+
+def _detect_flash_attn_support() -> bool:
+    """Check whether the installed llama-server binary supports --flash-attn."""
+    binary = which("llama-server")
+    if binary is None:
+        return False
+    try:
+        result = subprocess.run(
+            [binary, "-h"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        return "--flash-attn" in result.stdout or "--flash-attn" in result.stderr
+    except Exception as exc:
+        logger.debug("_detect_flash_attn_support subprocess failed: %s", exc)
+        return False
+
+
+def _get_flash_attn_support() -> bool:
+    """Return whether the installed llama-server supports --flash-attn (detected once)."""
+    if _flash_attn_state["supported"] is None:
+        _flash_attn_state["supported"] = _detect_flash_attn_support()
+    return bool(_flash_attn_state["supported"])
 
 
 class LlamaLauncherError(RuntimeError):
@@ -207,10 +238,13 @@ class LlamaServerLauncher:
             str(self.config.desired_context_tokens),
             "--device",
             self.config.device,
-            "--gpu-layers",
-            str(self.config.gpu_layers),
             "--jinja",
         ]
+        if _get_flash_attn_support():
+            args.extend(["--flash-attn", "auto"])
+        gpu_layers = self.config.gpu_layers
+        if gpu_layers > 0 and gpu_layers < 999:
+            args.extend(["--gpu-layers", str(gpu_layers)])
         if _get_mmproj_support():
             args.append("--no-mmproj")
 
@@ -324,7 +358,7 @@ class LlamaServerLauncher:
     def _load_matching_state(self) -> _LauncherState | None:
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             return None
         except json.JSONDecodeError:
             self._clear_state()
@@ -512,7 +546,7 @@ class LlamaServerLauncher:
                 try:
                     tracked_process.wait(timeout=0.1)
                 except Exception:
-                    pass
+                    logger.debug("terminate_pid wait failed pid=%s", pid, exc_info=True)
             _ACTIVE_LAUNCH_PROCESSES.pop(pid, None)
             return
 
@@ -537,7 +571,7 @@ class LlamaServerLauncher:
                 try:
                     tracked_process.wait(timeout=0.1)
                 except Exception:
-                    pass
+                    logger.debug("terminate_pid wait failed pid=%s", pid, exc_info=True)
             _ACTIVE_LAUNCH_PROCESSES.pop(pid, None)
             return
         hard_deadline = time.monotonic() + 1.0

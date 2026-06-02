@@ -8,6 +8,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from grc_agent.runtime.output_policy import is_variable_block
+
 logger = logging.getLogger(__name__)
 
 from grc_agent._payload import ErrorCode
@@ -305,7 +307,7 @@ def _apply_add_block(
     if name_issues:
         return name_issues, []
 
-    if block_type == "variable":
+    if is_variable_block(block_type):
         parameter_issues = _validate_parameter_updates(
             block_type=block_type,
             params=parameters,

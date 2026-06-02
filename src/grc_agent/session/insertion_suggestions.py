@@ -5,8 +5,11 @@ No graph mutation. No hardcoded recipes. No blacklists.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from grc_agent.catalog.describe import describe_block
 from grc_agent.catalog.schema import BlockDescription, NormalizedParameter, NormalizedPort
@@ -191,15 +194,15 @@ def suggest_insertions(
             payload = describe_block(src_type)
             if payload.get("ok"):
                 catalog_blocks[src_block] = _payload_to_desc(payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("insertion_suggestions describe_block failed for src=%s: %s", src_type, exc)
     if dst_type:
         try:
             payload = describe_block(dst_type)
             if payload.get("ok"):
                 catalog_blocks[dst_block] = _payload_to_desc(payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("insertion_suggestions describe_block failed for dst=%s: %s", dst_type, exc)
 
     source_spec = _port_spec_from_connection(target, "src", catalog_blocks)
     dest_spec = _port_spec_from_connection(target, "dst", catalog_blocks)

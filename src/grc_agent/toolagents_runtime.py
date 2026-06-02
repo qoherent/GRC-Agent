@@ -306,7 +306,11 @@ class ToolAgentsHistoryAdapter:
                     tool_call_result_id=str(uuid.uuid4()),
                     tool_call_id=tool_call_id,
                     tool_call_name=tool_name,
-                    tool_call_result=str(message.get("content") or ""),
+                    tool_call_result=(
+                        json.dumps(content, sort_keys=True)
+                        if isinstance(content, (dict, list))
+                        else str(content or "")
+                    ),
                 )
             )
             return ChatMessage(

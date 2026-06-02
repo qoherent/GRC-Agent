@@ -10,15 +10,15 @@ logger = logging.getLogger(__name__)
 
 class ProcessManager(QObject):
     """Manages compiling GRC flowgraphs and executing the compiled Python scripts.
-    
+
     Implements a Split-Stage Execution framework:
     1. Compiles GRC to a temporary directory using `grcc`.
     2. Runs the compiled Python script using the python interpreter.
-    
+
     Implements Two-Phase Termination (terminate -> kill fallback after 2000ms).
     Prevents zombie directories via manual rmtree cleanups.
     """
-    
+
     # Signals for UI integration
     started = Signal()
     stdout_received = Signal(str)
@@ -42,18 +42,22 @@ class ProcessManager(QObject):
         try:
             return session.flowgraph.metadata["options"]["parameters"]["id"]
         except (KeyError, TypeError, AttributeError) as e:
-            logger.warning(f"Could not resolve flowgraph ID from metadata: {e}. Defaulting to 'top_block'.")
+            logger.warning(
+                f"Could not resolve flowgraph ID from metadata: {e}. Defaulting to 'top_block'."
+            )
             return "top_block"
 
     def _disconnect_and_reap(self, proc: QProcess, label: str) -> None:
-        """Disconnect all slots from an active process, terminate it, and schedule self-destruction."""
-        try:
-            proc.errorOccurred.disconnect()
-            proc.finished.disconnect()
-            proc.readyReadStandardOutput.disconnect()
-            proc.readyReadStandardError.disconnect()
-        except Exception:
-            pass
+        failed = 0
+        for signal_name in ("errorOccurred", "finished", "readyReadStandardOutput", "readyReadStandardError"):
+            try:
+                getattr(proc, signal_name).disconnect()
+            except (TypeError, RuntimeError):
+                failed += 1
+        if failed == 4:
+            logger.warning("_disconnect_and_reap all disconnects failed for %s, skipping terminate", label)
+            proc.deleteLater()
+            return
 
         proc.terminate()
 
@@ -66,7 +70,9 @@ class ProcessManager(QObject):
         def force_kill_orphaned():
             try:
                 if proc.state() == QProcess.ProcessState.Running:
-                    logger.warning(f"Orphaned {label} process refused SIGTERM, killing...")
+                    logger.warning(
+                        f"Orphaned {label} process refused SIGTERM, killing..."
+                    )
                     proc.kill()
             except RuntimeError:
                 pass
@@ -105,22 +111,32 @@ class ProcessManager(QObject):
                 self._run_kill_timer.deleteLater()
                 self._run_kill_timer = None
 
-    def compile_and_run(self, session) -> None:
-        """First stage: Compile `.grc` file via `grcc` into a temporary directory."""
-        if (self.compile_process and self.compile_process.state() == QProcess.ProcessState.Running) or \
-           (self.run_process and self.run_process.state() == QProcess.ProcessState.Running):
-            self.status_message.emit("Compile & Run already in progress; ignoring re-entrant request.")
-            logger.warning("Re-entrant compile_and_run ignored while a flowgraph is active.")
+    def validate_graph(self, session) -> None:
+        """Compile `.grc` file via `grcc` to validate the graph without executing."""
+        if (
+            self.compile_process
+            and self.compile_process.state() == QProcess.ProcessState.Running
+        ) or (
+            self.run_process
+            and self.run_process.state() == QProcess.ProcessState.Running
+        ):
+            self.status_message.emit(
+                "Validation already in progress; ignoring re-entrant request."
+            )
+            logger.warning(
+                    "Re-entrant validate_graph ignored while a validation is active."
+            )
             return
 
         self._reap_active_processes()
         self.cleanup_temp_dir()
 
         self.active_session = session
-        grc_path = getattr(session, "path", "")
+        grc_path = str(getattr(session, "path", "") or "")
         if not grc_path:
             self.status_message.emit("Error: No flowgraph path in active session.")
             return
+        grc_path = os.path.abspath(grc_path)
 
         # Create persistent temporary directory for this compile/run cycle
         self._current_temp_dir = tempfile.mkdtemp(prefix="grc_agent_run_")
@@ -131,7 +147,9 @@ class ProcessManager(QObject):
         try:
             self.compile_process = QProcess(self)
             self.compile_process.setWorkingDirectory(os.path.dirname(grc_path))
-            self.compile_process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
+            self.compile_process.setProcessEnvironment(
+                QProcessEnvironment.systemEnvironment()
+            )
 
             # Connect compilation standard outputs, error occurred and finished slots
             self.compile_process.errorOccurred.connect(self.on_compile_error)
@@ -145,14 +163,18 @@ class ProcessManager(QObject):
             self.finished.emit(-1)
             return
 
-        self.status_message.emit(f"Compiling {os.path.basename(grc_path)} with grcc...")
+        self.status_message.emit(f"Validating {os.path.basename(grc_path)} with grcc...")
         self.started.emit()
 
         # Execute grcc -o <temp_dir> <grc_path>
         self.compile_process.start("grcc", ["-o", self._current_temp_dir, grc_path])
 
     def on_compile_error(self, error: QProcess.ProcessError) -> None:
-        err_msg = self.compile_process.errorString() if self.compile_process else "Unknown error"
+        err_msg = (
+            self.compile_process.errorString()
+            if self.compile_process
+            else "Unknown error"
+        )
         self.status_message.emit(f"Compilation process error occurred: {err_msg}")
         # Clean up FailedToStart since finished is not emitted in that case.
         if error == QProcess.ProcessError.FailedToStart:
@@ -164,15 +186,25 @@ class ProcessManager(QObject):
 
     def on_compile_stdout(self) -> None:
         if self.compile_process:
-            data = self.compile_process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            data = (
+                self.compile_process.readAllStandardOutput()
+                .data()
+                .decode("utf-8", errors="replace")
+            )
             self.stdout_received.emit(data)
 
     def on_compile_stderr(self) -> None:
         if self.compile_process:
-            data = self.compile_process.readAllStandardError().data().decode("utf-8", errors="replace")
+            data = (
+                self.compile_process.readAllStandardError()
+                .data()
+                .decode("utf-8", errors="replace")
+            )
             self.stderr_received.emit(data)
 
-    def on_compilation_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+    def on_compilation_finished(
+        self, exit_code: int, exit_status: QProcess.ExitStatus
+    ) -> None:
         """Triggered when compilation process terminates."""
         # Stop and delete the kill timer if it's running
         if self._compile_kill_timer is not None:
@@ -193,33 +225,37 @@ class ProcessManager(QObject):
             is_normal_exit = True
         elif "NormalExit" in str(exit_status):
             is_normal_exit = True
-            
+
         if exit_code == 0 and is_normal_exit:
-            self.status_message.emit("Compilation succeeded. Spawning flowgraph script...")
-            self.start_execution()
+            self.status_message.emit("Validation passed.")
+            self.finished.emit(0)
         else:
-            self.status_message.emit(f"Compilation failed with exit code {exit_code}.")
+            self.status_message.emit(f"Validation failed with exit code {exit_code}.")
             self.finished.emit(exit_code)
 
     def start_execution(self) -> None:
         """Second stage: execute the compiled Python script using the python interpreter."""
         if not self.active_session or not self._current_temp_dir:
             return
-            
+
         flowgraph_id = self.resolve_flowgraph_id(self.active_session)
         grc_path = self.active_session.path
         py_file = os.path.join(self._current_temp_dir, f"{flowgraph_id}.py")
-        
+
         # Verify that the compiled artifact exists before running it
         if not os.path.exists(py_file):
-            self.status_message.emit(f"Compiled executable script not found at expected path: {py_file}")
+            self.status_message.emit(
+                f"Compiled executable script not found at expected path: {py_file}"
+            )
             self.finished.emit(-1)
             return
-            
+
         try:
             self.run_process = QProcess(self)
             self.run_process.setWorkingDirectory(os.path.dirname(grc_path))
-            self.run_process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
+            self.run_process.setProcessEnvironment(
+                QProcessEnvironment.systemEnvironment()
+            )
 
             self.run_process.errorOccurred.connect(self.on_run_error)
             self.run_process.readyReadStandardOutput.connect(self.on_run_stdout)
@@ -236,7 +272,9 @@ class ProcessManager(QObject):
         self.run_process.start(sys.executable, [py_file])
 
     def on_run_error(self, error: QProcess.ProcessError) -> None:
-        err_msg = self.run_process.errorString() if self.run_process else "Unknown error"
+        err_msg = (
+            self.run_process.errorString() if self.run_process else "Unknown error"
+        )
         self.status_message.emit(f"Flowgraph run process error occurred: {err_msg}")
         # Clean up FailedToStart since finished is not emitted in that case.
         if error == QProcess.ProcessError.FailedToStart:
@@ -248,12 +286,20 @@ class ProcessManager(QObject):
 
     def on_run_stdout(self) -> None:
         if self.run_process:
-            data = self.run_process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            data = (
+                self.run_process.readAllStandardOutput()
+                .data()
+                .decode("utf-8", errors="replace")
+            )
             self.stdout_received.emit(data)
 
     def on_run_stderr(self) -> None:
         if self.run_process:
-            data = self.run_process.readAllStandardError().data().decode("utf-8", errors="replace")
+            data = (
+                self.run_process.readAllStandardError()
+                .data()
+                .decode("utf-8", errors="replace")
+            )
             self.stderr_received.emit(data)
 
     def on_run_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
@@ -274,11 +320,21 @@ class ProcessManager(QObject):
 
     def stop(self) -> None:
         """Initiates a Two-Phase termination sequence for compiling/running flowgraphs."""
-        if self.compile_process and self.compile_process.state() == QProcess.ProcessState.Running:
-            self._terminate_with_fallback(self.compile_process, self._compile_kill_timer, "compilation")
+        if (
+            self.compile_process
+            and self.compile_process.state() == QProcess.ProcessState.Running
+        ):
+            self._terminate_with_fallback(
+                self.compile_process, self._compile_kill_timer, "compilation"
+            )
 
-        if self.run_process and self.run_process.state() == QProcess.ProcessState.Running:
-            self._terminate_with_fallback(self.run_process, self._run_kill_timer, "flowgraph execution")
+        if (
+            self.run_process
+            and self.run_process.state() == QProcess.ProcessState.Running
+        ):
+            self._terminate_with_fallback(
+                self.run_process, self._run_kill_timer, "flowgraph execution"
+            )
 
     def _terminate_with_fallback(
         self,
@@ -311,7 +367,9 @@ class ProcessManager(QObject):
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.setInterval(2000)
-        timer.timeout.connect(lambda p=proc, lbl=label: self._force_kill_process(p, lbl))
+        timer.timeout.connect(
+            lambda p=proc, lbl=label: self._force_kill_process(p, lbl)
+        )
         timer.start()
 
         if label == "compilation":
@@ -322,7 +380,9 @@ class ProcessManager(QObject):
     def _force_kill_process(self, proc: QProcess, label: str) -> None:
         try:
             if proc and proc.state() == QProcess.ProcessState.Running:
-                self.status_message.emit(f"{label.capitalize()} process failed to terminate. Forcefully killing (Phase 2)...")
+                self.status_message.emit(
+                    f"{label.capitalize()} process failed to terminate. Forcefully killing (Phase 2)..."
+                )
                 proc.kill()
         except RuntimeError:
             pass
@@ -376,11 +436,15 @@ class ProcessManager(QObject):
         # 4. Persistent directory cleanup
         self.cleanup_temp_dir()
 
+    compile_and_run = validate_graph  # backward compat alias
+
     def cleanup_temp_dir(self) -> None:
         """Removes the persistent temp directory containing the compiled artifact."""
         if self._current_temp_dir and os.path.exists(self._current_temp_dir):
             try:
                 shutil.rmtree(self._current_temp_dir, ignore_errors=True)
             except Exception as e:
-                logger.error(f"Failed to remove temp directory {self._current_temp_dir}: {e}")
+                logger.error(
+                    f"Failed to remove temp directory {self._current_temp_dir}: {e}"
+                )
             self._current_temp_dir = None

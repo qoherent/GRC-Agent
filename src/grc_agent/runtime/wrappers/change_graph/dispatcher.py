@@ -11,6 +11,7 @@ from typing import Any
 from grc_agent._payload import ErrorCode
 from grc_agent.catalog import describe_block
 from grc_agent.runtime.block_semantics import _block_semantics
+from grc_agent.runtime.output_policy import is_meaningful, is_variable_block
 from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
 
 ToolResult = dict[str, Any]
@@ -682,7 +683,7 @@ def _undefined_variable_hint(
     has_added = any(
         isinstance(op, dict)
         and op.get("op_type") == "add_block"
-        and op.get("block_type") == "variable"
+        and is_variable_block(str(op.get("block_type", "")))
         for op in operations
     )
     if has_added:
@@ -1119,9 +1120,6 @@ def _update_state_operation(
     if block_id is not None:
         op["block_type"] = block_id
     return op
-    if block_id is not None:
-        op["block_type"] = block_id
-    return op
 
 
 def _optional_catalog_block_id(value: Any) -> str | None:
@@ -1189,6 +1187,9 @@ def _synthesized_flat_delta(
     removed_connections = sorted(before_connection_ids - after_connection_ids)
     if added_blocks:
         delta["added_blocks"] = added_blocks
+        block_types = _added_block_types(agent, after_block_names - before_block_names)
+        if block_types:
+            delta["added_block_types"] = block_types
     if removed_blocks:
         delta["removed_blocks"] = removed_blocks
     if added_connections:
@@ -1206,12 +1207,19 @@ def _synthesized_flat_delta(
     return delta
 
 
-def _drop_empty_result_fields(payload: dict[str, Any]) -> dict[str, Any]:
+def _added_block_types(agent: Any, added_names: set[str]) -> dict[str, str]:
+    """Look up the block type for each newly added block."""
+    if not agent.session.flowgraph:
+        return {}
     return {
-        key: value
-        for key, value in payload.items()
-        if value not in (None, "", [], {})
+        b.instance_name: b.block_type
+        for b in agent.session.flowgraph.blocks
+        if b.instance_name in added_names
     }
+
+
+def _drop_empty_result_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if is_meaningful(value)}
 
 
 def _compact_file_integrity(file_integrity: dict[str, Any]) -> dict[str, Any]:
@@ -1257,7 +1265,7 @@ def _operation_effect(operation: dict[str, Any]) -> str | None:
         block_type = operation.get("block_type")
         name = operation.get("instance_name")
         params = operation.get("parameters")
-        if block_type == "variable" and name:
+        if is_variable_block(str(block_type or "")) and name:
             value = params.get("value") if isinstance(params, dict) else None
             return f"add variable {name}={value}" if value is not None else f"add variable {name}"
         if block_type and name:

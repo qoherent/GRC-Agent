@@ -64,7 +64,7 @@ def test_working_directory_and_environment(qtbot):
 
 @patch("grc_agent_gui.process_manager.QProcess")
 def test_split_stage_execution(mock_qprocess_class, qtbot):
-    """Assert compilation runs grcc, and on success, spawns QProcess executing the Python script."""
+    """Assert compilation runs grcc and on success emits finished without execution."""
     manager = ProcessManager()
     
     # Mock session
@@ -80,13 +80,16 @@ def test_split_stage_execution(mock_qprocess_class, qtbot):
     
     # Instantiate mocked QProcesses
     mock_compile_proc = MagicMock()
-    mock_run_proc = MagicMock()
     
     # Configure mock class to return our mocks
-    mock_qprocess_class.side_effect = [mock_compile_proc, mock_run_proc]
+    mock_qprocess_class.side_effect = [mock_compile_proc]
     
-    # Trigger compile and run
-    manager.compile_and_run(mock_session)
+    # Track finished signal
+    finished_codes = []
+    manager.finished.connect(lambda code: finished_codes.append(code))
+    
+    # Trigger validate
+    manager.validate_graph(mock_session)
     
     # Assert compile process started grcc
     mock_compile_proc.start.assert_called_once()
@@ -98,19 +101,10 @@ def test_split_stage_execution(mock_qprocess_class, qtbot):
     mock_compile_proc.exitCode.return_value = 0
     mock_compile_proc.exitStatus.return_value = QProcess.ExitStatus.NormalExit
     
-    # Write a dummy python file to satisfy the os.path.exists check
-    py_file = os.path.join(manager._current_temp_dir, "my_graph.py")
-    with open(py_file, "w") as f:
-        f.write("# dummy compiled python script")
-        
     # Trigger the compilation finished slot manually
     manager.on_compilation_finished(0, QProcess.ExitStatus.NormalExit)
     
-    # Assert run process was spawned for the compiled python script using sys.executable
-    mock_run_proc.start.assert_called_once()
-    run_args = mock_run_proc.start.call_args[0]
-    assert run_args[0] == sys.executable
-    assert "my_graph.py" in run_args[1][0]
+    assert finished_codes == [0]
 
 
 def test_two_phase_termination(qtbot):
@@ -208,12 +202,10 @@ def test_button_state_locking(qtbot):
     # Emit started signal
     window.process_manager.started.emit()
     assert not window.run_btn.isEnabled()
-    assert window.stop_btn.isEnabled()
     
     # Emit finished signal
     window.process_manager.finished.emit(0)
     assert window.run_btn.isEnabled()
-    assert not window.stop_btn.isEnabled()
 
 
 def test_compile_process_has_fallback_kill(qtbot):

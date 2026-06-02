@@ -24,8 +24,11 @@ No hardcoded fixture logic. No block recipes. No blacklists.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.session.insertion_suggestions import InsertionCandidate, suggest_insertions
@@ -442,8 +445,8 @@ def _describe_block_safe(block_type: str) -> dict[str, Any] | None:
         d = describe_block(block_type)
         if d.get("ok"):
             return d
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("_describe_block_safe failed for block_type=%s: %s", block_type, exc)
     return None
 
 

@@ -11,6 +11,8 @@ import json
 import re
 from typing import Any
 
+from grc_agent.runtime.output_policy import is_variable_block
+
 
 class TransactionNormalizer:
     """Normalize malformed transactions produced by small models.
@@ -296,7 +298,7 @@ class TransactionNormalizer:
             return None
         if set(params) != {"value"}:
             return None
-        variable_names = [block.instance_name for block in self._session.flowgraph.blocks if block.block_type == "variable"]
+        variable_names = [block.instance_name for block in self._session.flowgraph.blocks if is_variable_block(block.block_type)]
         if len(variable_names) == 1:
             return variable_names[0]
         return None

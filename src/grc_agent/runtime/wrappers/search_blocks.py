@@ -12,12 +12,14 @@ from grc_agent._payload import ErrorCode
 from grc_agent.catalog import describe_block
 from grc_agent.catalog.errors import CatalogError
 from grc_agent.catalog.loaders import get_catalog_snapshot
+from grc_agent.runtime.output_policy import is_meaningful
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
 
 _CATALOG_SEARCH_INDEX_CACHE_MAX = 4
+_CATALOG_DETAIL_LIMIT = 3
 _CATALOG_SEARCH_INDEX_CACHE: OrderedDict[
     tuple[str, int, int], "_CatalogSearchIndex"
 ] = OrderedDict()
@@ -275,10 +277,9 @@ def search_blocks(
     limited = candidates[:limit]
     output_truncated = len(candidates) > len(limited)
     if not debug:
-        for item in limited:
+        for idx, item in enumerate(limited):
             block_id = str(item.get("block_id", ""))
-            name = str(item.get("name", ""))
-            if _is_exact_catalog_query(q, block_id=block_id, name=name):
+            if idx < _CATALOG_DETAIL_LIMIT:
                 details = _compact_catalog_details(block_id)
                 if details:
                     item["catalog"] = details
@@ -574,7 +575,7 @@ def _compact_catalog_details(block_id: str) -> dict[str, Any]:
         param = {
             key: raw_param.get(key)
             for key in ("id", "label", "dtype", "default")
-            if raw_param.get(key) not in (None, "", [], {})
+            if is_meaningful(raw_param.get(key))
         }
         options = raw_param.get("options")
         if isinstance(options, list) and options:
@@ -593,7 +594,7 @@ def _compact_catalog_details(block_id: str) -> dict[str, Any]:
                 {
                     key: raw_port.get(key)
                     for key in ("id", "domain", "dtype", "optional")
-                    if raw_port.get(key) not in (None, "", [], {})
+                    if is_meaningful(raw_port.get(key))
                 }
             )
         if compact_ports:
@@ -601,7 +602,7 @@ def _compact_catalog_details(block_id: str) -> dict[str, Any]:
     return {
         key: value
         for key, value in {"params": params, **ports}.items()
-        if value not in (None, "", [], {})
+        if is_meaningful(value)
     }
 
 

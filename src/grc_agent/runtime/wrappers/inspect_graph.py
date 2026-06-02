@@ -14,20 +14,12 @@ from grc_agent.runtime.editable_parameters import (
 )
 from grc_agent.session import summarize_graph
 from grc_agent.session_ops import connection_id as render_connection_id
+from grc_agent.runtime.output_policy import is_meaningful, is_variable_block, truncate_list
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
-
 VALID_VIEWS = {"overview", "details"}
-MAX_TARGETS = 5
-MAX_PARAMS = 12
-MAX_PARAMS_PER_BLOCK = 12
-MAX_ALL_DETAIL_PARAMS = 16
-MAX_DEFAULT_DETAIL_PARAMS = 8
-MAX_CONNECTIONS_PER_BLOCK = 12
-MAX_OVERVIEW_CONNECTIONS = 8
-MAX_CANDIDATES = 8
 
 
 def inspect_graph(
@@ -60,8 +52,9 @@ def inspect_graph(
             output_truncated=False,
         )
 
-    normalized_targets = _normalize_string_list(targets, limit=MAX_TARGETS)
-    normalized_params = _normalize_string_list(params, limit=MAX_PARAMS)
+    gc = agent._guardrails_cfg
+    normalized_targets = _normalize_string_list(targets, limit=gc.max_inspect_targets)
+    normalized_params = _normalize_string_list(params, limit=gc.max_inspect_params)
     if selected_view not in VALID_VIEWS:
         result = _invalid_request(
             agent,
@@ -69,19 +62,19 @@ def inspect_graph(
             code="invalid_view",
             message="inspect_graph.view must be 'overview' or 'details'.",
         )
-    elif len(targets) > MAX_TARGETS:
+    elif len(targets) > gc.max_inspect_targets:
         result = _invalid_request(
             agent,
             view=selected_view,
             code="target_limit_exceeded",
-            message=f"inspect_graph accepts at most {MAX_TARGETS} targets.",
+            message=f"inspect_graph accepts at most {gc.max_inspect_targets} targets.",
         )
-    elif len(params) > MAX_PARAMS:
+    elif len(params) > gc.max_inspect_params:
         result = _invalid_request(
             agent,
             view=selected_view,
             code="param_limit_exceeded",
-            message=f"inspect_graph accepts at most {MAX_PARAMS} params.",
+            message=f"inspect_graph accepts at most {gc.max_inspect_params} params.",
         )
     elif selected_view == "overview":
         result = _overview(agent, targets=normalized_targets, params=normalized_params)
@@ -149,8 +142,9 @@ def _overview(
         )
         for connection in agent.session.flowgraph.connections
     ]
-    shown_connections = connections[:MAX_OVERVIEW_CONNECTIONS]
-    omitted_connections = max(0, len(connections) - len(shown_connections))
+    gc = agent._guardrails_cfg
+    shown_connections, omitted_connections_list = truncate_list(connections, gc.max_overview_connections)
+    omitted_connections = len(omitted_connections_list)
     incoming, outgoing = _connection_summaries(agent.session.flowgraph.connections)
     block_rows = _overview_block_rows(
         agent.session.flowgraph.blocks,
@@ -210,6 +204,7 @@ def _details(
             ],
         )
     assert agent.session.flowgraph is not None
+    gc = agent._guardrails_cfg
     candidates = build_editable_parameter_candidates(
         agent.session,
         catalog_root=agent.catalog_root,
@@ -269,6 +264,7 @@ def _details(
             incoming_connections=incoming.get(match.block.instance_name, ()),
             outgoing_connections=outgoing.get(match.block.instance_name, ()),
             variable_values=variable_values,
+            gc=gc,
         )
         resolved_rows.append(row)
         matched_params.update(row_matched_params)
@@ -534,6 +530,7 @@ def _block_details_row(
     incoming_connections: tuple[str, ...],
     outgoing_connections: tuple[str, ...],
     variable_values: dict[str, Any],
+    gc: Any,
 ) -> tuple[dict[str, Any], set[str], set[str], bool]:
     specific_params = _specific_params(params)
     requested_param_tokens = [_tokens(param) for param in specific_params]
@@ -542,7 +539,7 @@ def _block_details_row(
     selected_candidates: list[EditableParameterCandidate] = []
     for candidate in candidates:
         if not params:
-            if len(candidates) <= MAX_DEFAULT_DETAIL_PARAMS or _default_detail_param(candidate):
+            if len(candidates) <= gc.min_detail_params_before_truncation or _default_detail_param(candidate):
                 selected_candidates.append(candidate)
                 matched_params.add(candidate.param_key)
         elif _params_request_all(params):
@@ -558,17 +555,17 @@ def _block_details_row(
                 selected_candidates.append(candidate)
                 matched_params.add(candidate.param_key)
                 matched_requested_params.update(matched_requests)
-    if not params and len(candidates) <= MAX_DEFAULT_DETAIL_PARAMS and not selected_candidates:
-        selected_candidates = candidates[:MAX_DEFAULT_DETAIL_PARAMS]
+    if not params and len(candidates) <= gc.min_detail_params_before_truncation and not selected_candidates:
+        selected_candidates = candidates[:gc.min_detail_params_before_truncation]
     elif _params_request_all(params) and not selected_candidates:
-        selected_candidates = candidates[:MAX_PARAMS_PER_BLOCK]
+        selected_candidates = candidates[:gc.max_detail_params_requested]
 
     if not params:
-        param_limit = MAX_DEFAULT_DETAIL_PARAMS
+        param_limit = gc.max_detail_params_default
     elif _params_request_all(params):
-        param_limit = MAX_ALL_DETAIL_PARAMS
+        param_limit = gc.max_detail_params_all
     else:
-        param_limit = MAX_PARAMS_PER_BLOCK
+        param_limit = gc.max_detail_params_requested
     params_truncated = len(selected_candidates) > param_limit
     returned_candidates = selected_candidates[:param_limit]
     parameters = [
@@ -594,8 +591,8 @@ def _block_details_row(
         row["parameters"] = parameters
     if incoming or outgoing:
         row["connections"] = {
-            "incoming": incoming[:MAX_CONNECTIONS_PER_BLOCK],
-            "outgoing": outgoing[:MAX_CONNECTIONS_PER_BLOCK],
+            "incoming": incoming[:gc.max_connections_per_block],
+            "outgoing": outgoing[:gc.max_connections_per_block],
         }
     if params_truncated:
         row["params_truncated"] = True
@@ -628,7 +625,7 @@ def _parameter_payload(
         payload["options"] = list(candidate.param_options)
     if candidate.param_option_labels:
         payload["option_labels"] = list(candidate.param_option_labels)
-    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+    return {key: value for key, value in payload.items() if is_meaningful(value)}
 
 
 def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:
@@ -637,7 +634,7 @@ def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:
         params = block.params.get("parameters") if isinstance(block.params, dict) else None
         if not isinstance(params, dict) or "value" not in params:
             continue
-        if block.block_type == "variable" or block.block_type.startswith("variable_"):
+        if is_variable_block(block.block_type):
             values[block.instance_name] = params.get("value")
     return values
 
@@ -796,7 +793,7 @@ def _connection_summaries(
     )
 
 
-def _candidate_payloads(blocks: list[Block]) -> list[dict[str, Any]]:
+def _candidate_payloads(blocks: list[Block], *, max_candidates: int = 12) -> list[dict[str, Any]]:
     return [
         {
             "instance_name": block.instance_name,
@@ -807,7 +804,7 @@ def _candidate_payloads(blocks: list[Block]) -> list[dict[str, Any]]:
             "uid": block.block_uid,
             "reason": "graph-local target candidate",
         }
-        for block in blocks[:MAX_CANDIDATES]
+        for block in blocks[:max_candidates]
     ]
 
 
@@ -846,11 +843,20 @@ def _overview_block_rows(
                 outgoing=outgoing.get(block.instance_name, ()),
             ),
         }
-        if block.block_type == "variable":
+        if is_variable_block(block.block_type):
             params = block.params.get("parameters", {})
             if isinstance(params, dict) and "value" in params:
                 row["value"] = params["value"]
-        rows.append({key: value for key, value in row.items() if value not in (None, "", [], {})})
+            meaningful = {k: v for k, v in params.items() if is_meaningful(v) and k != "value"}
+            if meaningful:
+                row["params"] = meaningful
+        else:
+            block_params = block.params.get("parameters", {})
+            if isinstance(block_params, dict):
+                meaningful = {k: v for k, v in block_params.items() if is_meaningful(v)}
+                if meaningful:
+                    row["params"] = meaningful
+        rows.append({key: value for key, value in row.items() if is_meaningful(value)})
     return rows
 
 
@@ -860,7 +866,7 @@ def _default_detail_param(candidate: EditableParameterCandidate) -> bool:
         return False
     if isinstance(candidate.param_label, str) and candidate.param_label.strip():
         value = _compact_value(candidate.current_value)
-        return bool(value)
+        return is_meaningful(value)
     return False
 
 

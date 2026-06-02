@@ -1,7 +1,7 @@
 import html
 import logging
 import re
-from PySide6.QtGui import QTextDocument
+from PySide6.QtGui import QTextCursor, QTextDocument
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QTextBrowser
 
 from pygments import highlight
@@ -17,9 +17,24 @@ logger = logging.getLogger(__name__)
 # dangerous tags and on*-event attributes so that an HTML engine swap
 # later (or a paste-to-pdf path) cannot become a vector.
 _DANGEROUS_TAGS = (
-    "script", "iframe", "object", "embed", "style", "link", "meta",
-    "form", "input", "button", "select", "textarea", "base", "frame",
-    "frameset", "applet", "svg", "math",
+    "script",
+    "iframe",
+    "object",
+    "embed",
+    "style",
+    "link",
+    "meta",
+    "form",
+    "input",
+    "button",
+    "select",
+    "textarea",
+    "base",
+    "frame",
+    "frameset",
+    "applet",
+    "svg",
+    "math",
 )
 _DANGEROUS_TAG_RE = re.compile(
     r"<\s*(?P<tag>" + "|".join(_DANGEROUS_TAGS) + r")\b[^>]*?(/?)>",
@@ -82,7 +97,20 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
                 continue
 
             lang = lines[0].strip()
-            common_langs = {"python", "py", "cpp", "c++", "c", "bash", "sh", "yaml", "yml", "json", "xml", "html"}
+            common_langs = {
+                "python",
+                "py",
+                "cpp",
+                "c++",
+                "c",
+                "bash",
+                "sh",
+                "yaml",
+                "yml",
+                "json",
+                "xml",
+                "html",
+            }
             if lang.lower() in common_langs:
                 code = "\n".join(lines[1:])
             else:
@@ -138,6 +166,7 @@ class ChatWidget(QWidget):
 
         self.chat_input = QLineEdit(self)
         self.chat_input.setPlaceholderText("Ask the GRC Agent...")
+        self.chat_input.setMinimumHeight(32)
         layout.addWidget(self.chat_input)
 
     def append_message(self, role: str, text: str) -> None:
@@ -145,27 +174,51 @@ class ChatWidget(QWidget):
         self._history.append({"role": role, "text": text, "_rendered": None})
         self._render_chat()
 
-    def start_stream(self) -> None:
-        """Start a text streaming session, locking updates to plain-text mode.
+    def append_status(self, text: str) -> None:
+        """Insert a subtle italic status line at the current cursor position."""
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.chat_display.setTextCursor(cursor)
+        self.chat_display.insertHtml(
+            f'<p style="color: #a6adc8; font-style: italic; margin: 2px 0;">{html.escape(text)}</p>'
+        )
 
-        The bold "Agent:" prefix is no longer injected here; it is added
-        exclusively by ``_render_chat`` on the final render pass. This
-        eliminates the duplicate-prefix artifact visible during the
-        transition from stream to finalized render (audit 2.4).
-        """
+    def append_mutation(self, result: str) -> None:
+        """Insert a styled mutation summary line."""
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.chat_display.setTextCursor(cursor)
+        self.chat_display.insertHtml(
+            '<p style="color: #a6e3a1; border-left: 3px solid #a6e3a1; '
+            'padding-left: 8px; margin: 4px 0;">&#10003; Graph updated</p>'
+        )
+
+    def append_error(self, text: str) -> None:
+        """Insert a styled error line."""
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.chat_display.setTextCursor(cursor)
+        self.chat_display.insertHtml(
+            f'<p style="color: #f38ba8; border-left: 3px solid #f38ba8; '
+            f'padding-left: 8px; margin: 4px 0;">&#10007; {html.escape(text[:200])}</p>'
+        )
+
+    def start_stream(self) -> None:
+        """Start a text streaming session, locking updates to plain-text mode."""
         self._streaming = True
         self._history.append({"role": "assistant", "text": "", "_rendered": None})
-        # No chat_display.append("<b>Agent:</b> ") here on purpose. The
-        # streaming chunks are appended via insertPlainText; the prefix
-        # is added by the final _render_chat() call.
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.chat_display.setTextCursor(cursor)
 
     def append_stream_chunk(self, text: str) -> None:
         """Append raw stream text incrementally to prevent UI flicker."""
         if self._streaming:
             self._history[-1]["text"] += text
-            # Invalidate the memoized render for the streaming entry;
-            # the final render will rebuild it.
             self._history[-1]["_rendered"] = None
+            cursor = self.chat_display.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            self.chat_display.setTextCursor(cursor)
             self.chat_display.insertPlainText(text)
             self.chat_display.ensureCursorVisible()
 
@@ -212,4 +265,6 @@ class ChatWidget(QWidget):
         else:
             # Explicit clamp to be safe even though QScrollBar.setValue
             # is internally clamped.
-            scroll_bar.setValue(max(scroll_bar.minimum(), min(old_val, scroll_bar.maximum())))
+            scroll_bar.setValue(
+                max(scroll_bar.minimum(), min(old_val, scroll_bar.maximum()))
+            )

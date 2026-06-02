@@ -58,7 +58,9 @@ class InspectorWidget(QWidget):
         self.open_grc_btn = QPushButton("Open in GRC", self)
         self.open_grc_btn.setEnabled(False)
         self.open_grc_btn.clicked.connect(self.open_in_grc)
-        self.open_grc_btn.setToolTip("Open the active flowgraph in the GNU Radio Companion editor.")
+        self.open_grc_btn.setToolTip(
+            "Open the active flowgraph in the GNU Radio Companion editor."
+        )
         header_layout.addWidget(self.open_grc_btn)
 
         layout.addLayout(header_layout)
@@ -68,7 +70,9 @@ class InspectorWidget(QWidget):
         self.variables_table = QTableWidget(self)
         self.variables_table.setColumnCount(2)
         self.variables_table.setHorizontalHeaderLabels(["Name", "Value"])
-        self.variables_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.variables_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
         layout.addWidget(self.variables_table)
 
         # Section 2: Blocks Tree
@@ -89,7 +93,9 @@ class InspectorWidget(QWidget):
         self.open_grc_btn.setEnabled(bool(path))
         # Reset failure state when the path is reassigned.
         if path:
-            self.open_grc_btn.setToolTip("Open the active flowgraph in the GNU Radio Companion editor.")
+            self.open_grc_btn.setToolTip(
+                "Open the active flowgraph in the GNU Radio Companion editor."
+            )
 
     def open_in_grc(self) -> None:
         """Launch the official gnuradio-companion GUI editor detached.
@@ -114,7 +120,9 @@ class InspectorWidget(QWidget):
             )
             return
 
-        logger.info(f"Launching gnuradio-companion detached for file: {self.grc_file_path}")
+        logger.info(
+            f"Launching gnuradio-companion detached for file: {self.grc_file_path}"
+        )
         result = QProcess.startDetached("gnuradio-companion", [self.grc_file_path])
         # PySide6 returns a tuple (ok: bool, pid: int) on success, or
         # False on failure depending on the binding version. Handle both.
@@ -152,14 +160,21 @@ class InspectorWidget(QWidget):
         summary = inspect_graph_data.get("summary", {}) or {}
         blocks = summary.get("blocks", []) or []
         connections = summary.get("connections", []) or []
+        block_params = inspect_graph_data.get("_block_params", {}) or {}
 
         # 3. Repopulate Variables Table
-        variables = [b for b in blocks if b.get("block_type") == "variable" or b.get("role") == "variable"]
+        variables = [
+            b
+            for b in blocks
+            if b.get("block_type") == "variable" or b.get("role") == "variable"
+        ]
         self.variables_table.setRowCount(0)
         self.variables_table.setRowCount(len(variables))
         for row_idx, var in enumerate(variables):
             name_item = QTableWidgetItem(str(var.get("instance_name", "")))
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             val_item = QTableWidgetItem(str(var.get("value", "")))
+            val_item.setFlags(val_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.variables_table.setItem(row_idx, 0, name_item)
             self.variables_table.setItem(row_idx, 1, val_item)
 
@@ -191,7 +206,12 @@ class InspectorWidget(QWidget):
                 categories["sources"].append(block)
             elif "sink" in role or "sink" in btype:
                 categories["sinks"].append(block)
-            elif "filter" in role or "filter" in btype or "resampler" in btype or "decimator" in btype:
+            elif (
+                "filter" in role
+                or "filter" in btype
+                or "resampler" in btype
+                or "decimator" in btype
+            ):
                 categories["filters"].append(block)
             else:
                 categories["other_blocks"].append(block)
@@ -206,9 +226,16 @@ class InspectorWidget(QWidget):
             cat_node.setData(0, Qt.UserRole, cat_key)
 
             for block in cat_blocks:
+                name = str(block.get("instance_name", ""))
                 child = QTreeWidgetItem(cat_node)
-                child.setText(0, str(block.get("instance_name", "")))
+                child.setText(0, name)
                 child.setText(1, str(block.get("block_type", "")))
+
+                params = block_params.get(name, {})
+                for pkey, pval in params.items():
+                    param_item = QTreeWidgetItem(child)
+                    param_item.setText(0, pkey)
+                    param_item.setText(1, str(pval))
 
         # 5. Repopulate Connections Wires
         self.connections_list.clear()

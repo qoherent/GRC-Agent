@@ -87,6 +87,20 @@ class GuardrailsConfig:
     max_compact_list_items: int
     max_graph_summary_blocks: int
     max_context_nodes: int
+    max_overview_connections: int = 12
+    max_detail_params_default: int = 12
+    max_detail_params_all: int = 20
+    max_detail_params_requested: int = 16
+    max_connections_per_block: int = 16
+    max_inspect_targets: int = 8
+    max_candidates_display: int = 12
+    max_catalog_params: int = 14
+    max_catalog_ports: int = 10
+    max_catalog_options: int = 10
+    max_history_answer_chars: int = 500
+    max_history_excerpt_chars: int = 200
+    max_inspect_params: int = 16
+    min_detail_params_before_truncation: int = 8
 
 
 DEFAULT_DOCS_ANSWER_CONFIG = DocsAnswerConfig(
@@ -111,9 +125,9 @@ DEFAULT_DOCS_ANSWER_CONFIG = DocsAnswerConfig(
 
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
     search_blocks_default_k=5,
-    search_blocks_max_k=10,
+    search_blocks_max_k=12,
     ask_grc_docs_default_k=3,
-    ask_grc_docs_max_k=6,
+    ask_grc_docs_max_k=8,
     conceptual_cache_size=64,
 )
 
@@ -123,7 +137,7 @@ DEFAULT_GUARDRAILS_CONFIG = GuardrailsConfig(
     max_tool_output_bytes=32768,
     max_validation_errors=8,
     max_validation_stderr_chars=1200,
-    max_compact_list_items=3,
+    max_compact_list_items=5,
     max_graph_summary_blocks=50,
     max_context_nodes=20,
 )

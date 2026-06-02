@@ -15,12 +15,18 @@ class AgentWorker(QObject):
     """
 
     started = Signal()
-    tool_started = Signal(str, str)     # (tool_name, arguments_json_str)
-    tool_finished = Signal(str, str)    # (tool_name, result_json_str)
-    response_chunk = Signal(str)        # Streamed token/character chunks
-    turn_finished = Signal(dict)        # Final turn completion payload
+    tool_started = Signal(str, str)  # (tool_name, arguments_json_str)
+    tool_finished = Signal(str, str)  # (tool_name, result_json_str)
+    response_chunk = Signal(str)  # Streamed token/character chunks
+    turn_finished = Signal(dict)  # Final turn completion payload
 
-    def __init__(self, agent: Any, user_message: str, provider_config: Any, parent: QObject = None) -> None:
+    def __init__(
+        self,
+        agent: Any,
+        user_message: str,
+        provider_config: Any,
+        parent: QObject = None,
+    ) -> None:
         super().__init__(parent)
         self.agent = agent
         self.user_message = user_message
@@ -108,7 +114,7 @@ class AgentWorker(QObject):
             self._flush_turn_finished()
             return
         end = min(self._stream_pos + self._stream_chunk_size, len(self._stream_buffer))
-        chunk = self._stream_buffer[self._stream_pos:end]
+        chunk = self._stream_buffer[self._stream_pos : end]
         self._stream_pos = end
         self.response_chunk.emit(chunk)
         if self._stream_pos >= len(self._stream_buffer):
@@ -157,6 +163,10 @@ class AgentWorker(QObject):
                 client = getattr(runner.provider, "client", None)
                 if client:
                     client.close()
-                    logger.info("Forcefully closed HTTP client socket for active worker.")
+                    logger.info(
+                        "Forcefully closed HTTP client socket for active worker."
+                    )
             except Exception as e:
-                logger.warning(f"Error during forceful close of HTTP client socket: {e}")
+                logger.warning(
+                    f"Error during forceful close of HTTP client socket: {e}"
+                )

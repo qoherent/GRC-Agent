@@ -61,7 +61,8 @@ def _ensure_platform() -> Any:
     """Return the cached ``Platform`` or ``None`` if unavailable."""
     try:
         return _get_gnu_platform()
-    except Exception:
+    except Exception as exc:
+        logger.warning("GNU Radio Platform unavailable: %s", exc)
         return None
 
 
@@ -93,7 +94,7 @@ class _GnuConnectionExtractor:
             try:
                 conns.append(_gnu_conn_to_model(gnu_conn))
             except Exception as exc:
-                logger.debug("Failed to translate GNU connection: %s", exc)
+                logger.warning("Failed to translate GNU connection, dropping: %s", exc)
                 continue
         return conns
 

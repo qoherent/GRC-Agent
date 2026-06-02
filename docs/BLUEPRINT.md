@@ -370,11 +370,11 @@ End-to-end runtime readiness requires:
 - llama.cpp server-side built-in tools not detected in `/props`
 - four MVP model-facing wrappers only
 
-CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
+CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999 --flash-attn auto` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
 When `[llama].model_path` is configured, the launcher passes `-m` to
 `llama-server` pointing directly at the local `.gguf`. The Qwen 3.5 GGUF
-file is loaded this way; ensure `--jinja` is used so the embedded ChatML
-template correctly renders tool-call messages.
+file is loaded this way; jinja templating is enabled by default in current
+llama.cpp builds so the embedded ChatML template correctly renders tool-call messages.
 
 ## Documentation Set
 

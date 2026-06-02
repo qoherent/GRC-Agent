@@ -32,7 +32,7 @@ from grc_agent.dogfood import (
 )
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
-from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
+
 from grc_agent.llama_probe import (
     LlamaServerError,
     extract_enabled_builtin_tools,
@@ -966,15 +966,35 @@ def _run_llama_runtime(
         print("Starting new empty graph...")
         session = FlowgraphSession.create()
     logger.info("chat_start file=%s message=%s", file_path, user_message[:80] if user_message else None)
-    retrieval_status, catalog_root = _prepare_retrieval()
-    if retrieval_status != 0:
-        return retrieval_status
+
+    from grc_agent.startup import bootstrap_runtime
+
+    result = bootstrap_runtime(
+        config,
+        start_llama=True,
+        init_retrieval=True,
+        api_key=api_key,
+        server_url=server_url,
+        model_alias=model,
+    )
+
+    if not result.retrieval_ok:
+        print("\n--- Retrieval ---")
+        print(result.errors[0] if result.errors else "Retrieval initialization failed.")
+        return 1
+
+    if result.launch_status == "failed":
+        logger.error("launcher_failed error=%s", result.errors[-1] if result.errors else "unknown")
+        print("\n--- Launcher ---")
+        print(result.errors[-1] if result.errors else "Failed to ensure llama.cpp server.")
+        return 1
+
     agent = GrcAgent(
         session,
-        catalog_root=catalog_root,
+        catalog_root=result.catalog_root,
         config=config.agent,
-        llama_server_url=config.llama.server_url,
-        llama_model=config.llama.model,
+        llama_server_url=result.server_url,
+        llama_model=result.model_alias,
         llama_request_timeout_seconds=effective_request_timeout,
     )
     _print_active_session(agent, verbose=verbose)
@@ -984,35 +1004,21 @@ def _run_llama_runtime(
             f"max_tool_rounds={effective_max_tool_rounds}, "
             f"request_timeout={int(effective_request_timeout)}s"
         )
-    llama_config = config.llama
-    launcher = LlamaServerLauncher(
-        llama_config,
-        server_url=server_url,
-        model_alias=model,
-        api_key=api_key,
-    )
-    print(f"Checking llama.cpp server at {server_url} for model {model or llama_config.model}...")
-    try:
-        launch_result = launcher.ensure_server_ready()
-    except LlamaLauncherError as exc:
-        logger.error("launcher_failed error=%s", exc)
-        print("\n--- Launcher ---")
-        print(str(exc))
-        return 1
-    provider_config = launch_result.provider_config
+
+    provider_config = result.provider_config
     provider_config.timeout_seconds = effective_request_timeout
 
-    if launch_result.status == "started":
-        logger.info("server_started url=%s pid=%s", launch_result.server_url, launch_result.pid)
+    if result.launch_status == "started":
+        logger.info("server_started url=%s", result.server_url)
         print(
-            f"Started llama.cpp server for {launch_result.model_alias} "
-            f"at {launch_result.server_url} (pid {launch_result.pid}; health verified)"
+            f"Started llama.cpp server for {result.model_alias} "
+            f"at {result.server_url} (health verified)"
         )
     else:
-        logger.info("server_reused url=%s", launch_result.server_url)
+        logger.info("server_reused url=%s", result.server_url)
         print(
-            f"Reusing llama.cpp server for {launch_result.model_alias} "
-            f"at {launch_result.server_url} (health verified)"
+            f"Reusing llama.cpp server for {result.model_alias} "
+            f"at {result.server_url} (health verified)"
         )
 
     if user_message is not None:
@@ -1020,7 +1026,7 @@ def _run_llama_runtime(
             agent,
             provider_config,
             user_message,
-            model,
+            result.model_alias,
             config,
             max_tool_rounds=effective_max_tool_rounds,
             verbose=verbose,
@@ -1031,7 +1037,7 @@ def _run_llama_runtime(
     return _run_repl_loop(
         agent,
         provider_config,
-        model,
+        result.model_alias,
         config,
         max_tool_rounds=effective_max_tool_rounds,
         verbose=verbose,
