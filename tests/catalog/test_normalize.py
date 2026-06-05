@@ -1,7 +1,7 @@
 """Direct tests for catalog normalization helpers."""
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent.catalog.errors import CatalogLoadError
 from grc_agent.catalog.normalize import (

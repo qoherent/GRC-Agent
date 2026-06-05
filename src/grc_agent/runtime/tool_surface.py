@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-
 PUBLIC_TOOL_NAMES: tuple[str, ...] = (
     "new_grc",
     "load_grc",

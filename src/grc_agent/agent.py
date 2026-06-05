@@ -1,19 +1,20 @@
 """Thin runtime wrapper for routed package-level `.grc` tools."""
 
 import copy
-from collections import OrderedDict
-from functools import lru_cache
 import hashlib
 import json
 import logging
 import re
-from pathlib import Path
 import time
-from typing import Any, Callable
+from collections import OrderedDict
+from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
+from grc_agent._payload import ErrorCode
 from grc_agent.catalog import describe_block
 from grc_agent.catalog.loaders import build_catalog_snapshot
-from grc_agent._payload import ErrorCode
 from grc_agent.config import AgentConfig, default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import (
@@ -24,45 +25,48 @@ from grc_agent.history import (
     snapshot_session,
 )
 from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
-from grc_agent.runtime.output_policy import is_meaningful
+from grc_agent.runtime.clarification_payloads import (
+    connection_clarification_payload as connection_clarification_payload_wrapper,
+)
+from grc_agent.runtime.clarification_payloads import (
+    duplicate_block_clarification_payload as duplicate_block_clarification_payload_wrapper,
+)
+from grc_agent.runtime.clarification_payloads import (
+    rewire_clarification_payload as rewire_clarification_payload_wrapper,
+)
+from grc_agent.runtime.clarification_payloads import (
+    rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
+)
 from grc_agent.runtime.clarification_state import (
     normalize_pending_clarification,
     parse_clarification_option_label,
     pending_clarification_reminder,
     resolve_pending_clarification_state,
 )
-from grc_agent.runtime.prompt import build_system_prompt
-from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
-from grc_agent.runtime.path_safety import (
-    resolved_path as resolve_runtime_path,
-    unsafe_graph_root_for_path,
-)
-from grc_agent.runtime.tool_schemas import build_tool_schemas
-from grc_agent.runtime.tool_context import (
-    compact_tool_entry as compact_tool_entry_wrapper,
-    tool_history_content_as_text as tool_history_content_as_text_wrapper,
-)
-from grc_agent.runtime.model_context import (
-    history_content_as_text as history_content_as_text_wrapper,
-    render_model_messages,
-)
-from grc_agent.runtime.tool_surface import (
-    MVP_MODEL_TOOL_NAMES,
-    MODEL_TOOL_NAMES_ORDERED,
-    MVP_TOOL_SURFACE,
-)
 from grc_agent.runtime.docs_answer import (
     _DocsComparisonSides,
     _DocsEvidenceCandidate,
+)
+from grc_agent.runtime.docs_answer import (
     ask_grc_docs as ask_grc_docs_wrapper,
+)
+from grc_agent.runtime.docs_answer import (
     build_docs_source_quality as build_docs_source_quality_wrapper,
+)
+from grc_agent.runtime.docs_answer import (
     build_typed_docs_answer as build_typed_docs_answer_wrapper,
+)
+from grc_agent.runtime.docs_answer import (
     collect_docs_candidates as collect_docs_candidates_wrapper,
+)
+from grc_agent.runtime.docs_answer import (
     rank_docs_candidates as rank_docs_candidates_wrapper,
 )
 from grc_agent.runtime.docs_answer.advisor import (
     classify_docs_advisor_error,
     probe_docs_advisor_server,
+)
+from grc_agent.runtime.docs_answer.advisor import (
     run_docs_answer_advisor as run_docs_answer_advisor_wrapper,
 )
 from grc_agent.runtime.docs_answer.formatting import (
@@ -99,37 +103,74 @@ from grc_agent.runtime.docs_answer.selection import (
     should_catalog_assist,
     text_matches_term_or_synonym,
 )
-from grc_agent.runtime.clarification_payloads import (
-    connection_clarification_payload as connection_clarification_payload_wrapper,
-    duplicate_block_clarification_payload as duplicate_block_clarification_payload_wrapper,
-    rewire_clarification_payload as rewire_clarification_payload_wrapper,
-    rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
+from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
+from grc_agent.runtime.model_context import (
+    history_content_as_text as history_content_as_text_wrapper,
+)
+from grc_agent.runtime.model_context import (
+    render_model_messages,
+)
+from grc_agent.runtime.output_policy import is_meaningful
+from grc_agent.runtime.path_safety import (
+    resolved_path as resolve_runtime_path,
+)
+from grc_agent.runtime.path_safety import (
+    unsafe_graph_root_for_path,
+)
+from grc_agent.runtime.prompt import build_system_prompt
+from grc_agent.runtime.tool_context import (
+    compact_tool_entry as compact_tool_entry_wrapper,
+)
+from grc_agent.runtime.tool_context import (
+    tool_history_content_as_text as tool_history_content_as_text_wrapper,
+)
+from grc_agent.runtime.tool_schemas import build_tool_schemas
+from grc_agent.runtime.tool_surface import (
+    MODEL_TOOL_NAMES_ORDERED,
+    MVP_MODEL_TOOL_NAMES,
+    MVP_TOOL_SURFACE,
+)
+from grc_agent.runtime.transaction_normalization import TransactionNormalizer
+from grc_agent.runtime.wrappers.change_graph.disconnect_resolution import (
+    resolve_disconnect_connection_id,
+)
+from grc_agent.runtime.wrappers.change_graph.dispatcher import (
+    dispatch_flat_change_graph_batch,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    connection_endpoint_candidates as connection_endpoint_candidates_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    has_endpoint_value,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    loaded_block_by_name as loaded_block_by_name_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    loaded_block_has_port as loaded_block_has_port_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    resolve_old_rewire_connection_id as resolve_old_rewire_connection_id_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    resolve_rewire_new_endpoint_args as resolve_rewire_new_endpoint_args_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    rewire_new_endpoint_candidates as rewire_new_endpoint_candidates_wrapper,
+)
+from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    rewire_new_endpoint_is_exact as rewire_new_endpoint_is_exact_wrapper,
+)
+from grc_agent.runtime.wrappers.get_grc_context_internal import (
+    get_grc_context_internal as get_grc_context_internal_wrapper,
 )
 from grc_agent.runtime.wrappers.inspect_graph import inspect_graph as inspect_graph_wrapper
 from grc_agent.runtime.wrappers.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
-from grc_agent.runtime.wrappers.get_grc_context_internal import (
-    get_grc_context_internal as get_grc_context_internal_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.dispatcher import (
-    dispatch_flat_change_graph_batch,
-)
-from grc_agent.runtime.wrappers.change_graph.disconnect_resolution import (
-    resolve_disconnect_connection_id,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
-    connection_endpoint_candidates as connection_endpoint_candidates_wrapper,
-    has_endpoint_value,
-    loaded_block_by_name as loaded_block_by_name_wrapper,
-    loaded_block_has_port as loaded_block_has_port_wrapper,
-    resolve_old_rewire_connection_id as resolve_old_rewire_connection_id_wrapper,
-    resolve_rewire_new_endpoint_args as resolve_rewire_new_endpoint_args_wrapper,
-    rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
-    rewire_new_endpoint_candidates as rewire_new_endpoint_candidates_wrapper,
-    rewire_new_endpoint_is_exact as rewire_new_endpoint_is_exact_wrapper,
-)
-from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime_tool_validation import (
     build_tool_schema_map,
     validate_runtime_tool_call,
@@ -1557,7 +1598,7 @@ class GrcAgent:
             title = str(row.get("title", "")).strip()
             source = str(row.get("source", "")).strip()
             excerpt = str(row.get("excerpt", "")).strip()
-            source_digest.update(f"{title}|{source}|{excerpt}".encode("utf-8"))
+            source_digest.update(f"{title}|{source}|{excerpt}".encode())
         return (
             cache_scope,
             question,

@@ -174,7 +174,7 @@ class ResolvedPort:
 class EnumChoice(str):
     """Enum parameter value with GNU option attributes attached as properties."""
 
-    def __new__(cls, value: str, *, attributes: dict[str, Any] | None = None) -> "EnumChoice":
+    def __new__(cls, value: str, *, attributes: dict[str, Any] | None = None) -> EnumChoice:
         instance = str.__new__(cls, value)
         instance._attributes = attributes or {}
         return instance

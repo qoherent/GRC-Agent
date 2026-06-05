@@ -9,8 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from grc_agent._payload import ErrorCode
 from grc_agent.config import AppConfig
-from grc_agent.llama_launcher import LlamaServerLauncher, LlamaLauncherError
+from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
 from grc_agent.llama_probe import LlamaHealthProbe
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig
@@ -29,6 +30,7 @@ class RuntimeBootstrapResult:
     launch_pid: int | None = None
     retrieval_ok: bool = False
     errors: list[str] = field(default_factory=list)
+    error_type: str | None = None
 
 
 def bootstrap_runtime(
@@ -119,7 +121,9 @@ def _bootstrap_llama(
         result.launch_pid = launch_result.pid
     except LlamaLauncherError as exc:
         result.launch_status = "failed"
-        result.errors.append(str(exc))
+        message = str(exc)
+        result.errors.append(message)
+        result.error_type = _classify_launcher_error(message)
 
 
 def _probe_llama(
@@ -144,7 +148,9 @@ def _probe_llama(
     except Exception as exc:
         result.health_evidence = None
         result.launch_status = "probe_failed"
-        result.errors.append(str(exc))
+        message = str(exc)
+        result.errors.append(message)
+        result.error_type = _classify_launcher_error(message)
 
 
 def _build_fallback_provider(
@@ -165,3 +171,21 @@ def _build_fallback_provider(
 
 
 __all__ = ["RuntimeBootstrapResult", "bootstrap_runtime"]
+
+
+def _classify_launcher_error(message: str) -> str:
+    """Map a launcher/probe error message to a stable ``ErrorCode`` value.
+
+    Allows the CLI/GUI to surface actionable install/config hints instead of
+    raw exception text. Falls back to ``internal_error`` for unknown shapes.
+    """
+    lowered = message.lower()
+    if "llama-server" in lowered and "not found" in lowered:
+        return ErrorCode.LLAMA_SERVER_MISSING
+    if "llama-server" in lowered or "llama-server binary" in lowered:
+        return ErrorCode.LLAMA_SERVER_MISSING
+    if "alias" in lowered and "mismatch" in lowered:
+        return ErrorCode.MODEL_NOT_FOUND
+    if "model" in lowered and "not found" in lowered:
+        return ErrorCode.MODEL_NOT_FOUND
+    return ErrorCode.INTERNAL_ERROR

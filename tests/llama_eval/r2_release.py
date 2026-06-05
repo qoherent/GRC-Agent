@@ -19,7 +19,6 @@ from tests.llama_eval.harness import (
     ToolExpectation,
 )
 
-
 R2_CASES: list[LiveScenario] = [
     # ── Test A: Update then update again (sequential same-target edits) ──
     LiveScenario(

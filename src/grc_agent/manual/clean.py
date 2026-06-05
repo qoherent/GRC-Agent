@@ -187,7 +187,7 @@ def _chunk_body(
         line_start = buffer[0][0]
         line_end = buffer[-1][0]
         digest = hashlib.sha1(  # noqa: S324 - stable non-security chunk id.
-            f"{page_id}:{ordinal}:{line_start}:{line_end}".encode("utf-8")
+            f"{page_id}:{ordinal}:{line_start}:{line_end}".encode()
         ).hexdigest()[:12]
         chunks.append(
             ManualChunk(

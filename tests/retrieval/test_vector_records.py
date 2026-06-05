@@ -1,9 +1,9 @@
 """Compact safety tests for vector retrieval record construction."""
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from grc_agent.manual import clean_manual_page
 from grc_agent.retrieval import vector as vector_module

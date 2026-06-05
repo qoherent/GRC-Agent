@@ -12,10 +12,10 @@ import sys
 from tests.llama_eval.dsp_scenarios import generate_qam_scenarios
 from tests.llama_eval.harness import (
     build_phase_parser,
-    run_live_scenario_once,
-    run_phase_eval,
     dimension_pass_counts,
     majority_passed,
+    run_live_scenario_once,
+    run_phase_eval,
 )
 
 

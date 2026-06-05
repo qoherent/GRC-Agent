@@ -24,6 +24,12 @@ node_modules/
 .opencode/
 playground/
 # Playground / generated artifacts (not tracked)
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.pytest_cache/
 /*.py
 __pycache__/
 *.py[oc]

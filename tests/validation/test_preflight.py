@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent import FlowgraphSession, preflight_transaction
 

@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
 import hashlib
 import io
-from pathlib import Path
 import shutil
 import tempfile
-from unittest import mock
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
 
 from grc_agent._payload import ErrorCode
 from grc_agent.agent import GrcAgent
 from grc_agent.cli import _run_repl_save_command
 from grc_agent.flowgraph_session import FlowgraphSession
-
 
 FIXTURE = Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 

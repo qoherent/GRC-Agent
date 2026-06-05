@@ -1,8 +1,9 @@
+import logging
 import os
+import shutil
 import sys
 import tempfile
-import shutil
-import logging
+
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class ProcessManager(QObject):
         # we never index by transient Python/C++ object IDs.
         self._compile_kill_timer = None
         self._run_kill_timer = None
+        self._should_run_after_compile = False
 
     def resolve_flowgraph_id(self, session) -> str:
         """Resolve the options block id parameter from the session flowgraph metadata."""
@@ -228,8 +230,13 @@ class ProcessManager(QObject):
 
         if exit_code == 0 and is_normal_exit:
             self.status_message.emit("Validation passed.")
-            self.finished.emit(0)
+            if getattr(self, '_should_run_after_compile', False):
+                self._should_run_after_compile = False
+                self.start_execution()
+            else:
+                self.finished.emit(0)
         else:
+            self._should_run_after_compile = False
             self.status_message.emit(f"Validation failed with exit code {exit_code}.")
             self.finished.emit(exit_code)
 
@@ -436,7 +443,9 @@ class ProcessManager(QObject):
         # 4. Persistent directory cleanup
         self.cleanup_temp_dir()
 
-    compile_and_run = validate_graph  # backward compat alias
+    def compile_and_run(self, session) -> None:
+        self._should_run_after_compile = True
+        self.validate_graph(session)
 
     def cleanup_temp_dir(self) -> None:
         """Removes the persistent temp directory containing the compiled artifact."""

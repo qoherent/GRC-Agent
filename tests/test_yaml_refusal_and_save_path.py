@@ -1,9 +1,9 @@
 """Safety checks for raw YAML refusal and internal save path handling."""
 
-from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession

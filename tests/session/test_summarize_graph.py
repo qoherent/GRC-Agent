@@ -1,7 +1,7 @@
 """Tests for the phase 3 structured graph summary helper."""
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session import load_grc, summarize_graph

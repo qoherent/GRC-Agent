@@ -1,7 +1,7 @@
 """Edge-case tests for get_grc_context."""
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session import get_grc_context

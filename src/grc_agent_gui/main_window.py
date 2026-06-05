@@ -1,34 +1,62 @@
+import json
 import logging
+import sys
+from pathlib import Path
 from typing import Any
+
 from PySide6.QtCore import (
-    QThread,
-    Qt,
+    QEvent,
+    QObject,
     QProcess,
     QRunnable,
-    QThreadPool,
-    QObject,
-    Signal,
-    QEvent,
     QSettings,
+    Qt,
+    QThread,
+    QThreadPool,
+    QUrl,
+    Signal,
 )
+from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QMainWindow,
-    QWidget,
+    QFileDialog,
     QHBoxLayout,
-    QVBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
     QSplitter,
     QStatusBar,
-    QPushButton,
-    QLabel,
-    QPlainTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
-from .workers import AgentWorker
 from .chat_widget import ChatWidget
 from .inspector import InspectorWidget
 from .process_manager import ProcessManager
+from .workers import AgentWorker
 
 logger = logging.getLogger(__name__)
+
+
+# Public, user-facing constants surfaced in the About dialog and in
+# ``grc-agent paths`` -- keep in sync with ``pyproject.toml``.
+APP_NAME = "GRC Agent"
+APP_DISPLAY_NAME = "GRC Agent Companion"
+APP_ORGANIZATION = "Qoherent"
+APP_HOMEPAGE_URL = "https://github.com/qoherent/grc-agent"
+APP_LICENSE_NAME = "MIT"
+APP_LICENSE_URL = "https://opensource.org/licenses/MIT"
+
+
+def _get_app_version() -> str:
+    """Return the installed grc-agent version, or 'unknown' if not installed."""
+    try:
+        from importlib.metadata import version
+
+        return version("grc-agent")
+    except Exception:
+        return "unknown"
 
 
 class InspectorWorkerSignals(QObject):
@@ -72,7 +100,47 @@ class MainWindow(QMainWindow):
         self.process_manager = None
         self._safe_to_close = False
 
-        self.setWindowTitle("GRC Agent Companion")
+        self.setWindowTitle(f"{APP_DISPLAY_NAME} {_get_app_version()}")
+        icon_path = Path(__file__).parent / "resources" / "icon.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        # Accept drops of `.grc` files onto the main window.
+        self.setAcceptDrops(True)
+
+        # Add File Menu
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("&File")
+
+        open_action = QAction("&Open...", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self.open_file_dialog)
+        file_menu.addAction(open_action)
+
+        self.save_action = QAction("&Save", self)
+        self.save_action.setShortcut("Ctrl+S")
+        self.save_action.triggered.connect(self.save_file)
+        file_menu.addAction(self.save_action)
+
+        file_menu.addSeparator()
+
+        self.export_chat_action = QAction("&Export Chat...", self)
+        self.export_chat_action.setShortcut("Ctrl+E")
+        self.export_chat_action.triggered.connect(self.export_chat_dialog)
+        file_menu.addAction(self.export_chat_action)
+
+        open_output_action = QAction("Open &Output Folder", self)
+        open_output_action.triggered.connect(self.open_output_folder)
+        file_menu.addAction(open_output_action)
+
+        # Help Menu
+        help_menu = menubar.addMenu("&Help")
+        about_action = QAction("&About GRC Agent", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
+        open_docs_action = QAction("Open &Docs Folder", self)
+        open_docs_action.triggered.connect(self.open_docs_folder)
+        help_menu.addAction(open_docs_action)
 
         self._settings = QSettings("GRC_Agent", "GUI")
         geom = self._settings.value("window/geometry")
@@ -117,14 +185,9 @@ class MainWindow(QMainWindow):
         console_controls.addWidget(QLabel("<b>Console Output</b>", console_panel))
         console_controls.addStretch()
 
-        self.run_btn = QPushButton("Validate", console_panel)
-        self.run_btn.setObjectName("runButton")
-
-        self.stop_btn = QPushButton("Stop", console_panel)
-        self.stop_btn.setObjectName("stopButton")
-        self.stop_btn.setVisible(False)
-
-        console_controls.addWidget(self.run_btn)
+        self.validate_btn = QPushButton("Validate", console_panel)
+        self.validate_btn.setObjectName("validateButton")
+        console_controls.addWidget(self.validate_btn)
         console_layout.addLayout(console_controls)
 
         self.console_log = QPlainTextEdit(console_panel)
@@ -157,9 +220,11 @@ class MainWindow(QMainWindow):
         self._pending_close = False
         self._safe_to_close = False
         self._last_applied_revision = None
+        self._validation_stdout = ""
+        self._validation_stderr = ""
 
         # Wire execution buttons & process manager signals
-        self.run_btn.clicked.connect(self.on_run_clicked)
+        self.validate_btn.clicked.connect(self.on_validate_clicked)
 
         self.process_manager.started.connect(self.on_process_started)
         self.process_manager.stdout_received.connect(self.on_process_stdout)
@@ -180,6 +245,28 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
 
+        self.validation_label = QLabel("Unknown", self)
+        self.status_bar.addPermanentWidget(self.validation_label)
+        self.update_ui_state()
+
+    def update_ui_state(self) -> None:
+        """Enable or disable chat and validation controls based on active session state."""
+        has_graph = (
+            self.agent.session is not None
+            and self.agent.session.flowgraph is not None
+        )
+        self.chat_input.setEnabled(has_graph)
+        self.validate_btn.setEnabled(has_graph)
+        self.save_action.setEnabled(has_graph)
+        self.export_chat_action.setEnabled(has_graph)
+
+        if has_graph:
+            self.chat_input.setPlaceholderText("Ask the assistant to modify or summarize the flowgraph...")
+        else:
+            self.chat_input.setPlaceholderText("Please load a .grc flowgraph (File -> Open or Drag & Drop) to start chatting...")
+            self.validation_label.setText("No Graph")
+            self.validation_label.setStyleSheet("color: #a6adc8;")
+
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.chat_input and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
@@ -195,6 +282,10 @@ class MainWindow(QMainWindow):
         prompt = self.chat_input.text().strip()
         if prompt:
             self.chat_input.clear()
+            if prompt.startswith("/save"):
+                self.chat_widget.append_message("user", prompt)
+                self.save_file()
+                return
             self.chat_widget.append_message("user", prompt)
             self.start_generation(prompt)
 
@@ -341,31 +432,97 @@ class MainWindow(QMainWindow):
 
     def on_inspector_refreshed(self, overview_data: dict[str, Any]) -> None:
         self.inspector_widget.update_state(overview_data)
+        val_status = overview_data.get("validation_result", {}).get("status", "unknown")
+        if val_status == "valid":
+            self.validation_label.setText("🟢 Valid")
+            self.validation_label.setStyleSheet("color: #a6e3a1;")
+        elif val_status == "invalid":
+            self.validation_label.setText("🔴 Invalid")
+            self.validation_label.setStyleSheet("color: #f38ba8;")
+        else:
+            self.validation_label.setText("⚪ Unvalidated")
+            self.validation_label.setStyleSheet("color: #a6adc8;")
+
+    def open_file_dialog(self) -> None:
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Open GRC Flowgraph", "", "GNU Radio Companion Files (*.grc)"
+        )
+        if file_name:
+            self.open_file(Path(file_name))
+
+    def open_file(self, file_path: Path) -> None:
+        """Load ``file_path`` into the agent and refresh the inspector.
+
+        Shared by the file dialog and the drag-and-drop handler. Surfaces
+        a ``QMessageBox`` on failure so the user gets a clear error
+        rather than a tiny status-bar message.
+        """
+        from grc_agent.session.load import load_grc
+        try:
+            loaded = load_grc(file_path)
+        except Exception as exc:
+            self._show_error("Open failed", f"Could not load {file_path}:\n{exc}")
+            return
+        if isinstance(loaded, dict):
+            self._show_error(
+                "Open failed",
+                f"Could not load {file_path}:\n{loaded.get('message', 'unknown error')}",
+            )
+            return
+        self.chat_widget.clear()
+        self.agent.history = []
+        self.agent.session = loaded
+        self.inspector_widget.set_grc_file_path(str(file_path))
+        self.refresh_inspector()
+        self.status_bar.showMessage(f"Loaded {file_path}")
+        self.update_ui_state()
+
+    def save_file(self) -> None:
+        if not (self.agent.session and self.agent.session.path):
+            self._show_info(
+                "Nothing to save",
+                "No flowgraph is currently loaded. Open a `.grc` first.",
+            )
+            return
+        from grc_agent.runtime.wrappers.change_graph import _write_committed_changes
+        success = _write_committed_changes(self.agent.session)
+        if success:
+            self.status_bar.showMessage("Graph saved.")
+        else:
+            self._show_error(
+                "Save failed",
+                "Saving the graph returned a failure result. "
+                "See the chat log for the underlying error.",
+            )
 
     def on_inspector_error(self, err_msg: str) -> None:
         logger.error(f"Failed to refresh inspector asynchronously: {err_msg}")
 
-    def on_run_clicked(self) -> None:
+    def on_validate_clicked(self) -> None:
         """Handler for 'Validate' button click."""
         if self.agent.session and self.agent.session.path:
             self.console_log.clear()
+            self._validation_stdout = ""
+            self._validation_stderr = ""
             self.process_manager.validate_graph(self.agent.session)
         else:
             self.on_process_status("Error: No active flowgraph session path.")
 
     def on_process_started(self) -> None:
         """Disable validate button while compilation is active."""
-        self.run_btn.setEnabled(False)
+        self.validate_btn.setEnabled(False)
         self.status_bar.showMessage("Validating flowgraph...")
         self._last_applied_revision = None
 
     def on_process_stdout(self, text: str) -> None:
         """Append standard output chunks to the console log."""
+        self._validation_stdout += text
         self.console_log.insertPlainText(text)
         self.console_log.ensureCursorVisible()
 
     def on_process_stderr(self, text: str) -> None:
         """Append standard error chunks to the console log."""
+        self._validation_stderr += text
         self.console_log.insertPlainText(text)
         self.console_log.ensureCursorVisible()
 
@@ -377,8 +534,18 @@ class MainWindow(QMainWindow):
 
     def on_process_finished(self, exit_code: int) -> None:
         """Re-enable validate button once compilation completes."""
-        self.run_btn.setEnabled(True)
-        self.status_bar.showMessage(f"Ready (last validation exit code: {exit_code})")
+        self.validate_btn.setEnabled(True)
+        self.status_bar.showMessage(f"Ready (last execution exit code: {exit_code})")
+
+        session = self.agent.session
+        if session:
+            session.last_validation_ok = (exit_code == 0)
+            session.last_validation_returncode = exit_code
+            session.last_validation_stdout = getattr(self, "_validation_stdout", "")
+            session.last_validation_stderr = getattr(self, "_validation_stderr", "")
+            session.last_validation_revision = session.state_revision
+
+        self.refresh_inspector()
 
     def closeEvent(self, event: Any) -> None:
         """Intercept application close to ensure background threads and run processes are reaped."""
@@ -406,8 +573,7 @@ class MainWindow(QMainWindow):
                 self.on_process_status(
                     "Shutting down running processes and thread workers..."
                 )
-                self.run_btn.setEnabled(False)
-                self.stop_btn.setEnabled(False)
+                self.validate_btn.setEnabled(False)
                 self.chat_input.setEnabled(False)
 
                 if self.worker:
@@ -455,3 +621,159 @@ class MainWindow(QMainWindow):
             self._safe_to_close = True
             self._pending_close = False
             self.close()
+
+    # ------------------------------------------------------------------
+    # File drag-and-drop
+    # ------------------------------------------------------------------
+    def dragEnterEvent(self, event: Any) -> None:
+        """Accept the drag if it contains at least one .grc file."""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(".grc"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event: Any) -> None:
+        """Open the first .grc file dropped onto the window."""
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".grc"):
+                self.open_file(Path(url.toLocalFile()))
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    # ------------------------------------------------------------------
+    # File menu: Open Output Folder, Export Chat
+    # ------------------------------------------------------------------
+    def open_output_folder(self) -> None:
+        """Open the directory where the package writes its state."""
+        try:
+            from grc_agent.cli import _collect_package_paths
+        except ImportError:
+            self._show_error(
+                "Output folder unavailable",
+                "Could not import the CLI's path catalog. Run "
+                "`uv run grc-agent paths` from a terminal to list the locations.",
+            )
+            return
+        paths = _collect_package_paths()
+        # Prefer the launcher-logs dir (most useful for triage), fall back
+        # to the user-state dir.
+        target = Path(paths.get("llama_logs") or paths.get("grc_agent_state"))
+        if not target.exists():
+            target.mkdir(parents=True, exist_ok=True)
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            self._show_error(
+                "Open output folder",
+                f"Could not open {target} in the system file manager.\n\n"
+                f"You can browse to it manually; the path is also in the tooltip.",
+            )
+        self.status_bar.showMessage(f"Output folder: {target}", 5000)
+
+    def export_chat_dialog(self) -> None:
+        """Write the current conversation to a Markdown or JSON file."""
+        history = self.chat_widget.get_history()
+        if not history:
+            self._show_info(
+                "Nothing to export",
+                "The chat is empty. Have a conversation first, then export.",
+            )
+            return
+        path_str, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export chat",
+            "grc-agent-chat.md",
+            "Markdown (*.md);;JSON (*.json)",
+        )
+        if not path_str:
+            return
+        try:
+            target = Path(path_str)
+            if selected_filter.startswith("JSON") or target.suffix.lower() == ".json":
+                payload = {"history": history}
+                target.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+            else:
+                target.write_text(
+                    self.chat_widget.export_markdown(), encoding="utf-8"
+                )
+        except OSError as exc:
+            self._show_error("Export failed", f"Could not write {path_str}:\n{exc}")
+            return
+        self.status_bar.showMessage(f"Exported chat to {path_str}", 5000)
+
+    # ------------------------------------------------------------------
+    # Help menu: About, Open Docs Folder
+    # ------------------------------------------------------------------
+    def show_about_dialog(self) -> None:
+        """Show the About dialog with version, license, and a copy-info button."""
+        version = _get_app_version()
+        text = (
+            f"<h3>{APP_DISPLAY_NAME}</h3>"
+            f"<p>Version <b>{version}</b></p>"
+            f"<p>License: <a href='{APP_LICENSE_URL}'>{APP_LICENSE_NAME}</a></p>"
+            f"<p>Project: <a href='{APP_HOMEPAGE_URL}'>{APP_HOMEPAGE_URL}</a></p>"
+            f"<p>&copy; 2026 {APP_ORGANIZATION}</p>"
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(f"About {APP_NAME}")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(text)
+        copy_button = box.addButton("&Copy version info", QMessageBox.ButtonRole.ActionRole)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+        if copy_button is not None and box.clickedButton() is copy_button:
+            from PySide6.QtWidgets import QApplication as _QApp
+            info = (
+                f"{APP_DISPLAY_NAME} {version}\n"
+                f"License: {APP_LICENSE_NAME}\n"
+                f"Python: {sys.version.split()[0]}\n"
+                f"Qt: {_QApp.instance().applicationVersion() or 'n/a'}\n"
+                f"Platform: {sys.platform}\n"
+            )
+            _QApp.clipboard().setText(info)
+            self.status_bar.showMessage("Version info copied to clipboard.", 5000)
+
+    def open_docs_folder(self) -> None:
+        """Open the bundled docs/ directory in the system file manager.
+
+        Falls back to a message pointing at the GitHub URL when the docs
+        directory is not present (typical for installed `uv tool install`
+        users, who do not get the source tree).
+        """
+        # The repo ships `docs/` at the project root; the installed tool
+        # does not. Resolve the local path and fall back gracefully.
+        repo_root_candidates = [
+            Path(__file__).resolve().parents[2] / "docs",
+            Path.cwd() / "docs",
+        ]
+        for candidate in repo_root_candidates:
+            if candidate.is_dir():
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate))):
+                    self._show_error(
+                        "Open docs folder",
+                        f"Could not open {candidate} in the system file manager.",
+                    )
+                return
+        self._show_info(
+            "Docs not available locally",
+            "This install was packaged without the docs/ directory.\n\n"
+            f"Read the docs online at {APP_HOMEPAGE_URL}/tree/main/docs",
+        )
+
+    # ------------------------------------------------------------------
+    # Modal helpers (QMessageBox wrappers)
+    # ------------------------------------------------------------------
+    def _show_error(self, title: str, message: str) -> None:
+        """Surface a non-recoverable error as a modal dialog (and the status bar)."""
+        logger.error("%s: %s", title, message)
+        QMessageBox.critical(self, title, message)
+        self.status_bar.showMessage(f"{title}: {message.splitlines()[0]}", 8000)
+
+    def _show_info(self, title: str, message: str) -> None:
+        """Surface an informational message as a modal dialog."""
+        QMessageBox.information(self, title, message)

@@ -6,15 +6,16 @@ import fcntl
 import json
 import logging
 import os
-from pathlib import Path
 import signal
 import socket
 import subprocess
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from shutil import which
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import urlparse
 
 from grc_agent.config import LlamaConfig
@@ -25,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_STARTUP_POLL_SECONDS = 0.5
+# Default on-disk locations for the launcher state and log files. Exposed as
+# module constants so `grc-agent paths` and other tools can surface the exact
+# paths without re-deriving them.
+DEFAULT_LLAMA_STATE_PATH = Path.home() / ".cache" / "grc_agent" / "llama_launcher_state.json"
+DEFAULT_LLAMA_LOG_DIR = Path.home() / ".cache" / "grc_agent" / "llama_launcher_logs"
 _ACTIVE_LAUNCH_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 # Detected once at first use; True if the installed llama.cpp supports --no-mmproj.
@@ -107,6 +113,12 @@ class _LauncherState:
     model_path: str | None
     pid: int
     log_path: str
+    # The PID of the Python launcher process that wrote this state
+    # file. When a *different* launcher reads the state, this field
+    # marks the cache as stale-by-lifecycle even if the cmdline still
+    # matches. Field defaults to 0 in the dataclass for backward
+    # compatibility with state files written by older versions.
+    launcher_pid: int = 0
 
 
 class LlamaServerLauncher:
@@ -142,6 +154,14 @@ class LlamaServerLauncher:
     def ensure_server_ready(self) -> LlamaLaunchResult:
         """Reuse a healthy server or launch one locally before the chat turn starts."""
         with self._lock():
+            # Reap any `llama-server` PID we left behind from a previous
+            # crashed/killed CLI/GUI invocation. This must happen *before*
+            # we look at the cached state file so a defunct state file
+            # does not block a fresh launch.
+            self.reap_orphan_pids()
+            # Bounded retention on the launcher log directory. Cheap
+            # when the dir is empty or all files are recent.
+            self.prune_old_logs()
             existing_state = self._prepare_matching_state()
 
             if self._socket_is_open():
@@ -158,6 +178,7 @@ class LlamaServerLauncher:
                 model_path=self.config.model_path,
                 pid=process.pid,
                 log_path=str(log_path),
+                launcher_pid=os.getpid(),
             )
             self._write_state(launched_state)
             try:
@@ -223,6 +244,10 @@ class LlamaServerLauncher:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"llama-server-{host.replace('.', '_')}-{port}.log"
 
+        device_val = self.config.device
+        if device_val.upper() == "CPU":
+            device_val = "none"
+
         model_arg_name, model_arg_value = self._model_argument()
         args = [
             binary,
@@ -237,7 +262,7 @@ class LlamaServerLauncher:
             "--ctx-size",
             str(self.config.desired_context_tokens),
             "--device",
-            self.config.device,
+            device_val,
             "--jinja",
         ]
         if _get_flash_attn_support():
@@ -268,9 +293,13 @@ class LlamaServerLauncher:
         deadline = time.monotonic() + self.config.startup_timeout_seconds
         probe = self._probe()
         last_error = "server is not reachable yet"
+        printed_download_msg = False
+        last_download_msg = None
 
         while time.monotonic() < deadline:
             if launched_process is not None and launched_process.poll() is not None:
+                if printed_download_msg:
+                    print()
                 raise LlamaLauncherError(
                     "llama.cpp server exited before readiness "
                     f"(exit code {launched_process.returncode}).\n"
@@ -282,6 +311,8 @@ class LlamaServerLauncher:
                 and not self._pid_is_alive(cached_state.pid)
                 and not self._socket_is_open()
             ):
+                if printed_download_msg:
+                    print()
                 raise LlamaLauncherError(
                     "Cached llama.cpp process exited before readiness.\n"
                     f"Log tail:\n{self._read_log_tail(cached_state)}"
@@ -299,6 +330,8 @@ class LlamaServerLauncher:
                         raise LlamaServerError(
                             "llama.cpp server context is unknown from /props."
                         )
+                    if printed_download_msg:
+                        print(" [Done]", flush=True)
                     return LlamaLaunchResult(
                         status="started" if started else "reused",
                         pid=cached_state.pid if cached_state is not None else None,
@@ -316,15 +349,45 @@ class LlamaServerLauncher:
                 except LlamaServerError as exc:
                     last_error = str(exc)
                     if "alias mismatch" in last_error:
+                        if printed_download_msg:
+                            print()
                         raise LlamaLauncherError(last_error) from exc
+
+            # If the socket is not open, check if there is an active Hugging Face download
+            if not self._socket_is_open():
+                progress = self._get_active_download_progress()
+                if progress:
+                    msg = f"\rDownloading model from Hugging Face... ({progress})"
+                    if msg != last_download_msg:
+                        print(msg, end="", flush=True)
+                        last_download_msg = msg
+                        printed_download_msg = True
 
             time.sleep(DEFAULT_STARTUP_POLL_SECONDS)
 
+        if printed_download_msg:
+            print()
         raise LlamaLauncherError(
             f"Timed out waiting for llama.cpp server at {self.server_url} "
             f"to become ready for alias '{self.model_alias}'. Last error: {last_error}.\n"
             f"Log tail:\n{self._read_log_tail(cached_state)}"
         )
+
+    def _get_active_download_progress(self) -> str | None:
+        try:
+            hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
+            if not hf_hub.is_dir():
+                return None
+            download_files = list(hf_hub.glob("**/*.downloadInProgress"))
+            if not download_files:
+                return None
+            total_bytes = sum(f.stat().st_size for f in download_files if f.is_file())
+            if total_bytes == 0:
+                return "starting download..."
+            gb_size = total_bytes / (1024 * 1024 * 1024)
+            return f"{gb_size:.2f} GB"
+        except Exception:
+            return None
 
     def _probe(self) -> LlamaHealthProbe:
         return LlamaHealthProbe(
@@ -380,6 +443,7 @@ class LlamaServerLauncher:
                 ),
                 pid=int(payload["pid"]),
                 log_path=str(payload["log_path"]),
+                launcher_pid=int(payload.get("launcher_pid", 0)),
             )
         except (KeyError, TypeError, ValueError):
             self._clear_state()
@@ -414,6 +478,10 @@ class LlamaServerLauncher:
                     "model_path": state.model_path,
                     "pid": state.pid,
                     "log_path": state.log_path,
+                    # Stamp the writing launcher's PID so a later
+                    # launcher can detect that the prior writer is
+                    # gone (i.e. the cached backend is an orphan).
+                    "launcher_pid": os.getpid(),
                 },
                 sort_keys=True,
             ),
@@ -455,7 +523,7 @@ class LlamaServerLauncher:
         ]
         if not cmdline:
             return False
-        if not any(Path(argument).name == "llama-server" for argument in cmdline[:2]):
+        if not any(Path(argument).name == "llama-server" for argument in cmdline[:3]):
             return False
         model_arg_name, model_arg_value = self._state_model_argument(state)
         return (
@@ -559,7 +627,9 @@ class LlamaServerLauncher:
                     try:
                         tracked_process.wait(timeout=0.1)
                     except Exception:
-                        pass
+                        logger.debug(
+                            "pre-sigterm wait failed pid=%s", pid, exc_info=True
+                        )
                 _ACTIVE_LAUNCH_PROCESSES.pop(pid, None)
                 return
             time.sleep(0.05)
@@ -585,8 +655,115 @@ class LlamaServerLauncher:
             try:
                 tracked_process.wait(timeout=0.1)
             except Exception:
-                pass
+                logger.debug("post-sigkill wait failed pid=%s", pid, exc_info=True)
         _ACTIVE_LAUNCH_PROCESSES.pop(pid, None)
+
+    def reap_orphan_pids(self) -> list[int]:
+        """Terminate any `llama-server` PID we previously launched but no
+        longer own. Called at the top of :meth:`ensure_server_ready` so a
+        killed parent process does not leave the model server holding the
+        port and GPU memory.
+
+        Discriminator: the cached state file's ``launcher_pid`` field. If
+        it does not match our current PID, the previous launcher is gone
+        and the cached backend is an orphan by lifecycle, regardless of
+        whether ``_ACTIVE_LAUNCH_PROCESSES`` happens to contain the PID.
+
+        We intentionally do **not** scan ``/proc`` for unrelated
+        ``llama-server`` processes. The cached state file is the
+        authoritative record of "PIDs this launcher started"; without
+        a cached record, a matching PID in ``/proc`` could equally well
+        belong to a parallel launcher (e.g. another user, a remote
+        tool, or — in tests — a stub binary we did not start). Reaping
+        such PIDs would be a destructive surprise.
+
+        The cached state file is cleared only when we actually
+        terminated an orphan — a "still current" cache is left alone
+        so a subsequent :meth:`_prepare_matching_state` finds it and
+        returns ``reused``.
+        """
+        terminated: list[int] = []
+        current_pid = os.getpid()
+        state = self._load_matching_state()
+        if state is None:
+            return terminated
+        if not self._pid_is_alive(state.pid):
+            # Cached state points at a dead PID. Clear the stale
+            # state file so a fresh launch can write a new one.
+            self._clear_state()
+            return terminated
+        same_launcher = state.launcher_pid == current_pid
+        tracked_here = state.pid in _ACTIVE_LAUNCH_PROCESSES
+        if same_launcher and tracked_here:
+            # The launcher is still alive and tracked in this
+            # Python process; the cached state is current. Do not
+            # reap, and leave the state file alone for reuse.
+            logger.debug(
+                "reap_orphan_pids: skipping live tracked pid=%s", state.pid
+            )
+            return terminated
+        if self._state_process_matches(state):
+            # The cached PID belongs to a previous launcher
+            # process that is now gone. The cmdline still
+            # matches what we would launch, so the orphan is
+            # ours to reap. After termination, clear the state
+            # file so the next prepare_matching_state falls
+            # through to a fresh launch.
+            self._terminate_pid(state.pid)
+            terminated.append(state.pid)
+            self._clear_state()
+        # else: cmdline no longer matches what we would launch
+        # (model/host/port changed). Leave the state file alone;
+        # _prepare_matching_state will reject it as non-matching
+        # and clear it on its own.
+        if terminated:
+            logger.info("reap_orphan_pids terminated=%s", terminated)
+        return terminated
+
+    def prune_old_logs(self, *, retention_days: int | None = None) -> list[Path]:
+        """Delete files in :attr:`log_dir` whose mtime is older than
+        ``retention_days`` days. Default is
+        ``self.config.log_retention_days``; pass an explicit value to
+        override (used by tests).
+
+        A retention of ``0`` keeps everything forever. The function
+        silently skips files it cannot stat or unlink, logging at
+        DEBUG.
+        """
+        days = (
+            retention_days
+            if retention_days is not None
+            else self.config.log_retention_days
+        )
+        if days <= 0:
+            return []
+        cutoff = time.time() - (days * 86400)
+        removed: list[Path] = []
+        try:
+            entries = list(self.log_dir.iterdir())
+        except FileNotFoundError:
+            return removed
+        except OSError as exc:
+            logger.debug("prune_old_logs: iterdir failed on %s: %s", self.log_dir, exc)
+            return removed
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError as exc:
+                logger.debug("prune_old_logs: stat failed on %s: %s", entry, exc)
+                continue
+            if mtime >= cutoff:
+                continue
+            try:
+                entry.unlink()
+                removed.append(entry)
+            except OSError as exc:
+                logger.debug("prune_old_logs: unlink failed on %s: %s", entry, exc)
+        if removed:
+            logger.info("prune_old_logs removed=%d retention_days=%d", len(removed), days)
+        return removed
 
     @staticmethod
     def _argument_value(arguments: list[str], flag: str) -> str | None:

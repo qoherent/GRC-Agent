@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-import re
 from typing import Any
 
 from grc_agent.catalog.describe import _describe_block_with_root
 from grc_agent.models import Block, Connection
 from grc_agent.session_ops import connection_id as render_connection_id
-
 
 _NUMERIC_SHORTHAND_RE = re.compile(r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))([kKmM])\s*$")
 

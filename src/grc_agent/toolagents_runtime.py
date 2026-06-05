@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import datetime
 import copy
+import datetime
 import json
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Any, Callable
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from openai import OpenAI
 from ToolAgents import FunctionTool, ToolRegistry
@@ -275,12 +276,15 @@ class ToolAgentsHistoryAdapter:
         date = datetime.datetime.now()
         content: list[Any] = []
         text = message.get("content")
+        text_for_result: str = ""
         if isinstance(text, str) and text:
             content.append(TextContent(content=text))
+            text_for_result = text
         elif isinstance(text, list):
             joined = _content_list_as_text(text)
             if joined:
                 content.append(TextContent(content=joined))
+                text_for_result = joined
 
         if role == "assistant":
             raw_tool_calls = message.get("tool_calls")
@@ -306,11 +310,7 @@ class ToolAgentsHistoryAdapter:
                     tool_call_result_id=str(uuid.uuid4()),
                     tool_call_id=tool_call_id,
                     tool_call_name=tool_name,
-                    tool_call_result=(
-                        json.dumps(content, sort_keys=True)
-                        if isinstance(content, (dict, list))
-                        else str(content or "")
-                    ),
+                    tool_call_result=text_for_result or "",
                 )
             )
             return ChatMessage(

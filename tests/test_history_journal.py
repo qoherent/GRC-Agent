@@ -1,18 +1,17 @@
 """Tests for local graph checkpointing and CLI-only restore."""
 
-from contextlib import redirect_stdout
-from io import StringIO
 import json
-from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.cli import main as cli_main
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
-
 
 FIXTURE = Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 MESSAGE_REWIRE_FIXTURE = Path(__file__).resolve().parent / "data" / "rewire_message_ambiguous.grc"

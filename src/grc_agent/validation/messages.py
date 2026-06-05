@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 
 def format_allowed_values(options: Iterable[object]) -> str:
@@ -10,7 +10,7 @@ def format_allowed_values(options: Iterable[object]) -> str:
     return f"Valid values: {rendered}." if rendered else ""
 
 
-def format_endpoint(block_name: str, port: "int | str") -> str:
+def format_endpoint(block_name: str, port: int | str) -> str:
     return f"{block_name}({port})"
 
 

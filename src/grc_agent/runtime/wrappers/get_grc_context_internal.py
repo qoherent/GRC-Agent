@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from grc_agent._payload import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
-
 
 ContextFn = Callable[..., dict[str, Any]]
 SymbolResolver = Callable[[str], str | None]

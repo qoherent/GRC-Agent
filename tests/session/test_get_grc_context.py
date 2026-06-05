@@ -1,7 +1,7 @@
 """Tests for the phase 3 bounded session-context helper."""
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent.session import get_grc_context, load_grc
 

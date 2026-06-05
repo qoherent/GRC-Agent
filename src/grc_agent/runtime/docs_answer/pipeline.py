@@ -31,12 +31,12 @@ _ANSWER_SOURCE_STOP_WORDS = frozenset(
 
 
 def ask_grc_docs(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     question: str,
     k: int | None = None,
     focus: str | None = None,
     debug: bool = False,
-) -> "ToolResult":
+) -> ToolResult:
     import time
 
     import grc_agent.agent as agent_module

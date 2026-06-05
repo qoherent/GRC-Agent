@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import socket
 import subprocess
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 from urllib.parse import urlparse
 
@@ -33,7 +33,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
             hf_model="stub/model:Q4_K_M",
             model_path=None,
             device="CUDA0",
-            gpu_layers=999,
+            gpu_layers=128,
             desired_context_tokens=120000,
             startup_timeout_seconds=5.0,
             max_tokens=256,
@@ -41,6 +41,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
             temperature=0.0,
             enable_thinking=False,
             request_timeout_seconds=2.0,
+            log_retention_days=7,
         )
 
     def _start_external_stub_server(
@@ -110,7 +111,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
                 errors="ignore",
             )
             self.assertIn("--device\x00CUDA0", cmdline)
-            self.assertIn("--gpu-layers\x00999", cmdline)
+            self.assertIn("--gpu-layers\x00128", cmdline)
             self.assertEqual(second.status, "reused")
             self.assertEqual(second.pid, first.pid)
 
@@ -130,6 +131,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
             temperature=0.0,
             enable_thinking=False,
             request_timeout_seconds=2.0,
+            log_retention_days=7,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:

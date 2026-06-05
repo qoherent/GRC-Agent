@@ -20,7 +20,7 @@ def test_variables_table_mapping(qtbot):
     """Verify that variables from inspect_graph populate QTableWidget rows and columns."""
     widget = InspectorWidget()
     qtbot.addWidget(widget)
-    
+
     mock_payload = {
         "ok": True,
         "view": "overview",
@@ -33,18 +33,18 @@ def test_variables_table_mapping(qtbot):
             ]
         }
     }
-    
+
     widget.update_state(mock_payload)
-    
+
     # We should have exactly 2 variables (samp_rate and freq) in the variables table
     assert widget.variables_table.rowCount() == 2
-    
+
     # Check values
     name_item_1 = widget.variables_table.item(0, 0)
     val_item_1 = widget.variables_table.item(0, 1)
     assert name_item_1.text() == "samp_rate"
     assert val_item_1.text() == "32000"
-    
+
     name_item_2 = widget.variables_table.item(1, 0)
     val_item_2 = widget.variables_table.item(1, 1)
     assert name_item_2.text() == "freq"
@@ -55,7 +55,7 @@ def test_blocks_tree_mapping(qtbot):
     """Verify that blocks from inspect_graph populate QTreeWidget categorised by role."""
     widget = InspectorWidget()
     qtbot.addWidget(widget)
-    
+
     mock_payload = {
         "ok": True,
         "view": "overview",
@@ -68,14 +68,14 @@ def test_blocks_tree_mapping(qtbot):
             ]
         }
     }
-    
+
     widget.update_state(mock_payload)
-    
+
     # Check that categories exist as top level items in the tree
     top_items = []
     for i in range(widget.blocks_tree.topLevelItemCount()):
         top_items.append(widget.blocks_tree.topLevelItem(i).text(0))
-        
+
     assert "Sources" in top_items
     assert "Variables" in top_items
     assert "Other Blocks" in top_items
@@ -85,7 +85,7 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
     """Verify state-preserving updates restore tree expanded states and scroll values."""
     widget = InspectorWidget()
     qtbot.addWidget(widget)
-    
+
     mock_payload_1 = {
         "ok": True,
         "view": "overview",
@@ -97,10 +97,10 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
             ]
         }
     }
-    
+
     # Initial load
     widget.update_state(mock_payload_1)
-    
+
     # Expand "Sources" category
     sources_item = None
     for i in range(widget.blocks_tree.topLevelItemCount()):
@@ -108,18 +108,18 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
         if item.text(0) == "Sources":
             sources_item = item
             break
-            
+
     assert sources_item is not None
     sources_item.setExpanded(True)
     assert sources_item.isExpanded()
-    
+
     # Mock scroll range and value for headless testing
     widget.blocks_tree.verticalScrollBar().setRange(0, 100)
     widget.blocks_tree.verticalScrollBar().setValue(50)
-    
+
     # Perform refresh
     widget.update_state(mock_payload_1)
-    
+
     # Assert expanded state and scroll are preserved
     new_sources_item = None
     for i in range(widget.blocks_tree.topLevelItemCount()):
@@ -127,7 +127,7 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
         if item.text(0) == "Sources":
             new_sources_item = item
             break
-            
+
     assert new_sources_item.isExpanded(), "Expanded category state was lost"
     assert widget.blocks_tree.verticalScrollBar().value() == 50
 

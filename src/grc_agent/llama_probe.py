@@ -121,7 +121,7 @@ class LlamaHealthProbe:
             raise LlamaServerError(
                 f"Timed out connecting to llama.cpp server at {url}."
             ) from exc
-        except socket.timeout as exc:
+        except TimeoutError as exc:
             raise LlamaServerError(
                 f"Timed out connecting to llama.cpp server at {url}."
             ) from exc
@@ -133,7 +133,7 @@ class LlamaHealthProbe:
             raise LlamaServerError(
                 f"Timed out waiting for llama.cpp server response from {path}."
             ) from exc
-        except socket.timeout as exc:
+        except TimeoutError as exc:
             raise LlamaServerError(
                 f"Timed out waiting for llama.cpp server response from {path}."
             ) from exc

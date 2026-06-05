@@ -1,8 +1,8 @@
 import logging
 from typing import Any
-from PySide6.QtCore import QMetaObject, QObject, QTimer, Signal, Slot, Qt
 
 from grc_agent.toolagents_runtime import ToolAgentsRunner
+from PySide6.QtCore import QMetaObject, QObject, Qt, QTimer, Signal, Slot
 
 logger = logging.getLogger(__name__)
 

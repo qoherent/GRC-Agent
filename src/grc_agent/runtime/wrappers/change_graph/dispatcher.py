@@ -12,7 +12,8 @@ from grc_agent._payload import ErrorCode
 from grc_agent.catalog import describe_block
 from grc_agent.runtime.block_semantics import _block_semantics
 from grc_agent.runtime.output_policy import is_meaningful, is_variable_block
-from grc_agent.session_ops import connection_id as render_connection_id, parse_connection_id
+from grc_agent.session_ops import connection_id as render_connection_id
+from grc_agent.session_ops import parse_connection_id
 
 ToolResult = dict[str, Any]
 
@@ -474,7 +475,7 @@ def _aggregate_hints(
                         src_idx = int(src_port_val)
                     except ValueError:
                         src_idx = src_port_val
-                        
+
                     try:
                         dst_idx = int(dst_port_val)
                     except ValueError:

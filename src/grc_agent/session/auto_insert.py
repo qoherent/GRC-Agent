@@ -35,7 +35,6 @@ from grc_agent.session.insertion_suggestions import InsertionCandidate, suggest_
 from grc_agent.transaction.apply import apply_edit
 from grc_agent.transaction.rollback import clone_session
 
-
 # How many validated candidates trigger a clarification instead of auto-commit.
 _CLARIFICATION_THRESHOLD = 2
 # Maximum number of options presented in the MCQ (A/B/C).

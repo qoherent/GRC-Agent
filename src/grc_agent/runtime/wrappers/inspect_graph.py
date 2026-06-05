@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections import Counter
 import time
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 from grc_agent.models import Block, Connection
@@ -12,9 +12,9 @@ from grc_agent.runtime.editable_parameters import (
     EditableParameterCandidate,
     build_editable_parameter_candidates,
 )
+from grc_agent.runtime.output_policy import is_meaningful, is_variable_block, truncate_list
 from grc_agent.session import summarize_graph
 from grc_agent.session_ops import connection_id as render_connection_id
-from grc_agent.runtime.output_policy import is_meaningful, is_variable_block, truncate_list
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
@@ -23,13 +23,13 @@ VALID_VIEWS = {"overview", "details"}
 
 
 def inspect_graph(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     *,
     view: str,
     targets: list[str],
     params: list[str],
     debug: bool = False,
-) -> "ToolResult":
+) -> ToolResult:
     started = time.monotonic()
     before_revision = agent.session.state_revision
     before_dirty = agent.session.is_dirty
@@ -103,7 +103,7 @@ def inspect_graph(
 
 
 def _overview(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     *,
     targets: list[str],
     params: list[str],
@@ -184,7 +184,7 @@ def _overview(
 
 
 def _details(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     *,
     targets: list[str],
     params: list[str],
@@ -653,7 +653,7 @@ def _matched_param_requests(
 
 
 def _base_payload(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     *,
     ok: bool,
     view: str,
@@ -694,7 +694,7 @@ def _base_payload(
 
 
 def _invalid_request(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     *,
     view: str,
     code: str,
@@ -709,7 +709,7 @@ def _invalid_request(
     )
 
 
-def _validation_status(agent: "GrcAgent") -> dict[str, Any]:
+def _validation_status(agent: GrcAgent) -> dict[str, Any]:
     if not agent.session.flowgraph:
         return {"status": "unknown"}
     agent.session.validate()
@@ -971,6 +971,6 @@ def _compact_value(value: Any) -> str:
     return str(value)
 
 
-def _graph_name(agent: "GrcAgent") -> str | None:
+def _graph_name(agent: GrcAgent) -> str | None:
     path = agent.session.path
     return path.name if path is not None else None

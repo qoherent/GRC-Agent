@@ -34,7 +34,6 @@ from grc_agent.toolagents_runtime import (
     run_bounded_toolagents_turn,
 )
 
-
 FIXTURE = Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 SEP = "=" * 70
 

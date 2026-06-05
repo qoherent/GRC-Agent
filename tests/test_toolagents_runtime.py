@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import datetime
-import uuid
 import unittest
+import uuid
 from unittest import mock
-
-from ToolAgents import FunctionTool
-from ToolAgents.agents import ChatToolAgent
-from ToolAgents.data_models.messages import ChatMessage, ChatMessageRole, TextContent
 
 from grc_agent.agent import GrcAgent
 from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
 from grc_agent.toolagents_runtime import (
+    ToolAgentsHistoryAdapter,
     ToolAgentsRegistryBuilder,
     ToolAgentsToolDelegate,
     _function_tool_from_openai_tool,
@@ -23,6 +20,9 @@ from grc_agent.toolagents_runtime import (
     _tool_failure_text,
     _tool_retry_reminder,
 )
+from ToolAgents import FunctionTool
+from ToolAgents.agents import ChatToolAgent
+from ToolAgents.data_models.messages import ChatMessage, ChatMessageRole, TextContent
 
 
 def _assistant_text(text: str) -> ChatMessage:
@@ -155,6 +155,87 @@ class ToolAgentsHistoryTests(unittest.TestCase):
 
         self.assertEqual(message.role, ChatMessageRole.Assistant)
         self.assertEqual(len(message.content), 1)
+
+
+class ToolAgentsHistoryAdapterToolMessageTests(unittest.TestCase):
+    """from_openai_message for role='tool' — the json.dumps(TextContent) regression."""
+
+    def test_tool_message_with_string_content(self) -> None:
+        payload = {
+            "role": "tool",
+            "tool_call_id": "call_abc123",
+            "name": "inspect_graph",
+            "content": '{"ok": true, "blocks": []}',
+        }
+        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
+        self.assertEqual(msg.role, ChatMessageRole.Tool)
+        self.assertEqual(len(msg.content), 2)
+        tc = msg.content[0]
+        self.assertIsInstance(tc, TextContent)
+        self.assertEqual(tc.content, '{"ok": true, "blocks": []}')
+        rc = msg.content[1]
+        self.assertEqual(rc.tool_call_id, "call_abc123")
+        self.assertEqual(rc.tool_call_name, "inspect_graph")
+        self.assertEqual(rc.tool_call_result, '{"ok": true, "blocks": []}')
+
+    def test_tool_message_with_text_content_list(self) -> None:
+        payload = {
+            "role": "tool",
+            "tool_call_id": "call_def456",
+            "name": "search_blocks",
+            "content": [{"text": "Found 3 blocks"}, {"text": " - analog_sig_source_x"}],
+        }
+        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
+        self.assertEqual(msg.role, ChatMessageRole.Tool)
+        self.assertEqual(len(msg.content), 2)
+        tc = msg.content[0]
+        self.assertIsInstance(tc, TextContent)
+        self.assertEqual(tc.content, "Found 3 blocks - analog_sig_source_x")
+        rc = msg.content[1]
+        self.assertEqual(rc.tool_call_name, "search_blocks")
+        self.assertEqual(rc.tool_call_result, "Found 3 blocks - analog_sig_source_x")
+
+    def test_tool_message_with_empty_content_string(self) -> None:
+        payload = {
+            "role": "tool",
+            "tool_call_id": "call_empty",
+            "name": "ask_grc_docs",
+            "content": "",
+        }
+        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
+        self.assertEqual(msg.role, ChatMessageRole.Tool)
+        self.assertEqual(len(msg.content), 1)
+        rc = msg.content[0]
+        self.assertEqual(rc.tool_call_id, "call_empty")
+        self.assertEqual(rc.tool_call_name, "ask_grc_docs")
+        self.assertEqual(rc.tool_call_result, "")
+
+    def test_tool_message_auto_generates_missing_tool_call_id(self) -> None:
+        payload = {
+            "role": "tool",
+            "name": "change_graph",
+            "content": "committed",
+        }
+        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
+        self.assertEqual(msg.role, ChatMessageRole.Tool)
+        self.assertEqual(len(msg.content), 2)
+        rc = msg.content[1]
+        self.assertEqual(rc.tool_call_name, "change_graph")
+        self.assertEqual(rc.tool_call_result, "committed")
+        self.assertIsInstance(rc.tool_call_id, str)
+        self.assertTrue(len(rc.tool_call_id) > 0)
+
+    def test_tool_message_handles_none_content(self) -> None:
+        payload = {
+            "role": "tool",
+            "tool_call_id": "call_none",
+            "name": "inspect_graph",
+        }
+        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
+        self.assertEqual(msg.role, ChatMessageRole.Tool)
+        self.assertEqual(len(msg.content), 1)
+        rc = msg.content[0]
+        self.assertEqual(rc.tool_call_result, "")
 
 
 class ToolAgentsRepairClassificationTests(unittest.TestCase):

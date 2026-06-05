@@ -23,7 +23,6 @@ from tests.llama_eval.r0_r1_shared import (
     _set_state,
 )
 
-
 MUTATION_CHECK = ({"kind": "mutation"},)
 READ_ONLY_CHECK = ({"kind": "no_mutation"},)
 

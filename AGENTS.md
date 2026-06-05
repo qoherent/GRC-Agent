@@ -22,8 +22,11 @@ fixture-specific shortcuts.
 - llama.cpp is the preferred local backend through its OpenAI-compatible `/v1`
   API. Health must prove reachability, model alias match, and actual context
   from `/props`.
-- The model-facing surface is exactly four wrappers:
-  `inspect_graph`, `search_blocks`, `ask_grc_docs`, `change_graph`.
+- The model-facing surface is exactly three wrappers:
+  `inspect_graph`, `query_knowledge`, `change_graph`.
+  `query_knowledge` is the unified read-only knowledge entry point and
+  internally dispatches to `search_blocks` (catalog candidates) or
+  `ask_grc_docs` (grounded manual/tutorial answers) based on intent.
 - Low-level graph, catalog, validation, save/load, and transaction tools are
   internal primitives, not chat tools.
 - Runtime assets such as GGUFs, embedding models, vector indexes, and caches are
@@ -100,7 +103,7 @@ Rewiring uses `remove_connections` + `add_connections`.)
 
 Never add model-facing lifecycle tools, raw YAML tools, block-specific macros,
 or broad repair/planning tools unless repeated eval evidence proves the
-four-wrapper surface is insufficient.
+three-wrapper surface is insufficient.
 
 ## Data Authority
 
@@ -163,16 +166,13 @@ history, and wrapper outputs compact by design.
 
 ## Durable Docs
 
+- `README.md`: customer-facing install, usage, troubleshooting, FAQ,
+  architecture, verification, roadmap link.
+- `docs/CHANGELOG.md`: release history and the deferred harder-wins roadmap.
 - `docs/BLUEPRINT.md`: architecture, wrappers, safety, context, evals, runtime
   status.
-- `docs/QUICKSTART.md`: navigation index to the two product quickstarts.
-- `docs/CLI_QUICKSTART.md`: CLI workflow (terminal chat, copy graphs, save,
-  history).
-- `docs/GUI_QUICKSTART.md`: GUI workflow (sidekick panel, inspector, compile &
-  run).
 - `docs/MODEL_CONTEXT_BIBLE.md`: generated from the actual injected prompt and
   model-facing tool schemas.
-- `docs/PYSIDE6_GUI_BLUEPRINT.md`: companion desktop UI design and validation report.
 
 Update docs when wrapper contracts, safety boundaries, eval gates, runtime
 requirements, or capability labels change.

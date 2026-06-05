@@ -323,7 +323,7 @@ class TransactionNormalizer:
             conns = [c for c in self._session.flowgraph.connections if c.src_block == instance_name or c.dst_block == instance_name]
             if not conns:
                 continue
-            def _port_json(p: "int | str") -> str:
+            def _port_json(p: int | str) -> str:
                 return f'"{p}"' if isinstance(p, str) else str(p)
             remove_conn_ops = ", ".join(
                 f'{{"op_type": "remove_connection", "src_block": "{c.src_block}", '

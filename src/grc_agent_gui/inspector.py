@@ -1,19 +1,20 @@
 import logging
 import os
 from typing import Any
+
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QListWidget,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
-    QListWidget,
-    QLabel,
-    QPushButton,
-    QHBoxLayout,
-    QHeaderView,
+    QVBoxLayout,
+    QWidget,
 )
 
 logger = logging.getLogger(__name__)

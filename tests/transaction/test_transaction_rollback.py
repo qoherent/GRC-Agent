@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from grc_agent import FlowgraphSession, apply_edit

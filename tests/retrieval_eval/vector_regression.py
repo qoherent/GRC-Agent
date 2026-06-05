@@ -8,7 +8,6 @@ from typing import Any, TextIO
 
 from tests.retrieval_eval.vector_retrieval import run_eval
 
-
 VECTOR_REGRESSION_PROGRESS_INTERVAL = 25
 VECTOR_BASELINE_V1_THRESHOLDS: dict[str, int] = {
     "minimum_vector_top_k_hits": 276,

@@ -2,9 +2,8 @@
 
 from typing import Any
 
+from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.flowgraph_session import DEFAULT_SUMMARY_BLOCK_LIMIT, FlowgraphSession
-
-from grc_agent._payload import build_error_payload, ErrorCode
 
 from .inspect import require_loaded_session
 

@@ -5,18 +5,18 @@ sync so structural edits can be validated with `grcc` and saved without dropping
 unsupported fields.
 """
 
-from collections import defaultdict, deque
-from contextlib import contextmanager
 import copy
 import fcntl
 import hashlib
 import logging
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import time
+from collections import defaultdict, deque
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -26,11 +26,23 @@ from grc_agent.runtime.output_policy import is_variable_block
 from .models import Block, Connection, Flowgraph
 from .session_ops import (
     block_name_is_referenced_elsewhere as shared_block_name_is_referenced_elsewhere,
-    connection_id as shared_connection_id,
+)
+from .session_ops import (
     connection_entry_to_tuple as shared_connection_entry_to_tuple,
+)
+from .session_ops import (
+    connection_id as shared_connection_id,
+)
+from .session_ops import (
     default_block_states as shared_default_block_states,
+)
+from .session_ops import (
     parse_blocks as shared_parse_blocks,
+)
+from .session_ops import (
     parse_connections as shared_parse_connections,
+)
+from .session_ops import (
     raw_connection_entry as shared_raw_connection_entry,
 )
 

@@ -19,11 +19,11 @@ def test_chat_widget_uses_qtextbrowser(qtbot):
     """Verify that ChatWidget uses QTextBrowser internally and has an input field."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    
+
     assert hasattr(widget, "chat_display"), "ChatWidget must have chat_display"
     assert hasattr(widget, "chat_input"), "ChatWidget must have chat_input"
-    
-    from PySide6.QtWidgets import QTextBrowser, QLineEdit
+
+    from PySide6.QtWidgets import QLineEdit, QTextBrowser
     assert isinstance(widget.chat_display, QTextBrowser)
     assert isinstance(widget.chat_input, QLineEdit)
 
@@ -32,10 +32,10 @@ def test_native_markdown_rendering(qtbot):
     """Assert that passing standard markdown updates the QTextBrowser document structure correctly."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    
+
     markdown_text = "# Header 1\n* Item 1\n* Item 2\n\n**Bold Text**"
     widget.append_message("assistant", markdown_text)
-    
+
     html = widget.chat_display.toHtml()
     assert "Header 1" in html or "h1" in html.lower()
     assert "Item 1" in html
@@ -46,10 +46,10 @@ def test_html_safety_handling(qtbot):
     """Assert that unsafe HTML structures are ignored or safely stripped."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    
+
     unsafe_markdown = "Hello <script>alert('hack');</script> <iframe src='http://evil.com'></iframe> World"
     widget.append_message("assistant", unsafe_markdown)
-    
+
     html = widget.chat_display.toHtml()
     assert "script" not in html.lower()
     assert "iframe" not in html.lower()
@@ -60,10 +60,10 @@ def test_chat_widget_appends_text(qtbot):
     """Assert that appending user/assistant messages updates display."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    
+
     widget.append_message("user", "Hello agent")
     assert "Hello agent" in widget.chat_display.toPlainText()
-    
+
     widget.append_message("assistant", "Hello user")
     assert "Hello user" in widget.chat_display.toPlainText()
 
@@ -72,21 +72,21 @@ def test_markdown_stream_throttling(qtbot):
     """Assert that chunk emissions append plain text and do not invoke full markdown rerenders."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    
+
     # Start a stream
     widget.start_stream()
-    
+
     # Emit token chunks
     widget.append_stream_chunk("def ")
     widget.append_stream_chunk("foo():")
-    
+
     # During stream, it should be appended as plain text in the display
     plain_text = widget.chat_display.toPlainText()
     assert "def foo():" in plain_text
-    
+
     # End the stream with definitive text
     widget.finalize_stream("```python\ndef foo():\n    pass\n```")
-    
+
     # Verify final markdown is set
     html = widget.chat_display.toHtml()
     assert "def" in html
@@ -97,11 +97,11 @@ def test_pygments_syntax_highlighting(qtbot):
     """Assert that final markdown code blocks are styled using Pygments (inline styles)."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    
+
     code_markdown = "Here is Python code:\n```python\nimport sys\nprint(sys.version)\n```"
     widget.start_stream()
     widget.finalize_stream(code_markdown)
-    
+
     html = widget.chat_display.toHtml()
     # Check for pygments output signature: inline styling on tokens
     assert "style=" in html
@@ -205,3 +205,42 @@ def test_sanitizer_strips_javascript_uri(qtbot):
     assert "javascript:" not in safe
     assert "vbscript:" not in safe
 
+
+
+def test_get_history_returns_independent_copy(qtbot):
+    """get_history() must return a copy, so callers can mutate without affecting the widget."""
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    widget.append_message("user", "hello")
+    widget.append_message("assistant", "world")
+
+    history = widget.get_history()
+    history.clear()
+    assert len(widget.get_history()) == 2
+
+
+def test_export_markdown_renders_user_and_assistant_messages(qtbot):
+    """export_markdown() must produce a Markdown doc with both roles."""
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    widget.append_message("user", "Summarize this graph.")
+    widget.append_message("assistant", "The graph has 3 blocks.")
+
+    md = widget.export_markdown()
+    assert "# GRC Agent chat export" in md
+    assert "## You" in md
+    assert "Summarize this graph." in md
+    assert "## Agent" in md
+    assert "The graph has 3 blocks." in md
+
+
+def test_export_markdown_empty_chat_is_minimal(qtbot):
+    """An empty chat must still produce a well-formed (but empty) Markdown doc."""
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    md = widget.export_markdown()
+    assert md.startswith("# GRC Agent chat export")
+    assert md.rstrip().endswith("GRC Agent chat export")

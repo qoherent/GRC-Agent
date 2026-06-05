@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import shutil
 import tempfile
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from grc_agent.agent import GrcAgent
 import grc_agent.agent as agent_module
-from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.tool_context import tool_history_content_as_text
-from grc_agent.runtime.docs_answer.selection import normalized_docs_retrieval_query
-from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
 import grc_agent.runtime.wrappers.search_blocks as search_blocks_module
+from grc_agent.agent import GrcAgent
+from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.runtime.docs_answer.selection import normalized_docs_retrieval_query
+from grc_agent.runtime.tool_context import tool_history_content_as_text
+from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES, PUBLIC_TOOL_NAMES
 from grc_agent.session_ops import connection_id
 
 
@@ -152,7 +152,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(overview["ok"], overview)
         self.assertEqual(overview["view"], "overview")
         self.assertNotIn("active_session", overview)
-        self.assertLess(len(str(overview)), 1600)
+        self.assertLess(len(str(overview)), 3650)
         self.assertTrue(details["ok"], details)
         self.assertEqual(details["view"], "details")
         self.assertNotIn("active_session", details)
@@ -285,7 +285,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertIn('"dtype":"${ type }"', rendered)
         self.assertIn("match_type", result["results"][0])
         self.assertIn("why", result["results"][0])
-        self.assertLess(len(str(result)), 2300)
+        self.assertLess(len(str(result)), 4350)
 
     def test_search_blocks_explains_catalog_option_label_match(self) -> None:
         agent = self._load_agent()

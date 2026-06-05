@@ -1,7 +1,7 @@
 """Direct tests for transaction commit payload builders."""
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.transaction.commit import (

@@ -10,10 +10,9 @@ from typing import Any
 from grc_agent.config import ConfigError, load_app_config, resolve_config_path
 from grc_agent.retrieval import initialize_retrieval
 
-
 EXPECTED_PYTHON = (3, 12)
 EXPECTED_GNURADIO = "3.10.9.2"
-_LLAMA_CPP_SERVER_HELP = "Start with: grc-agent chat --new --message 'hello'"
+_LLAMA_CPP_SERVER_HELP = "Start with: uv run grc-agent chat --new --message 'hello'"
 
 
 def _build_check(name: str, ok: bool, detail: str, **extra: Any) -> dict[str, Any]:
@@ -63,7 +62,7 @@ def _check_config(config_path: str | None = None) -> dict[str, Any]:
         return _build_check(
             "App config",
             False,
-            f"{exc}. Run: grc-agent doctor --skip-retrieval",
+            f"{exc}. Run: uv run grc-agent doctor --skip-retrieval",
         )
 
     resolved_path = resolve_config_path(config_path)

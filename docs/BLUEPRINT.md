@@ -13,7 +13,7 @@ Current classification:
 - Diagnostic-clean: `R7_EXACT_EXTERNAL`, `R7_NATURAL_EXTERNAL`, `Tier5_ADVERSARIAL`
 - Runtime: not production-ready
 
-The default model-facing surface is the four-wrapper MVP profile only. Low-level graph tools remain internal.
+The default model-facing surface is the three-wrapper MVP profile only. Low-level graph tools remain internal.
 ToolAgents is the model/provider/tool-call harness; GRC Agent still owns wrapper validation, routing, graph transactions, `grcc`, rollback, autosave, manual `/save`, history, and raw trace evidence.
 Chat transport lives in ToolAgents; this repo keeps only non-chat health/probe HTTP code.
 
@@ -203,7 +203,7 @@ Current mutation-wrapper status:
 
 Internal tools include graph creation/loading, summaries, catalog retrieval, block descriptions, vector retrieval, insert suggestions, connection removal/rewire, edit proposal/application, validation, and raw save. They are implementation primitives, not default model-facing chat tools.
 
-The model sees only the four wrappers above in MVP chat mode.
+The model sees only the three wrappers above in MVP chat mode.
 
 ## Data Authority
 
@@ -220,7 +220,7 @@ Model-backed chat uses ToolAgents with llama.cpp through its OpenAI-compatible `
 
 Each model step rebuilds a `ToolRegistry` from the currently allowed wrapper schemas. Delegates record the raw requested tool call, validate route and schema through `GrcAgent`, and execute `GrcAgent.execute_tool(..., model_tool_call=True)` only after validation passes. Invalid or disallowed calls return structured tool results for model repair or user-facing refusal without mutation.
 
-The CLI default uses the configured bounded round limit. `grc-agent chat
+The CLI default uses the configured bounded round limit. `uv run grc-agent chat
 --agentic` raises the bounded limit and request timeout for exploratory local
 turns without exposing extra tools or weakening validation. `--max-tool-rounds
 N` is an explicit per-session override.
@@ -245,7 +245,7 @@ There is no assistant-text fallback parser, JSON repair path, or AST/text transa
 
 1. Load or create one active `FlowgraphSession`.
 2. Build compact model messages from system policy, recent user/assistant/tool history, and bounded tool results.
-3. Ask llama.cpp through ToolAgents for one bounded `step(...)` with the four wrapper schemas.
+3. Ask llama.cpp through ToolAgents for one bounded `step(...)` with the three wrapper schemas.
 4. Validate every requested tool call against wrapper schemas and current route constraints.
 5. Execute accepted tool calls serially through GRC delegates.
 6. For mutations, route through `change_graph`, transaction validation, preflight, `grcc`, and rollback/commit.
@@ -262,7 +262,7 @@ Context is compacted by tool output design, not by hiding raw tool calls.
 - `details` exposes guarded target refs only for resolved graph-local targets and omits large param lists unless specifically requested.
 - `search_blocks` and `ask_grc_docs` return compact evidence objects; retrieval scores and verbose source text stay out of model-visible output.
 - Tool results are compacted before future model turns, while raw call/result history remains traceable.
-- The system prompt and four wrapper schemas are intentionally budgeted; long examples belong in tests/docs, not every model turn.
+- The system prompt and three wrapper schemas are intentionally budgeted; long examples belong in tests/docs, not every model turn.
 - Health checks verify desired vs actual llama context; current target is 120000 tokens when supported.
 - `max_tokens` limits generation length only; it is not used as a compression strategy.
 
@@ -294,7 +294,7 @@ The model has no lifecycle tools. `/save` in the CLI bypasses the model and call
 - For programmatic single-shot execution, use `--stdin` to pass prompts and `--json` to force stdout to emit a single, parseable JSON payload.
 - Bare `uv run grc-agent` enters chat only in an interactive TTY; non-interactive use prints help and exits command-safe.
 - Chat startup checks the configured llama.cpp server and starts/reuses it when needed; readiness is still health-verified before model-backed use.
-- `grc-agent health` is passive and reports `not_ready` if llama.cpp is not already reachable. Use `grc-agent doctor --start-llama` or chat startup when you want the launcher to start/reuse llama.cpp.
+- `uv run grc-agent health` is passive and reports `not_ready` if llama.cpp is not already reachable. Use `uv run grc-agent doctor --start-llama` or chat startup when you want the launcher to start/reuse llama.cpp.
 - Normal chat prints assistant text plus concise operation summaries.
 - Full history is hidden by default; use `/history`.
 - Use `/save [path] [--overwrite]` for deterministic manual save.
@@ -348,7 +348,7 @@ Docs-answer quality is evaluated separately from mutation safety. Groundedness a
 The default retrieval stack is local and lightweight:
 
 - Python dependencies come from `pyproject.toml`.
-- The active vector index is generated locally with `grc-agent vector build`.
+- The active vector index is generated locally with `uv run grc-agent vector build`.
 - Embedding models are downloaded/cached by the user environment at runtime; they are not bundled, vendored, or committed.
 - The default embedding model is `thenlper/gte-base` through FastEmbed. The cached quantized ONNX package is about 400 MB.
 - `search_blocks` combines exact/catalog lexical metadata lookup, cached in-memory SQLite FTS5 sparse ranking, and vector retrieval when the generated index is available. Lexical lookup covers exact block IDs, parameter IDs, port names, dtypes, labels, and categories; FTS5 covers sparse prose matches; vector retrieval covers semantic discovery.
@@ -382,10 +382,7 @@ Durable docs kept under `docs/`:
 
 - `BLUEPRINT.md`: architecture and safety contract
 - `MODEL_CONTEXT_BIBLE.md`: generated exact model-facing prompt and wrapper schemas
-- `QUICKSTART.md`: navigation index to the two product quickstarts
-- `CLI_QUICKSTART.md`: CLI workflow (terminal chat, copy graphs, save, history)
-- `GUI_QUICKSTART.md`: GUI workflow (sidekick panel, inspector, compile & run)
-- `PYSIDE6_GUI_BLUEPRINT.md`: desktop companion UI design and validation report
+- `CHANGELOG.md` (under `docs/`) — release history and the deferred harder-wins roadmap
 - `wiki_gnuradio_org/`: local GNU Radio tutorial/reference corpus
 
 ---
@@ -421,7 +418,7 @@ The native PySide6 Desktop GUI operates as a lightweight sidekick panel running 
 #### Second-pass hardening (M7)
 A 19-item audit of the sidekick GUI was completed after the M6
 remediation. The full list of items, contracts, and test mappings is
-documented in `docs/PYSIDE6_GUI_BLUEPRINT.md` under Milestone 7.
+documented in `AGENTS.md` (Engineering Rules / Agent Behavior sections).
 Highlights: per-slot kill timers (`_compile_kill_timer`,
 `_run_kill_timer`) instead of id-keyed dicts; `shutdown()` waits
 capped at 200ms × 2; layered HTML sanitization (pair-wise tag strip +
@@ -434,7 +431,7 @@ keys; `open_in_grc` no longer fails silently on missing
 #### Third-pass hardening (M8)
 A systems-architecture audit addressed critical PySide6/Qt threading
 violations, C++/Python GC gaps, and QProcess resource leaks. Full
-items and contracts are documented in `docs/PYSIDE6_GUI_BLUEPRINT.md`
+items and contracts are documented in `AGENTS.md`
 under Milestone 8. Highlights: thread-safe `cancel()` delegation via
 `QMetaObject.invokeMethod(QueuedConnection)`; `_reap_active_processes`
 disconnects and reaps old QProcess instances before new starts;

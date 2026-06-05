@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from contextlib import AbstractContextManager
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 import fcntl
 import hashlib
 import json
 import re
 import shutil
 import subprocess
+import uuid
+from collections import Counter
+from contextlib import AbstractContextManager
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-import uuid
 
 from qdrant_client import QdrantClient, models
 
@@ -1822,7 +1822,7 @@ def _stale_index_payload(manifest: dict[str, Any]) -> dict[str, Any] | None:
         error_type="stale_index",
         message=(
             "Vector index schema is stale for this runtime. "
-            "Run `grc-agent vector build` before semantic search."
+            "Run `uv run grc-agent vector build` before semantic search."
         ),
         details={
             "index_schema_version": actual,
@@ -1847,7 +1847,7 @@ def _query_embedding_model(
 def _missing_index_payload() -> dict[str, Any]:
     return build_error_payload(
         error_type="missing_index",
-        message="Vector index is missing. Run `grc-agent vector build` before semantic search.",
+        message="Vector index is missing. Run `uv run grc-agent vector build` before semantic search.",
     )
 
 
@@ -1857,7 +1857,7 @@ class _VectorIndexLock(AbstractContextManager["_VectorIndexLock"]):
         self._exclusive = exclusive
         self._handle: Any = None
 
-    def __enter__(self) -> "_VectorIndexLock":
+    def __enter__(self) -> _VectorIndexLock:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self._lock_path.open("a+", encoding="utf-8")
         mode = fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH

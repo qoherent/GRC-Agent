@@ -6,11 +6,11 @@ read-only candidate evidence.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
 import json
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from grc_agent.retrieval.vector import (
@@ -18,6 +18,7 @@ from grc_agent.retrieval.vector import (
     build_vector_records,
     semantic_search_grc,
 )
+
 from tests.retrieval_eval._eval_gate_lock import acquire_retrieval_eval_lock
 
 EVAL_DIMENSIONS: tuple[str, ...] = (

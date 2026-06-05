@@ -1,17 +1,16 @@
 """Local Qdrant behavior required by vector retrieval."""
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
-
-from qdrant_client import QdrantClient, models
+from pathlib import Path
 
 from grc_agent.retrieval.vector import (
     DEFAULT_VECTOR_COLLECTION_ALIAS,
     local_qdrant_alias_swap_smoke,
     prune_vector_collections,
 )
+from qdrant_client import QdrantClient, models
 
 
 class VectorQdrantLocalTests(unittest.TestCase):

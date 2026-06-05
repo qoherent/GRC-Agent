@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from dataclasses import dataclass
 import re
 import sqlite3
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from grc_agent._payload import ErrorCode
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 _CATALOG_SEARCH_INDEX_CACHE_MAX = 4
 _CATALOG_DETAIL_LIMIT = 3
 _CATALOG_SEARCH_INDEX_CACHE: OrderedDict[
-    tuple[str, int, int], "_CatalogSearchIndex"
+    tuple[str, int, int], _CatalogSearchIndex
 ] = OrderedDict()
 
 
@@ -52,12 +52,12 @@ class _CatalogSearchIndex:
 
 
 def search_blocks(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     query: str,
     k: int | None = None,
     debug: bool = False,
     enrich: bool = False,
-) -> "ToolResult":
+) -> ToolResult:
     import time
 
     import grc_agent.agent as agent_module
@@ -338,7 +338,7 @@ def search_blocks(
 
 def _lexical_catalog_candidates(
     *,
-    agent: "GrcAgent",
+    agent: GrcAgent,
     query: str,
     limit: int,
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -400,7 +400,7 @@ def _lexical_catalog_candidates(
     return [item for _, _, item in scored[:limit]], fts_error
 
 
-def _catalog_search_index(*, agent: "GrcAgent", snapshot: Any) -> _CatalogSearchIndex:
+def _catalog_search_index(*, agent: GrcAgent, snapshot: Any) -> _CatalogSearchIndex:
     """Return cached structured and FTS views for one catalog snapshot."""
     blocks = getattr(snapshot, "blocks", {})
     cache_key = (str(agent.catalog_root), id(snapshot), len(blocks))

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import ast
-from functools import lru_cache
 import importlib
 import inspect
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 

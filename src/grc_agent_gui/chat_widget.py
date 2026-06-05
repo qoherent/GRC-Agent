@@ -1,13 +1,13 @@
 import html
 import logging
 import re
-from PySide6.QtGui import QTextCursor, QTextDocument
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QTextBrowser
 
 from pygments import highlight
+from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.lexers.special import TextLexer
-from pygments.formatters import HtmlFormatter
+from PySide6.QtGui import QTextCursor, QTextDocument
+from PySide6.QtWidgets import QLineEdit, QTextBrowser, QVBoxLayout, QWidget
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +126,9 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
                     lexer = TextLexer()
 
             formatter = HtmlFormatter(
+                style="monokai",
                 noclasses=True,
-                cssstyles="font-family: monospace; font-size: 10pt; background-color: #f5f5f5; padding: 5px;",
+                cssstyles="font-family: monospace; font-size: 10pt; background-color: #181825; color: #cdd6f4; padding: 8px; border-radius: 4px; border: 1px solid #45475a; line-height: 1.4;",
             )
             highlighted_code = highlight(code, lexer, formatter)
             final_html_parts.append(highlighted_code)
@@ -137,8 +138,8 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
 
 def render_user_message_html(text: str) -> str:
     """Render a user message as a simple, sanitized bold-header HTML block."""
-    safe = html.escape(text)
-    return f"<p><b>You:</b> {safe}</p>"
+    safe = html.escape(text).replace("\n", "<br/>")
+    return f'<div style="margin-bottom: 12px;"><b style="color: #89b4fa;">You:</b><div style="margin-top: 4px; padding-left: 8px;">{safe}</div></div>'
 
 
 class ChatWidget(QWidget):
@@ -168,6 +169,11 @@ class ChatWidget(QWidget):
         self.chat_input.setPlaceholderText("Ask the GRC Agent...")
         self.chat_input.setMinimumHeight(32)
         layout.addWidget(self.chat_input)
+
+    def clear(self) -> None:
+        """Clear all messages and reset chat display."""
+        self._history.clear()
+        self.chat_display.clear()
 
     def append_message(self, role: str, text: str) -> None:
         """Append a standard completed message, parsing it as markdown/HTML."""
@@ -230,6 +236,32 @@ class ChatWidget(QWidget):
             self._history[-1]["_rendered"] = None
         self._render_chat()
 
+    def get_history(self) -> list[dict[str, str]]:
+        """Return a copy of the in-memory chat history for export."""
+        return [dict(entry) for entry in self._history]
+
+    def export_markdown(self) -> str:
+        """Render the chat history as a single Markdown document.
+
+        The export is intentionally plain (no Pygments / sanitization layer)
+        so the output round-trips cleanly into any Markdown reader.
+        """
+        lines: list[str] = ["# GRC Agent chat export", ""]
+        for entry in self._history:
+            role = entry.get("role", "")
+            text = entry.get("text", "")
+            if role == "user":
+                lines.append("## You")
+                lines.append("")
+                lines.append(text)
+                lines.append("")
+            elif role == "assistant":
+                lines.append("## Agent")
+                lines.append("")
+                lines.append(text)
+                lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
     def _render_chat(self) -> None:
         """Render all messages in the chat history, applying markdown and code styling.
 
@@ -249,9 +281,8 @@ class ChatWidget(QWidget):
                 html_contents.append(cached)
             else:
                 if cached is None:
-                    header = "<b>Agent:</b> "
                     body = markdown_to_highlighted_html(text)
-                    cached = f"<p>{header}{body}</p>"
+                    cached = f'<div style="margin-bottom: 12px;"><b style="color: #a6e3a1;">Agent:</b><div style="margin-top: 4px; padding-left: 8px;">{body}</div></div>'
                     msg["_rendered"] = cached
                 html_contents.append(cached)
 

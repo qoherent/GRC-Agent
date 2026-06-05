@@ -7,15 +7,15 @@ model-facing tools and restore always writes to a caller-provided copy path.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import difflib
 import hashlib
 import json
 import os
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-import uuid
 
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session_ops import connection_id as render_connection_id
@@ -312,7 +312,7 @@ class GraphHistoryJournal:
             "record_type": record_type,
             "accepted": accepted,
             "lineage_key": lineage_key,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "request_text": request_text,
             "tool_name": tool_name,
             "operation_type": operation_type,
@@ -382,7 +382,7 @@ def _snapshot_from_record(record: dict[str, Any]) -> GraphSnapshot:
 
 
 def _record_id() -> str:
-    now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    now = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return f"hist_{now}_{uuid.uuid4().hex[:8]}"
 
 
@@ -391,7 +391,7 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
         return "unloaded"
     path = str(session.path) if session.path is not None else "<memory>"
     snapshot = snapshot_session(session)
-    digest = hashlib.sha256(f"{path}\n{snapshot.graph_hash}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{path}\n{snapshot.graph_hash}".encode()).hexdigest()[:16]
     return f"lineage:{digest}"
 
 

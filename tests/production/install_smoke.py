@@ -10,14 +10,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UV_MODE = "default-uv"

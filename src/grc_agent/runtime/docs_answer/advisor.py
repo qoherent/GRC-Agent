@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 from grc_agent.runtime.docs_answer_advisor import (
     DocsAnswerSnippet,
+)
+from grc_agent.runtime.docs_answer_advisor import (
     run_docs_answer_advisor as run_docs_answer_advisor_core,
 )
 from grc_agent.toolagents_runtime import (

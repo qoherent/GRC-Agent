@@ -12,7 +12,7 @@ ToolResult = dict[str, Any]
 
 
 def query_knowledge(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     query: str,
     domain: str,
     debug: bool = False,

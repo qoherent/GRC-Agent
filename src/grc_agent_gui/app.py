@@ -1,17 +1,32 @@
 import atexit
+import logging
 import os
+import shutil
 import signal
 import sys
+import tempfile
+import time
 from pathlib import Path
-
-from PySide6.QtWidgets import QApplication
 
 from grc_agent.agent import GrcAgent
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session.load import load_grc
 from grc_agent.startup import bootstrap_runtime
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
+
 from grc_agent_gui.main_window import MainWindow
+
+logger = logging.getLogger(__name__)
+
+
+# Age (seconds) below which a `grc_agent_run_*` temp dir is treated as
+# in-flight and *not* pruned. 1 hour is conservative — the actual
+# `grcc` compile + first execute cycle completes in seconds under
+# normal conditions; the floor protects against racing with another
+# live GUI process whose compile just started.
+_GUI_TEMP_DIR_MIN_AGE_SECONDS = 3600
 
 
 _STYLESHEET = """
@@ -21,7 +36,50 @@ QMainWindow {
 QWidget {
     background-color: #1e1e2e;
     color: #cdd6f4;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     font-size: 13px;
+}
+QScrollBar:vertical {
+    border: none;
+    background: #11111b;
+    width: 8px;
+    margin: 0px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #45475a;
+    min-height: 20px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #585b70;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+}
+QScrollBar:horizontal {
+    border: none;
+    background: #11111b;
+    height: 8px;
+    margin: 0px;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal {
+    background: #45475a;
+    min-width: 20px;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #585b70;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
 }
 QTextBrowser {
     background-color: #181825;
@@ -160,13 +218,79 @@ QPushButton#stopButton:disabled {
 """
 
 
+def _prune_orphan_temp_dirs() -> list[str]:
+    """Remove stale ``grc_agent_run_*`` directories from ``/tmp``.
+
+    ``ProcessManager`` creates one of these for every compile/run
+    cycle and normally removes it on graceful close. If the GUI
+    crashes (segfault, OOM-kill, machine reboot) the directory is
+    left behind. This function is called once at GUI startup to
+    reclaim that space. A directory is treated as orphaned when
+    its mtime is older than :data:`_GUI_TEMP_DIR_MIN_AGE_SECONDS`;
+    that floor avoids racing with a freshly-spawned compile from a
+    concurrently-running GUI process under a different user.
+
+    Returns the list of removed paths (empty if none).
+    """
+    try:
+        tmp_root = Path(tempfile.gettempdir())
+    except OSError as exc:
+        logger.debug("_prune_orphan_temp_dirs: gettempdir failed: %s", exc)
+        return []
+    removed: list[str] = []
+    cutoff = time.time() - _GUI_TEMP_DIR_MIN_AGE_SECONDS
+    try:
+        entries = list(tmp_root.glob("grc_agent_run_*"))
+    except OSError as exc:
+        logger.debug("_prune_orphan_temp_dirs: glob failed on %s: %s", tmp_root, exc)
+        return removed
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError as exc:
+            logger.debug("_prune_orphan_temp_dirs: stat failed on %s: %s", entry, exc)
+            continue
+        if mtime >= cutoff:
+            # Recent enough to be in flight from another GUI process.
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(str(entry))
+        except OSError as exc:
+            logger.debug("_prune_orphan_temp_dirs: rmtree failed on %s: %s", entry, exc)
+    if removed:
+        logger.info("_prune_orphan_temp_dirs removed=%d", len(removed))
+    return removed
+
+
 def main() -> None:
     """Launch the GRC Agent PySide6 GUI application.
 
     Usage:
         uv run grc-agent-gui [path/to/copy.grc]
     """
+    # Reclaim temp dirs left behind by a previously-crashed GUI.
+    _prune_orphan_temp_dirs()
+
+    # Ensure GUI module loggers (which currently route to `logger.warning` /
+    # `logger.error` calls scattered across the GUI) have somewhere to land.
+    # The level is configurable via `GRC_AGENT_LOG_LEVEL` (e.g. "DEBUG").
+    log_level = os.environ.get("GRC_AGENT_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
     app = QApplication(sys.argv)
+    app.setApplicationName("GRC Agent")
+    app.setOrganizationName("Qoherent")
+    app.setApplicationDisplayName("GRC Agent Companion")
+    icon_path = Path(__file__).parent / "resources" / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     app.setStyleSheet(_STYLESHEET)
 
     config = load_app_config()
@@ -186,11 +310,11 @@ def main() -> None:
             sys.exit(2)
         if not loaded.validate():
             print(
-                f"Error: refusing to load graph because validation failed "
-                f"(state={loaded.validation_state().get('state', 'unknown')}).",
+                f"Warning: loaded graph with validation failure "
+                f"(state={loaded.validation_state().get('state', 'unknown')}). "
+                f"Fix the graph using the agent before compiling.",
                 file=sys.stderr,
             )
-            sys.exit(2)
         session = loaded
 
     agent = GrcAgent(session=session)
@@ -209,6 +333,19 @@ def main() -> None:
             f"Error: {result.errors[-1] if result.errors else 'Server startup failed'}",
             file=sys.stderr,
         )
+        if result.error_type == "llama_server_missing":
+            print(
+                "Hint: install llama.cpp and ensure `llama-server` is on PATH. "
+                "See the README install table.",
+                file=sys.stderr,
+            )
+        elif result.error_type == "model_not_found":
+            print(
+                "Hint: set [llama].model_path to a local GGUF file, or set "
+                "[llama].hf_model to a Hugging Face repo for auto-download. "
+                "Use `uv run grc-agent init` to write a starter config.",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     if result.launch_status == "started" and result.launch_pid is not None:

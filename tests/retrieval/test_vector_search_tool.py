@@ -1,16 +1,15 @@
 """Tests for the public read-only semantic search tool contract."""
 
-from pathlib import Path
 import fcntl
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.retrieval.vector import semantic_search_grc
-from grc_agent.retrieval.vector import vector_index_stats
+from grc_agent.retrieval.vector import semantic_search_grc, vector_index_stats
 from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
 
 

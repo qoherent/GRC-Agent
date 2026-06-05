@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from grc_agent._payload import build_error_payload, ErrorCode
+from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.flowgraph_session import FlowgraphSession
 
 

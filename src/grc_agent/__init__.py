@@ -4,11 +4,11 @@
 from .agent import GrcAgent
 from .catalog import describe_block
 from .doctor import run_doctor
-from .startup import RuntimeBootstrapResult, bootstrap_runtime
 from .flowgraph_session import FlowgraphSession
 from .models import Block, Connection, Flowgraph
 from .retrieval import initialize_retrieval
 from .session import get_grc_context, load_grc, summarize_graph
+from .startup import RuntimeBootstrapResult, bootstrap_runtime
 from .transaction import apply_edit, propose_edit
 from .validation import preflight_transaction
 

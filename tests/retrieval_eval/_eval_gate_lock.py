@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import fcntl
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
-
 
 _LOCK_PATH = Path(".grc_agent/vector_index/.retrieval_eval.lock")
 

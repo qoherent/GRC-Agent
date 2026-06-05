@@ -6,7 +6,6 @@ from typing import Any
 
 from grc_agent._payload import ErrorCode
 
-
 ToolSchemaMap = dict[str, dict[str, Any]]
 
 

@@ -1,29 +1,48 @@
 [build-system]
-requires = ["setuptools>=69"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "grc-agent"
 version = "0.1.0"
 description = "Local GNU Radio Companion .grc assistant."
 readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Qoherent"}]
+keywords = [
+    "gnu-radio",
+    "sdr",
+    "llm",
+    "agent",
+    "code-generation",
+    "local-llm",
+    "llama-cpp",
+    "rag",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
 requires-python = ">=3.12"
 dependencies = [
     "ToolAgents==0.3.0",
-    # GNU Radio 3.10.x Python bindings in the supported local environment are
-    # built against the NumPy 1.x ABI. Remove this when the supported GNU Radio
-    # target and deterministic gates pass with NumPy 2.x.
     "numpy<2 ; python_full_version < '3.13'",
     "pyyaml>=6.0.3",
-    # Provides local Qdrant + FastEmbed integration. Embedding model files are
-    # downloaded/cached by the user's environment during explicit vector build;
-    # they are not bundled in this package.
     "qdrant-client[fastembed]>=1.14.2",
-    "PySide6>=6.5.0",
-    "Pygments>=2.17.0",
 ]
 
 [project.optional-dependencies]
+gui = [
+    "PySide6>=6.5.0",
+    "Pygments>=2.17.0",
+]
 dev = [
     "ruff>=0.15.9",
     "ruamel-yaml>=0.19.1",
@@ -31,15 +50,38 @@ dev = [
     "pytest-qt>=4.4.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/qoherent/grc-agent"
+Repository = "https://github.com/qoherent/grc-agent"
+Issues = "https://github.com/qoherent/grc-agent/issues"
+Changelog = "https://github.com/qoherent/grc-agent/blob/main/docs/CHANGELOG.md"
+
 [project.scripts]
 grc-agent = "grc_agent.cli:main"
 grc-agent-gui = "grc_agent_gui.app:main"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.hatch.build.targets.wheel]
+packages = ["src/grc_agent", "src/grc_agent_gui"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel.force-include]
+"docs/wiki_gnuradio_org" = "grc_agent/wiki_gnuradio_org"
 
 [tool.ruff]
-extend-exclude = ["Temp"]
+line-length = 100
+target-version = "py312"
+src = ["grc_agent", "grc_agent_gui", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line-too-long (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]  # asserts are fine in tests
+"src/grc_agent/cli.py" = ["B008"]  # function call in default arg is intentional (argparse)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+qt_api = "pyside6"

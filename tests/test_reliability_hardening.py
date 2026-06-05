@@ -15,10 +15,10 @@ can self-correct rather than loop.
 
 from __future__ import annotations
 
-from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession

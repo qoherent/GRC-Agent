@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
 import json
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import median
-import time
 from typing import Any
 
 from grc_agent.agent import GrcAgent
 from grc_agent.config import default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.retrieval.vector import semantic_search_grc
-from tests.retrieval_eval._eval_gate_lock import acquire_retrieval_eval_lock
 
+from tests.retrieval_eval._eval_gate_lock import acquire_retrieval_eval_lock
 
 DEFAULT_CORPUS = Path("tests/data/grc_docs_answer_eval.jsonl")
 DEFAULT_ADVISOR_REPORT = Path("reports/GRC_DOCS_ANSWER_ADVISOR_REPORT.md")

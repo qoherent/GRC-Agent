@@ -1,11 +1,10 @@
 """Load app runtime configuration with built-in defaults and optional overrides."""
 
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import tomllib
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-
 
 CONFIG_FILE_NAME = "grc_agent.toml"
 CONFIG_ENV_VAR = "GRC_AGENT_CONFIG"
@@ -34,6 +33,11 @@ class LlamaConfig:
     temperature: float
     enable_thinking: bool
     request_timeout_seconds: float
+    # Retention in days for the launcher log files under
+    # `~/.cache/grc_agent/llama_launcher_logs/`. 0 keeps them forever;
+    # the default prunes anything older than 7 days on every CLI/GUI
+    # invocation. See `LlamaServerLauncher.prune_old_logs()`.
+    log_retention_days: int
 
 
 @dataclass(frozen=True)
@@ -180,7 +184,7 @@ def default_app_config() -> AppConfig:
             model="Qwen3.5-9B-UD-Q4_K_XL.gguf",
             hf_model="unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL",
             model_path=None,
-            device="CUDA0",
+            device="CPU",
             gpu_layers=999,
             desired_context_tokens=120000,
             startup_timeout_seconds=300.0,
@@ -189,6 +193,7 @@ def default_app_config() -> AppConfig:
             temperature=0.0,
             enable_thinking=False,
             request_timeout_seconds=60.0,
+            log_retention_days=7,
         ),
         agent=AgentConfig(
             history_compact_budget=100000,
@@ -331,6 +336,12 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 "request_timeout_seconds",
                 context="[llama]",
             ),
+            log_retention_days=_optional_non_negative_int(
+                llama_table,
+                "log_retention_days",
+                default=defaults.llama.log_retention_days,
+                context="[llama]",
+            ),
         ),
         agent=agent_config,
     )
@@ -420,6 +431,23 @@ def _optional_positive_int(
     return _require_positive_int(payload, key, context=context)
 
 
+def _optional_non_negative_int(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    context: str,
+) -> int:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigError(
+            f"{context}.{key} must be an integer greater than or equal to zero."
+        )
+    return value
+
+
 def _optional_positive_float(
     payload: dict[str, Any],
     key: str,
@@ -455,6 +483,10 @@ def _optional_nullable_non_empty_string(
         return default
     value = payload.get(key)
     if value is None:
+        return None
+    # Allow empty string to mean "unset; fall back to hf_model" so a fresh
+    # config can ship with `model_path = ""` without raising.
+    if isinstance(value, str) and not value.strip():
         return None
     return _require_non_empty_string(payload, key, context=context)
 
@@ -684,6 +716,10 @@ def _validate_cross_field_constraints(config: AppConfig) -> None:
     if config.llama.desired_context_tokens < 4096:
         raise ConfigError(
             "[llama].desired_context_tokens must be >= 4096 for bounded chat/tool turns."
+        )
+    if not 0 <= config.llama.log_retention_days <= 365:
+        raise ConfigError(
+            "[llama].log_retention_days must be between 0 and 365 (0 keeps logs forever)."
         )
     if guardrails.max_compact_list_items < 1:
         raise ConfigError(

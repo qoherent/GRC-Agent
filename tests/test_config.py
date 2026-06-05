@@ -1,9 +1,9 @@
 """Tests for runtime config resolution and packaged CLI defaults."""
 
-from pathlib import Path
 import tempfile
 import tomllib
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from grc_agent.cli import _build_parser, _maybe_translate_legacy_args
@@ -28,10 +28,15 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:8080")
         self.assertEqual(config.llama.model, "Qwen3.5-9B-UD-Q4_K_XL.gguf")
         self.assertEqual(config.llama.hf_model, "unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL")
-        self.assertEqual(
-            config.llama.model_path,
-            "/home/mahmoud/models/Qwen3.5-9B-UD-Q4_K_XL.gguf",
-        )
+        # model_path is intentionally empty in the committed default so a fresh
+        # clone does not hardcode a per-developer path. The loader normalizes
+        # an empty string to `None`, meaning "unset; fall back to hf_model".
+        # Set it via `grc-agent init` or by editing
+        # `~/.config/grc_agent/config.toml`.
+        self.assertIsNone(config.llama.model_path)
+        # device defaults to "CPU" so llama.cpp auto-detects the accelerator
+        # rather than failing on a CUDA-only default in a CPU-only install.
+        self.assertEqual(config.llama.device, "CPU")
         self.assertEqual(config.llama.desired_context_tokens, 120000)
         self.assertEqual(config.llama.startup_timeout_seconds, 300.0)
         self.assertEqual(config.llama.max_tokens, 4096)
@@ -39,6 +44,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
+        self.assertEqual(config.llama.log_retention_days, 7)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 320)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 64)
         self.assertEqual(config.agent.docs_answer.helper_prompt_version, "v3_compact")

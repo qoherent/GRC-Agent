@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import signal
 import socket
 import subprocess
 import time
-
+from pathlib import Path
 
 _STUB_LLAMA_SERVER = """#!/usr/bin/env python3
 import argparse

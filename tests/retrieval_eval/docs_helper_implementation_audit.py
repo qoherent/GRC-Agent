@@ -7,11 +7,11 @@ representative ask_grc_docs questions and writes a markdown audit report.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
 import json
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import median
-import time
 from typing import Any
 from urllib import request
 

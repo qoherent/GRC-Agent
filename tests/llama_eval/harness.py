@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
-from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import os
@@ -12,29 +10,31 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
-
-from ruamel.yaml import YAML
+from typing import Any
 
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
-from grc_agent.runtime import prompt as runtime_prompt
-from grc_agent.runtime import tool_schemas as runtime_tool_schemas
-from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
 from grc_agent.recovery import (
     NO_RECOVERY_NEEDED,
     RecoveryDecision,
     classify_tool_result_for_recovery,
 )
-from grc_agent.trace import build_live_eval_turn_trace
+from grc_agent.runtime import prompt as runtime_prompt
+from grc_agent.runtime import tool_schemas as runtime_tool_schemas
+from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
 from grc_agent.session_ops import parse_connection_id
 from grc_agent.toolagents_runtime import (
     ToolAgentsLlamaProviderConfig,
     run_bounded_toolagents_turn,
 )
+from grc_agent.trace import build_live_eval_turn_trace
+from ruamel.yaml import YAML
 
 DEFAULT_FIXTURE_NAME = "random_bit_generator.grc"
 DEFAULT_LIVE_EVAL_MAX_TOKENS = 2048
@@ -906,8 +906,8 @@ def run_live_scenario_once(
     mvp_tool_profile: bool = True,
 ) -> dict[str, Any]:
     """Run one declarative live scenario in an isolated fixture workspace."""
-    from grc_agent.agent import GrcAgent
     import grc_agent.runtime.prompt as _runtime_prompt
+    from grc_agent.agent import GrcAgent
 
     # Inject a unique run ID into the system prompt to force a KV cache miss
     # on llama.cpp across consecutive fuzzed runs (prevents floating-point drift).
@@ -941,7 +941,7 @@ def run_live_scenario_once(
 
         turn_results: list[dict[str, Any]] = []
         error_message = ""
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
 
         for turn_index, turn in enumerate(scenario.turns):
             pre_turn_setup: list[dict[str, Any]] = []
@@ -998,7 +998,7 @@ def run_live_scenario_once(
             )
             result: dict[str, Any] = {}
             turn_error = ""
-            turn_started = datetime.now(timezone.utc)
+            turn_started = datetime.now(UTC)
             try:
                 if turn.clarification_response:
                     clarification = agent.resolve_pending_clarification(
@@ -1085,7 +1085,7 @@ def run_live_scenario_once(
                 "ok": result.get("ok", False) if result else False,
                 "error": turn_error,
                 "elapsed_seconds": round(
-                    (datetime.now(timezone.utc) - turn_started).total_seconds(),
+                    (datetime.now(UTC) - turn_started).total_seconds(),
                     3,
                 ),
                 **tool_dimensions,
@@ -1190,7 +1190,7 @@ def run_live_scenario_once(
             else False,
             "error": error_message,
             "elapsed_seconds": round(
-                (datetime.now(timezone.utc) - started_at).total_seconds(),
+                (datetime.now(UTC) - started_at).total_seconds(),
                 3,
             ),
             **overall,
@@ -2205,7 +2205,7 @@ def load_run_store(results_path: str | Path) -> dict[str, Any]:
 def write_run_store(results_path: str | Path, store: dict[str, Any]) -> None:
     path = Path(results_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    store["updated_at"] = datetime.now(timezone.utc).isoformat()
+    store["updated_at"] = datetime.now(UTC).isoformat()
     path.write_text(json.dumps(store, indent=2, sort_keys=False), encoding="utf-8")
 
 
@@ -2284,7 +2284,7 @@ def build_persisted_run_entry(
         "category": case.category,
         "case_name": case.name,
         "run_index": run_index,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "status": status,
         "error_type": run_result.get("error_type")
         or classify_infra_error(run_result.get("error")),
@@ -2523,7 +2523,7 @@ def run_phase_eval(
         "n_runs": n_runs,
         "majority_threshold": majority_threshold,
         "stability_threshold": stability_threshold,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "cases": results,
         "summary": summary,
     }

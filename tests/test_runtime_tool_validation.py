@@ -1,7 +1,7 @@
 """Tests for runtime tool-call schema validation."""
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession

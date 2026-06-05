@@ -1,12 +1,11 @@
 """Regression tests for malformed catalog metadata and error envelopes."""
 
-from pathlib import Path
 import stat
 import tempfile
 import unittest
+from pathlib import Path
 
 import yaml
-
 from grc_agent.catalog.describe import _describe_block_with_root
 from grc_agent.catalog.loaders import clear_catalog_snapshot_cache
 

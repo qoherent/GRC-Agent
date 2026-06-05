@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
-from datetime import UTC, datetime
-from importlib.metadata import PackageNotFoundError, version
 import json
-from pathlib import Path
+import logging
 import platform
 import re
 import shutil
 import subprocess
 import sys
+from dataclasses import asdict, is_dataclass
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 from grc_agent.config import AppConfig, resolve_config_path
+
+logger = logging.getLogger(__name__)
 
 
 DEBUG_BUNDLE_SCHEMA_VERSION = "2026-05-20.phase19-debug-bundle-v2"
@@ -74,6 +77,7 @@ def _git_output(repo_root: Path, *args: str) -> str | None:
             text=True,
         )
     except Exception:
+        logger.debug("git %s failed", " ".join(args), exc_info=True)
         return None
     return completed.stdout.strip()
 
@@ -94,6 +98,9 @@ def _is_git_ignored(repo_root: Path, relative_path: str) -> bool | None:
             stderr=subprocess.DEVNULL,
         )
     except Exception:
+        logger.debug(
+            "git check-ignore %s failed", relative_path, exc_info=True
+        )
         return None
     return completed.returncode == 0
 
@@ -107,6 +114,9 @@ def _is_git_tracked(repo_root: Path, relative_path: str) -> bool | None:
             stderr=subprocess.DEVNULL,
         )
     except Exception:
+        logger.debug(
+            "git ls-files --error-unmatch %s failed", relative_path, exc_info=True
+        )
         return None
     return completed.returncode == 0
 

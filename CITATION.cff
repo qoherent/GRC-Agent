@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use GRC Agent in research or a published project, please cite it."
+title: "GRC Agent"
+type: software
+date-released: 2026-06-05
+version: 0.1.0
+license: MIT
+authors:
+  - name: Qoherent
+keywords:
+  - gnu-radio
+  - sdr
+  - llm
+  - agent
+  - code-generation
+  - llama-cpp
+  - retrieval-augmented-generation
+repository-code: "https://github.com/qoherent/grc-agent"
+url: "https://github.com/qoherent/grc-agent"

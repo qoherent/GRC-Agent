@@ -1,8 +1,8 @@
 """Round-trip graph-id stability checks."""
 
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from grc_agent.flowgraph_session import FlowgraphSession
 

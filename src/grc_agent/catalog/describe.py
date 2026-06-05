@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .errors import BlockNotFoundError, CatalogError, CatalogLoadError, build_error_payload
 from grc_agent._payload import ErrorCode
+
+from .errors import BlockNotFoundError, CatalogError, CatalogLoadError, build_error_payload
 from .loaders import find_block_source
 from .normalize import (
     build_signature,

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent.runtime.prompt import __version__ as PROMPT_VERSION
 from grc_agent.runtime.prompt import build_system_prompt
 from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOC_PATH = REPO_ROOT / "docs" / "MODEL_CONTEXT_BIBLE.md"

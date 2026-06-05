@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +17,8 @@ from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.models import Block, Connection
 from grc_agent.session_ops import (
     block_name_is_referenced_elsewhere,
-    connection_id,
     connection_entry_to_tuple,
+    connection_id,
     default_block_states,
     parse_blocks,
     parse_connections,
@@ -50,7 +50,7 @@ class SessionSnapshot:
     state_revision: int | None = None
 
     @classmethod
-    def from_session(cls, session: FlowgraphSession) -> "SessionSnapshot":
+    def from_session(cls, session: FlowgraphSession) -> SessionSnapshot:
         if session.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
         raw_data = copy.deepcopy(session.flowgraph.raw_data)
@@ -59,7 +59,7 @@ class SessionSnapshot:
         return snapshot
 
     @classmethod
-    def from_raw_data(cls, raw_data: dict[str, Any]) -> "SessionSnapshot":
+    def from_raw_data(cls, raw_data: dict[str, Any]) -> SessionSnapshot:
         blocks = parse_blocks(raw_data.get("blocks"))
         connections = parse_connections(raw_data.get("connections"))
         return cls(raw_data=raw_data, blocks=blocks, connections=connections)
@@ -1067,10 +1067,10 @@ def _evaluate_snapshot_params(
     evaluated_parameters_by_block = {}
     errors: list[ValidationIssue] = []
 
-    from gnuradio.grc.core.platform import Platform
-    from gnuradio import gr
     import gnuradio.digital as digital
     import gnuradio.filter as filter_mod
+    from gnuradio import gr
+    from gnuradio.grc.core.platform import Platform
 
     global _cached_platform
     if "_cached_platform" not in globals():
@@ -1088,7 +1088,7 @@ def _evaluate_snapshot_params(
     if _cached_platform is not None:
         try:
             fg = _cached_platform.make_flow_graph()
-            
+
             orig_eval = fg.evaluate
             def custom_eval(expr, namespace=None, local_namespace=None):
                 fg.namespace["digital"] = digital
@@ -1124,7 +1124,7 @@ def _evaluate_snapshot_params(
                 evaluated_parameters_by_block[grc_block.name] = block_eval_params
         except Exception as e:
             logger.debug("Snapshot native evaluation failed: %s", e)
-            
+
     return evaluated_parameters_by_block, errors
 
 
@@ -1582,7 +1582,7 @@ def _assert_new_block_name_available(
 def _validate_port_index(
     *,
     ports: list[ResolvedPort],
-    port_index: "int | str",
+    port_index: int | str,
     block_name: str,
     op_index: int,
     op_type: str,
@@ -1669,7 +1669,8 @@ def _preflight_dtype_param_hint(
     catalog_root: str | Path | None = None,
 ) -> str | None:
     import re
-    from .rules import build_parameter_context, _resolve_port_multiplicity
+
+    from .rules import _resolve_port_multiplicity, build_parameter_context
 
     block_type = block.block_type
     instance_name = block.instance_name

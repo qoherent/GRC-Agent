@@ -2,20 +2,18 @@
 
 import argparse
 import hashlib
-from importlib import metadata
 import json
 import logging
-from pathlib import Path
 import shlex
 import subprocess
 import sys
+from importlib import metadata
+from pathlib import Path
 from typing import Any
 
 from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.agent import GrcAgent
-from grc_agent.runtime.clarification import render_clarification_prompt
-from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
-from grc_agent.config import AppConfig, ConfigError, load_app_config
+from grc_agent.config import AppConfig, ConfigError, default_app_config, load_app_config
 from grc_agent.debug_bundle import (
     build_debug_bundle,
     debug_bundle_summary,
@@ -32,7 +30,6 @@ from grc_agent.dogfood import (
 )
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
-
 from grc_agent.llama_probe import (
     LlamaServerError,
     extract_enabled_builtin_tools,
@@ -40,17 +37,19 @@ from grc_agent.llama_probe import (
 )
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.retrieval.vector import (
-    build_vector_index,
     DEFAULT_EMBEDDING_MODEL,
-    prune_vector_collections,
-    propose_vector_metadata,
-    record_vector_miss,
-    semantic_search_grc,
     VALID_MISS_CATEGORIES,
     VALID_MISS_SOURCES,
+    build_vector_index,
+    propose_vector_metadata,
+    prune_vector_collections,
+    record_vector_miss,
+    semantic_search_grc,
     summarize_vector_misses,
     vector_index_stats,
 )
+from grc_agent.runtime.clarification import render_clarification_prompt
+from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
 from grc_agent.session.load import load_grc as load_grc_session
 from grc_agent.toolagents_runtime import (
@@ -157,9 +156,9 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
 
     chat_epilog = """
 Examples:
-  grc-agent chat mygraph.grc --message "Summarize this graph"
-  grc-agent chat mygraph.grc --message "Change samp_rate to 48000" --json
-  echo "Find an audio sink" | grc-agent chat mygraph.grc --stdin
+  uv run grc-agent chat mygraph.grc --message "Summarize this graph"
+  uv run grc-agent chat mygraph.grc --message "Change samp_rate to 48000" --json
+  echo "Find an audio sink" | uv run grc-agent chat mygraph.grc --stdin
 """
     chat_parser = subparsers.add_parser(
         "chat",
@@ -226,8 +225,8 @@ Examples:
 
     tool_epilog = """
 Examples:
-  grc-agent tool summarize_graph --file mygraph.grc
-  grc-agent tool apply_edit --args '{"add_blocks": [{"block_id": "analog_sig_source_x", "instance_name": "src"}]}'
+  uv run grc-agent tool summarize_graph --file mygraph.grc
+  uv run grc-agent tool apply_edit --args '{"add_blocks": [{"block_id": "analog_sig_source_x", "instance_name": "src"}]}'
 """
     tool_parser = subparsers.add_parser(
         "tool",
@@ -578,6 +577,79 @@ Examples:
         help="Print restore result as JSON.",
     )
 
+    init_epilog = """
+Examples:
+  # Interactive: prompts for each value
+  uv run grc-agent init
+
+  # Non-interactive: seed with explicit values
+  uv run grc-agent init --model-path ~/models/qwen.gguf --device CUDA0 --force
+
+  # Print the resolved target path without writing
+  uv run grc-agent init --print-target
+"""
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Write a starter config.toml to ~/.config/grc_agent/.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=init_epilog.strip("\n"),
+    )
+    init_parser.add_argument(
+        "--model",
+        help="llama.cpp model alias (e.g. my-model.gguf). Defaults to the built-in default.",
+    )
+    init_parser.add_argument(
+        "--hf-model",
+        help="Hugging Face repo id to auto-download from (e.g. unsloth/Qwen3.5-9B-GGUF:Q4_K_XL).",
+    )
+    init_parser.add_argument(
+        "--model-path",
+        help="Absolute path to a local GGUF model file. Leave empty to rely on --hf-model.",
+    )
+    init_parser.add_argument(
+        "--server-url",
+        help="llama.cpp HTTP base URL (default: http://127.0.0.1:8080).",
+    )
+    init_parser.add_argument(
+        "--device",
+        help="Accelerator device (CUDA0, Metal, Vulkan0, CPU). Default: CPU (auto-detect).",
+    )
+    init_parser.add_argument(
+        "--config-path",
+        help="Override the destination file path. Defaults to ~/.config/grc_agent/config.toml.",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the destination file if it already exists.",
+    )
+    init_parser.add_argument(
+        "--print-target",
+        action="store_true",
+        help="Print the resolved destination path and exit without writing.",
+    )
+    init_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the result as JSON.",
+    )
+    init_parser.add_argument(
+        "--log-retention-days",
+        type=int,
+        default=None,
+        help="Launcher log retention in days. 0 keeps logs forever. Default: 7.",
+    )
+
+    paths_parser = subparsers.add_parser(
+        "paths",
+        help="Print every filesystem location the package uses (config, history, vector index, caches).",
+    )
+    paths_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print all paths as a JSON object.",
+    )
+
     return parser
 
 
@@ -603,6 +675,8 @@ def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
         "vector",
         "dogfood",
         "history",
+        "init",
+        "paths",
     }
     if not argv or any(arg in command_names for arg in argv):
         return argv
@@ -639,10 +713,28 @@ def _parse_config_override(argv: list[str]) -> str | None:
     return args.config
 
 
+class Colors:
+    HEADER = "\033[95m"
+    BLUE = "\033[94m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+
+def _colorize(color: str, text: str) -> str:
+    """Colorize text with ANSI codes if stdout is a TTY."""
+    if sys.stdout.isatty():
+        return f"{color}{text}{Colors.RESET}"
+    return text
+
+
 def _print_history(agent: GrcAgent, *, verbose: bool = False) -> None:
     """Render runtime history in a compact CLI-friendly form."""
     if verbose:
-        print("\n--- History ---")
+        print(_colorize(Colors.BOLD + Colors.YELLOW, "\n--- History ---"))
         for turn in agent.history:
             if turn.get("role") == "session" and isinstance(turn.get("content"), dict):
                 printable_turn = dict(turn)
@@ -654,7 +746,7 @@ def _print_history(agent: GrcAgent, *, verbose: bool = False) -> None:
                     fn = tc.get("function") or {}
                     name = tc.get("name") or fn.get("name") or "?"
                     args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else fn.get("arguments", {})
-                    print(f"Assistant called {name}: {json.dumps(args)}")
+                    print(f"{_colorize(Colors.BOLD + Colors.GREEN, 'Assistant')} called {_colorize(Colors.CYAN, name)}: {json.dumps(args)}")
                 continue
             if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
                 printable_turn = dict(turn)
@@ -663,7 +755,7 @@ def _print_history(agent: GrcAgent, *, verbose: bool = False) -> None:
                 continue
             print(turn)
         return
-    print("\n--- History ---")
+    print(_colorize(Colors.BOLD + Colors.YELLOW, "\n--- History ---"))
     for turn in agent.history:
         if turn.get("role") == "session":
             continue
@@ -671,25 +763,25 @@ def _print_history(agent: GrcAgent, *, verbose: bool = False) -> None:
             for tc in turn["tool_calls"]:
                 fn = tc.get("function") or {}
                 name = tc.get("name") or fn.get("name") or "?"
-                print(f"  Tool call: {name}")
+                print(f"  {_colorize(Colors.BLUE, 'Tool call:')} {_colorize(Colors.BOLD, name)}")
             continue
         if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
             content = turn["content"]
             ok = content.get("ok")
             name = content.get("tool") or turn.get("name") or "?"
-            status = "ok" if ok else "FAILED"
+            status = _colorize(Colors.GREEN, "ok") if ok else _colorize(Colors.RED, "FAILED")
             msg = content.get("message", "")
-            line = f"  {name}: {status}"
+            line = f"  {_colorize(Colors.BOLD, name)}: {status}"
             if not ok and msg:
-                line += f" — {msg[:80]}"
+                line += f" — {_colorize(Colors.YELLOW, msg[:80])}"
             print(line)
             continue
         role = turn.get("role", "")
         text = turn.get("content", "")
         if role == "user" and isinstance(text, str):
-            print(f"  User: {text[:100]}")
+            print(f"  {_colorize(Colors.BOLD + Colors.CYAN, 'User:')} {text[:100]}")
         elif role == "assistant" and isinstance(text, str) and text:
-            print(f"  Assistant: {text[:120]}")
+            print(f"  {_colorize(Colors.BOLD + Colors.GREEN, 'Assistant:')} {text[:120]}")
 
 
 def _print_turn_operations(agent: GrcAgent, *, start_index: int) -> None:
@@ -705,29 +797,29 @@ def _print_turn_operations(agent: GrcAgent, *, start_index: int) -> None:
                 if not isinstance(args, dict):
                     args = fn.get("arguments", {})
                     if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except json.JSONDecodeError:
-                            args = {}
+                           try:
+                               args = json.loads(args)
+                           except json.JSONDecodeError:
+                               args = {}
                 detail = _tool_detail_from_args(args if isinstance(args, dict) else {})
-                requested.append(f"{name}{detail}")
+                requested.append(f"{_colorize(Colors.BOLD + Colors.CYAN, name)}{detail}")
         if turn.get("role") != "tool" or not isinstance(turn.get("content"), dict):
             continue
         content = turn["content"]
         name = content.get("tool") or turn.get("name") or "?"
         ok = content.get("ok")
-        status = "ok" if ok is True else "FAILED" if ok is False else "unknown"
+        status = _colorize(Colors.GREEN, "ok") if ok is True else _colorize(Colors.RED, "FAILED") if ok is False else "unknown"
         detail = _tool_detail_from_args(content)
         validation = _validation_status(content)
         dirty = _dirty_status(content)
-        line = f"{name}{detail}: {status}"
+        line = f"{_colorize(Colors.BOLD, name)}{detail}: {status}"
         extras = [item for item in (validation, dirty) if item]
         if extras:
             line += f" ({', '.join(extras)})"
         lines.append(line)
     if not lines and not requested:
         return
-    print("\nOperations:")
+    print(_colorize(Colors.BOLD + Colors.CYAN, "\nOperations:"))
     if requested:
         print(f"  requested: {'; '.join(requested)}")
     for line in lines:
@@ -767,24 +859,27 @@ def _dirty_status(payload: dict[str, Any]) -> str | None:
 def _print_active_session(agent: GrcAgent, *, verbose: bool = False) -> None:
     """Render the currently bound session before running the chat loop."""
     active_session = agent.active_session_snapshot()
-    print("\n--- Active Session ---")
+    print(_colorize(Colors.BOLD + Colors.CYAN, "\n--- Active Session ---"))
     if active_session is None:
         print("No active flowgraph session.")
         return
     validation = active_session["validation"]["status"]
     path = active_session.get("path") or "(new graph)"
+    val_color = Colors.GREEN if validation == "valid" else Colors.RED
+    val_str = _colorize(val_color, validation)
+    dirty_str = _colorize(Colors.YELLOW, "True") if active_session["dirty"] else "False"
     if verbose:
         print(
-            f"{path} "
+            f"{_colorize(Colors.BOLD, path)} "
             f"(graph_id={active_session['graph_id']}, "
             f"state_revision={active_session['state_revision']}, "
-            f"dirty={active_session['dirty']}, validation={validation})"
+            f"dirty={dirty_str}, validation={val_str})"
         )
     else:
         print(
-            f"{path} "
+            f"{_colorize(Colors.BOLD, path)} "
             f"(graph_id={active_session['graph_id']}, "
-            f"dirty={active_session['dirty']}, validation={validation})"
+            f"dirty={dirty_str}, validation={val_str})"
         )
 
 
@@ -805,18 +900,7 @@ def _load_initial_session(file_path: str | None) -> FlowgraphSession:
         if isinstance(loaded, dict):
             raise CliError(loaded)
         if not loaded.validate():
-            raise CliError(
-                {
-                    "ok": False,
-                    "message": "Refusing to load graph because validation failed.",
-                    "error_type": (
-                        ErrorCode.VALIDATION_TIMEOUT
-                        if loaded.last_validation_returncode == -2
-                        else ErrorCode.GNU_VALIDATION_FAILED
-                    ),
-                    "validation": loaded.validation_state(),
-                }
-            )
+            logger.warning("Graph loaded with validation failures. Ensure it is fixed before execution.")
         session = loaded
     return session
 
@@ -833,7 +917,7 @@ def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
-    print("\n--- Error ---")
+    print(_colorize(Colors.BOLD + Colors.RED, "\n--- Error ---"))
     print(payload.get("message", "Command failed."))
     error_type = str(payload.get("error_type") or "")
     hint = ""
@@ -850,10 +934,30 @@ def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
     elif error_type == ErrorCode.RETRIEVAL_NOT_READY:
         hint = (
             "Hint: run `uv run grc-agent doctor` and ensure GNU Radio catalog "
-            "metadata is discoverable."
+            "metadata is discoverable. Run `uv run grc-agent vector build` to build "
+            "the local index."
+        )
+    elif error_type == ErrorCode.LLAMA_SERVER_MISSING:
+        hint = (
+            "Hint: install llama.cpp and ensure `llama-server` is on PATH. "
+            "See the README install table. The CLI will auto-start a local "
+            "server once `llama-server` is on PATH; to use a remote server, "
+            "point `[llama].server_url` at it and set `start_llama=False` "
+            "(advanced)."
+        )
+    elif error_type == ErrorCode.GRCC_MISSING:
+        hint = (
+            "Hint: install GNU Radio 3.10.x via your package manager and "
+            "ensure `grcc` is on PATH. See the README install table."
+        )
+    elif error_type == ErrorCode.MODEL_NOT_FOUND:
+        hint = (
+            "Hint: set `[llama].model_path` in your config to a local GGUF "
+            "file, or set `[llama].hf_model` to a Hugging Face repo for "
+            "auto-download. Use `uv run grc-agent init` to write a starter config."
         )
     if hint:
-        print(hint)
+        print(_colorize(Colors.YELLOW, hint))
 
 
 def _is_installed_example_path(file_path: str | None) -> bool:
@@ -987,6 +1091,14 @@ def _run_llama_runtime(
         logger.error("launcher_failed error=%s", result.errors[-1] if result.errors else "unknown")
         print("\n--- Launcher ---")
         print(result.errors[-1] if result.errors else "Failed to ensure llama.cpp server.")
+        if result.error_type:
+            from grc_agent._payload import build_error_payload
+            _print_cli_error(
+                build_error_payload(
+                    error_type=result.error_type,
+                    message=result.errors[-1] if result.errors else "Launcher failed.",
+                )
+            )
         return 1
 
     agent = GrcAgent(
@@ -1150,7 +1262,7 @@ def _run_single_turn(
                     operations.append({"name": name, "arguments": args})
 
         final_state = agent.active_session_snapshot() or {}
-        
+
         payload = {
             "ok": result["ok"],
             "assistant_text": result.get("assistant_text", ""),
@@ -1181,12 +1293,12 @@ def _run_repl_loop(
         if max_tool_rounds is None
         else max_tool_rounds
     )
-    print("\nInteractive chat. Type /save [path], /history, /quit, or /exit.\n")
+    print(_colorize(Colors.BOLD + Colors.CYAN, "\nInteractive chat. Type /save [path], /history, /quit, or /exit.\n"))
     last_exit_code = 0
 
     while True:
         try:
-            user_input = input("You: ").strip()
+            user_input = input(_colorize(Colors.BOLD + Colors.BLUE, "You: ")).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1195,6 +1307,13 @@ def _run_repl_loop(
             continue
         if user_input.lower() in ("/quit", "/exit"):
             break
+        if user_input.lower() == "/help":
+            print("\nAvailable commands:")
+            print("  /save [path]    - Save current graph state (optionally to a specific path)")
+            print("  /history        - Show conversation and graph mutation history")
+            print("  /help           - Show this help message")
+            print("  /quit or /exit  - Exit the session\n")
+            continue
         if user_input.lower() == "/history":
             _print_history(agent, verbose=True)
             print()
@@ -1215,17 +1334,18 @@ def _run_repl_loop(
                 tool_result = resolved.get("tool_result", {})
                 ok = tool_result.get("ok")
                 msg = tool_result.get("message", "")
-                print(f"\n--- Executed {'OK' if ok else 'FAILED'} ---")
+                status_str = _colorize(Colors.GREEN, "OK") if ok else _colorize(Colors.RED, "FAILED")
+                print(f"\n{_colorize(Colors.BOLD, f'--- Executed {status_str} ---')}")
                 if msg:
                     print(msg)
                 _maybe_render_pending_clarification(agent)
                 continue
             elif mode == "expired":
-                print("\n--- Expired ---")
+                print(_colorize(Colors.BOLD + Colors.RED, "\n--- Expired ---"))
                 print(resolved.get("text", "The question is no longer valid."))
                 continue
             elif mode == "reminder":
-                print("\n--- Reminder ---")
+                print(_colorize(Colors.BOLD + Colors.YELLOW, "\n--- Reminder ---"))
                 print(resolved.get("text", ""))
                 _maybe_render_pending_clarification(agent)
                 continue
@@ -1245,14 +1365,14 @@ def _run_repl_loop(
                 max_tool_rounds=round_limit,
             )
         except LlamaServerError as exc:
-            print(f"\n--- Runtime Error ---\n{exc}")
+            print(f"\n{_colorize(Colors.BOLD + Colors.RED, '--- Runtime Error ---')}\n{exc}")
             last_exit_code = 1
             continue
 
         if result["ok"]:
-            print(f"\nAssistant:\n{result['assistant_text']}")
+            print(f"\n{_colorize(Colors.BOLD + Colors.GREEN, 'Assistant:')}\n{result['assistant_text']}")
         else:
-            print(f"\n--- Runtime ---\n{result['message']}")
+            print(f"\n{_colorize(Colors.BOLD + Colors.RED, '--- Runtime ---')}\n{result['message']}")
             last_exit_code = 1
 
         _maybe_render_pending_clarification(agent)
@@ -1875,6 +1995,265 @@ def _run_doctor_command(
     return 0 if report["ok"] else 1
 
 
+def _render_init_template(
+    *,
+    model: str | None,
+    hf_model: str | None,
+    model_path: str | None,
+    server_url: str | None,
+    device: str | None,
+    log_retention_days: int | None,
+) -> str:
+    """Render the starter `grc_agent.toml` body with the supplied values."""
+    defaults = default_app_config()
+    lines: list[str] = [
+        "# GRC Agent user config",
+        "# Generated by `grc-agent init`. See the README install table for the full list of",
+        "# supported values. Remove or comment out a key to fall back to the built-in",
+        "# default.",
+        "",
+        "[llama]",
+        f'server_url = "{_toml_escape(server_url or defaults.llama.server_url)}"',
+        f'model = "{_toml_escape(model or defaults.llama.model)}"',
+        f'hf_model = "{_toml_escape(hf_model or defaults.llama.hf_model)}"',
+    ]
+    resolved_model_path = model_path if model_path is not None else defaults.llama.model_path
+    if resolved_model_path:
+        lines.append(f'model_path = "{_toml_escape(resolved_model_path)}"')
+    else:
+        lines.append(
+            '# Set model_path to a local GGUF file path, or leave empty to rely on hf_model.'
+        )
+        lines.append("model_path = \"\"")
+    lines.append(
+        f'device = "{_toml_escape(device or defaults.llama.device)}"'
+    )
+    lines.append("gpu_layers = 999")
+    lines.append("desired_context_tokens = 120000")
+    lines.append("startup_timeout_seconds = 300.0")
+    lines.append("max_tokens = 4096")
+    lines.append("max_tool_rounds = 8")
+    lines.append("temperature = 0.0")
+    lines.append("enable_thinking = false")
+    lines.append("request_timeout_seconds = 120.0")
+    resolved_retention = (
+        log_retention_days
+        if log_retention_days is not None
+        else defaults.llama.log_retention_days
+    )
+    lines.append("# Retention in days for the launcher log files.")
+    lines.append("# 0 keeps them forever; the default prunes anything older.")
+    lines.append(f"log_retention_days = {int(resolved_retention)}")
+    return "\n".join(lines) + "\n"
+
+
+def _toml_escape(value: str) -> str:
+    """Escape a string for inclusion inside a TOML double-quoted basic string."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _prompt_init_value(label: str, *, default: str, current: str | None) -> str:
+    """Prompt the user for one init value when a TTY is attached."""
+    if current is not None:
+        return current
+    prompt_default = current if current is not None else default
+    try:
+        response = input(f"{label} [{prompt_default}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    if not response:
+        return default
+    return response
+
+
+def _run_init_command(args: argparse.Namespace) -> int:
+    """Write a starter config to the user's config directory."""
+    from grc_agent.config import user_config_path
+
+    target = (
+        Path(args.config_path).expanduser()
+        if args.config_path
+        else user_config_path()
+    )
+
+    if args.print_target:
+        print(str(target))
+        return 0
+
+    existing = target.is_file()
+    if existing and not args.force:
+        message = (
+            f"Refusing to overwrite existing config at {target}. "
+            "Pass --force to overwrite, or --config-path to write elsewhere."
+        )
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error_type": ErrorCode.INIT_FAILED,
+                        "message": message,
+                        "target": str(target),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message)
+        return 1
+
+    interactive = (
+        sys.stdin.isatty()
+        and sys.stdout.isatty()
+        and not any(
+            value is not None
+            for value in (
+                args.model,
+                args.hf_model,
+                args.model_path,
+                args.server_url,
+                args.device,
+                getattr(args, "log_retention_days", None),
+            )
+        )
+    )
+
+    defaults = default_app_config()
+    if interactive:
+        print(f"Writing starter config to {target}.")
+        print("Press Enter to accept the default shown in brackets.")
+        model = _prompt_init_value("Model alias", default=defaults.llama.model, current=args.model)
+        hf_model = _prompt_init_value(
+            "Hugging Face repo (auto-download source)", default=defaults.llama.hf_model, current=args.hf_model
+        )
+        model_path = _prompt_init_value(
+            "Local GGUF path (empty to use hf_model)",
+            default=defaults.llama.model_path or "",
+            current=args.model_path,
+        )
+        server_url = _prompt_init_value(
+            "llama.cpp server URL", default=defaults.llama.server_url, current=args.server_url
+        )
+        device = _prompt_init_value(
+            "Device (CPU/CUDA0/Metal/Vulkan0)", default=defaults.llama.device, current=args.device
+        )
+        log_retention_days_str = _prompt_init_value(
+            "Log retention in days (0 = keep forever)",
+            default=str(defaults.llama.log_retention_days),
+            current=(
+                str(args.log_retention_days)
+                if getattr(args, "log_retention_days", None) is not None
+                else None
+            ),
+        )
+        try:
+            log_retention_days = int(log_retention_days_str)
+        except ValueError:
+            log_retention_days = defaults.llama.log_retention_days
+    else:
+        model = args.model
+        hf_model = args.hf_model
+        model_path = args.model_path
+        server_url = args.server_url
+        device = args.device
+        log_retention_days = getattr(args, "log_retention_days", None)
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        body = _render_init_template(
+            model=model,
+            hf_model=hf_model,
+            model_path=model_path,
+            server_url=server_url,
+            device=device,
+            log_retention_days=log_retention_days,
+        )
+        target.write_text(body, encoding="utf-8")
+    except OSError as exc:
+        message = f"Failed to write {target}: {exc}"
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error_type": ErrorCode.INIT_FAILED,
+                        "message": message,
+                        "target": str(target),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message)
+        return 1
+
+    payload = {
+        "ok": True,
+        "target": str(target),
+        "wrote": not existing,
+        "model": model or defaults.llama.model,
+        "hf_model": hf_model or defaults.llama.hf_model,
+        "model_path": model_path or "",
+        "server_url": server_url or defaults.llama.server_url,
+        "device": device or defaults.llama.device,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        action = "Updated" if existing else "Wrote"
+        print(f"{action} {target}.")
+        print("Next: `uv run grc-agent doctor` to verify the environment.")
+    return 0
+
+
+def _collect_package_paths() -> dict[str, str]:
+    """Return a stable mapping of every on-disk location the package uses."""
+    from grc_agent.config import default_config_path, user_config_path
+    from grc_agent.history import HISTORY_ENV_VAR, default_history_path
+    from grc_agent.llama_launcher import (
+        DEFAULT_LLAMA_LOG_DIR,
+        DEFAULT_LLAMA_STATE_PATH,
+    )
+
+    cache_root = Path.home() / ".cache"
+    # `default_history_path()` returns a cwd-relative path when no env
+    # override is set; resolve it to an absolute path so the output is
+    # unambiguous regardless of the current working directory.
+    history_path = default_history_path()
+    if not history_path.is_absolute():
+        history_path = (Path.cwd() / history_path).resolve()
+    paths: dict[str, str] = {
+        "config_repo": str(default_config_path()),
+        "config_user": str(user_config_path()),
+        "history": str(history_path),
+        "history_env_var": HISTORY_ENV_VAR,
+        "vector_index_default": str(Path.home() / ".grc_agent" / "vector_index"),
+        "llama_state": str(DEFAULT_LLAMA_STATE_PATH),
+        "llama_logs": str(DEFAULT_LLAMA_LOG_DIR),
+        "fastembed_cache": str(cache_root / "fastembed"),
+        "hf_cache": str(cache_root / "huggingface"),
+        "grc_agent_state": str(Path.home() / ".grc_agent"),
+        "grc_agent_cache": str(cache_root / "grc_agent"),
+    }
+    return paths
+
+
+def _run_paths_command(args: argparse.Namespace) -> int:
+    """Print every filesystem location the package uses."""
+    paths = _collect_package_paths()
+    if args.json:
+        print(json.dumps(paths, indent=2, sort_keys=True))
+        return 0
+    width = max(len(key) for key in paths)
+    print("GRC Agent filesystem locations:")
+    for key, value in paths.items():
+        print(f"  {key.ljust(width)}  {value}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.WARNING,
@@ -1994,6 +2373,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "history":
         return _run_history_command(args)
+    if args.command == "init":
+        return _run_init_command(args)
+    if args.command == "paths":
+        return _run_paths_command(args)
 
     parser.error("Unknown command.")
     return 2

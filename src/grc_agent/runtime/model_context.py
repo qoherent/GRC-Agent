@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from grc_agent.runtime.tool_context import tool_history_content_as_text
-
 
 HistoryEntry = dict[str, Any]
 PromptProvider = Callable[[], str]

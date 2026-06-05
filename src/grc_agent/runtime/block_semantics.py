@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 import logging
+from functools import lru_cache
 from typing import Any
 
 from grc_agent.catalog.describe import _describe_block_with_root

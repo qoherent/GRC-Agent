@@ -73,7 +73,7 @@ class ClarificationRequest:
         return payload
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ClarificationRequest":
+    def from_dict(cls, payload: dict[str, Any]) -> ClarificationRequest:
         """Rehydrate from a dict stored in history or pending state."""
         opts = payload.get("options", [])
         options = [

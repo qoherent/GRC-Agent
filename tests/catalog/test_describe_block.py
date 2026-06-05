@@ -1,8 +1,8 @@
 """Tests for the public `describe_block` catalog API."""
 
 import inspect
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from grc_agent import describe_block
 from grc_agent.catalog.loaders import clear_catalog_snapshot_cache, discover_catalog_root
