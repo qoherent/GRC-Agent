@@ -149,7 +149,9 @@ class ModelCommandSwapTests(unittest.TestCase):
         fake_result.health_evidence = {"llama_model_ready": True}
         with mock.patch(
             "grc_agent.llama_launcher.LlamaServerLauncher"
-        ) as launcher_cls:
+        ) as launcher_cls, mock.patch(
+            "grc_agent.preferences.update_last_model"
+        ):
             launcher_cls.return_value.swap_model.return_value = fake_result
             args = argparse.Namespace(
                 model_command="swap",
@@ -184,7 +186,9 @@ class ModelCommandSwapTests(unittest.TestCase):
         fake_result.health_evidence = {}
         with mock.patch(
             "grc_agent.llama_launcher.LlamaServerLauncher"
-        ) as launcher_cls:
+        ) as launcher_cls, mock.patch(
+            "grc_agent.preferences.update_last_model"
+        ):
             launcher_cls.return_value.swap_model.return_value = fake_result
             args = argparse.Namespace(
                 model_command="swap",
@@ -209,7 +213,9 @@ class ModelCommandSwapTests(unittest.TestCase):
 
         with mock.patch(
             "grc_agent.llama_launcher.LlamaServerLauncher"
-        ) as launcher_cls:
+        ) as launcher_cls, mock.patch(
+            "grc_agent.preferences.update_last_model"
+        ):
             launcher_cls.return_value.swap_model.side_effect = (
                 LlamaLauncherError("server timeout")
             )

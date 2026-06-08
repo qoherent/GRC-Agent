@@ -15,10 +15,16 @@ Helpers
 - ``grc_agent_toml`` — writes a minimal valid ``grc_agent.toml`` to
   ``tmp_home/.config/grc_agent/config.toml`` with the supplied kwargs.
   Returns the resolved path.
+- ``no_real_prefs_writes`` (autouse) — records the developer's real
+  ``preferences.json`` mtime at test start and fails any test that
+  modifies it. This is the second line of defense against future
+  regressions: a leaky test that writes to the real path fails loudly
+  instead of silently clobbering the user's model choice.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -35,6 +41,37 @@ def tmp_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     yield home
     shutil.rmtree(home, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def no_real_prefs_writes() -> Any:
+    """Snapshot the real ``preferences.json`` mtime before each test and
+    fail if any test modifies it.
+
+    The GUI's ``_on_model_swap_finished`` calls
+    ``update_last_model`` with no explicit path, which writes to
+    ``~/.config/grc_agent/preferences.json`` by default. The
+    per-class ``setUp`` in ``MainWindowModelMenuTests`` redirects
+    ``XDG_CONFIG_HOME`` for the GUI tests. This fixture is a
+    second line of defense: if a future test forgets to redirect
+    and clobbers the real prefs file, the test fails immediately
+    instead of silently breaking the user's next ``grc-agent-gui``
+    launch.
+    """
+    real_path = Path.home() / ".config" / "grc_agent" / "preferences.json"
+    mtime_before: float | None = None
+    if real_path.exists():
+        mtime_before = real_path.stat().st_mtime
+    yield
+    if mtime_before is not None and real_path.exists():
+        mtime_after = real_path.stat().st_mtime
+        if mtime_after != mtime_before:
+            raise AssertionError(
+                f"Test modified {real_path} (mtime changed from "
+                f"{mtime_before} to {mtime_after}). Redirect "
+                "XDG_CONFIG_HOME in your test's setUp or pass an "
+                "explicit path= to update_last_model."
+            )
 
 
 @pytest.fixture()

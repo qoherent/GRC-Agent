@@ -191,6 +191,36 @@ class MainWindowModelMenuTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
+    def setUp(self) -> None:
+        # Redirect ``XDG_CONFIG_HOME`` so the GUI's
+        # ``update_last_model`` call inside ``_on_model_swap_finished``
+        # writes to a per-test tmp dir instead of the developer's
+        # real ``~/.config/grc_agent/preferences.json``. The same
+        # class is exercised under both pytest and stdlib unittest;
+        # this ``setUp`` works for both runners without depending on
+        # the pytest conftest.
+        import os
+        import shutil
+        import tempfile as _tempfile
+
+        self._xdg_root = _tempfile.mkdtemp(prefix="grc_gui_prefs_test_")
+        self.addCleanup(shutil.rmtree, self._xdg_root, ignore_errors=True)
+        self._xdg_patch = mock.patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": self._xdg_root}, clear=False
+        )
+        self._xdg_patch.start()
+        self.addCleanup(self._xdg_patch.stop)
+        # Sanity assert: confirm the redirect actually took effect.
+        # ``user_preferences_path`` reads ``XDG_CONFIG_HOME`` at
+        # call time, not import time, so this works as expected.
+        from grc_agent.preferences import user_preferences_path
+        resolved = str(user_preferences_path())
+        assert resolved.startswith(self._xdg_root), (
+            f"XDG_CONFIG_HOME redirect did not take effect: "
+            f"user_preferences_path()={resolved}, expected to start "
+            f"with {self._xdg_root}"
+        )
+
     def _build_window(
         self, llama_config: object | None = None
     ) -> MainWindow:
