@@ -4,7 +4,7 @@ The rules, examples, and formatting are versioned together so that behaviour
 only changes when the file actually changes.
 """
 
-__version__ = "2026-05-29-gnu-native-primitive-v1"
+__version__ = "2026-06-05-summary-rule-v2"
 
 
 def build_system_prompt() -> str:
@@ -23,5 +23,6 @@ def build_system_prompt() -> str:
         "7. Be decisive. Do not ask for permission to execute obvious parameter math.\n"
         "8. If validation fails with a hint, apply the exact fix in your next turn.\n"
         "9. Use force=true ONLY for intentional invalid intermediate states.\n"
+        "10. After executing tools, ALWAYS reply with a brief text summary of what you did and the result.\n"
         "Never fabricate instance names or block IDs."
     )

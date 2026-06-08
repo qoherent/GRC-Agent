@@ -42,6 +42,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
             enable_thinking=False,
             request_timeout_seconds=2.0,
             log_retention_days=7,
+            models_dir=None,
         )
 
     def _start_external_stub_server(
@@ -132,6 +133,7 @@ class LlamaServerLauncherTests(unittest.TestCase):
             enable_thinking=False,
             request_timeout_seconds=2.0,
             log_retention_days=7,
+            models_dir=None,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -314,3 +316,212 @@ class LlamaServerLauncherTests(unittest.TestCase):
             self.assertIsNone(result.pid)
             self.assertFalse(state_path.exists())
             self.assertIsNone(mismatched_process.poll())
+
+
+class SwapModelTests(unittest.TestCase):
+    """Phase 3: ``LlamaServerLauncher.swap_model`` builds a new config
+    and delegates to ``ensure_server_ready`` on a fresh launcher.
+
+    These tests stub the underlying ``ensure_server_ready`` so no real
+    ``llama-server`` is spawned. The contract under test is the
+    *plumbing*: config is replaced, a new launcher is built, the
+    new launcher is the one that produces the result.
+    """
+
+    def _config(self, port: int) -> LlamaConfig:
+        return LlamaConfig(
+            server_url=f"http://127.0.0.1:{port}",
+            model="old-model.gguf",
+            hf_model="old/repo:old-model.gguf",
+            model_path=None,
+            device="CUDA0",
+            gpu_layers=128,
+            desired_context_tokens=120000,
+            startup_timeout_seconds=5.0,
+            max_tokens=256,
+            max_tool_rounds=8,
+            temperature=0.0,
+            enable_thinking=False,
+            request_timeout_seconds=2.0,
+            log_retention_days=7,
+            models_dir=None,
+        )
+
+    def test_swap_replaces_config_and_returns_new_result(self) -> None:
+        port = reserve_free_port()
+        config = self._config(port)
+        old_launcher = LlamaServerLauncher(config)
+
+        fake_result = mock.MagicMock()
+        fake_result.model_alias = "new-model.gguf"
+        fake_result.status = "started"
+        fake_result.server_url = f"http://127.0.0.1:{port}"
+        fake_result.provider_config = mock.MagicMock()
+        fake_result.health_evidence = {
+            "llama_model_ready": True,
+        }
+
+        captured: list[LlamaConfig] = []
+
+        def _fake_ensure_server_ready(self):  # type: ignore[no-untyped-def]
+            captured.append(self.config)
+            return fake_result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.json"
+            logs = Path(tmp) / "logs"
+            with mock.patch.object(
+                LlamaServerLauncher,
+                "ensure_server_ready",
+                _fake_ensure_server_ready,
+            ), mock.patch.object(
+                old_launcher, "state_path", state
+            ), mock.patch.object(
+                old_launcher, "log_dir", logs
+            ):
+                result = old_launcher.swap_model(
+                    new_hf_repo="new/repo",
+                    new_filename="new-model.gguf",
+                )
+        self.assertIs(result, fake_result)
+        self.assertEqual(len(captured), 1)
+        new_config = captured[0]
+        # Old model fields must be gone; new ones must be present.
+        self.assertEqual(new_config.model, "new-model.gguf")
+        self.assertEqual(new_config.hf_model, "new/repo:new-model.gguf")
+        self.assertIsNone(new_config.model_path)
+        # Server URL, device, context window, and timeout must survive.
+        self.assertEqual(new_config.server_url, config.server_url)
+        self.assertEqual(new_config.device, config.device)
+        self.assertEqual(
+            new_config.desired_context_tokens,
+            config.desired_context_tokens,
+        )
+        self.assertEqual(
+            new_config.startup_timeout_seconds,
+            config.startup_timeout_seconds,
+        )
+
+    def test_swap_uses_explicit_alias_when_provided(self) -> None:
+        port = reserve_free_port()
+        config = self._config(port)
+        old_launcher = LlamaServerLauncher(config)
+        fake_result = mock.MagicMock()
+        fake_result.model_alias = "custom-alias"
+        fake_result.status = "started"
+        fake_result.server_url = f"http://127.0.0.1:{port}"
+        fake_result.provider_config = mock.MagicMock()
+        fake_result.health_evidence = {}
+
+        captured: list[LlamaConfig] = []
+
+        def _fake_ensure_server_ready(self):  # type: ignore[no-untyped-def]
+            captured.append(self.config)
+            return fake_result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                LlamaServerLauncher,
+                "ensure_server_ready",
+                _fake_ensure_server_ready,
+            ), mock.patch.object(
+                old_launcher, "state_path", Path(tmp) / "state.json"
+            ), mock.patch.object(
+                old_launcher, "log_dir", Path(tmp) / "logs"
+            ):
+                result = old_launcher.swap_model(
+                    new_hf_repo="new/repo",
+                    new_filename="new-model.gguf",
+                    new_alias="custom-alias",
+                )
+        self.assertIs(result, fake_result)
+        self.assertEqual(captured[0].model, "custom-alias")
+        self.assertEqual(captured[0].hf_model, "new/repo:new-model.gguf")
+
+    def test_swap_propagates_launcher_error(self) -> None:
+        port = reserve_free_port()
+        config = self._config(port)
+        old_launcher = LlamaServerLauncher(config)
+
+        def _explode(self):  # type: ignore[no-untyped-def]
+            raise LlamaLauncherError("simulated timeout")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                LlamaServerLauncher,
+                "ensure_server_ready",
+                _explode,
+            ), mock.patch.object(
+                old_launcher, "state_path", Path(tmp) / "state.json"
+            ), mock.patch.object(
+                old_launcher, "log_dir", Path(tmp) / "logs"
+            ):
+                with self.assertRaises(LlamaLauncherError) as ctx:
+                    old_launcher.swap_model(
+                        new_hf_repo="new/repo",
+                        new_filename="new-model.gguf",
+                    )
+        self.assertIn("simulated timeout", str(ctx.exception))
+
+    def test_swap_clears_old_cached_state_under_lock(self) -> None:
+        """Phase 3 subagent finding F2/F5: the swap must terminate any
+        cached backend owned by the OLD launcher so the new launcher
+        can bind the port. ``_cleanup_cached_state`` is the
+        authoritative reap path; assert the swap calls it on the
+        OLD launcher's state.
+        """
+        port = reserve_free_port()
+        config = self._config(port)
+        old_launcher = LlamaServerLauncher(config)
+        state_path = Path(tempfile.gettempdir()) / "swap_state_test.json"
+        if state_path.exists():
+            state_path.unlink()
+
+        cleanup_calls: list[Path] = []
+        matching_state_calls: list[Path] = []
+
+        def _fake_cleanup(self, state):  # type: ignore[no-untyped-def]
+            cleanup_calls.append(self.state_path)
+            return None
+
+        def _fake_prepare_matching_state(self):  # type: ignore[no-untyped-def]
+            matching_state_calls.append(self.state_path)
+            return None
+
+        def _fake_ensure_server_ready(self):  # type: ignore[no-untyped-def]
+            return mock.MagicMock(
+                model_alias="new-model.gguf",
+                status="started",
+                server_url=self.server_url,
+                provider_config=mock.MagicMock(),
+                health_evidence={},
+            )
+
+        with mock.patch.object(
+            LlamaServerLauncher,
+            "ensure_server_ready",
+            _fake_ensure_server_ready,
+        ), mock.patch.object(
+            LlamaServerLauncher,
+            "_cleanup_cached_state",
+            _fake_cleanup,
+        ), mock.patch.object(
+            LlamaServerLauncher,
+            "_prepare_matching_state",
+            _fake_prepare_matching_state,
+        ), mock.patch.object(
+            old_launcher, "state_path", state_path
+        ), mock.patch.object(
+            old_launcher, "log_dir", Path(tempfile.gettempdir()) / "swap_logs"
+        ):
+            result = old_launcher.swap_model(
+                new_hf_repo="new/repo",
+                new_filename="new-model.gguf",
+            )
+        # ``_cleanup_cached_state`` was called exactly once, on the
+        # OLD launcher's state path. This is the F2/F5 fix: the old
+        # cached backend (if any) is reaped before the new launcher
+        # binds the port.
+        self.assertEqual(cleanup_calls, [state_path])
+        self.assertEqual(matching_state_calls, [state_path])
+        self.assertEqual(result.model_alias, "new-model.gguf")

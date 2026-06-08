@@ -38,6 +38,12 @@ class LlamaConfig:
     # the default prunes anything older than 7 days on every CLI/GUI
     # invocation. See `LlamaServerLauncher.prune_old_logs()`.
     log_retention_days: int
+    # Optional directory containing hand-placed .gguf files the GUI's
+    # model-selector should also surface. `None` (default) means the
+    # selector only lists models in the Hugging Face cache under
+    # `~/.cache/huggingface/hub/`. When unset, the GUI still respects
+    # `[llama].model_path` for the currently-loaded model.
+    models_dir: str | None
 
 
 @dataclass(frozen=True)
@@ -181,10 +187,10 @@ def default_app_config() -> AppConfig:
     config = AppConfig(
         llama=LlamaConfig(
             server_url="http://127.0.0.1:8080",
-            model="Qwen3.5-9B-UD-Q4_K_XL.gguf",
-            hf_model="unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL",
+            model="Qwen3.5-2B-UD-Q4_K_XL.gguf",
+            hf_model="unsloth/Qwen3.5-2B-GGUF:Qwen3.5-2B-UD-Q4_K_XL",
             model_path=None,
-            device="CPU",
+            device="Auto",
             gpu_layers=999,
             desired_context_tokens=120000,
             startup_timeout_seconds=300.0,
@@ -194,6 +200,7 @@ def default_app_config() -> AppConfig:
             enable_thinking=False,
             request_timeout_seconds=60.0,
             log_retention_days=7,
+            models_dir=None,
         ),
         agent=AgentConfig(
             history_compact_budget=100000,
@@ -340,6 +347,12 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 llama_table,
                 "log_retention_days",
                 default=defaults.llama.log_retention_days,
+                context="[llama]",
+            ),
+            models_dir=_optional_nullable_non_empty_string(
+                llama_table,
+                "models_dir",
+                default=defaults.llama.models_dir,
                 context="[llama]",
             ),
         ),

@@ -509,6 +509,100 @@ def test_compile_and_run_reentrancy_guard(qtbot):
     assert manager.compile_process is mock_compile_proc
 
 
+def test_model_status_label_full_config(qtbot, tmp_path):
+    """Model status label exposes name, size, device, and gpu-layer fields when fully configured."""
+    from grc_agent_gui.main_window import MainWindow
+
+    gguf = tmp_path / "qwen3.5-4b-q4_k_m.gguf"
+    gguf.write_bytes(b"\x00" * (3 * 1024 * 1024 + 512 * 1024))  # ~3.5 MiB
+
+    mock_agent = MagicMock()
+    mock_agent.session = None
+    mock_provider = MagicMock()
+    mock_provider.model = "qwen3.5-4b"
+    mock_llama_cfg = MagicMock()
+    mock_llama_cfg.device = "CUDA0"
+    mock_llama_cfg.gpu_layers = 999
+    mock_llama_cfg.model_path = str(gguf)
+
+    window = MainWindow(mock_agent, mock_provider, llama_config=mock_llama_cfg)
+    qtbot.addWidget(window)
+
+    text = window.model_status_label.text()
+    assert "Model:" in text
+    assert "qwen3.5-4b-q4_k_m" in text
+    assert "3.5 MiB" in text
+    assert "GPU" in text
+    assert "CUDA0" in text
+    assert "999 layers" in text
+
+
+def test_model_status_label_cpu_device(qtbot, tmp_path):
+    """CPU device path renders as 'CPU' and disables GPU-offload line."""
+    from grc_agent_gui.main_window import MainWindow
+
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"\x00" * 2048)
+
+    mock_agent = MagicMock()
+    mock_agent.session = None
+    mock_provider = MagicMock()
+    mock_provider.model = "qwen3.5-4b"
+    mock_llama_cfg = MagicMock()
+    mock_llama_cfg.device = "cpu"
+    mock_llama_cfg.gpu_layers = 0
+    mock_llama_cfg.model_path = str(gguf)
+
+    window = MainWindow(mock_agent, mock_provider, llama_config=mock_llama_cfg)
+    qtbot.addWidget(window)
+
+    text = window.model_status_label.text()
+    assert "CPU" in text
+    assert "off (CPU)" in text
+    assert "GPU" not in text.split("CPU")[0]  # no spurious "GPU" token before "CPU"
+
+
+def test_model_status_label_missing_fields(qtbot):
+    """When llama_config is None and provider has no model, label shows n/a for unknown fields."""
+    from grc_agent_gui.main_window import MainWindow
+
+    mock_agent = MagicMock()
+    mock_agent.session = None
+    mock_provider = MagicMock()
+    mock_provider.model = None
+
+    window = MainWindow(mock_agent, mock_provider, llama_config=None)
+    qtbot.addWidget(window)
+
+    text = window.model_status_label.text()
+    assert "Model: unknown" in text
+    assert "n/a" in text
+
+
+def test_model_status_label_missing_path(qtbot):
+    """Missing model_path renders n/a for size but still shows alias and device."""
+    from grc_agent_gui.main_window import MainWindow
+
+    mock_agent = MagicMock()
+    mock_agent.session = None
+    mock_provider = MagicMock()
+    mock_provider.model = "qwen3.5-4b"
+    mock_llama_cfg = MagicMock()
+    mock_llama_cfg.device = "Metal"
+    mock_llama_cfg.gpu_layers = 50
+    mock_llama_cfg.model_path = None
+
+    window = MainWindow(mock_agent, mock_provider, llama_config=mock_llama_cfg)
+    qtbot.addWidget(window)
+
+    text = window.model_status_label.text()
+    assert "qwen3.5-4b" in text
+    assert "n/a" in text
+    assert "GPU" in text
+    assert "Metal" in text
+    assert "50 layers" in text
+
+
 def test_validation_label_states(qtbot):
     """Assert that validation label displays correct states (No Graph, Unvalidated, Valid, Invalid) and styles."""
     from grc_agent_gui.main_window import MainWindow

@@ -1,14 +1,14 @@
 [llama]
 server_url = "http://127.0.0.1:8080"
-model = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
-hf_model = "unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL"
+model = "Qwen3.5-2B-UD-Q4_K_XL.gguf"
+hf_model = "unsloth/Qwen3.5-2B-GGUF:Qwen3.5-2B-UD-Q4_K_XL"
 # Set model_path to the absolute path of a local GGUF, or leave empty and rely
 # on hf_model for auto-download. Use `grc-agent init` to write a starter config
 # tailored to your machine.
 model_path = ""
 # Set to a specific device (e.g. "CUDA0", "Metal", "Vulkan0") to force it, or
-# leave "CPU" to let llama.cpp auto-detect.
-device = "CPU"
+# leave "Auto" to let llama.cpp auto-detect GPU (CUDA/Metal/Vulkan) automatically.
+device = "Auto"
 gpu_layers = 999
 desired_context_tokens = 120000
 startup_timeout_seconds = 300.0

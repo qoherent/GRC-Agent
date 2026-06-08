@@ -180,13 +180,21 @@ class ChatWidget(QWidget):
         self._history.append({"role": role, "text": text, "_rendered": None})
         self._render_chat()
 
-    def append_status(self, text: str) -> None:
-        """Insert a subtle italic status line at the current cursor position."""
+    def append_status(self, name: str, args: str) -> None:
+        """Insert a styled tool-call status block with arguments."""
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.chat_display.setTextCursor(cursor)
+        safe_name = html.escape(name)
+        safe_args = html.escape(args)
         self.chat_display.insertHtml(
-            f'<p style="color: #a6adc8; font-style: italic; margin: 2px 0;">{html.escape(text)}</p>'
+            f'<div style="margin: 4px 0; padding: 4px 8px; '
+            f'border-left: 2px solid #89b4fa; '
+            f'background-color: #1e1e2e; '
+            f'font-family: monospace; font-size: 12px;">'
+            f'<span style="color: #89b4fa;">⚡ {safe_name}</span>'
+            f'<br/>&nbsp;&nbsp;<span style="color: #a6adc8;">{safe_args}</span>'
+            f'</div>'
         )
 
     def append_mutation(self, result: str) -> None:

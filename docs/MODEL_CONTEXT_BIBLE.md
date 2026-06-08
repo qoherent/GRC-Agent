@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-05-29-gnu-native-primitive-v1`
+Prompt version: `2026-06-05-summary-rule-v2`
 
 ## Model-Facing Surface
 
@@ -36,6 +36,7 @@ Modify the active graph via tools. keep going until done.
 7. Be decisive. Do not ask for permission to execute obvious parameter math.
 8. If validation fails with a hint, apply the exact fix in your next turn.
 9. Use force=true ONLY for intentional invalid intermediate states.
+10. After executing tools, ALWAYS reply with a brief text summary of what you did and the result.
 Never fabricate instance names or block IDs.
 ```
 

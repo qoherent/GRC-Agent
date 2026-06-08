@@ -7,6 +7,7 @@ import logging
 import shlex
 import subprocess
 import sys
+from datetime import UTC
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,12 @@ from grc_agent.llama_probe import (
     LlamaServerError,
     extract_enabled_builtin_tools,
     extract_model_context_limit,
+)
+from grc_agent.model_manager import (
+    cached_model_to_dict,
+    discover_cached_models,
+    list_system_specs,
+    system_specs_to_dict,
 )
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.retrieval.vector import (
@@ -422,6 +429,66 @@ Examples:
         help="Print proposal report as JSON.",
     )
 
+    model_parser = subparsers.add_parser(
+        "model",
+        help="Discover, inspect, and swap the local llama.cpp model.",
+    )
+    model_subparsers = model_parser.add_subparsers(dest="model_command")
+    model_subparsers.required = True
+    model_list_parser = model_subparsers.add_parser(
+        "list",
+        help="List every .gguf file in the local Hugging Face cache (and any configured models_dir).",
+    )
+    model_list_parser.add_argument(
+        "--hf-cache",
+        help="Override the HF cache root. Defaults to ~/.cache/huggingface/hub/.",
+    )
+    model_list_parser.add_argument(
+        "--models-dir",
+        help="Override the local models directory. Defaults to [llama].models_dir from grc_agent.toml.",
+    )
+    model_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print discovered models as JSON.",
+    )
+    model_specs_parser = model_subparsers.add_parser(
+        "specs",
+        help="Print local machine VRAM/GPU/RAM/CPU specs.",
+    )
+    model_specs_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print specs as JSON.",
+    )
+    model_swap_parser = model_subparsers.add_parser(
+        "swap",
+        help="Restart llama.cpp with a different model file.",
+    )
+    model_swap_parser.add_argument(
+        "--hf-repo",
+        required=True,
+        help="Hugging Face repo, e.g. 'unsloth/Qwen3.5-2B-GGUF'.",
+    )
+    model_swap_parser.add_argument(
+        "--filename",
+        required=True,
+        help="GGUF filename inside the repo, e.g. 'Qwen3.5-2B-UD-Q4_K_XL.gguf'.",
+    )
+    model_swap_parser.add_argument(
+        "--alias",
+        help=(
+            "llama.cpp --alias override. Defaults to the resolved GGUF basename. "
+            "Pass an explicit alias when swapping between two files that share "
+            "the same filename across different repos."
+        ),
+    )
+    model_swap_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print swap evidence as JSON.",
+    )
+
     dogfood_parser = subparsers.add_parser(
         "dogfood",
         help="Record and summarize structured real-use dogfooding evidence.",
@@ -515,6 +582,70 @@ Examples:
         help="Print dogfooding report as JSON.",
     )
 
+    sessions_parser = subparsers.add_parser(
+        "sessions",
+        help="List, show, export, and prune local chat sessions.",
+    )
+    sessions_parser.add_argument(
+        "--db",
+        help="Override the sessions DB path. Defaults to ~/.grc_agent/sessions.db.",
+    )
+    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
+    sessions_subparsers.required = True
+
+    sessions_list_parser = sessions_subparsers.add_parser(
+        "list", help="List chat sessions, most recent first."
+    )
+    sessions_list_parser.add_argument(
+        "--graph",
+        help="Filter by graph path substring.",
+    )
+    sessions_list_parser.add_argument(
+        "--limit", type=int, default=50, help="Maximum number of sessions to return."
+    )
+    sessions_list_parser.add_argument(
+        "--json", action="store_true", help="Print as JSON."
+    )
+
+    sessions_show_parser = sessions_subparsers.add_parser(
+        "show", help="Print one session's messages."
+    )
+    sessions_show_parser.add_argument("session_id", type=int)
+    sessions_show_parser.add_argument(
+        "--json", action="store_true", help="Print as JSON."
+    )
+
+    sessions_export_parser = sessions_subparsers.add_parser(
+        "export", help="Export one session to a file or stdout."
+    )
+    sessions_export_parser.add_argument("session_id", type=int)
+    sessions_export_parser.add_argument(
+        "--format", choices=["md", "json"], default="md"
+    )
+    sessions_export_parser.add_argument(
+        "--out", help="Output path. Default: stdout for json, ./session-<id>.md for md."
+    )
+
+    sessions_gc_parser = sessions_subparsers.add_parser(
+        "gc", help="Delete old or orphaned chat sessions."
+    )
+    sessions_gc_parser.add_argument(
+        "--older-than-days", type=int, default=180
+    )
+    sessions_gc_parser.add_argument(
+        "--only-orphans",
+        action="store_true",
+        help="Only delete sessions whose graph file is missing.",
+    )
+    sessions_gc_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be deleted without removing rows.",
+    )
+    sessions_gc_parser.add_argument(
+        "--json", action="store_true", help="Print as JSON."
+    )
+
     history_parser = subparsers.add_parser(
         "history",
         help="List, inspect, diff, and restore local graph checkpoints.",
@@ -600,7 +731,7 @@ Examples:
     )
     init_parser.add_argument(
         "--hf-model",
-        help="Hugging Face repo id to auto-download from (e.g. unsloth/Qwen3.5-9B-GGUF:Q4_K_XL).",
+        help="Hugging Face repo id to auto-download from (e.g. unsloth/Qwen3.5-2B-GGUF:Q4_K_XL).",
     )
     init_parser.add_argument(
         "--model-path",
@@ -1942,6 +2073,386 @@ def _run_vector_command(args: argparse.Namespace) -> int:
     return 2
 
 
+def _run_sessions_command(args: argparse.Namespace) -> int:
+    """Dispatch the ``grc-agent sessions`` subcommands."""
+    try:
+        if args.sessions_command == "list":
+            return _run_sessions_list(args)
+        if args.sessions_command == "show":
+            return _run_sessions_show(args)
+        if args.sessions_command == "export":
+            return _run_sessions_export(args)
+        if args.sessions_command == "gc":
+            return _run_sessions_gc(args)
+    except Exception as exc:
+        payload = build_error_payload(
+            error_type=ErrorCode.INTERNAL_ERROR,
+            message=str(exc),
+        )
+        print(json.dumps(payload, sort_keys=True))
+        return 1
+    return 2
+
+
+def _resolve_sessions_db_path(args: argparse.Namespace) -> Path:
+    if getattr(args, "db", None):
+        return Path(args.db).expanduser()
+    from grc_agent.sessions_store import default_sessions_db_path
+
+    return default_sessions_db_path()
+
+
+def _run_sessions_list(args: argparse.Namespace) -> int:
+    from grc_agent.sessions_store import list_sessions_sync
+
+    db = _resolve_sessions_db_path(args)
+    sessions = list_sessions_sync(
+        db,
+        graph_path_substring=getattr(args, "graph", None),
+        limit=int(getattr(args, "limit", 50) or 50),
+    )
+    if args.json:
+        payload = {
+            "ok": True,
+            "count": len(sessions),
+            "sessions": [
+                {
+                    "id": s.id,
+                    "graph_path": s.graph_path,
+                    "graph_hash": s.graph_hash,
+                    "started_at": s.started_at,
+                    "ended_at": s.ended_at,
+                    "model_alias": s.model_alias,
+                    "backend": s.backend,
+                    "title": s.title,
+                    "message_count": s.message_count,
+                }
+                for s in sessions
+            ],
+        }
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+    if not sessions:
+        print("No chat sessions found.")
+        return 0
+    print(f"Found {len(sessions)} session(s):")
+    for s in sessions:
+        status = "open" if s.ended_at is None else "closed"
+        print(
+            f"  [{s.id:>6}] {s.started_at}  msgs={s.message_count:>3}  "
+            f"status={status:<6}  model={s.model_alias or '(unknown)':<24}  "
+            f"graph={s.graph_path}"
+        )
+        if s.title:
+            print(f"          title: {s.title}")
+    return 0
+
+
+def _run_sessions_show(args: argparse.Namespace) -> int:
+    from grc_agent.sessions_store import list_messages_sync
+
+    db = _resolve_sessions_db_path(args)
+    messages = list_messages_sync(db, int(args.session_id))
+    if args.json:
+        payload = {
+            "ok": True,
+            "session_id": int(args.session_id),
+            "messages": [
+                {
+                    "id": m.id,
+                    "sequence": m.sequence,
+                    "role": m.role,
+                    "text": m.text,
+                    "payload": m.payload,
+                    "created_at": m.created_at,
+                }
+                for m in messages
+            ],
+        }
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+    if not messages:
+        print(f"No messages for session {args.session_id}.")
+        return 0
+    for m in messages:
+        print(f"--- [{m.sequence}] {m.role} @ {m.created_at} ---")
+        if m.text:
+            print(m.text)
+        if m.payload:
+            print(json.dumps(m.payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_sessions_export(args: argparse.Namespace) -> int:
+    from grc_agent.sessions_store import export_markdown_sync
+
+    db = _resolve_sessions_db_path(args)
+    if args.format == "md":
+        content = export_markdown_sync(db, int(args.session_id))
+    else:
+        from grc_agent.sessions_store import list_messages_sync
+
+        messages = list_messages_sync(db, int(args.session_id))
+        content = json.dumps(
+            {"session_id": int(args.session_id), "messages": [
+                {
+                    "id": m.id,
+                    "sequence": m.sequence,
+                    "role": m.role,
+                    "text": m.text,
+                    "payload": m.payload,
+                    "created_at": m.created_at,
+                }
+                for m in messages
+            ]},
+            indent=2,
+            sort_keys=True,
+        )
+    if args.out:
+        target = Path(args.out).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        print(f"Exported session {args.session_id} to {target}.")
+        return 0
+    print(content)
+    return 0
+
+
+def _run_sessions_gc(args: argparse.Namespace) -> int:
+    """Garbage-collect sessions.
+
+    The actual DB write goes through the writer thread; the CLI
+    command is short-lived so we open a temporary store just to
+    issue the GC. We use the ``gc()`` API which is itself
+    synchronous.
+    """
+    from grc_agent.sessions_store import list_sessions_sync, session_store_cm
+
+    db = _resolve_sessions_db_path(args)
+    if args.dry_run:
+        # Dry-run reads the current state and computes what
+        # would be deleted without touching the DB.
+        sessions = list_sessions_sync(db, limit=10_000)
+        only_orphans = bool(getattr(args, "only_orphans", False))
+        if only_orphans:
+            targets = [s for s in sessions if not Path(s.graph_path).exists()]
+        else:
+            from datetime import datetime, timedelta
+
+            cutoff_dt = (
+                datetime.now(UTC)
+                - timedelta(days=int(args.older_than_days))
+            )
+            # Compare on the parsed datetime so we use the same
+            # format as the DB's stored ``started_at`` and avoid
+            # the dry-run-vs-real-gc off-by-microsecond bug
+            # (subagent M2).
+            targets = [
+                s for s in sessions
+                if datetime.fromisoformat(s.started_at.replace("Z", "+00:00"))
+                < cutoff_dt
+            ]
+        if args.json:
+            print(json.dumps(
+                {"ok": True, "would_delete": len(targets),
+                 "session_ids": [s.id for s in targets]},
+                sort_keys=True,
+            ))
+        else:
+            print(f"Would delete {len(targets)} session(s).")
+        return 0
+    with session_store_cm(db_path=db) as store:
+        deleted = store.gc(
+            older_than_days=int(args.older_than_days),
+            only_orphans=bool(getattr(args, "only_orphans", False)),
+        )
+    if args.json:
+        print(json.dumps({"ok": True, "deleted": deleted}, sort_keys=True))
+    else:
+        print(f"Deleted {deleted} session(s).")
+    return 0
+
+
+def _run_model_command(args: argparse.Namespace, app_config: AppConfig) -> int:
+    """Dispatch the ``grc-agent model`` subcommands."""
+    try:
+        if args.model_command == "list":
+            return _run_model_list(args, app_config)
+        if args.model_command == "specs":
+            return _run_model_specs(args)
+        if args.model_command == "swap":
+            return _run_model_swap(args, app_config)
+    except Exception as exc:
+        payload = build_error_payload(
+            error_type=ErrorCode.INTERNAL_ERROR,
+            message=str(exc),
+        )
+        _print_model_payload(payload, json_output=getattr(args, "json", False))
+        return 1
+    return 2
+
+
+def _run_model_list(args: argparse.Namespace, app_config: AppConfig) -> int:
+    """List every .gguf the local runtime can load."""
+    hf_cache = Path(args.hf_cache).expanduser() if args.hf_cache else None
+    models_dir: Path | None
+    if args.models_dir:
+        models_dir = Path(args.models_dir).expanduser()
+    else:
+        cfg_dir = app_config.llama.models_dir
+        models_dir = Path(cfg_dir).expanduser() if cfg_dir else None
+    models = discover_cached_models(hf_cache=hf_cache, models_dir=models_dir)
+    if args.json:
+        payload = {
+            "ok": True,
+            "models": [cached_model_to_dict(m) for m in models],
+            "count": len(models),
+        }
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+    if not models:
+        print("No .gguf files found.")
+        print(
+            "Hint: download a model via the configured [llama].hf_model, or set "
+            "[llama].models_dir to a directory containing local .gguf files."
+        )
+        return 0
+    print(f"Found {len(models)} model file(s):")
+    for model in models:
+        size_mib = model.size_bytes / (1024 * 1024)
+        used = (
+            model.last_used.strftime("%Y-%m-%d")
+            if model.last_used is not None
+            else "unknown"
+        )
+        print(
+            f"  {model.hf_repo}:{model.filename}  "
+            f"({size_mib:.1f} MiB, last used {used})"
+        )
+    return 0
+
+
+def _run_model_specs(args: argparse.Namespace) -> int:
+    """Print local machine VRAM/GPU/RAM/CPU specs."""
+    specs = list_system_specs()
+    if args.json:
+        payload = {"ok": True, "specs": system_specs_to_dict(specs)}
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+    print("Local machine specs:")
+    print(f"  GPU : {specs.gpu_name or 'unknown'}")
+    if specs.gpu_vram_bytes is not None:
+        print(f"  VRAM: {specs.gpu_vram_bytes / (1024 ** 3):.2f} GiB")
+    else:
+        print("  VRAM: unknown")
+    if specs.ram_bytes is not None:
+        print(f"  RAM : {specs.ram_bytes / (1024 ** 3):.2f} GiB")
+    else:
+        print("  RAM : unknown")
+    print(f"  CPU : {specs.cpu_name or 'unknown'}")
+    if specs.cpu_cores_logical is not None:
+        print(f"  Cores: {specs.cpu_cores_logical}")
+    else:
+        print("  Cores: unknown")
+    return 0
+
+
+def _run_model_swap(args: argparse.Namespace, app_config: AppConfig) -> int:
+    """Restart the local llama.cpp server with a different model.
+
+    Phase 3 of the model-selector rollout. Delegates to
+    :meth:`grc_agent.llama_launcher.LlamaServerLauncher.swap_model`,
+    which builds a new :class:`LlamaConfig`, starts a fresh
+    ``llama-server`` process, waits for readiness, and returns the new
+    provider config. Errors surface as rc=1 with a human-readable
+    payload.
+    """
+    from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
+
+    try:
+        launcher = LlamaServerLauncher(app_config.llama)
+        result = launcher.swap_model(
+            new_hf_repo=args.hf_repo,
+            new_filename=args.filename,
+            new_alias=args.alias,
+        )
+    except LlamaLauncherError as exc:
+        payload = build_error_payload(
+            error_type=ErrorCode.INTERNAL_ERROR,
+            message=str(exc),
+        )
+        _print_model_payload(payload, json_output=args.json)
+        return 1
+    payload = {
+        "ok": True,
+        "model_alias": result.model_alias,
+        "server_url": result.server_url,
+        "status": result.status,
+        "health_evidence": result.health_evidence,
+    }
+    # Persist the selection so the next session starts with the
+    # same model. Failure is non-fatal; the swap itself succeeded.
+    try:
+        from grc_agent.preferences import update_last_model
+
+        update_last_model(
+            hf_repo=args.hf_repo,
+            filename=args.filename,
+            alias=result.model_alias,
+        )
+    except OSError as exc:
+        logger.warning("Failed to persist last_model preference: %s", exc)
+        payload["prefs_persisted"] = False
+    else:
+        payload.setdefault("prefs_persisted", True)
+    _print_model_payload(payload, json_output=args.json)
+    return 0
+
+
+def _print_model_payload(payload: dict[str, Any], *, json_output: bool) -> None:
+    """Print a model subcommand payload in the requested shape."""
+    if json_output:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    if not payload.get("ok"):
+        print(f"Error: {payload.get('message', 'unknown error')}")
+        return
+    if "models" in payload:
+        models = payload["models"]
+        print(f"Found {len(models)} model file(s):")
+        for model in models:
+            size_mib = int(model["size_bytes"]) / (1024 * 1024)
+            used = model["last_used"] or "unknown"
+            if used != "unknown":
+                used = used.split("T")[0]
+            print(
+                f"  {model['hf_repo']}:{model['filename']}  "
+                f"({size_mib:.1f} MiB, last used {used})"
+            )
+        return
+    if "specs" in payload:
+        specs = payload["specs"]
+        print("Local machine specs:")
+        print(f"  GPU : {specs['gpu_name'] or 'unknown'}")
+        if specs["gpu_vram_bytes"] is not None:
+            print(f"  VRAM: {specs['gpu_vram_bytes'] / (1024 ** 3):.2f} GiB")
+        else:
+            print("  VRAM: unknown")
+        if specs["ram_bytes"] is not None:
+            print(f"  RAM : {specs['ram_bytes'] / (1024 ** 3):.2f} GiB")
+        else:
+            print("  RAM : unknown")
+        print(f"  CPU : {specs['cpu_name'] or 'unknown'}")
+        cores = specs["cpu_cores_logical"]
+        print(f"  Cores: {cores if cores is not None else 'unknown'}")
+        return
+    if "model_alias" in payload:
+        print(f"Model swapped to {payload['model_alias']}")
+        print(f"Server: {payload['server_url']} (status: {payload['status']})")
+        return
+    print(json.dumps(payload, sort_keys=True, indent=2))
+
+
 def _run_dogfood_command(args: argparse.Namespace) -> int:
     try:
         if args.dogfood_command == "record":
@@ -2217,6 +2728,7 @@ def _collect_package_paths() -> dict[str, str]:
         DEFAULT_LLAMA_LOG_DIR,
         DEFAULT_LLAMA_STATE_PATH,
     )
+    from grc_agent.preferences import user_preferences_path
 
     cache_root = Path.home() / ".cache"
     # `default_history_path()` returns a cwd-relative path when no env
@@ -2228,8 +2740,10 @@ def _collect_package_paths() -> dict[str, str]:
     paths: dict[str, str] = {
         "config_repo": str(default_config_path()),
         "config_user": str(user_config_path()),
+        "preferences": str(user_preferences_path()),
         "history": str(history_path),
         "history_env_var": HISTORY_ENV_VAR,
+        "sessions_db": str(Path.home() / ".grc_agent" / "sessions.db"),
         "vector_index_default": str(Path.home() / ".grc_agent" / "vector_index"),
         "llama_state": str(DEFAULT_LLAMA_STATE_PATH),
         "llama_logs": str(DEFAULT_LLAMA_LOG_DIR),
@@ -2276,6 +2790,29 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 1
+    # Overlay user preferences (e.g. the model the GUI last picked)
+    # onto the config. Preferences win over ``grc_agent.toml`` for
+    # the model and hf_model fields; everything else is preserved.
+    try:
+        from grc_agent.preferences import (
+            apply_user_preferences_to_llama_config,
+            load_user_preferences,
+        )
+
+        prefs = load_user_preferences()
+        if (
+            prefs.last_model.alias
+            or prefs.last_model.hf_repo
+            or prefs.last_model.filename
+        ):
+            app_config = AppConfig(
+                llama=apply_user_preferences_to_llama_config(
+                    app_config.llama, prefs
+                ),
+                agent=app_config.agent,
+            )
+    except Exception as exc:  # noqa: BLE001 - defensive, see preferences loader
+        logger.debug("Failed to apply user preferences: %s", exc)
     parser = _build_parser(app_config)
     args = parser.parse_args(translated_argv)
 
@@ -2373,6 +2910,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "history":
         return _run_history_command(args)
+    if args.command == "sessions":
+        return _run_sessions_command(args)
+    if args.command == "model":
+        return _run_model_command(args, app_config)
     if args.command == "init":
         return _run_init_command(args)
     if args.command == "paths":

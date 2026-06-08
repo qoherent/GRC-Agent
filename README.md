@@ -53,6 +53,8 @@ Features include:
 - Chat interface for graph modifications
 - Live flowgraph inspector (variables, blocks, connections)
 - Compile, run, and stop controls for testing on the fly
+- Model selector dialog: discover local `.gguf` files in the Hugging Face cache, view system specs (GPU/VRAM/RAM/CPU), and live model swap that persists across sessions
+- Local chat-session history: `File > Recent Sessions...` to browse and reopen past conversations, persisted in a local SQLite store
 
 ---
 
@@ -61,9 +63,15 @@ Features include:
 ```bash
 uv run grc-agent doctor                         # Verify dependencies
 uv run grc-agent health                         # Check LLM connection status
-uv run grc-agent paths                          # Show data/config paths
+uv run grc-agent paths                          # Show data/config/preferences paths
 uv run grc-agent vector search "audio sink"     # Semantic search in catalog
 uv run grc-agent history list                   # List graph checkpoints
+uv run grc-agent model list                     # List .gguf files in the local HF cache
+uv run grc-agent model specs                    # Print local machine GPU/VRAM/RAM/CPU
+uv run grc-agent sessions list                  # List local chat sessions
+uv run grc-agent sessions show <id>            # Print one session's messages
+uv run grc-agent sessions export <id> --out out.md  # Export a session
+uv run grc-agent sessions gc --older-than-days 180  # Prune old sessions
 uv run grc-agent debug-bundle                   # Generate support debug bundle
 ```
 

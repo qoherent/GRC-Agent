@@ -200,6 +200,87 @@ class LlamaServerLauncher:
             self._cleanup_cached_state(self._prepare_matching_state())
         return self.ensure_server_ready()
 
+    def swap_model(
+        self,
+        *,
+        new_hf_repo: str,
+        new_filename: str,
+        new_alias: str | None = None,
+    ) -> LlamaLaunchResult:
+        """Restart the local llama.cpp server with a different model.
+
+        Phase 3 of the model-selector rollout. Performs the swap in
+        three steps, all under the file lock:
+
+        1. Terminate any cached backend owned by the OLD launcher
+           (``self``). ``_cleanup_cached_state`` uses the cached
+           state file as the authoritative record of the PID we
+           started, so a swap never reaps a server owned by
+           another launcher/user.
+        2. Build a new :class:`LlamaConfig` whose ``hf_model`` and
+           ``model`` point at the requested file. ``model_path`` is
+           cleared because swap is HF-token-driven; a
+           ``model_path``-driven swap is a separate code path the
+           CLI/GUI do not exercise in Phase 3.
+        3. Run :meth:`ensure_server_ready` on a fresh launcher for
+           the new config. The new launcher writes its own state
+           file and waits for readiness.
+
+        Args:
+            new_hf_repo: Hugging Face repo slug, e.g.
+                ``"unsloth/Qwen3.5-2B-GGUF"``.
+            new_filename: GGUF filename inside the repo, e.g.
+                ``"Qwen3.5-2B-UD-Q4_K_XL.gguf"``.
+            new_alias: Optional override for the ``--alias`` flag.
+                Defaults to the bare ``new_filename``.
+
+        Returns:
+            A :class:`LlamaLaunchResult` with the new provider_config
+            and health evidence.
+
+        Raises:
+            LlamaLauncherError: if the launcher could not terminate
+                the existing server, start the new one, or reach
+                readiness within ``startup_timeout_seconds``. The
+                cached state is cleared on any failure so a
+                subsequent :meth:`ensure_server_ready` does not
+                see a half-written record.
+        """
+        import dataclasses
+
+        hf_model_token = f"{new_hf_repo}:{new_filename}"
+        alias = (new_alias or new_filename).strip() or new_filename
+        new_config = dataclasses.replace(
+            self.config,
+            hf_model=hf_model_token,
+            model=alias,
+            # Swap is HF-token-driven. A model_path-driven swap is
+            # out of scope for Phase 3; preserving the old model_path
+            # would re-load the original file on the next
+            # ``ensure_server_ready`` and silently undo the swap.
+            model_path=None,
+        )
+        new_launcher = LlamaServerLauncher(
+            new_config,
+            server_url=self.server_url,
+            model_alias=alias,
+            api_key=self.api_key,
+            state_path=self.state_path,
+            log_dir=self.log_dir,
+        )
+        with self._lock():
+            # Terminate the old backend under the lock so a parallel
+            # ``ensure_server_ready`` call cannot race against our
+            # port handover. ``_cleanup_cached_state`` is a no-op
+            # when the cached state is empty or owned by another
+            # launcher, so this is safe under multi-user CI.
+            self._cleanup_cached_state(self._prepare_matching_state())
+            # Use ``ensure_server_ready`` (not ``restart_server_ready``)
+            # so the new launcher is the sole authority over its own
+            # state file from this point forward. The old cached state
+            # was just cleared, so a fresh launch is forced.
+            return new_launcher.ensure_server_ready()
+
     @contextmanager
     def _lock(self) -> Iterator[None]:
         """Advisory file lock to prevent concurrent CLI startup races."""
@@ -249,7 +330,7 @@ class LlamaServerLauncher:
             device_val = "none"
 
         model_arg_name, model_arg_value = self._model_argument()
-        args = [
+        args: list[str] = [
             binary,
             model_arg_name,
             model_arg_value,
@@ -261,10 +342,10 @@ class LlamaServerLauncher:
             str(port),
             "--ctx-size",
             str(self.config.desired_context_tokens),
-            "--device",
-            device_val,
             "--jinja",
         ]
+        if device_val.upper() != "AUTO":
+            args.extend(["--device", device_val])
         if _get_flash_attn_support():
             args.extend(["--flash-attn", "auto"])
         gpu_layers = self.config.gpu_layers

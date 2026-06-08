@@ -40,6 +40,7 @@ class StartupCleanupTests(unittest.TestCase):
             enable_thinking=False,
             request_timeout_seconds=2.0,
             log_retention_days=7,
+            models_dir=None,
         )
 
     def _start_external_stub_server(

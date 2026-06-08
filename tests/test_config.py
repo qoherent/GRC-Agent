@@ -26,17 +26,17 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertTrue(default_config_path().is_file())
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:8080")
-        self.assertEqual(config.llama.model, "Qwen3.5-9B-UD-Q4_K_XL.gguf")
-        self.assertEqual(config.llama.hf_model, "unsloth/Qwen3.5-9B-GGUF:Qwen3.5-9B-UD-Q4_K_XL")
+        self.assertEqual(config.llama.model, "Qwen3.5-2B-UD-Q4_K_XL.gguf")
+        self.assertEqual(config.llama.hf_model, "unsloth/Qwen3.5-2B-GGUF:Qwen3.5-2B-UD-Q4_K_XL")
         # model_path is intentionally empty in the committed default so a fresh
         # clone does not hardcode a per-developer path. The loader normalizes
         # an empty string to `None`, meaning "unset; fall back to hf_model".
         # Set it via `grc-agent init` or by editing
         # `~/.config/grc_agent/config.toml`.
         self.assertIsNone(config.llama.model_path)
-        # device defaults to "CPU" so llama.cpp auto-detects the accelerator
-        # rather than failing on a CUDA-only default in a CPU-only install.
-        self.assertEqual(config.llama.device, "CPU")
+        # device defaults to "Auto" so llama.cpp auto-detects the accelerator
+        # (CUDA/Metal/Vulkan) rather than hardcoding a specific backend.
+        self.assertEqual(config.llama.device, "Auto")
         self.assertEqual(config.llama.desired_context_tokens, 120000)
         self.assertEqual(config.llama.startup_timeout_seconds, 300.0)
         self.assertEqual(config.llama.max_tokens, 4096)
@@ -45,6 +45,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
         self.assertEqual(config.llama.log_retention_days, 7)
+        self.assertIsNone(config.llama.models_dir)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 320)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 64)
         self.assertEqual(config.agent.docs_answer.helper_prompt_version, "v3_compact")

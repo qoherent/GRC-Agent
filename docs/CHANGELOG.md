@@ -5,6 +5,98 @@ All notable changes to GRC Agent are documented here. The format follows
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 1.0 ships.
 
+## [Unreleased]
+
+### Added
+- **Model selector (Phase 1 of 3)**: read-only model discovery and
+  system-spec probes.
+  - New module `grc_agent.model_manager` with `discover_cached_models()`
+    (scans `~/.cache/huggingface/hub/` and an optional
+    `[llama].models_dir`; preserves original GGUF filenames from HF
+    snapshot symlinks; skips in-progress downloads; filters
+    `mmproj-*` projection files that the launcher would refuse to
+    load) and `list_system_specs()` (VRAM/GPU from `nvidia-smi`,
+    RAM from `/proc/meminfo`, CPU from `/proc/cpuinfo`; returns
+    `None` per field on unsupported platforms).
+  - New CLI subcommand `grc-agent model {list,specs,swap}`.
+    `swap` is a stub that surfaces a clear "Phase 3 not yet wired"
+    error so scripts can be authored against the final shape.
+  - New optional config field `[llama].models_dir` for hand-placed
+    `.gguf` directories that are not under the HF cache.
+
+- **Model selector (Phase 2 of 3)**: GUI model-selector dialog and
+  Model menu.
+  - New `Model` menu in the menubar with `Select Model...` (Ctrl+M)
+    and a disabled `Currently loaded: <name>` status entry that
+    resolves through `cfg.model`, then `cfg.hf_model`'s filename,
+    then `cfg.model_path` basename.
+  - New non-modal `ModelDialog` (`src/grc_agent_gui/model_dialog.py`)
+    with a dropdown listing every discovered `.gguf`, a confirm
+    strip whose "Switch model" button is enabled only when a
+    different model is picked, and a system-specs panel showing
+    compact one-liner (full names in tooltip).
+  - The `Select Model...` action is disabled while a chat turn is
+    in flight, mirroring the existing mid-turn protection.
+  - Confirming a selection in this phase appends a system-style
+    "Phase 3 not yet wired" note to the chat; the live swap ships
+    in Phase 3.
+
+- **Model selector (Phase 3 of 3)**: live model swap wired into the
+  GUI and the CLI.
+  - New `LlamaServerLauncher.swap_model(new_hf_repo, new_filename,
+    new_alias=None)` builds a fresh `LlamaConfig` (preserving
+    server URL, device, GPU layers, context window, and timeout)
+    and delegates to `ensure_server_ready` on a new launcher.
+    Server URL and health-evidence contract are preserved across
+    the swap.
+  - `grc-agent model swap --hf-repo <repo> --filename <name>
+    [--alias <name>]` now performs the live swap; on success it
+    prints the new model alias, server URL, status, and
+    health-evidence keys. `LlamaLauncherError` is surfaced as
+    rc=1 with a human-readable message.
+  - The GUI dispatches the swap through a `ModelSwapRunnable`
+    (QRunnable) so the UI does not freeze during HF download
+    (which can take minutes for an uncached model). The chat
+    input and Validate button are locked for the duration; the
+    "Currently loaded" menu and the model status label are
+    refreshed on success; failures are surfaced in both the
+    status bar and the chat panel.
+  - The model dialog's "Currently loaded" preselect now matches
+    `cfg.hf_repo:cfg.filename` (repo-aware) before falling back
+    to filename-only or stem matching.
+  - The chat history is preserved across a swap; the next model
+    turn sees the same messages.
+
+- **User preferences (System A)**: small JSON file at
+  `~/.config/grc_agent/preferences.json` persists the model the
+  user most recently loaded through the GUI or CLI. The file is
+  deliberately separate from `grc_agent.toml` (which is
+  hand-edited) so auto-written UI prefs do not clobber user
+  config. After a successful `grc-agent model swap` (CLI) or a
+  GUI `Switch model` confirmation, `last_model.{hf_repo,
+  filename, alias, saved_at}` is written atomically. On next
+  startup, preferences overlay `model` and `hf_model` onto the
+  in-memory `LlamaConfig` and clear `model_path` to match the
+  live-swap behavior. Failure to write is non-fatal (warning,
+  swap itself is not rolled back). The file path is listed in
+  `grc-agent paths` output as `preferences`. 17 unit tests.
+
+- **Local chat-session history (System B)**: SQLite-backed
+  store at `~/.grc_agent/sessions.db` (FTS5-indexed) holds
+  the user's chat history. The async writer runs on a dedicated
+  daemon thread with a 1000-message bounded queue,
+  drop-oldest backpressure, and 64-message batched commits
+  under WAL — the GUI's main thread is never blocked on
+  SQLite I/O. New `grc-agent sessions {list, show, export,
+  gc}` subcommand. New `File > Recent Sessions...` menu in
+  the GUI opens a browser dialog with a markdown preview;
+  double-click a row to clear the chat widget and replay the
+  session's messages. Per the agreed design, opening a `.grc`
+  always starts a fresh chat session; the user explicitly
+  reopens a past session via the dialog. The on-disk graph
+  file is unchanged by the new system. 26 unit tests + 7 GUI
+  tests.
+
 ## [0.1.0] - 2026-06-05
 
 First open-source release. Functional-complete internal tool released for
@@ -63,12 +155,13 @@ per `grc-agent init` question, followed by a "Verify" page that runs
 `user_config_path()` is missing, open the wizard instead of the main
 window. "Skip for now" acceptable.
 
-**Conversation history sidebar (with persistence)** (~3-4 days). Add a
-left-hand `QListView` to the main window, one row per saved session
-(loaded `.grc` path, chat messages, timestamp). Save through a small
-SQLite (or JSONL) layer under `~/.grc_agent/sessions/`. Double-click to
-reload.
-
+**Conversation history sidebar (with persistence)** — *partially
+shipped in v0.1.0 System B (modal `File > Recent Sessions...`
+dialog over a SQLite/FTS5 store at `~/.grc_agent/sessions.db`;
+`grc-agent sessions list|show|export|gc` CLI subcommand).
+The left-edge *sidebar* UI is still deferred; the data model and
+writer layer are in place and sidebar-friendly. ~2-3 days to
+add a thin Qt widget on top of the existing API.
 **Light / dark theme toggle (with system follow)** (~2-3 days). Move the
 hardcoded Catppuccin stylesheet out of `app.py` into two external `.qss`
 files. Add a `QSettings`-backed theme picker under **Help > Theme** (Dark

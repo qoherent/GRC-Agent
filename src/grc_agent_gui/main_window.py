@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from grc_agent.model_manager import CachedModel
 from PySide6.QtCore import (
     QEvent,
     QObject,
@@ -33,7 +34,13 @@ from PySide6.QtWidgets import (
 
 from .chat_widget import ChatWidget
 from .inspector import InspectorWidget
+from .model_dialog import (
+    ModelDialog,
+    ModelDialogSelection,
+    discover_models_for_dialog,
+)
 from .process_manager import ProcessManager
+from .recent_sessions_dialog import RecentSessionsDialog
 from .workers import AgentWorker
 
 logger = logging.getLogger(__name__)
@@ -59,9 +66,75 @@ def _get_app_version() -> str:
         return "unknown"
 
 
+def _default_sessions_db() -> "Path":
+    """Return the default sessions DB path. Module-level for
+    import-time access from inner functions."""
+    from grc_agent.sessions_store import default_sessions_db_path
+
+    return default_sessions_db_path()
+
+
 class InspectorWorkerSignals(QObject):
     finished = Signal(dict)
     error = Signal(str)
+
+
+class ModelSwapWorkerSignals(QObject):
+    finished = Signal(object)  # LlamaLaunchResult
+    error = Signal(str)        # human-readable error message
+
+
+class ModelSwapRunnable(QRunnable):
+    """Background swap of the local llama.cpp model.
+
+    Runs :meth:`grc_agent.llama_launcher.LlamaServerLauncher.swap_model`
+    off the GUI thread so the user does not see a frozen interface
+    during model download (HF-cached models: a few seconds; uncached:
+    tens of seconds to minutes).
+
+    The launcher takes its own file lock for the duration of the
+    swap. The GUI does not call ``ensure_server_ready`` from any other
+    code path while the swap is running (the ``select_model_action`` is
+    disabled, and the worker is the only path that touches the
+    launcher).
+    """
+
+    def __init__(
+        self,
+        llama_config: Any,
+        hf_repo: str,
+        filename: str,
+        alias: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.llama_config = llama_config
+        self.hf_repo = hf_repo
+        self.filename = filename
+        self.alias = alias
+        self.signals = ModelSwapWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            from grc_agent.llama_launcher import (
+                LlamaLauncherError,
+                LlamaServerLauncher,
+            )
+
+            launcher = LlamaServerLauncher(self.llama_config)
+            result = launcher.swap_model(
+                new_hf_repo=self.hf_repo,
+                new_filename=self.filename,
+                new_alias=self.alias,
+            )
+            self.signals.finished.emit(result)
+        except Exception as exc:  # noqa: BLE001 — surface as user-facing error
+            from grc_agent.llama_launcher import LlamaLauncherError
+
+            if isinstance(exc, LlamaLauncherError):
+                self.signals.error.emit(str(exc))
+            else:
+                logger.exception("Unexpected model-swap failure")
+                self.signals.error.emit(f"Model swap failed: {exc}")
 
 
 class InspectorRunnable(QRunnable):
@@ -90,12 +163,19 @@ class MainWindow(QMainWindow):
     """Main window for the GRC Agent desktop UI sidekick."""
 
     def __init__(
-        self, agent: Any, provider_config: Any = None, parent: QWidget = None
+        self,
+        agent: Any,
+        provider_config: Any = None,
+        llama_config: Any = None,
+        parent: QWidget = None,
     ) -> None:
         super().__init__(parent)
         self.agent = agent
         self.provider_config = provider_config
+        self.llama_config = llama_config
         self.worker = None
+        self._model_swap_runnable = None
+        self._pending_swap_selection = None
         self.thread = None
         self.process_manager = None
         self._safe_to_close = False
@@ -131,6 +211,26 @@ class MainWindow(QMainWindow):
         open_output_action = QAction("Open &Output Folder", self)
         open_output_action.triggered.connect(self.open_output_folder)
         file_menu.addAction(open_output_action)
+
+        file_menu.addSeparator()
+        self.recent_sessions_action = QAction("&Recent Sessions...", self)
+        self.recent_sessions_action.setShortcut("Ctrl+Shift+H")
+        self.recent_sessions_action.triggered.connect(self.open_recent_sessions_dialog)
+        file_menu.addAction(self.recent_sessions_action)
+
+        # Model Menu (Phase 2 of the model-selector rollout)
+        model_menu = menubar.addMenu("&Model")
+        self._model_menu = model_menu  # keep ref so we can update the "currently loaded" entry
+
+        self.select_model_action = QAction("&Select Model...", self)
+        self.select_model_action.setShortcut("Ctrl+M")
+        self.select_model_action.triggered.connect(self.open_model_dialog)
+        model_menu.addAction(self.select_model_action)
+
+        model_menu.addSeparator()
+        self.current_model_action = QAction("Currently loaded: (unknown)", self)
+        self.current_model_action.setEnabled(False)
+        model_menu.addAction(self.current_model_action)
 
         # Help Menu
         help_menu = menubar.addMenu("&Help")
@@ -245,9 +345,93 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
 
+        self.model_status_label = QLabel(self)
+        self.model_status_label.setObjectName("modelStatusLabel")
+        self.status_bar.addPermanentWidget(self.model_status_label)
+        self._update_model_status_label()
+
         self.validation_label = QLabel("Unknown", self)
         self.status_bar.addPermanentWidget(self.validation_label)
         self.update_ui_state()
+
+    @staticmethod
+    def _format_size(num_bytes: int) -> str:
+        """Render a byte count as a compact human-readable size (GiB / MiB)."""
+        if num_bytes < 1024 * 1024:
+            return f"{num_bytes / 1024:.0f} KiB"
+        if num_bytes < 1024 * 1024 * 1024:
+            return f"{num_bytes / (1024 * 1024):.1f} MiB"
+        return f"{num_bytes / (1024 * 1024 * 1024):.2f} GiB"
+
+    @staticmethod
+    def _gguf_file_size(path: str | None) -> str:
+        """Return the on-disk size of a GGUF file, or 'n/a' if unavailable."""
+        if not path:
+            return "n/a"
+        try:
+            return MainWindow._format_size(Path(path).stat().st_size)
+        except OSError:
+            return "n/a"
+
+    def _resolve_model_status(self) -> str:
+        """Build a single-line summary of the loaded model for the status bar.
+
+        Resolves fields from ``provider_config.model`` (alias) and
+        ``llama_config`` (device, gpu_layers, model_path). Falls back to
+        'n/a' for any missing or unreadable field rather than hiding the
+        label, so the affordance is always visible.
+        """
+        alias = None
+        provider = getattr(self, "provider_config", None)
+        if provider is not None:
+            alias = getattr(provider, "model", None)
+
+        cfg = getattr(self, "llama_config", None)
+
+        device_raw = getattr(cfg, "device", None) if cfg is not None else None
+        gpu_layers = getattr(cfg, "gpu_layers", None) if cfg is not None else None
+        model_path = getattr(cfg, "model_path", None) if cfg is not None else None
+
+        device_norm = (device_raw or "").strip()
+        if not device_norm or device_norm.lower() in {"cpu", "none", "null"}:
+            device_kind = "CPU"
+            device_detail = ""
+        else:
+            device_kind = "GPU"
+            device_detail = f" ({device_norm})"
+
+        if alias and model_path:
+            display_name = Path(model_path).stem
+        elif alias:
+            display_name = alias
+        elif model_path:
+            display_name = Path(model_path).stem
+        else:
+            display_name = "unknown"
+
+        size_str = self._gguf_file_size(model_path)
+
+        gpu_layer_str = "n/a"
+        if gpu_layers is not None:
+            if device_kind == "GPU":
+                gpu_layer_str = f"{int(gpu_layers)} layers"
+            else:
+                gpu_layer_str = "off (CPU)"
+
+        return (
+            f"Model: {display_name} · {size_str} · "
+            f"{device_kind}{device_detail} · GPU offload: {gpu_layer_str}"
+        )
+
+    def _update_model_status_label(self) -> None:
+        """Render the model status string into the permanent status-bar label."""
+        try:
+            self.model_status_label.setText(self._resolve_model_status())
+            self.model_status_label.setStyleSheet("color: #cdd6f4;")
+        except Exception as exc:
+            logger.debug("Failed to render model status label: %s", exc)
+            self.model_status_label.setText("Model: unknown")
+            self.model_status_label.setStyleSheet("color: #a6adc8;")
 
     def update_ui_state(self) -> None:
         """Enable or disable chat and validation controls based on active session state."""
@@ -259,6 +443,9 @@ class MainWindow(QMainWindow):
         self.validate_btn.setEnabled(has_graph)
         self.save_action.setEnabled(has_graph)
         self.export_chat_action.setEnabled(has_graph)
+        # Refresh the "Currently loaded" entry so the menu reflects the
+        # resolved model alias and disk size.
+        self._update_current_model_menu()
 
         if has_graph:
             self.chat_input.setPlaceholderText("Ask the assistant to modify or summarize the flowgraph...")
@@ -266,6 +453,16 @@ class MainWindow(QMainWindow):
             self.chat_input.setPlaceholderText("Please load a .grc flowgraph (File -> Open or Drag & Drop) to start chatting...")
             self.validation_label.setText("No Graph")
             self.validation_label.setStyleSheet("color: #a6adc8;")
+
+    def _update_current_model_menu(self) -> None:
+        """Refresh the Model menu's 'Currently loaded' entry."""
+        if not hasattr(self, "current_model_action"):
+            return
+        alias = self._display_model_alias()
+        if alias:
+            self.current_model_action.setText(f"Currently loaded: {alias}")
+        else:
+            self.current_model_action.setText("Currently loaded: (none)")
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.chat_input and event.type() == QEvent.Type.KeyPress:
@@ -322,6 +519,9 @@ class MainWindow(QMainWindow):
     def on_worker_started(self) -> None:
         """Lock input interface to prevent race conditions during generation."""
         self.chat_input.setEnabled(False)
+        if hasattr(self, "select_model_action"):
+            # Block model switches mid-turn per the agreed design.
+            self.select_model_action.setEnabled(False)
         self.status_bar.showMessage("Agent is thinking...")
         self.chat_widget.start_stream()
 
@@ -333,7 +533,7 @@ class MainWindow(QMainWindow):
             "border-top: 1px solid #45475a; font-size: 12px; padding: 2px 8px; } "
             "QStatusBar::item { border: none; }"
         )
-        self.chat_widget.append_status(f"Running {name}...")
+        self.chat_widget.append_status(name, args)
 
     def on_tool_finished(self, name: str, result: str) -> None:
         """Handle tool completion: show mutations, surface errors."""
@@ -359,6 +559,8 @@ class MainWindow(QMainWindow):
     def on_turn_finished(self, result: dict[str, Any]) -> None:
         """Unlock the interface and clear status fields."""
         self.chat_input.setEnabled(True)
+        if hasattr(self, "select_model_action"):
+            self.select_model_action.setEnabled(True)
         assistant_text = result.get("assistant_text", "")
         self.chat_widget.finalize_stream(assistant_text)
         self.refresh_inspector()
@@ -498,6 +700,366 @@ class MainWindow(QMainWindow):
     def on_inspector_error(self, err_msg: str) -> None:
         logger.error(f"Failed to refresh inspector asynchronously: {err_msg}")
 
+    def open_model_dialog(self) -> None:
+        """Open the non-modal model-selector dialog.
+
+        Phase 2: builds and shows the dialog wired to a discover-and-list
+        path. The actual swap is delegated to Phase 3
+        (``LlamaServerLauncher.swap_model``). If the user confirms a
+        selection in this phase, the chat panel shows a system-style
+        "swap not yet wired" message and the dialog closes cleanly.
+        """
+        from grc_agent.model_manager import list_system_specs
+
+        # Reuse an open dialog rather than spawning duplicates.
+        if (
+            hasattr(self, "_model_dialog")
+            and self._model_dialog is not None
+            and self._model_dialog.isVisible()
+        ):
+            self._model_dialog.raise_()
+            self._model_dialog.activateWindow()
+            return
+
+        models_dir = None
+        if getattr(self, "llama_config", None) is not None:
+            cfg_dir = getattr(self.llama_config, "models_dir", None)
+            if cfg_dir:
+                models_dir = Path(cfg_dir).expanduser()
+        try:
+            models = discover_models_for_dialog(models_dir=models_dir)
+        except Exception as exc:
+            logger.error("Failed to discover cached models: %s", exc)
+            models = []
+
+        # Resolve the currently loaded model. Phase 3 will replace this
+        # heuristic with a proper matcher that knows about ``hf_model``
+        # tokens and resolved paths.
+        current_model = self._resolve_current_model(models)
+        specs = list_system_specs()
+
+        dialog = ModelDialog(
+            current_model=current_model,
+            models=models,
+            specs=specs,
+            parent=self,
+        )
+        self._model_dialog = dialog
+        dialog.model_accepted.connect(self._on_model_dialog_accepted)
+        dialog.finished.connect(self._on_model_dialog_finished)
+        dialog.show()
+
+    def _on_model_dialog_accepted(self, selection: ModelDialogSelection) -> None:
+        """Handle a confirmed model selection from the dialog.
+
+        Phase 3: starts a background :class:`ModelSwapRunnable` and
+        disables the chat input + Validate button while the swap is
+        running. Defense-in-depth: also refuses if a chat turn is
+        already in flight, even though the menu was disabled at that
+        point.
+        """
+        from grc_agent.model_manager import CachedModel
+
+        assert isinstance(selection, ModelDialogSelection)
+        model: CachedModel = selection.cached_model
+
+        # Defense-in-depth: refuse if a turn is already running. The
+        # select_model_action is disabled in on_worker_started, so this
+        # is belt-and-suspenders, not the primary guard.
+        if self.thread is not None and self.thread.isRunning():
+            self.status_bar.showMessage(
+                "Cannot swap model while a chat turn is running."
+            )
+            return
+        # The launcher requires the [llama].hf_model config shape;
+        # refusing up front is friendlier than waiting for the launcher
+        # to time out.
+        if getattr(self, "llama_config", None) is None:
+            self.status_bar.showMessage(
+                "Cannot swap model: no llama_config on this session."
+            )
+            return
+
+        self._set_swap_in_progress(True)
+        self.status_bar.showMessage(
+            f"Swapping to {model.hf_model_token}..."
+        )
+
+        # Stash the selection so the success handler can rebuild the
+        # in-memory ``hf_model`` field correctly. The launcher's
+        # provider_config exposes ``model`` (the alias), not the
+        # ``hf_repo:filename`` token, so we have to use the
+        # originally-selected model to keep the GUI's config
+        # authoritative.
+        self._pending_swap_selection = selection
+
+        runnable = ModelSwapRunnable(
+            llama_config=self.llama_config,
+            hf_repo=model.hf_repo,
+            filename=model.filename,
+            alias=selection.alias_override or model.filename,
+        )
+        runnable.signals.finished.connect(self._on_model_swap_finished)
+        runnable.signals.error.connect(self._on_model_swap_error)
+        self._model_swap_runnable = runnable
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_model_swap_finished(self, result: Any) -> None:
+        """Apply the new launcher state and notify the user."""
+        from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig
+
+        new_provider: ToolAgentsLlamaProviderConfig = getattr(
+            result, "provider_config", None
+        )
+        if new_provider is None:
+            self._on_model_swap_error("Launcher returned no provider_config.")
+            return
+        # Update the in-memory config so future swaps/chats use the
+        # new model. We do NOT write to grc_agent.toml; the user can
+        # do that explicitly if they want the change to persist
+        # across sessions. Use the originally-selected model (not
+        # ``new_provider.model``, which is the bare alias) to
+        # reconstruct the ``hf_repo:filename`` token.
+        import dataclasses
+
+        selection = getattr(self, "_pending_swap_selection", None)
+        if (
+            getattr(self, "llama_config", None) is not None
+            and selection is not None
+        ):
+            new_hf_model = f"{selection.cached_model.hf_repo}:{selection.cached_model.filename}"
+            self.llama_config = dataclasses.replace(
+                self.llama_config,
+                model=result.model_alias,
+                hf_model=new_hf_model,
+                # Keep model_path=None (the swap path cleared it).
+            )
+        # Clear the runnable + selection refs so the next swap is clean.
+        self._model_swap_runnable = None
+        self._pending_swap_selection = None
+        self.provider_config = new_provider
+        self._set_swap_in_progress(False)
+        self._update_model_status_label()
+        self._update_current_model_menu()
+        # Persist the selection so the next GUI/CLI launch starts
+        # with this model. Failure is non-fatal: the swap itself
+        # already succeeded; we surface a hint in the status bar
+        # and continue. The user can re-swap or remove
+        # ``preferences.json`` to recover.
+        prefs_persisted = True
+        if selection is not None:
+            try:
+                from grc_agent.preferences import update_last_model
+
+                update_last_model(
+                    hf_repo=selection.cached_model.hf_repo,
+                    filename=selection.cached_model.filename,
+                    alias=result.model_alias,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Failed to persist last_model preference: %s", exc
+                )
+                prefs_persisted = False
+        suffix = "" if prefs_persisted else " (preferences not saved — disk full?)"
+        self.status_bar.showMessage(
+            f"Model switched to {result.model_alias}{suffix}", 5000
+        )
+        self.chat_widget.append_message(
+            "assistant",
+            f"[model selector] Switched to `{result.model_alias}` "
+            f"({result.status}). Existing chat history is preserved; "
+            "the next turn uses the new model.",
+        )
+
+    def _on_model_swap_error(self, message: str) -> None:
+        """Surface a swap failure and re-enable the controls."""
+        self._set_swap_in_progress(False)
+        self._model_swap_runnable = None
+        self._pending_swap_selection = None
+        self.status_bar.showMessage(f"Model swap failed: {message}", 8000)
+        self.chat_widget.append_message(
+            "assistant",
+            f"[model selector] Model swap failed: {message}",
+        )
+        # Refresh the menu so the "Currently loaded" entry stays in
+        # sync with reality.
+        self._update_current_model_menu()
+
+    def open_recent_sessions_dialog(self) -> None:
+        """Open the ``File > Recent Sessions...`` dialog.
+
+        Loads the most recent sessions from the local store,
+        shows a list with a markdown preview, and on double-click
+        clears the chat widget and replays the session's
+        messages. Per the agreed design, the chat history is
+        always overwritten when the user reopens a session; the
+        agent's in-memory history is also reset so the model
+        starts the next turn fresh.
+        """
+        from grc_agent.sessions_store import list_sessions_sync
+
+        try:
+            sessions = list_sessions_sync(
+                _default_sessions_db(),
+                limit=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to list recent sessions: %s", exc)
+            self.status_bar.showMessage(
+                f"Recent Sessions unavailable: {exc}", 5000
+            )
+            return
+
+        dialog = RecentSessionsDialog(
+            sessions=sessions,
+            message_preview_loader=self._load_session_preview,
+            parent=self,
+        )
+        dialog.session_opened.connect(self._open_past_session)
+        dialog.exec()
+
+    def _load_session_preview(self, session_id: int) -> list:
+        """Load a session's messages synchronously for the preview pane.
+
+        Uses the sync API so the dialog's preview is consistent
+        regardless of the writer thread's progress. Errors are
+        logged and surfaced as empty previews.
+        """
+        from grc_agent.sessions_store import list_messages_sync
+
+        try:
+            return list_messages_sync(_default_sessions_db(), session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to load session preview: %s", exc)
+            return []
+
+    def _open_past_session(self, session_id: int) -> None:
+        """Clear the chat widget and replay a past session's messages.
+
+        Per the agreed design, the next user message starts a
+        fresh turn on the new model; the old conversation is
+        preserved in the sessions DB and can be reopened again.
+        """
+        from grc_agent.sessions_store import list_messages_sync
+
+        try:
+            messages = list_messages_sync(_default_sessions_db(), session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to open session %s: %s", session_id, exc)
+            self.status_bar.showMessage(f"Open session failed: {exc}", 5000)
+            return
+        self.chat_widget.clear()
+        # The agent's in-memory history must be reset so the
+        # model does not see the union of the old chat and the
+        # reopened messages. We only mutate the local copy;
+        # the on-disk history is unchanged.
+        if getattr(self.agent, "history", None) is not None:
+            self.agent.history = []
+        for msg in messages:
+            # Skip system rows; those are an internal affordance.
+            if msg.role == "system":
+                continue
+            self.chat_widget.append_message(msg.role, msg.text)
+        self.status_bar.showMessage(
+            f"Loaded session {session_id} ({len(messages)} messages). "
+            "Next message starts a fresh turn.",
+            5000,
+        )
+
+    def _set_swap_in_progress(self, busy: bool) -> None:
+        """Lock or unlock the chat input / Validate button around a swap.
+
+        Mirrors the existing lock pattern used by
+        :meth:`on_process_started` and :meth:`on_worker_started`. The
+        ``select_model_action`` is left disabled for the duration of
+        the swap so the user cannot fire a second swap concurrently.
+        """
+        if not hasattr(self, "chat_input"):
+            return
+        self.chat_input.setEnabled(not busy and (
+            self.agent.session is not None
+            and self.agent.session.flowgraph is not None
+        ))
+        if hasattr(self, "validate_btn"):
+            self.validate_btn.setEnabled(not busy and (
+                self.agent.session is not None
+                and self.agent.session.flowgraph is not None
+            ))
+        if hasattr(self, "select_model_action"):
+            self.select_model_action.setEnabled(not busy)
+
+    def _on_model_dialog_finished(self, _result: int) -> None:
+        """Drop the dialog reference when it closes so a future menu
+        click re-opens it cleanly."""
+        if hasattr(self, "_model_dialog"):
+            self._model_dialog = None
+
+    def _display_model_alias(self) -> str:
+        """Return the user-facing model name for the status bar / menu.
+
+        Resolution order: ``cfg.model`` (the alias the launcher was
+        started with), then ``cfg.hf_model``'s filename portion (the
+        ``:filename`` half of ``org/repo:filename``), then
+        ``cfg.model_path``'s basename. Returns an empty string when no
+        field is set.
+        """
+        cfg = getattr(self, "llama_config", None)
+        if cfg is None:
+            return ""
+        alias = (getattr(cfg, "model", None) or "").strip()
+        if alias:
+            return alias
+        hf_model = (getattr(cfg, "hf_model", None) or "").strip()
+        if hf_model and ":" in hf_model:
+            return hf_model.split(":", 1)[1].strip()
+        model_path = getattr(cfg, "model_path", None)
+        if model_path:
+            return Path(model_path).name
+        return ""
+
+    def _resolve_current_model(
+        self, models: list[CachedModel]
+    ) -> CachedModel | None:
+        """Return the CachedModel that matches the loaded config, if any.
+
+        Tries to match the resolved display name (see
+        :meth:`_display_model_alias`) against each model's
+        ``filename`` and ``hf_repo:filename`` token. This covers all
+        three LlamaConfig fields the user can configure: ``model``,
+        ``hf_model``, and ``model_path``.
+        """
+        cfg = getattr(self, "llama_config", None)
+        if cfg is None:
+            return None
+        # Build a set of filenames-to-match. We accept both the bare
+        # filename and the basename-without-extension because the user
+        # may have set ``[llama].model = "Qwen3.5-2B-UD-Q4_K_XL"``
+        # (no extension) in their config.
+        target_filename = self._display_model_alias()
+        if not target_filename:
+            return None
+        # ``hf_repo:filename`` exact match beats filename-only when
+        # multiple repos ship the same filename.
+        hf_repo = (getattr(cfg, "hf_model", None) or "").strip()
+        if hf_repo and ":" in hf_repo:
+            repo = hf_repo.split(":", 1)[0].strip()
+            if repo:
+                for model in models:
+                    if (
+                        model.hf_repo == repo
+                        and model.filename == target_filename
+                    ):
+                        return model
+        # Filename-only fallback.
+        target_stem = Path(target_filename).stem
+        for model in models:
+            if model.filename == target_filename:
+                return model
+            if Path(model.filename).stem == target_stem:
+                return model
+        return None
+
     def on_validate_clicked(self) -> None:
         """Handler for 'Validate' button click."""
         if self.agent.session and self.agent.session.path:
@@ -587,6 +1149,10 @@ class MainWindow(QMainWindow):
             self._settings.setValue("window/geometry", self.saveGeometry())
             self._settings.setValue("window/h_splitter", self.h_splitter.saveState())
             self._settings.setValue("window/v_splitter", self.v_splitter.saveState())
+            # Drop the model-dialog reference so we never touch a
+            # destroyed C++ QDialog after the parent QMainWindow is
+            # gone.
+            self._model_dialog = None
             # Safe path: clean up temp directories and thread workers
             if self.process_manager:
                 self.process_manager.cleanup_temp_dir()

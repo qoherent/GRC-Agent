@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from grc_agent.agent import GrcAgent
-from grc_agent.config import load_app_config
+from grc_agent.config import AppConfig, load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session.load import load_grc
 from grc_agent.startup import bootstrap_runtime
@@ -294,6 +294,31 @@ def main() -> None:
     app.setStyleSheet(_STYLESHEET)
 
     config = load_app_config()
+    # Overlay user preferences (e.g. the model last picked in the
+    # GUI) onto the config. Preferences win over ``grc_agent.toml``
+    # for the model and hf_model fields; everything else is
+    # preserved. A malformed prefs file is logged and ignored by
+    # the loader; a load failure here is non-fatal.
+    try:
+        from grc_agent.preferences import (
+            apply_user_preferences_to_llama_config,
+            load_user_preferences,
+        )
+
+        prefs = load_user_preferences()
+        if (
+            prefs.last_model.alias
+            or prefs.last_model.hf_repo
+            or prefs.last_model.filename
+        ):
+            config = AppConfig(
+                llama=apply_user_preferences_to_llama_config(
+                    config.llama, prefs
+                ),
+                agent=config.agent,
+            )
+    except Exception as exc:  # noqa: BLE001 - defensive
+        logger.debug("Failed to apply user preferences: %s", exc)
 
     session: FlowgraphSession | None = None
     if len(sys.argv) > 1:
@@ -351,7 +376,11 @@ def main() -> None:
     if result.launch_status == "started" and result.launch_pid is not None:
         _register_server_cleanup(result.launch_pid)
 
-    window = MainWindow(agent, provider_config=result.provider_config)
+    window = MainWindow(
+        agent,
+        provider_config=result.provider_config,
+        llama_config=config.llama,
+    )
     app.aboutToQuit.connect(window.process_manager.shutdown)
     window.show()
 
