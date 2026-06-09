@@ -6,6 +6,12 @@ readiness so both products do the same startup dance without duplication.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+# Ensure FastEmbed downloads/caches models in a persistent directory instead of /tmp.
+os.environ.setdefault("FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "grc_agent" / "fastembed_cache"))
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,6 +82,7 @@ def bootstrap_runtime(
         if readiness.get("ok"):
             result.retrieval_ok = True
             result.catalog_root = readiness.get("catalog_root")
+            _warm_vector_embedding_model()
         else:
             msg = readiness.get("message", "Retrieval initialization failed.")
             result.errors.append(msg)
@@ -189,3 +196,25 @@ def _classify_launcher_error(message: str) -> str:
     if "model" in lowered and "not found" in lowered:
         return ErrorCode.MODEL_NOT_FOUND
     return ErrorCode.INTERNAL_ERROR
+
+
+def _warm_vector_embedding_model() -> None:
+    """Pre-load/download the default embedding model if not already cached.
+
+    Ensures that the model is cached and ready before CLI/GUI startup, preventing
+    blocking/hangs during active turns.
+    """
+    try:
+        from grc_agent.retrieval.vector import DEFAULT_EMBEDDING_MODEL
+        from fastembed import TextEmbedding
+
+        # Print a clear console message so the user is informed of the download status
+        print(f"Checking vector embedding model '{DEFAULT_EMBEDDING_MODEL}'...", flush=True)
+
+        # TextEmbedding downloads/initializes the model synchronously, printing progress to stderr
+        _ = TextEmbedding(model_name=DEFAULT_EMBEDDING_MODEL)
+    except Exception as exc:
+        # Retrieval index warming issues should be logged and not crash bootstrap
+        # (e.g. offline environments can still run without semantic retrieval).
+        import logging
+        logging.getLogger(__name__).warning("Failed to warm vector embedding model: %s", exc)

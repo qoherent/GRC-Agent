@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from functools import lru_cache
@@ -363,6 +364,7 @@ class GrcAgent:
         )
         self._history_lineage_key: str | None = None
         self.history: list[HistoryEntry] = []
+        self.chat_session_id = str(uuid.uuid4())
         self._last_validated_state_revision: int | None = None
         self._last_validation_ok: bool | None = None
         self._reset_validation_tracking()
@@ -400,7 +402,12 @@ class GrcAgent:
         self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
-        return build_system_prompt()
+        return build_system_prompt(self.chat_session_id)
+
+    def reset_chat_session(self) -> None:
+        """Reset the chat session history and generate a new session ID to clear KV cache matching."""
+        self.history = []
+        self.chat_session_id = str(uuid.uuid4())
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Return model-facing tool schemas for the active ToolSurface."""

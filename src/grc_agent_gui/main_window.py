@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from .chat_widget import ChatWidget
 from .inspector import InspectorWidget
+from .sidebar_widget import SidebarWidget
 from .model_dialog import (
     ModelDialog,
     ModelDialogSelection,
@@ -42,6 +43,7 @@ from .model_dialog import (
 from .process_manager import ProcessManager
 from .recent_sessions_dialog import RecentSessionsDialog
 from .workers import AgentWorker
+from grc_agent.sessions_store import open_session_store
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +181,8 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.process_manager = None
         self._safe_to_close = False
+        self.active_session_id = None
+        self.sessions_store = open_session_store(_default_sessions_db())
 
         self.setWindowTitle(f"{APP_DISPLAY_NAME} {_get_app_version()}")
         icon_path = Path(__file__).parent / "resources" / "icon.png"
@@ -213,9 +217,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_output_action)
 
         file_menu.addSeparator()
-        self.recent_sessions_action = QAction("&Recent Sessions...", self)
+        self.recent_sessions_action = QAction("&Session Sidebar", self)
         self.recent_sessions_action.setShortcut("Ctrl+Shift+H")
-        self.recent_sessions_action.triggered.connect(self.open_recent_sessions_dialog)
+        self.recent_sessions_action.triggered.connect(self.toggle_sidebar)
         file_menu.addAction(self.recent_sessions_action)
 
         # Model Menu (Phase 2 of the model-selector rollout)
@@ -264,6 +268,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal, v_splitter)
         self.h_splitter = splitter
 
+        # Instantiate Sidebar widget
+        self.sidebar_widget = SidebarWidget(splitter)
+        splitter.addWidget(self.sidebar_widget)
+
         # Instantiate ChatWidget sidekick pane
         self.chat_widget = ChatWidget(splitter)
         splitter.addWidget(self.chat_widget)
@@ -272,8 +280,22 @@ class MainWindow(QMainWindow):
         self.inspector_widget = InspectorWidget(splitter)
         splitter.addWidget(self.inspector_widget)
 
-        # Set splitter proportions (e.g. 60% chat, 40% inspector)
-        splitter.setSizes([480, 320])
+        # Connect sidebar signals
+        self.sidebar_widget.session_selected.connect(self._open_past_session)
+        self.sidebar_widget.new_chat_requested.connect(self.start_new_chat_session)
+        self.sidebar_widget.collapse_requested.connect(self.toggle_sidebar)
+
+        # Set stretch factors: only the Chat widget expands, sidebar and inspector keep fixed widths on resize.
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+
+        # Set default splitter proportions (e.g. 18% sidebar, 50% chat, remaining for inspector)
+        total_width = self.width() or 800
+        sidebar_w = max(150, int(total_width * 0.18))
+        chat_w = int(total_width * 0.50)
+        inspector_w = max(200, total_width - sidebar_w - chat_w)
+        splitter.setSizes([sidebar_w, chat_w, inspector_w])
         v_splitter.addWidget(splitter)
 
         # Console Log Panel (lower pane)
@@ -307,13 +329,7 @@ class MainWindow(QMainWindow):
         self.chat_input.returnPressed.connect(self.send_prompt)
         self.chat_input.installEventFilter(self)
 
-        # Restore saved splitter state
-        h_state = self._settings.value("window/h_splitter")
-        if h_state:
-            self.h_splitter.restoreState(h_state)
-        v_state = self._settings.value("window/v_splitter")
-        if v_state:
-            self.v_splitter.restoreState(v_state)
+        # Splitter states are restored in showEvent once window geometry is fully realized.
 
         # Initialize Process Manager
         self.process_manager = ProcessManager(self)
@@ -339,6 +355,7 @@ class MainWindow(QMainWindow):
         if self.agent.session and self.agent.session.path:
             self.inspector_widget.set_grc_file_path(str(self.agent.session.path))
         self.refresh_inspector()
+        self.refresh_sidebar_sessions()
 
         # Status Bar
         self.status_bar = QStatusBar(self)
@@ -474,6 +491,89 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event) -> None:
+        """Handle layout initialization after window geometry is fully realized."""
+        super().showEvent(event)
+        if not hasattr(self, "_first_shown"):
+            self._first_shown = True
+            total_w = self.width() or 800
+            
+            # Restore horizontal splitter state
+            h_state = self._settings.value("window/h_splitter")
+            if h_state:
+                self.h_splitter.restoreState(h_state)
+                sizes = self.h_splitter.sizes()
+                if len(sizes) == 3:
+                    # 1. Sidebar should be max 20% of total width. If it's larger or collapsed, set it to 18%.
+                    max_sidebar_w = int(total_w * 0.20)
+                    if (sizes[0] > max_sidebar_w or sizes[0] < 50) and not self.sidebar_widget.isHidden():
+                        sizes[0] = max(150, int(total_w * 0.18))
+                    
+                    # 2. Ensure inspector (index 2) has a sensible size and was not collapsed by older 2-widget settings
+                    if sizes[2] < 50 and not self.inspector_widget.isHidden():
+                        sizes[2] = max(200, int(total_w * 0.32))
+                    
+                    # 3. Chat gets the remainder
+                    sizes[1] = max(300, total_w - sizes[0] - sizes[2])
+                    self.h_splitter.setSizes(sizes)
+            else:
+                sidebar_w = max(150, int(total_w * 0.18))
+                chat_w = int(total_w * 0.50)
+                inspector_w = max(200, total_w - sidebar_w - chat_w)
+                self.h_splitter.setSizes([sidebar_w, chat_w, inspector_w])
+            
+            # Restore vertical splitter state
+            v_state = self._settings.value("window/v_splitter")
+            if v_state:
+                self.v_splitter.restoreState(v_state)
+
+    def _ensure_active_session_db_record(self, first_user_prompt: str) -> None:
+        """Create a new session record in SQLite if one isn't currently active."""
+        if self.active_session_id is not None:
+            return
+
+        # Get path and hash from active agent session
+        graph_path = ""
+        graph_hash = ""
+        if self.agent.session and self.agent.session.path:
+            graph_path = str(self.agent.session.path)
+            if hasattr(self.agent.session, "persisted_file_sha256") and self.agent.session.persisted_file_sha256:
+                graph_hash = self.agent.session.persisted_file_sha256
+            elif self.agent.session.path.exists():
+                try:
+                    import hashlib
+                    graph_hash = hashlib.sha256(self.agent.session.path.read_bytes()).hexdigest()
+                except Exception:
+                    graph_hash = "unknown"
+
+        model_alias = getattr(self.provider_config, "model", None)
+        if model_alias is not None:
+            if type(model_alias).__name__ in ("MagicMock", "Mock"):
+                model_alias = "mock-model"
+            else:
+                model_alias = str(model_alias)
+        else:
+            model_alias = "unknown"
+        backend = "llama_cpp"
+        
+        # Create a title using the first 40 chars of the user's prompt
+        title = first_user_prompt[:40]
+        if len(first_user_prompt) > 40:
+            title += "..."
+
+        try:
+            self.active_session_id = self.sessions_store.open_session(
+                graph_path=graph_path,
+                graph_hash=graph_hash,
+                model_alias=model_alias,
+                backend=backend,
+                title=title,
+            )
+            # Update the sidebar listing after creating a new session
+            self.refresh_sidebar_sessions()
+        except Exception as exc:
+            logger.exception("Failed to open new database session: %s", exc)
+
     def send_prompt(self) -> None:
         """Read the input box, format as a user message, and start worker generation."""
         prompt = self.chat_input.text().strip()
@@ -484,6 +584,15 @@ class MainWindow(QMainWindow):
                 self.save_file()
                 return
             self.chat_widget.append_message("user", prompt)
+
+            # Auto-save
+            self._ensure_active_session_db_record(prompt)
+            if self.active_session_id is not None:
+                try:
+                    self.sessions_store.append(self.active_session_id, "user", prompt)
+                except Exception as exc:
+                    logger.exception("Failed to save user prompt to DB: %s", exc)
+
             self.start_generation(prompt)
 
     def start_generation(self, prompt: str) -> None:
@@ -535,6 +644,16 @@ class MainWindow(QMainWindow):
         )
         self.chat_widget.append_status(name, args)
 
+        if self.active_session_id is not None:
+            try:
+                self.sessions_store.append(
+                    self.active_session_id,
+                    "tool_started",
+                    f"Tool: {name}\nArgs: {args}",
+                )
+            except Exception as exc:
+                logger.exception("Failed to save tool start to DB: %s", exc)
+
     def on_tool_finished(self, name: str, result: str) -> None:
         """Handle tool completion: show mutations, surface errors."""
         if name == "change_graph" and result:
@@ -544,6 +663,26 @@ class MainWindow(QMainWindow):
             self.chat_widget.append_error(f"{name}: {result[:300]}")
         self.status_bar.showMessage("Agent is thinking...")
         self.status_bar.setStyleSheet("")
+
+        if self.active_session_id is not None:
+            try:
+                if name == "change_graph" and result:
+                    if self._result_is_error(result):
+                        role = "error"
+                    else:
+                        role = "mutation"
+                else:
+                    if self._result_is_error(result):
+                        role = "error"
+                    else:
+                        role = "tool_finished"
+                self.sessions_store.append(
+                    self.active_session_id,
+                    role,
+                    result,
+                )
+            except Exception as exc:
+                logger.exception("Failed to save tool finish to DB: %s", exc)
 
     @staticmethod
     def _result_is_error(result_str: str) -> bool:
@@ -566,6 +705,19 @@ class MainWindow(QMainWindow):
         self.refresh_inspector()
         self.status_bar.setStyleSheet("")
         self.status_bar.showMessage("Ready")
+
+        if self.active_session_id is not None:
+            try:
+                self.sessions_store.append(
+                    self.active_session_id,
+                    "assistant",
+                    assistant_text,
+                )
+            except Exception as exc:
+                logger.exception("Failed to save assistant reply to DB: %s", exc)
+
+        self.refresh_sidebar_sessions()
+
         # Audit 4.6: warn if the on-disk graph has been mutated while a
         # flowgraph is still running. The running subprocess has its own
         # in-memory state and will not pick up the change until it is
@@ -672,7 +824,11 @@ class MainWindow(QMainWindow):
             )
             return
         self.chat_widget.clear()
-        self.agent.history = []
+        self.active_session_id = None
+        if hasattr(self.agent, "reset_chat_session"):
+            self.agent.reset_chat_session()
+        else:
+            self.agent.history = []
         self.agent.session = loaded
         self.inspector_widget.set_grc_file_path(str(file_path))
         self.refresh_inspector()
@@ -886,6 +1042,40 @@ class MainWindow(QMainWindow):
         # sync with reality.
         self._update_current_model_menu()
 
+    def refresh_sidebar_sessions(self) -> None:
+        """Fetch all sessions from the database and populate the sidebar list."""
+        from grc_agent.sessions_store import list_sessions_sync
+        try:
+            sessions = list_sessions_sync(
+                _default_sessions_db(),
+                limit=200,
+            )
+            self.sidebar_widget.populate_sessions(sessions)
+        except Exception as exc:
+            logger.exception("Failed to list recent sessions for sidebar: %s", exc)
+
+    def toggle_sidebar(self) -> None:
+        """Toggle the visibility of the session history sidebar."""
+        should_show = self.sidebar_widget.isHidden()
+        self.sidebar_widget.setVisible(should_show)
+        if should_show:
+            # When showing, make sure it has a non-zero size
+            sizes = self.h_splitter.sizes()
+            if len(sizes) == 3 and sizes[0] < 50:
+                sizes[0] = max(150, int(self.width() * 0.18))
+                self.h_splitter.setSizes(sizes)
+
+    def start_new_chat_session(self) -> None:
+        """Start a fresh chat session, resetting the GUI and the agent state."""
+        self.chat_widget.clear()
+        if hasattr(self.agent, "reset_chat_session"):
+            self.agent.reset_chat_session()
+        elif getattr(self.agent, "history", None) is not None:
+            self.agent.history = []
+        self.active_session_id = None
+        self.sidebar_widget.list_widget.clearSelection()
+        self.status_bar.showMessage("Started a fresh chat session.", 5000)
+
     def open_recent_sessions_dialog(self) -> None:
         """Open the ``File > Recent Sessions...`` dialog.
 
@@ -935,35 +1125,57 @@ class MainWindow(QMainWindow):
             return []
 
     def _open_past_session(self, session_id: int) -> None:
-        """Clear the chat widget and replay a past session's messages.
+        """Clear the chat widget, autoload the associated .grc graph, and replay past messages.
 
         Per the agreed design, the next user message starts a
         fresh turn on the new model; the old conversation is
         preserved in the sessions DB and can be reopened again.
         """
-        from grc_agent.sessions_store import list_messages_sync
+        from grc_agent.sessions_store import get_session_sync, list_messages_sync
 
         try:
+            session_rec = get_session_sync(_default_sessions_db(), session_id)
             messages = list_messages_sync(_default_sessions_db(), session_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to open session %s: %s", session_id, exc)
             self.status_bar.showMessage(f"Open session failed: {exc}", 5000)
             return
-        self.chat_widget.clear()
-        # The agent's in-memory history must be reset so the
-        # model does not see the union of the old chat and the
-        # reopened messages. We only mutate the local copy;
-        # the on-disk history is unchanged.
-        if getattr(self.agent, "history", None) is not None:
+
+        # 1. Autoload the GRC graph associated with the session
+        if session_rec and session_rec.graph_path:
+            g_path = Path(session_rec.graph_path)
+            if g_path.exists():
+                self.open_file(g_path)
+            else:
+                self.status_bar.showMessage(f"Warning: Associated graph file not found: {g_path}", 5000)
+                self.chat_widget.clear()
+        else:
+            self.chat_widget.clear()
+
+        # Reset the agent's chat session to clear older llama.cpp KV cache
+        if hasattr(self.agent, "reset_chat_session"):
+            self.agent.reset_chat_session()
+        elif getattr(self.agent, "history", None) is not None:
             self.agent.history = []
+
+        # Reconstruct the agent's history from database messages to restore context
         for msg in messages:
-            # Skip system rows; those are an internal affordance.
+            if msg.role == "user":
+                self.agent.history.append({"role": "user", "content": msg.text})
+            elif msg.role == "assistant":
+                self.agent.history.append({"role": "assistant", "content": msg.text})
+
+        # Keep the active session ID to allow active continuation/resumption
+        self.active_session_id = session_id
+
+        # Replay all messages in the chat widget (it will render them appropriately)
+        for msg in messages:
             if msg.role == "system":
                 continue
             self.chat_widget.append_message(msg.role, msg.text)
+
         self.status_bar.showMessage(
-            f"Loaded session {session_id} ({len(messages)} messages). "
-            "Next message starts a fresh turn.",
+            f"Resumed session {session_id} ({len(messages)} messages).",
             5000,
         )
 
@@ -1153,6 +1365,12 @@ class MainWindow(QMainWindow):
             # destroyed C++ QDialog after the parent QMainWindow is
             # gone.
             self._model_dialog = None
+            # Close sessions store to flush pending database operations
+            if hasattr(self, "sessions_store") and self.sessions_store:
+                try:
+                    self.sessions_store.close()
+                except Exception:
+                    logger.debug("Failed to close sessions store on window exit", exc_info=True)
             # Safe path: clean up temp directories and thread workers
             if self.process_manager:
                 self.process_manager.cleanup_temp_dir()

@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+# Ensure FastEmbed downloads/caches models in a persistent directory instead of /tmp.
+os.environ.setdefault("FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "grc_agent" / "fastembed_cache"))
+
 import fcntl
 import hashlib
 import json

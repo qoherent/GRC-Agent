@@ -97,6 +97,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
   file is unchanged by the new system. 26 unit tests + 7 GUI
   tests.
 
+- **Session history sidebar (System B — Part 2)**: `SidebarWidget`
+  replaces the modal `File > Recent Sessions...` dialog with a
+  persistent left-side panel inside the main splitter.
+  - Defaults to 18% width (max 20%); resizable and collapsable via
+    the `◀` chevron button, `File > Session Sidebar` menu item, or
+    `Ctrl+Shift+H`.
+  - Double-clicking a session autoloads the associated `.grc` graph
+    **and** resumes that session: `active_session_id` is preserved,
+    `agent.history` is reconstructed from the DB `user`/`assistant`
+    messages, and subsequent sends append to the same SQLite record.
+  - `ChatWidget` event roles (`tool_started`, `mutation`, `error`,
+    `tool_finished`) now write to `self._history` and render through
+    `_render_chat()` — fixing display drift on turns that include
+    tool use.
+  - Splitter state restored in `showEvent` (after window geometry is
+    fully realized) instead of `__init__`; `setStretchFactor(1, 1)`
+    on the chat pane keeps the sidebar and inspector at fixed widths
+    on window resize. 5 GUI tests (116 total, all green).
+
+### Fixed
+- **GUI layout — sidebar over-wide / inspector collapsed on
+  relaunch**: `QSplitter.restoreState` was called in `__init__`
+  before `window.show()`, so `self.width()` returned the
+  pre-geometry value (~92 px). Size-correction arithmetic based on
+  that value produced wrong proportions. Moved restoration to
+  `showEvent` (fires once when the window is first mapped) where
+  `self.width()` returns the true resolved width. Added
+  `setStretchFactor` so only the chat pane grows on window resize.
+
+- **Session resumption — new session created instead of continuing**:
+  `_open_past_session` was unconditionally setting
+  `active_session_id = None` after loading a past session, so the
+  next `send_prompt` call created a fresh DB record instead of
+  appending to the resumed one. Now `active_session_id` is set to
+  the loaded session's ID. `agent.history` is rebuilt from the
+  stored `user`/`assistant` messages so the model sees prior
+  context on continuation turns.
+
 ## [0.1.0] - 2026-06-05
 
 First open-source release. Functional-complete internal tool released for
@@ -155,13 +193,13 @@ per `grc-agent init` question, followed by a "Verify" page that runs
 `user_config_path()` is missing, open the wizard instead of the main
 window. "Skip for now" acceptable.
 
-**Conversation history sidebar (with persistence)** — *partially
-shipped in v0.1.0 System B (modal `File > Recent Sessions...`
-dialog over a SQLite/FTS5 store at `~/.grc_agent/sessions.db`;
-`grc-agent sessions list|show|export|gc` CLI subcommand).
-The left-edge *sidebar* UI is still deferred; the data model and
-writer layer are in place and sidebar-friendly. ~2-3 days to
-add a thin Qt widget on top of the existing API.
+**Conversation history sidebar (with persistence)** — *shipped in
+[Unreleased] as System B Part 2*. The persistent `SidebarWidget`
+(left-edge panel, collapsible, resizable to max 20% width, session
+resumption with agent history restoration) replaces the modal
+`File > Recent Sessions...` dialog. The SQLite/FTS5 store at
+`~/.grc_agent/sessions.db` and the `grc-agent sessions` CLI
+subcommand that shipped in v0.1.0 System B remain the data layer.
 **Light / dark theme toggle (with system follow)** (~2-3 days). Move the
 hardcoded Catppuccin stylesheet out of `app.py` into two external `.qss`
 files. Add a `QSettings`-backed theme picker under **Help > Theme** (Dark

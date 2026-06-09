@@ -6,7 +6,7 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.lexers.special import TextLexer
-from PySide6.QtGui import QTextCursor, QTextDocument
+from PySide6.QtGui import QTextBlockFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import QLineEdit, QTextBrowser, QVBoxLayout, QWidget
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,7 @@ class ChatWidget(QWidget):
         # Each entry: {"role": str, "text": str, "_rendered": str | None}
         self._history: list[dict[str, str]] = []
         self._streaming = False
+        self._stream_header_printed = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -174,6 +175,8 @@ class ChatWidget(QWidget):
         """Clear all messages and reset chat display."""
         self._history.clear()
         self.chat_display.clear()
+        self._streaming = False
+        self._stream_header_printed = False
 
     def append_message(self, role: str, text: str) -> None:
         """Append a standard completed message, parsing it as markdown/HTML."""
@@ -182,44 +185,23 @@ class ChatWidget(QWidget):
 
     def append_status(self, name: str, args: str) -> None:
         """Insert a styled tool-call status block with arguments."""
-        cursor = self.chat_display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.chat_display.setTextCursor(cursor)
-        safe_name = html.escape(name)
-        safe_args = html.escape(args)
-        self.chat_display.insertHtml(
-            f'<div style="margin: 4px 0; padding: 4px 8px; '
-            f'border-left: 2px solid #89b4fa; '
-            f'background-color: #1e1e2e; '
-            f'font-family: monospace; font-size: 12px;">'
-            f'<span style="color: #89b4fa;">⚡ {safe_name}</span>'
-            f'<br/>&nbsp;&nbsp;<span style="color: #a6adc8;">{safe_args}</span>'
-            f'</div>'
-        )
+        self._history.append({"role": "tool_started", "text": f"Tool: {name}\nArgs: {args}", "_rendered": None})
+        self._render_chat()
 
     def append_mutation(self, result: str) -> None:
         """Insert a styled mutation summary line."""
-        cursor = self.chat_display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.chat_display.setTextCursor(cursor)
-        self.chat_display.insertHtml(
-            '<p style="color: #a6e3a1; border-left: 3px solid #a6e3a1; '
-            'padding-left: 8px; margin: 4px 0;">&#10003; Graph updated</p>'
-        )
+        self._history.append({"role": "mutation", "text": result, "_rendered": None})
+        self._render_chat()
 
     def append_error(self, text: str) -> None:
         """Insert a styled error line."""
-        cursor = self.chat_display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.chat_display.setTextCursor(cursor)
-        self.chat_display.insertHtml(
-            f'<p style="color: #f38ba8; border-left: 3px solid #f38ba8; '
-            f'padding-left: 8px; margin: 4px 0;">&#10007; {html.escape(text[:200])}</p>'
-        )
+        self._history.append({"role": "error", "text": text, "_rendered": None})
+        self._render_chat()
 
     def start_stream(self) -> None:
         """Start a text streaming session, locking updates to plain-text mode."""
         self._streaming = True
+        self._stream_header_printed = False
         self._history.append({"role": "assistant", "text": "", "_rendered": None})
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -230,8 +212,30 @@ class ChatWidget(QWidget):
         if self._streaming:
             self._history[-1]["text"] += text
             self._history[-1]["_rendered"] = None
+            
             cursor = self.chat_display.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
+            
+            if not self._stream_header_printed:
+                # Break out of any previous block (like a user message or a tool status block)
+                cursor.insertBlock(QTextBlockFormat())
+                
+                # Insert the styled "Agent:" header
+                cursor.insertHtml(
+                    '<div style="margin-top: 12px; margin-bottom: 4px;">'
+                    '<b style="color: #a6e3a1;">Agent:</b>'
+                    '</div>'
+                )
+                
+                # Move to the end of the header and start the indented block for streaming
+                cursor.movePosition(QTextCursor.MoveOperation.End)
+                block_format = QTextBlockFormat()
+                block_format.setLeftMargin(8)
+                block_format.setTopMargin(4)
+                cursor.insertBlock(block_format)
+                
+                self._stream_header_printed = True
+                
             self.chat_display.setTextCursor(cursor)
             self.chat_display.insertPlainText(text)
             self.chat_display.ensureCursorVisible()
@@ -239,6 +243,7 @@ class ChatWidget(QWidget):
     def finalize_stream(self, final_text: str) -> None:
         """Finalize the stream and apply the definitive highlighted markdown HTML."""
         self._streaming = False
+        self._stream_header_printed = False
         if self._history and self._history[-1]["role"] == "assistant":
             self._history[-1]["text"] = final_text
             self._history[-1]["_rendered"] = None
@@ -282,16 +287,49 @@ class ChatWidget(QWidget):
             role = msg["role"]
             text = msg["text"]
             cached = msg.get("_rendered")
+            if cached is not None:
+                if cached:
+                    html_contents.append(cached)
+                continue
+
             if role == "user":
-                if cached is None:
-                    cached = render_user_message_html(text)
-                    msg["_rendered"] = cached
-                html_contents.append(cached)
+                cached = render_user_message_html(text)
+            elif role == "assistant":
+                body = markdown_to_highlighted_html(text)
+                cached = f'<div style="margin-bottom: 12px;"><b style="color: #a6e3a1;">Agent:</b><div style="margin-top: 4px; padding-left: 8px;">{body}</div></div>'
+            elif role == "tool_started":
+                lines = text.split("\n", 1)
+                name = lines[0][6:].strip() if len(lines) > 0 else ""
+                args = lines[1][5:].strip() if len(lines) > 1 else ""
+                safe_name = html.escape(name)
+                safe_args = html.escape(args)
+                cached = (
+                    f'<div style="margin: 4px 0; padding: 4px 8px; '
+                    f'border-left: 2px solid #89b4fa; '
+                    f'background-color: #1e1e2e; '
+                    f'font-family: monospace; font-size: 12px; border-radius: 4px; line-height: 1.4;">'
+                    f'<span style="color: #89b4fa;">⚡ {safe_name}</span>'
+                    f'<br/>&nbsp;&nbsp;<span style="color: #a6adc8;">{safe_args}</span>'
+                    f'</div>'
+                )
+            elif role == "mutation":
+                cached = (
+                    '<div style="color: #a6e3a1; border-left: 3px solid #a6e3a1; '
+                    'padding-left: 8px; margin: 6px 0; font-size: 13px;">&#10003; Graph updated</div>'
+                )
+            elif role == "error":
+                cached = (
+                    f'<div style="color: #f38ba8; border-left: 3px solid #f38ba8; '
+                    f'padding-left: 8px; margin: 6px 0; font-size: 13px;">&#10007; {html.escape(text[:200])}</div>'
+                )
+            elif role == "tool_finished":
+                cached = ""
             else:
-                if cached is None:
-                    body = markdown_to_highlighted_html(text)
-                    cached = f'<div style="margin-bottom: 12px;"><b style="color: #a6e3a1;">Agent:</b><div style="margin-top: 4px; padding-left: 8px;">{body}</div></div>'
-                    msg["_rendered"] = cached
+                body = markdown_to_highlighted_html(text)
+                cached = f'<div style="margin-bottom: 12px;"><b style="color: #a6e3a1;">Agent:</b><div style="margin-top: 4px; padding-left: 8px;">{body}</div></div>'
+
+            msg["_rendered"] = cached
+            if cached:
                 html_contents.append(cached)
 
         scroll_bar = self.chat_display.verticalScrollBar()

@@ -7,9 +7,10 @@ only changes when the file actually changes.
 __version__ = "2026-06-05-summary-rule-v2"
 
 
-def build_system_prompt() -> str:
-    """Return the full MVP wrapper-only system prompt shipped to the model."""
-    return (
+def build_system_prompt(session_id: str | None = None) -> str:
+    """Return the full MVP wrapper-only system prompt shipped to the model, optionally isolated by session_id."""
+    prefix = f"Session ID: {session_id}\n" if session_id else ""
+    return prefix + (
         "You are a GRC graph agent and wireless communications expert.\n"
         "Modify the active graph via tools. keep going until done.\n"
         "1. ALWAYS inspect_graph before editing.\n"

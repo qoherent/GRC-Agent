@@ -461,3 +461,57 @@ file-hotspot groups, a 12-category test-gap taxonomy, a strict output
 schema with file:line + 3-step trigger + confidence rating, and
 anti-hallucination mechanisms.
 
+#### Session history sidebar & bug-fix pass (M11)
+
+**Session history sidebar** (`SidebarWidget`, `src/grc_agent_gui/sidebar_widget.py`):
+
+- A persistent `QWidget` in the leftmost splitter pane replaces the
+  modal `File > Recent Sessions...` dialog.
+- Width defaults to 18% of the window; user-draggable; constrained to
+  a maximum of 20%; collapsible via the `◀` button, the
+  `File > Session Sidebar` menu item, or `Ctrl+Shift+H`.
+- `populate_sessions()` takes a list of `SessionRecord` objects and
+  renders them as `QListWidgetItem` entries. Double-clicking emits
+  `session_selected(int session_id)`.
+- Signals: `session_selected`, `new_chat_requested`, `collapse_requested`.
+
+**Splitter layout contract** (`main_window.py`, `showEvent`):
+
+- `QSplitter.restoreState` is deferred from `__init__` to a
+  one-shot `showEvent` override so that `self.width()` returns the
+  true realized geometry (e.g. 1702 px) rather than the
+  pre-show value (~92 px).
+- `setStretchFactor(0, 0)` / `setStretchFactor(1, 1)` /
+  `setStretchFactor(2, 0)` — only the chat pane absorbs spare
+  space on resize; the sidebar and inspector hold their pixel widths.
+- Size guards applied in `showEvent` after `restoreState`:
+  - sidebar > 20% → clamp to 18%.
+  - inspector < 50 px (old 2-widget state migrated) → restore to 32%.
+  - chat pane fills the remainder (minimum 300 px).
+
+**Session resumption contract** (`_open_past_session`):
+
+- `active_session_id` is set to the loaded session's ID (not `None`),
+  so subsequent `send_prompt` calls append to the **same** SQLite
+  record instead of opening a new one.
+- `agent.history` is rebuilt from the stored `user` and `assistant`
+  messages so the model sees full prior context on continuation turns.
+  Tool rows (`tool_started`, `tool_finished`, `mutation`, `error`) are
+  excluded from the model history (they are display-only).
+- `reset_chat_session()` is still called first to clear the llama.cpp
+  KV-cache session ID before reconstructing history.
+
+**`ChatWidget` role model** (`chat_widget.py`, `_render_chat`):
+
+- `append_status`, `append_mutation`, `append_error` now write named
+  role entries to `self._history` and trigger `_render_chat()` instead
+  of injecting raw HTML directly. This ensures all message types are
+  replayed consistently during session resumption.
+- `_render_chat()` dispatches on `role` with distinct HTML templates:
+  `user`, `assistant`, `tool_started` (⚡ block), `mutation` (✓ green
+  bar), `error` (✗ red bar), `tool_finished` (empty/hidden), and a
+  catch-all `assistant` template for any unrecognised role.
+- HTML rendering is memoized per message dict (`_rendered` key);
+  re-renders on unchanged messages are a cheap list join.
+
+**Test count**: 116 GUI tests (all green).

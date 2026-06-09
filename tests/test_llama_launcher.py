@@ -320,9 +320,9 @@ class LlamaServerLauncherTests(unittest.TestCase):
 
 class SwapModelTests(unittest.TestCase):
     """Phase 3: ``LlamaServerLauncher.swap_model`` builds a new config
-    and delegates to ``ensure_server_ready`` on a fresh launcher.
+    and delegates to ``_ensure_server_ready_unlocked`` on a fresh launcher.
 
-    These tests stub the underlying ``ensure_server_ready`` so no real
+    These tests stub the underlying ``_ensure_server_ready_unlocked`` so no real
     ``llama-server`` is spawned. The contract under test is the
     *plumbing*: config is replaced, a new launcher is built, the
     new launcher is the one that produces the result.
@@ -363,7 +363,7 @@ class SwapModelTests(unittest.TestCase):
 
         captured: list[LlamaConfig] = []
 
-        def _fake_ensure_server_ready(self):  # type: ignore[no-untyped-def]
+        def _fake_ensure_server_ready_unlocked(self):  # type: ignore[no-untyped-def]
             captured.append(self.config)
             return fake_result
 
@@ -372,8 +372,8 @@ class SwapModelTests(unittest.TestCase):
             logs = Path(tmp) / "logs"
             with mock.patch.object(
                 LlamaServerLauncher,
-                "ensure_server_ready",
-                _fake_ensure_server_ready,
+                "_ensure_server_ready_unlocked",
+                _fake_ensure_server_ready_unlocked,
             ), mock.patch.object(
                 old_launcher, "state_path", state
             ), mock.patch.object(
@@ -415,15 +415,15 @@ class SwapModelTests(unittest.TestCase):
 
         captured: list[LlamaConfig] = []
 
-        def _fake_ensure_server_ready(self):  # type: ignore[no-untyped-def]
+        def _fake_ensure_server_ready_unlocked(self):  # type: ignore[no-untyped-def]
             captured.append(self.config)
             return fake_result
 
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(
                 LlamaServerLauncher,
-                "ensure_server_ready",
-                _fake_ensure_server_ready,
+                "_ensure_server_ready_unlocked",
+                _fake_ensure_server_ready_unlocked,
             ), mock.patch.object(
                 old_launcher, "state_path", Path(tmp) / "state.json"
             ), mock.patch.object(
@@ -449,7 +449,7 @@ class SwapModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(
                 LlamaServerLauncher,
-                "ensure_server_ready",
+                "_ensure_server_ready_unlocked",
                 _explode,
             ), mock.patch.object(
                 old_launcher, "state_path", Path(tmp) / "state.json"
@@ -488,7 +488,7 @@ class SwapModelTests(unittest.TestCase):
             matching_state_calls.append(self.state_path)
             return None
 
-        def _fake_ensure_server_ready(self):  # type: ignore[no-untyped-def]
+        def _fake_ensure_server_ready_unlocked(self):  # type: ignore[no-untyped-def]
             return mock.MagicMock(
                 model_alias="new-model.gguf",
                 status="started",
@@ -499,8 +499,8 @@ class SwapModelTests(unittest.TestCase):
 
         with mock.patch.object(
             LlamaServerLauncher,
-            "ensure_server_ready",
-            _fake_ensure_server_ready,
+            "_ensure_server_ready_unlocked",
+            _fake_ensure_server_ready_unlocked,
         ), mock.patch.object(
             LlamaServerLauncher,
             "_cleanup_cached_state",

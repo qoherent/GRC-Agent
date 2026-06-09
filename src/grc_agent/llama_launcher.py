@@ -154,45 +154,49 @@ class LlamaServerLauncher:
     def ensure_server_ready(self) -> LlamaLaunchResult:
         """Reuse a healthy server or launch one locally before the chat turn starts."""
         with self._lock():
-            # Reap any `llama-server` PID we left behind from a previous
-            # crashed/killed CLI/GUI invocation. This must happen *before*
-            # we look at the cached state file so a defunct state file
-            # does not block a fresh launch.
-            self.reap_orphan_pids()
-            # Bounded retention on the launcher log directory. Cheap
-            # when the dir is empty or all files are recent.
-            self.prune_old_logs()
-            existing_state = self._prepare_matching_state()
+            return self._ensure_server_ready_unlocked()
 
-            if self._socket_is_open():
-                return self._wait_for_existing_backend(existing_state)
+    def _ensure_server_ready_unlocked(self) -> LlamaLaunchResult:
+        """Core ready/start logic executed under the file lock."""
+        # Reap any `llama-server` PID we left behind from a previous
+        # crashed/killed CLI/GUI invocation. This must happen *before*
+        # we look at the cached state file so a defunct state file
+        # does not block a fresh launch.
+        self.reap_orphan_pids()
+        # Bounded retention on the launcher log directory. Cheap
+        # when the dir is empty or all files are recent.
+        self.prune_old_logs()
+        existing_state = self._prepare_matching_state()
 
-            if existing_state is not None:
-                return self._wait_for_existing_backend(existing_state)
+        if self._socket_is_open():
+            return self._wait_for_existing_backend(existing_state)
 
-            process, log_path = self._start_server_process()
-            launched_state = _LauncherState(
-                base_url=self.server_url,
-                model_alias=self.model_alias,
-                hf_model=self.config.hf_model,
-                model_path=self.config.model_path,
-                pid=process.pid,
-                log_path=str(log_path),
-                launcher_pid=os.getpid(),
+        if existing_state is not None:
+            return self._wait_for_existing_backend(existing_state)
+
+        process, log_path = self._start_server_process()
+        launched_state = _LauncherState(
+            base_url=self.server_url,
+            model_alias=self.model_alias,
+            hf_model=self.config.hf_model,
+            model_path=self.config.model_path,
+            pid=process.pid,
+            log_path=str(log_path),
+            launcher_pid=os.getpid(),
+        )
+        self._write_state(launched_state)
+        try:
+            launch_result = self._wait_for_ready(
+                launched_process=process,
+                cached_state=launched_state,
+                started=True,
             )
-            self._write_state(launched_state)
-            try:
-                launch_result = self._wait_for_ready(
-                    launched_process=process,
-                    cached_state=launched_state,
-                    started=True,
-                )
-                self._remember_process(process)
-                return launch_result
-            except Exception:
-                self._clear_state()
-                self._terminate_process(process)
-                raise
+            self._remember_process(process)
+            return launch_result
+        except Exception:
+            self._clear_state()
+            self._terminate_process(process)
+            raise
 
     def restart_server_ready(self) -> LlamaLaunchResult:
         """Terminate any matching cached backend and start or reuse a fresh ready backend."""
@@ -222,7 +226,7 @@ class LlamaServerLauncher:
            cleared because swap is HF-token-driven; a
            ``model_path``-driven swap is a separate code path the
            CLI/GUI do not exercise in Phase 3.
-        3. Run :meth:`ensure_server_ready` on a fresh launcher for
+        3. Run :meth:`_ensure_server_ready_unlocked` on a fresh launcher for
            the new config. The new launcher writes its own state
            file and waits for readiness.
 
@@ -275,11 +279,10 @@ class LlamaServerLauncher:
             # when the cached state is empty or owned by another
             # launcher, so this is safe under multi-user CI.
             self._cleanup_cached_state(self._prepare_matching_state())
-            # Use ``ensure_server_ready`` (not ``restart_server_ready``)
-            # so the new launcher is the sole authority over its own
-            # state file from this point forward. The old cached state
+            # Use ``_ensure_server_ready_unlocked`` (not ``ensure_server_ready``)
+            # since we already hold the lock on the shared path. The old cached state
             # was just cleared, so a fresh launch is forced.
-            return new_launcher.ensure_server_ready()
+            return new_launcher._ensure_server_ready_unlocked()
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
