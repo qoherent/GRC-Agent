@@ -296,9 +296,9 @@ def main() -> None:
     config = load_app_config()
     # Overlay user preferences (e.g. the model last picked in the
     # GUI) onto the config. Preferences win over ``grc_agent.toml``
-    # for the model and hf_model fields; everything else is
-    # preserved. A malformed prefs file is logged and ignored by
-    # the loader; a load failure here is non-fatal.
+    # for the model field; everything else is preserved. A malformed
+    # prefs file is logged and ignored by the loader; a load failure
+    # here is non-fatal.
     try:
         from grc_agent.preferences import (
             apply_user_preferences_to_llama_config,
@@ -306,11 +306,7 @@ def main() -> None:
         )
 
         prefs = load_user_preferences()
-        if (
-            prefs.last_model.alias
-            or prefs.last_model.hf_repo
-            or prefs.last_model.filename
-        ):
+        if prefs.last_model.model:
             config = AppConfig(
                 llama=apply_user_preferences_to_llama_config(
                     config.llama, prefs
@@ -344,8 +340,21 @@ def main() -> None:
 
     agent = GrcAgent(session=session)
 
+    # Lightweight provider picker on first launch. The user picks
+    # Ollama or OpenRouter; we persist the choice to user
+    # preferences and continue. No daemon management, no hardware
+    # polling — if the Ollama daemon is down, the existing Phase 2
+    # backend_unreachable path renders a degraded-mode UI.
+    from grc_agent.preferences import load_user_preferences
+
+    prefs = load_user_preferences()
+    if not prefs.provider_chosen:
+        if not _run_provider_picker(app, config):
+            print("Provider selection cancelled; exiting.", flush=True)
+            return
+
     print("Checking model server...", flush=True)
-    result = bootstrap_runtime(config, start_llama=True, init_retrieval=True)
+    result = bootstrap_runtime(config, init_retrieval=True)
 
     if not result.retrieval_ok and result.errors:
         print(f"Retrieval warning: {result.errors[0]}", file=sys.stderr)
@@ -358,16 +367,15 @@ def main() -> None:
             f"Error: {result.errors[-1] if result.errors else 'Server startup failed'}",
             file=sys.stderr,
         )
-        if result.error_type == "llama_server_missing":
+        if result.error_type == "backend_server_missing":
             print(
-                "Hint: install llama.cpp and ensure `llama-server` is on PATH. "
+                "Hint: ensure the backend server is installed and on PATH. "
                 "See the README install table.",
                 file=sys.stderr,
             )
         elif result.error_type == "model_not_found":
             print(
-                "Hint: set [llama].model_path to a local GGUF file, or set "
-                "[llama].hf_model to a Hugging Face repo for auto-download. "
+                "Hint: set [llama].model to a valid model name for your backend. "
                 "Use `uv run grc-agent init` to write a starter config.",
                 file=sys.stderr,
             )
@@ -380,13 +388,19 @@ def main() -> None:
         agent,
         provider_config=result.provider_config,
         llama_config=config.llama,
+        bootstrap_result=result,
     )
     app.aboutToQuit.connect(window.process_manager.shutdown)
     window.show()
 
     model = result.model_alias or config.llama.model
     status = result.launch_status
-    if status == "started":
+    if status == "probe_failed":
+        window.status_bar.showMessage(
+            f"Backend unreachable at {result.server_url} — chat disabled, "
+            f"use Model > Select Model to recover."
+        )
+    elif status == "started":
         window.status_bar.showMessage(f"Started {model} — ready")
     else:
         window.status_bar.showMessage(f"Connected to {model}")
@@ -396,7 +410,7 @@ def main() -> None:
 
 
 def _register_server_cleanup(pid: int) -> None:
-    """Arrange to terminate the llama-server process when this process exits."""
+    """Arrange to terminate the backend server process when this process exits."""
 
     def _cleanup():
         try:
@@ -406,6 +420,32 @@ def _register_server_cleanup(pid: int) -> None:
             pass
 
     atexit.register(_cleanup)
+
+
+def _run_provider_picker(app: QApplication, config: AppConfig) -> bool:
+    """Show the provider picker once; persist the choice.
+
+    Returns ``True`` on a confirmed choice, ``False`` on cancel
+    (caller exits cleanly). The choice is saved to the user
+    preferences file so subsequent launches skip the picker.
+    """
+    from grc_agent.preferences import update_provider_chosen
+
+    from grc_agent_gui.provider_picker_dialog import ProviderPickerDialog
+
+    picker = ProviderPickerDialog()
+    if picker.exec() != picker.DialogCode.Accepted:
+        return False
+
+    backend = picker.selected_backend()
+    try:
+        update_provider_chosen(provider=backend)
+    except OSError as exc:
+        # Preference write failure is non-fatal; the user can still
+        # use the app, they will just see the picker again next
+        # launch.
+        logger.warning("Failed to persist provider choice: %s", exc)
+    return True
 
 
 if __name__ == "__main__":

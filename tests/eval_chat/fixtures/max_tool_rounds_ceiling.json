@@ -1,0 +1,77 @@
+{
+  "id": "max_tool_rounds_ceiling",
+  "description": "Model loops on tool calls. The safety ceiling caps the turn at max_tool_rounds=2 model steps. After step 2 completes, step 3 trips the ceiling; the 4th model step never runs.",
+  "user_message": "Help me.",
+  "max_tool_rounds": 2,
+  "tool_stubs": {
+    "inspect_graph": {
+      "ok": true,
+      "view": "overview",
+      "summary": {"graph_name": "x", "counts": "b=0 c=0 v=0", "blocks": [], "connections": []}
+    }
+  },
+  "model_responses": [
+    {
+      "id": "resp-1",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "inspect_graph", "arguments": "{\"view\": \"overview\"}"}
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-2",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-2",
+            "type": "function",
+            "function": {"name": "inspect_graph", "arguments": "{\"view\": \"details\"}"}
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-3",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-3",
+            "type": "function",
+            "function": {"name": "inspect_graph", "arguments": "{\"view\": \"overview\"}"}
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-4",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {"role": "assistant", "content": "Done."}
+      }]
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "error_type": "safety_ceiling_reached",
+    "tool_calls_executed": 2,
+    "tool_calls_requested": 3
+  }
+}

@@ -25,27 +25,14 @@ class RuntimeConfigTests(unittest.TestCase):
         config = load_app_config()
 
         self.assertTrue(default_config_path().is_file())
-        self.assertEqual(config.llama.server_url, "http://127.0.0.1:8080")
-        self.assertEqual(config.llama.model, "Qwen3.5-2B-UD-Q4_K_XL.gguf")
-        self.assertEqual(config.llama.hf_model, "unsloth/Qwen3.5-2B-GGUF:Qwen3.5-2B-UD-Q4_K_XL")
-        # model_path is intentionally empty in the committed default so a fresh
-        # clone does not hardcode a per-developer path. The loader normalizes
-        # an empty string to `None`, meaning "unset; fall back to hf_model".
-        # Set it via `grc-agent init` or by editing
-        # `~/.config/grc_agent/config.toml`.
-        self.assertIsNone(config.llama.model_path)
-        # device defaults to "Auto" so llama.cpp auto-detects the accelerator
-        # (CUDA/Metal/Vulkan) rather than hardcoding a specific backend.
-        self.assertEqual(config.llama.device, "Auto")
-        self.assertEqual(config.llama.desired_context_tokens, 120000)
-        self.assertEqual(config.llama.startup_timeout_seconds, 300.0)
+        self.assertEqual(config.llama.server_url, "http://localhost:11434")
+        self.assertEqual(config.llama.backend, "ollama")
+        self.assertEqual(config.llama.model, "qwen3.5:9b-q4_K_M")
         self.assertEqual(config.llama.max_tokens, 4096)
         self.assertEqual(config.llama.max_tool_rounds, 8)
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
-        self.assertEqual(config.llama.log_retention_days, 7)
-        self.assertIsNone(config.llama.models_dir)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 320)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 64)
         self.assertEqual(config.agent.docs_answer.helper_prompt_version, "v3_compact")
@@ -62,7 +49,6 @@ class RuntimeConfigTests(unittest.TestCase):
             ["chat", "fixture.grc", "--message", "Summarize the graph."]
         )
 
-        self.assertEqual(args.llama_server_url, config.llama.server_url)
         self.assertEqual(args.model, config.llama.model)
         self.assertFalse(args.agentic)
         self.assertIsNone(args.max_tool_rounds)
@@ -124,10 +110,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     "[llama]\n"
                     'server_url = "http://127.0.0.1:9000"\n'
                     'model = "custom-model"\n'
-                    'hf_model = "custom/model:Q4"\n'
-                    'model_path = "/models/custom.gguf"\n'
-                    "desired_context_tokens = 120000\n"
-                    "startup_timeout_seconds = 120.0\n"
+                    'backend = "openrouter"\n'
                     "max_tokens = 2048\n"
                     "max_tool_rounds = 42\n"
                     "temperature = 0.2\n"
@@ -151,7 +134,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:9000")
         self.assertEqual(config.llama.model, "custom-model")
-        self.assertEqual(config.llama.model_path, "/models/custom.gguf")
+        self.assertEqual(config.llama.backend, "openrouter")
         self.assertTrue(config.llama.enable_thinking)
         self.assertEqual(config.llama.max_tool_rounds, 42)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 512)
@@ -166,11 +149,8 @@ class RuntimeConfigTests(unittest.TestCase):
             config_path.write_text(
                 (
                     "[llama]\n"
-                    "server_url='http://127.0.0.1:8080'\n"
+                    "server_url='http://localhost:11434'\n"
                     "model='m'\n"
-                    "hf_model='m:q'\n"
-                    "desired_context_tokens=120000\n"
-                    "startup_timeout_seconds=1.0\n"
                     "max_tokens=1024\n"
                     "max_tool_rounds=1\n"
                     "temperature=0.0\n"
@@ -193,37 +173,11 @@ class RuntimeConfigTests(unittest.TestCase):
             ):
                 load_app_config(config_path)
 
-    def test_load_app_config_rejects_too_small_desired_context(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "small_ctx.toml"
-            config_path.write_text(
-                (
-                    "[llama]\n"
-                    "server_url='http://127.0.0.1:8080'\n"
-                    "model='m'\n"
-                    "hf_model='m:q'\n"
-                    "desired_context_tokens=2048\n"
-                    "startup_timeout_seconds=1.0\n"
-                    "max_tokens=1024\n"
-                    "max_tool_rounds=1\n"
-                    "temperature=0.0\n"
-                    "enable_thinking=false\n"
-                    "request_timeout_seconds=1.0\n"
-                    "\n[agent]\n"
-                    "history_compact_budget=1000\n"
-                ),
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(
-                ConfigError, "desired_context_tokens must be >= 4096"
-            ):
-                load_app_config(config_path)
-
     def test_resolve_config_path_prefers_env_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_config = Path(tmpdir) / "env.toml"
             env_config.write_text(
-                "[llama]\nserver_url='http://127.0.0.1:8080'\nmodel='m'\nhf_model='m:q'\ndesired_context_tokens=120000\nstartup_timeout_seconds=1.0\nmax_tokens=1\nmax_tool_rounds=1\ntemperature=0.0\nenable_thinking=false\nrequest_timeout_seconds=1.0\n",
+                "[llama]\nserver_url='http://localhost:11434'\nmodel='m'\nmax_tokens=1\nmax_tool_rounds=1\ntemperature=0.0\nenable_thinking=false\nrequest_timeout_seconds=1.0\n",
                 encoding="utf-8",
             )
 
@@ -247,6 +201,51 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(path.name, "config.toml")
         self.assertEqual(path.parent.name, "grc_agent")
         self.assertIn(".config", str(path.parent.parent))
+
+    def test_load_app_config_accepts_and_validates_backends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for val in ("ollama", "openrouter"):
+                config_path = Path(tmpdir) / f"{val}.toml"
+                config_path.write_text(
+                    (
+                        "[llama]\n"
+                        'server_url = "http://localhost:11434"\n'
+                        f'backend = "{val}"\n'
+                        'model = "m"\n'
+                        "max_tokens = 1024\n"
+                        "max_tool_rounds = 1\n"
+                        "temperature = 0.0\n"
+                        "enable_thinking = false\n"
+                        "request_timeout_seconds = 1.0\n"
+                        "\n[agent]\n"
+                        "history_compact_budget = 1000\n"
+                    ),
+                    encoding="utf-8",
+                )
+                config = load_app_config(config_path)
+                self.assertEqual(config.llama.backend, val)
+
+            invalid_path = Path(tmpdir) / "invalid_backend.toml"
+            invalid_path.write_text(
+                (
+                    "[llama]\n"
+                    'server_url = "http://localhost:11434"\n'
+                    'backend = "invalid_val"\n'
+                    'model = "m"\n'
+                    "max_tokens = 1024\n"
+                    "max_tool_rounds = 1\n"
+                    "temperature = 0.0\n"
+                    "enable_thinking = false\n"
+                    "request_timeout_seconds = 1.0\n"
+                    "\n[agent]\n"
+                    "history_compact_budget = 1000\n"
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ConfigError, "backend must be"
+            ):
+                load_app_config(invalid_path)
 
     def test_pyproject_declares_console_script_entrypoint(self) -> None:
         pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"

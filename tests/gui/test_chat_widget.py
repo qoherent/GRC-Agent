@@ -277,10 +277,56 @@ def test_block_nesting_prevention(qtbot):
     
     # Finalize
     widget.finalize_stream("response text")
-    
+
     plain_text_after = widget.chat_display.toPlainText()
     lines_after = [line.strip() for line in plain_text_after.split("\n") if line.strip()]
     assert "You:" in lines_after
     assert "Hello" in lines_after
     assert "Agent:" in lines_after
     assert "response text" in lines_after
+
+
+def test_drop_last_assistant_removes_empty_placeholder(qtbot):
+    """When a turn ends with an empty assistant text (the model
+    only issued tool calls), the chat widget should drop the
+    streaming placeholder so the user does not see an empty
+    "Agent:" bubble.
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    widget.append_message("user", "Inspect the graph.")
+    widget.start_stream()
+    # The model never produced text; the streaming placeholder is
+    # an empty assistant row.
+    assert widget._history[-1]["role"] == "assistant"
+    assert widget._history[-1]["text"] == ""
+
+    widget.drop_last_assistant()
+
+    # The empty assistant row is gone.
+    roles = [row["role"] for row in widget._history]
+    assert "assistant" not in roles
+    # The user row is still there.
+    assert "user" in roles
+
+    plain = widget.chat_display.toPlainText()
+    assert "Inspect the graph." in plain
+    # No "Agent:" header since the only assistant row was dropped.
+    assert "Agent:" not in plain
+
+
+def test_finalize_stream_keeps_final_text_when_present(qtbot):
+    """Sanity: ``finalize_stream`` is the path used when the model
+    *did* produce text. Empty-text case is covered above.
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+    widget.append_message("user", "hi")
+    widget.start_stream()
+    widget.append_stream_chunk("partial")
+    widget.finalize_stream("final answer")
+
+    plain = widget.chat_display.toPlainText()
+    assert "final answer" in plain
+

@@ -1,178 +1,73 @@
-# AGENTS.md
+## Persona & Engineering Core Principles
 
-## Mission
+* **Role:** Senior System Designer / Software Engineer.
+* **Tone:** Strict, bold, objective, and entirely free of fluff.
+* **Principle of Simplicity:** Lean heavily toward simplifying over complicating. Reject speculative features or preemptive architectural shifts without hard empirical test data (The Anti-Symptom Rule).
+* **Engineering Rigor:** Never make assumptions. Stop and ask questions when critical architectural or dependency decisions are required. Reject ad-hoc logic causing latency, redundant calculations, extra costs, or performance degradation.
+* **Modernity:** Always build against the latest verified library specifications and features. Immediately flag and eliminate outdated paradigms or brittle logic. Utilize `context7` MCP to ensure syntax accuracy for new API boundaries.
 
-GRC Agent is a local assistant for GNU Radio Companion `.grc` graphs. It should
-inspect the active graph, explain graph-local evidence, mutate only through
-validated tools, verify committed changes with native GNU/GRC validation, and
-ask for clarification when intent or targets are ambiguous.
+---
 
-Autonomy must come from typed state, compact wrappers, deterministic validation,
-copied-graph safety, rollback, and measured behavior. Do not use raw YAML
-patches, hidden retries, broad synonym dictionaries, tutorial recipes, or
-fixture-specific shortcuts.
+## Tool Surface Area & Constraints
 
-## Current Runtime
+* **Active Wrappers:** Exactly three strict model-facing wrappers are permitted:
+1. `inspect_graph`
+2. `query_knowledge`
+3. `change_graph` (Internal operations like `add_block` and `connect` belong inside `change_graph`).
 
-- Runtime is not production-ready.
-- Release-validated: `R0_READ_ONLY`, `R1_SET_PARAM_ONLY`.
-- Beta-validated: `R1_SET_STATE`, `R2_DISCONNECT`, `R3_REWIRE`,
-  `R4A_INSERT_BLOCK_ON_CONNECTION`, `R4B_REMOVE_BLOCK`, `R4C_ADD_VARIABLE`.
-- ToolAgents is the model/provider/tool-call harness.
-- llama.cpp is the preferred local backend through its OpenAI-compatible `/v1`
-  API. Health must prove reachability, model alias match, and actual context
-  from `/props`.
-- The model-facing surface is exactly three wrappers:
-  `inspect_graph`, `query_knowledge`, `change_graph`.
-  `query_knowledge` is the unified read-only knowledge entry point and
-  internally dispatches to `search_blocks` (catalog candidates) or
-  `ask_grc_docs` (grounded manual/tutorial answers) based on intent.
-- Low-level graph, catalog, validation, save/load, and transaction tools are
-  internal primitives, not chat tools.
-- Runtime assets such as GGUFs, embedding models, vector indexes, and caches are
-  user-local and must not be bundled or committed.
 
-## Safety Contract
+* **No Speculative Expansion:** Do not add additional endpoints (e.g., a standalone `disconnect` or model-facing `validate_graph`) unless the live `tests/eval_chat/` execution harness demonstrates explicit failure patterns under a specific LLM.
+* **Execution Paradigm:** **Parallel tool calls must remain disabled.** Tool calls execute strictly in serial order to safeguard the state transitions of the external GNU Radio graph.
 
-- Never edit raw `.grc` YAML directly.
-- Work on copied graphs, not installed examples or user originals.
-- `change_graph` is the only model-facing graph-content mutation wrapper.
-- The model has no lifecycle tools. Graph loading happens at CLI session start;
-  `/save` is an explicit CLI command.
-- Successful committed mutations validate and autosave to the active copied
-  graph path when it is safe and writable.
-- Refuse commits if the active copied graph changed on disk since the session
-  last loaded/saved it.
-- Failed schema validation or preflight must not commit.
-- Final native/`grcc` validation failure may commit only when the user intent
-  supports an invalid intermediate graph and `force=true` is used. `force=true`
-  never bypasses unknown refs, bad ports/params, stale files, ambiguity, apply
-  failure, or save failure.
-- Failed edits roll back atomically.
-- Docs/RAG are explanation-only and never mutation authority.
-- Ambiguous targets must clarify with real graph candidates; no first-match
-  mutation.
-- `grcc` proves compilability, not semantic/user-intent correctness.
+---
 
-## ToolAgents Runtime
+## Runtime & Execution Loop Architecture
 
-- Use bounded `ChatToolAgent.step(...)`, not unbounded response loops.
-- Rebuild the `ToolRegistry` every model step from the currently allowed wrapper
-  schemas.
-- Use `FunctionTool.from_openai_tool(schema, delegate)`.
-- Delegates must record raw requested name/arguments, validate route and schema,
-  then execute `GrcAgent.execute_tool(..., model_tool_call=True)` only after
-  validation passes.
-- Tool calls execute serially; keep `parallel_tool_calls` disabled.
-- `--agentic` may raise bounded rounds/timeouts, but must not expose extra tools
-  or bypass validation.
-- If the assistant lacks graph evidence, allow one bounded inspect/search
-  reminder. Do not add free-text parsing, JSON repair, hidden repair, or
-  assistant-text transaction recovery.
-- Do not restore `LlamaServerClient`, `LlamaToolCall`,
-  `run_bounded_llama_turn`, assistant-text fallback parsing, JSON-stub repair,
-  or AST/text transaction recovery.
-- Runtime reminders must not force `change_graph` after a graph-evidence-backed
-  clarification. Ambiguity should end the turn with no mutation.
+* **The Manual Engine:** Do not use `ToolAgents` native automated tool recursion (`.get_response()`). Maintain absolute execution lifecycle control using a manual `while True: ToolAgentsRunner._run_turn_events` loop executing bounded single `.step()` operations.
+* **Justified Hooks:** This manual loop is non-negotiable and exists exclusively to handle:
+1. Real-time PyQt GUI callbacks (`on_tool_start`, `on_tool_end`).
+2. Sequential mutation tracking (`change_graph` classification).
+3. Context-aware runtime reminder injections.
+4. Explicit loop iteration safety ceilings (`max_tool_rounds`).
 
-## Wrapper Contracts
 
-- `inspect_graph`: read-only graph inspection. Omitted `view` becomes
-  `overview` unless targets are supplied, then `details`. Overview is a compact
-  topology index. Details returns target identity, selected params, connection
-  context, guarded target refs, ambiguity, truncation, and validation status.
-  Missing/empty `params` must not become `["all"]`; `params=["all"]` is bounded.
-- `search_blocks`: read-only catalog discovery. Keep exact/catalog lexical and
-  sparse lookup for block IDs, params, ports, and dtypes; vector retrieval is
-  supplemental. It never authorizes mutation.
-- `ask_grc_docs`: read-only grounded docs answering. Keep answers concise,
-  cited, and explanation-only. Strip instruction-like retrieved text. Never
-  return mutation authority or edit payloads.
-- `change_graph`: flat batch mutation wrapper with `add_blocks`,
-  `remove_blocks`, `update_params`, `update_states`, `add_connections`,
-  `remove_connections`, `add_variables`, `update_variables`,
-  `remove_variables`, and `force`.
 
-(Insertion on a wire uses `remove_connections` + `add_blocks` + `add_connections` in one batch.
-Rewiring uses `remove_connections` + `add_connections`.)
-  Runtime owns ordering, stale-state guards, file-integrity checks, transaction
-  normalization, native candidate validation, `grcc`, rollback, commit, and
-  autosave. Results must stay compact and operation-specific: committed status,
-  state revision, exact effects, validation, autosave, refusal, and
-  clarification evidence.
+---
 
-Never add model-facing lifecycle tools, raw YAML tools, block-specific macros,
-or broad repair/planning tools unless repeated eval evidence proves the
-three-wrapper surface is insufficient.
+## Defensive Engineering & Guardrails
 
-## Data Authority
+### 1. Per-Turn Retry-Storm Guard
 
-- Active graph inspection is authority for instance names, current values,
-  connections, target refs, and state revisions.
-- Installed GNU Radio catalog metadata is authority for block IDs, ports,
-  params, defaults, options, flags, categories, and block semantics.
-- GNU platform metadata is preferred for semantic flags such as `not_dsp`.
-- Local docs under `docs/wiki_gnuradio_org/` are explanation-scoped.
-- ToolAgents tutorials are harness references only, not graph-edit recipes.
+* **Mechanism:** Maintain a localized `seen_tool_calls` cache per turn inside `src/grc_agent/toolagents_runtime.py`, utilizing `_canonicalize_args` keyed on `(name, canonical_json_args)`.
+* **Behavior:** If a local LLM hallucinates or enters an infinite loop, repeating a tool request with matching arguments inside the same turn, short-circuit the execution immediately. Return the cached result with flags `ok=True` and `deduplicated=True`.
 
-## Anti-Symptom Rule
+### 2. Context Compaction
 
-Before changing prompts, schemas, tool order, or runtime behavior:
+* **Algorithm:** Use **one-pass exact mathematical arithmetic** ($O(1)$ slicing computation) rather than recursive reduction loops.
+* **Sentinel Contracting:** Every truncation must terminate cleanly with an explicit string boundary sentinel:
+`... [TRUNCATED by chat-history compactor: was N chars, kept M]`
+* The original length `N` must be calculated exactly once to protect the metadata from compound corruption across subsequent rewrites.
 
-- inspect raw requested tool calls, raw tool outputs, final assistant text, and
-  trace history;
-- identify whether the issue is missing evidence, context bloat, ambiguous
-  schema, bad validation, provider behavior, or model capacity;
-- prefer catalog-backed semantics, graph-local evidence, deterministic
-  normalization, and output-shape fixes over wording hacks;
-- add semantic tests for tool call shape, graph diff, validation, rollback,
-  autosave/manual-save outcome, raw trace evidence, and answer quality.
+### 3. Wire-Format Role Safety
 
-Small local models are sensitive to context bloat. Keep prompts, schemas,
-history, and wrapper outputs compact by design.
+* **Role Constraints:** Do not leak custom system strings (e.g., `runtime_reminder`) as roles over the wire. The underlying OpenAI conversion layers will reject them or cause chat template breakage on local engines.
+* **Reminder Injection:** Inject runtime control-plane directives strictly under the standard `user` role. Isolate the text body cleanly using structural XML demarcations:
+```xml
+<runtime_directive>
+[Control plane guidance / retry hint here]
+</runtime_directive>
 
-## Engineering Rules
+```
 
-- Prefer the smallest correct change in the authoritative layer.
-- Use package imports under `src/grc_agent/`.
-- Keep `pyproject.toml` authoritative.
-- Do not add Docker as the default install path unless local GNU Radio packaging
-  makes it unavoidable.
-- Do not commit generated vector indexes, FastEmbed/Hugging Face caches, GGUF
-  files, or other model artifacts.
-- Use `uv run` for commands.
-- Use stdlib `unittest` for deterministic tests.
-- Use targeted tests while iterating; reserve full `uv run python -m unittest`
-  for release-candidate or broad runtime changes.
-- Do not delete or weaken safety tests unless they are redundant, stale, or
-  checking the wrong contract.
 
-## Agent Behavior
 
-### Ask Before Acting (Medium and Hard Problems)
+### 4. UI Rendering Fallbacks
 
-- **Trivial changes** (typos, single-line fixes, obvious import additions, test
-  regeneration after a prompted change) may be applied directly.
-- **Medium and hard changes** — anything involving architecture, prompt
-  wording, schema changes, new rules, new heuristics, retrieval tuning,
-  eval gate adjustments, or multi-file edits — must be proposed to the user
-  first and approved before any code is written or changed.
-- When a medium/hard problem is identified: **stop, report the root cause,
-  enumerate the candidate solutions with trade-offs, and wait for the user to
-  choose one.**
-- Do not pick a solution, start implementing it, and then report back. Report
-  first, implement only after explicit approval.
-- If in doubt about severity, treat the problem as medium and ask.
+* **Empty Assistant Protection:** When a final model response contains tool-execution directives but lacks text bodies, intercept the empty string mutation layer. Cleanly resolve a user-facing visual text block directly extracted from the final tool result to prevent rendering empty bubble elements in the chat view.
 
-## Durable Docs
+---
 
-- `README.md`: customer-facing install, usage, troubleshooting, FAQ,
-  architecture, verification, roadmap link.
-- `docs/CHANGELOG.md`: release history and the deferred harder-wins roadmap.
-- `docs/BLUEPRINT.md`: architecture, wrappers, safety, context, evals, runtime
-  status.
-- `docs/MODEL_CONTEXT_BIBLE.md`: generated from the actual injected prompt and
-  model-facing tool schemas.
+## Compatibility and Data Boundaries
 
-Update docs when wrapper contracts, safety boundaries, eval gates, runtime
-requirements, or capability labels change.
+* **Strict Fail-Fast Persistence:** Maintain a zero-backward-compatibility rule. If legacy database structures or missing payload fields are detected on a resume path, refuse the session load entirely.
+* **Session Refusal:** Drop the sequence context gracefully, transition the application state to a fresh timeline, and alert the user via the status bar to initiate a clean session. Never introduce shims or legacy-to-typed synthesis layers.

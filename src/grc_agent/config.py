@@ -12,38 +12,47 @@ USER_CONFIG_FILE_NAME = "config.toml"
 USER_CONFIG_DIR_NAME = "grc_agent"
 
 
+def _load_dotenv() -> None:
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parents[2] / ".env"
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                with candidate.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            key, val = line.split("=", 1)
+                            key = key.strip()
+                            val = val.strip().strip("'\"")
+                            os.environ[key] = val
+                break
+            except Exception:
+                pass
+
+_load_dotenv()
+
+
 class ConfigError(RuntimeError):
     """Raised when an explicit or discovered config file is invalid."""
 
 
 @dataclass(frozen=True)
 class LlamaConfig:
-    """Configurable defaults for the local llama.cpp runtime path."""
+    """Configurable defaults for the model backend."""
 
-    server_url: str
-    model: str
-    hf_model: str
-    model_path: str | None
-    device: str
-    gpu_layers: int
-    desired_context_tokens: int
-    startup_timeout_seconds: float
-    max_tokens: int
-    max_tool_rounds: int
-    temperature: float
-    enable_thinking: bool
-    request_timeout_seconds: float
-    # Retention in days for the launcher log files under
-    # `~/.cache/grc_agent/llama_launcher_logs/`. 0 keeps them forever;
-    # the default prunes anything older than 7 days on every CLI/GUI
-    # invocation. See `LlamaServerLauncher.prune_old_logs()`.
-    log_retention_days: int
-    # Optional directory containing hand-placed .gguf files the GUI's
-    # model-selector should also surface. `None` (default) means the
-    # selector only lists models in the Hugging Face cache under
-    # `~/.cache/huggingface/hub/`. When unset, the GUI still respects
-    # `[llama].model_path` for the currently-loaded model.
-    models_dir: str | None
+    server_url: str = "http://localhost:11434"
+    model: str = "qwen3.5:9b-q4_K_M"
+    backend: str = "ollama"
+    max_tokens: int = 4096
+    max_tool_rounds: int = 8
+    temperature: float = 0.0
+    enable_thinking: bool = False
+    request_timeout_seconds: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -185,29 +194,9 @@ def user_config_path() -> Path:
 def default_app_config() -> AppConfig:
     """Return the built-in runtime defaults used when no config file exists."""
     config = AppConfig(
-        llama=LlamaConfig(
-            server_url="http://127.0.0.1:8080",
-            model="Qwen3.5-2B-UD-Q4_K_XL.gguf",
-            hf_model="unsloth/Qwen3.5-2B-GGUF:Qwen3.5-2B-UD-Q4_K_XL",
-            model_path=None,
-            device="Auto",
-            gpu_layers=999,
-            desired_context_tokens=120000,
-            startup_timeout_seconds=300.0,
-            max_tokens=4096,
-            max_tool_rounds=8,
-            temperature=0.0,
-            enable_thinking=False,
-            request_timeout_seconds=60.0,
-            log_retention_days=7,
-            models_dir=None,
-        ),
+        llama=LlamaConfig(),
         agent=AgentConfig(
             history_compact_budget=100000,
-            docs_answer=DEFAULT_DOCS_ANSWER_CONFIG,
-            retrieval=DEFAULT_RETRIEVAL_CONFIG,
-            history=DEFAULT_HISTORY_CONFIG,
-            guardrails=DEFAULT_GUARDRAILS_CONFIG,
         ),
     )
     _validate_cross_field_constraints(config)
@@ -289,40 +278,17 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 llama_table, "server_url", context="[llama]"
             ),
             model=_require_non_empty_string(llama_table, "model", context="[llama]"),
-            hf_model=_require_non_empty_string(
-                llama_table, "hf_model", context="[llama]"
-            ),
-            model_path=_optional_nullable_non_empty_string(
+            backend=_optional_non_empty_string(
                 llama_table,
-                "model_path",
-                default=defaults.llama.model_path,
+                "backend",
+                default=defaults.llama.backend,
                 context="[llama]",
             ),
-            device=_optional_non_empty_string(
+            max_tokens=_optional_positive_int(
                 llama_table,
-                "device",
-                default=defaults.llama.device,
+                "max_tokens",
+                default=defaults.llama.max_tokens,
                 context="[llama]",
-            ),
-            gpu_layers=_optional_positive_int(
-                llama_table,
-                "gpu_layers",
-                default=defaults.llama.gpu_layers,
-                context="[llama]",
-            ),
-            desired_context_tokens=_optional_positive_int(
-                llama_table,
-                "desired_context_tokens",
-                default=defaults.llama.desired_context_tokens,
-                context="[llama]",
-            ),
-            startup_timeout_seconds=_require_positive_float(
-                llama_table,
-                "startup_timeout_seconds",
-                context="[llama]",
-            ),
-            max_tokens=_require_positive_int(
-                llama_table, "max_tokens", context="[llama]"
             ),
             max_tool_rounds=_optional_positive_int(
                 llama_table,
@@ -330,29 +296,22 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 default=defaults.llama.max_tool_rounds,
                 context="[llama]",
             ),
-            temperature=_require_non_negative_float(
+            temperature=_optional_non_negative_float(
                 llama_table,
                 "temperature",
+                default=defaults.llama.temperature,
                 context="[llama]",
             ),
-            enable_thinking=_require_bool(
-                llama_table, "enable_thinking", context="[llama]"
+            enable_thinking=_optional_bool(
+                llama_table,
+                "enable_thinking",
+                default=defaults.llama.enable_thinking,
+                context="[llama]",
             ),
-            request_timeout_seconds=_require_positive_float(
+            request_timeout_seconds=_optional_positive_float(
                 llama_table,
                 "request_timeout_seconds",
-                context="[llama]",
-            ),
-            log_retention_days=_optional_non_negative_int(
-                llama_table,
-                "log_retention_days",
-                default=defaults.llama.log_retention_days,
-                context="[llama]",
-            ),
-            models_dir=_optional_nullable_non_empty_string(
-                llama_table,
-                "models_dir",
-                default=defaults.llama.models_dir,
+                default=defaults.llama.request_timeout_seconds,
                 context="[llama]",
             ),
         ),
@@ -365,7 +324,6 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
 def _require_table(
     payload: dict[str, Any], key: str, *, context: str
 ) -> dict[str, Any]:
-    """Require one nested TOML table."""
     value = payload.get(key)
     if not isinstance(value, dict):
         raise ConfigError(f"{context} must contain a [{key}] table.")
@@ -375,7 +333,6 @@ def _require_table(
 def _require_non_empty_string(
     payload: dict[str, Any], key: str, *, context: str
 ) -> str:
-    """Require one non-empty string config value."""
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{context}.{key} must be a non-empty string.")
@@ -383,7 +340,6 @@ def _require_non_empty_string(
 
 
 def _require_positive_int(payload: dict[str, Any], key: str, *, context: str) -> int:
-    """Require one strictly positive integer config value."""
     value = payload.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ConfigError(f"{context}.{key} must be an integer greater than zero.")
@@ -393,7 +349,6 @@ def _require_positive_int(payload: dict[str, Any], key: str, *, context: str) ->
 def _require_positive_float(
     payload: dict[str, Any], key: str, *, context: str
 ) -> float:
-    """Require one strictly positive numeric config value."""
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
         raise ConfigError(f"{context}.{key} must be a number greater than zero.")
@@ -403,7 +358,6 @@ def _require_positive_float(
 def _require_non_negative_float(
     payload: dict[str, Any], key: str, *, context: str
 ) -> float:
-    """Require one non-negative numeric config value."""
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
         raise ConfigError(
@@ -413,7 +367,6 @@ def _require_non_negative_float(
 
 
 def _require_bool(payload: dict[str, Any], key: str, *, context: str) -> bool:
-    """Require one boolean config value."""
     value = payload.get(key)
     if not isinstance(value, bool):
         raise ConfigError(f"{context}.{key} must be true or false.")
@@ -485,23 +438,16 @@ def _optional_non_empty_string(
     return _require_non_empty_string(payload, key, context=context)
 
 
-def _optional_nullable_non_empty_string(
+def _optional_non_negative_float(
     payload: dict[str, Any],
     key: str,
     *,
-    default: str | None,
+    default: float,
     context: str,
-) -> str | None:
+) -> float:
     if key not in payload:
         return default
-    value = payload.get(key)
-    if value is None:
-        return None
-    # Allow empty string to mean "unset; fall back to hf_model" so a fresh
-    # config can ship with `model_path = ""` without raising.
-    if isinstance(value, str) and not value.strip():
-        return None
-    return _require_non_empty_string(payload, key, context=context)
+    return _require_non_negative_float(payload, key, context=context)
 
 
 def _docs_answer_config(
@@ -512,96 +458,21 @@ def _docs_answer_config(
     return DocsAnswerConfig(
         enabled=_optional_bool(table, "enabled", default=defaults.enabled, context="[agent.docs_answer]"),
         helper_mode=_optional_non_empty_string(table, "helper_mode", default=defaults.helper_mode, context="[agent.docs_answer]"),
-        helper_max_output_tokens=_optional_positive_int(
-            table,
-            "helper_max_output_tokens",
-            default=defaults.helper_max_output_tokens,
-            context="[agent.docs_answer]",
-        ),
-        helper_timeout_seconds=_optional_positive_float(
-            table,
-            "helper_timeout_seconds",
-            default=defaults.helper_timeout_seconds,
-            context="[agent.docs_answer]",
-        ),
-        helper_max_snippet_chars=_optional_positive_int(
-            table,
-            "helper_max_snippet_chars",
-            default=defaults.helper_max_snippet_chars,
-            context="[agent.docs_answer]",
-        ),
-        helper_max_total_context_chars=_optional_positive_int(
-            table,
-            "helper_max_total_context_chars",
-            default=defaults.helper_max_total_context_chars,
-            context="[agent.docs_answer]",
-        ),
-        max_sources=_optional_positive_int(
-            table,
-            "max_sources",
-            default=defaults.max_sources,
-            context="[agent.docs_answer]",
-        ),
-        answer_target_chars=_optional_positive_int(
-            table,
-            "answer_target_chars",
-            default=defaults.answer_target_chars,
-            context="[agent.docs_answer]",
-        ),
-        excerpt_target_chars=_optional_positive_int(
-            table,
-            "excerpt_target_chars",
-            default=defaults.excerpt_target_chars,
-            context="[agent.docs_answer]",
-        ),
-        semantic_manual_enabled=_optional_bool(
-            table,
-            "semantic_manual_enabled",
-            default=defaults.semantic_manual_enabled,
-            context="[agent.docs_answer]",
-        ),
-        semantic_tutorial_enabled=_optional_bool(
-            table,
-            "semantic_tutorial_enabled",
-            default=defaults.semantic_tutorial_enabled,
-            context="[agent.docs_answer]",
-        ),
-        probe_timeout_seconds=_optional_positive_float(
-            table,
-            "probe_timeout_seconds",
-            default=defaults.probe_timeout_seconds,
-            context="[agent.docs_answer]",
-        ),
-        retry_interval_on_failure_seconds=_optional_positive_float(
-            table,
-            "retry_interval_on_failure_seconds",
-            default=defaults.retry_interval_on_failure_seconds,
-            context="[agent.docs_answer]",
-        ),
-        retry_interval_on_success_seconds=_optional_positive_float(
-            table,
-            "retry_interval_on_success_seconds",
-            default=defaults.retry_interval_on_success_seconds,
-            context="[agent.docs_answer]",
-        ),
-        fallback_enabled=_optional_bool(
-            table,
-            "fallback_enabled",
-            default=defaults.fallback_enabled,
-            context="[agent.docs_answer]",
-        ),
-        answer_cache_size=_optional_positive_int(
-            table,
-            "answer_cache_size",
-            default=defaults.answer_cache_size,
-            context="[agent.docs_answer]",
-        ),
-        helper_prompt_version=_optional_non_empty_string(
-            table,
-            "helper_prompt_version",
-            default=defaults.helper_prompt_version,
-            context="[agent.docs_answer]",
-        ),
+        helper_max_output_tokens=_optional_positive_int(table, "helper_max_output_tokens", default=defaults.helper_max_output_tokens, context="[agent.docs_answer]"),
+        helper_timeout_seconds=_optional_positive_float(table, "helper_timeout_seconds", default=defaults.helper_timeout_seconds, context="[agent.docs_answer]"),
+        helper_max_snippet_chars=_optional_positive_int(table, "helper_max_snippet_chars", default=defaults.helper_max_snippet_chars, context="[agent.docs_answer]"),
+        helper_max_total_context_chars=_optional_positive_int(table, "helper_max_total_context_chars", default=defaults.helper_max_total_context_chars, context="[agent.docs_answer]"),
+        max_sources=_optional_positive_int(table, "max_sources", default=defaults.max_sources, context="[agent.docs_answer]"),
+        answer_target_chars=_optional_positive_int(table, "answer_target_chars", default=defaults.answer_target_chars, context="[agent.docs_answer]"),
+        excerpt_target_chars=_optional_positive_int(table, "excerpt_target_chars", default=defaults.excerpt_target_chars, context="[agent.docs_answer]"),
+        semantic_manual_enabled=_optional_bool(table, "semantic_manual_enabled", default=defaults.semantic_manual_enabled, context="[agent.docs_answer]"),
+        semantic_tutorial_enabled=_optional_bool(table, "semantic_tutorial_enabled", default=defaults.semantic_tutorial_enabled, context="[agent.docs_answer]"),
+        probe_timeout_seconds=_optional_positive_float(table, "probe_timeout_seconds", default=defaults.probe_timeout_seconds, context="[agent.docs_answer]"),
+        retry_interval_on_failure_seconds=_optional_positive_float(table, "retry_interval_on_failure_seconds", default=defaults.retry_interval_on_failure_seconds, context="[agent.docs_answer]"),
+        retry_interval_on_success_seconds=_optional_positive_float(table, "retry_interval_on_success_seconds", default=defaults.retry_interval_on_success_seconds, context="[agent.docs_answer]"),
+        fallback_enabled=_optional_bool(table, "fallback_enabled", default=defaults.fallback_enabled, context="[agent.docs_answer]"),
+        answer_cache_size=_optional_positive_int(table, "answer_cache_size", default=defaults.answer_cache_size, context="[agent.docs_answer]"),
+        helper_prompt_version=_optional_non_empty_string(table, "helper_prompt_version", default=defaults.helper_prompt_version, context="[agent.docs_answer]"),
     )
 
 
@@ -611,36 +482,11 @@ def _retrieval_config(
     defaults: RetrievalConfig,
 ) -> RetrievalConfig:
     return RetrievalConfig(
-        search_blocks_default_k=_optional_positive_int(
-            table,
-            "search_blocks_default_k",
-            default=defaults.search_blocks_default_k,
-            context="[agent.retrieval]",
-        ),
-        search_blocks_max_k=_optional_positive_int(
-            table,
-            "search_blocks_max_k",
-            default=defaults.search_blocks_max_k,
-            context="[agent.retrieval]",
-        ),
-        ask_grc_docs_default_k=_optional_positive_int(
-            table,
-            "ask_grc_docs_default_k",
-            default=defaults.ask_grc_docs_default_k,
-            context="[agent.retrieval]",
-        ),
-        ask_grc_docs_max_k=_optional_positive_int(
-            table,
-            "ask_grc_docs_max_k",
-            default=defaults.ask_grc_docs_max_k,
-            context="[agent.retrieval]",
-        ),
-        conceptual_cache_size=_optional_positive_int(
-            table,
-            "conceptual_cache_size",
-            default=defaults.conceptual_cache_size,
-            context="[agent.retrieval]",
-        ),
+        search_blocks_default_k=_optional_positive_int(table, "search_blocks_default_k", default=defaults.search_blocks_default_k, context="[agent.retrieval]"),
+        search_blocks_max_k=_optional_positive_int(table, "search_blocks_max_k", default=defaults.search_blocks_max_k, context="[agent.retrieval]"),
+        ask_grc_docs_default_k=_optional_positive_int(table, "ask_grc_docs_default_k", default=defaults.ask_grc_docs_default_k, context="[agent.retrieval]"),
+        ask_grc_docs_max_k=_optional_positive_int(table, "ask_grc_docs_max_k", default=defaults.ask_grc_docs_max_k, context="[agent.retrieval]"),
+        conceptual_cache_size=_optional_positive_int(table, "conceptual_cache_size", default=defaults.conceptual_cache_size, context="[agent.retrieval]"),
     )
 
 
@@ -650,12 +496,7 @@ def _history_config(
     defaults: HistoryConfig,
 ) -> HistoryConfig:
     return HistoryConfig(
-        checkpoint_retention=_optional_positive_int(
-            table,
-            "checkpoint_retention",
-            default=defaults.checkpoint_retention,
-            context="[agent.history]",
-        )
+        checkpoint_retention=_optional_positive_int(table, "checkpoint_retention", default=defaults.checkpoint_retention, context="[agent.history]")
     )
 
 
@@ -665,50 +506,24 @@ def _guardrails_config(
     defaults: GuardrailsConfig,
 ) -> GuardrailsConfig:
     return GuardrailsConfig(
-        max_tool_output_bytes=_optional_positive_int(
-            table,
-            "max_tool_output_bytes",
-            default=defaults.max_tool_output_bytes,
-            context="[agent.guardrails]",
-        ),
-        max_validation_errors=_optional_positive_int(
-            table,
-            "max_validation_errors",
-            default=defaults.max_validation_errors,
-            context="[agent.guardrails]",
-        ),
-        max_validation_stderr_chars=_optional_positive_int(
-            table,
-            "max_validation_stderr_chars",
-            default=defaults.max_validation_stderr_chars,
-            context="[agent.guardrails]",
-        ),
-        max_compact_list_items=_optional_positive_int(
-            table,
-            "max_compact_list_items",
-            default=defaults.max_compact_list_items,
-            context="[agent.guardrails]",
-        ),
-        max_graph_summary_blocks=_optional_positive_int(
-            table,
-            "max_graph_summary_blocks",
-            default=defaults.max_graph_summary_blocks,
-            context="[agent.guardrails]",
-        ),
-        max_context_nodes=_optional_positive_int(
-            table,
-            "max_context_nodes",
-            default=defaults.max_context_nodes,
-            context="[agent.guardrails]",
-        ),
+        max_tool_output_bytes=_optional_positive_int(table, "max_tool_output_bytes", default=defaults.max_tool_output_bytes, context="[agent.guardrails]"),
+        max_validation_errors=_optional_positive_int(table, "max_validation_errors", default=defaults.max_validation_errors, context="[agent.guardrails]"),
+        max_validation_stderr_chars=_optional_positive_int(table, "max_validation_stderr_chars", default=defaults.max_validation_stderr_chars, context="[agent.guardrails]"),
+        max_compact_list_items=_optional_positive_int(table, "max_compact_list_items", default=defaults.max_compact_list_items, context="[agent.guardrails]"),
+        max_graph_summary_blocks=_optional_positive_int(table, "max_graph_summary_blocks", default=defaults.max_graph_summary_blocks, context="[agent.guardrails]"),
+        max_context_nodes=_optional_positive_int(table, "max_context_nodes", default=defaults.max_context_nodes, context="[agent.guardrails]"),
     )
 
 
 def _validate_cross_field_constraints(config: AppConfig) -> None:
-    """Reject contradictory numeric config combinations early."""
     retrieval = config.agent.retrieval
     docs_answer = config.agent.docs_answer
     guardrails = config.agent.guardrails
+
+    if config.llama.backend not in ("ollama", "openrouter"):
+        raise ConfigError(
+            f"[llama].backend must be 'ollama' or 'openrouter'; found '{config.llama.backend}'."
+        )
 
     if retrieval.search_blocks_default_k > retrieval.search_blocks_max_k:
         raise ConfigError(
@@ -726,18 +541,52 @@ def _validate_cross_field_constraints(config: AppConfig) -> None:
         raise ConfigError(
             "[agent.docs_answer].helper_max_snippet_chars must be <= helper_max_total_context_chars."
         )
-    if config.llama.desired_context_tokens < 4096:
-        raise ConfigError(
-            "[llama].desired_context_tokens must be >= 4096 for bounded chat/tool turns."
-        )
-    if not 0 <= config.llama.log_retention_days <= 365:
-        raise ConfigError(
-            "[llama].log_retention_days must be between 0 and 365 (0 keeps logs forever)."
-        )
     if guardrails.max_compact_list_items < 1:
         raise ConfigError(
             "[agent.guardrails].max_compact_list_items must be >= 1."
         )
+
+
+def update_toml_config_file(config_path: Path, updates: dict[str, Any]) -> None:
+    """Read a TOML file, update fields in [llama] section, and write it back."""
+    if not config_path.is_file():
+        return
+    import json
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    new_lines: list[str] = []
+    in_llama = False
+    updated_keys: set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if stripped == "[llama]":
+                in_llama = True
+            else:
+                if in_llama:
+                    for k, v in updates.items():
+                        if k not in updated_keys:
+                            new_lines.append(f"{k} = {json.dumps(v)}")
+                    in_llama = False
+            new_lines.append(line)
+            continue
+
+        if in_llama and "=" in line:
+            key, _ = line.split("=", 1)
+            key = key.strip()
+            if key in updates:
+                new_lines.append(f"{key} = {json.dumps(updates[key])}")
+                updated_keys.add(key)
+                continue
+
+        new_lines.append(line)
+
+    if in_llama:
+        for k, v in updates.items():
+            if k not in updated_keys:
+                new_lines.append(f"{k} = {json.dumps(v)}")
+
+    config_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
 __all__ = [
@@ -755,5 +604,6 @@ __all__ = [
     "default_config_path",
     "load_app_config",
     "resolve_config_path",
+    "update_toml_config_file",
     "user_config_path",
 ]

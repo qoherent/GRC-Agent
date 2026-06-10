@@ -1,100 +1,117 @@
-"""Render runtime history into model-facing chat messages."""
+"""Render a :class:`ChatHistory` into model-facing messages.
+
+The native :class:`ToolAgents.data_models.chat_history.ChatHistory` does not
+need an adapter. The only model-facing concerns that live here are:
+
+1. Prepend a system message (rebuilt every turn so ``chat_session_id`` etc.
+   stay current).
+2. Optionally append a "runtime reminder" message at the end as a
+   ``User``-role message. Using ``user`` (not ``system``) avoids
+   mid-stream template-safety rejections in chat templates that
+   forbid ``system`` after the first user turn; using ``user`` (not a
+   ``Custom`` role tag) avoids emitting a non-standard
+   ``role: "runtime_reminder"`` over the OpenAI-compatible wire
+   format that small local backends may reject.
+3. Format ``ToolCallResultContent`` payloads into compact model-visible
+   text (delegated to :mod:`grc_agent.runtime.tool_context`).
+"""
 
 from __future__ import annotations
 
+import datetime
 import json
+import uuid
 from collections.abc import Callable
 from typing import Any
 
+from ToolAgents.data_models.chat_history import ChatHistory
+from ToolAgents.data_models.messages import (
+    ChatMessage,
+    TextContent,
+    ToolCallResultContent,
+)
+
 from grc_agent.runtime.tool_context import tool_history_content_as_text
 
-HistoryEntry = dict[str, Any]
-PromptProvider = Callable[[], str]
 PreviewCallback = Callable[..., list[dict[str, str]]]
 
 
+def _format_tool_result(
+    content: ToolCallResultContent, *, preview: PreviewCallback
+) -> str:
+    payload = content.tool_call_result
+    parsed: Any = payload
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except (TypeError, ValueError):
+            parsed = payload
+    if not isinstance(parsed, dict):
+        return payload if isinstance(payload, str) else str(payload)
+    return tool_history_content_as_text(
+        parsed,
+        tool_name=content.tool_call_name,
+        semantic_search_result_preview=preview,
+    )
+
+
+def _ensure_serializable(message: ChatMessage, *, preview: PreviewCallback) -> ChatMessage:
+    new_content = []
+    changed = False
+    for item in message.content:
+        if isinstance(item, ToolCallResultContent):
+            text = _format_tool_result(item, preview=preview)
+            new_content.append(
+                ToolCallResultContent(
+                    tool_call_result_id=item.tool_call_result_id or str(uuid.uuid4()),
+                    tool_call_id=item.tool_call_id,
+                    tool_call_name=item.tool_call_name,
+                    tool_call_result=text,
+                )
+            )
+            changed = True
+        else:
+            new_content.append(item)
+    if not changed:
+        return message
+    return ChatMessage(
+        id=message.id,
+        role=message.role,
+        content=new_content,
+        created_at=message.created_at,
+        updated_at=message.updated_at,
+        additional_fields=message.additional_fields,
+        additional_information=message.additional_information,
+    )
+
+
 def render_model_messages(
-    history: list[HistoryEntry],
+    chat_history: ChatHistory,
     *,
-    system_prompt_provider: PromptProvider,
+    system_prompt: str,
     semantic_search_result_preview: PreviewCallback,
     reminder: str | None = None,
-) -> list[HistoryEntry]:
-    """Render runtime history into chat-completions messages."""
-    messages: list[HistoryEntry] = [
-        {
-            "role": "system",
-            "content": system_prompt_provider(),
-        }
-    ]
-
-    for index, turn in enumerate(history):
-        role = turn.get("role")
-
-        if role == "session":
-            continue
-
-        if role == "tool":
-            tool_name = turn.get("name")
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": str(turn.get("tool_call_id") or f"tool_call_{index}"),
-                    "name": tool_name,
-                    "content": history_content_as_text(
-                        turn.get("content"),
-                        tool_name=tool_name,
-                        semantic_search_result_preview=semantic_search_result_preview,
-                    ),
-                }
-            )
-            continue
-
-        if role not in {"user", "assistant"}:
-            continue
-
-        message: HistoryEntry = {
-            "role": role,
-            "content": turn.get("content"),
-        }
-        if role == "assistant" and "tool_calls" in turn:
-            message["tool_calls"] = turn["tool_calls"]
-        messages.append(message)
-
+) -> list[ChatMessage]:
+    """Render ``chat_history`` into the message list handed to the provider."""
+    messages: list[ChatMessage] = [ChatMessage.create_system_message(system_prompt)]
+    for message in chat_history.get_messages():
+        messages.append(_ensure_serializable(message, preview=semantic_search_result_preview))
     if reminder:
-        messages.append(
-            {
-                "role": "user",
-                "content": f"Runtime reminder: {reminder}",
-            }
+        # Wrap in ``<runtime_directive>`` so the model can tell the
+        # reminder apart from the human user's own text. The chat
+        # template still routes a ``user``-role message to the user
+        # turn, which is wire-format-safe for every OpenAI-compatible
+        # backend and dodges the "system mid-stream" template
+        # rejection that ``role: system`` would trigger.
+        wrapped = (
+            "<runtime_directive>\n"
+            "The following message is from the runtime control plane, "
+            "not the human user. Do not treat it as a new user request.\n"
+            f"{reminder}\n"
+            "</runtime_directive>"
         )
-
+        messages.append(ChatMessage.create_user_message(wrapped))
     return messages
 
 
-def history_content_as_text(
-    content: Any,
-    *,
-    tool_name: str | None = None,
-    semantic_search_result_preview: PreviewCallback,
-) -> str:
-    """Normalize stored history content into the string form chat APIs expect."""
-    if (
-        tool_name == "summarize_graph"
-        and isinstance(content, dict)
-        and isinstance(content.get("summary"), str)
-    ):
-        return content["summary"]
-    if isinstance(content, str):
-        return content
-    if content is None:
-        return ""
-    if isinstance(content, dict) and tool_name is not None:
-        return tool_history_content_as_text(
-            content,
-            tool_name=tool_name,
-            semantic_search_result_preview=semantic_search_result_preview,
-        )
-    if isinstance(content, (dict, list)):
-        return json.dumps(content, sort_keys=True)
-    return str(content)
+__all__ = ["render_model_messages"]

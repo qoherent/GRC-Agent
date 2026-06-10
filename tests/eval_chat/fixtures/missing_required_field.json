@@ -1,0 +1,52 @@
+{
+  "id": "missing_required_field",
+  "description": "Model calls inspect_graph without the required 'view' field. Schema validation should reject it with a clear error.",
+  "user_message": "Inspect the graph.",
+  "max_tool_rounds": 4,
+  "tool_stubs": {
+    "inspect_graph": {
+      "ok": false,
+      "error_type": "validation_error",
+      "validation_errors": [
+        {"code": "missing_field", "field": "view", "message": "view is required"}
+      ]
+    }
+  },
+  "model_responses": [
+    {
+      "id": "resp-1",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "inspect_graph",
+              "arguments": "{}"
+            }
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-2",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "Will retry with the right args."
+        }
+      }]
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "tool_calls_executed": 1,
+    "tool_calls_requested": 1
+  }
+}

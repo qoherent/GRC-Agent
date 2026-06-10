@@ -8,8 +8,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 ## [Unreleased]
 
 ### Added
-- **Model selector (Phase 1 of 3)**: read-only model discovery and
-  system-spec probes.
+- **Multi-backend LLM support** (`llama_cpp`, `ollama`, `openrouter`).
+  - `[llama].backend` config field selects the active backend at startup.
+  - **Ollama**: probed via `GET /v1/models` through the standard OpenAI-compat
+    path; model discovery via `/api/tags`; on-demand GGUF registration uses
+    `ollama create <name> -f <tmpModelfile>` so any cached HF model can be
+    loaded without a manual pull.
+  - **OpenRouter**: API key (`OPENROUTER_API_KEY`) and model name
+    (`OPENROUTER_MODEL`) loaded exclusively from the root `.env`; no
+    hardcoding in source. Uses the `requests`-based OpenRouter client.
+  - New `grc-agent model list --backend {llama_cpp,ollama}` and
+    `grc-agent model swap --backend {llama_cpp,ollama,openrouter}` CLI paths.
+  - **GUI client/model switcher**: `ModelDialog` now lists all three backends
+    in a "Client" combo. The `llama_cpp` and `ollama` model combos both show
+    the full local HF cache (5 models) so users can select any cached GGUF
+    regardless of backend. Pulled-only Ollama models appear beneath with an
+    "(Ollama Pulled)" suffix; duplicates are suppressed by normalised name.
+  - Chat input accepts `/client`, `\client`, `/model`, `\model` slash-commands
+    to open the switcher dialog from the keyboard.
+  - Status bar shows the active backend next to the loaded model name.
+
+### Fixed
+- **`'LlamaConfig' object has no attribute 'llama'` on OpenRouter/Ollama swap**:
+  `ModelSwapRunnable` was passing a bare `LlamaConfig` to `bootstrap_runtime`,
+  which expects an `AppConfig`. Fixed by wrapping the mutated `LlamaConfig`
+  in a fresh `AppConfig` before calling `bootstrap_runtime`.
+- **Ollama model dialog showed only already-pulled models**: The dialog now
+  lists all locally cached HF GGUF files for the Ollama backend and registers
+  them on demand, matching the `llama_cpp` model list.
+- **Switch button not enabled when changing backends**: `_refresh_button_state`
+  now enables the button whenever the selected backend differs from the active
+  one, independent of the selected model.
+
   - New module `grc_agent.model_manager` with `discover_cached_models()`
     (scans `~/.cache/huggingface/hub/` and an optional
     `[llama].models_dir`; preserves original GGUF filenames from HF
@@ -134,6 +164,87 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
   the loaded session's ID. `agent.history` is rebuilt from the
   stored `user`/`assistant` messages so the model sees prior
   context on continuation turns.
+
+- **Resume dropped tool evidence — model lost inspect/search context**:
+  The previous resume path reconstructed `agent.history` from DB rows
+  by filtering on `role in {"user", "assistant"}`. Every
+  `tool`-role row and every `assistant` row that carried
+  `tool_calls` was silently dropped, so a resumed session started
+  with no `inspect_graph` / `search_blocks` evidence in the model's
+  context. The first mutation after a resume would force a re-inspect.
+  The new path persists typed `ChatMessage` payloads in the
+  `payload` column (`assistant_model` / `tool_model` roles) and
+  replays them via `ChatMessage.from_dict` on resume. See
+  `docs/superpowers/specs/2026-06-09-chat-history-refactor-design.md`.
+
+### Changed
+- **Conversation model is now a typed `ChatHistory`** (ToolAgents
+  `ToolAgents==0.3.0`). The previous ad-hoc `list[dict]` history is
+  gone; the `ToolAgentsHistoryAdapter` collapses to a thin shim used
+  only by the JSON-only helper path (`ToolAgentsJsonClient`).
+  `GrcAgent.history` becomes `GrcAgent.chat_history`; the runtime
+  appends the typed `ChatMessage` returned by `chat_agent.step`
+  directly. The "session" pseudo-role is gone; the graph snapshot
+  is kept out-of-band on the agent.
+
+- **Real-token streaming via `ToolAgentsRunner.stream_turn`**. The
+  GUI's previous post-hoc 16-char QTimer throttle of the *finished*
+  model output is replaced by a `stream_turn` generator that yields
+  `chunk` / `tool_start` / `tool_end` / `model_message` / `final`
+  events. `AgentWorker.run_turn_streaming` consumes the iterator and
+  falls back to the bounded non-streaming `run_turn` when streaming
+  is not exposed by the provider.
+
+- **Retry-storm guard** in the tool-call loop: when the model issues
+  the same tool call (`(name, canonicalized-args)`) more than once
+  in a turn and the first call returned successfully, the duplicate
+  short-circuits to a `deduplicated: True` result that reuses the
+  prior result. Prevents small local models that loop on themselves
+  from exhausting the chat history with identical calls. `tests/test_tool_call_dedup.py::EndToEndRetryStormTests`
+  covers a 5-call storm → 1 underlying execution.
+
+- **One-pass proportional compaction**: `compact_chat_history` does
+  a single pass over the candidates, computing each new payload size
+  by proportional allocation against the remaining budget. No
+  iterative shave-loop, no per-cycle length re-computation. Truncated
+  payloads end with `... [TRUNCATED by chat-history compactor: was N
+  chars, kept M]` so the model can tell the JSON was cut off.
+
+- **Reminder is wrapped in `<runtime_directive>`** tags and emitted
+  as a `user`-role message. The `user` role dodges both the
+  "system mid-stream" template rejection and the "non-standard
+  wire role" rejection that an earlier `Custom`-role tag design
+  introduced. The XML wrapper keeps the control plane's voice
+  distinct from the human user's.
+
+- **Empty assistant bubble dropped** when a turn ends with the model
+  producing only tool calls (no final text). The chat widget no
+  longer shows an empty "Agent:" header; the typed `assistant_model`
+  row already carries the message for resume. New
+  `drop_last_assistant()` method on `ChatWidget`; the persistence
+  layer also skips writing the empty flat `assistant` display row.
+
+- **GUI sidebar width halved from 18% to 9%** (per UX feedback).
+  `toggle_sidebar`'s reopen-size and the showEvent size-guard clamp
+  both updated to match.
+
+- **Eval harness (`tests/eval_chat/`)**: 10 JSON-fixture-driven
+  scenarios driving the real `ToolAgentsRunner._run_turn_events`
+  loop with a stubbed `chat_agent.step`. No real llama.cpp, runs
+  in CI. Captures the runtime's contract for the retry-storm
+  guard, surface-gate refusal, schema validation, safety ceiling,
+  and edge-case JSON parsing. Baseline: 10/10 PASS. New
+  capabilities must ship with fixtures for their failure modes —
+  documented in BLUEPRINT's "Measured Behavior" section.
+
+- **Legacy resume fallback removed.** AGENTS.md now explicitly
+  forbids backward-compat shims, fallback syntheses, and dual-format
+  persistence. `_open_past_session` refuses to resume a session
+  written before the typed-history format: no model rows → no
+  typed history → `active_session_id = None` and a status-bar
+  message tells the user to start a new chat. The test
+  `test_open_legacy_session_refuses_to_resume` enforces the
+  refusal.
 
 ## [0.1.0] - 2026-06-05
 

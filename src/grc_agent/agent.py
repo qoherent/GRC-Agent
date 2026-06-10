@@ -9,9 +9,19 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from ToolAgents.data_models.chat_history import ChatHistory
+from ToolAgents.data_models.messages import (
+    ChatMessage,
+    ChatMessageRole,
+    TextContent,
+    ToolCallContent,
+    ToolCallResultContent,
+)
 
 from grc_agent._payload import ErrorCode
 from grc_agent.catalog import describe_block
@@ -106,9 +116,6 @@ from grc_agent.runtime.docs_answer.selection import (
 )
 from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
 from grc_agent.runtime.model_context import (
-    history_content_as_text as history_content_as_text_wrapper,
-)
-from grc_agent.runtime.model_context import (
     render_model_messages,
 )
 from grc_agent.runtime.output_policy import is_meaningful
@@ -118,10 +125,8 @@ from grc_agent.runtime.path_safety import (
 from grc_agent.runtime.path_safety import (
     unsafe_graph_root_for_path,
 )
+from grc_agent.runtime.chat_history import compact_chat_history
 from grc_agent.runtime.prompt import build_system_prompt
-from grc_agent.runtime.tool_context import (
-    compact_tool_entry as compact_tool_entry_wrapper,
-)
 from grc_agent.runtime.tool_context import (
     tool_history_content_as_text as tool_history_content_as_text_wrapper,
 )
@@ -185,6 +190,15 @@ logger = logging.getLogger(__name__)
 ToolResult = dict[str, Any]
 ToolCallable = Callable[..., ToolResult]
 HistoryEntry = dict[str, Any]
+
+
+def _user_text_of(message: ChatMessage) -> str:
+    parts: list[str] = []
+    for item in message.content:
+        if isinstance(item, TextContent) and isinstance(item.content, str):
+            parts.append(item.content)
+    return "\n".join(p for p in parts if p)
+
 
 _SAVE_PATH_HINT_PATTERN = re.compile(r"(?P<path>(?:~|/)[^\s'\"`]+\.grc)\b")
 _ALIAS_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
@@ -363,7 +377,8 @@ class GrcAgent:
             accepted_retention=self.config.history.checkpoint_retention,
         )
         self._history_lineage_key: str | None = None
-        self.history: list[HistoryEntry] = []
+        self.chat_history: ChatHistory = ChatHistory()
+        self._session_snapshot: dict[str, Any] | None = None
         self.chat_session_id = str(uuid.uuid4())
         self._last_validated_state_revision: int | None = None
         self._last_validation_ok: bool | None = None
@@ -406,7 +421,8 @@ class GrcAgent:
 
     def reset_chat_session(self) -> None:
         """Reset the chat session history and generate a new session ID to clear KV cache matching."""
-        self.history = []
+        self.chat_history.clear()
+        self._session_snapshot = None
         self.chat_session_id = str(uuid.uuid4())
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
@@ -725,12 +741,12 @@ class GrcAgent:
         texts: list[str] = []
         if isinstance(self._turn_user_message, str) and self._turn_user_message.strip():
             texts.append(self._turn_user_message)
-        for turn in reversed(self.history):
-            if turn.get("role") != "user":
+        for message in reversed(self.chat_history.get_messages()):
+            if message.role != ChatMessageRole.User:
                 continue
-            content = turn.get("content")
-            if isinstance(content, str) and content.strip():
-                texts.append(content)
+            text = _user_text_of(message)
+            if text:
+                texts.append(text)
                 break
         if not texts:
             return []
@@ -748,12 +764,12 @@ class GrcAgent:
     def _current_user_text(self) -> str:
         if isinstance(self._turn_user_message, str) and self._turn_user_message.strip():
             return self._turn_user_message.strip()
-        for turn in reversed(self.history):
-            if turn.get("role") != "user":
+        for message in reversed(self.chat_history.get_messages()):
+            if message.role != ChatMessageRole.User:
                 continue
-            content = turn.get("content")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
+            text = _user_text_of(message)
+            if text:
+                return text.strip()
         return ""
 
     @staticmethod
@@ -899,27 +915,28 @@ class GrcAgent:
                 self._pending_clarification.get("clarification_id") or "pending"
             )
         tool_call_id = f"clarification_{clarification_id}_{option.label}"
-        self.history.append({"role": "user", "content": raw_reply})
-        self.history.append(
-            {
-                "role": "assistant",
-                "content": "",
+        self.chat_history.add_user_message(raw_reply)
+        now = datetime.now()
+        clarification_message = ChatMessage(
+            id=str(uuid.uuid4()),
+            role=ChatMessageRole.Assistant,
+            content=[
+                ToolCallContent(
+                    tool_call_id=tool_call_id,
+                    tool_call_name=option.tool_name,
+                    tool_call_arguments=option.tool_args,
+                )
+            ],
+            created_at=now,
+            updated_at=now,
+            additional_fields={
                 "clarification_selection": {
                     "label": option.label,
                     "clarification_id": clarification_id,
-                },
-                "tool_calls": [
-                    {
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": option.tool_name,
-                            "arguments": json.dumps(option.tool_args, sort_keys=True),
-                        },
-                    }
-                ],
-            }
+                }
+            },
         )
+        self.chat_history.add_message(clarification_message)
         return tool_call_id
 
     def _record_clarification_option_result(
@@ -928,13 +945,22 @@ class GrcAgent:
         tool_name: str,
         result: dict[str, Any],
     ) -> None:
-        self.history.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "name": tool_name,
-                "content": result,
-            }
+        now = datetime.now()
+        self.chat_history.add_message(
+            ChatMessage(
+                id=str(uuid.uuid4()),
+                role=ChatMessageRole.Tool,
+                content=[
+                    ToolCallResultContent(
+                        tool_call_result_id=str(uuid.uuid4()),
+                        tool_call_id=tool_call_id,
+                        tool_call_name=tool_name,
+                        tool_call_result=json.dumps(result, sort_keys=True),
+                    )
+                ],
+                created_at=now,
+                updated_at=now,
+            )
         )
 
     def _pending_clarification_reminder(self) -> str:
@@ -1060,7 +1086,7 @@ class GrcAgent:
             "agent_core_ready": agent_core_ready,
             "session_loaded": has_session,
             "retrieval_ready": has_retrieval,
-            "history_length": len(self.history),
+            "history_length": self.chat_history.get_message_count(),
             "active_tool_surface": surface.name,
             "model_facing_tools": list(surface.model_tool_names),
             "model_tool_count": model_tool_count,
@@ -1078,46 +1104,10 @@ class GrcAgent:
         except ValueError:
             return None
 
-    def run_step_fake(
-        self, user_msg: str, fake_assistant_actions: list[HistoryEntry]
-    ) -> None:
-        """
-        A fake loop step to test the plumbing.
-        fake_assistant_actions is a list of dicts.
-        If it has 'tool', it's a tool call. If it has 'text', it's a message.
-        """
-        self.history.append({"role": "user", "content": user_msg})
-        self._turn_user_message = user_msg
-
-        for action in fake_assistant_actions:
-            if "text" in action:
-                self.history.append({"role": "assistant", "content": action["text"]})
-
-            if "tool" in action:
-                tool_name = action["tool"]
-                kwargs = action.get("kwargs", {})
-
-                self.history.append(
-                    {
-                        "role": "assistant",
-                        "tool_calls": [{"name": tool_name, "arguments": kwargs}],
-                    }
-                )
-
-                result = self.execute_tool(tool_name, kwargs, model_tool_call=True)
-
-                self.history.append(
-                    {
-                        "role": "tool",
-                        "name": tool_name,
-                        "content": result,
-                    }
-                )
-
-    def get_model_messages(self, *, reminder: str | None = None) -> list[HistoryEntry]:
+    def get_model_messages(self, *, reminder: str | None = None) -> list[ChatMessage]:
         return render_model_messages(
-            self.history,
-            system_prompt_provider=self.get_system_prompt,
+            self.chat_history,
+            system_prompt=self.get_system_prompt(),
             semantic_search_result_preview=self._semantic_search_result_preview,
             reminder=reminder,
         )
@@ -1128,83 +1118,11 @@ class GrcAgent:
 
     def compact_history(self) -> None:
         """Reduce history token cost before a new multi-turn conversation turn."""
-        last_session_index: int | None = None
-        user_indices: list[int] = []
-        total_chars = 0
-        for index, turn in enumerate(self.history):
-            role = turn.get("role")
-            if role == "session":
-                last_session_index = index
-            if role == "user":
-                user_indices.append(index)
-            total_chars += len(str(turn))
-
-        previous_turn_start = user_indices[-2] if len(user_indices) >= 2 else None
-
-        if last_session_index is not None or previous_turn_start is not None:
-            compacted = []
-            for idx, turn in enumerate(self.history):
-                role = turn.get("role")
-                if role == "session" and idx != last_session_index:
-                    continue
-                if (
-                    role == "tool"
-                    and previous_turn_start is not None
-                    and idx < previous_turn_start
-                    and isinstance(turn.get("content"), dict)
-                ):
-                    compacted.append(self._compact_tool_entry(turn))
-                else:
-                    compacted.append(turn)
-            self.history = compacted
-            total_chars = sum(len(str(turn)) for turn in self.history)
-
-        self._proactive_compact_if_needed(total_chars=total_chars, user_indices=user_indices)
-        logger.debug("compact_history history_len=%d", len(self.history))
-
-    def _proactive_compact_if_needed(
-        self,
-        *,
-        total_chars: int | None = None,
-        user_indices: list[int] | None = None,
-    ) -> None:
-        """Drop older assistant/tool detail when history exceeds the char budget."""
-        if total_chars is None:
-            total_chars = sum(len(str(turn)) for turn in self.history)
-        if total_chars <= self.config.history_compact_budget:
-            return
-
-        if user_indices is None:
-            user_indices = [
-                idx for idx, turn in enumerate(self.history) if turn.get("role") == "user"
-            ]
-        if len(user_indices) < 2:
-            return
-
-        cutoff = user_indices[-1]
-        compacted = []
-        for idx, turn in enumerate(self.history):
-            if idx >= cutoff:
-                compacted.append(turn)
-                continue
-            role = turn.get("role")
-            if role == "session":
-                continue
-            if role == "assistant":
-                continue
-            if role == "tool" and isinstance(turn.get("content"), dict):
-                compacted.append(self._compact_tool_entry(turn))
-            else:
-                compacted.append(turn)
-
-        self.history = compacted
-
-    @staticmethod
-    def _compact_tool_entry(turn: HistoryEntry) -> HistoryEntry:
-        return compact_tool_entry_wrapper(
-            turn,
-            semantic_search_result_preview=GrcAgent._semantic_search_result_preview,
+        compact_chat_history(
+            self.chat_history,
+            budget_chars=self.config.history_compact_budget,
         )
+        logger.debug("compact_history history_len=%d", self.chat_history.get_message_count())
 
     # ------------------------------------------------------------------- #
     # History content formatting
@@ -1524,13 +1442,8 @@ class GrcAgent:
         snapshot = self.active_session_snapshot()
         if snapshot is None:
             return
-        self.history.append(
-            {
-                "role": "session",
-                "reason": reason,
-                "content": snapshot,
-            }
-        )
+        self._session_snapshot = dict(snapshot)
+        self._session_snapshot["reason"] = reason
 
     def _missing_session_result(self, tool_name: str) -> ToolResult | None:
         if self.session.flowgraph is not None:

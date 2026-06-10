@@ -1,0 +1,132 @@
+{
+  "id": "retry_storm_5_identical_calls",
+  "description": "Model issues the same inspect_graph call 5 times. The retry-storm guard must short-circuit; only 1 underlying tool call.",
+  "user_message": "Inspect the graph.",
+  "max_tool_rounds": 6,
+  "tool_stubs": {
+    "inspect_graph": {
+      "ok": true,
+      "view": "overview",
+      "summary": {
+        "graph_name": "top_block",
+        "counts": "b=1 c=0 v=0",
+        "blocks": [],
+        "connections": []
+      }
+    }
+  },
+  "model_responses": [
+    {
+      "id": "resp-1",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "inspect_graph",
+              "arguments": "{\"view\": \"overview\"}"
+            }
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-2",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-2",
+            "type": "function",
+            "function": {
+              "name": "inspect_graph",
+              "arguments": "{\"view\": \"overview\"}"
+            }
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-3",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-3",
+            "type": "function",
+            "function": {
+              "name": "inspect_graph",
+              "arguments": "{\"view\": \"overview\"}"
+            }
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-4",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-4",
+            "type": "function",
+            "function": {
+              "name": "inspect_graph",
+              "arguments": "{\"view\": \"overview\"}"
+            }
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-5",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-5",
+            "type": "function",
+            "function": {
+              "name": "inspect_graph",
+              "arguments": "{\"view\": \"overview\"}"
+            }
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-6",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "The graph has 1 block and 0 connections."
+        }
+      }]
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "assistant_text": "The graph has 1 block and 0 connections.",
+    "tool_calls_executed": 1,
+    "tool_calls_requested": 5
+  }
+}

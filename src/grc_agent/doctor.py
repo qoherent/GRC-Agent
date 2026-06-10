@@ -12,7 +12,6 @@ from grc_agent.retrieval import initialize_retrieval
 
 EXPECTED_PYTHON = (3, 12)
 EXPECTED_GNURADIO = "3.10.9.2"
-_LLAMA_CPP_SERVER_HELP = "Start with: uv run grc-agent chat --new --message 'hello'"
 
 
 def _build_check(name: str, ok: bool, detail: str, **extra: Any) -> dict[str, Any]:
@@ -67,16 +66,16 @@ def _check_config(config_path: str | None = None) -> dict[str, Any]:
 
     resolved_path = resolve_config_path(config_path)
     source = str(resolved_path) if resolved_path is not None else "built-in defaults"
-    llama_ok = config.llama.server_url and config.llama.model
+    backend_ok = config.llama.server_url and config.llama.model
     return _build_check(
         "App config",
         True,
         source,
         source=source,
-        llama_server_url=config.llama.server_url,
-        llama_model=config.llama.model,
-        llama_desired_context_tokens=config.llama.desired_context_tokens,
-        llama_configured=llama_ok,
+        backend_server_url=config.llama.server_url,
+        backend_model=config.llama.model,
+        backend=config.llama.backend,
+        backend_configured=backend_ok,
     )
 
 
@@ -99,42 +98,39 @@ def _check_retrieval() -> dict[str, Any]:
 
 
 def _check_llama_server(config_path: str | None = None) -> dict[str, Any]:
+    backend = "ollama"
     try:
         from grc_agent.config import load_app_config as _load
         from grc_agent.startup import bootstrap_runtime
 
         config = _load(config_path)
-        result = bootstrap_runtime(config, start_llama=True, init_retrieval=False)
-        desired_context = config.llama.desired_context_tokens
-        actual_context = (
-            result.health_evidence.get("llama_actual_context_tokens")
-            if result.health_evidence
-            else None
-        )
-        context_ok = (
-            actual_context is not None and actual_context >= desired_context
-        )
+        backend = config.llama.backend
+        result = bootstrap_runtime(config, init_retrieval=False)
+
         detail = f"{result.model_alias} at {result.server_url} ({result.launch_status})"
-        if actual_context is not None:
-            detail = (
-                f"{detail}; context desired={desired_context}, actual={actual_context}"
-            )
-        else:
-            detail = (
-                f"{detail}; context desired={desired_context}, actual=unknown"
-            )
+
+        check_name = "Ollama server"
+        if backend == "openrouter":
+            check_name = "OpenRouter API"
+
         return _build_check(
-            "llama.cpp server",
-            context_ok,
+            check_name,
+            result.launch_status != "failed",
             detail,
-            desired_context_tokens=desired_context,
-            actual_context_tokens=actual_context,
         )
     except Exception as exc:
+        check_name = "Ollama server"
+        if backend == "openrouter":
+            check_name = "OpenRouter API"
+
+        help_msg = "Ensure Ollama is running and has the configured model pulled."
+        if backend == "openrouter":
+            help_msg = "Ensure internet connectivity and a valid OpenRouter API key config in .env."
+
         return _build_check(
-            "llama.cpp server",
+            check_name,
             False,
-            f"{exc}. {_LLAMA_CPP_SERVER_HELP}",
+            f"{exc}. {help_msg}",
         )
 
 

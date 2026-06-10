@@ -1,0 +1,77 @@
+{
+  "id": "two_distinct_tool_calls",
+  "description": "Model issues inspect_graph then query_knowledge. Each runs once. Final text returned.",
+  "user_message": "Find the analog_noise_source_x block.",
+  "max_tool_rounds": 4,
+  "tool_stubs": {
+    "inspect_graph": {
+      "ok": true,
+      "view": "overview",
+      "summary": {
+        "graph_name": "top_block",
+        "counts": "b=3 c=2 v=1",
+        "blocks": [],
+        "connections": []
+      }
+    },
+    "query_knowledge": {
+      "ok": true,
+      "domain": "catalog",
+      "query": "analog_noise_source_x",
+      "results": [
+        {"block_id": "analog_noise_source_x", "name": "Noise Source"}
+      ]
+    }
+  },
+  "model_responses": [
+    {
+      "id": "resp-1",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "inspect_graph", "arguments": "{\"view\": \"overview\"}"}
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-2",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-2",
+            "type": "function",
+            "function": {"name": "query_knowledge", "arguments": "{\"domain\": \"catalog\", \"query\": \"analog_noise_source_x\"}"}
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-3",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "Found it: analog_noise_source_x (Noise Source)."
+        }
+      }]
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "assistant_text": "Found it: analog_noise_source_x (Noise Source).",
+    "tool_calls_executed": 2,
+    "tool_calls_requested": 2
+  }
+}

@@ -325,10 +325,9 @@ def build_debug_bundle(
         "llama": {
             "server_url": health_report.get("llama_server_url")
             or release_manifest.get("runtime", {}).get("server_url"),
-            "model_ready": health_report.get("llama_model_ready"),
-            "context_verified": health_report.get("llama_context_verified"),
-            "actual_context_tokens": health_report.get("llama_actual_context_tokens"),
-            "desired_context_tokens": health_report.get("llama_desired_context_tokens"),
+            "model_ready": health_report.get("model_ready"),
+            "context_verified": health_report.get("context_verified"),
+            "actual_context_tokens": health_report.get("actual_context_tokens"),
             "status": health_report.get("status"),
             "status_reasons": health_report.get("status_reasons", []),
         },

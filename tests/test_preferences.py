@@ -34,20 +34,13 @@ def _make_llama_config(**overrides: object) -> LlamaConfig:
     """Build a fully-populated LlamaConfig for tests."""
     base = dict(
         server_url="http://127.0.0.1:8080",
-        model="default-model.gguf",
-        hf_model="default/repo:default-model.gguf",
-        model_path=None,
-        device="CUDA0",
-        gpu_layers=999,
-        desired_context_tokens=120000,
-        startup_timeout_seconds=300.0,
+        model="test-model",
+        backend="ollama",
         max_tokens=4096,
         max_tool_rounds=8,
         temperature=0.0,
         enable_thinking=False,
-        request_timeout_seconds=60.0,
-        log_retention_days=7,
-        models_dir=None,
+        request_timeout_seconds=120.0,
     )
     base.update(overrides)
     return LlamaConfig(**base)
@@ -56,11 +49,8 @@ def _make_llama_config(**overrides: object) -> LlamaConfig:
 class DefaultsTests(unittest.TestCase):
     def test_default_preferences_have_expected_values(self) -> None:
         prefs = default_user_preferences()
-        self.assertEqual(prefs.last_model.hf_repo, "")
-        self.assertEqual(prefs.last_model.filename, "")
-        self.assertEqual(prefs.last_model.alias, "")
+        self.assertEqual(prefs.last_model.model, "")
         self.assertEqual(prefs.last_model.saved_at, "")
-        self.assertFalse(prefs.confirm_model_swap)
         self.assertEqual(prefs.schema_version, PREFERENCES_SCHEMA_VERSION)
 
 
@@ -116,12 +106,9 @@ class LoadTests(unittest.TestCase):
             target = Path("/tmp/rt_full.json")
             original = UserPreferences(
                 last_model=LastModel(
-                    hf_repo="org/repo",
-                    filename="model.gguf",
-                    alias="model",
+                    model="llama3.2",
                     saved_at="2026-01-01T00:00:00Z",
                 ),
-                confirm_model_swap=True,
             )
             save_user_preferences(original, path=target)
             loaded = load_user_preferences(path=target)
@@ -158,7 +145,7 @@ class LoadTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 999,
-                        "last_model": {"hf_repo": "o/r", "filename": "f.gguf"},
+                        "last_model": {"model": "llama3.2"},
                     }
                 ),
                 encoding="utf-8",
@@ -175,27 +162,15 @@ class LoadTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "last_model": {"hf_repo": "o/r", "filename": "f.gguf"},
+                        "last_model": {"model": "llama3.2"},
                         "future_flag": True,
                     }
                 ),
                 encoding="utf-8",
             )
             prefs = load_user_preferences(path=target)
-        self.assertEqual(prefs.last_model.hf_repo, "o/r")
+        self.assertEqual(prefs.last_model.model, "llama3.2")
         self.assertTrue(self._has_log_containing("future_flag"))
-
-    def test_load_handles_non_bool_confirm_model_swap(self) -> None:
-        with tempfile_Target() as target:
-            target.write_text(
-                json.dumps(
-                    {"schema_version": 1, "confirm_model_swap": "yes"}
-                ),
-                encoding="utf-8",
-            )
-            prefs = load_user_preferences(path=target)
-        self.assertFalse(prefs.confirm_model_swap)
-        self.assertTrue(self._has_log_containing("non-bool"))
 
 
 class SaveTests(unittest.TestCase):
@@ -206,7 +181,7 @@ class SaveTests(unittest.TestCase):
             self.assertFalse(parent.parent.exists())
             save_user_preferences(
                 UserPreferences(
-                    last_model=LastModel(hf_repo="o/r", filename="f.gguf")
+                    last_model=LastModel(model="llama3.2")
                 ),
                 path=parent,
             )
@@ -217,7 +192,7 @@ class SaveTests(unittest.TestCase):
         with tempfile_Target(suffix="prefs.json") as target:
             save_user_preferences(
                 UserPreferences(
-                    last_model=LastModel(hf_repo="o/r", filename="f.gguf")
+                    last_model=LastModel(model="llama3.2")
                 ),
                 path=target,
             )
@@ -230,9 +205,7 @@ class SaveTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     save_user_preferences(
                         UserPreferences(
-                            last_model=LastModel(
-                                hf_repo="o/r2", filename="f2.gguf"
-                            )
+                            last_model=LastModel(model="qwen2.5")
                         ),
                         path=target,
                     )
@@ -244,22 +217,17 @@ class SaveTests(unittest.TestCase):
         with tempfile_Target(suffix="prefs.json") as target:
             save_user_preferences(
                 UserPreferences(
-                    last_model=LastModel(
-                        hf_repo="zzz", filename="z.gguf", alias="z"
-                    ),
-                    confirm_model_swap=True,
+                    last_model=LastModel(model="qwen2.5", saved_at="t"),
                 ),
                 path=target,
             )
             text = target.read_text(encoding="utf-8")
             # json.dumps with sort_keys=True yields a stable,
             # diff-friendly file. Just assert sorted fields.
-            self.assertLess(text.index('"confirm_model_swap"'),
-                            text.index('"last_model"'))
-            self.assertLess(text.index('"alias"'),
-                            text.index('"filename"'))
-            self.assertLess(text.index('"filename"'),
-                            text.index('"hf_repo"'))
+            self.assertLess(text.index('"last_model"'),
+                            text.index('"schema_version"'))
+            self.assertLess(text.index('"model"'),
+                            text.index('"saved_at"'))
 
 
 class ApplyToLlamaConfigTests(unittest.TestCase):
@@ -270,106 +238,41 @@ class ApplyToLlamaConfigTests(unittest.TestCase):
         )
         self.assertEqual(out, cfg)
 
-    def test_populated_prefs_override_model_and_hf_model(self) -> None:
-        cfg = _make_llama_config(
-            model="old.gguf", hf_model="old/repo:old.gguf"
-        )
+    def test_populated_prefs_override_model(self) -> None:
+        cfg = _make_llama_config(model="old-model")
         out = apply_user_preferences_to_llama_config(
             cfg,
             UserPreferences(
-                last_model=LastModel(
-                    hf_repo="new/repo",
-                    filename="new-model.gguf",
-                    alias="new-model",
-                )
+                last_model=LastModel(model="new-model")
             ),
         )
         self.assertEqual(out.model, "new-model")
-        self.assertEqual(out.hf_model, "new/repo:new-model.gguf")
 
     def test_apply_does_not_touch_other_fields(self) -> None:
         cfg = _make_llama_config(
-            device="Metal",
-            gpu_layers=42,
-            desired_context_tokens=65536,
-            model_path="/tmp/placeholder.gguf",
+            backend="ollama",
+            max_tokens=2048,
         )
         out = apply_user_preferences_to_llama_config(
             cfg,
             UserPreferences(
-                last_model=LastModel(
-                    hf_repo="new/repo",
-                    filename="new.gguf",
-                    alias="new",
-                )
+                last_model=LastModel(model="new-model")
             ),
         )
-        self.assertEqual(out.device, "Metal")
-        self.assertEqual(out.gpu_layers, 42)
-        self.assertEqual(out.desired_context_tokens, 65536)
-        # F1: swap persistence must clear model_path, otherwise the
-        # launcher's ``-m`` flag would silently revert the swap.
-        self.assertIsNone(out.model_path)
-
-    def test_apply_clears_model_path_for_swap_persistence(self) -> None:
-        """F1 regression: a swap persisted to prefs must override
-        ``[llama].model_path`` from ``grc_agent.toml`` on the next
-        launch. The launcher prefers ``-m model_path`` over
-        ``-hf hf_model``, so leaving model_path untouched would
-        silently revert the swap.
-        """
-        cfg = _make_llama_config(
-            model="old-local.gguf",
-            hf_model="old/repo:old-local.gguf",
-            model_path="/data/big-local.gguf",
-        )
-        out = apply_user_preferences_to_llama_config(
-            cfg,
-            UserPreferences(
-                last_model=LastModel(
-                    hf_repo="new/repo",
-                    filename="new-model.gguf",
-                    alias="new-model",
-                )
-            ),
-        )
-        self.assertIsNone(out.model_path)
+        self.assertEqual(out.backend, "ollama")
+        self.assertEqual(out.max_tokens, 2048)
         self.assertEqual(out.model, "new-model")
-        self.assertEqual(out.hf_model, "new/repo:new-model.gguf")
-
-    def test_apply_alias_only_overlay(self) -> None:
-        """F2 regression: an alias-only prefs file is honored at
-        startup, matching the helper's own guard."""
-        cfg = _make_llama_config()
-        out = apply_user_preferences_to_llama_config(
-            cfg,
-            UserPreferences(
-                last_model=LastModel(alias="my-fine-tune")
-            ),
-        )
-        self.assertEqual(out.model, "my-fine-tune")
-        # hf_model is unchanged because we only have an alias.
-        self.assertEqual(out.hf_model, cfg.hf_model)
 
 
 class UpdateLastModelTests(unittest.TestCase):
-    def test_update_writes_last_model_and_preserves_other_keys(self) -> None:
+    def test_update_writes_last_model(self) -> None:
         with tempfile_Target(suffix="prefs.json") as target:
-            # Seed with a non-default confirm_model_swap.
-            save_user_preferences(
-                UserPreferences(confirm_model_swap=True), path=target
-            )
             update_last_model(
-                hf_repo="o/r",
-                filename="f.gguf",
-                alias="f",
+                model="llama3.2",
                 path=target,
             )
             loaded = load_user_preferences(path=target)
-        self.assertEqual(loaded.last_model.hf_repo, "o/r")
-        self.assertEqual(loaded.last_model.filename, "f.gguf")
-        self.assertEqual(loaded.last_model.alias, "f")
-        self.assertTrue(loaded.confirm_model_swap)
+        self.assertEqual(loaded.last_model.model, "llama3.2")
         # saved_at is a recent ISO-8601 UTC timestamp.
         parsed = datetime.strptime(
             loaded.last_model.saved_at, "%Y-%m-%dT%H:%M:%SZ"

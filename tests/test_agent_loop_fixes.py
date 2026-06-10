@@ -3,17 +3,28 @@
 Tests cover:
   Fix #1: No premature exit on commit (commit result flows as role:"tool")
   Fix #2: Transient reminder (not in agent history), recency bias (at end),
-          template safety (role:"user", not role:"system" mid-stream)
+          template safety (Custom role tag, not role:"system" mid-stream)
   Fix #3: No forced_next_tool_name / forced tool_choice remnants
   Fix #4: update_states flat enum accepted; old object schema rejected
 """
 
 from __future__ import annotations
 
+import datetime
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+
+from ToolAgents.data_models.chat_history import ChatHistory
+from ToolAgents.data_models.messages import (
+    ChatMessage,
+    ChatMessageRole,
+    TextContent,
+    ToolCallContent,
+    ToolCallResultContent,
+)
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -30,25 +41,69 @@ from grc_agent.toolagents_runtime import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _history_record(role: str, content: str) -> dict:
-    return {"role": role, "content": content}
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.now()
 
 
-def _tool_history_record(name: str, content: dict, call_id: str = "fake-call-id") -> dict:
-    return {
-        "role": "tool",
-        "tool_call_id": call_id,
-        "name": name,
-        "content": content,
-    }
+def _user_message(text: str) -> ChatMessage:
+    return ChatMessage(
+        id=f"u-{text[:8]}",
+        role=ChatMessageRole.User,
+        content=[TextContent(content=text)],
+        created_at=_now(),
+        updated_at=_now(),
+    )
 
 
-def _assistant_with_tool_calls(calls: list[dict]) -> dict:
-    return {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": calls,
-    }
+def _assistant_message(text: str) -> ChatMessage:
+    return ChatMessage(
+        id=f"a-{text[:8]}",
+        role=ChatMessageRole.Assistant,
+        content=[TextContent(content=text)],
+        created_at=_now(),
+        updated_at=_now(),
+    )
+
+
+def _assistant_with_tool_calls(
+    calls: list[tuple[str, str, dict]]
+) -> ChatMessage:
+    content: list = []
+    for call_id, name, args in calls:
+        content.append(
+            ToolCallContent(
+                tool_call_id=call_id,
+                tool_call_name=name,
+                tool_call_arguments=args,
+            )
+        )
+    return ChatMessage(
+        id="a-tc",
+        role=ChatMessageRole.Assistant,
+        content=content,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+
+
+def _tool_history_record(
+    name: str, content: dict, call_id: str = "fake-call-id"
+) -> ChatMessage:
+    return ChatMessage(
+        id=f"t-{call_id}",
+        role=ChatMessageRole.Tool,
+        content=[
+            ToolCallResultContent(
+                tool_call_result_id=f"r-{call_id}",
+                tool_call_id=call_id,
+                tool_call_name=name,
+                tool_call_result=json.dumps(content, sort_keys=True),
+            )
+        ],
+        created_at=_now(),
+        updated_at=_now(),
+    )
 
 
 def _fixture_path(name: str) -> Path:
@@ -64,47 +119,50 @@ class Fix2TransientReminderTests(unittest.TestCase):
     """render_model_messages uses reminder transiently — not persisted."""
 
     def test_reminder_is_not_persisted_to_history(self) -> None:
-        history = [
-            {"role": "session", "content": {"state_revision": 1}},
-            _history_record("user", "Change samp_rate to 48000"),
-        ]
+        history = ChatHistory()
+        history.add_message(_user_message("Change samp_rate to 48000"))
         _messages = render_model_messages(
             history,
-            system_prompt_provider=build_system_prompt,
+            system_prompt=build_system_prompt("session"),
             semantic_search_result_preview=lambda _r: [],
             reminder="Call inspect_graph first.",
         )
-        self.assertEqual(len(history), 2)
-        self.assertNotIn("Runtime reminder", str(history))
+        self.assertEqual(history.get_message_count(), 1)
+        reminder_in_history = any(
+            "Runtime reminder" in (item.content if isinstance(item, TextContent) else "")
+            for message in history.get_messages()
+            for item in message.content
+            if isinstance(item, TextContent)
+        )
+        self.assertFalse(reminder_in_history)
 
     def test_no_reminder_when_none_passed(self) -> None:
-        history = [
-            _history_record("user", "What is the sample rate?"),
-            _tool_history_record("inspect_graph", {"ok": True, "view": "overview"}),
-            _history_record("assistant", "The sample rate is 32000."),
-        ]
+        history = ChatHistory()
+        history.add_message(_user_message("What is the sample rate?"))
+        history.add_message(_tool_history_record("inspect_graph", {"ok": True, "view": "overview"}))
+        history.add_message(_assistant_message("The sample rate is 32000."))
         messages = render_model_messages(
             history,
-            system_prompt_provider=build_system_prompt,
+            system_prompt=build_system_prompt("session"),
             semantic_search_result_preview=lambda _r: [],
             reminder=None,
         )
-        role_sequence = [m["role"] for m in messages]
-        self.assertNotIn("Runtime reminder", role_sequence)
+        has_reminder = any(
+            "Runtime reminder" in message.get_as_text() for message in messages
+        )
+        self.assertFalse(has_reminder)
 
     def test_reminder_does_not_alter_agent_get_model_messages_history(self) -> None:
         agent = GrcAgent()
-        agent.history.append(_history_record("user", "Disable the throttle block."))
-        before_count = len(agent.history)
+        agent.chat_history.add_user_message("Disable the throttle block.")
+        before_count = agent.chat_history.get_message_count()
 
         msgs = agent.get_model_messages(reminder="You need inspect_graph evidence.")
-        after_count = len(agent.history)
+        after_count = agent.chat_history.get_message_count()
 
         self.assertEqual(after_count, before_count)
-        has_reminder_in_content = any(
-            "Runtime reminder" in str(m.get("content", "")) for m in msgs
-        )
-        self.assertTrue(has_reminder_in_content)
+        has_reminder = any("runtime_directive" in m.get_as_text() for m in msgs)
+        self.assertTrue(has_reminder)
 
 
 # ---------------------------------------------------------------------------
@@ -116,106 +174,169 @@ class Fix2RecencyBiasTests(unittest.TestCase):
     """render_model_messages places the reminder at the END."""
 
     def test_reminder_after_all_history(self) -> None:
-        history = [
-            _history_record("user", "Inspect the graph."),
-            _tool_history_record("inspect_graph", {"ok": True, "summary": "..."}),
-            _history_record("assistant", "I see the graph."),
-            _history_record("user", "Now change samp_rate."),
-        ]
+        history = ChatHistory()
+        history.add_message(_user_message("Inspect the graph."))
+        history.add_message(_tool_history_record("inspect_graph", {"ok": True, "summary": "..."}))
+        history.add_message(_assistant_message("I see the graph."))
+        history.add_message(_user_message("Now change samp_rate."))
         messages = render_model_messages(
             history,
-            system_prompt_provider=build_system_prompt,
+            system_prompt=build_system_prompt("session"),
             semantic_search_result_preview=lambda _r: [],
             reminder="Use change_graph now.",
         )
-        self.assertEqual(messages[-1]["role"], "user")
-        self.assertIn("Runtime reminder:", messages[-1]["content"])
+        self.assertEqual(messages[-1].role, ChatMessageRole.User)
+        self.assertIn("Use change_graph now.", messages[-1].get_as_text())
+        self.assertIn("<runtime_directive>", messages[-1].get_as_text())
 
     def test_reminder_position_with_mixed_tool_history(self) -> None:
-        history = [
-            _history_record("user", "Add an AGC block."),
+        history = ChatHistory()
+        history.add_message(_user_message("Add an AGC block."))
+        history.add_message(
             _assistant_with_tool_calls(
-                [{"name": "inspect_graph", "arguments": {"view": "overview"}}]
-            ),
-            _tool_history_record("inspect_graph", {"ok": True, "view": "overview", "summary": "3 blocks"}),
+                [("c1", "inspect_graph", {"view": "overview"})]
+            )
+        )
+        history.add_message(
+            _tool_history_record(
+                "inspect_graph",
+                {"ok": True, "view": "overview", "summary": "3 blocks"},
+                call_id="c1",
+            )
+        )
+        history.add_message(
             _assistant_with_tool_calls(
-                [{"name": "search_blocks", "arguments": {"query": "AGC"}}]
-            ),
-            _tool_history_record("search_blocks", {"ok": True, "candidates": []}),
-            _history_record("assistant", "I need to search more."),
-        ]
+                [("c2", "search_blocks", {"query": "AGC"})]
+            )
+        )
+        history.add_message(
+            _tool_history_record(
+                "search_blocks",
+                {"ok": True, "candidates": []},
+                call_id="c2",
+            )
+        )
+        history.add_message(_assistant_message("I need to search more."))
         messages = render_model_messages(
             history,
-            system_prompt_provider=build_system_prompt,
+            system_prompt=build_system_prompt("session"),
             semantic_search_result_preview=lambda _r: [],
             reminder="Call the relevant tool now.",
         )
         self.assertGreater(len(messages), 2)
-        self.assertEqual(messages[-1]["role"], "user")
-        self.assertIn("Runtime reminder:", messages[-1]["content"])
+        self.assertEqual(messages[-1].role, ChatMessageRole.User)
+        self.assertIn("Call the relevant tool now.", messages[-1].get_as_text())
+        self.assertIn("<runtime_directive>", messages[-1].get_as_text())
         self.assertTrue(
-            messages[-1]["content"].endswith("Call the relevant tool now."),
-            f"Reminder content should be last: {messages[-1]['content']!r}",
+            messages[-1].get_as_text().endswith("</runtime_directive>"),
+            f"Reminder content should be wrapped: {messages[-1].get_as_text()!r}",
         )
 
 
 # ---------------------------------------------------------------------------
-# Fix #2: Template Safety — reminder role is "user", not "system"
+# Fix #2: Template Safety — reminder role is Custom (tagged), not "system"
 # ---------------------------------------------------------------------------
 
 
 class Fix2TemplateSafetyTests(unittest.TestCase):
-    """render_model_messages reminder is role:"user" — safe for all chat templates."""
+    """render_model_messages reminder is role:User — safe for all chat
+    templates and standard on the OpenAI wire format."""
 
-    def test_reminder_uses_role_user_not_system(self) -> None:
-        history = [_history_record("user", "Change sample rate.")]
+    def test_reminder_uses_user_role_not_system(self) -> None:
+        history = ChatHistory()
+        history.add_message(_user_message("Change sample rate."))
         messages = render_model_messages(
             history,
-            system_prompt_provider=build_system_prompt,
+            system_prompt=build_system_prompt("session"),
             semantic_search_result_preview=lambda _r: [],
             reminder="Retry change_graph.",
         )
-        self.assertEqual(messages[-1]["role"], "user")
+        self.assertEqual(messages[-1].role, ChatMessageRole.User)
+
+    def test_reminder_is_wrapped_in_runtime_directive(self) -> None:
+        """The reminder must be visually isolated from the human's
+        text so the model can tell the control plane apart from the
+        user. We wrap the body in ``<runtime_directive>`` tags.
+        """
+        history = ChatHistory()
+        history.add_message(_user_message("hi"))
+        messages = render_model_messages(
+            history,
+            system_prompt=build_system_prompt("session"),
+            semantic_search_result_preview=lambda _r: [],
+            reminder="Use change_graph now.",
+        )
+        body = messages[-1].get_as_text()
+        self.assertTrue(body.startswith("<runtime_directive>"))
+        self.assertTrue(body.endswith("</runtime_directive>"))
+        self.assertIn("control plane", body)
+        self.assertIn("Use change_graph now.", body)
+
+    def test_reminder_survives_openai_message_converter(self) -> None:
+        """Reminder must produce a wire-valid role:user message; an
+        earlier draft used a Custom-role tag that the OpenAI message
+        converter mapped to ``role: "runtime_reminder"`` — a non-
+        standard wire role that small backends may reject. Regression
+        test for the runtime-reminder turn-failure reported when the
+        chat-history refactor landed.
+        """
+        from ToolAgents.provider.message_converter.open_ai_message_converter import (
+            OpenAIMessageConverter,
+        )
+
+        history = ChatHistory()
+        history.add_message(_user_message("hi"))
+        messages = render_model_messages(
+            history,
+            system_prompt=build_system_prompt("session"),
+            semantic_search_result_preview=lambda _r: [],
+            reminder="Use change_graph now.",
+        )
+        # Drive the converter the same way chat_api.get_response does.
+        converter = OpenAIMessageConverter()
+        converted = converter.to_provider_format(messages)
+        wire_roles = {m["role"] for m in converted}
+        self.assertIn("user", wire_roles)
+        self.assertNotIn("runtime_reminder", wire_roles)
+        self.assertNotIn("custom", wire_roles)
 
     def test_only_one_system_message_exists(self) -> None:
         """The main system prompt is the sole role:system message."""
-        history = [
-            _history_record("user", "Hello."),
-            _history_record("assistant", "Hi! How can I help?"),
-        ]
+        history = ChatHistory()
+        history.add_message(_user_message("Hello."))
+        history.add_message(_assistant_message("Hi! How can I help?"))
         messages = render_model_messages(
             history,
-            system_prompt_provider=build_system_prompt,
+            system_prompt=build_system_prompt("session"),
             semantic_search_result_preview=lambda _r: [],
             reminder="Call the relevant tool.",
         )
-        system_count = sum(1 for m in messages if m["role"] == "system")
+        system_count = sum(1 for m in messages if m.role == ChatMessageRole.System)
         self.assertEqual(system_count, 1)
 
     def test_no_system_message_after_user_assistant_pairs(self) -> None:
         """No role:system message appears after user/assistant history begins."""
-        history = [
-            _history_record("user", "Inspect."),
-            _tool_history_record("inspect_graph", {"ok": True}),
-            _history_record("assistant", "Done."),
-        ]
+        history = ChatHistory()
+        history.add_message(_user_message("Inspect."))
+        history.add_message(_tool_history_record("inspect_graph", {"ok": True}))
+        history.add_message(_assistant_message("Done."))
         messages = render_model_messages(
             history,
-            system_prompt_provider=build_system_prompt,
+            system_prompt=build_system_prompt("session"),
             semantic_search_result_preview=lambda _r: [],
             reminder="Continue with change_graph.",
         )
-        roles_after_first_user = []
         saw_first_user = False
+        system_after_first_user = 0
         for m in messages:
-            if m["role"] == "user" and not saw_first_user:
+            if m.role == ChatMessageRole.User and not saw_first_user:
                 saw_first_user = True
-            if saw_first_user and m["role"] == "system":
-                roles_after_first_user.append(m)
+            if saw_first_user and m.role == ChatMessageRole.System:
+                system_after_first_user += 1
         self.assertEqual(
-            len(roles_after_first_user),
+            system_after_first_user,
             0,
-            f"Found system message(s) mid-conversation: {roles_after_first_user}",
+            f"Found system message(s) mid-conversation in {messages}",
         )
 
 

@@ -7,7 +7,7 @@ is the runtime config, hand-edited by power users, and parsed with
 strict schema validation. Mixing auto-written UI prefs into a
 hand-edited file invites clobber bugs.
 
-The file holds at most a handful of keys (currently five). Each
+The file holds at most a handful of keys. Each
 preference is a field on :class:`UserPreferences`. There is no
 generic key-value engine; the user said "focus on simple stuff."
 
@@ -43,17 +43,9 @@ PREFERENCES_SCHEMA_VERSION = 1
 
 @dataclass(frozen=True)
 class LastModel:
-    """The model the user most recently loaded through the GUI/CLI.
+    """The model the user most recently loaded through the GUI/CLI."""
 
-    The three fields travel together because the launcher needs all
-    of them to start: ``hf_repo:filename`` is the HF token passed to
-    ``llama-server -hf``, and ``alias`` is the value passed to
-    ``--alias`` (the chat-widget-friendly identifier).
-    """
-
-    hf_repo: str = ""
-    filename: str = ""
-    alias: str = ""
+    model: str = ""
     saved_at: str = ""  # RFC 3339 UTC, informational only
 
 
@@ -62,7 +54,7 @@ class UserPreferences:
     """The full set of persisted user preferences."""
 
     last_model: LastModel = field(default_factory=LastModel)
-    confirm_model_swap: bool = False
+    provider_chosen: str = ""  # "" | "ollama" | "openrouter"
     schema_version: int = PREFERENCES_SCHEMA_VERSION
 
 
@@ -96,7 +88,7 @@ def _parse_last_model(raw: object) -> LastModel:
         )
         return LastModel()
     out: dict[str, str] = {}
-    for key in ("hf_repo", "filename", "alias", "saved_at"):
+    for key in ("model", "saved_at"):
         value = raw.get(key)
         if isinstance(value, str):
             out[key] = value
@@ -116,14 +108,14 @@ def _parse_preferences(raw: object) -> UserPreferences:
         if "last_model" in raw
         else LastModel()
     )
-    confirm = False
-    if "confirm_model_swap" in raw:
-        value = raw["confirm_model_swap"]
-        if isinstance(value, bool):
-            confirm = value
+    provider_chosen = ""
+    if "provider_chosen" in raw:
+        value = raw["provider_chosen"]
+        if isinstance(value, str) and value in {"", "ollama", "openrouter"}:
+            provider_chosen = value
         else:
             logger.info(
-                "preferences: dropping non-bool confirm_model_swap=%r", value
+                "preferences: dropping unknown provider_chosen=%r", value
             )
     schema_version = PREFERENCES_SCHEMA_VERSION
     if "schema_version" in raw:
@@ -137,13 +129,13 @@ def _parse_preferences(raw: object) -> UserPreferences:
     for unknown_key in raw:
         if unknown_key not in (
             "last_model",
-            "confirm_model_swap",
+            "provider_chosen",
             "schema_version",
         ):
             logger.info("preferences: ignoring unknown key %r", unknown_key)
     return UserPreferences(
         last_model=last_model,
-        confirm_model_swap=confirm,
+        provider_chosen=provider_chosen,
         schema_version=schema_version,
     )
 
@@ -230,51 +222,31 @@ def save_user_preferences(
 def apply_user_preferences_to_llama_config(llama_config: Any, prefs: UserPreferences) -> Any:
     """Overlay persisted preferences onto a :class:`LlamaConfig`.
 
-    Only ``model`` and ``hf_model`` are touched. All other fields
-    (device, gpu_layers, context window, model_path, etc.) are
-    preserved. If ``prefs.last_model`` is empty (the default), the
-    input is returned unchanged.
+    Touches ``model`` (from ``prefs.last_model``) and ``backend``
+    (from ``prefs.provider_chosen``). Empty prefs fields are a
+    no-op so the input config wins by default.
 
     This is intentionally a pure function: it does not write to
     disk, and it never raises on missing fields. Callers pass the
     returned config to the launcher.
     """
-    # Import locally to keep this module importable from contexts
-    # that do not need the full runtime config (e.g. the GUI's
-    # preferences-only tests).
     from grc_agent.config import LlamaConfig
 
-    last = prefs.last_model
-    if not last.hf_repo and not last.filename and not last.alias:
-        return llama_config
     if not isinstance(llama_config, LlamaConfig):
-        # Defensive: a non-LlamaConfig slipped through. The
-        # caller is expected to know what it passed in.
         return llama_config
     import dataclasses
 
-    new_model = last.alias or last.filename
-    new_hf_model = (
-        f"{last.hf_repo}:{last.filename}" if last.hf_repo and last.filename else llama_config.hf_model
-    )
-    return dataclasses.replace(
-        llama_config,
-        model=new_model,
-        hf_model=new_hf_model,
-        # Clear model_path to None on swap-persistence to match the
-        # live-swap behavior: the launcher prefers ``-m`` (model_path)
-        # over ``-hf`` (hf_model), so leaving the user's original
-        # model_path in grc_agent.toml would silently revert the
-        # swap on every restart. None is the swap's intended state.
-        model_path=None,
-    )
+    updated = llama_config
+    if prefs.last_model.model:
+        updated = dataclasses.replace(updated, model=prefs.last_model.model)
+    if prefs.provider_chosen in {"ollama", "openrouter"}:
+        updated = dataclasses.replace(updated, backend=prefs.provider_chosen)
+    return updated
 
 
 def update_last_model(
     *,
-    hf_repo: str,
-    filename: str,
-    alias: str,
+    model: str,
     path: Path | None = None,
 ) -> None:
     """Convenience: write just the ``last_model`` fields.
@@ -287,14 +259,37 @@ def update_last_model(
     current = load_user_preferences(path=path)
     saved_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_last = LastModel(
-        hf_repo=hf_repo,
-        filename=filename,
-        alias=alias,
+        model=model,
         saved_at=saved_at,
     )
     updated = UserPreferences(
         last_model=new_last,
-        confirm_model_swap=current.confirm_model_swap,
+        provider_chosen=current.provider_chosen,
+        schema_version=PREFERENCES_SCHEMA_VERSION,
+    )
+    save_user_preferences(updated, path=path)
+
+
+def update_provider_chosen(
+    *,
+    provider: str,
+    path: Path | None = None,
+) -> None:
+    """Persist the user's provider-picker choice.
+
+    Reads the current preferences, sets ``provider_chosen`` to
+    ``"ollama"`` or ``"openrouter"``, and writes atomically. Used
+    by the GUI/CLI after the picker accepts. Subsequent launches
+    skip the picker because ``prefs.provider_chosen`` is non-empty.
+    """
+    if provider not in {"ollama", "openrouter"}:
+        raise ValueError(
+            f"provider must be 'ollama' or 'openrouter'; got {provider!r}"
+        )
+    current = load_user_preferences(path=path)
+    updated = UserPreferences(
+        last_model=current.last_model,
+        provider_chosen=provider,
         schema_version=PREFERENCES_SCHEMA_VERSION,
     )
     save_user_preferences(updated, path=path)
@@ -310,5 +305,6 @@ __all__ = [
     "load_user_preferences",
     "save_user_preferences",
     "update_last_model",
+    "update_provider_chosen",
     "user_preferences_path",
 ]

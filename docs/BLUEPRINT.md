@@ -216,7 +216,7 @@ Docs and ToolAgents tutorials are not runtime graph-edit recipes. When model beh
 
 ## Runtime Harness
 
-Model-backed chat uses ToolAgents with llama.cpp through its OpenAI-compatible `/v1` API. The runtime uses bounded `ChatToolAgent.step(...)` calls rather than an unbounded response loop so the repo still controls the max tool-round ceiling.
+Model-backed chat uses ToolAgents with llama.cpp through its OpenAI-compatible `/v1` API. The runtime uses bounded `ChatToolAgent.step(...)` calls rather than an unbounded response loop so the repo still controls the max tool-round ceiling. We own the per-step loop explicitly via `ToolAgentsRunner._run_turn_events` so we can: (1) emit per-tool `on_tool_start` / `on_tool_end` callbacks for the GUI, (2) inject mid-loop runtime reminders, (3) classify `change_graph` outcomes, and (4) enforce a tool-round safety ceiling. These four hooks are the reason the loop is bespoke rather than delegated to `ChatToolAgent.get_response`.
 
 Each model step rebuilds a `ToolRegistry` from the currently allowed wrapper schemas. Delegates record the raw requested tool call, validate route and schema through `GrcAgent`, and execute `GrcAgent.execute_tool(..., model_tool_call=True)` only after validation passes. Invalid or disallowed calls return structured tool results for model repair or user-facing refusal without mutation.
 
@@ -225,14 +225,25 @@ The CLI default uses the configured bounded round limit. `uv run grc-agent chat
 turns without exposing extra tools or weakening validation. `--max-tool-rounds
 N` is an explicit per-session override.
 
+### Conversation model
+
+The runtime's conversation object is `ToolAgents.data_models.chat_history.ChatHistory`. The agent owns one `ChatHistory` per session; the GUI worker, the CLI, and the persistence layer all consume its typed `ChatMessage` stream. There is no parallel `list[dict]` history. The legacy `GrcAgent.history` attribute has been removed.
+
+### Retry-storm guard
+
+If the model issues the same tool call (same `(name, canonicalized-args)` pair) more than once in a turn and the first call returned successfully, the runtime short-circuits the duplicate with a `deduplicated: True` result that reuses the prior result. This prevents a small local model that loops on itself from exhausting the chat history with identical calls.
+
 If the assistant returns final text that says it needs inspection/search, or
 answers a graph-local fact question without any tool evidence, the runtime adds
 one reminder and continues the same bounded turn. This is a missed-tool nudge,
 not a free-text fallback parser, hidden repair path, or permission bypass.
-For mutation requests, reminders may require `change_graph` only when enough
-tool evidence exists and the model is not asking a clarification. If the model
-asks a graph-evidence-backed clarification, the turn may end with no mutation.
-This prevents reminder pressure from turning ambiguity into first-match edits.
+Reminders are emitted as a `user`-role message wrapped in
+`<runtime_directive>` tags so the model can tell the control plane apart from
+the human user's voice. For mutation requests, reminders may require
+`change_graph` only when enough tool evidence exists and the model is not
+asking a clarification. If the model asks a graph-evidence-backed
+clarification, the turn may end with no mutation. This prevents reminder
+pressure from turning ambiguity into first-match edits.
 
 Vague graph-edit requests are allowed into the model/tool loop so the model can
 inspect and clarify. Mutation safety remains enforced by wrapper schemas, route
@@ -244,12 +255,12 @@ There is no assistant-text fallback parser, JSON repair path, or AST/text transa
 ## Agent Loop
 
 1. Load or create one active `FlowgraphSession`.
-2. Build compact model messages from system policy, recent user/assistant/tool history, and bounded tool results.
+2. Build compact model messages from system policy, the typed `ChatHistory`, and bounded tool results.
 3. Ask llama.cpp through ToolAgents for one bounded `step(...)` with the three wrapper schemas.
 4. Validate every requested tool call against wrapper schemas and current route constraints.
-5. Execute accepted tool calls serially through GRC delegates.
+5. Execute accepted tool calls serially through GRC delegates. The retry-storm guard short-circuits any call whose `(name, args)` matches a prior successful call in this turn.
 6. For mutations, route through `change_graph`, transaction validation, preflight, `grcc`, and rollback/commit.
-7. Append raw requested calls, executed calls, tool results, deltas, and validation state to history/trace.
+7. Append the typed `ChatMessage` returned by `chat_agent.step` and the typed `ToolCallResultContent` for each tool result to `ChatHistory`. A `model_message_added` signal persists both as `assistant_model` / `tool_model` rows in the sessions DB so resume can replay them.
 8. Stop after bounded tool rounds or when the assistant returns grounded final text.
 
 Fallback free-text parsing is disabled for the MVP runtime. If the model cannot produce a valid call, the turn fails closed or asks for clarification.
@@ -261,7 +272,8 @@ Context is compacted by tool output design, not by hiding raw tool calls.
 - `inspect_graph` has only `overview` and `details`, with explicit truncation and ambiguity metadata.
 - `details` exposes guarded target refs only for resolved graph-local targets and omits large param lists unless specifically requested.
 - `search_blocks` and `ask_grc_docs` return compact evidence objects; retrieval scores and verbose source text stay out of model-visible output.
-- Tool results are compacted before future model turns, while raw call/result history remains traceable.
+- `compact_chat_history` (`grc_agent.runtime.chat_history`) enforces a hard char budget by one-pass proportional allocation across `ToolCallResultContent` payloads. Truncated payloads end with `... [TRUNCATED by chat-history compactor: was N chars, kept M]` so the model can tell the JSON or text was cut off.
+- Raw call/result history remains traceable in the chat-history journal.
 - The system prompt and three wrapper schemas are intentionally budgeted; long examples belong in tests/docs, not every model turn.
 - Health checks verify desired vs actual llama context; current target is 120000 tokens when supported.
 - `max_tokens` limits generation length only; it is not used as a compression strategy.
@@ -313,27 +325,12 @@ Deterministic gates:
 - `uv run grc-agent health`
 - `uv run grc-agent release-manifest`
 
-Live dashboards exercise llama.cpp routing and behavior by suite. They preserve raw requested/executed tool calls, separate task success from runtime safety, and fail closed on forbidden raw/internal tool history.
+Live dashboards exercise Ollama routing and behavior by suite. They preserve raw requested/executed tool calls, separate task success from runtime safety, and fail closed on forbidden raw/internal tool history.
 
 All live evals enforce 11 REPORT_DIMENSIONS: routing_pass, argument_pass, tool_success_pass, semantic_pass, safety_pass, runtime_safety_pass, model_contract_pass, end_state_pass, recovery_pass, budget_pass, lint_pass.
 
 - `budget_pass` — upper-bound thresholds for tool_rounds, tool_calls, assistant_text length. Catches catastrophic thrashing without demanding perfect DSP math from a 4B model.
 - `lint_pass` — graph-hygiene checks after mutation: orphan blocks, unused variables, disabled blocks with connections, duplicate block names. Known fixture-level dirtiness is whitelistable via `lint_expected_issues`.
-
-Live quick gate (model-facing behavior changes):
-
-- `uv run python -m tests.llama_eval.run_r0_release --n-runs 1 --results-path /tmp/r0.json`
-- `uv run python -m tests.llama_eval.run_r1_release --n-runs 1 --results-path /tmp/r1.json`
-- `uv run python -m tests.llama_eval.run_r2_release --n-runs 1 --results-path /tmp/r2.json`
-
-Parameterized DSP Fuzzing Gauntlet:
-
-- `uv run python -m tests.llama_eval.run_dsp_gauntlet --seed 42 --count 30 --quick`
-- Generates scenarios from 8 generators (notch, ble, ofdm, qam, mac, inline_swap, cascade, typo) with isolated `random.Random(seed)`.
-- Each scenario produces a `LiveScenario` with `fuzzed_variables` mapped to prompt and semantic checks (prompt-to-evaluation symmetry).
-- Fixture variables are patched via `ruamel.yaml` round-trip-safe YAML mutation (`fuzz_fixture`).
-- Reports pass/fail per scenario plus aggregate budget and lint metrics.
-- `--seed` for deterministic reproducibility; `--output-dir` for post-mortem graph preservation.
 
 The full `unittest` discovery is slow because it includes integration-style graph loading, `grcc` validation, eval harness logic, and CLI loops. Use targeted tests during iteration and reserve full runs for release candidates.
 
@@ -369,6 +366,47 @@ End-to-end runtime readiness requires:
 - actual llama context verified
 - llama.cpp server-side built-in tools not detected in `/props`
 - four MVP model-facing wrappers only
+
+## Measured Behavior (eval_chat baseline)
+
+CI-runnable eval harness at `tests/eval_chat/`. Each fixture is a JSON
+file with raw OpenAI-shape model responses; the harness drives the
+real `ToolAgentsRunner._run_turn_events` loop with a stubbed
+`chat_agent.step` and asserts over the final result dict plus the
+resulting `ChatHistory`. No real llama.cpp, no network — runs in CI.
+
+Captured run: 10/10 PASS, ~1.5 s total wall time on a developer
+laptop. Each fixture below documents one runtime contract. A
+regression on any of them is a *behavior* regression, not just a
+unit test.
+
+| Fixture | Contract under test |
+| --- | --- |
+| `happy_path_text_only` | No tool call, no nudge → final text. |
+| `happy_path_one_tool_call` | One tool call, one result, one final text. |
+| `two_distinct_tool_calls` | Two distinct calls, two executions, two results, one final text. |
+| `retry_storm_5_identical_calls` | Same call 5× → 1 underlying execution, 5 dedups, 1 result row. |
+| `tool_not_in_active_surface` | `apply_edit` (internal-only) → `TOOL_NOT_ALLOWED_FOR_SURFACE` + stop batch. |
+| `unknown_tool_name` | Hallucinated tool → surface gate refusal, surfaced to the model as final text. |
+| `malformed_json_arguments` | Bad JSON in `tool_call.arguments` → caught by validation, never reaches the tool. |
+| `missing_required_field` | Missing required schema field → validation rejection, model gets feedback. |
+| `max_tool_rounds_ceiling` | Runaway tool-call loop → safety ceiling bails with `safety_ceiling_reached`. |
+| `empty_assistant_text_after_tool_call` | Tool-call-only final turn → resolved text comes from the tool result. |
+
+The eval is the regression gate for new tool capabilities. Adding a
+wrapper without a fixture for its failure modes is a spec gap, not
+a shortcut. Run the harness with:
+
+```
+uv run python -m unittest tests.eval_chat.test_fixtures
+```
+
+The harness can also be run directly to produce a Markdown summary
+of the most recent pass:
+
+```
+uv run python -m tests.eval_chat.harness
+```
 
 CUDA-enabled llama.cpp on `CUDA0` is the default NVIDIA runtime path. The local launcher passes `--device CUDA0 --gpu-layers 999 --flash-attn auto` explicitly; if `llama-server --list-devices` does not show `CUDA0`, model-backed chat is not runtime-ready.
 When `[llama].model_path` is configured, the launcher passes `-m` to
@@ -467,9 +505,10 @@ anti-hallucination mechanisms.
 
 - A persistent `QWidget` in the leftmost splitter pane replaces the
   modal `File > Recent Sessions...` dialog.
-- Width defaults to 18% of the window; user-draggable; constrained to
-  a maximum of 20%; collapsible via the `◀` button, the
-  `File > Session Sidebar` menu item, or `Ctrl+Shift+H`.
+- Width defaults to 9% of the window (halved from 18% per UX
+  feedback); user-draggable; constrained to a maximum of 20%;
+  collapsible via the `◀` button, the `File > Session Sidebar`
+  menu item, or `Ctrl+Shift+H`.
 - `populate_sessions()` takes a list of `SessionRecord` objects and
   renders them as `QListWidgetItem` entries. Double-clicking emits
   `session_selected(int session_id)`.
@@ -485,7 +524,7 @@ anti-hallucination mechanisms.
   `setStretchFactor(2, 0)` — only the chat pane absorbs spare
   space on resize; the sidebar and inspector hold their pixel widths.
 - Size guards applied in `showEvent` after `restoreState`:
-  - sidebar > 20% → clamp to 18%.
+  - sidebar > 20% → clamp to 9% (matches the new default).
   - inspector < 50 px (old 2-widget state migrated) → restore to 32%.
   - chat pane fills the remainder (minimum 300 px).
 
@@ -494,10 +533,21 @@ anti-hallucination mechanisms.
 - `active_session_id` is set to the loaded session's ID (not `None`),
   so subsequent `send_prompt` calls append to the **same** SQLite
   record instead of opening a new one.
-- `agent.history` is rebuilt from the stored `user` and `assistant`
-  messages so the model sees full prior context on continuation turns.
-  Tool rows (`tool_started`, `tool_finished`, `mutation`, `error`) are
-  excluded from the model history (they are display-only).
+- The DB has two kinds of rows: display rows (existing
+  `user` / `assistant` / `tool_started` / `tool_finished` / `mutation`
+  / `error` text) and model rows (`assistant_model` / `tool_model`
+  with the typed `ChatMessage` in the `payload` column). Display
+  rows are replayed into the chat widget. Model rows are replayed
+  into `agent.chat_history` via `ChatMessage.from_dict(payload)` so
+  the next model step has the same `inspect_graph` / `search_blocks`
+  / tool-call evidence the user originally saw.
+- **No legacy fallback.** A session that predates the typed-history
+  format has no `assistant_model` / `tool_model` rows and is
+  refused. The resume path shows a status-bar message ("this session
+  predates the typed-history format and cannot be resumed — start a
+  new chat") and leaves `active_session_id` set to `None`. The user
+  starts a new chat. AGENTS.md forbids backward-compat shims; old
+  sessions are not carried forward.
 - `reset_chat_session()` is still called first to clear the llama.cpp
   KV-cache session ID before reconstructing history.
 

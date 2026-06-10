@@ -15,10 +15,6 @@ def _parse_args(argv):
     import argparse
     parser = argparse.ArgumentParser(prog="grc-agent init")
     parser.add_argument("--model")
-    parser.add_argument("--hf-model")
-    parser.add_argument("--model-path")
-    parser.add_argument("--server-url")
-    parser.add_argument("--device")
     parser.add_argument("--config-path")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--print-target", action="store_true")
@@ -46,25 +42,20 @@ class InitCommandTests(unittest.TestCase):
         shutil.rmtree(self._tmp_home, ignore_errors=True)
 
     def test_init_writes_starter_config_to_user_path(self) -> None:
-        args = _parse_args([
-            "--model-path", "/tmp/qwen.gguf",
-            "--device", "CPU",
-            "--server-url", "http://127.0.0.1:8080",
-        ])
+        args = _parse_args(["--model", "llama3.2"])
         rc = _run_init_command(args)
         self.assertEqual(rc, 0)
         target = self._tmp_home / ".config" / "grc_agent" / "config.toml"
         self.assertTrue(target.is_file())
         body = target.read_text(encoding="utf-8")
-        self.assertIn("model_path = \"/tmp/qwen.gguf\"", body)
-        self.assertIn("device = \"CPU\"", body)
+        self.assertIn('model = "llama3.2"', body)
         self.assertIn("[llama]", body)
 
     def test_init_refuses_to_overwrite_without_force(self) -> None:
         target = self._tmp_home / ".config" / "grc_agent" / "config.toml"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("# pre-existing\n", encoding="utf-8")
-        args = _parse_args(["--model-path", "/tmp/other.gguf"])
+        args = _parse_args(["--model", "other-model"])
         rc = _run_init_command(args)
         self.assertEqual(rc, 1)
         # Original content is preserved.
@@ -75,18 +66,18 @@ class InitCommandTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("# pre-existing\n", encoding="utf-8")
         args = _parse_args([
-            "--model-path", "/tmp/other.gguf",
+            "--model", "other-model",
             "--force",
         ])
         rc = _run_init_command(args)
         self.assertEqual(rc, 0)
-        self.assertIn("model_path = \"/tmp/other.gguf\"", target.read_text(encoding="utf-8"))
+        self.assertIn('model = "other-model"', target.read_text(encoding="utf-8"))
 
     def test_init_respects_explicit_config_path(self) -> None:
         explicit = self._tmp_home / "my-config.toml"
         args = _parse_args([
             "--config-path", str(explicit),
-            "--model-path", "/tmp/explicit.gguf",
+            "--model", "explicit-model",
         ])
         rc = _run_init_command(args)
         self.assertEqual(rc, 0)
@@ -104,7 +95,7 @@ class InitCommandTests(unittest.TestCase):
 
     def test_init_json_output_round_trip(self) -> None:
         args = _parse_args([
-            "--model-path", "/tmp/json.gguf",
+            "--model", "json-model",
             "--json",
         ])
         with mock.patch("builtins.print") as mock_print:
@@ -114,23 +105,18 @@ class InitCommandTests(unittest.TestCase):
         printed = mock_print.call_args_list[0].args[0]
         payload = json.loads(printed)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["model_path"], "/tmp/json.gguf")
         self.assertIn("target", payload)
 
     def test_init_written_config_loads_through_loader(self) -> None:
         """The starter file must round-trip through load_app_config without error."""
         from grc_agent.config import load_app_config
 
-        args = _parse_args([
-            "--model-path", "/tmp/roundtrip.gguf",
-            "--device", "CPU",
-        ])
+        args = _parse_args(["--model", "roundtrip-model"])
         rc = _run_init_command(args)
         self.assertEqual(rc, 0)
         target = self._tmp_home / ".config" / "grc_agent" / "config.toml"
         loaded = load_app_config(target)
-        self.assertEqual(loaded.llama.model_path, "/tmp/roundtrip.gguf")
-        self.assertEqual(loaded.llama.device, "CPU")
+        self.assertEqual(loaded.llama.model, "roundtrip-model")
 
     def test_init_writes_built_in_defaults_when_no_flags_passed_non_interactive(self) -> None:
         """In a non-TTY, non-interactive run, init writes a config with built-in defaults."""
@@ -144,7 +130,6 @@ class InitCommandTests(unittest.TestCase):
         body = target.read_text(encoding="utf-8")
         defaults = default_app_config()
         self.assertIn(f'model = "{defaults.llama.model}"', body)
-        self.assertIn(f'hf_model = "{defaults.llama.hf_model}"', body)
 
 
 if __name__ == "__main__":

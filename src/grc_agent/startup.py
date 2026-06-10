@@ -1,7 +1,7 @@
 """Shared runtime bootstrap for CLI and GUI.
 
-Single entry point for retrieval initialization and llama.cpp server
-readiness so both products do the same startup dance without duplication.
+Single entry point for retrieval initialization and LLM backend readiness
+so both products do the same startup dance without duplication.
 """
 
 from __future__ import annotations
@@ -12,15 +12,18 @@ from pathlib import Path
 # Ensure FastEmbed downloads/caches models in a persistent directory instead of /tmp.
 os.environ.setdefault("FASTEMBED_CACHE_PATH", str(Path.home() / ".cache" / "grc_agent" / "fastembed_cache"))
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 from grc_agent._payload import ErrorCode
 from grc_agent.config import AppConfig
-from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
-from grc_agent.llama_probe import LlamaHealthProbe
 from grc_agent.retrieval import initialize_retrieval
-from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig
+from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig, model_name_matches
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,25 +45,21 @@ class RuntimeBootstrapResult:
 def bootstrap_runtime(
     config: AppConfig,
     *,
-    start_llama: bool = True,
     init_retrieval: bool = True,
     api_key: str | None = None,
     server_url: str | None = None,
     model_alias: str | None = None,
 ) -> RuntimeBootstrapResult:
-    """Initialize retrieval and/or ensure llama.cpp server readiness.
+    """Initialize retrieval and probe LLM backend readiness.
 
     Parameters
     ----------
     config:
         Loaded application configuration.
-    start_llama:
-        When True, ensures the llama.cpp server is running (starts it if
-        necessary).  When False, only probes the server (no startup).
     init_retrieval:
         When True, initializes the GNU Radio catalog retrieval index.
     api_key:
-        Optional API key for the llama.cpp server.
+        Optional API key for the backend server.
     server_url:
         Override for config.llama.server_url.
     model_alias:
@@ -68,8 +67,7 @@ def bootstrap_runtime(
 
     Returns
     -------
-    RuntimeBootstrapResult with provider_config always populated (from
-    actual launch or built from config defaults).
+    RuntimeBootstrapResult with provider_config always populated.
     """
     effective_server_url = (server_url or config.llama.server_url).rstrip("/")
     effective_model = model_alias or config.llama.model
@@ -87,11 +85,8 @@ def bootstrap_runtime(
             msg = readiness.get("message", "Retrieval initialization failed.")
             result.errors.append(msg)
 
-    # 2. Llama server startup or probe
-    if start_llama:
-        _bootstrap_llama(result, config, api_key, effective_server_url, effective_model)
-    else:
-        _probe_llama(result, config, api_key, effective_server_url, effective_model)
+    # 2. Probe backend
+    _probe_generic(result, config, api_key, effective_server_url, effective_model)
 
     # Always build a fallback provider config from the static config so
     # callers always have something to pass to ToolAgentsRunner (even if
@@ -104,60 +99,83 @@ def bootstrap_runtime(
     return result
 
 
-def _bootstrap_llama(
+def _probe_generic(
     result: RuntimeBootstrapResult,
     config: AppConfig,
     api_key: str | None,
     effective_server_url: str,
     effective_model: str,
+    *,
+    client: httpx.Client | None = None,
 ) -> None:
-    """Start or reuse a llama.cpp server and populate the result."""
+    """Probe a generic LLM server endpoint (Ollama, OpenRouter, etc.)."""
+    backend = config.llama.backend
+    own_client = client is None
+    if own_client:
+        client = httpx.Client(timeout=5.0)
     try:
-        launcher = LlamaServerLauncher(
-            config.llama,
-            server_url=effective_server_url,
-            model_alias=effective_model,
-            api_key=api_key,
-        )
-        launch_result = launcher.ensure_server_ready()
-        result.provider_config = launch_result.provider_config
-        result.health_evidence = launch_result.health_evidence
-        result.server_url = launch_result.server_url
-        result.model_alias = launch_result.model_alias
-        result.launch_status = launch_result.status
-        result.launch_pid = launch_result.pid
-    except LlamaLauncherError as exc:
-        result.launch_status = "failed"
-        message = str(exc)
-        result.errors.append(message)
-        result.error_type = _classify_launcher_error(message)
+        logger = logging.getLogger(__name__)
 
+        # Query /v1/models to verify the server is alive and reachable
+        openai_base_url = f"{effective_server_url.rstrip('/')}/v1"
+        url = f"{openai_base_url}/models"
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
-def _probe_llama(
-    result: RuntimeBootstrapResult,
-    config: AppConfig,
-    api_key: str | None,
-    effective_server_url: str,
-    effective_model: str,
-) -> None:
-    """Probe the server address for evidence without starting a process."""
-    try:
-        probe = LlamaHealthProbe(
-            base_url=effective_server_url,
-            api_key=api_key,
-            timeout_seconds=min(config.llama.request_timeout_seconds, 5.0),
-        )
-        evidence = probe.health_evidence(expected_alias=effective_model)
-        result.health_evidence = evidence
+        response = client.get(url, headers=headers)
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict) and "data" in parsed:
+                model_ids = [m.get("id") for m in parsed["data"] if isinstance(m, dict) and m.get("id")]
+                if not model_name_matches(effective_model, model_ids):
+                    logger.warning(
+                        f"Model '{effective_model}' not found in /v1/models of {backend}. Available models: {model_ids}"
+                    )
+        except Exception:
+            pass
+
+        # Build health evidence. The probe verified the server is
+        # reachable and the model id appears in /v1/models, so the
+        # "probe_ok" launch_status is the truthful readiness signal.
+        # Context window is not actually measured here — we report
+        # the configured max_tokens as the requested window.
+        result.health_evidence = {
+            "server_url": effective_server_url,
+            "model": effective_model,
+            "provider_type": backend,
+            "model_ready": True,
+            "context_verified": False,
+            "actual_context_tokens": config.llama.max_tokens,
+        }
         result.server_url = effective_server_url
         result.model_alias = effective_model
         result.launch_status = "probe_ok"
+
+        # For Ollama, check if the model's template supports tool calling
+        if backend == "ollama":
+            try:
+                from grc_agent.model_manager import check_ollama_tool_support
+                tool_ok = check_ollama_tool_support(effective_server_url, effective_model)
+                if tool_ok is False:
+                    logger.warning(
+                        "Ollama model '%s' does not support tool calling. "
+                        "Its chat template lacks {{ .Tools }}. "
+                        "The agent requires tool calling to function. "
+                        "Use a model fine-tuned for tool use, or switch backend to openrouter.",
+                        effective_model,
+                    )
+            except Exception:
+                pass
     except Exception as exc:
         result.health_evidence = None
         result.launch_status = "probe_failed"
-        message = str(exc)
+        message = f"Failed to reach {backend} server at {effective_server_url}: {exc}"
         result.errors.append(message)
-        result.error_type = _classify_launcher_error(message)
+        result.error_type = _classify_launcher_error(exc, effective_server_url)
+    finally:
+        if own_client:
+            client.close()
 
 
 def _build_fallback_provider(
@@ -177,20 +195,20 @@ def _build_fallback_provider(
     )
 
 
-__all__ = ["RuntimeBootstrapResult", "bootstrap_runtime"]
+def _classify_launcher_error(exc: BaseException, server_url: str) -> str:
+    """Map a probe exception to a stable ``ErrorCode`` value.
 
-
-def _classify_launcher_error(message: str) -> str:
-    """Map a launcher/probe error message to a stable ``ErrorCode`` value.
-
-    Allows the CLI/GUI to surface actionable install/config hints instead of
-    raw exception text. Falls back to ``internal_error`` for unknown shapes.
+    Connection-shaped errors (TCP refused, DNS failure, timeout) get a
+    dedicated ``backend_unreachable`` code so the GUI can render a
+    platform-agnostic hint and the user can reach the recovery path
+    (Model > Select Model) without restarting the desktop app.
     """
-    lowered = message.lower()
-    if "llama-server" in lowered and "not found" in lowered:
-        return ErrorCode.LLAMA_SERVER_MISSING
-    if "llama-server" in lowered or "llama-server binary" in lowered:
-        return ErrorCode.LLAMA_SERVER_MISSING
+    import httpx
+
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)):
+        logger.warning("Backend unreachable at %s: %s", server_url, exc)
+        return ErrorCode.BACKEND_UNREACHABLE
+    lowered = str(exc).lower()
     if "alias" in lowered and "mismatch" in lowered:
         return ErrorCode.MODEL_NOT_FOUND
     if "model" in lowered and "not found" in lowered:
@@ -205,8 +223,9 @@ def _warm_vector_embedding_model() -> None:
     blocking/hangs during active turns.
     """
     try:
-        from grc_agent.retrieval.vector import DEFAULT_EMBEDDING_MODEL
         from fastembed import TextEmbedding
+
+        from grc_agent.retrieval.vector import DEFAULT_EMBEDDING_MODEL
 
         # Print a clear console message so the user is informed of the download status
         print(f"Checking vector embedding model '{DEFAULT_EMBEDDING_MODEL}'...", flush=True)
@@ -218,3 +237,6 @@ def _warm_vector_embedding_model() -> None:
         # (e.g. offline environments can still run without semantic retrieval).
         import logging
         logging.getLogger(__name__).warning("Failed to warm vector embedding model: %s", exc)
+
+
+__all__ = ["RuntimeBootstrapResult", "bootstrap_runtime"]

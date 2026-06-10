@@ -249,6 +249,19 @@ class ChatWidget(QWidget):
             self._history[-1]["_rendered"] = None
         self._render_chat()
 
+    def drop_last_assistant(self) -> None:
+        """Remove the most recent ``assistant`` row from the visible log.
+
+        Used when a turn ends with an empty assistant text (the model
+        only issued tool calls). The display row would otherwise show
+        an empty "Agent:" bubble.
+        """
+        self._streaming = False
+        self._stream_header_printed = False
+        if self._history and self._history[-1]["role"] == "assistant":
+            self._history.pop()
+        self._render_chat()
+
     def get_history(self) -> list[dict[str, str]]:
         """Return a copy of the in-memory chat history for export."""
         return [dict(entry) for entry in self._history]

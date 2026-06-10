@@ -1,0 +1,51 @@
+{
+  "id": "malformed_json_arguments",
+  "description": "Model passes malformed JSON as tool_call arguments. The runtime's validation layer catches it before execution; the tool is never invoked.",
+  "user_message": "Search for AGC.",
+  "max_tool_rounds": 4,
+  "tool_stubs": {
+    "query_knowledge": {
+      "ok": true,
+      "domain": "catalog",
+      "query": "AGC",
+      "results": []
+    }
+  },
+  "model_responses": [
+    {
+      "id": "resp-1",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "query_knowledge",
+              "arguments": "{\"query\": \"AGC\""
+            }
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-2",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "OK."
+        }
+      }]
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "tool_calls_executed": 0,
+    "tool_calls_requested": 1
+  }
+}

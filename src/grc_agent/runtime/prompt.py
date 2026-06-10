@@ -4,7 +4,7 @@ The rules, examples, and formatting are versioned together so that behaviour
 only changes when the file actually changes.
 """
 
-__version__ = "2026-06-05-summary-rule-v2"
+__version__ = "2026-06-10-no-tool-for-greetings-v3"
 
 
 def build_system_prompt(session_id: str | None = None) -> str:
@@ -25,5 +25,8 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "8. If validation fails with a hint, apply the exact fix in your next turn.\n"
         "9. Use force=true ONLY for intentional invalid intermediate states.\n"
         "10. After executing tools, ALWAYS reply with a brief text summary of what you did and the result.\n"
+        "11. Do NOT invoke tools for casual greetings, acknowledgments, or conversational pleasantries "
+        "(e.g. 'hi', 'hello', 'thanks', 'ok'). Reply directly with a short text response. "
+        "Only call a tool when the user expresses an intent that requires a graph action or knowledge lookup.\n"
         "Never fabricate instance names or block IDs."
     )

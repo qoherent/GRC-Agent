@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-06-05-summary-rule-v2`
+Prompt version: `2026-06-10-no-tool-for-greetings-v3`
 
 ## Model-Facing Surface
 
@@ -37,6 +37,7 @@ Modify the active graph via tools. keep going until done.
 8. If validation fails with a hint, apply the exact fix in your next turn.
 9. Use force=true ONLY for intentional invalid intermediate states.
 10. After executing tools, ALWAYS reply with a brief text summary of what you did and the result.
+11. Do NOT invoke tools for casual greetings, acknowledgments, or conversational pleasantries (e.g. 'hi', 'hello', 'thanks', 'ok'). Reply directly with a short text response. Only call a tool when the user expresses an intent that requires a graph action or knowledge lookup.
 Never fabricate instance names or block IDs.
 ```
 

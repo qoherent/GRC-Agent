@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import unittest
 import uuid
+from typing import Any
 from unittest import mock
 
 from grc_agent.agent import GrcAgent
@@ -158,84 +159,44 @@ class ToolAgentsHistoryTests(unittest.TestCase):
 
 
 class ToolAgentsHistoryAdapterToolMessageTests(unittest.TestCase):
-    """from_openai_message for role='tool' — the json.dumps(TextContent) regression."""
+    """The JSON-only helper path (``ToolAgentsJsonClient``) still goes
+    through ``ToolAgentsHistoryAdapter.from_openai_messages``. The runtime
+    model path uses typed ``ChatMessage`` objects and ``ChatHistory`` now;
+    the helper path is the only consumer of the dict adapter."""
 
-    def test_tool_message_with_string_content(self) -> None:
-        payload = {
-            "role": "tool",
-            "tool_call_id": "call_abc123",
-            "name": "inspect_graph",
-            "content": '{"ok": true, "blocks": []}',
-        }
-        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
-        self.assertEqual(msg.role, ChatMessageRole.Tool)
-        self.assertEqual(len(msg.content), 2)
-        tc = msg.content[0]
-        self.assertIsInstance(tc, TextContent)
-        self.assertEqual(tc.content, '{"ok": true, "blocks": []}')
-        rc = msg.content[1]
-        self.assertEqual(rc.tool_call_id, "call_abc123")
-        self.assertEqual(rc.tool_call_name, "inspect_graph")
-        self.assertEqual(rc.tool_call_result, '{"ok": true, "blocks": []}')
+    def test_user_message_round_trip(self) -> None:
+        payload = {"role": "user", "content": "What is the sample rate?"}
+        msgs = ToolAgentsHistoryAdapter.from_openai_messages([payload])
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].role, ChatMessageRole.User)
+        text = next(c for c in msgs[0].content if isinstance(c, TextContent))
+        self.assertEqual(text.content, "What is the sample rate?")
 
-    def test_tool_message_with_text_content_list(self) -> None:
-        payload = {
-            "role": "tool",
-            "tool_call_id": "call_def456",
-            "name": "search_blocks",
-            "content": [{"text": "Found 3 blocks"}, {"text": " - analog_sig_source_x"}],
-        }
-        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
-        self.assertEqual(msg.role, ChatMessageRole.Tool)
-        self.assertEqual(len(msg.content), 2)
-        tc = msg.content[0]
-        self.assertIsInstance(tc, TextContent)
-        self.assertEqual(tc.content, "Found 3 blocks - analog_sig_source_x")
-        rc = msg.content[1]
-        self.assertEqual(rc.tool_call_name, "search_blocks")
-        self.assertEqual(rc.tool_call_result, "Found 3 blocks - analog_sig_source_x")
+    def test_assistant_message_round_trip(self) -> None:
+        payload = {"role": "assistant", "content": "The sample rate is 32000."}
+        msgs = ToolAgentsHistoryAdapter.from_openai_messages([payload])
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].role, ChatMessageRole.Assistant)
+        text = next(c for c in msgs[0].content if isinstance(c, TextContent))
+        self.assertEqual(text.content, "The sample rate is 32000.")
 
-    def test_tool_message_with_empty_content_string(self) -> None:
-        payload = {
-            "role": "tool",
-            "tool_call_id": "call_empty",
-            "name": "ask_grc_docs",
-            "content": "",
-        }
-        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
-        self.assertEqual(msg.role, ChatMessageRole.Tool)
-        self.assertEqual(len(msg.content), 1)
-        rc = msg.content[0]
-        self.assertEqual(rc.tool_call_id, "call_empty")
-        self.assertEqual(rc.tool_call_name, "ask_grc_docs")
-        self.assertEqual(rc.tool_call_result, "")
+    def test_empty_input_returns_empty_list(self) -> None:
+        self.assertEqual(ToolAgentsHistoryAdapter.from_openai_messages([]), [])
 
-    def test_tool_message_auto_generates_missing_tool_call_id(self) -> None:
-        payload = {
-            "role": "tool",
-            "name": "change_graph",
-            "content": "committed",
-        }
-        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
-        self.assertEqual(msg.role, ChatMessageRole.Tool)
-        self.assertEqual(len(msg.content), 2)
-        rc = msg.content[1]
-        self.assertEqual(rc.tool_call_name, "change_graph")
-        self.assertEqual(rc.tool_call_result, "committed")
-        self.assertIsInstance(rc.tool_call_id, str)
-        self.assertTrue(len(rc.tool_call_id) > 0)
+    def test_runtime_path_uses_typed_chat_history(self) -> None:
+        """The main ``run_turn`` path stores the assistant ``ChatMessage``
+        returned by ``chat_agent.step`` directly into the agent's
+        ``ChatHistory``. This is the contract the chat-history refactor
+        relies on."""
+        from grc_agent.agent import GrcAgent
 
-    def test_tool_message_handles_none_content(self) -> None:
-        payload = {
-            "role": "tool",
-            "tool_call_id": "call_none",
-            "name": "inspect_graph",
-        }
-        msg = ToolAgentsHistoryAdapter.from_openai_message(payload)
-        self.assertEqual(msg.role, ChatMessageRole.Tool)
-        self.assertEqual(len(msg.content), 1)
-        rc = msg.content[0]
-        self.assertEqual(rc.tool_call_result, "")
+        agent = GrcAgent()
+        agent.chat_history.add_user_message("hi")
+        agent.chat_history.add_message(_assistant_text("hello back"))
+        self.assertEqual(agent.chat_history.get_message_count(), 2)
+        last = agent.chat_history.get_messages()[-1]
+        self.assertEqual(last.role, ChatMessageRole.Assistant)
+        self.assertEqual(last.get_as_text(), "hello back")
 
 
 class ToolAgentsRepairClassificationTests(unittest.TestCase):
@@ -434,6 +395,115 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
 
         self.assertTrue(_is_missing_graph_evidence_response(result))
         self.assertFalse(_is_terminal_change_graph_failure(result))
+
+
+class ToolAgentsProviderConfigTests(unittest.TestCase):
+    def test_create_settings_omits_llama_extra_body(self) -> None:
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
+        mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
+        mock_settings = mock.MagicMock()
+        mock_provider.get_default_settings.return_value = mock_settings
+
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="qwen-1.5b",
+        )
+        settings = cfg.create_settings(mock_provider)
+        set_value_calls = [call[0] for call in mock_settings.set_value.call_args_list]
+        self.assertNotIn("extra_body", [c[0] for c in set_value_calls])
+
+    def test_openrouter_settings_includes_provider_extra_body(self) -> None:
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
+        mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
+        mock_settings = mock.MagicMock()
+        mock_provider.get_default_settings.return_value = mock_settings
+
+        with mock.patch.dict("os.environ", {
+            "OPENROUTER_PROVIDER_ORDER": "alibaba",
+            "OPENROUTER_ALLOW_FALLBACKS": "false"
+        }):
+            cfg = ToolAgentsLlamaProviderConfig(
+                base_url="https://openrouter.ai/api",
+                model="qwen-1.5b",
+            )
+            settings = cfg.create_settings(mock_provider)
+
+        mock_settings.set_value.assert_any_call("extra_body", {
+            "provider": {
+                "order": ["alibaba"],
+                "allow_fallbacks": False
+            }
+        })
+
+
+class ToolAgentsRunnerBackendUnreachableTests(unittest.TestCase):
+    """When the underlying HTTP client cannot reach the backend
+    (Connection refused, DNS failure, etc.), the runner must surface
+    a typed ``backend_unreachable`` payload instead of an unhandled
+    ``openai.APIConnectionError``."""
+
+    def _make_runner_with_failing_step(self) -> Any:
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+        from ToolAgents.agents import ChatToolAgent
+
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="qwen3.5:9b-q4_K_M",
+            timeout_seconds=1.0,
+        )
+        provider = cfg.create_provider()
+        # Make the first .step() raise an APIConnectionError as if the
+        # TCP socket was refused. We patch on the agent so the manual
+        # loop catches it through the public boundary.
+        chat_agent = ChatToolAgent(chat_api=provider)
+
+        def _raise_connection_error(*args, **kwargs):
+            import openai
+            raise openai.APIConnectionError(
+                request=mock.MagicMock()
+            )
+
+        chat_agent.step = _raise_connection_error  # type: ignore[method-assign]
+        return ToolAgentsRunner(cfg, chat_agent=chat_agent)
+
+    def test_run_turn_returns_typed_backend_unreachable(self) -> None:
+
+        agent = GrcAgent()
+        runner = self._make_runner_with_failing_step()
+
+        result = runner.run_turn(agent, "hi")
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_type"), "backend_unreachable")
+        text = str(result.get("assistant_text", ""))
+        self.assertIn("Connection refused", text)
+        # Platform-agnostic — no systemd, no service-manager-specific terms.
+        lowered = text.lower()
+        self.assertNotIn("systemctl", lowered)
+        self.assertNotIn("journalctl", lowered)
+        # Backend URL must be in the hint for actionable guidance.
+        self.assertIn("http://127.0.0.1:11434", text)
+        # Model name is preserved for context.
+        self.assertEqual(result.get("model"), "qwen3.5:9b-q4_K_M")
+        # The structured server_url must also be exposed for programmatic use.
+        self.assertEqual(
+            result.get("details", {}).get("server_url"),
+            "http://127.0.0.1:11434",
+        )
+
+    def test_stream_turn_emits_backend_unreachable_final(self) -> None:
+        agent = GrcAgent()
+        runner = self._make_runner_with_failing_step()
+
+        events = list(runner.stream_turn(agent, "hi"))
+        final_events = [e for e in events if e.get("event") == "final"]
+        self.assertEqual(len(final_events), 1)
+        result = final_events[0].get("result", {})
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_type"), "backend_unreachable")
 
 
 if __name__ == "__main__":

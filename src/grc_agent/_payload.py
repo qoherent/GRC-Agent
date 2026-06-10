@@ -33,6 +33,7 @@ class ErrorCode:
     GRCC_MISSING = "grcc_missing"
     MODEL_NOT_FOUND = "model_not_found"
     INIT_FAILED = "init_failed"
+    BACKEND_UNREACHABLE = "backend_unreachable"
 
 
 def build_error_payload(

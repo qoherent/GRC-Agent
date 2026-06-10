@@ -91,7 +91,7 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         prompt = agent.get_system_prompt()
 
-        self.assertLess(len(prompt), 1200)
+        self.assertLess(len(prompt), 1800)
         for name in ("inspect_graph", "query_knowledge", "change_graph"):
             self.assertIn(name, prompt)
         self.assertIn("keep going", prompt)

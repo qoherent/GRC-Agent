@@ -1,33 +1,18 @@
 [llama]
-server_url = "http://127.0.0.1:8080"
-model = "Qwen3.5-2B-UD-Q4_K_XL.gguf"
-hf_model = "unsloth/Qwen3.5-2B-GGUF:Qwen3.5-2B-UD-Q4_K_XL"
-# Set model_path to the absolute path of a local GGUF, or leave empty and rely
-# on hf_model for auto-download. Use `grc-agent init` to write a starter config
-# tailored to your machine.
-model_path = ""
-# Set to a specific device (e.g. "CUDA0", "Metal", "Vulkan0") to force it, or
-# leave "Auto" to let llama.cpp auto-detect GPU (CUDA/Metal/Vulkan) automatically.
-device = "Auto"
-gpu_layers = 999
-desired_context_tokens = 120000
-startup_timeout_seconds = 300.0
+server_url = "http://localhost:11434"
+model = "qwen3.5:9b-q4_K_M"
+backend = "ollama"
 max_tokens = 4096
 max_tool_rounds = 8
 temperature = 0.0
 enable_thinking = false
 request_timeout_seconds = 120.0
-# Retention in days for the launcher log files under
-# ~/.cache/grc_agent/llama_launcher_logs/. 0 = keep forever.
-log_retention_days = 7
 
 [agent]
 history_compact_budget = 100000
 
 [agent.docs_answer]
 enabled = true
-# Deterministic grounded-answer builder is the primary safety-baseline path.
-# Keep helper synthesis disabled unless running explicit research experiments.
 helper_mode = "auto"
 helper_max_output_tokens = 320
 helper_timeout_seconds = 3.5
@@ -46,8 +31,6 @@ answer_cache_size = 64
 helper_prompt_version = "v3_compact"
 
 [agent.retrieval]
-# The embedding model is intentionally not bundled. `grc-agent vector build`
-# downloads/caches the FastEmbed default locally when needed.
 search_blocks_default_k = 5
 search_blocks_max_k = 10
 ask_grc_docs_default_k = 3

@@ -1,0 +1,48 @@
+{
+  "id": "empty_assistant_text_after_tool_call",
+  "description": "Model issues a tool call but produces no final text. The runtime should resolve the tool result's message as the assistant_text fallback, and the agent's chat_history should hold a non-empty assistant message.",
+  "user_message": "Inspect.",
+  "max_tool_rounds": 4,
+  "tool_stubs": {
+    "inspect_graph": {
+      "ok": true,
+      "view": "overview",
+      "message": "Graph has 3 blocks and 2 connections.",
+      "summary": {"graph_name": "x", "counts": "b=3 c=2 v=0", "blocks": [], "connections": []}
+    }
+  },
+  "model_responses": [
+    {
+      "id": "resp-1",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "inspect_graph", "arguments": "{\"view\": \"overview\"}"}
+          }]
+        }
+      }]
+    },
+    {
+      "id": "resp-2",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": null
+        }
+      }]
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "tool_calls_executed": 1,
+    "tool_calls_requested": 1
+  }
+}

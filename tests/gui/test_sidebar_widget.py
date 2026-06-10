@@ -21,7 +21,7 @@ def _make_session(id: int = 1, **overrides) -> SessionRecord:
         started_at="2026-06-01T00:00:00.000000Z",
         ended_at=None,
         model_alias="test-model",
-        backend="llama_cpp",
+        backend="ollama",
         title=f"Session {id}",
         message_count=0,
         graph_exists=True,
@@ -156,7 +156,7 @@ def test_open_past_session_autoloads_graph(qtbot, tmp_path, monkeypatch):
         graph_path=str(grc_file),
         graph_hash="hash123",
         model_alias="modelA",
-        backend="llama_cpp",
+        backend="ollama",
         title="Session Graph Load",
     )
     window.sessions_store.flush(timeout=2.0)
@@ -173,6 +173,14 @@ def test_open_past_session_autoloads_graph(qtbot, tmp_path, monkeypatch):
 
 
 def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
+    """Resume replays the typed ``assistant_model`` / ``tool_model``
+    rows into ``agent.chat_history`` and the display rows into the
+    chat widget. After resume, the next user prompt appends to the
+    same session.
+    """
+    import datetime
+    import json
+
     db_path = tmp_path / "sessions.db"
     import grc_agent_gui.main_window
     monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
@@ -181,53 +189,170 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
 
     mock_agent = MagicMock()
     mock_agent.session = None
-    mock_agent.history = []
+    from ToolAgents.data_models.chat_history import ChatHistory
+    from ToolAgents.data_models.messages import (
+        ChatMessage,
+        ChatMessageRole,
+        TextContent,
+        ToolCallContent,
+        ToolCallResultContent,
+    )
+    mock_agent.chat_history = ChatHistory()
     mock_provider = MagicMock()
-    
+
     window = MainWindow(mock_agent, mock_provider)
     qtbot.addWidget(window)
 
     monkeypatch.setattr(window, "open_file", MagicMock())
     monkeypatch.setattr(window, "start_generation", MagicMock())
 
-    # Create a session and write messages
+    # Create a session and write messages — typed model rows for
+    # the agent's chat history, display rows for the chat widget.
     session_id = window.sessions_store.open_session(
         graph_path="",
         graph_hash="",
         model_alias="modelA",
-        backend="llama_cpp",
+        backend="ollama",
         title="Session Resumption Test",
     )
     window.sessions_store.append(session_id, "user", "Hello agent")
     window.sessions_store.append(session_id, "assistant", "Hello user")
+    now = datetime.datetime.now()
+    user_msg = ChatMessage(
+        id="u-1",
+        role=ChatMessageRole.User,
+        content=[TextContent(content="Hello agent")],
+        created_at=now,
+        updated_at=now,
+    )
+    asst_msg = ChatMessage(
+        id="a-1",
+        role=ChatMessageRole.Assistant,
+        content=[
+            ToolCallContent(
+                tool_call_id="c-1",
+                tool_call_name="inspect_graph",
+                tool_call_arguments={"view": "overview"},
+            )
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    tool_msg = ChatMessage(
+        id="t-1",
+        role=ChatMessageRole.Tool,
+        content=[
+            ToolCallResultContent(
+                tool_call_result_id="r-1",
+                tool_call_id="c-1",
+                tool_call_name="inspect_graph",
+                tool_call_result='{"ok": true, "blocks": 3}',
+            )
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    window.sessions_store.append(
+        session_id, "assistant_model", "", payload=user_msg.model_dump(mode="json")
+    )
+    window.sessions_store.append(
+        session_id, "assistant_model", "", payload=asst_msg.model_dump(mode="json")
+    )
+    window.sessions_store.append(
+        session_id, "tool_model", "", payload=tool_msg.model_dump(mode="json")
+    )
     window.sessions_store.flush(timeout=2.0)
 
     # Open/resume the past session
     window._open_past_session(session_id)
 
-    # 1. Verify that active_session_id is set correctly (resumed)
+    # 1. active_session_id is set to the resumed session.
     assert window.active_session_id == session_id
 
-    # 2. Verify agent history is reconstructed
-    assert len(window.agent.history) == 2
-    assert window.agent.history[0] == {"role": "user", "content": "Hello agent"}
-    assert window.agent.history[1] == {"role": "assistant", "content": "Hello user"}
+    # 2. The typed chat history holds the 3 model rows in order.
+    assert mock_agent.chat_history.get_message_count() == 3
+    roles = [m.role for m in mock_agent.chat_history.get_messages()]
+    assert roles == [
+        ChatMessageRole.User,
+        ChatMessageRole.Assistant,
+        ChatMessageRole.Tool,
+    ]
+    # The tool call survives round-trip.
+    assert (
+        mock_agent.chat_history.get_messages()[1]
+        .get_tool_calls()[0]
+        .tool_call_name
+        == "inspect_graph"
+    )
 
-    # 3. Send a new message and verify it appends to the same session
+    # 3. The chat widget shows the display rows.
+    widget_history = window.chat_widget.get_history()
+    widget_roles = [row["role"] for row in widget_history]
+    assert "user" in widget_roles
+    assert "assistant" in widget_roles
+
+    # 4. Send a new message and verify it appends to the same session.
     window.chat_input.setText("How are you?")
     window.send_prompt()
     window.sessions_store.flush(timeout=2.0)
 
-    # Confirm active_session_id did not change
     assert window.active_session_id == session_id
 
-    # Check database messages count is 3 now
+    # 5. Database now has the original 5 rows + 1 new user row:
+    #    2 display (user, assistant) + 3 model (user, assistant,
+    #    tool) + 1 new user from send_prompt.
     messages = window.sessions_store._writer_conn.execute(
-        "SELECT role, text FROM messages WHERE session_id = ?", (session_id,)
+        "SELECT role, text FROM messages WHERE session_id = ? ORDER BY sequence",
+        (session_id,),
     ).fetchall()
-    assert len(messages) == 3
-    assert messages[2][0] == "user"
-    assert messages[2][1] == "How are you?"
+    assert len(messages) == 6
+    assert messages[-1][0] == "user"
+    assert messages[-1][1] == "How are you?"
+
+    # Explicit teardown
+    window.sessions_store.close()
+    SessionStore._instance = None
+
+
+def test_open_legacy_session_refuses_to_resume(qtbot, tmp_path, monkeypatch):
+    """Sessions written before ``assistant_model`` / ``tool_model``
+    rows existed have no typed history to resume. The resume path
+    must refuse, not synthesize a legacy fallback. AGENTS.md
+    forbids backward-compat shims.
+    """
+    db_path = tmp_path / "sessions.db"
+    import grc_agent_gui.main_window
+    monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
+
+    SessionStore._instance = None
+
+    from ToolAgents.data_models.chat_history import ChatHistory
+    mock_agent = MagicMock()
+    mock_agent.session = None
+    mock_agent.chat_history = ChatHistory()
+    mock_provider = MagicMock()
+
+    window = MainWindow(mock_agent, mock_provider)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "open_file", MagicMock())
+
+    # A "legacy" session: only display rows, no model rows.
+    session_id = window.sessions_store.open_session(
+        graph_path="",
+        graph_hash="",
+        model_alias="modelA",
+        backend="ollama",
+        title="Legacy Session",
+    )
+    window.sessions_store.append(session_id, "user", "Old prompt")
+    window.sessions_store.append(session_id, "assistant", "Old reply")
+    window.sessions_store.flush(timeout=2.0)
+
+    window._open_past_session(session_id)
+
+    # The resume path refused — no fallback synthesis.
+    assert window.active_session_id is None
+    assert mock_agent.chat_history.get_message_count() == 0
 
     # Explicit teardown
     window.sessions_store.close()

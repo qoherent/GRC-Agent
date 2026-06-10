@@ -2,7 +2,7 @@
 
 These tests only verify that the `__main__.py` files exist and import the
 expected `main` symbol. Running the full CLI/GUI in a test process is out of
-scope (the CLI tries to start llama.cpp; the GUI requires a display server).
+scope (the CLI starts the LLM backend; the GUI requires a display server).
 """
 
 import importlib

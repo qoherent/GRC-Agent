@@ -13,9 +13,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from openai import OpenAI
+from openai import APIConnectionError, OpenAI
 from ToolAgents import FunctionTool, ToolRegistry
 from ToolAgents.agents import ChatToolAgent
+from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
     ChatMessageRole,
@@ -28,6 +29,11 @@ from ToolAgents.provider.llm_provider import ProviderSettings
 
 from grc_agent._payload import ErrorCode
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
+from grc_agent.session_roles import (
+    ASSISTANT_MODEL_ROLE,
+    TOOL_MODEL_ROLE,
+    chat_message_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +146,74 @@ class ToolAgentsRuntimeError(RuntimeError):
     """Raised when the ToolAgents runtime cannot complete a turn."""
 
 
+# Catches the OpenAI SDK's ``APIConnectionError`` (the one bubbled up by
+# ``openai.OpenAI`` chat completions) as well as the underlying ``httpx``
+# transport errors that surface from a missing local Ollama/OpenRouter
+# endpoint. Kept as a tuple so the runner can ``except (_BACKEND_...)``
+# once and stay flat against the SDK version.
+import httpx as _httpx
+
+_BACKEND_CONNECTION_ERRORS = (
+    APIConnectionError,
+    _httpx.ConnectError,
+    _httpx.ConnectTimeout,
+    _httpx.ReadTimeout,
+)
+
+
+def _backend_unreachable_hint(server_url: str) -> str:
+    """Return the platform-agnostic hint shown to the user.
+
+    No ``systemctl`` / ``journalctl`` / Linux-specific text. Applies on
+    macOS and Windows where Ollama is a desktop application that the
+    user starts from the menu bar / Start menu.
+    """
+    return (
+        "Connection refused. Is Ollama running? "
+        "Ensure the Ollama application is active or check the system "
+        f"service at {server_url}."
+    )
+
+
+def _backend_unreachable_payload(
+    *,
+    exc: BaseException,
+    model: str,
+    server_url: str,
+    assistant_turns: int = 0,
+) -> dict[str, Any]:
+    """Build the typed result returned when the backend is unreachable."""
+    return {
+        "ok": False,
+        "error_type": "backend_unreachable",
+        "model": model,
+        "steps": assistant_turns,
+        "tool_rounds_used": 0,
+        "tool_calls_requested": 0,
+        "tool_calls_executed": 0,
+        "assistant_text": _backend_unreachable_hint(server_url),
+        "message": _backend_unreachable_hint(server_url),
+        "details": {
+            "server_url": server_url,
+            "exception_type": type(exc).__name__,
+        },
+    }
+
+
+def _assistant_text_message(text: str) -> ChatMessage:
+    """Build a typed ``ChatMessage`` carrying plain assistant text."""
+    now = datetime.datetime.now()
+    return ChatMessage(
+        id=str(uuid.uuid4()),
+        role=ChatMessageRole.Assistant,
+        content=[TextContent(content=text)],
+        created_at=now,
+        updated_at=now,
+    )
+
+
 class GrcOpenAIChatAPI(OpenAIChatAPI):
-    """OpenAI-compatible provider with llama.cpp request fields preserved."""
+    """OpenAI-compatible provider."""
 
     def __init__(
         self,
@@ -152,16 +224,119 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
         timeout_seconds: float,
     ) -> None:
         super().__init__(api_key=api_key, model=model, base_url=base_url)
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        self._is_openrouter = "openrouter" in (base_url or "").lower()
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout_seconds,
         )
 
+    def get_response(
+        self,
+        messages: list[ChatMessage],
+        settings=None,
+        tools: list[FunctionTool] | None = None,
+    ) -> ChatMessage:
+        if self._is_openrouter:
+            request_kwargs = self._prepare_request(messages, settings, tools)
+            request_kwargs["stream"] = False
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+
+            json_payload = {}
+            for k, v in request_kwargs.items():
+                if k == "extra_body" and isinstance(v, dict):
+                    json_payload.update(v)
+                else:
+                    json_payload[k] = v
+
+            import requests
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=json_payload,
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Mock classes to mimic OpenAI's API responses for ToolAgents' response converter
+            class MockFunction:
+                def __init__(self, name: str, arguments: str) -> None:
+                    self.name = name
+                    self.arguments = arguments
+
+            class MockToolCall:
+                def __init__(self, tc_id: str, function: MockFunction) -> None:
+                    self.id = tc_id
+                    self.function = function
+
+            class MockChatCompletionMessage:
+                def __init__(self, content: str | None, tool_calls: list[MockToolCall] | None) -> None:
+                    self.content = content
+                    self.tool_calls = tool_calls
+
+            class MockChatCompletionChoice:
+                def __init__(self, message: MockChatCompletionMessage) -> None:
+                    self.message = message
+
+            class MockChatCompletion:
+                def __init__(self, response_data: dict[str, Any]) -> None:
+                    self.raw_data = response_data
+                    self.model_extra: dict[str, Any] = {}
+                    if "error" in response_data:
+                        self.model_extra = {"error": response_data["error"]}
+
+                    message_data = response_data["choices"][0]["message"]
+
+                    tcs = []
+                    if "tool_calls" in message_data and message_data["tool_calls"]:
+                        for tc in message_data["tool_calls"]:
+                            tcs.append(
+                                MockToolCall(
+                                    tc_id=tc["id"],
+                                    function=MockFunction(
+                                        name=tc["function"]["name"],
+                                        arguments=tc["function"]["arguments"],
+                                    ),
+                                )
+                            )
+                    self.choices = [
+                        MockChatCompletionChoice(
+                            MockChatCompletionMessage(
+                                content=message_data.get("content"),
+                                tool_calls=tcs if tcs else None,
+                            )
+                        )
+                    ]
+
+                def model_dump(self) -> dict[str, Any]:
+                    return self.raw_data
+
+            mock_completion = MockChatCompletion(data)
+            return self.response_converter.from_provider_response(mock_completion)
+        else:
+            return super().get_response(messages, settings=settings, tools=tools)
+
+    def get_streaming_response(
+        self,
+        messages: list[ChatMessage],
+        settings=None,
+        tools: list[FunctionTool] | None = None,
+    ):
+        if self._is_openrouter:
+            raise NotImplementedError("Streaming is not supported for openrouter backend.")
+        return super().get_streaming_response(messages, settings=settings, tools=tools)
+
 
 @dataclass
 class ToolAgentsLlamaProviderConfig:
-    """Configuration for the ToolAgents OpenAI-compatible llama.cpp provider."""
+    """Configuration for the ToolAgents OpenAI-compatible provider."""
 
     base_url: str
     model: str = ""
@@ -173,7 +348,10 @@ class ToolAgentsLlamaProviderConfig:
 
     @property
     def openai_base_url(self) -> str:
-        return f"{self.base_url.rstrip('/')}/v1"
+        base = self.base_url.rstrip('/')
+        if base.endswith("/v1"):
+            return base
+        return f"{base}/v1"
 
     def create_provider(self) -> GrcOpenAIChatAPI:
         """Create the ToolAgents OpenAI-compatible provider."""
@@ -183,37 +361,6 @@ class ToolAgentsLlamaProviderConfig:
             base_url=self.openai_base_url,
             timeout_seconds=self.timeout_seconds,
         )
-
-    def require_ready(self) -> None:
-        """Probe llama.cpp readiness for call sites that need an explicit check."""
-        from grc_agent.llama_probe import LlamaHealthProbe
-
-        LlamaHealthProbe(
-            self.base_url,
-            api_key=self.api_key,
-            timeout_seconds=self.timeout_seconds,
-        ).require_ready()
-
-    def require_model_alias(self, expected_alias: str) -> None:
-        """Probe the llama.cpp model alias and update this config on success."""
-        from grc_agent.llama_probe import LlamaHealthProbe
-
-        LlamaHealthProbe(
-            self.base_url,
-            api_key=self.api_key,
-            timeout_seconds=self.timeout_seconds,
-        ).require_model_alias(expected_alias)
-        self.model = expected_alias
-
-    def get_server_properties(self) -> dict[str, Any]:
-        """Return llama.cpp `/props` for metadata/reporting callers."""
-        from grc_agent.llama_probe import LlamaHealthProbe
-
-        return LlamaHealthProbe(
-            self.base_url,
-            api_key=self.api_key,
-            timeout_seconds=self.timeout_seconds,
-        ).get_server_properties()
 
     def create_settings(
         self,
@@ -225,7 +372,7 @@ class ToolAgentsLlamaProviderConfig:
         temperature: float | None = None,
         enable_thinking: bool | None = None,
     ) -> ProviderSettings:
-        """Return request settings with llama.cpp extra fields attached."""
+        """Return request settings."""
         settings = provider.get_default_settings()
         settings.set_value(
             "temperature",
@@ -235,119 +382,44 @@ class ToolAgentsLlamaProviderConfig:
         settings.set_value("response_format", response_format)
         settings.add_request_setting("max_tokens", max_tokens or self.max_tokens)
         settings.add_request_setting("parallel_tool_calls", False)
-        settings.set_value(
-            "extra_body",
-            {
-                "parse_tool_calls": True,
-                "chat_template_kwargs": {
-                    "enable_thinking": (
-                        self.enable_thinking
-                        if enable_thinking is None
-                        else bool(enable_thinking)
-                    ),
-                },
-            },
-        )
+        if "openrouter" in (self.base_url or "").lower():
+            extra_body = {}
+            import os
+            provider_order = os.getenv("OPENROUTER_PROVIDER_ORDER")
+            allow_fallbacks = os.getenv("OPENROUTER_ALLOW_FALLBACKS")
+
+            provider_dict = {}
+            if provider_order:
+                provider_dict["order"] = [p.strip() for p in provider_order.split(",")]
+            if allow_fallbacks is not None:
+                provider_dict["allow_fallbacks"] = allow_fallbacks.lower() in ("true", "1", "yes")
+
+            if provider_dict:
+                extra_body["provider"] = provider_dict
+
+            if extra_body:
+                settings.set_value("extra_body", extra_body)
         return settings
 
 
 class ToolAgentsHistoryAdapter:
-    """Convert rendered GRC history dictionaries to ToolAgents messages."""
+    """Adapter for the OpenAI-shaped helper path that still uses dict messages.
 
-    @staticmethod
-    def model_messages_from_agent(
-        agent: GrcAgent, *, reminder: str | None = None
-    ) -> list[ChatMessage]:
-        return [
-            ToolAgentsHistoryAdapter.from_openai_message(message)
-            for message in agent.get_model_messages(reminder=reminder)
-        ]
+    The main run_turn path no longer needs an adapter: the agent holds a
+    typed :class:`ChatHistory` and ``render_model_messages`` returns
+    :class:`ChatMessage` objects directly. This shim is kept for the
+    JSON-only helper path (``ToolAgentsJsonClient.create_chat_completion``)
+    and for any call site that still speaks OpenAI-shaped dicts.
+    """
 
     @staticmethod
     def from_openai_messages(messages: list[dict[str, Any]]) -> list[ChatMessage]:
-        return [
-            ToolAgentsHistoryAdapter.from_openai_message(message)
-            for message in messages
-        ]
-
-    @staticmethod
-    def from_openai_message(message: dict[str, Any]) -> ChatMessage:
-        role = str(message.get("role") or "")
-        date = datetime.datetime.now()
-        content: list[Any] = []
-        text = message.get("content")
-        text_for_result: str = ""
-        if isinstance(text, str) and text:
-            content.append(TextContent(content=text))
-            text_for_result = text
-        elif isinstance(text, list):
-            joined = _content_list_as_text(text)
-            if joined:
-                content.append(TextContent(content=joined))
-                text_for_result = joined
-
-        if role == "assistant":
-            raw_tool_calls = message.get("tool_calls")
-            if isinstance(raw_tool_calls, list):
-                for index, raw_call in enumerate(raw_tool_calls):
-                    parsed = _parse_history_tool_call(raw_call, index=index)
-                    if parsed is None:
-                        continue
-                    call_id, name, arguments = parsed
-                    content.append(
-                        ToolCallContent(
-                            tool_call_id=call_id,
-                            tool_call_name=name,
-                            tool_call_arguments=arguments,
-                        )
-                    )
-
-        if role == "tool":
-            tool_call_id = str(message.get("tool_call_id") or uuid.uuid4())
-            tool_name = str(message.get("name") or "")
-            content.append(
-                ToolCallResultContent(
-                    tool_call_result_id=str(uuid.uuid4()),
-                    tool_call_id=tool_call_id,
-                    tool_call_name=tool_name,
-                    tool_call_result=text_for_result or "",
-                )
-            )
-            return ChatMessage(
-                id=str(uuid.uuid4()),
-                role=ChatMessageRole.Tool,
-                content=content,
-                created_at=date,
-                updated_at=date,
-            )
-
-        role_map = {
-            "system": ChatMessageRole.System,
-            "user": ChatMessageRole.User,
-            "assistant": ChatMessageRole.Assistant,
-        }
-        chat_role = role_map.get(role, ChatMessageRole.User)
-        return ChatMessage(
-            id=str(uuid.uuid4()),
-            role=chat_role,
-            content=content,
-            created_at=date,
-            updated_at=date,
-        )
-
-    @staticmethod
-    def assistant_history_entry(message: ChatMessage) -> dict[str, Any]:
-        """Convert one ToolAgents assistant message to this repo's trace shape."""
-        entry: dict[str, Any] = {
-            "role": "assistant",
-            "content": _message_text(message),
-        }
-        tool_calls = []
-        for tool_call in message.get_tool_calls():
-            tool_calls.append(_tool_call_as_history_payload(tool_call))
-        if tool_calls:
-            entry["tool_calls"] = tool_calls
-        return entry
+        out: list[ChatMessage] = []
+        for message in messages:
+            converted = ChatMessage.from_dictionaries([message])
+            if converted:
+                out.append(converted[0])
+        return out
 
 
 @dataclass(frozen=True)
@@ -375,10 +447,6 @@ class ToolAgentsToolDelegate:
         self.wrapper_eval_telemetry = wrapper_eval_telemetry
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
-
-    def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        """ToolAgents FunctionTool entry point."""
-        return self.invoke(kwargs).result
 
     def invoke(
         self,
@@ -501,34 +569,102 @@ class ToolAgentsRunner:
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, Any], None] | None = None,
     ) -> dict[str, Any]:
-        """Run one bounded ToolAgents-backed model turn."""
+        """Run one bounded ToolAgents-backed model turn.
+
+        Returns the same dict shape as ``stream_turn``'s final event, for
+        callers that want a single blocking call. The internal loop
+        yields events through ``_run_turn_events``; this method consumes
+        them and assembles the structured result.
+        """
         del mvp_tool_profile
         if not isinstance(user_message, str) or not user_message.strip():
             raise ValueError("user_message must be a non-empty string.")
+
+        for event in self._run_turn_events(
+            agent,
+            user_message,
+            model=model,
+            wrapper_eval_telemetry=wrapper_eval_telemetry,
+            max_tool_rounds=max_tool_rounds,
+            on_tool_start=on_tool_start,
+            on_tool_end=on_tool_end,
+        ):
+            if event.get("event") == "final":
+                return event.get("result", {})
+        return {
+            "ok": False,
+            "error_type": "no_final",
+            "assistant_text": "Turn loop ended without a final event.",
+        }
+
+    def stream_turn(
+        self,
+        agent: GrcAgent,
+        user_message: str,
+        *,
+        model: str | None = None,
+        mvp_tool_profile: bool = True,
+        wrapper_eval_telemetry: bool = False,
+        max_tool_rounds: int | None = None,
+        on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
+        on_tool_end: Callable[[str, Any], None] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield events from one bounded turn. Same loop as ``run_turn``.
+
+        Events:
+
+        * ``{"event": "chunk", "text": "..."}`` — model output chunk.
+          Emitted with real provider streaming when the final assistant
+          message has no tool calls; emitted in one chunk otherwise.
+        * ``{"event": "tool_start", "name": "..."}`` — pre-tool hook.
+        * ``{"event": "tool_end", "name": "...", "result": {...}}`` —
+          post-tool hook.
+        * ``{"event": "model_message", "role": "...", "payload": {...}}``
+          — typed ``ChatMessage`` added to ``agent.chat_history`` during
+          the turn. ``role`` is ``assistant_model`` or ``tool_model``.
+        * ``{"event": "final", "result": {...}}`` — terminal structured
+          result, same shape as ``run_turn``'s return value.
+        """
+        del mvp_tool_profile
+        yield from self._run_turn_events(
+            agent,
+            user_message,
+            model=model,
+            wrapper_eval_telemetry=wrapper_eval_telemetry,
+            max_tool_rounds=max_tool_rounds,
+            on_tool_start=on_tool_start,
+            on_tool_end=on_tool_end,
+        )
+
+    def _run_turn_events(
+        self,
+        agent: GrcAgent,
+        user_message: str,
+        *,
+        model: str | None,
+        wrapper_eval_telemetry: bool,
+        max_tool_rounds: int | None,
+        on_tool_start: Callable[[str, dict[str, Any]], None] | None,
+        on_tool_end: Callable[[str, Any], None] | None,
+    ) -> Iterator[dict[str, Any]]:
         resolved_model = model or self.provider_config.model
-        if resolved_model != self.provider_config.model:
-            raise ToolAgentsRuntimeError(
-                "llama.cpp server alias mismatch: "
-                f"configured '{resolved_model}', discovered '{self.provider_config.model}'."
-            )
         if max_tool_rounds is None:
             max_tool_rounds = MVP_TOOL_SURFACE.default_max_tool_rounds
 
-        pre_compact_chars = sum(len(str(turn)) for turn in agent.history)
+        pre_compact_chars = _chat_history_chars(agent.chat_history)
         agent.compact_history()
-        post_compact_chars = sum(len(str(turn)) for turn in agent.history)
+        post_compact_chars = _chat_history_chars(agent.chat_history)
         history_truncated = post_compact_chars < pre_compact_chars
-        if any(turn.get("role") == "user" for turn in agent.history):
+        if any(m.role == ChatMessageRole.User for m in agent.chat_history.get_messages()):
             agent._record_active_session_history(reason="turn_refresh")
-        agent.history.append({"role": "user", "content": user_message})
+        agent.chat_history.add_user_message(user_message)
 
         unsupported = agent.check_unsupported_request(user_message)
         if unsupported is not None:
-            agent.history.append(
-                {"role": "assistant", "content": unsupported["assistant_text"]}
-            )
+            agent.chat_history.add_assistant_message(unsupported["assistant_text"])
             logger.info("unsupported_request_blocked message=%s", user_message[:80])
-            return unsupported
+            yield {"event": "final", "result": unsupported}
+            return
 
         agent._turn_user_message = user_message
 
@@ -539,6 +675,7 @@ class ToolAgentsRunner:
         assistant_turns = 0
         correction_retries_used = 0
         retry_reminders_used: set[str] = set()
+        seen_tool_calls: dict[tuple[str, str], dict[str, Any]] = {}
         change_graph_schema_failure_pending = False
         change_graph_committed = False
         change_graph_control_response = False
@@ -564,38 +701,78 @@ class ToolAgentsRunner:
                 on_tool_end=on_tool_end,
             )
             registry = registry_builder.build(active_allowed_tools)
-            messages = ToolAgentsHistoryAdapter.model_messages_from_agent(
+            messages = _model_messages_with_reminder(
                 agent, reminder=pending_reminder
             )
             pending_reminder = None
-            assistant_message = self.chat_agent.step(
-                messages,
-                tool_registry=registry,
-                settings=settings,
-            )
+            try:
+                assistant_message = self.chat_agent.step(
+                    messages,
+                    tool_registry=registry,
+                    settings=settings,
+                )
+            except _BACKEND_CONNECTION_ERRORS as exc:
+                logger.warning(
+                    "Backend unreachable during turn: model=%s url=%s error=%s",
+                    resolved_model,
+                    self.provider_config.base_url,
+                    exc,
+                )
+                payload = _backend_unreachable_payload(
+                    exc=exc,
+                    model=resolved_model,
+                    server_url=self.provider_config.base_url,
+                    assistant_turns=assistant_turns,
+                )
+                agent.chat_history.add_assistant_message(payload["assistant_text"])
+                yield {
+                    "event": "model_message",
+                    "role": ASSISTANT_MODEL_ROLE,
+                    "payload": chat_message_payload(
+                        _assistant_text_message(payload["assistant_text"])
+                    ),
+                }
+                yield {"event": "final", "result": payload}
+                return
             assistant_turns += 1
             tool_calls = assistant_message.get_tool_calls()
             tool_calls_requested += len(tool_calls)
             tool_names_requested.extend(tool_call.tool_call_name for tool_call in tool_calls)
 
             if tool_calls and tool_rounds_used >= max_tool_rounds:
-                return {
-                    "ok": False,
-                    "error_type": ErrorCode.SAFETY_CEILING,
-                    "model": resolved_model,
-                    "steps": assistant_turns,
-                    "tool_rounds_used": tool_rounds_used,
-                    "tool_calls_requested": tool_calls_requested,
-                    "tool_calls_executed": tool_calls_executed,
-                    "message": (
-                        "Safety tool-round ceiling reached before the model "
-                        "produced a final answer."
-                    ),
+                ceiling_text = (
+                    "The model ran for the maximum number of tool rounds "
+                    f"({max_tool_rounds}) without producing a final answer. "
+                    "This can happen when a small local model loops on the "
+                    "same question. Please rephrase your request or be more "
+                    "specific."
+                )
+                yield {"event": "chunk", "text": ceiling_text}
+                yield {
+                    "event": "final",
+                    "result": {
+                        "ok": False,
+                        "error_type": ErrorCode.SAFETY_CEILING,
+                        "model": resolved_model,
+                        "steps": assistant_turns,
+                        "tool_rounds_used": tool_rounds_used,
+                        "tool_calls_requested": tool_calls_requested,
+                        "tool_calls_executed": tool_calls_executed,
+                        "assistant_text": ceiling_text,
+                        "message": (
+                            "Safety tool-round ceiling reached before the model "
+                            "produced a final answer."
+                        ),
+                    },
                 }
+                return
 
-            agent.history.append(
-                ToolAgentsHistoryAdapter.assistant_history_entry(assistant_message)
-            )
+            agent.chat_history.add_message(assistant_message)
+            yield {
+                "event": "model_message",
+                "role": ASSISTANT_MODEL_ROLE,
+                "payload": chat_message_payload(assistant_message),
+            }
 
             if tool_calls:
                 tool_rounds_used += 1
@@ -608,7 +785,51 @@ class ToolAgentsRunner:
                         str(tool_call.tool_call_arguments)[:120],
                     )
                     delegate = registry_builder.delegates.get(tool_name)
-                    if delegate is None:
+                    dedup_key = (
+                        tool_name,
+                        _canonicalize_args(tool_call.tool_call_arguments),
+                    )
+                    if (
+                        delegate is not None
+                        and dedup_key in seen_tool_calls
+                    ):
+                        prior = seen_tool_calls[dedup_key]
+                        prior_ok = isinstance(prior, dict) and prior.get("ok") is True
+                        if prior_ok:
+                            dedup_result = {
+                                "tool": tool_name,
+                                "ok": True,
+                                "deduplicated": True,
+                                "message": (
+                                    f"Tool '{tool_name}' was already called with the same arguments "
+                                    "earlier in this turn. Reusing the prior result to avoid an "
+                                    "identical tool call."
+                                ),
+                                "prior_result": prior,
+                            }
+                            logger.info(
+                                "tool_call_dedup name=%s", tool_name
+                            )
+                            if on_tool_start:
+                                try:
+                                    on_tool_start(tool_name, tool_call.tool_call_arguments)
+                                except Exception as e:
+                                    logger.error(f"Error in on_tool_start callback: {e}")
+                            if on_tool_end:
+                                try:
+                                    on_tool_end(tool_name, dedup_result)
+                                except Exception as e:
+                                    logger.error(f"Error in on_tool_end callback: {e}")
+                            result = dedup_result
+                            executed = False
+                        else:
+                            delegate_result = delegate.invoke(
+                                tool_call.tool_call_arguments,
+                                allowed_tool_names=active_allowed_tools,
+                            )
+                            result = delegate_result.result
+                            executed = delegate_result.executed
+                    elif delegate is None:
                         result = {
                             "tool": tool_name,
                             "ok": False,
@@ -663,36 +884,46 @@ class ToolAgentsRunner:
                         )
                         if isinstance(result, dict) and _is_ambiguous_tool_result(result):
                             graph_ambiguity_pending = True
-                    agent.history.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.tool_call_id,
-                            "name": tool_name,
-                            "content": result,
-                        }
-                    )
+                        if (
+                            isinstance(result, dict)
+                            and result.get("ok") is True
+                        ):
+                            seen_tool_calls[dedup_key] = result
+                    tool_result_message = _tool_result_message(tool_call, result)
+                    agent.chat_history.add_message(tool_result_message)
+                    yield {
+                        "event": "model_message",
+                        "role": TOOL_MODEL_ROLE,
+                        "payload": chat_message_payload(tool_result_message),
+                    }
                     if agent.should_stop_batch_after_result(tool_name, result):
                         stopping_failure = result
                         break
                 if stopping_failure is not None:
                     assistant_text = _tool_failure_text(stopping_failure)
-                    agent.history.append({"role": "assistant", "content": assistant_text})
-                    return {
-                        "ok": False,
-                        "model": resolved_model,
-                        "steps": assistant_turns,
-                        "tool_rounds_used": tool_rounds_used,
-                        "tool_calls_requested": tool_calls_requested,
-                        "tool_calls_executed": tool_calls_executed,
-                        "assistant_text": assistant_text,
-                        "error_type": stopping_failure.get("error_type"),
-                        "message": assistant_text,
-                        "correction_retries_used": correction_retries_used,
+                    agent.chat_history.add_assistant_message(assistant_text)
+                    yield {
+                        "event": "final",
+                        "result": {
+                            "ok": False,
+                            "model": resolved_model,
+                            "steps": assistant_turns,
+                            "tool_rounds_used": tool_rounds_used,
+                            "tool_calls_requested": tool_calls_requested,
+                            "tool_calls_executed": tool_calls_executed,
+                            "assistant_text": assistant_text,
+                            "error_type": stopping_failure.get("error_type"),
+                            "message": assistant_text,
+                            "correction_retries_used": correction_retries_used,
+                        },
                     }
+                    return
                 continue
 
-            assistant_text = _resolve_final_assistant_text(agent.history, _message_text(assistant_message))
-            agent.history[-1]["content"] = assistant_text
+            assistant_text = _resolve_final_assistant_text(
+                agent.chat_history, _message_text(assistant_message)
+            )
+            _replace_last_assistant_text(agent.chat_history, assistant_text)
             retry_reminder = _tool_retry_reminder(
                 user_message=user_message,
                 assistant_text=assistant_text,
@@ -727,24 +958,32 @@ class ToolAgentsRunner:
                 tool_rounds_used,
                 tool_calls_executed,
             )
-            return _attach_context_budget_telemetry(
-                {
-                    "ok": True,
-                    "model": resolved_model,
-                    "steps": assistant_turns,
-                    "tool_rounds_used": tool_rounds_used,
-                    "tool_calls_requested": tool_calls_requested,
-                    "tool_calls_executed": tool_calls_executed,
-                    "correction_retries_used": correction_retries_used,
-                    "assistant_text": assistant_text,
-                },
-                enabled=wrapper_eval_telemetry,
-                model_context_limit=None,
-                history_chars=post_compact_chars,
-                tool_context_chars=tool_context_chars,
-                truncated_history=history_truncated,
-                truncated_tool_output=truncated_tool_output,
-            )
+            yield {
+                "event": "chunk",
+                "text": assistant_text,
+            }
+            yield {
+                "event": "final",
+                "result": _attach_context_budget_telemetry(
+                    {
+                        "ok": True,
+                        "model": resolved_model,
+                        "steps": assistant_turns,
+                        "tool_rounds_used": tool_rounds_used,
+                        "tool_calls_requested": tool_calls_requested,
+                        "tool_calls_executed": tool_calls_executed,
+                        "correction_retries_used": correction_retries_used,
+                        "assistant_text": assistant_text,
+                    },
+                    enabled=wrapper_eval_telemetry,
+                    model_context_limit=None,
+                    history_chars=post_compact_chars,
+                    tool_context_chars=tool_context_chars,
+                    truncated_history=history_truncated,
+                    truncated_tool_output=truncated_tool_output,
+                ),
+            }
+            return
 
 
 def _tool_retry_reminder(
@@ -1163,35 +1402,6 @@ def _is_primitive_item_schema(items: dict[str, Any]) -> bool:
     return "type" in items and "properties" not in items
 
 
-def _parse_history_tool_call(
-    raw_call: Any,
-    *,
-    index: int,
-) -> tuple[str, str, dict[str, Any] | str] | None:
-    if not isinstance(raw_call, dict):
-        return None
-    function_payload = raw_call.get("function")
-    if isinstance(function_payload, dict):
-        name = function_payload.get("name")
-        arguments = function_payload.get("arguments")
-    else:
-        name = raw_call.get("name")
-        arguments = raw_call.get("arguments")
-    if not isinstance(name, str) or not name:
-        return None
-    if isinstance(arguments, str):
-        try:
-            parsed_arguments: dict[str, Any] | str = json.loads(arguments)
-        except json.JSONDecodeError:
-            parsed_arguments = arguments
-    elif isinstance(arguments, dict):
-        parsed_arguments = arguments
-    else:
-        parsed_arguments = {}
-    call_id = str(raw_call.get("id") or f"tool_call_{index}")
-    return call_id, name, parsed_arguments
-
-
 def _tool_call_as_history_payload(tool_call: ToolCallContent) -> dict[str, Any]:
     arguments = tool_call.tool_call_arguments
     if isinstance(arguments, dict):
@@ -1208,16 +1418,6 @@ def _tool_call_as_history_payload(tool_call: ToolCallContent) -> dict[str, Any]:
     }
 
 
-def _content_list_as_text(content: list[Any]) -> str:
-    parts: list[str] = []
-    for item in content:
-        if isinstance(item, str):
-            parts.append(item)
-        elif isinstance(item, dict) and isinstance(item.get("text"), str):
-            parts.append(item["text"])
-    return "".join(parts)
-
-
 def _message_text(message: ChatMessage) -> str:
     parts = [
         content.content
@@ -1225,6 +1425,78 @@ def _message_text(message: ChatMessage) -> str:
         if isinstance(content, TextContent) and isinstance(content.content, str)
     ]
     return "\n".join(part for part in parts if part)
+
+
+def _chat_history_chars(chat_history: ChatHistory) -> int:
+    return sum(len(m.get_as_text()) for m in chat_history.get_messages())
+
+
+def _canonicalize_args(arguments: Any) -> str:
+    """Return a stable string key for a tool call's argument bag.
+
+    Used to detect retry-storms: if the model issues the same
+    ``(tool_name, canonical_args)`` pair twice in a turn, we reuse
+    the prior result instead of re-executing.
+    """
+    try:
+        return json.dumps(arguments, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(arguments)
+
+
+def _model_messages_with_reminder(
+    agent: GrcAgent, *, reminder: str | None
+) -> list[ChatMessage]:
+    return agent.get_model_messages(reminder=reminder)
+
+
+def _tool_result_message(
+    tool_call: ToolCallContent, result: Any
+) -> ChatMessage:
+    now = datetime.datetime.now()
+    serialized = (
+        result
+        if isinstance(result, str)
+        else json.dumps(result, sort_keys=True, default=str)
+    )
+    return ChatMessage(
+        id=str(uuid.uuid4()),
+        role=ChatMessageRole.Tool,
+        content=[
+            ToolCallResultContent(
+                tool_call_result_id=str(uuid.uuid4()),
+                tool_call_id=tool_call.tool_call_id,
+                tool_call_name=tool_call.tool_call_name,
+                tool_call_result=serialized,
+            )
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _replace_last_assistant_text(chat_history: ChatHistory, text: str) -> None:
+    messages = chat_history.get_messages()
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == ChatMessageRole.Assistant:
+            new_content = [
+                TextContent(content=text)
+                if isinstance(item, TextContent)
+                else item
+                for item in messages[index].content
+            ]
+            if not any(isinstance(item, TextContent) for item in new_content):
+                new_content.insert(0, TextContent(content=text))
+            messages[index] = ChatMessage(
+                id=messages[index].id,
+                role=messages[index].role,
+                content=new_content,
+                created_at=messages[index].created_at,
+                updated_at=messages[index].updated_at,
+                additional_fields=messages[index].additional_fields,
+                additional_information=messages[index].additional_information,
+            )
+            return
 
 
 def _chat_message_as_openai_response(
@@ -1340,20 +1612,45 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _resolve_final_assistant_text(
-    history: list[dict[str, Any]],
+    chat_history: ChatHistory,
     assistant_content: str,
 ) -> str:
     if assistant_content.strip():
         return assistant_content
-    for turn in reversed(history):
-        if turn.get("role") != "tool":
+
+    tool_payloads: list[dict[str, Any]] = []
+    for message in reversed(chat_history.get_messages()):
+        if message.role != ChatMessageRole.Tool:
             continue
-        content = turn.get("content")
-        if isinstance(content, dict):
-            message = content.get("message")
-            if isinstance(message, str) and message.strip():
-                return message
-    return "Request completed."
+        for content in message.content:
+            if isinstance(content, ToolCallResultContent):
+                try:
+                    payload = json.loads(content.tool_call_result)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(payload, dict):
+                    tool_payloads.append(payload)
+                    message_text = payload.get("message")
+                    if isinstance(message_text, str) and message_text.strip():
+                        return message_text
+
+    if not tool_payloads:
+        return "Request completed."
+
+    last_payload = tool_payloads[-1]
+    tool_name = str(last_payload.get("tool") or "the tool")
+    is_ok = last_payload.get("ok") is True
+    error_type = str(last_payload.get("error_type") or "").strip()
+    raw_message = str(last_payload.get("message") or "").strip()
+
+    if not is_ok:
+        detail = raw_message or error_type or "the tool reported a failure"
+        return f"I attempted to call {tool_name} but it failed: {detail}."
+
+    return (
+        f"{tool_name} completed. Let me know what to do next "
+        "(e.g. inspect a block, change a parameter, or save the graph)."
+    )
 
 
 def _attach_context_budget_telemetry(
@@ -1383,6 +1680,19 @@ def _attach_context_budget_telemetry(
 
 def _estimate_tokens(chars: int) -> int:
     return max(1, int(chars / 4)) if chars > 0 else 0
+
+
+def model_name_matches(
+    name: str, available_ids: list[str]
+) -> bool:
+    """Check if a model name exists in available IDs with :latest suffix tolerance."""
+    if name in available_ids:
+        return True
+    stripped = name.removesuffix(":latest")
+    return any(
+        id_.removesuffix(":latest") == stripped or id_ == f"{stripped}:latest"
+        for id_ in available_ids
+    )
 
 
 __all__ = [

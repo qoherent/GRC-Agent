@@ -140,7 +140,7 @@ def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]
     llama_ready = health_status == "ok"
     context_verified = bool(
         isinstance(health_payload, dict)
-        and health_payload.get("llama_context_verified") is True
+        and health_payload.get("context_verified") is True
     )
     vector_stats = steps.get("vector_stats", {})
     vector_index_ready = vector_stats.get("returncode") == 0

@@ -31,17 +31,7 @@ from grc_agent.dogfood import (
 )
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
-from grc_agent.llama_probe import (
-    LlamaServerError,
-    extract_enabled_builtin_tools,
-    extract_model_context_limit,
-)
-from grc_agent.model_manager import (
-    cached_model_to_dict,
-    discover_cached_models,
-    list_system_specs,
-    system_specs_to_dict,
-)
+from grc_agent.paths import collect_package_paths
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.retrieval.vector import (
     DEFAULT_EMBEDDING_MODEL,
@@ -66,22 +56,6 @@ from grc_agent.toolagents_runtime import (
 
 logger = logging.getLogger(__name__)
 
-
-FAKE_USER_MESSAGE = "Please change the samp_rate to 48000 and validate the graph."
-FAKE_ACTIONS = [
-    {"text": "I'll do that right away."},
-    {
-        "tool": "change_graph",
-        "kwargs": {
-            "update_variables": [
-                {
-                    "instance_name": "samp_rate",
-                    "value": "48000",
-                }
-            ]
-        },
-    },
-]
 
 _RETRIEVAL_READY_TOOLS = {"describe_block", "propose_edit", "apply_edit"}
 _INSTALLED_GRAPH_ROOTS = (
@@ -125,11 +99,6 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         action="store_true",
         help="Skip retrieval readiness checks.",
     )
-    doctor_parser.add_argument(
-        "--start-llama",
-        action="store_true",
-        help="Opt into starting/reusing llama.cpp as part of doctor checks.",
-    )
 
     subparsers.add_parser(
         "health",
@@ -155,12 +124,6 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         help="Optional local vector index directory to inspect.",
     )
 
-    fake_parser = subparsers.add_parser(
-        "fake",
-        help="Run a deterministic fake-model step through the runtime.",
-    )
-    fake_parser.add_argument("file", help="Path to a .grc file to load.")
-
     chat_epilog = """
 Examples:
   uv run grc-agent chat mygraph.grc --message "Summarize this graph"
@@ -169,7 +132,7 @@ Examples:
 """
     chat_parser = subparsers.add_parser(
         "chat",
-        help="Run one or more llama.cpp-backed turns against a loaded graph. "
+        help="Run one or more model-backed turns against a loaded graph. "
         "With --message or --stdin, runs a single turn; without it, starts an interactive REPL.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=chat_epilog.strip("\n"),
@@ -199,22 +162,17 @@ Examples:
     chat_parser.add_argument(
         "--message",
         required=False,
-        help="Run one bounded llama.cpp turn with this user message. "
+        help="Run one bounded model turn with this user message. "
         "When omitted, starts an interactive REPL loop.",
     )
     chat_parser.add_argument(
-        "--llama-server-url",
-        default=llama_config.server_url if llama_config is not None else None,
-        help="Base URL for a llama.cpp HTTP server. Defaults to grc_agent.toml.",
+        "--api-key",
+        help="Optional API key for server authentication",
     )
     chat_parser.add_argument(
         "--model",
         default=llama_config.model if llama_config is not None else None,
-        help="llama.cpp model id. Defaults to the configured value in grc_agent.toml.",
-    )
-    chat_parser.add_argument(
-        "--api-key",
-        help="Optional API key for llama.cpp server authentication",
+        help="Override the configured model name.",
     )
     chat_parser.add_argument(
         "--agentic",
@@ -431,57 +389,36 @@ Examples:
 
     model_parser = subparsers.add_parser(
         "model",
-        help="Discover, inspect, and swap the local llama.cpp model.",
+        help="Discover, inspect, and swap the local model.",
     )
     model_subparsers = model_parser.add_subparsers(dest="model_command")
     model_subparsers.required = True
     model_list_parser = model_subparsers.add_parser(
         "list",
-        help="List every .gguf file in the local Hugging Face cache (and any configured models_dir).",
+        help="List every model in the local Ollama instance.",
     )
     model_list_parser.add_argument(
-        "--hf-cache",
-        help="Override the HF cache root. Defaults to ~/.cache/huggingface/hub/.",
-    )
-    model_list_parser.add_argument(
-        "--models-dir",
-        help="Override the local models directory. Defaults to [llama].models_dir from grc_agent.toml.",
+        "--backend",
+        choices=["ollama", "openrouter"],
+        help="Backend client to list models for (ollama, openrouter). Defaults to active backend.",
     )
     model_list_parser.add_argument(
         "--json",
         action="store_true",
         help="Print discovered models as JSON.",
     )
-    model_specs_parser = model_subparsers.add_parser(
-        "specs",
-        help="Print local machine VRAM/GPU/RAM/CPU specs.",
-    )
-    model_specs_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print specs as JSON.",
-    )
     model_swap_parser = model_subparsers.add_parser(
         "swap",
-        help="Restart llama.cpp with a different model file.",
+        help="Switch clients/models.",
     )
     model_swap_parser.add_argument(
-        "--hf-repo",
-        required=True,
-        help="Hugging Face repo, e.g. 'unsloth/Qwen3.5-2B-GGUF'.",
+        "--backend",
+        choices=["ollama", "openrouter"],
+        help="The backend client to switch to.",
     )
     model_swap_parser.add_argument(
-        "--filename",
-        required=True,
-        help="GGUF filename inside the repo, e.g. 'Qwen3.5-2B-UD-Q4_K_XL.gguf'.",
-    )
-    model_swap_parser.add_argument(
-        "--alias",
-        help=(
-            "llama.cpp --alias override. Defaults to the resolved GGUF basename. "
-            "Pass an explicit alias when swapping between two files that share "
-            "the same filename across different repos."
-        ),
+        "--model",
+        help="Model name (used for 'ollama' or general model override).",
     )
     model_swap_parser.add_argument(
         "--json",
@@ -714,7 +651,7 @@ Examples:
   uv run grc-agent init
 
   # Non-interactive: seed with explicit values
-  uv run grc-agent init --model-path ~/models/qwen.gguf --device CUDA0 --force
+  uv run grc-agent init --model llama3.2 --force
 
   # Print the resolved target path without writing
   uv run grc-agent init --print-target
@@ -727,23 +664,7 @@ Examples:
     )
     init_parser.add_argument(
         "--model",
-        help="llama.cpp model alias (e.g. my-model.gguf). Defaults to the built-in default.",
-    )
-    init_parser.add_argument(
-        "--hf-model",
-        help="Hugging Face repo id to auto-download from (e.g. unsloth/Qwen3.5-2B-GGUF:Q4_K_XL).",
-    )
-    init_parser.add_argument(
-        "--model-path",
-        help="Absolute path to a local GGUF model file. Leave empty to rely on --hf-model.",
-    )
-    init_parser.add_argument(
-        "--server-url",
-        help="llama.cpp HTTP base URL (default: http://127.0.0.1:8080).",
-    )
-    init_parser.add_argument(
-        "--device",
-        help="Accelerator device (CUDA0, Metal, Vulkan0, CPU). Default: CPU (auto-detect).",
+        help="Ollama model name (e.g. llama3.2). Defaults to the built-in default.",
     )
     init_parser.add_argument(
         "--config-path",
@@ -764,13 +685,6 @@ Examples:
         action="store_true",
         help="Print the result as JSON.",
     )
-    init_parser.add_argument(
-        "--log-retention-days",
-        type=int,
-        default=None,
-        help="Launcher log retention in days. 0 keeps logs forever. Default: 7.",
-    )
-
     paths_parser = subparsers.add_parser(
         "paths",
         help="Print every filesystem location the package uses (config, history, vector index, caches).",
@@ -800,7 +714,6 @@ def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
         "health",
         "release-manifest",
         "debug-bundle",
-        "fake",
         "chat",
         "tool",
         "vector",
@@ -811,10 +724,6 @@ def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
     }
     if not argv or any(arg in command_names for arg in argv):
         return argv
-
-    if "--fake" in argv:
-        translated = [arg for arg in argv if arg != "--fake"]
-        return ["fake", *translated]
 
     if "--message" in argv:
         prefix: list[str] = []
@@ -1070,11 +979,10 @@ def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
         )
     elif error_type == ErrorCode.LLAMA_SERVER_MISSING:
         hint = (
-            "Hint: install llama.cpp and ensure `llama-server` is on PATH. "
-            "See the README install table. The CLI will auto-start a local "
-            "server once `llama-server` is on PATH; to use a remote server, "
-            "point `[llama].server_url` at it and set `start_llama=False` "
-            "(advanced)."
+            "Hint: ensure Ollama is running or OpenRouter API key is set. "
+            "See the README install table. To use Ollama, make sure the "
+            "Ollama service is running; to use OpenRouter, set the "
+            "OPENROUTER_API_KEY environment variable."
         )
     elif error_type == ErrorCode.GRCC_MISSING:
         hint = (
@@ -1083,9 +991,9 @@ def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
         )
     elif error_type == ErrorCode.MODEL_NOT_FOUND:
         hint = (
-            "Hint: set `[llama].model_path` in your config to a local GGUF "
-            "file, or set `[llama].hf_model` to a Hugging Face repo for "
-            "auto-download. Use `uv run grc-agent init` to write a starter config."
+            "Hint: set `[llama].model` in your config to an Ollama model name, "
+            "or set `[llama].backend` to \"openrouter\" and configure your "
+            "OPENROUTER_API_KEY. Use `uv run grc-agent init` to write a starter config."
         )
     if hint:
         print(_colorize(Colors.YELLOW, hint))
@@ -1115,7 +1023,7 @@ def _reject_if_original_graph_path(file_path: str | None) -> bool:
     print("\n--- Error ---")
     print("Refusing to open an installed GNU Radio example directly.")
     print(
-        "Hint: copy the graph first, then run chat/fake on the copied path. "
+        "Hint: copy the graph first, then run chat on the copied path. "
         "Example: cp /usr/share/gnuradio/examples/.../file.grc /tmp/work.grc"
     )
     return True
@@ -1131,40 +1039,6 @@ def _parse_tool_kwargs(raw_arguments: str) -> dict[str, Any]:
     return parsed
 
 
-def _run_fake_runtime(file_path: str, config: AppConfig) -> int:
-    """Exercise the routed runtime contract with deterministic fake actions."""
-    if _reject_if_original_graph_path(file_path):
-        return 1
-    print(f"Loading {file_path}...")
-    try:
-        session = _load_initial_session(file_path)
-    except CliError as exc:
-        _print_cli_error(exc.payload)
-        return 1
-    retrieval_status, catalog_root = _prepare_retrieval()
-    if retrieval_status != 0:
-        return retrieval_status
-    agent = GrcAgent(
-        session,
-        catalog_root=catalog_root,
-        config=config.agent,
-        llama_server_url=config.llama.server_url,
-        llama_model=config.llama.model,
-        llama_request_timeout_seconds=config.llama.request_timeout_seconds,
-    )
-    _print_active_session(agent, verbose=True)
-
-    print("--- System Prompt ---")
-    print(agent.get_system_prompt())
-    print("---------------------\n")
-
-    agent.run_step_fake(FAKE_USER_MESSAGE, FAKE_ACTIONS)
-
-    _print_history(agent, verbose=True)
-
-    return 0
-
-
 def _run_llama_runtime(
     file_path: str | None,
     user_message: str | None,
@@ -1178,7 +1052,7 @@ def _run_llama_runtime(
     verbose: bool = False,
     json_output: bool = False,
 ) -> int:
-    """Run one or more bounded llama.cpp-backed turns against the routed runtime."""
+    """Run one or more bounded model-backed turns against the routed runtime."""
     original_stdout = sys.stdout
     if json_output:
         sys.stdout = sys.stderr
@@ -1188,6 +1062,16 @@ def _run_llama_runtime(
         requested=max_tool_rounds,
     )
     effective_request_timeout = _effective_request_timeout(config, agentic=agentic)
+
+    # Interactive provider picker on first launch (no prior choice
+    # recorded in user preferences). Skipped when stdin is not a
+    # TTY (piped input, CI, scripted runs).
+    from grc_agent.cli_setup import run_cli_setup
+
+    if not run_cli_setup(config=config, is_tty=sys.stdin.isatty()):
+        print("Provider selection cancelled; exiting.", flush=True)
+        return 0
+
     if file_path is not None:
         if _reject_if_original_graph_path(file_path):
             return 1
@@ -1206,7 +1090,6 @@ def _run_llama_runtime(
 
     result = bootstrap_runtime(
         config,
-        start_llama=True,
         init_retrieval=True,
         api_key=api_key,
         server_url=server_url,
@@ -1221,7 +1104,7 @@ def _run_llama_runtime(
     if result.launch_status == "failed":
         logger.error("launcher_failed error=%s", result.errors[-1] if result.errors else "unknown")
         print("\n--- Launcher ---")
-        print(result.errors[-1] if result.errors else "Failed to ensure llama.cpp server.")
+        print(result.errors[-1] if result.errors else "Failed to ensure model server.")
         if result.error_type:
             from grc_agent._payload import build_error_payload
             _print_cli_error(
@@ -1254,13 +1137,13 @@ def _run_llama_runtime(
     if result.launch_status == "started":
         logger.info("server_started url=%s", result.server_url)
         print(
-            f"Started llama.cpp server for {result.model_alias} "
+            f"Started model server for {result.model_alias} "
             f"at {result.server_url} (health verified)"
         )
     else:
         logger.info("server_reused url=%s", result.server_url)
         print(
-            f"Reusing llama.cpp server for {result.model_alias} "
+            f"Reusing model server for {result.model_alias} "
             f"at {result.server_url} (health verified)"
         )
 
@@ -1329,7 +1212,7 @@ def _run_single_turn(
     json_output: bool = False,
     original_stdout: Any | None = None,
 ) -> int:
-    """Run one bounded llama turn and print the result."""
+    """Run one bounded model turn and print the result."""
     if config is None:
         config = load_app_config()
     round_limit = (
@@ -1347,7 +1230,7 @@ def _run_single_turn(
             mvp_tool_profile=True,
             max_tool_rounds=round_limit,
         )
-    except LlamaServerError as exc:
+    except Exception as exc:
         if json_output and original_stdout is not None:
             sys.stdout = original_stdout
             print(json.dumps({"ok": False, "message": str(exc)}))
@@ -1495,7 +1378,7 @@ def _run_repl_loop(
                 mvp_tool_profile=True,
                 max_tool_rounds=round_limit,
             )
-        except LlamaServerError as exc:
+        except Exception as exc:
             print(f"\n{_colorize(Colors.BOLD + Colors.RED, '--- Runtime Error ---')}\n{exc}")
             last_exit_code = 1
             continue
@@ -1615,42 +1498,17 @@ def _build_health_report(config: AppConfig) -> dict[str, Any]:
     if not readiness.get("ok"):
         report["retrieval_message"] = readiness.get("message", "Retrieval not ready.")
         status_reasons.append("retrieval_not_ready")
-    report["llama_desired_context_tokens"] = config.llama.desired_context_tokens
-    report["llama_device"] = config.llama.device
-    report["llama_gpu_layers"] = config.llama.gpu_layers
     report["llama_max_tokens"] = config.llama.max_tokens
     report["llama_max_tool_rounds"] = config.llama.max_tool_rounds
-    report["llama_model_ready"] = False
-    report["llama_context_verified"] = False
-    try:
-        from grc_agent.llama_probe import LlamaHealthProbe
-
-        probe = LlamaHealthProbe(
-            base_url=config.llama.server_url,
-            timeout_seconds=min(config.llama.request_timeout_seconds, 5.0),
-        )
-        probe.require_ready()
-        probe.require_model_alias(config.llama.model)
-        props = probe.get_server_properties()
-        actual_context = extract_model_context_limit(props)
-        report["llama_actual_context_tokens"] = actual_context
-        report["llama_build_info"] = props.get("build_info")
-        report["llama_chat_template_caps"] = props.get("chat_template_caps")
-        builtin_tools = sorted(extract_enabled_builtin_tools(props))
-        report["llama_builtin_tools_enabled"] = builtin_tools
-        report["llama_builtin_tools_disabled"] = not builtin_tools
-        report["llama_model_ready"] = True
-        report["llama_context_verified"] = actual_context is not None
-        if builtin_tools:
-            status_reasons.append("llama_builtin_tools_enabled")
-        if actual_context is None:
-            status_reasons.append("llama_context_unknown")
-        elif actual_context < config.llama.desired_context_tokens:
-            status_reasons.append("llama_context_below_desired")
-    except Exception as exc:
-        report["llama_actual_context_tokens"] = None
-        report["llama_props_error"] = str(exc)
-        status_reasons.append("llama_unreachable")
+    # Provider-agnostic telemetry. "model_ready" reflects whether the
+    # agent's tool surface is wired up; "context_verified" stays False
+    # because this code path does not actually probe the LLM's context
+    # window. "actual_context_tokens" reports the configured max_tokens
+    # (it is the requested window, not a server-measured one).
+    report["provider_type"] = config.llama.backend
+    report["model_ready"] = bool(report.get("agent_core_ready"))
+    report["context_verified"] = False
+    report["actual_context_tokens"] = config.llama.max_tokens
 
     if not report.get("agent_core_ready"):
         status_reasons.append("agent_core_not_ready")
@@ -1725,10 +1583,8 @@ def _build_release_manifest(config: AppConfig) -> dict[str, Any]:
         "runtime": {
             "model_alias": config.llama.model,
             "server_url": config.llama.server_url,
-            "device": config.llama.device,
-            "gpu_layers": config.llama.gpu_layers,
-            "desired_context_tokens": config.llama.desired_context_tokens,
-            "actual_context_tokens": health_report.get("llama_actual_context_tokens"),
+
+            "actual_context_tokens": health_report.get("actual_context_tokens"),
             "health_status": health_report.get("status"),
             "health_status_reasons": health_report.get("status_reasons", []),
         },
@@ -2278,8 +2134,6 @@ def _run_model_command(args: argparse.Namespace, app_config: AppConfig) -> int:
     try:
         if args.model_command == "list":
             return _run_model_list(args, app_config)
-        if args.model_command == "specs":
-            return _run_model_specs(args)
         if args.model_command == "swap":
             return _run_model_swap(args, app_config)
     except Exception as exc:
@@ -2293,120 +2147,108 @@ def _run_model_command(args: argparse.Namespace, app_config: AppConfig) -> int:
 
 
 def _run_model_list(args: argparse.Namespace, app_config: AppConfig) -> int:
-    """List every .gguf the local runtime can load."""
-    hf_cache = Path(args.hf_cache).expanduser() if args.hf_cache else None
-    models_dir: Path | None
-    if args.models_dir:
-        models_dir = Path(args.models_dir).expanduser()
-    else:
-        cfg_dir = app_config.llama.models_dir
-        models_dir = Path(cfg_dir).expanduser() if cfg_dir else None
-    models = discover_cached_models(hf_cache=hf_cache, models_dir=models_dir)
+    """List every model the local runtime can load."""
+    backend = getattr(args, "backend", None) or app_config.llama.backend
+    if backend != "ollama":
+        if args.json:
+            print(json.dumps({"ok": False, "error": "Model listing is only supported for the 'ollama' backend."}))
+        else:
+            print("Model listing is only supported for the 'ollama' backend. For other backends, list models using their own APIs/tools.")
+        return 1
+
+    server_url = app_config.llama.server_url
+    if app_config.llama.backend != "ollama":
+        server_url = "http://localhost:11434"
+    from grc_agent.model_manager import discover_ollama_models
+    models = discover_ollama_models(server_url)
     if args.json:
         payload = {
             "ok": True,
-            "models": [cached_model_to_dict(m) for m in models],
+            "models": models,
             "count": len(models),
         }
         print(json.dumps(payload, sort_keys=True))
         return 0
     if not models:
-        print("No .gguf files found.")
-        print(
-            "Hint: download a model via the configured [llama].hf_model, or set "
-            "[llama].models_dir to a directory containing local .gguf files."
-        )
+        print("No Ollama models found.")
+        print(f"Hint: make sure Ollama is running at {server_url} and models are pulled.")
         return 0
-    print(f"Found {len(models)} model file(s):")
-    for model in models:
-        size_mib = model.size_bytes / (1024 * 1024)
-        used = (
-            model.last_used.strftime("%Y-%m-%d")
-            if model.last_used is not None
-            else "unknown"
-        )
-        print(
-            f"  {model.hf_repo}:{model.filename}  "
-            f"({size_mib:.1f} MiB, last used {used})"
-        )
-    return 0
-
-
-def _run_model_specs(args: argparse.Namespace) -> int:
-    """Print local machine VRAM/GPU/RAM/CPU specs."""
-    specs = list_system_specs()
-    if args.json:
-        payload = {"ok": True, "specs": system_specs_to_dict(specs)}
-        print(json.dumps(payload, sort_keys=True))
-        return 0
-    print("Local machine specs:")
-    print(f"  GPU : {specs.gpu_name or 'unknown'}")
-    if specs.gpu_vram_bytes is not None:
-        print(f"  VRAM: {specs.gpu_vram_bytes / (1024 ** 3):.2f} GiB")
-    else:
-        print("  VRAM: unknown")
-    if specs.ram_bytes is not None:
-        print(f"  RAM : {specs.ram_bytes / (1024 ** 3):.2f} GiB")
-    else:
-        print("  RAM : unknown")
-    print(f"  CPU : {specs.cpu_name or 'unknown'}")
-    if specs.cpu_cores_logical is not None:
-        print(f"  Cores: {specs.cpu_cores_logical}")
-    else:
-        print("  Cores: unknown")
+    print(f"Found {len(models)} Ollama model(s):")
+    for m in models:
+        print(f"  {m}")
     return 0
 
 
 def _run_model_swap(args: argparse.Namespace, app_config: AppConfig) -> int:
-    """Restart the local llama.cpp server with a different model.
+    """Switch client/backend.
 
-    Phase 3 of the model-selector rollout. Delegates to
-    :meth:`grc_agent.llama_launcher.LlamaServerLauncher.swap_model`,
-    which builds a new :class:`LlamaConfig`, starts a fresh
-    ``llama-server`` process, waits for readiness, and returns the new
-    provider config. Errors surface as rc=1 with a human-readable
-    payload.
+    Supports 'ollama' and 'openrouter'.
     """
-    from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
-
-    try:
-        launcher = LlamaServerLauncher(app_config.llama)
-        result = launcher.swap_model(
-            new_hf_repo=args.hf_repo,
-            new_filename=args.filename,
-            new_alias=args.alias,
-        )
-    except LlamaLauncherError as exc:
+    backend = getattr(args, "backend", None) or app_config.llama.backend
+    if backend not in ("ollama", "openrouter"):
         payload = build_error_payload(
             error_type=ErrorCode.INTERNAL_ERROR,
-            message=str(exc),
+            message=f"Unsupported backend client: {backend}",
         )
         _print_model_payload(payload, json_output=args.json)
         return 1
-    payload = {
-        "ok": True,
-        "model_alias": result.model_alias,
-        "server_url": result.server_url,
-        "status": result.status,
-        "health_evidence": result.health_evidence,
-    }
-    # Persist the selection so the next session starts with the
-    # same model. Failure is non-fatal; the swap itself succeeded.
-    try:
-        from grc_agent.preferences import update_last_model
 
-        update_last_model(
-            hf_repo=args.hf_repo,
-            filename=args.filename,
-            alias=result.model_alias,
-        )
-    except OSError as exc:
-        logger.warning("Failed to persist last_model preference: %s", exc)
-        payload["prefs_persisted"] = False
-    else:
-        payload.setdefault("prefs_persisted", True)
-    _print_model_payload(payload, json_output=args.json)
-    return 0
+    if backend == "ollama":
+        new_model = getattr(args, "model", None) or app_config.llama.model
+        if backend != app_config.llama.backend and not getattr(args, "model", None):
+            if not new_model:
+                new_model = "llama3.2"
+
+        # Update grc_agent.toml
+        try:
+            from grc_agent.config import resolve_config_path, update_toml_config_file
+            config_path = resolve_config_path(None)
+            if config_path:
+                update_toml_config_file(config_path, {
+                    "backend": "ollama",
+                    "server_url": "http://localhost:11434",
+                    "model": new_model,
+                })
+        except Exception as exc:
+            logger.warning("Failed to persist to grc_agent.toml: %s", exc)
+
+        payload = {
+            "ok": True,
+            "model_alias": new_model,
+            "server_url": "http://localhost:11434",
+            "status": "ready",
+            "health_evidence": {"ollama_ready": True},
+            "prefs_persisted": True,
+        }
+        _print_model_payload(payload, json_output=args.json)
+        return 0
+
+    elif backend == "openrouter":
+        import os
+        env_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+        # Update grc_agent.toml
+        try:
+            from grc_agent.config import resolve_config_path, update_toml_config_file
+            config_path = resolve_config_path(None)
+            if config_path:
+                update_toml_config_file(config_path, {
+                    "backend": "openrouter",
+                    "server_url": "https://openrouter.ai/api",
+                    "model": env_model,
+                })
+        except Exception as exc:
+            logger.warning("Failed to persist to grc_agent.toml: %s", exc)
+
+        payload = {
+            "ok": True,
+            "model_alias": env_model,
+            "server_url": "https://openrouter.ai/api",
+            "status": "ready",
+            "health_evidence": {"openrouter_ready": True},
+            "prefs_persisted": True,
+        }
+        _print_model_payload(payload, json_output=args.json)
+        return 0
 
 
 def _print_model_payload(payload: dict[str, Any], *, json_output: bool) -> None:
@@ -2419,32 +2261,9 @@ def _print_model_payload(payload: dict[str, Any], *, json_output: bool) -> None:
         return
     if "models" in payload:
         models = payload["models"]
-        print(f"Found {len(models)} model file(s):")
+        print(f"Found {len(models)} model(s):")
         for model in models:
-            size_mib = int(model["size_bytes"]) / (1024 * 1024)
-            used = model["last_used"] or "unknown"
-            if used != "unknown":
-                used = used.split("T")[0]
-            print(
-                f"  {model['hf_repo']}:{model['filename']}  "
-                f"({size_mib:.1f} MiB, last used {used})"
-            )
-        return
-    if "specs" in payload:
-        specs = payload["specs"]
-        print("Local machine specs:")
-        print(f"  GPU : {specs['gpu_name'] or 'unknown'}")
-        if specs["gpu_vram_bytes"] is not None:
-            print(f"  VRAM: {specs['gpu_vram_bytes'] / (1024 ** 3):.2f} GiB")
-        else:
-            print("  VRAM: unknown")
-        if specs["ram_bytes"] is not None:
-            print(f"  RAM : {specs['ram_bytes'] / (1024 ** 3):.2f} GiB")
-        else:
-            print("  RAM : unknown")
-        print(f"  CPU : {specs['cpu_name'] or 'unknown'}")
-        cores = specs["cpu_cores_logical"]
-        print(f"  Cores: {cores if cores is not None else 'unknown'}")
+            print(f"  {model}")
         return
     if "model_alias" in payload:
         print(f"Model swapped to {payload['model_alias']}")
@@ -2494,13 +2313,12 @@ def _run_doctor_command(
     config_path: str | None,
     json_output: bool,
     skip_retrieval: bool,
-    check_llama: bool,
 ) -> int:
     """Execute the packaged-app doctor checks."""
     report = run_doctor(
         config_path=config_path,
         check_retrieval=not skip_retrieval,
-        check_llama=check_llama,
+        check_llama=False,
     )
     print_doctor_report(report, json_output=json_output)
     return 0 if report["ok"] else 1
@@ -2509,11 +2327,6 @@ def _run_doctor_command(
 def _render_init_template(
     *,
     model: str | None,
-    hf_model: str | None,
-    model_path: str | None,
-    server_url: str | None,
-    device: str | None,
-    log_retention_days: int | None,
 ) -> str:
     """Render the starter `grc_agent.toml` body with the supplied values."""
     defaults = default_app_config()
@@ -2524,37 +2337,15 @@ def _render_init_template(
         "# default.",
         "",
         "[llama]",
-        f'server_url = "{_toml_escape(server_url or defaults.llama.server_url)}"',
+        f'server_url = "{_toml_escape(defaults.llama.server_url)}"',
         f'model = "{_toml_escape(model or defaults.llama.model)}"',
-        f'hf_model = "{_toml_escape(hf_model or defaults.llama.hf_model)}"',
+        f'backend = "{_toml_escape(defaults.llama.backend)}"',
+        f"max_tokens = {defaults.llama.max_tokens}",
+        f"max_tool_rounds = {defaults.llama.max_tool_rounds}",
+        f"temperature = {defaults.llama.temperature}",
+        f"enable_thinking = {str(defaults.llama.enable_thinking).lower()}",
+        f"request_timeout_seconds = {defaults.llama.request_timeout_seconds}",
     ]
-    resolved_model_path = model_path if model_path is not None else defaults.llama.model_path
-    if resolved_model_path:
-        lines.append(f'model_path = "{_toml_escape(resolved_model_path)}"')
-    else:
-        lines.append(
-            '# Set model_path to a local GGUF file path, or leave empty to rely on hf_model.'
-        )
-        lines.append("model_path = \"\"")
-    lines.append(
-        f'device = "{_toml_escape(device or defaults.llama.device)}"'
-    )
-    lines.append("gpu_layers = 999")
-    lines.append("desired_context_tokens = 120000")
-    lines.append("startup_timeout_seconds = 300.0")
-    lines.append("max_tokens = 4096")
-    lines.append("max_tool_rounds = 8")
-    lines.append("temperature = 0.0")
-    lines.append("enable_thinking = false")
-    lines.append("request_timeout_seconds = 120.0")
-    resolved_retention = (
-        log_retention_days
-        if log_retention_days is not None
-        else defaults.llama.log_retention_days
-    )
-    lines.append("# Retention in days for the launcher log files.")
-    lines.append("# 0 keeps them forever; the default prunes anything older.")
-    lines.append(f"log_retention_days = {int(resolved_retention)}")
     return "\n".join(lines) + "\n"
 
 
@@ -2618,68 +2409,21 @@ def _run_init_command(args: argparse.Namespace) -> int:
     interactive = (
         sys.stdin.isatty()
         and sys.stdout.isatty()
-        and not any(
-            value is not None
-            for value in (
-                args.model,
-                args.hf_model,
-                args.model_path,
-                args.server_url,
-                args.device,
-                getattr(args, "log_retention_days", None),
-            )
-        )
+        and args.model is None
     )
 
     defaults = default_app_config()
     if interactive:
         print(f"Writing starter config to {target}.")
         print("Press Enter to accept the default shown in brackets.")
-        model = _prompt_init_value("Model alias", default=defaults.llama.model, current=args.model)
-        hf_model = _prompt_init_value(
-            "Hugging Face repo (auto-download source)", default=defaults.llama.hf_model, current=args.hf_model
-        )
-        model_path = _prompt_init_value(
-            "Local GGUF path (empty to use hf_model)",
-            default=defaults.llama.model_path or "",
-            current=args.model_path,
-        )
-        server_url = _prompt_init_value(
-            "llama.cpp server URL", default=defaults.llama.server_url, current=args.server_url
-        )
-        device = _prompt_init_value(
-            "Device (CPU/CUDA0/Metal/Vulkan0)", default=defaults.llama.device, current=args.device
-        )
-        log_retention_days_str = _prompt_init_value(
-            "Log retention in days (0 = keep forever)",
-            default=str(defaults.llama.log_retention_days),
-            current=(
-                str(args.log_retention_days)
-                if getattr(args, "log_retention_days", None) is not None
-                else None
-            ),
-        )
-        try:
-            log_retention_days = int(log_retention_days_str)
-        except ValueError:
-            log_retention_days = defaults.llama.log_retention_days
+        model = _prompt_init_value("Model name", default=defaults.llama.model, current=args.model)
     else:
         model = args.model
-        hf_model = args.hf_model
-        model_path = args.model_path
-        server_url = args.server_url
-        device = args.device
-        log_retention_days = getattr(args, "log_retention_days", None)
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         body = _render_init_template(
             model=model,
-            hf_model=hf_model,
-            model_path=model_path,
-            server_url=server_url,
-            device=device,
-            log_retention_days=log_retention_days,
         )
         target.write_text(body, encoding="utf-8")
     except OSError as exc:
@@ -2706,10 +2450,6 @@ def _run_init_command(args: argparse.Namespace) -> int:
         "target": str(target),
         "wrote": not existing,
         "model": model or defaults.llama.model,
-        "hf_model": hf_model or defaults.llama.hf_model,
-        "model_path": model_path or "",
-        "server_url": server_url or defaults.llama.server_url,
-        "device": device or defaults.llama.device,
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2720,44 +2460,9 @@ def _run_init_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _collect_package_paths() -> dict[str, str]:
-    """Return a stable mapping of every on-disk location the package uses."""
-    from grc_agent.config import default_config_path, user_config_path
-    from grc_agent.history import HISTORY_ENV_VAR, default_history_path
-    from grc_agent.llama_launcher import (
-        DEFAULT_LLAMA_LOG_DIR,
-        DEFAULT_LLAMA_STATE_PATH,
-    )
-    from grc_agent.preferences import user_preferences_path
-
-    cache_root = Path.home() / ".cache"
-    # `default_history_path()` returns a cwd-relative path when no env
-    # override is set; resolve it to an absolute path so the output is
-    # unambiguous regardless of the current working directory.
-    history_path = default_history_path()
-    if not history_path.is_absolute():
-        history_path = (Path.cwd() / history_path).resolve()
-    paths: dict[str, str] = {
-        "config_repo": str(default_config_path()),
-        "config_user": str(user_config_path()),
-        "preferences": str(user_preferences_path()),
-        "history": str(history_path),
-        "history_env_var": HISTORY_ENV_VAR,
-        "sessions_db": str(Path.home() / ".grc_agent" / "sessions.db"),
-        "vector_index_default": str(Path.home() / ".grc_agent" / "vector_index"),
-        "llama_state": str(DEFAULT_LLAMA_STATE_PATH),
-        "llama_logs": str(DEFAULT_LLAMA_LOG_DIR),
-        "fastembed_cache": str(cache_root / "fastembed"),
-        "hf_cache": str(cache_root / "huggingface"),
-        "grc_agent_state": str(Path.home() / ".grc_agent"),
-        "grc_agent_cache": str(cache_root / "grc_agent"),
-    }
-    return paths
-
-
 def _run_paths_command(args: argparse.Namespace) -> int:
     """Print every filesystem location the package uses."""
-    paths = _collect_package_paths()
+    paths = collect_package_paths()
     if args.json:
         print(json.dumps(paths, indent=2, sort_keys=True))
         return 0
@@ -2792,7 +2497,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     # Overlay user preferences (e.g. the model the GUI last picked)
     # onto the config. Preferences win over ``grc_agent.toml`` for
-    # the model and hf_model fields; everything else is preserved.
+    # the model field; everything else is preserved.
     try:
         from grc_agent.preferences import (
             apply_user_preferences_to_llama_config,
@@ -2800,11 +2505,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         prefs = load_user_preferences()
-        if (
-            prefs.last_model.alias
-            or prefs.last_model.hf_repo
-            or prefs.last_model.filename
-        ):
+        if prefs.last_model.alias:
             app_config = AppConfig(
                 llama=apply_user_preferences_to_llama_config(
                     app_config.llama, prefs
@@ -2840,7 +2541,6 @@ def main(argv: list[str] | None = None) -> int:
             config_path=args.config,
             json_output=args.json,
             skip_retrieval=args.skip_retrieval,
-            check_llama=args.start_llama,
         )
 
     if args.command == "health":
@@ -2856,9 +2556,6 @@ def main(argv: list[str] | None = None) -> int:
             output_path=args.output,
             vector_index_dir=args.vector_index_dir,
         )
-
-    if args.command == "fake":
-        return _run_fake_runtime(args.file, app_config)
 
     if args.command == "chat":
         if getattr(args, "new_graph", False):
@@ -2884,9 +2581,7 @@ def main(argv: list[str] | None = None) -> int:
             file_arg,
             message,
             app_config,
-            app_config.llama.server_url
-            if args.llama_server_url is None
-            else args.llama_server_url,
+            app_config.llama.server_url,
             app_config.llama.model if args.model is None else args.model,
             args.api_key,
             agentic=args.agentic,

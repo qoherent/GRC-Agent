@@ -61,7 +61,7 @@ class _StoreTestCase(unittest.TestCase):
         graph_path: str = "/tmp/example.grc",
         graph_hash: str = "grc:abc",
         model_alias: str | None = "test-model",
-        backend: str | None = "llama_cpp",
+        backend: str | None = "ollama",
         title: str = "Test session",
     ) -> int:
         return self.store.open_session(
@@ -140,7 +140,7 @@ class RoundTripTests(_StoreTestCase):
         self.assertEqual(rec.graph_path, "/tmp/a.grc")
         self.assertEqual(rec.graph_hash, "grc:111")
         self.assertEqual(rec.model_alias, "test-model")
-        self.assertEqual(rec.backend, "llama_cpp")
+        self.assertEqual(rec.backend, "ollama")
         self.assertEqual(rec.title, "first")
         self.assertEqual(rec.message_count, 0)
         self.assertIsNone(rec.ended_at)
@@ -163,6 +163,82 @@ class RoundTripTests(_StoreTestCase):
         msgs = self.store.list_messages(sid)
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0].payload, payload)
+
+    def test_model_role_rows_round_trip(self) -> None:
+        """Rows with role ``assistant_model`` / ``tool_model`` carry the
+        full ``ChatMessage`` payload and round-trip through the DB so
+        the resume path can rebuild the agent's ``ChatHistory``."""
+        from grc_agent.session_roles import (
+            ASSISTANT_MODEL_ROLE,
+            TOOL_MODEL_ROLE,
+            chat_message_payload,
+        )
+        from ToolAgents.data_models.chat_history import ChatHistory
+        from ToolAgents.data_models.messages import (
+            ChatMessageRole,
+            ToolCallContent,
+            ToolCallResultContent,
+        )
+
+        history = ChatHistory()
+        history.add_user_message("inspect")
+        history.add_assistant_message("calling inspect_graph")
+        tool_call = ToolCallContent(
+            tool_call_id="c1",
+            tool_call_name="inspect_graph",
+            tool_call_arguments={"view": "overview"},
+        )
+        from datetime import datetime
+        from ToolAgents.data_models.messages import ChatMessage
+        now = datetime.now()
+        asst_msg = ChatMessage(
+            id="a1",
+            role=ChatMessageRole.Assistant,
+            content=[tool_call],
+            created_at=now,
+            updated_at=now,
+        )
+        history.add_message(asst_msg)
+        tool_msg = ChatMessage(
+            id="t1",
+            role=ChatMessageRole.Tool,
+            content=[
+                ToolCallResultContent(
+                    tool_call_result_id="r1",
+                    tool_call_id="c1",
+                    tool_call_name="inspect_graph",
+                    tool_call_result="ok",
+                )
+            ],
+            created_at=now,
+            updated_at=now,
+        )
+        history.add_message(tool_msg)
+
+        sid = self._open_session()
+        self.store.append(
+            sid,
+            ASSISTANT_MODEL_ROLE,
+            "",
+            payload=chat_message_payload(asst_msg),
+        )
+        self.store.append(
+            sid,
+            TOOL_MODEL_ROLE,
+            "",
+            payload=chat_message_payload(tool_msg),
+        )
+        self.store.flush(timeout=2.0)
+        msgs = self.store.list_messages(sid)
+        roles = [m.role for m in msgs]
+        self.assertEqual(roles, [ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE])
+        self.assertEqual(msgs[0].text, "")
+        self.assertEqual(msgs[1].text, "")
+        self.assertEqual(msgs[0].payload["role"], "assistant")
+        self.assertEqual(msgs[1].payload["role"], "tool")
+        self.assertEqual(
+            msgs[0].payload["content"][0]["tool_call_name"], "inspect_graph"
+        )
 
     def test_close_session_updates_counts_and_ended_at(self) -> None:
         sid = self._open_session()
