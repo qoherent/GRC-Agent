@@ -53,6 +53,7 @@ class AgentWorker(QObject):
     response_chunk = Signal(str)
     model_message_added = Signal(str, str)
     turn_finished = Signal(dict)
+    backend_unreachable = Signal(dict)
 
     def __init__(
         self,
@@ -71,7 +72,11 @@ class AgentWorker(QObject):
         self._is_cancelled = False
         self._stream_timer: QTimer | None = None
         self._pending_result: dict[str, Any] | None = None
-        self.on_backend_unreachable = on_backend_unreachable
+
+        # Wire the cross-thread callback via a Qt signal so the
+        # GUI-level handler always runs on the main thread.
+        if on_backend_unreachable is not None:
+            self.backend_unreachable.connect(on_backend_unreachable)
 
     def run_turn(self) -> None:
         self.started.emit()
@@ -109,17 +114,11 @@ class AgentWorker(QObject):
                 self.turn_finished.emit(result)
                 # When the backend is unreachable, the GUI must surface
                 # the typed hint into the chat bubble *and* reset the
-                # chat input state to match the degraded mode (the
-                # worker cannot reach a backend, so the user should not
-                # be able to fire another turn until they recover).
+                # chat input state to match the degraded mode.  The
+                # ``backend_unreachable`` signal ensures these GUI
+                # mutations always run on the main thread.
                 if result.get("error_type") == "backend_unreachable":
-                    if hasattr(self, "on_backend_unreachable") and self.on_backend_unreachable:
-                        try:
-                            self.on_backend_unreachable(result)
-                        except Exception as cb_exc:  # noqa: BLE001
-                            logger.warning(
-                                "on_backend_unreachable callback raised: %s", cb_exc
-                            )
+                    self.backend_unreachable.emit(result)
         except Exception as exc:
             logger.exception("AgentWorker failed during turn execution")
             self.turn_finished.emit(
@@ -197,17 +196,13 @@ class AgentWorker(QObject):
                 # Surface the typed backend-unreachable hint into the
                 # chat bubble (the stream had no incremental tokens) and
                 # notify the GUI so it can re-enter degraded mode.
+                # The ``backend_unreachable`` signal ensures all GUI
+                # mutations run on the main thread.
                 if final.get("error_type") == "backend_unreachable":
                     text = final.get("assistant_text", "")
                     if text:
                         self.response_chunk.emit(text)
-                    if hasattr(self, "on_backend_unreachable") and self.on_backend_unreachable:
-                        try:
-                            self.on_backend_unreachable(final)
-                        except Exception as cb_exc:  # noqa: BLE001
-                            logger.warning(
-                                "on_backend_unreachable callback raised: %s", cb_exc
-                            )
+                    self.backend_unreachable.emit(final)
                 self.turn_finished.emit(final)
         except AttributeError as exc:
             logger.warning("stream_turn unavailable, falling back to run_turn: %s", exc)

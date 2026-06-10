@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -40,6 +41,13 @@ from .model_dialog import (
 )
 from .process_manager import ProcessManager
 from .recent_sessions_dialog import RecentSessionsDialog
+from .setup_panel import (
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENROUTER,
+    OllamaSetupSelection,
+    OllamaSetupWidget,
+    ProviderPickerWidget,
+)
 from .sidebar_widget import SidebarWidget
 from .workers import AgentWorker
 
@@ -223,6 +231,7 @@ class MainWindow(QMainWindow):
         parent: QWidget = None,
         *,
         bootstrap_result: Any = None,
+        setup_mode: bool = True,
     ) -> None:
         super().__init__(parent)
         self.agent = agent
@@ -326,11 +335,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
         # Instantiate primary vertical splitter
         v_splitter = QSplitter(Qt.Vertical, central_widget)
         self.v_splitter = v_splitter
-        main_layout.addWidget(v_splitter)
+        # NOTE: v_splitter is added to the main_stack below so the
+        # setup panel can take over the central area on launch.
 
         # Instantiate horizontal splitter for upper sidepanels
         splitter = QSplitter(Qt.Horizontal, v_splitter)
@@ -390,6 +401,51 @@ class MainWindow(QMainWindow):
 
         v_splitter.addWidget(console_panel)
         v_splitter.setSizes([450, 150])
+
+        # --- Setup flow: shown in the central area on every launch ---
+        # Two pages, controlled by signals:
+        #   0 = ProviderPickerWidget (Ollama / OpenRouter)
+        #   1 = OllamaSetupWidget (status + model dropdown + cancel/confirm)
+        self.setup_stack = QStackedWidget(central_widget)
+        self.provider_picker = ProviderPickerWidget(self.setup_stack)
+        ollama_url = (
+            str(getattr(self.llama_config, "server_url", "http://localhost:11434"))
+            if self.llama_config is not None
+            else "http://localhost:11434"
+        )
+        ollama_current_model = (
+            str(getattr(self.llama_config, "model", ""))
+            if self.llama_config is not None
+            else ""
+        )
+        self.ollama_setup_widget = OllamaSetupWidget(
+            server_url=ollama_url,
+            current_model=ollama_current_model,
+            parent=self.setup_stack,
+        )
+        self.setup_stack.addWidget(self.provider_picker)   # index 0
+        self.setup_stack.addWidget(self.ollama_setup_widget)  # index 1
+
+        # Top-level stack: setup flow vs. main work area.
+        #   0 = setup flow (provider picker / ollama setup)
+        #   1 = v_splitter (sidebar, chat, inspector, console)
+        self.main_stack = QStackedWidget(central_widget)
+        self.main_stack.addWidget(self.setup_stack)   # index 0
+        self.main_stack.addWidget(self.v_splitter)    # index 1
+        main_layout.addWidget(self.main_stack)
+
+        # Wire the setup flow signals.
+        self.provider_picker.provider_chosen.connect(self._on_setup_provider_chosen)
+        self.provider_picker.cancelled.connect(self._on_setup_provider_cancelled)
+        self.ollama_setup_widget.confirmed.connect(self._on_setup_ollama_confirmed)
+        self.ollama_setup_widget.cancelled.connect(self._on_setup_ollama_cancelled)
+
+        # Show the setup flow on launch, or skip straight to the
+        # main work area when the caller (e.g. a test) asks for it.
+        if setup_mode:
+            self.main_stack.setCurrentIndex(0)
+        else:
+            self.main_stack.setCurrentIndex(1)
 
         # Aliases for backwards compatibility and automated testing
         self.chat_input = self.chat_widget.chat_input
@@ -553,6 +609,66 @@ class MainWindow(QMainWindow):
             if entry.get("text", "").startswith(marker):
                 return
         self.chat_widget.append_error(f"{marker} {hint}")
+
+    # ------------------------------------------------------------------
+    # Setup flow (provider picker -> Ollama setup -> main view)
+    # ------------------------------------------------------------------
+    def _on_setup_provider_chosen(self, backend: str) -> None:
+        """User picked a provider in the picker. Show the next step."""
+        if backend == PROVIDER_OLLAMA:
+            # Swap to the Ollama setup page within the setup flow.
+            self.setup_stack.setCurrentIndex(1)
+        elif backend == PROVIDER_OPENROUTER:
+            # OpenRouter: nothing more to ask, jump straight to main.
+            import dataclasses
+            if self.llama_config is not None:
+                self.llama_config = dataclasses.replace(
+                    self.llama_config, backend=PROVIDER_OPENROUTER
+                )
+            self._finish_setup_and_swap_to_main()
+        else:
+            logger.warning("Unknown backend from provider picker: %r", backend)
+
+    def _on_setup_provider_cancelled(self) -> None:
+        """User clicked Quit on the provider picker; close the app."""
+        logger.info("Provider picker cancelled; closing main window")
+        self.close()
+
+    def _on_setup_ollama_confirmed(self, selection: OllamaSetupSelection) -> None:
+        """User picked a model in the Ollama setup; swap to main view."""
+        import dataclasses
+        if self.llama_config is not None:
+            self.llama_config = dataclasses.replace(
+                self.llama_config,
+                backend=PROVIDER_OLLAMA,
+                server_url=selection.server_url,
+                model=selection.model_name,
+            )
+        if self.provider_config is not None:
+            self.provider_config.model = selection.model_name
+            self.provider_config.base_url = selection.server_url
+        logger.info(
+            "Ollama setup confirmed: server=%s model=%s",
+            selection.server_url, selection.model_name,
+        )
+        self._finish_setup_and_swap_to_main()
+
+    def _on_setup_ollama_cancelled(self) -> None:
+        """User clicked Back on the Ollama setup; return to picker."""
+        self.setup_stack.setCurrentIndex(0)
+
+    def _finish_setup_and_swap_to_main(self) -> None:
+        """Swap the central area from setup flow to the main work area."""
+        # Reset reachability to "unknown"; if the backend is down the
+        # first chat turn will surface ``backend_unreachable`` via
+        # the Phase 2 handler which then flips ``backend_reachable``
+        # to ``False`` and disables the chat input.
+        self.backend_reachable = None
+        self._backend_unreachable_hint = None
+        self._update_model_status_label()
+        self.update_ui_state()
+        self.main_stack.setCurrentIndex(1)
+        self.status_bar.showMessage("Connected.", 5000)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.chat_input and event.type() == QEvent.Type.KeyPress:

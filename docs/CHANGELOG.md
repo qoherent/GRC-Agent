@@ -8,6 +8,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 ## [Unreleased]
 
 ### Added
+- **First-launch provider picker** embedded in the main GUI (not a pre-launch
+  modal). On every launch the user picks Ollama (local) or OpenRouter (cloud).
+  - **Ollama setup screen** shows daemon reachability, VRAM/RAM (via `psutil`
+    and `nvidia-smi`), a model dropdown with Refresh, and Back/Confirm buttons.
+  - Confirm is disabled when the daemon is unreachable; the user is told to
+    start the daemon externally and click Refresh.
+  - No daemon management: the application never spawns or kills `ollama serve`.
+- **Degraded mode** when the backend is unreachable at launch:
+  - The main window still opens (no crash, no forced exit).
+  - Chat input and Validate button are disabled.
+  - A platform-agnostic banner ("Connection refused. Is Ollama running? …")
+    renders in the chat view.
+  - Model > Select Model remains accessible as the recovery path.
+- **Backend-unreachable error handling** during active turns:
+  - `openai.APIConnectionError` and `httpx.ConnectError` are caught in the
+    manual turn loop, producing a typed `backend_unreachable` payload with
+    the server URL. The error is surfaced as a chat bubble hint.
+  - Cross-thread signal (`backend_unreachable` Qt Signal) ensures GUI
+    mutations always run on the main thread.
+- `ErrorCode.BACKEND_UNREACHABLE` in `_payload.py`.
+- `UserPreferences.provider_chosen` field and `update_provider_chosen()` helper.
+- `ProviderPickerWidget` and `OllamaSetupWidget` in `setup_panel.py`.
+- `psutil>=5.9.0` dependency for RAM diagnostics.
+
+### Changed
+- GUI launch no longer aborts when the backend probe fails; the application
+  enters degraded mode instead.
+
+### Removed
+- `src/grc_agent/llama_launcher.py` and `src/grc_agent/llama_probe.py`
+  (obsoleted by the ToolAgents-backed runtime).
+
 - **Multi-backend LLM support** (`llama_cpp`, `ollama`, `openrouter`).
   - `[llama].backend` config field selects the active backend at startup.
   - **Ollama**: probed via `GET /v1/models` through the standard OpenAI-compat

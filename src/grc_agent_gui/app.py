@@ -340,18 +340,13 @@ def main() -> None:
 
     agent = GrcAgent(session=session)
 
-    # Lightweight provider picker on first launch. The user picks
-    # Ollama or OpenRouter; we persist the choice to user
-    # preferences and continue. No daemon management, no hardware
-    # polling — if the Ollama daemon is down, the existing Phase 2
-    # backend_unreachable path renders a degraded-mode UI.
-    from grc_agent.preferences import load_user_preferences
-
-    prefs = load_user_preferences()
-    if not prefs.provider_chosen:
-        if not _run_provider_picker(app, config):
-            print("Provider selection cancelled; exiting.", flush=True)
-            return
+    # The provider picker + Ollama setup flow is now embedded in the
+    # main window itself (setup_mode=True).  No pre-launch modal
+    # dialogs.  The user sees the picker inside the main view on
+    # every launch, picks their provider, and on Confirm the window
+    # swaps to the chat / inspector work area.  If the daemon is
+    # down, the existing Phase 2 ``backend_unreachable`` degraded
+    # path handles it inside the chat view.
 
     print("Checking model server...", flush=True)
     result = bootstrap_runtime(config, init_retrieval=True)
@@ -389,6 +384,7 @@ def main() -> None:
         provider_config=result.provider_config,
         llama_config=config.llama,
         bootstrap_result=result,
+        setup_mode=True,
     )
     app.aboutToQuit.connect(window.process_manager.shutdown)
     window.show()
@@ -420,32 +416,6 @@ def _register_server_cleanup(pid: int) -> None:
             pass
 
     atexit.register(_cleanup)
-
-
-def _run_provider_picker(app: QApplication, config: AppConfig) -> bool:
-    """Show the provider picker once; persist the choice.
-
-    Returns ``True`` on a confirmed choice, ``False`` on cancel
-    (caller exits cleanly). The choice is saved to the user
-    preferences file so subsequent launches skip the picker.
-    """
-    from grc_agent.preferences import update_provider_chosen
-
-    from grc_agent_gui.provider_picker_dialog import ProviderPickerDialog
-
-    picker = ProviderPickerDialog()
-    if picker.exec() != picker.DialogCode.Accepted:
-        return False
-
-    backend = picker.selected_backend()
-    try:
-        update_provider_chosen(provider=backend)
-    except OSError as exc:
-        # Preference write failure is non-fatal; the user can still
-        # use the app, they will just see the picker again next
-        # launch.
-        logger.warning("Failed to persist provider choice: %s", exc)
-    return True
 
 
 if __name__ == "__main__":
