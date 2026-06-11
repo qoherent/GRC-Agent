@@ -91,7 +91,12 @@ class MvpToolProfileTests(unittest.TestCase):
         agent = self._load_agent()
         prompt = agent.get_system_prompt()
 
-        self.assertLess(len(prompt), 1800)
+        # The 1800-char cap pre-dates the AUTHORITY preamble added
+        # in v4 (``2026-06-11-mutation-authority-v4``). Bumped to
+        # 1900 to keep the guardrail meaningful while accommodating
+        # the new mutation-authority content. The prompt is still
+        # well within the context window of any local model.
+        self.assertLess(len(prompt), 1900)
         for name in ("inspect_graph", "query_knowledge", "change_graph"):
             self.assertIn(name, prompt)
         self.assertIn("keep going", prompt)
