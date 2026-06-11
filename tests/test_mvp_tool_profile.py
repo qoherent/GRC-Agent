@@ -97,10 +97,9 @@ class MvpToolProfileTests(unittest.TestCase):
         # the new mutation-authority content. The prompt is still
         # well within the context window of any local model.
         self.assertLess(len(prompt), 1900)
-        for name in ("inspect_graph", "query_knowledge", "change_graph"):
-            self.assertIn(name, prompt)
-        self.assertIn("keep going", prompt)
-        self.assertIn("wireless communications expert", prompt)
+        self.assertIn("GNU Radio graph editing assistant", prompt)
+        self.assertIn("variables are blocks", prompt)
+        self.assertIn("bypass", prompt)
         self.assertNotIn("Use one tool call", prompt)
         for forbidden in ("apply_edit", "propose_edit", "semantic_search_grc", "save_graph"):
             self.assertNotIn(forbidden, prompt)
@@ -302,8 +301,8 @@ class MvpToolProfileTests(unittest.TestCase):
         ):
             result = agent.execute_tool(
                 "search_blocks",
-                {"query": "sine wave source"},
-                model_tool_call=True,
+                {"query": "sine wave source", "debug": True},
+                model_tool_call=False,
             )
 
         self.assertTrue(result["ok"], result)
@@ -385,7 +384,7 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value={"ok": False, "error_type": "missing_index"},
             ),
         ):
-            result = agent.execute_tool("search_blocks", {"query": "num_inputs"})
+            result = agent.execute_tool("search_blocks", {"query": "num_inputs", "debug": True})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["retrieval_mode"], "lexical_only")
@@ -528,7 +527,7 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value={"ok": False, "error_type": "missing_index"},
             ),
         ):
-            result = agent.execute_tool("search_blocks", {"query": "throughput"})
+            result = agent.execute_tool("search_blocks", {"query": "throughput", "debug": True})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["retrieval_mode"], "lexical_only")

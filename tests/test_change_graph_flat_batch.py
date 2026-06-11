@@ -144,7 +144,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(self._param(agent.session, "samp_rate", "value"), before)
         repair = result.get("schema_repair_instruction", {})
-        self.assertIn("update_variables", repair.get("change_graph_hint", ""))
         self.assertIn("update_params[0].instance_name", repair.get("missing_fields", []))
 
     def test_flat_add_block_with_params_and_connection_commits_exact_graph(self) -> None:
@@ -222,11 +221,11 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertFalse(result.get("committed", True), result)
         self.assertEqual(self._block_names(agent.session), before_blocks)
         self.assertEqual(self._connection_ids(agent.session), before_connections)
-        self.assertIn('add_blocks[].params.type="float"', result.get("hint", ""))
+        self.assertIn('Stream dtype mismatch', result.get("hint", ""))
         self.assertIn("Source IO type", rendered)
         self.assertIn("float", rendered)
         self.assertIn("complex", rendered)
-        self.assertIn('add_blocks[].params.type="float"', rendered)
+        self.assertIn('Stream dtype mismatch', rendered)
 
     def test_native_validation_failure_reports_unchanged_graph_facts(self) -> None:
         tmp, _path, agent = self._load_temp_agent()
@@ -265,7 +264,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertEqual(self._connection_ids(agent.session), before_connections)
         self.assertEqual(agent.session.state_revision, before_revision)
         self.assertEqual(agent.session.is_dirty, before_dirty)
-        self.assertIn("no changes committed", rendered)
+        self.assertIn("changes not committed", rendered.lower())
         self.assertIn('"graph_unchanged":true', rendered)
         self.assertIn('"rollback":"complete"', rendered)
         self.assertIn("Source - out(0): Port is not connected.", rendered)
@@ -358,7 +357,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertFalse(result["committed"], result)
         self.assertEqual(self._param(agent.session, "samp_rate", "value"), before)
-        self.assertIn("Inspect the target block details", str(result.get("errors", [])))
+        self.assertIn("parameter_not_found", str(result.get("errors", [])))
 
     def test_update_states_accepts_disabled_boolean_alias(self) -> None:
         tmp, path, agent = self._load_temp_agent()
@@ -467,9 +466,9 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "gnu_validation_failed")
         self.assertEqual(agent.session.state_revision, before_revision)
         hint = result.get("hint", "")
-        self.assertIn("terminal/control block", hint)
-        self.assertIn("cannot be bypassed", hint)
-        self.assertNotIn("state='bypass'", hint)
+        self.assertIn("terminal/control block", hint.lower())
+        self.assertIn("cannot be bypassed", hint.lower())
+        self.assertNotIn("severed", hint.lower())
 
     def test_disable_inline_transform_returns_bypass_hint(self) -> None:
         """Disabling a stream-transform inline block emits bypass hint."""
@@ -495,8 +494,8 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertEqual(result.get("error_type"), "gnu_validation_failed")
         self.assertEqual(agent.session.state_revision, before_revision)
         hint = result.get("hint", "")
-        self.assertIn("bypass", hint.lower())
-        self.assertNotIn("terminal/control block", hint)
+        self.assertIn("port connections severed", hint.lower())
+        self.assertNotIn("terminal/control block", hint.lower())
 
 
 if __name__ == "__main__":

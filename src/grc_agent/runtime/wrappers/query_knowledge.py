@@ -24,7 +24,7 @@ def query_knowledge(
         return agent._tool_result(
             "query_knowledge",
             ok=False,
-            message=f"Invalid domain '{domain}'. Use 'catalog' or 'docs'.",
+            message=f"Invalid domain '{domain}'.",
             error_type="invalid_request",
         )
 

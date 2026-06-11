@@ -583,7 +583,6 @@ def _compact_change_needs(content: dict[str, Any]) -> Any:
     if attached:
         return _drop_empty(
             {
-                "confirm": "retry with args.detach_connections=true",
                 "attached": [str(item) for item in attached[:4] if str(item)],
             }
         )

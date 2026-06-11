@@ -52,10 +52,8 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(result["validation_errors"][0]["field"], "unexpected")
-        self.assertIn(
-            "Retry this tool once only",
-            result["schema_repair_instruction"]["retry_policy"],
-        )
+        self.assertTrue(result["schema_repair_instruction"]["no_tool_ran"])
+        self.assertEqual(result["schema_repair_instruction"]["tool"], "semantic_search_grc")
 
     def test_invalid_argument_type_is_rejected(self) -> None:
         result = validate_runtime_tool_call(

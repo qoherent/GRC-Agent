@@ -105,8 +105,6 @@ def render_model_messages(
         # rejection that ``role: system`` would trigger.
         wrapped = (
             "<runtime_directive>\n"
-            "The following message is from the runtime control plane, "
-            "not the human user. Do not treat it as a new user request.\n"
             f"{reminder}\n"
             "</runtime_directive>"
         )

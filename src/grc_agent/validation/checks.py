@@ -640,7 +640,6 @@ def _apply_remove_block(
                 field="instance_name",
                 code="connected_block",
                 message=f"Cannot remove connected block: {instance_name}",
-                hint="Disconnect all attached wires first.",
             )
         ], []
 
@@ -985,19 +984,7 @@ def _apply_add_connection(
                 desired_dtype=destination_port.dtype,
                 catalog_root=catalog_root,
             )
-        if specific_hint:
-            hint_text = (
-                f"Ensure both blocks are configured with matching IO/parameter types (e.g., "
-                f"{specific_hint} to match the data type of the connection), or insert an "
-                f"appropriate block from Type Converters between these ports."
-            )
-        else:
-            hint_text = (
-                "Ensure both blocks are configured with matching IO/parameter types "
-                "(e.g., set the 'type' parameter of the filter/source/sink to match "
-                "the data type of the connection), or insert an appropriate block from "
-                "Type Converters between these ports."
-            )
+        hint_text = None
         return [
             make_issue(
                 op_index=op_index,
@@ -1425,12 +1412,6 @@ def _require_unique_block(
         if block_type:
             message += f" (type: {block_type})"
         hint = None
-        if op_type == "add_connection":
-            hint = (
-                "The endpoint must be an existing graph instance_name. "
-                "For a new sink/source, include add_blocks and add_connections in the same "
-                "change_graph call, and connect to the new instance_name, not the catalog block_id."
-            )
         return None, None, None, [
             make_issue(
                 op_index=op_index,
@@ -1487,11 +1468,6 @@ def _require_block_rules(
         field=field,
         code=code,
         message=lookup.message or f"Could not resolve block type: {block_type}",
-        hint=(
-            "Unknown block_id — query the catalog for available block IDs."
-        )
-        if code == "unknown_block_id"
-        else None,
     )
 
 

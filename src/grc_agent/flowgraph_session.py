@@ -1677,12 +1677,12 @@ class FlowgraphSession:
             raise ValueError("No flowgraph loaded.")
 
         if any(block.instance_name == instance_name for block in self.flowgraph.blocks):
-            raise ValueError(f"Block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.")
+            raise ValueError(f"Block already exists: {instance_name}.")
         if any(
             isinstance(entry, dict) and entry.get("name") == instance_name
             for entry in raw_blocks
         ):
-            raise ValueError(f"Raw block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.")
+            raise ValueError(f"Raw block already exists: {instance_name}.")
 
     def _require_unique_parsed_block(
         self,

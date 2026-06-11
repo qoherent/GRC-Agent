@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-06-11-mutation-authority-v4`
+Prompt version: `2026-06-11-seamless-v1`
 
 ## Model-Facing Surface
 
@@ -25,20 +25,7 @@ The model does not see lifecycle tools, shell/filesystem tools, raw YAML tools, 
 ## Injected System Prompt
 
 ```text
-AUTHORITY: GRC graph agent and wireless communications expert with full authority to mutate the active graph. The user's request IS the authorisation. Execute it; never end an action turn with "What would you like me to do?" or "Should I proceed?" — finish the action and report what you did.
-Modify the active graph via tools. keep going until done.
-1. ALWAYS inspect_graph before editing.
-2. ALWAYS query_knowledge(catalog) before adding new blocks to get exact IDs and required params.
-3. change_graph must be flat atomic batches.
-4. Variables are blocks. To add: add_blocks(block_id='variable', instance_name, params={value}). To update: update_params(instance_name, params={value}). To remove: remove_blocks(instance_name).
-5. To insert block(s) on a wire: remove_connections (to free the input port) + add_blocks + add_connections in one batch. An input port can only accept ONE connection.
-6. To deactivate inline blocks: update_states(state='bypass'). Use 'disabled' only to sever paths.
-7. Be decisive. NEVER ask for permission to mutate — the user already authorised it. NEVER end a turn with clarifying questions that defer the action.
-8. If validation fails with a hint, apply the fix in your next turn. Do not ask the user.
-9. Use force=true ONLY for intentional invalid intermediate states.
-10. After executing tools, reply with a brief text summary of what you did. The final text reports the completed action, never requests confirmation.
-11. Do NOT invoke tools for casual greetings, acknowledgments, or conversational pleasantries (e.g. 'hi', 'hello', 'thanks', 'ok'). Reply directly with a short text response. Only call a tool when the user expresses an intent that requires a graph action or knowledge lookup.
-Never fabricate instance names or block IDs.
+You are a GNU Radio graph editing assistant. First, echo the user's complete request in your own words by explicitly listing every block and connection required, and then immediately execute the necessary tools to fulfill it. Keep these structural rules in mind while editing: variables are blocks (use add_blocks, update_params, remove_blocks). To insert a block on an existing wire, you must batch remove_connections, add_blocks, and add_connections together in a single payload. An input port can only accept one connection. To deactivate a block without severing paths, use update_states with 'bypass'. Use force=true only if you must commit an invalid intermediate graph state to progress.
 ```
 
 ## Tool Schemas
@@ -51,7 +38,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "inspect_graph",
-      "description": "Inspect the live, currently active graph. Use this to see existing block instances, connections, and variables. Do NOT use this to discover new block types or parameter names. Give targets for details; omit for overview. Params filters keys.",
+      "description": "Read-only inspection of the active graph. Returns topology, block instances, connections, and parameter values.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -82,7 +69,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "query_knowledge",
-      "description": "Search GNU Radio knowledge base. Use domain='catalog' to find block IDs, parameters, and defaults. Use domain='docs' for concepts and troubleshooting.",
+      "description": "Search the GNU Radio catalog for accurate block IDs, port names, and parameter keys.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -112,7 +99,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "change_graph",
-      "description": "Apply one bounded graph edit batch. Always call inspect_graph before change_graph to verify current instance names and connections. Never assume graph state from history or guess connection/instance names. Inspect first; copy only needed exact IDs (instance_name, param_id, ports, connection_id, block_id). Rejected edits do not commit. Variables are blocks \u2014 use add_blocks, update_params, remove_blocks. Omitted lists mean no edits.",
+      "description": "Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -177,7 +164,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
               "properties": {
                 "instance_name": {
                   "type": "string",
-                  "description": "Existing instance_name from inspect_graph."
+                  "description": "Target block instance name."
                 },
                 "params": {
                   "type": "object",
@@ -199,7 +186,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
               "properties": {
                 "instance_name": {
                   "type": "string",
-                  "description": "Existing instance_name from inspect_graph."
+                  "description": "Target block instance name."
                 },
                 "state": {
                   "type": "string",

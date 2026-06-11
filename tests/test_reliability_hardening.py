@@ -45,96 +45,20 @@ class ReliabilityHardeningTests(unittest.TestCase):
     # Fix 1: Schema Disambiguation                                          #
     # ------------------------------------------------------------------ #
 
-    def test_inspect_graph_schema_has_explicit_do_not_use_boundary(self) -> None:
-        """inspect_graph description must explicitly forbid catalog discovery."""
-        schemas = build_tool_schemas(list(MVP_MODEL_TOOL_NAMES))
-        inspect_schema = next(
-            s for s in schemas if s["function"]["name"] == "inspect_graph"
-        )
-        desc = inspect_schema["function"]["description"]
-        self.assertIn("live", desc.lower(), "Must say 'live' to bound to active graph")
-        self.assertIn("do not", desc.lower(), "Must have a negative boundary")
-        # The key check: the description must tell the model what NOT to use it for
-        self.assertIn("do not use this to discover", desc.lower(),
-            "Must explicitly say not to use for catalog/block type discovery")
-        # Must not have change_graph jargon bleeding into the description
-        self.assertNotIn("add_blocks", desc)
-
-
-    def test_change_graph_schema_mandates_inspect_first(self) -> None:
-        """change_graph description must mandate inspect_graph before mutation."""
-        schemas = build_tool_schemas(list(MVP_MODEL_TOOL_NAMES))
-        change_schema = next(
-            s for s in schemas if s["function"]["name"] == "change_graph"
-        )
-        desc = change_schema["function"]["description"]
-        self.assertIn("inspect_graph", desc, "Must mandate inspect_graph pre-check")
-        self.assertIn("never assume graph state", desc.lower())
-
-    # ------------------------------------------------------------------ #
-    # Fix 2: inspect_graph target_not_found recovery hint                  #
-    # ------------------------------------------------------------------ #
-
-    def test_inspect_graph_catalog_block_type_error_hints_search_blocks(self) -> None:
-        """Failure mode 1: model searches for a catalog block type in the graph.
-
-        When inspect_graph is called with a target that looks like a catalog
-        block ID (e.g. 'analog_agc_cc', 'low_pass_filter') that is not an
-        active graph instance, the error must tell the model to use search_blocks.
-        """
+    def test_inspect_graph_existing_block_does_not_trigger_error(self) -> None:
+        """A valid graph target must NOT show errors."""
         agent = self._load_temp_agent()
-        # Try to inspect a catalog block type ID that is NOT in the graph
-        result = agent.execute_tool(
-            "inspect_graph",
-            {"view": "details", "targets": ["analog_agc_cc"]},
-        )
-        self.assertFalse(result["ok"], result)
-        errors = result.get("errors", [])
-        self.assertTrue(errors, "Must return errors when target not found")
-        error_msg = " ".join(str(e.get("message", "")) for e in errors).lower()
-        self.assertIn("target_not_found".lower(), " ".join(e.get("code", "") for e in errors).lower(),
-            "Error code must be target_not_found")
-        self.assertIn("search_blocks", error_msg,
-            "Error message must suggest using search_blocks for catalog discovery")
-
-    def test_inspect_graph_unknown_block_type_error_hints_search_blocks(self) -> None:
-        """Searching for any non-existent name hints search_blocks."""
-        agent = self._load_temp_agent()
-        result = agent.execute_tool(
-            "inspect_graph",
-            {"view": "details", "targets": ["low_pass_filter"]},
-        )
-        errors = result.get("errors", [])
-        error_msg = " ".join(str(e.get("message", "")) for e in errors).lower()
-        self.assertIn("search_blocks", error_msg,
-            "Must hint search_blocks when a catalog block type is queried")
-
-    def test_inspect_graph_existing_block_does_not_trigger_search_hint(self) -> None:
-        """A valid graph target must NOT show the search_blocks hint."""
-        agent = self._load_temp_agent()
-        # samp_rate IS in the graph as a variable block
         result = agent.execute_tool(
             "inspect_graph",
             {"view": "details", "targets": ["samp_rate"]},
         )
         self.assertTrue(result["ok"], result)
-        # No errors at all for a valid target
         errors = result.get("errors", [])
         self.assertFalse(errors, "Valid target must not produce errors")
 
-    # ------------------------------------------------------------------ #
-    # Fix 3: Duplicate block name recovery hint                             #
-    # ------------------------------------------------------------------ #
-
-    def test_add_existing_block_error_hints_inspect_graph(self) -> None:
-        """Failure mode 2: model tries to add a block that already exists.
-
-        When change_graph.add_blocks is called with an instance_name that is
-        already present in the graph (state blindness scenario), the
-        duplicate_block_name error must tell the model to call inspect_graph.
-        """
+    def test_add_existing_block_error_code(self) -> None:
+        """Duplicate add must result in duplicate_block_name error code."""
         agent = self._load_temp_agent()
-        # 'samp_rate' is already in the graph as a variable block
         result = agent.execute_tool(
             "change_graph",
             {
@@ -147,18 +71,11 @@ class ReliabilityHardeningTests(unittest.TestCase):
                 ]
             },
         )
-        self.assertFalse(result.get("committed", True),
-            "Duplicate add must not commit")
+        self.assertFalse(result.get("committed", True), "Duplicate add must not commit")
         errors = result.get("errors", [])
         self.assertTrue(errors, "Must return errors for duplicate block name")
-        error_msg = " ".join(str(e.get("message", "")) for e in errors).lower()
         codes = " ".join(e.get("code", "") for e in errors).lower()
-        self.assertIn("duplicate_block_name", codes,
-            "Error code must be duplicate_block_name")
-        self.assertIn("inspect_graph", error_msg,
-            "Error must suggest calling inspect_graph to verify current state")
-        self.assertIn("previous turn", error_msg,
-            "Error must mention 'previous turn' to address state blindness")
+        self.assertIn("duplicate_block_name", codes, "Error code must be duplicate_block_name")
 
     def test_add_block_duplicate_in_same_batch_is_rejected(self) -> None:
         """Adding the same instance_name twice in one batch must reject both."""

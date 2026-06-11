@@ -188,15 +188,6 @@ def dispatch_flat_change_graph_batch(
     )
     if ok:
         agent.session._last_failed_ops_hash = None
-        validation_ok = bool(result.get("validation_ok")) if isinstance(result, dict) else False
-        if validation_ok:
-            payload["system_directive"] = (
-                "Graph updated and validated successfully."
-            )
-        else:
-            payload["system_directive"] = (
-                "Graph saved but validation failed — review errors and continue."
-            )
     if isinstance(result, dict):
         if result.get("forced_validation_failure"):
             payload["forced_validation_failure"] = result.get("forced_validation_failure")
@@ -216,6 +207,12 @@ def dispatch_flat_change_graph_batch(
                 and agent.session.state_revision == before_revision
                 and agent.session.is_dirty == before_dirty
             )
+            payload["committed"] = False
+            payload["message"] = (
+                "No changes were committed."
+                if graph_unchanged
+                else "Partial changes applied but final verification failed."
+            )
             payload["graph_unchanged"] = graph_unchanged
             payload["rollback"] = "complete" if graph_unchanged else "unknown"
             if result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED:
@@ -234,10 +231,7 @@ def dispatch_flat_change_graph_batch(
             # ── Phase 3: State-aware repeat-payload escalator ──────────────
             current_ops_hash = json.dumps(normalized_operations, sort_keys=True)
             if agent.session._last_failed_ops_hash == current_ops_hash:
-                escalation_warning = (
-                    "This payload was already submitted and rejected. "
-                    "Review the validation errors and try a different approach."
-                )
+                escalation_warning = "This payload was already submitted and rejected."
                 payload.setdefault("warnings", []).append(escalation_warning)
             agent.session._last_failed_ops_hash = current_ops_hash
 
@@ -430,73 +424,25 @@ def _aggregate_hints(
                 if match:
                     src_dt = match.group(1)
                     dst_dt = match.group(2)
-                    src_name = match.group(3)
-                    src_port_val = match.group(4)
-                    dst_name = match.group(5)
-                    dst_port_val = match.group(6)
+                    hints.append(f"Stream dtype mismatch: {src_dt} -> {dst_dt}.")
                 else:
                     match = re.search(
                         r"Cannot connect ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\) to ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\)",
                         msg
                     )
                     if match:
-                        src_name = match.group(1)
-                        src_port_val = match.group(2)
                         src_dt = match.group(3)
-                        dst_name = match.group(4)
-                        dst_port_val = match.group(5)
                         dst_dt = match.group(6)
+                        hints.append(f"Stream dtype mismatch: {src_dt} -> {dst_dt}.")
                     else:
-                        # Also try matching existing connection invalid pattern
                         match = re.search(
                             r"Existing connection became invalid: ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\) -> ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\)",
                             msg
                         )
                         if match:
-                            src_name = match.group(1)
-                            src_port_val = match.group(2)
                             src_dt = match.group(3)
-                            dst_name = match.group(4)
-                            dst_port_val = match.group(5)
                             dst_dt = match.group(6)
-                if match:
-                    try:
-                        src_idx = int(src_port_val)
-                    except ValueError:
-                        src_idx = src_port_val
-
-                    try:
-                        dst_idx = int(dst_port_val)
-                    except ValueError:
-                        dst_idx = dst_port_val
-
-                    added_blocks = {
-                        str(op.get("instance_name")): op
-                        for op in operations
-                        if isinstance(op, dict)
-                        and op.get("op_type") in {"add_block", "insert_block_on_connection"}
-                        and isinstance(op.get("instance_name"), str)
-                    }
-
-                    preflight_hint = None
-                    if dst_name in added_blocks:
-                        preflight_hint = _dtype_param_hint_for_added_block(
-                            added_blocks[dst_name],
-                            port_direction="inputs",
-                            port_id=dst_idx,
-                            desired_dtype=src_dt,
-                            mismatch=f"{src_dt} -> {dst_dt}",
-                        )
-                    if not preflight_hint and src_name in added_blocks:
-                        preflight_hint = _dtype_param_hint_for_added_block(
-                            added_blocks[src_name],
-                            port_direction="outputs",
-                            port_id=src_idx,
-                            desired_dtype=dst_dt,
-                            mismatch=f"{src_dt} -> {dst_dt}",
-                        )
-                    if preflight_hint:
-                        hints.append(preflight_hint)
+                            hints.append(f"Stream dtype mismatch: {src_dt} -> {dst_dt}.")
 
     var_hint = _undefined_variable_hint(operations, errors_payload)
     if var_hint:
@@ -519,12 +465,6 @@ def _bypass_hint(
     validation_result: Any,
     errors_payload: Any,
 ) -> str | None:
-    """Check if model disabled a block — fire on preflight or native errors.
-
-    Only suggests bypass for stream-transform (inline DSP) blocks.
-    For sinks, sources, variables, and blocks flagged with disable_bypass,
-    emits a topology-aware terminal hint instead.
-    """
     disabled_ops = [
         op for op in operations
         if isinstance(op, dict)
@@ -575,38 +515,15 @@ def _bypass_hint(
             all_are_stream_transforms = False
 
     if all_are_stream_transforms:
-        return (
-            "Block disabled — port connections severed. "
-            "Use bypass state to deactivate without disconnecting."
-        )
+        return "Block disabled — port connections severed."
 
-    return (
-        "Terminal/control block cannot be bypassed. "
-        "Disable and remove connections separately."
-    )
+    return "Terminal/control block cannot be bypassed."
 
 
 def _ofdm_carrier_hint(
     operations: list[dict[str, Any]],
     errors_payload: Any,
 ) -> str | None:
-    """Return a tuple-of-lists hint for OFDM carrier parameter updates."""
-    if not isinstance(errors_payload, list):
-        return None
-    has_carrier_update = any(
-        isinstance(op, dict)
-        and op.get("op_type") == "update_params"
-        and any(
-            key in ("occupied_carriers", "pilot_carriers")
-            for key in (op.get("params") or {}).keys()
-        )
-        for op in operations
-    )
-    if has_carrier_update:
-        return (
-            "OFDM carrier parameters require a tuple of lists with trailing comma — "
-            "e.g. (list(range(-24, 0)) + list(range(1, 25)),)"
-        )
     return None
 
 
@@ -615,7 +532,6 @@ def _port_discovery_hint(
     operations: list[dict[str, Any]],
     errors_payload: Any,
 ) -> str | None:
-    """Return a hint when a connection fails due to port or catalog block issues."""
     if not isinstance(errors_payload, list):
         return None
     has_port_error = any(
@@ -628,14 +544,10 @@ def _port_discovery_hint(
     )
     if not has_port_error:
         return None
-    return (
-        "Connection failed — message ports require string identifiers. "
-        "Check port names via query_knowledge."
-    )
+    return "Connection failed — message ports require string identifiers."
 
 
 def _port_occupancy_hint(errors_payload: Any) -> str | None:
-    """Check for port occupancy errors in preflight."""
     if not isinstance(errors_payload, list):
         return None
     for row in errors_payload:
@@ -643,10 +555,7 @@ def _port_occupancy_hint(errors_payload: Any) -> str | None:
             continue
         msg = str(row.get("message", "")).lower()
         if "port is already connected" in msg or "already in use" in msg:
-            return (
-                "Input port already occupied — free it with remove_connections "
-                "before connecting."
-            )
+            return "Input port already occupied."
     return None
 
 
@@ -654,7 +563,6 @@ def _undefined_variable_hint(
     operations: list[dict[str, Any]],
     errors_payload: Any,
 ) -> str | None:
-    """Return a hint when a variable is created and referenced in the same batch."""
     if not isinstance(errors_payload, list):
         return None
     has_undefined = any(
@@ -671,18 +579,12 @@ def _undefined_variable_hint(
         for op in operations
     )
     if has_added:
-        return (
-            "Variable referenced before creation in same batch."
-        )
+        return "Variable referenced before creation in same batch."
     return None
 
 
 def _flat_change_graph_hint() -> str:
-    return (
-        "change_graph accepts flat fields: add_blocks[].block_id, "
-        "add_blocks[].instance_name, add_blocks[].params, update_params[].params, "
-        "add_connections[].src/dst, remove_connections[]."
-    )
+    return ""
 
 
 def _repair_hint_for_validation_failure(
@@ -696,213 +598,21 @@ def _repair_hint_for_validation_failure(
     native_errors = _native_validation_error_text(validation_result)
     if not native_errors:
         return None
-    # Check for invalid parameter expressions in native errors
     param_pattern = re.compile(r"Param - [^(]+\(([^)]+)\):\s*Expression[\s\S]*?is\s+invalid", re.IGNORECASE)
     for error in native_errors:
         param_match = param_pattern.search(error)
         if param_match:
             param_name = param_match.group(1)
-            return (
-                f"Invalid or missing value for parameter '{param_name}'."
-            )
+            return f"Invalid or missing value for parameter '{param_name}'."
 
     dtype_pair = _first_dtype_mismatch(native_errors)
     if dtype_pair is None:
         if _is_port_occupancy_error(native_errors):
-            return (
-                "No change committed; graph unchanged. "
-                "Input port already occupied — free it with remove_connections "
-                "before connecting."
-            )
-        return (
-            "No change committed; graph unchanged. Native GNU validation error: "
-            f"{native_errors[0]}"
-        )
+            return "Input port already occupied."
+        return f"Native GNU validation error: {native_errors[0]}"
+
     source_dtype, destination_dtype = dtype_pair
-    param_hint = _configurable_dtype_param_hint(
-        operations,
-        native_errors=native_errors,
-        source_dtype=source_dtype,
-        destination_dtype=destination_dtype,
-    )
-    if param_hint:
-        return param_hint
-    return (
-        "Stream dtype mismatch: "
-        f"{source_dtype} -> {destination_dtype}."
-    )
-
-
-def _native_validation_error_text(validation_result: dict[str, Any]) -> list[str]:
-    native = validation_result.get("native")
-    if not isinstance(native, dict):
-        return []
-    errors = native.get("errors")
-    if not isinstance(errors, list):
-        return []
-    return [" ".join(str(error).split()) for error in errors if str(error).strip()]
-
-
-def _first_dtype_mismatch(errors: list[str]) -> tuple[str, str] | None:
-    pattern = re.compile(
-        r'Source IO type "([^"]+)" does not match sink IO type "([^"]+)"'
-    )
-    for error in errors:
-        match = pattern.search(error)
-        if match:
-            return match.group(1), match.group(2)
-    return None
-
-
-def _is_port_occupancy_error(native_errors: list[str]) -> bool:
-    """Return whether the model hit a port occupancy / multi-connection error."""
-    return any(
-        "port is already connected" in error.lower()
-        for error in native_errors
-    )
-
-
-def _configurable_dtype_param_hint(
-    operations: list[dict[str, Any]],
-    *,
-    native_errors: list[str],
-    source_dtype: str,
-    destination_dtype: str,
-) -> str | None:
-    added_blocks = {
-        str(op.get("instance_name")): op
-        for op in operations
-        if isinstance(op, dict)
-        and op.get("op_type") in {"add_block", "insert_block_on_connection"}
-        and isinstance(op.get("instance_name"), str)
-    }
-    if not added_blocks:
-        return None
-
-    block_pat = re.compile(
-        r"Block - ([a-zA-Z0-9_]+) - [^(]+\([^)]+\)\s+(Source|Sink) - ([a-zA-Z0-9_]+)\((\d+)\)"
-    )
-    type_pat = re.compile(
-        r"Source IO type \"([^\"]+)\" does not match sink IO type \"([^\"]+)\""
-    )
-
-    for error in native_errors:
-        block_matches = block_pat.findall(error)
-        type_match = type_pat.search(error)
-        if len(block_matches) == 2 and type_match:
-            src_name, src_dir, src_port, src_idx_str = block_matches[0]
-            dst_name, dst_dir, dst_port, dst_idx_str = block_matches[1]
-            src_idx = int(src_idx_str)
-            dst_idx = int(dst_idx_str)
-            src_dt = type_match.group(1)
-            dst_dt = type_match.group(2)
-
-            if dst_name in added_blocks:
-                hint = _dtype_param_hint_for_added_block(
-                    added_blocks[dst_name],
-                    port_direction="inputs",
-                    port_id=dst_idx,
-                    desired_dtype=src_dt,
-                    mismatch=f"{src_dt} -> {dst_dt}",
-                )
-                if hint:
-                    return hint
-
-            if src_name in added_blocks:
-                hint = _dtype_param_hint_for_added_block(
-                    added_blocks[src_name],
-                    port_direction="outputs",
-                    port_id=src_idx,
-                    desired_dtype=dst_dt,
-                    mismatch=f"{src_dt} -> {dst_dt}",
-                )
-                if hint:
-                    return hint
-
-    # Fallback to the original logic
-    for operation in operations:
-        if not isinstance(operation, dict) or operation.get("op_type") != "add_connection":
-            continue
-        dst_block = operation.get("dst_block")
-        dst_port = operation.get("dst_port")
-        if isinstance(dst_block, str) and dst_block in added_blocks:
-            hint = _dtype_param_hint_for_added_block(
-                added_blocks[dst_block],
-                port_direction="inputs",
-                port_id=dst_port,
-                desired_dtype=source_dtype,
-                mismatch=f"{source_dtype} -> {destination_dtype}",
-            )
-            if hint:
-                return hint
-        src_block = operation.get("src_block")
-        src_port = operation.get("src_port")
-        if isinstance(src_block, str) and src_block in added_blocks:
-            hint = _dtype_param_hint_for_added_block(
-                added_blocks[src_block],
-                port_direction="outputs",
-                port_id=src_port,
-                desired_dtype=destination_dtype,
-                mismatch=f"{source_dtype} -> {destination_dtype}",
-            )
-            if hint:
-                return hint
-    return None
-
-
-def _dtype_param_hint_for_added_block(
-    operation: dict[str, Any],
-    *,
-    port_direction: str,
-    port_id: Any,
-    desired_dtype: str,
-    mismatch: str,
-) -> str | None:
-    block_type = operation.get("block_type")
-    instance_name = operation.get("instance_name")
-    if not isinstance(block_type, str) or not isinstance(instance_name, str):
-        return None
-    catalog = describe_block(block_type)
-    if catalog.get("ok") is False:
-        return None
-    port = _catalog_port(catalog.get(port_direction), port_id)
-    dtype = port.get("dtype") if isinstance(port, dict) else None
-    param_id = _template_param_id(dtype)
-    if param_id is None:
-        return None
-    param = _catalog_param(catalog.get("parameters"), param_id)
-    options = param.get("options") if isinstance(param, dict) else None
-
-    suggested_val = None
-    if isinstance(options, list):
-        if desired_dtype in {str(option) for option in options}:
-            suggested_val = desired_dtype
-        else:
-            attr = _template_param_attr(dtype)
-            option_attributes = param.get("option_attributes") if isinstance(param, dict) else None
-            if attr and isinstance(option_attributes, dict):
-                attrs = option_attributes.get(attr)
-                if isinstance(attrs, list):
-                    matching = [options[i] for i, val in enumerate(attrs) if str(val) == desired_dtype and i < len(options)]
-                    if matching:
-                        suggested_val = matching[0]
-
-    if suggested_val is None:
-        return None
-
-    existing_params = operation.get("parameters") or operation.get("params")
-    if isinstance(existing_params, dict) and str(existing_params.get(param_id)) == suggested_val:
-        return None
-    op_type = operation.get("op_type")
-    if op_type == "insert_block_on_connection":
-        return (
-            f"Dtype mismatch: {mismatch}. "
-            f"Suggested parameter: {param_id}=\"{suggested_val}\"."
-        )
-    return (
-        f"Dtype mismatch: {mismatch}. "
-        f"Suggested parameter: {param_id}=\"{suggested_val}\"."
-    )
+    return f"Stream dtype mismatch: {source_dtype} -> {destination_dtype}."
 
 
 def _catalog_port(ports: Any, port_id: Any) -> dict[str, Any]:
@@ -1280,3 +990,33 @@ def _render_operation_connection(operation: dict[str, Any]) -> str | None:
     if src_block is None or src_port is None or dst_block is None or dst_port is None:
         return None
     return render_connection_id(str(src_block), src_port, str(dst_block), dst_port)
+
+
+def _native_validation_error_text(validation_result: dict[str, Any]) -> list[str]:
+    native = validation_result.get("native")
+    if not isinstance(native, dict):
+        return []
+    errors = native.get("errors")
+    if not isinstance(errors, list):
+        return []
+    return [" ".join(str(error).split()) for error in errors if str(error).strip()]
+
+
+def _first_dtype_mismatch(errors: list[str]) -> tuple[str, str] | None:
+    pattern = re.compile(
+        r'Source IO type "([^"]+)" does not match sink IO type "([^"]+)"'
+    )
+    for error in errors:
+        match = pattern.search(error)
+        if match:
+            return match.group(1), match.group(2)
+    return None
+
+
+def _is_port_occupancy_error(native_errors: list[str]) -> bool:
+    """Return whether the model hit a port occupancy / multi-connection error."""
+    return any(
+        "port is already connected" in error.lower()
+        for error in native_errors
+    )
+

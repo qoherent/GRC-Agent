@@ -2051,12 +2051,6 @@ class GrcAgent:
         if normalized_block_id != block_id:
             result["requested_block_id"] = block_id
             result["resolved_block_id"] = normalized_block_id
-        if result.get("ok") is False and str(block_id).startswith(
-            ("catalog:block:", "session:block:")
-        ):
-            result["hint"] = (
-                "describe_block expects a GNU block ID."
-            )
         return result
 
     def _semantic_search_grc(
@@ -2069,10 +2063,6 @@ class GrcAgent:
             payload = semantic_search_grc(query, scope=scope)
         else:
             payload = semantic_search_grc(query, scope=scope, k=k)
-        if payload.get("ok"):
-            payload["hint"] = (
-                    "Read-only candidate results."
-            )
         return self._payload_result("semantic_search_grc", payload)
 
     def _suggest_compatible_insertions(self, connection_id: str, k: int = 5) -> ToolResult:
@@ -2451,15 +2441,7 @@ class GrcAgent:
         )
         result = self._payload_result("propose_edit", payload)
         if result.get("ok") and result.get("error_count", 0) == 0:
-            result["hint"] = (
-                "Preview only — graph was not modified."
-            )
-        elif result.get("ok") is False:
-            result["hint"] = (
-                "Preview failed. Explain the preflight errors to the user. "
-                "If the user asked only for a preview, stop after explaining. "
-                + TransactionNormalizer.transaction_hint()
-            )
+            result["hint"] = "Preview only — graph was not modified."
         return result
 
     def _autosave_after_validated_mutation(self, *, allow_invalid: bool = False) -> dict[str, Any]:
@@ -2548,28 +2530,7 @@ class GrcAgent:
                     f"{autosave.get('message', 'autosave failed')}"
                 )
         else:
-            errors = result.get("errors")
-            if isinstance(errors, list) and any(
-                isinstance(error, dict)
-                and error.get("code") == "block_still_referenced"
-                for error in errors
-            ):
-                dep_hint = self._transaction_normalizer.build_dependency_repair_hint(result)
-                result["hint"] = (
-                    "This block is still referenced by other blocks. "
-                    "To remove it, first update every dependent parameter to use a literal value, then remove the block. "
-                    + (dep_hint + " " if dep_hint else "")
-                    + TransactionNormalizer.transaction_hint()
-                )
-            elif isinstance(errors, list) and any(
-                isinstance(error, dict)
-                and error.get("code") == "connected_block"
-                for error in errors
-            ):
-                conn_hint = self._transaction_normalizer.build_connection_hints_for_remove_block(result)
-                result["hint"] = (conn_hint + " " if conn_hint else "") + TransactionNormalizer.transaction_hint()
-            else:
-                result["hint"] = TransactionNormalizer.transaction_hint()
+            result["hint"] = None
         return result
 
     def _validate_graph(self) -> ToolResult:

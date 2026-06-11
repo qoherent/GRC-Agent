@@ -244,7 +244,6 @@ def _details(
             continue
         if match.status == "not_found" or match.block is None:
             message = match.message or f"Target {requested_target!r} did not match any active block instance or connection in the graph."
-            message += " Use query_knowledge(catalog) to find available block IDs."
             errors.append(
                 {
                     "code": "target_not_found",
@@ -300,7 +299,7 @@ def _details(
         ),
         ambiguity={
             "has_ambiguity": has_ambiguity,
-            "reason": "Target matched multiple graph objects. Re-run details with an exact candidate name or uid."
+            "reason": "Target matched multiple graph objects."
             if has_ambiguity
             else None,
         },

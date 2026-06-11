@@ -307,74 +307,7 @@ class TransactionNormalizer:
     # Dependency / connection helpers
     # ------------------------------------------------------------------- #
 
-    def build_connection_hints_for_remove_block(self, result: dict[str, Any]) -> str:
-        if self._session is None or self._session.flowgraph is None:
-            return ""
-        normalized_ops = result.get("normalized_operations")
-        if not isinstance(normalized_ops, list):
-            return ""
-        parts = []
-        for op in normalized_ops:
-            if not isinstance(op, dict) or op.get("op_type") != "remove_block":
-                continue
-            instance_name = op.get("instance_name")
-            if not isinstance(instance_name, str):
-                continue
-            conns = [c for c in self._session.flowgraph.connections if c.src_block == instance_name or c.dst_block == instance_name]
-            if not conns:
-                continue
-            def _port_json(p: int | str) -> str:
-                return f'"{p}"' if isinstance(p, str) else str(p)
-            remove_conn_ops = ", ".join(
-                f'{{"op_type": "remove_connection", "src_block": "{c.src_block}", '
-                f'"src_port": {_port_json(c.src_port)}, "dst_block": "{c.dst_block}", "dst_port": {_port_json(c.dst_port)}}}'
-                for c in conns
-            )
-            parts.append(
-                f"`{instance_name}` is still connected. "
-                f"To disconnect and remove it, use this ordered transaction: "
-                f"[{remove_conn_ops}, "
-                f'{{"op_type": "remove_block", "instance_name": "{instance_name}"}}]'
-            )
-        return " ".join(parts)
-
-    def build_dependency_repair_hint(self, result: dict[str, Any]) -> str:
-        if self._session is None or self._session.flowgraph is None:
-            return ""
-        normalized_ops = result.get("normalized_operations")
-        if not isinstance(normalized_ops, list):
-            return ""
-        remove_ops = [op for op in normalized_ops if isinstance(op, dict) and op.get("op_type") == "remove_block"]
-        if not remove_ops:
-            return ""
-        parts: list[str] = []
-        for op in remove_ops:
-            instance_name = op.get("instance_name")
-            if not isinstance(instance_name, str):
-                continue
-            dependents = self._find_param_dependents(instance_name)
-            if dependents:
-                dep_str = ", ".join(f"`{dep['instance_name']}.{dep['param_key']}`" for dep in dependents)
-                parts.append(
-                    f"`{instance_name}` is referenced by: {dep_str}. "
-                    f"Update those parameters to literal values before removing `{instance_name}`."
-                )
-        return " ".join(parts)
-
-    def _find_param_dependents(self, instance_name: str) -> list[dict[str, str]]:
-        if self._session is None or self._session.flowgraph is None:
-            return []
-        dependents: list[dict[str, str]] = []
-        for block in self._session.flowgraph.blocks:
-            if block.instance_name == instance_name:
-                continue
-            params = block.params.get("parameters")
-            if not isinstance(params, dict):
-                continue
-            for key, value in params.items():
-                if isinstance(value, str) and instance_name in value:
-                    dependents.append({"instance_name": block.instance_name, "param_key": key, "current_value": value})
-        return dependents
+    # (Dead dependency/connection hint helpers removed)
 
     # ------------------------------------------------------------------- #
     # Symbol / instance-name helpers
@@ -406,13 +339,7 @@ class TransactionNormalizer:
 
     @staticmethod
     def transaction_hint() -> str:
-        return (
-            "Use the flat change_graph fields only. "
-            "For parameter edits use update_params with instance_name and params. "
-            "For block adds use add_blocks with block_id from search_blocks, instance_name, and params keyed by catalog param_id. "
-            "For insertion use remove_connections + add_blocks + add_connections in a single batch. "
-            "For connections use add_connections[].src/dst and remove_connections[] exact connection_id values."
-        )
+        return ""
 
     @staticmethod
     def looks_like_transaction_payload(payload: Any) -> bool:

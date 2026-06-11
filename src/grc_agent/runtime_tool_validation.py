@@ -70,11 +70,7 @@ def validate_runtime_tool_call(
 
     return {
         "error_type": ErrorCode.TOOL_CALL_INVALID,
-        "message": (
-            f"Rejected invalid tool call for {tool_name}: {issues[0]['message']} "
-            "No tool ran. Retry the same tool only if you can fill the invalid "
-            "or missing fields from the user request or prior graph output; otherwise ask the user."
-        ),
+        "message": f"Rejected invalid tool call for {tool_name}: {issues[0]['message']} No tool ran.",
         "validation_errors": issues,
         "schema_repair_instruction": _schema_repair_instruction(tool_name, issues),
     }
@@ -94,28 +90,12 @@ def _schema_repair_instruction(
         for issue in issues
         if issue.get("code") != "missing_required" and isinstance(issue.get("field"), str)
     ]
-    instruction = {
+    return {
         "tool": tool_name,
         "no_tool_ran": True,
         "missing_fields": missing,
         "invalid_fields": invalid,
-        "retry_policy": (
-            "Retry this tool once only if the missing or invalid fields are available "
-            "from the user request or prior graph/tool output. Otherwise ask the user "
-            "for the missing information. Do not invent graph identifiers, file paths, "
-            "mutation targets, or mutation values."
-        ),
     }
-    if tool_name == "change_graph":
-        instruction["change_graph_hint"] = (
-            "For existing variables shown by inspect_graph, use "
-            "update_variables=[{'instance_name':'samp_rate','value':'48000'}]. "
-            "To remove variables, use remove_variables=['unused_var']. "
-            "For existing block parameters, use "
-            "update_params=[{'instance_name':'...', 'params': {'param_id':'value'}}]. "
-            "Do not put graph instance names into block_id."
-        )
-    return instruction
 
 
 def _validate_object(

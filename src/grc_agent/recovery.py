@@ -69,7 +69,7 @@ def classify_tool_result_for_recovery(
             allowed_tools=("validate_graph", "save_graph"),
             max_mutation_retries=0,
             prompt=(
-                "Save refused — graph is dirty and needs validation first."
+                "Save refused — graph has unvalidated changes."
             ),
             reason="dirty graph requires validation before save",
         )
@@ -89,8 +89,7 @@ def classify_tool_result_for_recovery(
                 allowed_tools=(*READ_ONLY_INSPECTION_TOOLS, mutation_tool),
                 max_mutation_retries=1,
                 prompt=(
-                    "Previous mutation call was missing required arguments. "
-                    f"Try again with valid arguments."
+                    "Previous mutation call was missing required arguments."
                 ),
                 reason="mutation arguments were incomplete",
             )

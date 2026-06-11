@@ -174,7 +174,6 @@ class PreflightTransactionTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["errors"][0]["op_index"], 1)
         self.assertEqual(payload["errors"][0]["code"], "incompatible_dtype")
-        self.assertIn("Type Converters", payload["errors"][0]["hint"])
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
         self.assertEqual(session.flowgraph.raw_data, original_raw)

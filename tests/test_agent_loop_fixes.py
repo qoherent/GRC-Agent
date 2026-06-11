@@ -269,7 +269,6 @@ class Fix2TemplateSafetyTests(unittest.TestCase):
         body = messages[-1].get_as_text()
         self.assertTrue(body.startswith("<runtime_directive>"))
         self.assertTrue(body.endswith("</runtime_directive>"))
-        self.assertIn("control plane", body)
         self.assertIn("Use change_graph now.", body)
 
     def test_reminder_survives_openai_message_converter(self) -> None:

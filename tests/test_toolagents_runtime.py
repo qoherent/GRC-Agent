@@ -258,7 +258,7 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
             graph_ambiguity_pending=False,
         )
 
-        self.assertIn("current tool evidence", reminder or "")
+        self.assertIn("current tool evidence", (reminder or "").lower())
 
     def test_ambiguous_stream_rewire_clarification_not_forced_into_mutation(self) -> None:
         reminder = _tool_retry_reminder(
