@@ -71,3 +71,13 @@
 
 * **Strict Fail-Fast Persistence:** Maintain a zero-backward-compatibility rule. If legacy database structures or missing payload fields are detected on a resume path, refuse the session load entirely.
 * **Session Refusal:** Drop the sequence context gracefully, transition the application state to a fresh timeline, and alert the user via the status bar to initiate a clean session. Never introduce shims or legacy-to-typed synthesis layers.
+
+> **OS & System Boundaries**
+> * **No Daemon Management:** The application runs in user-space. You are strictly forbidden from writing code that manages OS-level background services, daemons (e.g., `systemd`, `launchd`), or `subprocess.Popen` lifecycle management for external servers like Ollama.
+> * **No Hardware Polling:** Do not introduce hardware telemetry libraries (`psutil`, parsing `nvidia-smi`) to build status dashboards. If a backend is unreachable, handle it via graceful degradation, not by attempting to fix the host OS.
+
+Prevent the agent from changing the application flow without your explicit permission.
+
+> **UI & Flow Constraints**
+> * **Non-Blocking Flow:** Never introduce blocking setup wizards, pre-launch modals, or mandatory configuration screens that interrupt the standard application launch flow, unless explicitly directed.
+> * **Graceful Degradation over Hard Crashes:** If an external dependency (like an LLM backend) is unreachable, the GUI must still launch into a "Degraded Mode" (e.g., chat disabled, visual warning) to allow the user access to settings. Never use `sys.exit()` in a GUI path for a network failure.

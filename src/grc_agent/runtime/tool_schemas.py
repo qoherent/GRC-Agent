@@ -407,7 +407,7 @@ def build_tool_schemas(
     mvp_schemas = [
         _schema(
             "inspect_graph",
-            "Inspect the live, currently active graph. Use this to see existing block instances, connections, and variables. Do NOT use this to discover new block types or parameter names. Give targets for details; omit for overview. Params filters keys.",
+            "Read-only inspection of the active graph. Returns topology, block instances, connections, and parameter values.",
             {
                 "targets": {
                     "type": "array",
@@ -433,7 +433,7 @@ def build_tool_schemas(
         ),
         _schema(
             "query_knowledge",
-            "Search GNU Radio knowledge base. Use domain='catalog' to find block IDs, parameters, and defaults. Use domain='docs' for concepts and troubleshooting.",
+            "Search the GNU Radio catalog for accurate block IDs, port names, and parameter keys.",
             {
                 "query": {
                     "type": "string",
@@ -454,7 +454,7 @@ def build_tool_schemas(
         ),
         _schema(
             "change_graph",
-            "Apply one bounded graph edit batch. Always call inspect_graph before change_graph to verify current instance names and connections. Never assume graph state from history or guess connection/instance names. Inspect first; copy only needed exact IDs (instance_name, param_id, ports, connection_id, block_id). Rejected edits do not commit. Variables are blocks — use add_blocks, update_params, remove_blocks. Omitted lists mean no edits.",
+            "Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction.",
             {
                 "reasoning": {
                     "type": "string",
