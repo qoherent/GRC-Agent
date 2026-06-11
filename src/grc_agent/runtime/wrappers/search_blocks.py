@@ -276,7 +276,28 @@ def search_blocks(
 
     limited = candidates[:limit]
     output_truncated = len(candidates) > len(limited)
-    if not debug:
+    text_lines: list[str] = []
+
+    # ── Tier 1 / Tier 2 detection ──────────────────────────────────────
+    has_exact_hit = any(
+        str(item.get("match_type", "")) in {"exact_block_id", "exact_label"}
+        for item in limited
+    )
+
+    if not debug and not enrich and not has_exact_hit:
+        # Tier 1 — concept search: ultra-compact, no JSON bloat.
+        # Return only block_id + name so the 9B model's attention
+        # heads land directly on the IDs it needs to copy.
+        compact = []
+        for idx, item in enumerate(limited, 1):
+            bid = str(item.get("block_id", ""))
+            name = str(item.get("name", ""))
+            text_lines.append(f"{idx}. ID: {bid} | Name: {name}")
+            compact.append({"block_id": bid, "name": name})
+        limited = compact
+
+    elif not debug:
+        # Tier 2 — exact match or debug: full catalog details.
         for idx, item in enumerate(limited):
             block_id = str(item.get("block_id", ""))
             if idx < _CATALOG_DETAIL_LIMIT:
@@ -299,6 +320,11 @@ def search_blocks(
             }
             for item in limited
         ]
+        # Build text summary for Tier 2 as well
+        for idx, item in enumerate(limited, 1):
+            bid = str(item.get("block_id", ""))
+            name = str(item.get("name", ""))
+            text_lines.append(f"{idx}. ID: {bid} | Name: {name}")
     if cache_key is not None and cacheable:
         agent._search_blocks_cache_put(
             cache_key,
@@ -315,6 +341,11 @@ def search_blocks(
             "ok": True,
             "query": q,
             "results": limited,
+            **(
+                {"results_text": "\n".join(text_lines)}
+                if text_lines
+                else {}
+            ),
             "degraded_retrieval": degraded_retrieval,
             "retrieval_mode": retrieval_mode,
             "output_truncated": output_truncated,
