@@ -37,33 +37,11 @@ from grc_agent.session_roles import (
 
 logger = logging.getLogger(__name__)
 
-_AGENTIC_TOOL_REMINDER = (
-    "Runtime reminder: you need current tool evidence for this answer. "
-    "Do not ask the user for permission to inspect or search. "
-    "Call the relevant available tool now, or answer only if current tool evidence is sufficient. "
-    "For parameter edits, inspect_graph details gives exact param_id values. "
-    "For adding blocks, search_blocks gives exact installed block_id and param_ids."
-)
-_MUTATION_TOOL_REMINDER = (
-    "Runtime reminder: the user asked to change the active graph. Use change_graph now. "
-    "For adding a block, use add_blocks. For inserting a block on a wire, use remove_connections "
-    "+ add_blocks + add_connections in the same call. Provide all initial params in the same call."
-)
-_INVALID_CHANGE_GRAPH_REMINDER = (
-    "Runtime reminder: your previous change_graph call had invalid or missing args. "
-    "Retry change_graph. For existing variables, use update_variables. "
-    "For block parameters, use update_params. block_id is the catalog type."
-)
-_MUTATION_NOT_COMMITTED_REMINDER = (
-    "Runtime reminder: the user asked for a graph edit, but no change_graph has succeeded. "
-    "Call change_graph now with add_blocks, remove_connections, add_connections or other edit lists. "
-    "Ensure all block parameters (like type, cutoff_freq, width) are fully specified."
-)
-_WRONG_INSERT_REPAIR_REMINDER = (
-    "Runtime reminder: inserting into an existing wire uses remove_connections "
-    "+ add_blocks + add_connections in the same change_graph call. "
-    "Adding a parallel path or source uses add_blocks + add_connections."
-)
+_AGENTIC_TOOL_REMINDER = "Current tool evidence may be insufficient for this answer."
+_MUTATION_TOOL_REMINDER = "The user requested a graph mutation that has not been executed."
+_INVALID_CHANGE_GRAPH_REMINDER = "The previous change_graph call had invalid or missing arguments."
+_MUTATION_NOT_COMMITTED_REMINDER = "No graph edit has succeeded yet for this request."
+_WRONG_INSERT_REPAIR_REMINDER = "Wire insertion requires remove_connections + add_blocks + add_connections in the same call."
 _TOOL_NEED_PATTERNS = (
     re.compile(
         r"\b(?:need|needs|needed|would need|must|should)\b.{0,80}\b(?:inspect|search|look up|check|query)\b",
@@ -381,7 +359,7 @@ class ToolAgentsLlamaProviderConfig:
         settings.set_value("tool_choice", tool_choice)
         settings.set_value("response_format", response_format)
         settings.add_request_setting("max_tokens", max_tokens or self.max_tokens)
-        settings.add_request_setting("parallel_tool_calls", False)
+        settings.add_request_setting("parallel_tool_calls", True)
         if "openrouter" in (self.base_url or "").lower():
             extra_body = {}
             import os
@@ -650,6 +628,8 @@ class ToolAgentsRunner:
         resolved_model = model or self.provider_config.model
         if max_tool_rounds is None:
             max_tool_rounds = MVP_TOOL_SURFACE.default_max_tool_rounds
+        if hasattr(agent, 'config') and hasattr(agent.config, 'llama') and agent.config.llama.max_tool_rounds:
+            max_tool_rounds = max(max_tool_rounds, agent.config.llama.max_tool_rounds)
 
         pre_compact_chars = _chat_history_chars(agent.chat_history)
         agent.compact_history()
@@ -851,6 +831,7 @@ class ToolAgentsRunner:
                             if isinstance(result, dict):
                                 if result.get("ok") is True and result.get("committed") is True:
                                     change_graph_committed = True
+                                    seen_tool_calls.clear()
                                 error_type = result.get("error_type")
                                 wrong_insert = _is_repairable_insert_in_connection_response(
                                     result

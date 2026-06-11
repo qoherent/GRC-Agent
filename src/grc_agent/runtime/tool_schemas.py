@@ -74,11 +74,7 @@ def build_tool_schemas(
     internal_schemas = [
         _schema(
             "new_grc",
-            "Create a new empty GRC flowgraph session. "
-            "Use this when the user wants to build a new flowgraph from scratch. "
-            "After creating, use apply_edit with add_block, add_connection, update_params to build the graph, "
-            "then validate_graph and save_graph to persist it. "
-            "Only profile='minimal' is supported.",
+            "Create a new empty GRC flowgraph session.",
             {
                 "profile": {
                     "type": "string",
@@ -103,12 +99,7 @@ def build_tool_schemas(
         ),
         _schema(
             "summarize_graph",
-            "Return a bounded summary or overview of the loaded GNU Radio graph. "
-            "Use this when the user asks for a summary or overview, "
-            "or for vague whole-graph questions like what am I looking at, what is generating the signal here, "
-            "give me a quick overview, what variables are in the graph, what blocks are loaded, "
-            "is the graph dirty, show me the current state, or what changed. "
-            "Use it even when a previous tool result already showed the state; do not answer those questions from memory alone.",
+            "Return a summary of the loaded GNU Radio graph: blocks, connections, variables, and current state.",
             {
                 "max_blocks": {
                     "type": "integer",
@@ -118,8 +109,7 @@ def build_tool_schemas(
         ),
         _schema(
             "get_grc_context",
-            "Show the local wiring around one loaded session block or variable. "
-            "Use an exact session instance name when possible; close matches may be suggested on failure.",
+            "Show the local wiring around one loaded session block or variable.",
             {
                 "node_id": {
                     "type": "string",
@@ -138,8 +128,7 @@ def build_tool_schemas(
         ),
         _schema(
             "describe_block",
-            "Return the normalized GNU catalog description for one block id such as `blocks_throttle2` or `qtgui_time_sink_x`. "
-            "If you searched first, use the result's `block_id` field. Use this directly for explicit block-type requests like `Describe the variable block type.` with `block_id=\"variable\"`.",
+            "Return the GNU catalog description for one block ID.",
             {
                 "block_id": {
                     "type": "string",
@@ -150,10 +139,7 @@ def build_tool_schemas(
         ),
         _schema(
             "semantic_search_grc",
-            "Search the local read-only vector index for semantically similar GNU Radio catalog blocks or documentation chunks. "
-            "Use only for read-only discovery or explanation. "
-            "This tool never authorizes graph mutation; edits require graph-local evidence, verified tools, and grcc validation. "
-            "If the index is missing, tell the user to run `grc-agent vector build`.",
+            "Search the vector index for semantically similar GNU Radio catalog blocks or documentation.",
             {
                 "query": {
                     "type": "string",
@@ -174,12 +160,7 @@ def build_tool_schemas(
         ),
         _schema(
             "suggest_compatible_insertions",
-            "Suggest catalog-backed blocks that can be inserted into an existing connection. "
-            "Use this BEFORE insert_block_on_connection when the user asks to add/insert a compatible block into an existing connection or path. "
-            "First inspect the graph (summarize_graph, get_grc_context) to identify the connection_id, "
-            "then call this tool, then use insert_block_on_connection with one suggested candidate. "
-            "Each candidate includes insert_tool_args that can be passed directly to insert_block_on_connection. "
-            "Do NOT call describe_block first for insertion requests; this tool already searches the catalog for compatible candidates.",
+            "Return catalog-backed block candidates compatible with an existing connection.",
             {
                 "connection_id": {
                     "type": "string",
@@ -194,11 +175,7 @@ def build_tool_schemas(
         ),
         _schema(
             "insert_block_on_connection",
-            "Thin wrapper around `apply_edit` with `op_type=insert_block_on_connection`. "
-            "Use this to insert one catalog block into an existing stream connection. "
-            "Does not support message connections or multi-port inserted blocks. "
-            "You may copy insert_tool_args from suggest_compatible_insertions directly into this tool. "
-            "This tool builds a transaction and delegates to `apply_edit`; mutation, validation, rollback, and errors are identical.",
+            "Insert one catalog block into an existing stream connection.",
             {
                 "connection_id": {
                     "type": "string",
@@ -221,12 +198,7 @@ def build_tool_schemas(
         ),
         _schema(
             "auto_insert_block",
-            "Autonomously search, score, try, and commit one compatible block insertion into a stream connection. "
-            "Use this for natural-language requests like 'add a filter' or 'insert a head block' "
-            "when the user does not provide exact connection_id, block_type, or params. "
-            "The tool performs bounded candidate search internally and commits only the first candidate that passes grcc validation. "
-            "If no candidate validates, it returns the attempted candidates with failure reasons. "
-            "Never mutates the live graph unless grcc passes.",
+            "Search, score, and commit one compatible block insertion into a stream connection.",
             {
                 "goal": {
                     "type": "string",
@@ -249,10 +221,7 @@ def build_tool_schemas(
         ),
         _schema(
             "remove_connection",
-            "Remove one existing connection by exact connection_id through the verified edit pipeline. "
-            "Use connection_id when available. Endpoint fields are accepted only so the runtime can resolve "
-            "one exact existing connection_id or ask for clarification; endpoint fields are never a separate "
-            "mutation path.",
+            "Remove one existing connection by connection_id.",
             {
                 "connection_id": {
                     "type": "string",
@@ -279,11 +248,7 @@ def build_tool_schemas(
         ),
         _schema(
             "rewire_connection",
-            "Atomically replace one existing connection with one new connection through the verified edit pipeline. "
-            "The old connection may be given as old_connection_id or endpoint hints; endpoint hints are used only "
-            "to resolve one exact old connection_id or ask for clarification. New endpoint hints may be partial only "
-            "when they resolve to one executable candidate or a bounded clarification choice; never guess placement. "
-            "This wrapper internally applies one ordered remove_connection + add_connection transaction and never commits a partial disconnect.",
+            "Atomically replace one existing connection with a new connection.",
             {
                 "old_connection_id": {
                     "type": "string",
@@ -326,12 +291,7 @@ def build_tool_schemas(
         ),
         _schema(
             "apply_edit",
-            "Apply a supported transaction to the live graph. Use this for normal edit requests. "
-            "Supported `op_type`: `update_params`, `update_states`, `add_connection`, `remove_connection`, `remove_block`, `add_block`, `insert_block_on_connection`. "
-            "For inserting a block into an existing connection, use `insert_block_on_connection` instead of separate add_block/remove_connection/add_connection operations. "
-            "For `add_block`, use `block_type` from the GNU catalog (e.g., `blocks_throttle2`, `variable`). "
-            "Parameters not provided will be filled with catalog defaults. "
-            'Example: `{"transaction": {"op_type": "update_params", "instance_name": "samp_rate", "params": {"value": "48000"}}}`.',
+            "Apply a supported transaction to the live graph.",
             {
                 "transaction": {
                     "type": ["object", "array"],
@@ -342,11 +302,7 @@ def build_tool_schemas(
         ),
         _schema(
             "propose_edit",
-            "Preview whether a supported transaction would succeed. This does not modify the graph. "
-            "Use it only for explicit preview / dry-run / what-if requests. "
-            "Supported `op_type`: `update_params`, `update_states`, `add_connection`, `remove_connection`, `remove_block`, `add_block`, `insert_block_on_connection`. "
-            "For inserting a block into an existing connection, use `insert_block_on_connection` instead of separate add_block/remove_connection/add_connection operations. "
-            'Example: `{"transaction": {"op_type": "update_params", "instance_name": "samp_rate", "params": {"value": "48000"}}}`.',
+            "Preview whether a supported transaction would succeed without modifying the graph.",
             {
                 "transaction": {
                     "type": ["object", "array"],
@@ -357,20 +313,12 @@ def build_tool_schemas(
         ),
         _schema(
             "validate_graph",
-            "Compile-check and validate the current graph with GNU Radio. "
-            "Use this when the user asks to validate or check the graph, or to verify structural validity and compile success. "
-            "If the same user turn also asked to save or summarize after validation, emit those tool calls after `validate_graph` in the same assistant message; do not stop after `validate_graph`.",
+            "Compile-check and validate the current graph. Returns validation status and any errors.",
             {},
         ),
         _schema(
             "save_graph",
-            "Write the current graph to disk. Use this to save, persist, write out, or write a copy to a path. "
-            "Phrases like `write it out`, `write this out`, `save a copy to path` mean the current loaded graph. "
-            "Manual save requests still require this internal tool even if the graph is already clean. "
-            "Do NOT use this for `export as Python`, `standalone Python script`, or code generation requests; those are unsupported. "
-            "Allowed only after the latest dirty state has validated successfully. "
-            "When the user asks to save a copy, save to a specific path, or save a new graph, pass the explicit `path` parameter. "
-            "Omit `path` only when saving an existing loaded graph directly to its current file location.",
+            "Write the current graph to disk at the specified path.",
             {
                 "path": {
                     "type": "string",
@@ -384,7 +332,7 @@ def build_tool_schemas(
         ),
         _schema(
             "search_blocks",
-            "Internal: search installed GNU Radio catalog for block IDs and params.",
+            "Search installed GNU Radio catalog for block IDs and parameters.",
             {
                 "query": {"type": "string"},
                 "k": {"type": "integer"},
@@ -395,7 +343,7 @@ def build_tool_schemas(
         ),
         _schema(
             "ask_grc_docs",
-            "Internal: answer GNU Radio docs questions with local sources.",
+            "Answer GNU Radio documentation questions with local knowledge.",
             {
                 "question": {"type": "string"},
                 "k": {"type": "integer"},
@@ -508,7 +456,7 @@ def build_tool_schemas(
                         "properties": {
                             "instance_name": {
                                 "type": "string",
-                                "description": "Existing instance_name from inspect_graph.",
+                                "description": "Target block instance name.",
                             },
                             "params": {
                                 "type": "object",
@@ -527,7 +475,7 @@ def build_tool_schemas(
                         "properties": {
                             "instance_name": {
                                 "type": "string",
-                                "description": "Existing instance_name from inspect_graph.",
+                                "description": "Target block instance name.",
                             },
                             "state": {
                                 "type": "string",

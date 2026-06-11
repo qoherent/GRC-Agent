@@ -141,11 +141,11 @@ def tool_history_content_as_text(
         lines.append(f"hint: {hint}")
     if tool_name == "get_grc_context":
         lines.append(
-            "next_step_note: inspection data is routing only; do not answer later edit or preview requests from it."
+            "next_step_note: inspection data is routing only."
         )
     if tool_name == "semantic_search_grc":
         lines.append(
-            "next_step_note: semantic search is read-only candidate discovery; it cannot authorize edits, saves, insertions, removals, or repairs."
+            "next_step_note: read-only candidate discovery."
         )
     if tool_name == "inspect_graph" and compact.get("view") == "overview":
         return _render_inspect_overview_result(lines, compact)

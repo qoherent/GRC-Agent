@@ -1488,7 +1488,7 @@ def _require_block_rules(
         code=code,
         message=lookup.message or f"Could not resolve block type: {block_type}",
         hint=(
-            "Run search_blocks for the block concept and retry with the exact installed GNU block_id."
+            "Unknown block_id — query the catalog for available block IDs."
         )
         if code == "unknown_block_id"
         else None,
@@ -1517,8 +1517,7 @@ def _validate_parameter_updates(
                     code="parameter_not_found",
                     message=f"Unknown parameter for block type {block_type}: {parameter_id}",
                     hint=(
-                        "Inspect the target block details and retry with an exact param_id. "
-                        f"Known param_ids include: {', '.join(sorted(allowed_parameter_ids)[:12])}."
+                        f"Unknown param_id. Available parameters: {', '.join(sorted(allowed_parameter_ids)[:12])}."
                     ),
                 )
             )
@@ -1559,7 +1558,7 @@ def _assert_new_block_name_available(
                 op_type=op_type,
                 field="instance_name",
                 code="duplicate_block_name",
-                message=f"Block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.",
+                message=f"Block already exists: {instance_name}. Block already exists in the graph.",
             )
         ]
 
@@ -1573,7 +1572,7 @@ def _assert_new_block_name_available(
                 op_type=op_type,
                 field="instance_name",
                 code="duplicate_block_name",
-                message=f"Raw block already exists: {instance_name}. If the block was already added in a previous turn, do not add it again. Call inspect_graph to verify the current state.",
+                message=f"Raw block already exists: {instance_name}. Block already exists in the graph.",
             )
         ]
     return []
@@ -1604,8 +1603,7 @@ def _validate_port_index(
             f"(available: {format_port_range(len(ports))})."
         ),
         hint=(
-            "Inspect the source/destination block details and retry with an existing port. "
-            "If adding a new input to a variable-input block, include the required parameter update in the same batch."
+            "Port not found on the specified block."
         ),
     )
 

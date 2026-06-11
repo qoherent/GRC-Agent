@@ -69,9 +69,7 @@ def classify_tool_result_for_recovery(
             allowed_tools=("validate_graph", "save_graph"),
             max_mutation_retries=0,
             prompt=(
-                "The previous save was refused because the dirty graph needs validation. "
-                "If save was explicitly requested, call validate_graph and then save_graph. "
-                "Do not change graph structure or parameters."
+                "Save refused — graph is dirty and needs validation first."
             ),
             reason="dirty graph requires validation before save",
         )
@@ -91,12 +89,8 @@ def classify_tool_result_for_recovery(
                 allowed_tools=(*READ_ONLY_INSPECTION_TOOLS, mutation_tool),
                 max_mutation_retries=1,
                 prompt=(
-                    "The previous mutation tool result was missing required arguments. "
-                    f"Use read-only inspection only if needed, then call {mutation_tool} at most "
-                    "once for the same user intent. Do not call propose_edit because the "
-                    "user requested a real mutation, not a preview. Use exact graph "
-                    "endpoints from tool output. If the corrected action is not clearly "
-                    "valid, explain and stop. Do not persist the graph."
+                    "Previous mutation call was missing required arguments. "
+                    f"Try again with valid arguments."
                 ),
                 reason="mutation arguments were incomplete",
             )

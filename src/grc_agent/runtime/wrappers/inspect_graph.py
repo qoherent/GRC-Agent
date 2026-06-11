@@ -244,7 +244,7 @@ def _details(
             continue
         if match.status == "not_found" or match.block is None:
             message = match.message or f"Target {requested_target!r} did not match any active block instance or connection in the graph."
-            message += f" If you want to search the catalog of available GNU Radio block types (e.g. to discover parameter IDs or block names like '{requested_target}'), you MUST use the 'search_blocks' tool instead."
+            message += " Use query_knowledge(catalog) to find available block IDs."
             errors.append(
                 {
                     "code": "target_not_found",

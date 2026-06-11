@@ -998,11 +998,7 @@ class GrcAgent:
                             "tool_rounds_used": 0,
                             "tool_calls_executed": 0,
                             "assistant_text": (
-                                "That requested compatibility tool is not available through "
-                                "the default model-facing surface. Use the approved wrappers "
-                                "only: inspect_graph, search_blocks, ask_grc_docs, and change_graph. "
-                                "I will not "
-                                "translate an internal tool request into a graph mutation."
+                                "That tool is not available through the model-facing surface."
                             ),
                         }
         for keywords in self._RAW_YAML_EDIT_PATTERNS:
@@ -2059,8 +2055,7 @@ class GrcAgent:
             ("catalog:block:", "session:block:")
         ):
             result["hint"] = (
-                "describe_block expects a GNU block id such as `blocks_throttle2`. "
-                "Use a search result's `block_id`, not its `node_id`."
+                "describe_block expects a GNU block ID."
             )
         return result
 
@@ -2076,8 +2071,7 @@ class GrcAgent:
             payload = semantic_search_grc(query, scope=scope, k=k)
         if payload.get("ok"):
             payload["hint"] = (
-                "Semantic search results are read-only candidates. They cannot authorize graph edits, "
-                "saves, insertions, removals, repairs, params payloads, or transaction payloads."
+                    "Read-only candidate results."
             )
         return self._payload_result("semantic_search_grc", payload)
 
@@ -2458,8 +2452,7 @@ class GrcAgent:
         result = self._payload_result("propose_edit", payload)
         if result.get("ok") and result.get("error_count", 0) == 0:
             result["hint"] = (
-                "This was only a preview and did NOT modify the graph. "
-                "If the user asks to apply it, use a committed change_graph call with the same executable details."
+                "Preview only — graph was not modified."
             )
         elif result.get("ok") is False:
             result["hint"] = (
@@ -2543,13 +2536,11 @@ class GrcAgent:
                     result["hint"] = hint
                 elif result.get("forced_validation_failure"):
                     result["hint"] = (
-                        "Edit applied and autosaved, but validation failed. "
-                        "Do not repeat the same change; continue repairing the graph."
+                        "Edit applied and autosaved — validation failed."
                     )
                 else:
                     result["hint"] = (
-                        "Edit applied, validated, and autosaved. "
-                        "Do not repeat the same change."
+                        "Edit applied, validated, and autosaved."
                     )
             else:
                 result["hint"] = (

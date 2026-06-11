@@ -187,18 +187,15 @@ def dispatch_flat_change_graph_batch(
         }
     )
     if ok:
+        agent.session._last_failed_ops_hash = None
         validation_ok = bool(result.get("validation_ok")) if isinstance(result, dict) else False
         if validation_ok:
             payload["system_directive"] = (
-                "SUCCESS. The graph has been updated and compiles cleanly. "
-                "If all user instructions are complete, STOP calling tools "
-                "and output your final response."
+                "Graph updated and validated successfully."
             )
         else:
             payload["system_directive"] = (
-                "COMMITTED WITH ERRORS. The graph was saved but remains "
-                "invalid. CONTINUE calling tools to execute your next steps "
-                "and resolve the unconnected ports/errors."
+                "Graph saved but validation failed — review errors and continue."
             )
     if isinstance(result, dict):
         if result.get("forced_validation_failure"):
@@ -224,12 +221,7 @@ def dispatch_flat_change_graph_batch(
             if result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED:
                 payload["rejected_phase"] = "native_grc_validation"
                 payload["message"] = (
-                    "Candidate graph rejected by native GRC validation; "
-                    "no changes committed. "
-                    "Note: change_graph validates the entire graph atomically. "
-                    "If multiple independent errors exist, you must fix all "
-                    "of them in a single batch payload, or use force=true "
-                    "for intermediate steps."
+                    "Graph edit rejected by validation. Changes not committed."
                 )
             native_errors = (
                 _native_validation_error_text(validation_result)
@@ -243,11 +235,8 @@ def dispatch_flat_change_graph_batch(
             current_ops_hash = json.dumps(normalized_operations, sort_keys=True)
             if agent.session._last_failed_ops_hash == current_ops_hash:
                 escalation_warning = (
-                    "CRITICAL WARNING: You just submitted this EXACT same "
-                    "payload and it failed. DO NOT repeat your previous values. "
-                    "Read the validation errors carefully, ensure no connections "
-                    "or blocks were accidentally dropped, and try a completely "
-                    "new approach."
+                    "This payload was already submitted and rejected. "
+                    "Review the validation errors and try a different approach."
                 )
                 payload.setdefault("warnings", []).append(escalation_warning)
             agent.session._last_failed_ops_hash = current_ops_hash
@@ -587,15 +576,13 @@ def _bypass_hint(
 
     if all_are_stream_transforms:
         return (
-            "Disabling this block broke its port connections. "
-            "Use update_states with state='bypass' instead of 'disabled' "
-            "to deactivate the block while keeping the graph connected."
+            "Block disabled — port connections severed. "
+            "Use bypass state to deactivate without disconnecting."
         )
 
     return (
-        "This is a terminal/control block that cannot be bypassed. "
-        "To deactivate: remove its connections via remove_connections first, "
-        "then disable; or use force=true for an invalid intermediate state."
+        "Terminal/control block cannot be bypassed. "
+        "Disable and remove connections separately."
     )
 
 
@@ -617,9 +604,8 @@ def _ofdm_carrier_hint(
     )
     if has_carrier_update:
         return (
-            "GNU Radio OFDM carrier parameters strictly require a tuple of lists. "
-            "Ensure your Python expression is wrapped in parentheses with a trailing comma. "
-            'Example: (list(range(-24, 0)) + list(range(1, 25)),)'
+            "OFDM carrier parameters require a tuple of lists with trailing comma — "
+            "e.g. (list(range(-24, 0)) + list(range(1, 25)),)"
         )
     return None
 
@@ -643,9 +629,8 @@ def _port_discovery_hint(
     if not has_port_error:
         return None
     return (
-        "Connection failed. Message ports use string identifiers (e.g. port='pdus'), "
-        "not integers. Use query_knowledge(catalog) to find the exact port names "
-        "for each block before connecting."
+        "Connection failed — message ports require string identifiers. "
+        "Check port names via query_knowledge."
     )
 
 
@@ -659,10 +644,8 @@ def _port_occupancy_hint(errors_payload: Any) -> str | None:
         msg = str(row.get("message", "")).lower()
         if "port is already connected" in msg or "already in use" in msg:
             return (
-                "You attempted to connect to an input port that is already in use. "
-                "GRC input ports accept only one connection. "
-                "Include the exact connection_id in remove_connections to free "
-                "the port before connecting your new block."
+                "Input port already occupied — free it with remove_connections "
+                "before connecting."
             )
     return None
 
@@ -689,16 +672,14 @@ def _undefined_variable_hint(
     )
     if has_added:
         return (
-            "You created a variable and referenced it in the same batch. "
-            "Create the variable in one change_graph call, then reference it "
-            "in a second call."
+            "Variable referenced before creation in same batch."
         )
     return None
 
 
 def _flat_change_graph_hint() -> str:
     return (
-        "Use the flat change_graph fields: add_blocks[].block_id, "
+        "change_graph accepts flat fields: add_blocks[].block_id, "
         "add_blocks[].instance_name, add_blocks[].params, update_params[].params, "
         "add_connections[].src/dst, remove_connections[]."
     )
@@ -722,9 +703,7 @@ def _repair_hint_for_validation_failure(
         if param_match:
             param_name = param_match.group(1)
             return (
-                f"No change committed; graph unchanged. Native GNU validation error: "
-                f"The parameter '{param_name}' has an invalid or missing value. "
-                f"Please specify a valid value for '{param_name}' in your parameter dictionary."
+                f"Invalid or missing value for parameter '{param_name}'."
             )
 
     dtype_pair = _first_dtype_mismatch(native_errors)
@@ -732,14 +711,12 @@ def _repair_hint_for_validation_failure(
         if _is_port_occupancy_error(native_errors):
             return (
                 "No change committed; graph unchanged. "
-                "You attempted to connect to an input port that is already in use. "
-                "GRC input ports accept only one connection. "
-                "Include the exact connection_id in remove_connections to free "
-                "the port before connecting your new block."
+                "Input port already occupied — free it with remove_connections "
+                "before connecting."
             )
         return (
             "No change committed; graph unchanged. Native GNU validation error: "
-            f"{native_errors[0]} Ask the user for the intended valid edit or explicit force."
+            f"{native_errors[0]}"
         )
     source_dtype, destination_dtype = dtype_pair
     param_hint = _configurable_dtype_param_hint(
@@ -751,9 +728,8 @@ def _repair_hint_for_validation_failure(
     if param_hint:
         return param_hint
     return (
-        "Native GNU validation found a stream dtype mismatch "
-        f"({source_dtype} -> {destination_dtype}). Retry with compatible block "
-        "parameters or add a converter block."
+        "Stream dtype mismatch: "
+        f"{source_dtype} -> {destination_dtype}."
     )
 
 
@@ -920,16 +896,12 @@ def _dtype_param_hint_for_added_block(
     op_type = operation.get("op_type")
     if op_type == "insert_block_on_connection":
         return (
-            f"Native GNU validation found a stream dtype mismatch ({mismatch}). "
-            f"The newly inserted `{instance_name}` uses catalog param `{param_id}` "
-            f"for its {port_direction[:-1]} dtype; retry with "
-            f"add_blocks[].params.{param_id}=\"{suggested_val}\"."
+            f"Dtype mismatch: {mismatch}. "
+            f"Suggested parameter: {param_id}=\"{suggested_val}\"."
         )
     return (
-        f"Native GNU validation found a stream dtype mismatch ({mismatch}). "
-        f"The newly added `{instance_name}` uses catalog param `{param_id}` "
-        f"for its {port_direction[:-1]} dtype; retry with "
-        f"add_blocks[].params.{param_id}=\"{suggested_val}\"."
+        f"Dtype mismatch: {mismatch}. "
+        f"Suggested parameter: {param_id}=\"{suggested_val}\"."
     )
 
 
