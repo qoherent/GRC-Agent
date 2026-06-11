@@ -46,6 +46,7 @@ from .setup_panel import (
     PROVIDER_OPENROUTER,
     OllamaSetupSelection,
     OllamaSetupWidget,
+    OllamaStartHintWidget,
     ProviderPickerWidget,
 )
 from .sidebar_widget import SidebarWidget
@@ -403,9 +404,11 @@ class MainWindow(QMainWindow):
         v_splitter.setSizes([450, 150])
 
         # --- Setup flow: shown in the central area on every launch ---
-        # Two pages, controlled by signals:
+        # Three pages, controlled by signals:
         #   0 = ProviderPickerWidget (Ollama / OpenRouter)
-        #   1 = OllamaSetupWidget (status + model dropdown + cancel/confirm)
+        #   1 = OllamaSetupWidget (status + model dropdown + cancel/confirm/next)
+        #   2 = OllamaStartHintWidget (start-the-server copy boxes, only
+        #       shown when the probe shows the server is unreachable)
         self.setup_stack = QStackedWidget(central_widget)
         self.provider_picker = ProviderPickerWidget(self.setup_stack)
         ollama_url = (
@@ -423,8 +426,14 @@ class MainWindow(QMainWindow):
             current_model=ollama_current_model,
             parent=self.setup_stack,
         )
-        self.setup_stack.addWidget(self.provider_picker)   # index 0
-        self.setup_stack.addWidget(self.ollama_setup_widget)  # index 1
+        self.ollama_start_hint_widget = OllamaStartHintWidget(
+            server_url=ollama_url,
+            current_model=ollama_current_model,
+            parent=self.setup_stack,
+        )
+        self.setup_stack.addWidget(self.provider_picker)            # index 0
+        self.setup_stack.addWidget(self.ollama_setup_widget)        # index 1
+        self.setup_stack.addWidget(self.ollama_start_hint_widget)    # index 2
 
         # Top-level stack: setup flow vs. main work area.
         #   0 = setup flow (provider picker / ollama setup)
@@ -439,6 +448,15 @@ class MainWindow(QMainWindow):
         self.provider_picker.cancelled.connect(self._on_setup_provider_cancelled)
         self.ollama_setup_widget.confirmed.connect(self._on_setup_ollama_confirmed)
         self.ollama_setup_widget.cancelled.connect(self._on_setup_ollama_cancelled)
+        self.ollama_setup_widget.next_requested.connect(
+            self._on_setup_ollama_next_requested
+        )
+        self.ollama_start_hint_widget.confirmed.connect(
+            self._on_setup_ollama_confirmed
+        )
+        self.ollama_start_hint_widget.cancelled.connect(
+            self._on_setup_ollama_cancelled
+        )
 
         # Show the setup flow on launch, or skip straight to the
         # main work area when the caller (e.g. a test) asks for it.
@@ -616,8 +634,11 @@ class MainWindow(QMainWindow):
     def _on_setup_provider_chosen(self, backend: str) -> None:
         """User picked a provider in the picker. Show the next step."""
         if backend == PROVIDER_OLLAMA:
-            # Swap to the Ollama setup page within the setup flow.
-            self.setup_stack.setCurrentIndex(1)
+            # Probe the server before routing so we can skip the setup
+            # widget when the daemon is clearly down. The user lands
+            # straight on the start-hint page in that case and never
+            # has to click through a useless dropdown.
+            self._route_ollama_setup_or_hint()
         elif backend == PROVIDER_OPENROUTER:
             # OpenRouter: nothing more to ask, jump straight to main.
             import dataclasses
@@ -654,8 +675,36 @@ class MainWindow(QMainWindow):
         self._finish_setup_and_swap_to_main()
 
     def _on_setup_ollama_cancelled(self) -> None:
-        """User clicked Back on the Ollama setup; return to picker."""
+        """User clicked Back on either Ollama page; return to picker."""
         self.setup_stack.setCurrentIndex(0)
+
+    def _on_setup_ollama_next_requested(self) -> None:
+        """User clicked **Start the server** on the setup page; advance to the start-hint page."""
+        self.setup_stack.setCurrentIndex(2)
+
+    def _route_ollama_setup_or_hint(self) -> None:
+        """Run the probe once and route to the right Ollama setup page.
+
+        The probe is shared between the CLI and the GUI (see
+        :func:`grc_agent.model_manager.probe_ollama_backend`). If the
+        server is reachable we land on the regular setup page so the
+        user can pick a model; if not we skip straight to the
+        start-hint page so the user has the exact commands to run.
+        """
+        from grc_agent.model_manager import probe_ollama_backend
+
+        ollama_url = str(
+            getattr(self.ollama_setup_widget, "_server_url", "http://localhost:11434")
+        )
+        ollama_model = str(
+            getattr(self.ollama_setup_widget, "_current_model", "")
+        )
+        status = probe_ollama_backend(ollama_url, ollama_model)
+        if status.server_reachable:
+            self.setup_stack.setCurrentIndex(1)
+        else:
+            self.ollama_start_hint_widget.update_status(status)
+            self.setup_stack.setCurrentIndex(2)
 
     def _finish_setup_and_swap_to_main(self) -> None:
         """Swap the central area from setup flow to the main work area."""

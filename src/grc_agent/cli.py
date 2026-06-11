@@ -771,92 +771,162 @@ def _colorize(color: str, text: str) -> str:
     return text
 
 
+def _parse_tool_call_arguments(raw: Any) -> dict[str, Any]:
+    """Coerce a ``tool_call_arguments`` field to a ``dict``.
+
+    ToolAgents stores arguments either as a dict (preferred) or as a
+    JSON string. The printer layer previously had this same logic
+    inlined; centralising it keeps the typed access consistent.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _parse_tool_call_result(raw: Any) -> dict[str, Any]:
+    """Coerce a ``tool_call_result`` field to a ``dict``.
+
+    The runtime serialises tool results as JSON strings; the legacy
+    printers used to treat them as dicts directly. Returns an empty
+    dict on parse failure so downstream ``.get(...)`` calls stay
+    safe.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _print_history(agent: GrcAgent, *, verbose: bool = False) -> None:
-    """Render runtime history in a compact CLI-friendly form."""
+    """Render runtime history in a compact CLI-friendly form.
+
+    Iterates the typed :class:`ChatMessage` objects returned by
+    :meth:`agent.chat_history.get_messages` and uses attribute
+    access on the Pydantic models (no dict shim, no legacy
+    ``agent.history`` fallback). The pre-typed-history
+    ``role == "session"`` branch is dropped: ``ChatMessageRole``
+    has no such member.
+    """
+    from ToolAgents.data_models.messages import ChatMessageRole
+
+    messages = agent.chat_history.get_messages()
+
     if verbose:
         print(_colorize(Colors.BOLD + Colors.YELLOW, "\n--- History ---"))
-        for turn in agent.history:
-            if turn.get("role") == "session" and isinstance(turn.get("content"), dict):
-                printable_turn = dict(turn)
-                printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
-                print(printable_turn)
-                continue
-            if turn.get("role") == "assistant" and turn.get("tool_calls"):
-                for tc in turn["tool_calls"]:
-                    fn = tc.get("function") or {}
-                    name = tc.get("name") or fn.get("name") or "?"
-                    args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else fn.get("arguments", {})
-                    print(f"{_colorize(Colors.BOLD + Colors.GREEN, 'Assistant')} called {_colorize(Colors.CYAN, name)}: {json.dumps(args)}")
-                continue
-            if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
-                printable_turn = dict(turn)
-                printable_turn["content"] = json.dumps(turn["content"], sort_keys=True)
-                print(printable_turn)
-                continue
-            print(turn)
+        for message in messages:
+            for tc in message.get_tool_calls():
+                args = _parse_tool_call_arguments(tc.tool_call_arguments)
+                print(
+                    f"{_colorize(Colors.BOLD + Colors.GREEN, 'Assistant')} "
+                    f"called {_colorize(Colors.CYAN, tc.tool_call_name)}: "
+                    f"{json.dumps(args)}"
+                )
+            for tr in message.get_tool_call_results():
+                print(
+                    f"{_colorize(Colors.BOLD + Colors.MAGENTA, 'Tool result')} "
+                    f"for {tr.tool_call_name}: {tr.tool_call_result}"
+                )
+            text = message.get_as_text()
+            if text:
+                print(f"  [{message.role.value}] {text}")
         return
+
     print(_colorize(Colors.BOLD + Colors.YELLOW, "\n--- History ---"))
-    for turn in agent.history:
-        if turn.get("role") == "session":
-            continue
-        if turn.get("role") == "assistant" and turn.get("tool_calls"):
-            for tc in turn["tool_calls"]:
-                fn = tc.get("function") or {}
-                name = tc.get("name") or fn.get("name") or "?"
-                print(f"  {_colorize(Colors.BLUE, 'Tool call:')} {_colorize(Colors.BOLD, name)}")
-            continue
-        if turn.get("role") == "tool" and isinstance(turn.get("content"), dict):
-            content = turn["content"]
-            ok = content.get("ok")
-            name = content.get("tool") or turn.get("name") or "?"
-            status = _colorize(Colors.GREEN, "ok") if ok else _colorize(Colors.RED, "FAILED")
-            msg = content.get("message", "")
-            line = f"  {_colorize(Colors.BOLD, name)}: {status}"
-            if not ok and msg:
-                line += f" — {_colorize(Colors.YELLOW, msg[:80])}"
-            print(line)
-            continue
-        role = turn.get("role", "")
-        text = turn.get("content", "")
-        if role == "user" and isinstance(text, str):
-            print(f"  {_colorize(Colors.BOLD + Colors.CYAN, 'User:')} {text[:100]}")
-        elif role == "assistant" and isinstance(text, str) and text:
-            print(f"  {_colorize(Colors.BOLD + Colors.GREEN, 'Assistant:')} {text[:120]}")
+    for message in messages:
+        if message.role == ChatMessageRole.User:
+            text = message.get_as_text()
+            if text:
+                print(
+                    f"  {_colorize(Colors.BOLD + Colors.CYAN, 'User:')} "
+                    f"{text[:100]}"
+                )
+        elif message.role == ChatMessageRole.Assistant:
+            for tc in message.get_tool_calls():
+                print(
+                    f"  {_colorize(Colors.BLUE, 'Tool call:')} "
+                    f"{_colorize(Colors.BOLD, tc.tool_call_name)}"
+                )
+            text = message.get_as_text()
+            if text:
+                print(
+                    f"  {_colorize(Colors.BOLD + Colors.GREEN, 'Assistant:')} "
+                    f"{text[:120]}"
+                )
+        elif message.role == ChatMessageRole.Tool:
+            for tr in message.get_tool_call_results():
+                name = tr.tool_call_name
+                content = _parse_tool_call_result(tr.tool_call_result)
+                if content:
+                    name = content.get("tool") or name
+                ok = content.get("ok") if content else None
+                msg = content.get("message", "") if content else ""
+                status = (
+                    _colorize(Colors.GREEN, "ok")
+                    if ok is True
+                    else _colorize(Colors.RED, "FAILED")
+                    if ok is False
+                    else "unknown"
+                )
+                line = f"  {_colorize(Colors.BOLD, name)}: {status}"
+                if ok is False and msg:
+                    line += f" — {_colorize(Colors.YELLOW, msg[:80])}"
+                print(line)
 
 
 def _print_turn_operations(agent: GrcAgent, *, start_index: int) -> None:
-    """Render concise operation details for the just-completed turn."""
+    """Render concise operation details for the just-completed turn.
+
+    Iterates :class:`ChatMessage` objects from the typed chat
+    history; tool calls are read off
+    :meth:`ChatMessage.get_tool_calls` and tool results are
+    JSON-decoded from :attr:`ToolCallResultContent.tool_call_result`.
+    """
+    from ToolAgents.data_models.messages import ChatMessageRole
+
+    messages = agent.chat_history.get_messages()
     lines: list[str] = []
     requested: list[str] = []
-    for turn in agent.history[start_index:]:
-        if turn.get("role") == "assistant" and turn.get("tool_calls"):
-            for tool_call in turn["tool_calls"]:
-                fn = tool_call.get("function") or {}
-                name = tool_call.get("name") or fn.get("name") or "?"
-                args = tool_call.get("arguments")
-                if not isinstance(args, dict):
-                    args = fn.get("arguments", {})
-                    if isinstance(args, str):
-                           try:
-                               args = json.loads(args)
-                           except json.JSONDecodeError:
-                               args = {}
-                detail = _tool_detail_from_args(args if isinstance(args, dict) else {})
-                requested.append(f"{_colorize(Colors.BOLD + Colors.CYAN, name)}{detail}")
-        if turn.get("role") != "tool" or not isinstance(turn.get("content"), dict):
-            continue
-        content = turn["content"]
-        name = content.get("tool") or turn.get("name") or "?"
-        ok = content.get("ok")
-        status = _colorize(Colors.GREEN, "ok") if ok is True else _colorize(Colors.RED, "FAILED") if ok is False else "unknown"
-        detail = _tool_detail_from_args(content)
-        validation = _validation_status(content)
-        dirty = _dirty_status(content)
-        line = f"{_colorize(Colors.BOLD, name)}{detail}: {status}"
-        extras = [item for item in (validation, dirty) if item]
-        if extras:
-            line += f" ({', '.join(extras)})"
-        lines.append(line)
+    for message in messages[start_index:]:
+        if message.role == ChatMessageRole.Assistant:
+            for tc in message.get_tool_calls():
+                args = _parse_tool_call_arguments(tc.tool_call_arguments)
+                detail = _tool_detail_from_args(args)
+                requested.append(
+                    f"{_colorize(Colors.BOLD + Colors.CYAN, tc.tool_call_name)}{detail}"
+                )
+        elif message.role == ChatMessageRole.Tool:
+            for tr in message.get_tool_call_results():
+                content = _parse_tool_call_result(tr.tool_call_result)
+                if not content:
+                    continue
+                name = content.get("tool") or tr.tool_call_name
+                ok = content.get("ok")
+                status = (
+                    _colorize(Colors.GREEN, "ok")
+                    if ok is True
+                    else _colorize(Colors.RED, "FAILED")
+                    if ok is False
+                    else "unknown"
+                )
+                detail = _tool_detail_from_args(content)
+                validation = _validation_status(content)
+                dirty = _dirty_status(content)
+                line = f"{_colorize(Colors.BOLD, name)}{detail}: {status}"
+                extras = [item for item in (validation, dirty) if item]
+                if extras:
+                    line += f" ({', '.join(extras)})"
+                lines.append(line)
     if not lines and not requested:
         return
     print(_colorize(Colors.BOLD + Colors.CYAN, "\nOperations:"))
@@ -1072,6 +1142,74 @@ def _run_llama_runtime(
         print("Provider selection cancelled; exiting.", flush=True)
         return 0
 
+    # Detect-only Ollama probe. The user is responsible for running
+    # ``ollama serve`` and ``ollama pull <model_name>`` themselves;
+    # the shared helper (consumed by the GUI's setup widget too)
+    # returns a structured status we render verbatim so both entry
+    # points surface the exact same wording to the user. No daemon
+    # management, no auto-pull, no Popen.
+    #
+    # When the config has no model name (the default — there is no
+    # "configured model" assumption) we transparently fall back to
+    # the first installed tag the server reports, mirroring the GUI
+    # "Models on this machine" list. The user can still override
+    # with ``--model <name>`` on the command line.
+    from grc_agent.model_manager import probe_ollama_backend
+
+    if config.llama.backend == "ollama":
+        effective_model = model or config.llama.model
+        ollama_status = probe_ollama_backend(
+            config.llama.server_url,
+            effective_model,
+        )
+        if not ollama_status.server_reachable:
+            print(_colorize(Colors.BOLD + Colors.RED, "\n--- Ollama ---"))
+            print(ollama_status.hint)
+            print(
+                _colorize(
+                    Colors.YELLOW,
+                    "\nHint: GRC Agent does not start the Ollama daemon "
+                    "and does not download models. Run the commands above "
+                    "in a new terminal, then retry.",
+                )
+            )
+            return 1
+        if effective_model and not ollama_status.model_available:
+            # The user asked for a tag that isn't installed; warn
+            # and fall back to the first installed model instead of
+            # 404-ing on the first chat turn.
+            print(_colorize(Colors.YELLOW, "\n--- Ollama ---"))
+            print(ollama_status.hint)
+            if ollama_status.available_models:
+                print(
+                    _colorize(
+                        Colors.YELLOW,
+                        f"Falling back to the first installed model: "
+                        f"`{ollama_status.available_models[0]}`.",
+                    )
+                )
+                effective_model = ollama_status.available_models[0]
+            else:
+                print(
+                    _colorize(
+                        Colors.YELLOW,
+                        "No models are installed yet. Use "
+                        "`ollama pull <model_name>` to download one.",
+                    )
+                )
+                return 1
+        elif not effective_model and ollama_status.available_models:
+            # No model supplied anywhere; pick the first installed
+            # tag so the chat path has something to send to Ollama.
+            effective_model = ollama_status.available_models[0]
+            logger.info(
+                "ollama_pick_default model=%s", effective_model,
+            )
+        # Reflect the resolved alias back into the runtime bootstrap
+        # by shadowing the local variable; bootstrap_runtime reads
+        # ``model_alias`` from this argument.
+        model = effective_model
+
     if file_path is not None:
         if _reject_if_original_graph_path(file_path):
             return 1
@@ -1221,7 +1359,7 @@ def _run_single_turn(
         else max_tool_rounds
     )
     try:
-        history_start = len(agent.history)
+        history_start = len(agent.chat_history.get_messages())
         result = run_bounded_toolagents_turn(
             agent,
             provider_config,
@@ -1259,21 +1397,16 @@ def _run_single_turn(
         if original_stdout is not None:
             sys.stdout = original_stdout
 
+        from ToolAgents.data_models.messages import ChatMessageRole
+
         operations = []
-        for turn in agent.history[history_start:]:
-            if turn.get("role") == "assistant" and turn.get("tool_calls"):
-                for tc in turn["tool_calls"]:
-                    fn = tc.get("function") or {}
-                    name = tc.get("name") or fn.get("name") or "?"
-                    args = tc.get("arguments")
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except Exception:
-                            args = {}
-                    if not isinstance(args, dict):
-                        args = fn.get("arguments", {})
-                    operations.append({"name": name, "arguments": args})
+        messages = agent.chat_history.get_messages()
+        for message in messages[history_start:]:
+            if message.role != ChatMessageRole.Assistant:
+                continue
+            for tc in message.get_tool_calls():
+                args = _parse_tool_call_arguments(tc.tool_call_arguments)
+                operations.append({"name": tc.tool_call_name, "arguments": args})
 
         final_state = agent.active_session_snapshot() or {}
 
@@ -1369,7 +1502,7 @@ def _run_repl_loop(
             # mode == "none" should not happen when _pending_clarification is not None
 
         try:
-            history_start = len(agent.history)
+            history_start = len(agent.chat_history.get_messages())
             result = run_bounded_toolagents_turn(
                 agent,
                 provider_config,

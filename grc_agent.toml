@@ -1,6 +1,5 @@
 [llama]
 server_url = "http://localhost:11434"
-model = "qwen3.5:9b-q4_K_M"
 backend = "ollama"
 max_tokens = 4096
 max_tool_rounds = 8

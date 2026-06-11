@@ -27,7 +27,12 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(default_config_path().is_file())
         self.assertEqual(config.llama.server_url, "http://localhost:11434")
         self.assertEqual(config.llama.backend, "ollama")
-        self.assertEqual(config.llama.model, "qwen3.5:9b-q4_K_M")
+        # The repo config no longer carries a hardcoded ``model``
+        # entry — the user is expected to pick from the installed
+        # tags at runtime, so the default resolves to the empty
+        # string. The CLI falls back to the first installed tag
+        # when this is empty.
+        self.assertEqual(config.llama.model, "")
         self.assertEqual(config.llama.max_tokens, 4096)
         self.assertEqual(config.llama.max_tool_rounds, 8)
         self.assertEqual(config.llama.temperature, 0.0)

@@ -43,10 +43,16 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class LlamaConfig:
-    """Configurable defaults for the model backend."""
+    """Configurable defaults for the model backend.
+
+    ``model`` defaults to an empty string. The user is expected to pick
+    a model from whatever the active backend reports (the GUI shows
+    ``/api/tags``; the CLI falls back to the first available tag) —
+    there is no built-in "configured model" assumption.
+    """
 
     server_url: str = "http://localhost:11434"
-    model: str = "qwen3.5:9b-q4_K_M"
+    model: str = ""
     backend: str = "ollama"
     max_tokens: int = 4096
     max_tool_rounds: int = 8
@@ -277,7 +283,12 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
             server_url=_require_non_empty_string(
                 llama_table, "server_url", context="[llama]"
             ),
-            model=_require_non_empty_string(llama_table, "model", context="[llama]"),
+            model=_optional_non_empty_string(
+                llama_table,
+                "model",
+                default=defaults.llama.model,
+                context="[llama]",
+            ),
             backend=_optional_non_empty_string(
                 llama_table,
                 "backend",
