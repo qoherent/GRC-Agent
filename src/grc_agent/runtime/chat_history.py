@@ -85,13 +85,24 @@ def compact_chat_history(
     chat_history: ChatHistory,
     *,
     budget_chars: int,
-    max_tool_result_chars: int = 800,
+    max_tool_result_chars: int = 4000,
 ) -> bool:
     """Shorten tool results in ``chat_history`` until the total is under budget.
 
     Returns ``True`` if any message was rewritten, ``False`` if the history
     already fit. The function is idempotent: calling it twice with the same
     arguments is a no-op on the second call.
+
+    ``max_tool_result_chars`` caps any individual ``ToolCallResultContent``
+    payload. The previous hard-coded cap of 800 was starving the model of
+    ``query_knowledge`` results: a single GNU Radio catalog block
+    definition (name, IO signature, full param list) can easily exceed
+    800 chars, so the compactor was deleting the exact block ID the
+    model had just retrieved. 4000 chars is roughly 1,000 tokens — large
+    enough to fit a full catalog JSON object, small enough that even
+    ten such payloads still fit comfortably inside the 100K-char
+    ``history_compact_budget`` and the 256K-token context window of
+    even the smallest local model.
 
     Algorithm: one pass. We split the history into an immutable
     "shell" (system message, user messages, assistant text, tool-call

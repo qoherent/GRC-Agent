@@ -173,6 +173,7 @@ class AgentConfig:
     """Configurable defaults for the GrcAgent behavior."""
 
     history_compact_budget: int
+    max_tool_result_chars: int = 4000
     docs_answer: DocsAnswerConfig = DEFAULT_DOCS_ANSWER_CONFIG
     retrieval: RetrievalConfig = DEFAULT_RETRIEVAL_CONFIG
     history: HistoryConfig = DEFAULT_HISTORY_CONFIG
@@ -259,6 +260,12 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
         agent_config = AgentConfig(
             history_compact_budget=_require_positive_int(
                 agent_table, "history_compact_budget", context="[agent]"
+            ),
+            max_tool_result_chars=_optional_positive_int(
+                agent_table,
+                "max_tool_result_chars",
+                default=defaults.agent.max_tool_result_chars,
+                context="[agent]",
             ),
             docs_answer=_docs_answer_config(
                 docs_table if isinstance(docs_table, dict) else {},

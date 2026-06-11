@@ -180,6 +180,62 @@ class CompactChatHistoryTests(unittest.TestCase):
         total = sum(len(m.get_as_text()) for m in history.get_messages())
         self.assertLessEqual(total, 300)
 
+    def test_per_payload_cap_respected_when_budget_is_tight(self) -> None:
+        """The per-payload cap (default 4000) is the upper bound for
+        any individual ``ToolCallResultContent`` payload once the
+        compactor decides it must shrink the history. Without this
+        guarantee, a single ``query_knowledge`` result can swallow
+        a chunk of the context window — which was the data-starvation
+        bug that motivated exposing the cap to config.
+        """
+        history = ChatHistory()
+        history.add_user_message("Find me a sink.")
+        for i in range(8):
+            history.add_message(_assistant_tool_call_message(
+                f"calling query_knowledge {i}"
+            ))
+            history.add_message(_tool_result_message("Z" * 12_000, call_id=f"c{i}"))
+        # 8 * 12K = 96K payload > 30K budget, so the compactor must
+        # run and apply the per-payload cap to each candidate.
+        compact_chat_history(history, budget_chars=30_000)
+        for i, message in enumerate(history.get_messages()):
+            for content in message.content:
+                if isinstance(content, ToolCallResultContent):
+                    self.assertLessEqual(
+                        len(content.tool_call_result), 4000,
+                        f"Result #{i} exceeded the default 4000-char "
+                        f"per-payload cap: {len(content.tool_call_result)} chars.",
+                    )
+                    self.assertIn(
+                        "TRUNCATED by chat-history compactor",
+                        content.tool_call_result,
+                    )
+
+    def test_per_payload_cap_is_configurable(self) -> None:
+        """A caller can lower the cap explicitly. This is the agent's
+        escape hatch when a known tool returns larger JSON than
+        even 4000 chars can hold."""
+        history = ChatHistory()
+        history.add_user_message("Find me a sink.")
+        for i in range(8):
+            history.add_message(_assistant_tool_call_message(
+                f"calling query_knowledge {i}"
+            ))
+            history.add_message(_tool_result_message("Z" * 12_000, call_id=f"c{i}"))
+        # Caller asks for a 2000-char cap. The compactor must clamp
+        # each candidate down to <= 2000.
+        compact_chat_history(
+            history, budget_chars=30_000, max_tool_result_chars=2000
+        )
+        for message in history.get_messages():
+            for content in message.content:
+                if isinstance(content, ToolCallResultContent):
+                    self.assertLessEqual(len(content.tool_call_result), 2000)
+                    self.assertIn(
+                        "TRUNCATED by chat-history compactor",
+                        content.tool_call_result,
+                    )
+
 
 class ChatHistoryRoundTripTests(unittest.TestCase):
     def test_save_load_preserves_tool_messages(self) -> None:

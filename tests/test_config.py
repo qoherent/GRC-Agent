@@ -34,6 +34,13 @@ class RuntimeConfigTests(unittest.TestCase):
         # when this is empty.
         self.assertEqual(config.llama.model, "")
         self.assertEqual(config.llama.max_tokens, 4096)
+        # The default per-payload truncation cap is 4000 chars —
+        # large enough to fit a full GNU Radio catalog JSON object
+        # for ``query_knowledge``, small enough that even ten
+        # such payloads still fit inside the 100K-char history
+        # budget and the 256K-token context window.
+        self.assertEqual(config.agent.max_tool_result_chars, 4000)
+        self.assertEqual(config.agent.history_compact_budget, 100000)
         self.assertEqual(config.llama.max_tool_rounds, 8)
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
@@ -123,6 +130,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     "request_timeout_seconds = 30.0\n"
                     "\n[agent]\n"
                     "history_compact_budget = 5000\n"
+                    "max_tool_result_chars = 8000\n"
                     "\n[agent.docs_answer]\n"
                     "helper_max_output_tokens = 512\n"
                     "answer_cache_size = 32\n"
@@ -142,6 +150,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.backend, "openrouter")
         self.assertTrue(config.llama.enable_thinking)
         self.assertEqual(config.llama.max_tool_rounds, 42)
+        self.assertEqual(config.agent.max_tool_result_chars, 8000)
         self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 512)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 32)
         self.assertEqual(config.agent.docs_answer.helper_prompt_version, "custom_prompt_v1")

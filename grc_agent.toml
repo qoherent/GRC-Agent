@@ -9,6 +9,7 @@ request_timeout_seconds = 120.0
 
 [agent]
 history_compact_budget = 100000
+max_tool_result_chars = 4000
 
 [agent.docs_answer]
 enabled = true

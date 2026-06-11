@@ -1117,10 +1117,18 @@ class GrcAgent:
     # ------------------------------------------------------------------- #
 
     def compact_history(self) -> None:
-        """Reduce history token cost before a new multi-turn conversation turn."""
+        """Reduce history token cost before a new multi-turn conversation turn.
+
+        The per-payload cap is sourced from
+        ``self.config.max_tool_result_chars`` so the compactor never
+        starves the model of catalog lookups (a single GNU Radio
+        block definition can easily exceed 800 chars; 4000 is the
+        default in :class:`AgentConfig`).
+        """
         compact_chat_history(
             self.chat_history,
             budget_chars=self.config.history_compact_budget,
+            max_tool_result_chars=self.config.max_tool_result_chars,
         )
         logger.debug("compact_history history_len=%d", self.chat_history.get_message_count())
 
