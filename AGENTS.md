@@ -1,83 +1,74 @@
-## Persona & Engineering Core Principles
+## Role & Principles
 
-* **Role:** Senior System Designer / Software Engineer.
-* **Tone:** Strict, bold, objective, and entirely free of fluff.
-* **Principle of Simplicity:** Lean heavily toward simplifying over complicating. Reject speculative features or preemptive architectural shifts without hard empirical test data (The Anti-Symptom Rule).
-* **Engineering Rigor:** Never make assumptions. Stop and ask questions when critical architectural or dependency decisions are required. Reject ad-hoc logic causing latency, redundant calculations, extra costs, or performance degradation.
-* **Modernity:** Always build against the latest verified library specifications and features. Immediately flag and eliminate outdated paradigms or brittle logic. Utilize `context7` MCP to ensure syntax accuracy for new API boundaries.
-
----
-
-## Tool Surface Area & Constraints
-
-* **Active Wrappers:** Exactly three strict model-facing wrappers are permitted:
-1. `inspect_graph`
-2. `query_knowledge`
-3. `change_graph` (Internal operations like `add_block` and `connect` belong inside `change_graph`).
-
-
-* **No Speculative Expansion:** Do not add additional endpoints (e.g., a standalone `disconnect` or model-facing `validate_graph`) unless the live `tests/eval_chat/` execution harness demonstrates explicit failure patterns under a specific LLM.
-* **Execution Paradigm:** **Parallel tool calls must remain disabled.** Tool calls execute strictly in serial order to safeguard the state transitions of the external GNU Radio graph.
+- **Role:** Senior Systems Engineer / GNU Radio tool-use architect.
+- **Tone:** Direct, data-driven, zero fluff.
+- **Anti-Symptom Rule:** Reject speculative features or architectural shifts without hard empirical test data.
+- **No Assumptions:** Stop and ask when critical architecture or dependency decisions are required.
 
 ---
 
-## Runtime & Execution Loop Architecture
+## Prompt & Tool Surface Architecture
 
-* **The Manual Engine:** Do not use `ToolAgents` native automated tool recursion (`.get_response()`). Maintain absolute execution lifecycle control using a manual `while True: ToolAgentsRunner._run_turn_events` loop executing bounded single `.step()` operations.
-* **Justified Hooks:** This manual loop is non-negotiable and exists exclusively to handle:
-1. Real-time PyQt GUI callbacks (`on_tool_start`, `on_tool_end`).
-2. Sequential mutation tracking (`change_graph` classification).
-3. Context-aware runtime reminder injections.
-4. Explicit loop iteration safety ceilings (`max_tool_rounds`).
+### The System Prompt Is the Sole Behavioral Authority
 
+The system prompt (`prompt.py`) is the **only** place authorized to dictate model behavior.
+- Tool schemas describe **capability** — what a function does, not when or how to use it.
+- Tool results return **state** — what happened, metadata, errors.
+- Error strings return **facts** — what failed, never what to do about it.
 
+### In-Band Control Flow Is Prohibited
+
+No string the model sees may contain:
+- ALL-CAPS directives (`STOP`, `CONTINUE`, `DO NOT`, `CRITICAL WARNING`, `MUST`)
+- Behavioral commands (`Use this when`, `Call X now`, `Retry`, `You should`, `Please specify`)
+- Procedural recipes (`First inspect, then query, then mutate`)
+- System prompt rules duplicated in tool descriptions, runtime reminders, or error messages
+
+This applies to: tool schemas, wrapper outputs, validation errors, runtime directives, hint strings, system_directive fields, recovery prompts, next_step_notes — **every string the model receives.**
+
+### Active MVP Wrappers
+
+Three model-facing tools:
+1. `inspect_graph` — Read-only graph inspection.
+2. `query_knowledge` — Catalog and documentation search.
+3. `change_graph` — Batch graph mutation (add/remove blocks, params, states, connections).
+
+No speculative expansion without live eval harness evidence.
 
 ---
 
-## Defensive Engineering & Guardrails
+## Runtime & State Management
 
-### 1. Per-Turn Retry-Storm Guard
+### Manual Execution Loop
 
-* **Mechanism:** Maintain a localized `seen_tool_calls` cache per turn inside `src/grc_agent/toolagents_runtime.py`, utilizing `_canonicalize_args` keyed on `(name, canonical_json_args)`.
-* **Behavior:** If a local LLM hallucinates or enters an infinite loop, repeating a tool request with matching arguments inside the same turn, short-circuit the execution immediately. Return the cached result with flags `ok=True` and `deduplicated=True`.
+Maintain absolute lifecycle control via `while True: ToolAgentsRunner._run_turn_events` with bounded `.step()` operations. Exists to handle:
+1. PyQt GUI callbacks (`on_tool_start`, `on_tool_end`).
+2. Sequential mutation tracking.
+3. Runtime reminder injections (kept factual, not behavioral).
+4. Loop safety ceiling (`max_tool_rounds`, configurable via TOML).
 
-### 2. Context Compaction
+### Dedup Cache Must Invalidate on Mutation
 
-* **Algorithm:** Use **one-pass exact mathematical arithmetic** ($O(1)$ slicing computation) rather than recursive reduction loops.
-* **Sentinel Contracting:** Every truncation must terminate cleanly with an explicit string boundary sentinel:
-`... [TRUNCATED by chat-history compactor: was N chars, kept M]`
-* The original length `N` must be calculated exactly once to protect the metadata from compound corruption across subsequent rewrites.
+The per-turn `seen_tool_calls` cache (keyed on `(name, canonical_args)`) must be cleared after any successful `change_graph` that increments `state_revision`. Otherwise the next `inspect_graph` returns stale topology. Same for `_last_failed_ops_hash` — clear on commit.
 
-### 3. Wire-Format Role Safety
+### Context Compaction
 
-* **Role Constraints:** Do not leak custom system strings (e.g., `runtime_reminder`) as roles over the wire. The underlying OpenAI conversion layers will reject them or cause chat template breakage on local engines.
-* **Reminder Injection:** Inject runtime control-plane directives strictly under the standard `user` role. Isolate the text body cleanly using structural XML demarcations:
+Use one-pass $O(1)$ arithmetic slicing. Every truncation terminates with `... [TRUNCATED by chat-history compactor: was N chars, kept M]`. Original length $N$ calculated exactly once to prevent compound corruption.
+
+### Wire-Format Role Safety
+
+Runtime directives injected under `user` role only, isolated by:
 ```xml
-<runtime_directive>
-[Control plane guidance / retry hint here]
-</runtime_directive>
-
+<runtime_directive>[control plane text]</runtime_directive>
 ```
-
-
-
-### 4. UI Rendering Fallbacks
-
-* **Empty Assistant Protection:** When a final model response contains tool-execution directives but lacks text bodies, intercept the empty string mutation layer. Cleanly resolve a user-facing visual text block directly extracted from the final tool result to prevent rendering empty bubble elements in the chat view.
+Never leak custom role strings over the wire.
 
 ---
 
-## Compatibility and Data Boundaries
+## Constraints
 
-* **Strict Fail-Fast Persistence:** Maintain a zero-backward-compatibility rule. If legacy database structures or missing payload fields are detected on a resume path, refuse the session load entirely.
-* **Session Refusal:** Drop the sequence context gracefully, transition the application state to a fresh timeline, and alert the user via the status bar to initiate a clean session. Never introduce shims or legacy-to-typed synthesis layers.
-
-> **OS & System Boundaries**
-> * **No Daemon Management:** The application runs in user-space. You are strictly forbidden from writing code that manages OS-level background services, daemons (e.g., `systemd`, `launchd`), or `subprocess.Popen` lifecycle management for external servers like Ollama.
-> * **No Hardware Polling:** Do not introduce hardware telemetry libraries (`psutil`, parsing `nvidia-smi`) to build status dashboards. If a backend is unreachable, handle it via graceful degradation, not by attempting to fix the host OS.
-
-Prevent the agent from changing the application flow without your explicit permission.
-
-> **UI & Flow Constraints**
-> * **Non-Blocking Flow:** Never introduce blocking setup wizards, pre-launch modals, or mandatory configuration screens that interrupt the standard application launch flow, unless explicitly directed.
-> * **Graceful Degradation over Hard Crashes:** If an external dependency (like an LLM backend) is unreachable, the GUI must still launch into a "Degraded Mode" (e.g., chat disabled, visual warning) to allow the user access to settings. Never use `sys.exit()` in a GUI path for a network failure.
+- **No Daemon Management:** Forbidden from managing OS-level services, daemons, or `subprocess.Popen` lifecycle for external servers (Ollama, etc.).
+- **No Hardware Polling:** No telemetry libraries (`psutil`, `nvidia-smi`). Handle backend unreachability via graceful degradation.
+- **Non-Blocking Flow:** No setup wizards, pre-launch modals, or mandatory config screens. GUI launches into degraded mode if backend is unreachable — never `sys.exit()` on network failure.
+- **No Backward Compatibility:** If legacy database structures or missing payload fields are detected, refuse session load. No shims, no legacy synthesis layers.
+- **No Application Flow Changes Without Permission:** Prevent the agent from altering application flow without explicit authorization.
