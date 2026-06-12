@@ -14,6 +14,19 @@ from grc_agent.catalog.errors import CatalogError
 from grc_agent.catalog.loaders import get_catalog_snapshot
 from grc_agent.runtime.output_policy import is_meaningful
 
+# ---------------------------------------------------------------------------
+# Block-specific FTS synonym injection (Fix: search tuning, not prompt tuning)
+# Maps block_id -> extra terms appended to that block's FTS body so that
+# natural-language queries surface the correct block without prompt coaching.
+# ---------------------------------------------------------------------------
+_BLOCK_SEARCH_SYNONYMS: dict[str, tuple[str, ...]] = {
+    # 'variable' block: model queries 'constant value block', 'named value', etc.
+    "variable": ("constant", "value", "named value", "static", "scalar",
+                  "flowgraph variable", "define variable", "set variable"),
+    "analog_sig_source_x": ("complex source", "signal source", "sine wave",
+                             "cosine wave", "waveform generator"),
+}
+
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
@@ -94,7 +107,7 @@ def search_blocks(
     )
     limit = max(1, min(limit_value, agent._retrieval_cfg.search_blocks_max_k))
     cacheable = not debug and not enrich
-    retrieval_mode = "hybrid"
+    retrieval_mode = "lexical"
     degraded_retrieval = False
 
     cache_key: tuple[str, int, str] | None = None
@@ -131,92 +144,43 @@ def search_blocks(
 
     if cache_key is not None:
         handlers.append("search_blocks_cache(miss)")
-    handlers.append("catalog_hybrid_lexical_search")
-    lexical_candidates, lexical_error = _lexical_catalog_candidates(
+    handlers.append("catalog_lexical_search")
+    candidates, lexical_error = _lexical_catalog_candidates(
         agent=agent,
         query=q,
         limit=max(limit * 4, limit),
     )
     if lexical_error is not None:
         degraded_retrieval = True
-        handlers.append("catalog_hybrid_lexical_search(degraded)")
-    handlers.append("semantic_search_grc(catalog)")
-    semantic: dict[str, Any] = agent_module.semantic_search_grc(q, scope="catalog", k=limit)
+        handlers.append("catalog_lexical_search(degraded)")
 
-    semantic_candidates: list[dict[str, Any]] = []
-    if semantic.get("ok") is not True:
-        error_type = semantic.get("error_type") or ErrorCode.RETRIEVAL_NOT_READY
-        semantic_unavailable = error_type in {
-            "missing_index",
-            ErrorCode.RETRIEVAL_NOT_READY,
-        }
-        degraded_retrieval = degraded_retrieval or semantic_unavailable
-        if lexical_candidates:
-            candidates = lexical_candidates
-            retrieval_mode = "lexical_only"
-        else:
-            retrieval_mode = "semantic_unavailable"
-            message = semantic.get("message") or "Catalog vector search is not available."
-            if lexical_error is not None:
-                message = f"{message} Catalog lexical search also failed: {lexical_error}"
-            result = agent._payload_result(
-                "search_blocks",
-                {
-                    "ok": False,
-                    "query": q,
-                    "results": [],
-                    "degraded_retrieval": bool(degraded_retrieval),
-                    "retrieval_mode": retrieval_mode,
-                    "output_truncated": False,
-                    "message": message,
-                    "error_type": error_type,
-                },
-                include_active_session=False,
-            )
-            return agent._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="search_blocks",
-                wrapper_action="query",
-                internal_handlers=handlers,
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=False,
-            )
-    else:
-        for row in semantic.get("results", []):
-            if not isinstance(row, dict):
-                continue
-            block_id = row.get("canonical_block_id")
-            if not isinstance(block_id, str) or not block_id:
-                continue
-            name = row.get("title")
-            summary = row.get("excerpt")
-            item: dict[str, Any] = {
-                "block_id": block_id,
-                "name": name if isinstance(name, str) and name else block_id,
-                "summary": agent_module._compact_block_summary(summary),
-                "match_type": "semantic",
-                "source": "semantic",
-            }
-            if debug:
-                item["debug"] = {
-                    "source": "semantic",
-                    "record_id": row.get("record_id"),
-                    "score": row.get("vector_score_raw"),
-                }
-            semantic_candidates.append(item)
-
-        candidates = _merge_catalog_candidates(
-            query=q,
-            lexical_candidates=lexical_candidates,
-            semantic_candidates=semantic_candidates,
+    if not candidates and lexical_error is not None:
+        result = agent._payload_result(
+            "search_blocks",
+            {
+                "ok": False,
+                "query": q,
+                "results": [],
+                "degraded_retrieval": bool(degraded_retrieval),
+                "retrieval_mode": retrieval_mode,
+                "output_truncated": False,
+                "message": f"Catalog lexical search failed: {lexical_error}",
+                "error_type": ErrorCode.RETRIEVAL_NOT_READY,
+            },
+            include_active_session=False,
         )
-
-    if semantic.get("ok") is True and not lexical_candidates:
-        retrieval_mode = "semantic" if lexical_error is not None else "hybrid"
+        return agent._attach_wrapper_dispatch_telemetry(
+            debug=debug,
+            wrapper_name="search_blocks",
+            wrapper_action="query",
+            internal_handlers=handlers,
+            started=started,
+            before_revision=before_revision,
+            before_dirty=before_dirty,
+            result=result,
+            validation_run=False,
+            output_truncated=False,
+        )
 
     if not candidates:
         result = agent._payload_result(
@@ -283,10 +247,19 @@ def search_blocks(
         str(item.get("match_type", "")) in {"exact_block_id", "exact_label"}
         for item in limited
     )
+    # Promote to Tier-2 when the query explicitly names a known block_id.
+    # e.g. query='blocks_null_sink parameters' contains 'blocks_null_sink'.
+    if not has_exact_hit:
+        query_tokens = set(re.findall(r"[a-z0-9_]+", q.casefold()))
+        has_exact_hit = any(
+            str(item.get("block_id", "")).casefold() in query_tokens
+            or str(item.get("block_id", "")).casefold() in q.casefold()
+            for item in limited
+        )
 
     if not debug and not enrich and not has_exact_hit:
         # Tier 1 — concept search: ultra-compact, no JSON bloat.
-        # Return only block_id + name so the 9B model's attention
+        # Return only block_id + name so the model's attention
         # heads land directly on the IDs it needs to copy.
         compact = []
         for idx, item in enumerate(limited, 1):
@@ -411,17 +384,24 @@ def _lexical_catalog_candidates(
         limit=limit * 2,
     )
     if fts_error is None:
+        fts_boost_max = 60.0
+        n_ranked = max(1, len(fts_ranked))
         for rank, block_id in enumerate(fts_ranked, start=1):
             item = index.all_items.get(block_id)
             if item is None:
                 continue
-            fts_score = 120.0 - rank
+            fts_boost = fts_boost_max * (1.0 - (rank - 1) / n_ranked)
             existing = scored_by_id.get(block_id)
-            if existing is None or existing[0] < fts_score:
+            if existing is not None:
+                boosted_score = existing[0] + fts_boost
+                boosted_item = dict(existing[2])
+                boosted_item["match_type"] = "fts5" if fts_boost > existing[0] else existing[1]
+                scored_by_id[block_id] = (boosted_score, existing[1], boosted_item)
+            else:
                 fts_item = dict(item)
                 fts_item["match_type"] = "fts5"
                 fts_item["source"] = "catalog_fts5"
-                scored_by_id[block_id] = (fts_score, "fts5", fts_item)
+                scored_by_id[block_id] = (fts_boost, "fts5", fts_item)
 
     scored = [
         (score, block_id, item)
@@ -471,12 +451,15 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
         ]
         documentation = _string_value(payload.get("documentation")) or ""
         fields = [raw_block.block_id, label, *params, *inputs, *outputs, *categories]
-        fts_text = " ".join([*fields, documentation])
+        synonyms = _BLOCK_SEARCH_SYNONYMS.get(raw_block.block_id, ())
+        fts_text = " ".join([*fields, documentation, *synonyms])
         fts_records.append((raw_block.block_id, fts_text))
         field_norms = {_normalize_for_search(field) for field in fields if field}
         field_tokens: set[str] = set()
         for field in fields:
             field_tokens.update(_search_terms(field))
+        for synonym in synonyms:
+            field_tokens.update(_search_terms(synonym))
         item = {
             "block_id": raw_block.block_id,
             "name": label,
@@ -503,7 +486,7 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
                 item=item,
                 field_norms=field_norms,
                 field_tokens=field_tokens,
-                doc_tokens=_search_terms(documentation[:1200]),
+                doc_tokens=_search_terms(documentation[:1200]) | _search_terms(" ".join(synonyms)),
                 label=label,
                 params=params + raw_param_ids,
                 ports=[*inputs, *outputs],
@@ -517,65 +500,6 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
         fts_conn=fts_conn,
         fts_error=fts_error,
     )
-
-
-def _merge_catalog_candidates(
-    *,
-    query: str,
-    lexical_candidates: list[dict[str, Any]],
-    semantic_candidates: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    import grc_agent.agent as agent_module
-
-    merged: dict[str, dict[str, Any]] = {}
-    scores: dict[str, float] = {}
-    for rank, item in enumerate(lexical_candidates, start=1):
-        block_id = str(item.get("block_id", ""))
-        if not block_id:
-            continue
-        merged.setdefault(block_id, dict(item))
-        scores[block_id] = scores.get(block_id, 0.0) + 1.0 / (20 + rank)
-        match_type = str(item.get("match_type", ""))
-        if match_type.startswith("exact_"):
-            scores[block_id] += 1.0
-        elif match_type in {"metadata", "name", "param", "port"}:
-            scores[block_id] += 0.25
-    for rank, item in enumerate(semantic_candidates, start=1):
-        block_id = str(item.get("block_id", ""))
-        if not block_id:
-            continue
-        existing = merged.get(block_id)
-        if existing is None:
-            merged[block_id] = dict(item)
-        else:
-            exact_match_types = {"exact_block_id", "exact_label", "param", "port"}
-            if (
-                item.get("summary")
-                and str(existing.get("match_type")) not in exact_match_types
-            ):
-                existing["summary"] = item.get("summary")
-            if existing.get("source") != "semantic":
-                existing["source"] = "hybrid"
-        scores[block_id] = scores.get(block_id, 0.0) + 1.0 / (60 + rank)
-
-    query_raw = query.casefold()
-    query_norm = agent_module._normalize_alias_key(query)
-
-    def sort_key(item: dict[str, Any]) -> tuple[float, int, str]:
-        block_id = str(item.get("block_id", ""))
-        name = str(item.get("name", ""))
-        identity = 2
-        if query_raw in {block_id.casefold(), f"catalog:block:{block_id}".casefold()}:
-            identity = 0
-        elif query_norm and query_norm == agent_module._normalize_alias_key(block_id):
-            identity = 0
-        elif query_raw == name.casefold():
-            identity = 1
-        elif query_norm and query_norm == agent_module._normalize_alias_key(name):
-            identity = 1
-        return (-scores.get(block_id, 0.0), identity, block_id)
-
-    return sorted(merged.values(), key=sort_key)
 
 
 def _is_exact_catalog_query(query: str, *, block_id: str, name: str) -> bool:

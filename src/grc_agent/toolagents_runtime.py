@@ -41,7 +41,7 @@ _AGENTIC_TOOL_REMINDER = "Current tool evidence may be insufficient for this ans
 _MUTATION_TOOL_REMINDER = "The user requested a graph mutation that has not been executed."
 _INVALID_CHANGE_GRAPH_REMINDER = "The previous change_graph call had invalid or missing arguments."
 _MUTATION_NOT_COMMITTED_REMINDER = "No graph edit has succeeded yet for this request."
-_WRONG_INSERT_REPAIR_REMINDER = "Wire insertion requires remove_connections + add_blocks + add_connections in the same call."
+_WRONG_INSERT_REPAIR_REMINDER = "Wire insertion validation failed. Review occupied ports."
 _TOOL_NEED_PATTERNS = (
     re.compile(
         r"\b(?:need|needs|needed|would need|must|should)\b.{0,80}\b(?:inspect|search|look up|check|query)\b",
@@ -409,7 +409,6 @@ class ToolDelegateResult:
 
 
 class ToolAgentsToolDelegate:
-    """Validation-preserving delegate for one model-facing wrapper."""
 
     def __init__(
         self,
@@ -631,6 +630,9 @@ class ToolAgentsRunner:
         if hasattr(agent, 'config') and hasattr(agent.config, 'llama') and agent.config.llama.max_tool_rounds:
             max_tool_rounds = max(max_tool_rounds, agent.config.llama.max_tool_rounds)
 
+        from grc_agent.runtime.model_context import _prune_completed_episodes
+        agent.chat_history.messages = _prune_completed_episodes(agent.chat_history.messages)
+
         pre_compact_chars = _chat_history_chars(agent.chat_history)
         agent.compact_history()
         post_compact_chars = _chat_history_chars(agent.chat_history)
@@ -664,7 +666,6 @@ class ToolAgentsRunner:
         graph_ambiguity_pending = False
         tool_context_chars = 0
         truncated_tool_output = False
-        pending_reminder: str | None = None
 
         logger.info("turn_start model=%s message=%s", resolved_model, user_message[:80])
         active_allowed_tools = set(MVP_TOOL_SURFACE.model_tool_names)
@@ -682,9 +683,8 @@ class ToolAgentsRunner:
             )
             registry = registry_builder.build(active_allowed_tools)
             messages = _model_messages_with_reminder(
-                agent, reminder=pending_reminder
+                agent, reminder=None
             )
-            pending_reminder = None
             try:
                 assistant_message = self.chat_agent.step(
                     messages,
@@ -764,6 +764,8 @@ class ToolAgentsRunner:
                         tool_name,
                         str(tool_call.tool_call_arguments)[:120],
                     )
+                    before_revision = agent.session.state_revision
+                    before_session_id = id(agent.session)
                     delegate = registry_builder.delegates.get(tool_name)
                     dedup_key = (
                         tool_name,
@@ -773,42 +775,30 @@ class ToolAgentsRunner:
                         delegate is not None
                         and dedup_key in seen_tool_calls
                     ):
-                        prior = seen_tool_calls[dedup_key]
-                        prior_ok = isinstance(prior, dict) and prior.get("ok") is True
-                        if prior_ok:
-                            dedup_result = {
-                                "tool": tool_name,
-                                "ok": True,
-                                "deduplicated": True,
-                                "message": (
-                                    f"Tool '{tool_name}' was already called with the same arguments "
-                                    "earlier in this turn. Reusing the prior result to avoid an "
-                                    "identical tool call."
-                                ),
-                                "prior_result": prior,
-                            }
-                            logger.info(
-                                "tool_call_dedup name=%s", tool_name
-                            )
-                            if on_tool_start:
-                                try:
-                                    on_tool_start(tool_name, tool_call.tool_call_arguments)
-                                except Exception as e:
-                                    logger.error(f"Error in on_tool_start callback: {e}")
-                            if on_tool_end:
-                                try:
-                                    on_tool_end(tool_name, dedup_result)
-                                except Exception as e:
-                                    logger.error(f"Error in on_tool_end callback: {e}")
-                            result = dedup_result
-                            executed = False
-                        else:
-                            delegate_result = delegate.invoke(
-                                tool_call.tool_call_arguments,
-                                allowed_tool_names=active_allowed_tools,
-                            )
-                            result = delegate_result.result
-                            executed = delegate_result.executed
+                        dedup_result = {
+                            "tool": tool_name,
+                            "ok": False,
+                            "deduplicated": True,
+                            "message": (
+                                "Duplicate tool call detected with identical arguments. "
+                                "Request ignored. Reformulate your query or change parameters."
+                            ),
+                        }
+                        logger.info(
+                            "tool_call_dedup name=%s", tool_name
+                        )
+                        if on_tool_start:
+                            try:
+                                on_tool_start(tool_name, tool_call.tool_call_arguments)
+                            except Exception as e:
+                                logger.error(f"Error in on_tool_start callback: {e}")
+                        if on_tool_end:
+                            try:
+                                on_tool_end(tool_name, dedup_result)
+                            except Exception as e:
+                                logger.error(f"Error in on_tool_end callback: {e}")
+                        result = dedup_result
+                        executed = False
                     elif delegate is None:
                         result = {
                             "tool": tool_name,
@@ -831,7 +821,6 @@ class ToolAgentsRunner:
                             if isinstance(result, dict):
                                 if result.get("ok") is True and result.get("committed") is True:
                                     change_graph_committed = True
-                                    seen_tool_calls.clear()
                                 error_type = result.get("error_type")
                                 wrong_insert = _is_repairable_insert_in_connection_response(
                                     result
@@ -870,6 +859,12 @@ class ToolAgentsRunner:
                             and result.get("ok") is True
                         ):
                             seen_tool_calls[dedup_key] = result
+
+                        if (
+                            agent.session.state_revision != before_revision
+                            or id(agent.session) != before_session_id
+                        ):
+                            seen_tool_calls.clear()
                     tool_result_message = _tool_result_message(tool_call, result)
                     agent.chat_history.add_message(tool_result_message)
                     yield {
@@ -926,7 +921,8 @@ class ToolAgentsRunner:
             ):
                 retry_reminders_used.add(retry_key)
                 correction_retries_used += 1
-                pending_reminder = retry_reminder
+                wrapped = f"<runtime_directive>\n{retry_reminder}\n</runtime_directive>"
+                agent.chat_history.add_user_message(wrapped)
                 logger.info(
                     "tool_evidence_retry retries=%d message=%s",
                     correction_retries_used,

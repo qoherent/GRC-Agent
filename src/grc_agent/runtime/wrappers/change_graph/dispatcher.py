@@ -277,7 +277,7 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
     for index, item in enumerate(remove_connections):
         connection_id = _connection_id_from_remove_item(item)
         if connection_id is None:
-            errors.append(f"remove_connections[{index}] must be a connection_id string.")
+            errors.append(f"remove_connections[{index}] expected to be a connection_id string.")
             continue
         _append_remove_connection(operations, removed_connection_ids, connection_id, errors, f"remove_connections[{index}]")
 
@@ -299,7 +299,7 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
 
     for index, item in enumerate(add_blocks):
         if not isinstance(item, dict):
-            errors.append(f"add_blocks[{index}] must be an object.")
+            errors.append(f"add_blocks[{index}] expected to be an object.")
             continue
         block_id = _required_string(item, "block_id", f"add_blocks[{index}]", errors)
         instance_name = _required_string(item, "instance_name", f"add_blocks[{index}]", errors)
@@ -308,10 +308,10 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
         params = item.get("params", {})
         state = item.get("state")
         if not isinstance(params, dict):
-            errors.append(f"add_blocks[{index}].params must be an object when provided.")
+            errors.append(f"add_blocks[{index}].params expected to be an object when provided.")
             continue
         if state is not None and not isinstance(state, str):
-            errors.append(f"add_blocks[{index}].state must be a string when provided.")
+            errors.append(f"add_blocks[{index}].state expected to be a string when provided.")
             continue
         op = {
             "op_type": "add_block",
@@ -339,7 +339,7 @@ def _normalize_flat_change_graph_batch(agent: Any, **batches: Any) -> tuple[list
 
     for index, item in enumerate(add_connections):
         if not isinstance(item, dict):
-            errors.append(f"add_connections[{index}] must be an object.")
+            errors.append(f"add_connections[{index}] expected to be an object.")
             continue
         src = _parse_transaction_endpoint(item.get("src"))
         dst = _parse_transaction_endpoint(item.get("dst"))
@@ -515,7 +515,7 @@ def _bypass_hint(
             all_are_stream_transforms = False
 
     if all_are_stream_transforms:
-        return "Block disabled — port connections severed."
+        return "Block disabled — port connections severed. Cannot disable block with active connections."
 
     return "Terminal/control block cannot be bypassed."
 
@@ -664,7 +664,7 @@ def _as_list(value: Any, field_name: str, errors: list[str]) -> list[Any]:
         return []
     if isinstance(value, list):
         return value
-    errors.append(f"{field_name} must be an array when provided.")
+    errors.append(f"{field_name} expected to be an array when provided.")
     return []
 
 
@@ -672,7 +672,7 @@ def _required_string(item: dict[str, Any], key: str, field_name: str, errors: li
     value = item.get(key)
     if isinstance(value, str) and value.strip():
         return value.strip()
-    errors.append(f"{field_name}.{key} must be a non-empty string.")
+    errors.append(f"{field_name}.{key} expected to be a non-empty string.")
     return None
 
 
@@ -683,7 +683,7 @@ def _variable_instance_name(item: dict[str, Any], field_name: str, errors: list[
     legacy = item.get("name")
     if isinstance(legacy, str) and legacy.strip():
         return legacy.strip()
-    errors.append(f"{field_name}.instance_name must be a non-empty string.")
+    errors.append(f"{field_name}.instance_name expected to be a non-empty string.")
     return None
 
 
@@ -724,7 +724,7 @@ def _remove_block_operation(
     if isinstance(item, str):
         item = {"instance_name": item}
     if not isinstance(item, dict):
-        errors.append(f"{field_name}[{index}] must be a block name or object.")
+        errors.append(f"{field_name}[{index}] expected to be a block name or object.")
         return None
     instance_name = item.get("instance_name")
     block_id = item.get("block_id")
@@ -748,11 +748,11 @@ def _update_params_operation(
     errors: list[str],
 ) -> dict[str, Any] | None:
     if not isinstance(item, dict):
-        errors.append(f"{field_name}[{index}] must be an object.")
+        errors.append(f"{field_name}[{index}] expected to be an object.")
         return None
     params = item.get("params")
     if not isinstance(params, dict) or not params:
-        errors.append(f"{field_name}[{index}].params must be a non-empty object.")
+        errors.append(f"{field_name}[{index}].params expected to be a non-empty object.")
         return None
     op: dict[str, Any] = {
         "op_type": "update_params",
@@ -776,7 +776,7 @@ def _update_state_operation(
     errors: list[str],
 ) -> dict[str, Any] | None:
     if not isinstance(item, dict):
-        errors.append(f"{field_name}[{index}] must be an object.")
+        errors.append(f"{field_name}[{index}] expected to be an object.")
         return None
     state = item.get("state")
     if isinstance(state, str):
@@ -784,7 +784,7 @@ def _update_state_operation(
     else:
         states = item.get("states")
         if not isinstance(states, dict) or not states:
-            errors.append(f"{field_name}[{index}].state must be an enum or .states must be a non-empty object.")
+            errors.append(f"{field_name}[{index}].state expected to be an enum or .states expected to be a non-empty object.")
             return None
         state = states.get("state")
         if state is None and "enabled" in states:
@@ -792,7 +792,7 @@ def _update_state_operation(
         if state is None and "disabled" in states:
             state = "disabled" if bool(states.get("disabled")) else "enabled"
     if state not in {"enabled", "disabled", "bypass"}:
-        errors.append(f"{field_name}[{index}].state must be enabled/disabled/bypass.")
+        errors.append(f"{field_name}[{index}].state expected to be enabled/disabled/bypass.")
         return None
     op: dict[str, Any] = {"op_type": "update_states", "state": state}
     instance_name = _required_string(item, "instance_name", f"{field_name}[{index}]", errors)

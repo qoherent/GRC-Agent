@@ -1,4 +1,4 @@
-"""Catalog readiness checks for vector-backed retrieval."""
+"""Catalog readiness checks for retrieval."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from grc_agent.catalog.loaders import (
 
 
 class RetrievalReadinessError(RuntimeError):
-    """Raised when catalog metadata required for vector indexing is unavailable."""
+    """Raised when catalog metadata required for retrieval is unavailable."""
 
 
 def initialize_retrieval(
@@ -24,7 +24,7 @@ def initialize_retrieval(
     catalog_root: str | Path | None = None,
     warm_catalog: bool = False,
 ) -> dict[str, Any]:
-    """Verify GNU Radio catalog metadata required by vector search.
+    """Verify GNU Radio catalog metadata required for retrieval.
 
     ``warm_catalog`` is accepted for CLI compatibility. There is no separate
     catalog index to warm.
@@ -47,7 +47,7 @@ def initialize_retrieval(
             "domain": len(files.domain),
         },
         "catalog_index_warmed": False,
-        "retrieval_backend": "vector",
+        "retrieval_backend": "lexical_fts5",
     }
 
 

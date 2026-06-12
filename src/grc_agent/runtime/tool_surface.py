@@ -8,7 +8,6 @@ PUBLIC_TOOL_NAMES: tuple[str, ...] = (
     "summarize_graph",
     "get_grc_context",
     "describe_block",
-    "semantic_search_grc",
     "suggest_compatible_insertions",
     "insert_block_on_connection",
     "auto_insert_block",

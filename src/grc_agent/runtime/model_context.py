@@ -14,24 +14,28 @@ need an adapter. The only model-facing concerns that live here are:
    format that small local backends may reject.
 3. Format ``ToolCallResultContent`` payloads into compact model-visible
    text (delegated to :mod:`grc_agent.runtime.tool_context`).
+4. Episodic memory pruning: strip tool_call and tool_result payloads from
+   completed prior turns so the model only sees tool activity from the
+   current active episode. An episode boundary is a terminal assistant
+   message (one that contains TextContent but no ToolCallContent).
 """
 
 from __future__ import annotations
 
-import datetime
 import json
 import uuid
 from collections.abc import Callable
 from typing import Any
 
+from grc_agent.runtime.tool_context import tool_history_content_as_text
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
+    ChatMessageRole,
     TextContent,
+    ToolCallContent,
     ToolCallResultContent,
 )
-
-from grc_agent.runtime.tool_context import tool_history_content_as_text
 
 PreviewCallback = Callable[..., list[dict[str, str]]]
 
@@ -85,6 +89,94 @@ def _ensure_serializable(message: ChatMessage, *, preview: PreviewCallback) -> C
     )
 
 
+def _is_human_user_message(message: ChatMessage) -> bool:
+    if message.role != ChatMessageRole.User:
+        return False
+    text = message.get_as_text() if hasattr(message, "get_as_text") else ""
+    if not text:
+        parts = [c.content for c in message.content if isinstance(c, TextContent)]
+        text = "".join(parts)
+    return "<runtime_directive>" not in text
+
+
+def _strip_tool_content(message: ChatMessage) -> ChatMessage | None:
+    if message.role == ChatMessageRole.Tool:
+        return None
+    if message.role == ChatMessageRole.User:
+        text = message.get_as_text() if hasattr(message, "get_as_text") else ""
+        if not text:
+            parts = [c.content for c in message.content if isinstance(c, TextContent)]
+            text = "".join(parts)
+        if "<runtime_directive>" in text:
+            return None
+        return message
+    if message.role == ChatMessageRole.Assistant:
+        text_only = [c for c in message.content if isinstance(c, TextContent)]
+        if text_only and any(t.content.strip() for t in text_only):
+            return ChatMessage(
+                id=message.id,
+                role=message.role,
+                content=text_only,
+                created_at=message.created_at,
+                updated_at=message.updated_at,
+                additional_fields=message.additional_fields,
+                additional_information=message.additional_information,
+            )
+        return None
+    return message
+
+
+def _prune_completed_episodes(messages: list[ChatMessage]) -> list[ChatMessage]:
+    human_boundary = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if _is_human_user_message(messages[i]):
+            human_boundary = i
+            break
+    if human_boundary < 0:
+        return messages
+
+    dead_history = messages[:human_boundary]
+    active_history = messages[human_boundary:]
+
+    pruned_dead: list[ChatMessage] = []
+    for msg in dead_history:
+        stripped = _strip_tool_content(msg)
+        if stripped is not None:
+            pruned_dead.append(stripped)
+
+    combined = pruned_dead + active_history
+
+    consolidated: list[ChatMessage] = []
+    for msg in combined:
+        if not consolidated:
+            consolidated.append(msg)
+            continue
+        prev = consolidated[-1]
+        if msg.role == prev.role and msg.role in (ChatMessageRole.User, ChatMessageRole.Assistant):
+            merged_content = []
+            for item in prev.content:
+                merged_content.append(item)
+            for item in msg.content:
+                if isinstance(item, TextContent) and merged_content and isinstance(merged_content[-1], TextContent):
+                    merged_content[-1] = TextContent(
+                        content=merged_content[-1].content + "\n\n" + item.content
+                    )
+                else:
+                    merged_content.append(item)
+            consolidated[-1] = ChatMessage(
+                id=prev.id,
+                role=prev.role,
+                content=merged_content,
+                created_at=prev.created_at,
+                updated_at=prev.updated_at,
+                additional_fields=prev.additional_fields,
+                additional_information=prev.additional_information,
+            )
+        else:
+            consolidated.append(msg)
+    return consolidated
+
+
 def render_model_messages(
     chat_history: ChatHistory,
     *,
@@ -93,16 +185,12 @@ def render_model_messages(
     reminder: str | None = None,
 ) -> list[ChatMessage]:
     """Render ``chat_history`` into the message list handed to the provider."""
+    raw_messages = chat_history.get_messages()
+    pruned = _prune_completed_episodes(raw_messages)
     messages: list[ChatMessage] = [ChatMessage.create_system_message(system_prompt)]
-    for message in chat_history.get_messages():
+    for message in pruned:
         messages.append(_ensure_serializable(message, preview=semantic_search_result_preview))
     if reminder:
-        # Wrap in ``<runtime_directive>`` so the model can tell the
-        # reminder apart from the human user's own text. The chat
-        # template still routes a ``user``-role message to the user
-        # turn, which is wire-format-safe for every OpenAI-compatible
-        # backend and dodges the "system mid-stream" template
-        # rejection that ``role: system`` would trigger.
         wrapped = (
             "<runtime_directive>\n"
             f"{reminder}\n"

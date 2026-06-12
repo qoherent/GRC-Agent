@@ -35,7 +35,6 @@ from grc_agent.history import (
     operation_type_from_result,
     snapshot_session,
 )
-from grc_agent.retrieval.vector import semantic_search_grc, vector_index_version_token
 from grc_agent.runtime.clarification_payloads import (
     connection_clarification_payload as connection_clarification_payload_wrapper,
 )
@@ -1104,7 +1103,7 @@ class GrcAgent:
         return render_model_messages(
             self.chat_history,
             system_prompt=self.get_system_prompt(),
-            semantic_search_result_preview=self._semantic_search_result_preview,
+            semantic_search_result_preview=lambda *a, **kw: [],
             reminder=reminder,
         )
 
@@ -1138,7 +1137,7 @@ class GrcAgent:
         return history_content_as_text_wrapper(
             content,
             tool_name=tool_name,
-            semantic_search_result_preview=self._semantic_search_result_preview,
+            semantic_search_result_preview=lambda *a, **kw: [],
         )
 
     def _tool_history_content_as_text(
@@ -1150,32 +1149,8 @@ class GrcAgent:
         return tool_history_content_as_text_wrapper(
             content,
             tool_name=tool_name,
-            semantic_search_result_preview=self._semantic_search_result_preview,
+            semantic_search_result_preview=lambda *a, **kw: [],
         )
-
-    @staticmethod
-    def _semantic_search_result_preview(
-        results: Any,
-        *,
-        max_items: int = 3,
-    ) -> list[dict[str, str]]:
-        if not isinstance(results, list):
-            return []
-        preview: list[dict[str, str]] = []
-        for item in results[:max_items]:
-            if not isinstance(item, dict):
-                continue
-            compact: dict[str, str] = {}
-            for key in ("canonical_block_id", "record_id", "source_type", "title"):
-                value = item.get(key)
-                if isinstance(value, str) and value:
-                    compact[key] = value
-            score = item.get("vector_score_raw")
-            if isinstance(score, int | float):
-                compact["vector_score_raw"] = str(score)
-            if compact:
-                preview.append(compact)
-        return preview
 
     # ------------------------------------------------------------------- #
     # Tool registry builders
@@ -1188,7 +1163,6 @@ class GrcAgent:
             "summarize_graph": self._summarize_graph,
             "get_grc_context": self._get_grc_context,
             "describe_block": self._describe_block,
-            "semantic_search_grc": self._semantic_search_grc,
             "suggest_compatible_insertions": self._suggest_compatible_insertions,
             "insert_block_on_connection": self._insert_block_on_connection,
             "auto_insert_block": self._auto_insert_block,
@@ -1487,8 +1461,7 @@ class GrcAgent:
 
     def _search_blocks_version_token(self) -> str:
         catalog_token = _catalog_version_token(self.catalog_root)
-        vector_token = vector_index_version_token()
-        return f"catalog={catalog_token}|vector={vector_token}"
+        return f"catalog={catalog_token}"
 
     def _search_blocks_cache_get(
         self, key: tuple[str, int, str]
@@ -1504,7 +1477,7 @@ class GrcAgent:
     ) -> None:
         self._search_blocks_cache[key] = copy.deepcopy(payload)
         self._search_blocks_cache.move_to_end(key)
-        while len(self._search_blocks_cache) > self._retrieval_cfg.conceptual_cache_size:
+        while len(self._search_blocks_cache) > self._retrieval_cfg.lexical_cache_size:
             self._search_blocks_cache.popitem(last=False)
 
     def _ask_grc_docs_cache_key(
@@ -1530,7 +1503,6 @@ class GrcAgent:
             str(focus or ""),
             retrieval_mode,
             source_digest.hexdigest(),
-            vector_index_version_token(),
             self._docs_answer_cfg.helper_prompt_version,
             self._docs_answer_cfg.helper_mode,
         )
@@ -1594,17 +1566,8 @@ class GrcAgent:
             debug=debug,
         )
 
-    def _collect_docs_candidates(
-        self,
-        *,
-        semantic_manual: dict[str, Any],
-        semantic_tutorial: dict[str, Any],
-    ) -> list[_DocsEvidenceCandidate]:
-        return collect_docs_candidates_wrapper(
-            self,
-            semantic_manual=semantic_manual,
-            semantic_tutorial=semantic_tutorial,
-        )
+    def _collect_docs_candidates(self) -> list[_DocsEvidenceCandidate]:
+        return collect_docs_candidates_wrapper(self)
 
     def _rank_docs_candidates(
         self,
@@ -2052,18 +2015,6 @@ class GrcAgent:
             result["requested_block_id"] = block_id
             result["resolved_block_id"] = normalized_block_id
         return result
-
-    def _semantic_search_grc(
-        self,
-        query: str,
-        scope: str = "all",
-        k: int | None = None,
-    ) -> ToolResult:
-        if k is None:
-            payload = semantic_search_grc(query, scope=scope)
-        else:
-            payload = semantic_search_grc(query, scope=scope, k=k)
-        return self._payload_result("semantic_search_grc", payload)
 
     def _suggest_compatible_insertions(self, connection_id: str, k: int = 5) -> ToolResult:
         """Read-only suggestion for blocks that can be inserted into a connection."""

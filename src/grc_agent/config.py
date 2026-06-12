@@ -74,8 +74,6 @@ class DocsAnswerConfig:
     max_sources: int
     answer_target_chars: int
     excerpt_target_chars: int
-    semantic_manual_enabled: bool
-    semantic_tutorial_enabled: bool
     probe_timeout_seconds: float
     retry_interval_on_failure_seconds: float
     retry_interval_on_success_seconds: float
@@ -92,7 +90,7 @@ class RetrievalConfig:
     search_blocks_max_k: int
     ask_grc_docs_default_k: int
     ask_grc_docs_max_k: int
-    conceptual_cache_size: int
+    lexical_cache_size: int
 
 
 @dataclass(frozen=True)
@@ -138,8 +136,6 @@ DEFAULT_DOCS_ANSWER_CONFIG = DocsAnswerConfig(
     max_sources=2,
     answer_target_chars=300,
     excerpt_target_chars=220,
-    semantic_manual_enabled=True,
-    semantic_tutorial_enabled=True,
     probe_timeout_seconds=0.5,
     retry_interval_on_failure_seconds=3.0,
     retry_interval_on_success_seconds=1.5,
@@ -153,7 +149,7 @@ DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
     search_blocks_max_k=12,
     ask_grc_docs_default_k=3,
     ask_grc_docs_max_k=8,
-    conceptual_cache_size=64,
+    lexical_cache_size=64,
 )
 
 DEFAULT_HISTORY_CONFIG = HistoryConfig(checkpoint_retention=100)
@@ -483,8 +479,6 @@ def _docs_answer_config(
         max_sources=_optional_positive_int(table, "max_sources", default=defaults.max_sources, context="[agent.docs_answer]"),
         answer_target_chars=_optional_positive_int(table, "answer_target_chars", default=defaults.answer_target_chars, context="[agent.docs_answer]"),
         excerpt_target_chars=_optional_positive_int(table, "excerpt_target_chars", default=defaults.excerpt_target_chars, context="[agent.docs_answer]"),
-        semantic_manual_enabled=_optional_bool(table, "semantic_manual_enabled", default=defaults.semantic_manual_enabled, context="[agent.docs_answer]"),
-        semantic_tutorial_enabled=_optional_bool(table, "semantic_tutorial_enabled", default=defaults.semantic_tutorial_enabled, context="[agent.docs_answer]"),
         probe_timeout_seconds=_optional_positive_float(table, "probe_timeout_seconds", default=defaults.probe_timeout_seconds, context="[agent.docs_answer]"),
         retry_interval_on_failure_seconds=_optional_positive_float(table, "retry_interval_on_failure_seconds", default=defaults.retry_interval_on_failure_seconds, context="[agent.docs_answer]"),
         retry_interval_on_success_seconds=_optional_positive_float(table, "retry_interval_on_success_seconds", default=defaults.retry_interval_on_success_seconds, context="[agent.docs_answer]"),
@@ -504,7 +498,7 @@ def _retrieval_config(
         search_blocks_max_k=_optional_positive_int(table, "search_blocks_max_k", default=defaults.search_blocks_max_k, context="[agent.retrieval]"),
         ask_grc_docs_default_k=_optional_positive_int(table, "ask_grc_docs_default_k", default=defaults.ask_grc_docs_default_k, context="[agent.retrieval]"),
         ask_grc_docs_max_k=_optional_positive_int(table, "ask_grc_docs_max_k", default=defaults.ask_grc_docs_max_k, context="[agent.retrieval]"),
-        conceptual_cache_size=_optional_positive_int(table, "conceptual_cache_size", default=defaults.conceptual_cache_size, context="[agent.retrieval]"),
+        lexical_cache_size=_optional_positive_int(table, "lexical_cache_size", default=defaults.lexical_cache_size, context="[agent.retrieval]"),
     )
 
 

@@ -138,27 +138,6 @@ def build_tool_schemas(
             required=["block_id"],
         ),
         _schema(
-            "semantic_search_grc",
-            "Search the vector index for semantically similar GNU Radio catalog blocks or documentation.",
-            {
-                "query": {
-                    "type": "string",
-                    "description": "Semantic search text. Maximum 800 characters.",
-                    "maxLength": 800,
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["all", "catalog", "manual", "tutorial"],
-                    "description": "Which read-only vector records to search.",
-                },
-                "k": {
-                    "type": "integer",
-                    "description": "Optional maximum results. Default 5, capped at 10.",
-                },
-            },
-            required=["query"],
-        ),
-        _schema(
             "suggest_compatible_insertions",
             "Return catalog-backed block candidates compatible with an existing connection.",
             {
@@ -295,7 +274,7 @@ def build_tool_schemas(
             {
                 "transaction": {
                     "type": ["object", "array"],
-                    "description": "One supported operation object or an ordered list of operation objects. Every operation object must include `op_type`.",
+                    "description": "One supported operation object or an ordered list of operation objects. Every operation object requires `op_type`.",
                 }
             },
             required=["transaction"],
@@ -306,7 +285,7 @@ def build_tool_schemas(
             {
                 "transaction": {
                     "type": ["object", "array"],
-                    "description": "One supported operation object or an ordered list of operation objects. Every operation object must include `op_type`.",
+                    "description": "One supported operation object or an ordered list of operation objects. Every operation object requires `op_type`.",
                 }
             },
             required=["transaction"],
@@ -406,7 +385,7 @@ def build_tool_schemas(
             {
                 "reasoning": {
                     "type": "string",
-                    "description": "Briefly explain the current graph state and your step-by-step plan for this batch.",
+                    "description": "Plan and reasoning for this batch.",
                 },
                 "add_blocks": {
                     "type": "array",

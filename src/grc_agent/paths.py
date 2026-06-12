@@ -29,8 +29,6 @@ def collect_package_paths() -> dict[str, str]:
         "history": str(history_path),
         "history_env_var": HISTORY_ENV_VAR,
         "sessions_db": str(Path.home() / ".grc_agent" / "sessions.db"),
-        "vector_index_default": str(Path.home() / ".grc_agent" / "vector_index"),
-        "fastembed_cache": str(cache_root / "fastembed"),
         "grc_agent_state": str(Path.home() / ".grc_agent"),
         "grc_agent_cache": str(cache_root / "grc_agent"),
     }

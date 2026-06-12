@@ -198,7 +198,7 @@ def normalize_operations(operations: Any) -> tuple[list[ValidationOperation], li
                 op_type="transaction",
                 field="operations",
                 code="invalid_operations",
-                message="operations must be a mapping or a list of mappings.",
+                message="operations expected to be a mapping or a list of mappings.",
             )
         ]
 
@@ -209,7 +209,7 @@ def normalize_operations(operations: Any) -> tuple[list[ValidationOperation], li
                 op_type="transaction",
                 field="operations",
                 code="empty_operations",
-                message="operations must contain at least one operation.",
+                message="operations required to contain at least one operation.",
             )
         ]
 
@@ -223,7 +223,7 @@ def normalize_operations(operations: Any) -> tuple[list[ValidationOperation], li
                     op_type="transaction",
                     field="operation",
                     code="invalid_operation",
-                    message="Each operation must be a mapping.",
+                    message="Each operation expected to be a mapping.",
                 )
             )
             continue
@@ -238,7 +238,7 @@ def normalize_operations(operations: Any) -> tuple[list[ValidationOperation], li
                     field="op_type",
                     code="unsupported_op_type",
                     message=(
-                        "op_type must be one of: update_params, add_connection, "
+                        "op_type expected to be one of: update_params, add_connection, "
                         "remove_connection, remove_block, add_block."
                     ),
                 )
@@ -450,7 +450,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="instance_name",
                     code="invalid_field_type",
-                    message="instance_name must be a non-empty string.",
+                    message="instance_name expected to be a non-empty string.",
                 )
             )
         else:
@@ -467,7 +467,7 @@ def _normalize_operation(
                         op_type=op_type,
                         field="block_type",
                         code="invalid_field_type",
-                        message="block_type must be a non-empty string if provided.",
+                        message="block_type expected to be a non-empty string if provided.",
                     )
                 )
             else:
@@ -485,7 +485,7 @@ def _normalize_operation(
                             op_type=op_type,
                             field="connection_id",
                             code="invalid_field_type",
-                            message="connection_id must be a non-empty string.",
+                            message="connection_id expected to be a non-empty string.",
                         )
                     )
                 else:
@@ -529,7 +529,7 @@ def _normalize_operation(
                         op_type=op_type,
                         field=field_name,
                         code="invalid_field_type",
-                        message=f"{field_name} must be a non-empty string.",
+                        message=f"{field_name} expected to be a non-empty string.",
                     )
                 )
                 continue
@@ -547,7 +547,7 @@ def _normalize_operation(
                             op_type=op_type,
                             field=field_name,
                             code="invalid_field_type",
-                            message=f"{field_name} must be a non-negative integer.",
+                            message=f"{field_name} expected to be a non-negative integer.",
                         )
                     )
                     continue
@@ -561,7 +561,7 @@ def _normalize_operation(
                         op_type=op_type,
                         field=field_name,
                         code="invalid_field_type",
-                        message=f"{field_name} must be a non-negative integer or a non-empty string port name.",
+                        message=f"{field_name} expected to be a non-negative integer or a non-empty string port name.",
                     )
                 )
                 continue
@@ -575,7 +575,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="params",
                     code="invalid_field_type",
-                    message="params must be a mapping.",
+                    message="params expected to be a mapping.",
                 )
             )
         elif not params:
@@ -585,7 +585,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="params",
                     code="empty_params",
-                    message="params must contain at least one parameter update.",
+                    message="params required to contain at least one parameter update.",
                 )
             )
         else:
@@ -608,7 +608,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="state",
                     code="invalid_field_type",
-                    message="state must be a non-empty string.",
+                    message="state expected to be a non-empty string.",
                 )
             )
         else:
@@ -636,7 +636,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="block_type",
                     code="invalid_field_type",
-                    message="block_type must be a non-empty string.",
+                    message="block_type expected to be a non-empty string.",
                 )
             )
         else:
@@ -650,7 +650,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="parameters",
                     code="invalid_field_type",
-                    message="parameters must be a mapping.",
+                    message="parameters expected to be a mapping.",
                 )
             )
         else:
@@ -673,7 +673,7 @@ def _normalize_operation(
                         op_type=op_type,
                         field="states",
                         code="invalid_field_type",
-                        message="states must be a mapping when provided.",
+                        message="states expected to be a mapping when provided.",
                     )
                 )
             else:
@@ -688,7 +688,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="instance_name",
                     code="invalid_field_type",
-                    message="instance_name must be a non-empty string.",
+                    message="instance_name expected to be a non-empty string.",
                 )
             )
         else:
@@ -702,7 +702,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="block_type",
                     code="invalid_field_type",
-                    message="block_type must be a non-empty string.",
+                    message="block_type expected to be a non-empty string.",
                 )
             )
         else:
@@ -716,7 +716,7 @@ def _normalize_operation(
                     op_type=op_type,
                     field="connection_id",
                     code="invalid_field_type",
-                    message="connection_id must be a non-empty string.",
+                    message="connection_id expected to be a non-empty string.",
                 )
             )
         else:
@@ -731,7 +731,7 @@ def _normalize_operation(
                         op_type=op_type,
                         field="params",
                         code="invalid_field_type",
-                        message="params must be a mapping when provided.",
+                        message="params expected to be a mapping when provided.",
                     )
                 )
             else:
@@ -754,7 +754,7 @@ def _normalize_operation(
                         op_type=op_type,
                         field="states",
                         code="invalid_field_type",
-                        message="states must be a mapping when provided.",
+                        message="states expected to be a mapping when provided.",
                     )
                 )
             else:
@@ -781,7 +781,7 @@ def _validate_parameter_mapping(
                     op_type=op_type,
                     field=f"{field}.{parameter_id}",
                     code="invalid_param_key",
-                    message="Parameter keys must be non-empty strings.",
+                    message="Parameter keys expected to be non-empty strings.",
                 )
             )
     return issues

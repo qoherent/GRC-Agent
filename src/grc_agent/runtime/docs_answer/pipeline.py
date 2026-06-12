@@ -39,8 +39,6 @@ def ask_grc_docs(
 ) -> ToolResult:
     import time
 
-    import grc_agent.agent as agent_module
-
     started = time.monotonic()
     before_revision = agent.session.state_revision
     before_dirty = agent.session.is_dirty
@@ -76,22 +74,12 @@ def ask_grc_docs(
     )
     answer_type = agent._classify_docs_answer_type(question_text)
 
-    retrieval_k = max(
-        limit,
-        min(agent._retrieval_cfg.ask_grc_docs_max_k, max(limit + 2, 5)),
-    )
-    retrieval_query = agent._normalized_docs_retrieval_query(
-        question=question_text,
-        answer_type=answer_type,
-    )
-    retrieval_queries = _docs_retrieval_queries(question_text, retrieval_query)
-    semantic_manual: dict[str, Any] = {"ok": False, "results": []}
-    semantic_tutorial: dict[str, Any] = {"ok": False, "results": []}
+
     degraded_retrieval = False
     fallback_used = False
     fallback_reason = "not_attempted"
     warnings: list[str] = []
-    retrieval_mode = "semantic_docs"
+    retrieval_mode = "keyword_docs"
     source_limit = min(limit, agent._docs_answer_cfg.max_sources)
     final_cache_key = agent._ask_grc_docs_cache_key(
         question=question_text,
@@ -144,93 +132,7 @@ def ask_grc_docs(
             output_truncated=False,
         )
 
-    run_manual_semantic = agent._docs_answer_cfg.semantic_manual_enabled
-    run_tutorial_semantic = agent._docs_answer_cfg.semantic_tutorial_enabled
-
-    if run_manual_semantic:
-        handlers.append("semantic_search_grc(manual)")
-        semantic_manual = _run_docs_semantic_queries(
-            agent_module,
-            retrieval_queries,
-            scope="manual",
-            k=retrieval_k,
-        )
-        if semantic_manual.get("ok") is not True and semantic_manual.get(
-            "error_type"
-        ) in {
-            "missing_index",
-            ErrorCode.RETRIEVAL_NOT_READY,
-        }:
-            degraded_retrieval = True
-
-    if run_tutorial_semantic:
-        handlers.append("semantic_search_grc(tutorial)")
-        semantic_tutorial = _run_docs_semantic_queries(
-            agent_module,
-            retrieval_queries,
-            scope="tutorial",
-            k=retrieval_k,
-        )
-        if semantic_tutorial.get("ok") is not True and semantic_tutorial.get(
-            "error_type"
-        ) in {
-            "missing_index",
-            ErrorCode.RETRIEVAL_NOT_READY,
-        }:
-            degraded_retrieval = True
-
-    enabled_semantic_payloads = [
-        payload
-        for enabled, payload in (
-            (run_manual_semantic, semantic_manual),
-            (run_tutorial_semantic, semantic_tutorial),
-        )
-        if enabled
-    ]
-    if (
-        enabled_semantic_payloads
-        and all(payload.get("ok") is not True for payload in enabled_semantic_payloads)
-    ):
-        error_type = (
-            semantic_manual.get("error_type")
-            or semantic_tutorial.get("error_type")
-            or ErrorCode.RETRIEVAL_NOT_READY
-        )
-        warnings.append("vector_index_missing_or_not_ready")
-        result = agent._payload_result(
-            "ask_grc_docs",
-            {
-                "ok": False,
-                "question": question_text,
-                "focus": focus_text,
-                "answer": "",
-                "sources": [],
-                "insufficient_evidence": True,
-                "fallback_used": False,
-                "degraded_retrieval": True,
-                "retrieval_mode": "semantic_unavailable",
-                "warnings": warnings,
-                "message": "Docs vector retrieval is not available.",
-                "error_type": error_type,
-            },
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="ask_grc_docs",
-            wrapper_action="query",
-            internal_handlers=handlers,
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
-        )
-
-    candidates = agent._collect_docs_candidates(
-        semantic_manual=semantic_manual,
-        semantic_tutorial=semantic_tutorial,
-    )
+    candidates = agent._collect_docs_candidates()
     ranked_candidates = agent._rank_docs_candidates(
         question=question_text,
         candidates=candidates,
@@ -286,7 +188,7 @@ def ask_grc_docs(
         selected_candidates=selected_candidates,
     )
     if degraded_retrieval:
-        warnings.append("vector_index_missing_or_not_ready")
+        warnings.append("retrieval_degraded")
 
     insufficient_evidence = len(snippets) == 0 or str(source_quality.get("quality")) == "weak"
     answer = ""
@@ -612,47 +514,6 @@ def _docs_answer_payload_from_cache(
     }
 
 
-def _run_docs_semantic_queries(
-    agent_module: Any,
-    queries: list[str],
-    *,
-    scope: str,
-    k: int,
-) -> dict[str, Any]:
-    payloads = [
-        agent_module.semantic_search_grc(query, scope=scope, k=k)
-        for query in queries
-        if query
-    ]
-    if not payloads:
-        return {"ok": False, "results": []}
-    ok_payloads = [payload for payload in payloads if payload.get("ok") is True]
-    if not ok_payloads:
-        return payloads[0]
-
-    merged_results: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for payload in ok_payloads:
-        for row in payload.get("results", []):
-            if not isinstance(row, dict):
-                continue
-            result_id = _semantic_result_id(row)
-            if result_id in seen:
-                continue
-            seen.add(result_id)
-            merged_results.append(row)
-
-    merged = dict(ok_payloads[0])
-    merged["results"] = merged_results
-    warnings: list[Any] = []
-    for payload in ok_payloads:
-        raw_warnings = payload.get("warnings")
-        if isinstance(raw_warnings, list):
-            warnings.extend(raw_warnings)
-    merged["warnings"] = list(dict.fromkeys(warnings))
-    return merged
-
-
 def _semantic_result_id(row: dict[str, Any]) -> str:
     for key in ("record_id", "canonical_block_id"):
         value = row.get(key)
@@ -819,110 +680,8 @@ def _answer_evidence_text(answer: str) -> str:
     return text
 
 
-def collect_docs_candidates(
-    agent,
-    *,
-    semantic_manual: dict[str, Any],
-    semantic_tutorial: dict[str, Any],
-) -> list[_DocsEvidenceCandidate]:
-    candidates: list[_DocsEvidenceCandidate] = []
-    seen_records: set[str] = set()
-
-    def _append(
-        *,
-        record_id: Any,
-        title: Any,
-        source: Any,
-        excerpt: Any,
-        section: Any,
-        channel: str,
-        semantic_score: float | None = None,
-        source_type_hint: str | None = None,
-    ) -> None:
-        title_text = " ".join(str(title or "").split()).strip()
-        source_text = " ".join(str(source or "").split()).strip()
-        excerpt_text = agent._clean_docs_excerpt(str(excerpt or ""))
-        if not title_text or not source_text or not excerpt_text:
-            return
-        aliases = agent._docs_title_aliases(title_text)
-        if aliases:
-            source_text = f"{source_text} | title_aliases:{','.join(aliases)}"
-
-        record_key = _docs_candidate_record_key(
-            record_id=record_id,
-            source=source_text,
-            excerpt=excerpt_text,
-        )
-        if record_key in seen_records:
-            return
-        seen_records.add(record_key)
-
-        lower_excerpt = excerpt_text.lower()
-        if title_text and lower_excerpt.startswith(title_text.lower()):
-            excerpt_text = excerpt_text[len(title_text):].lstrip(" -:.\n")
-        elif source_text and lower_excerpt.startswith(source_text.lower()):
-            excerpt_text = excerpt_text[len(source_text):].lstrip(" -:.\n")
-        excerpt_text = agent._clean_docs_excerpt(excerpt_text)
-
-        max_collected_excerpt_chars = max(
-            agent._docs_answer_cfg.helper_max_total_context_chars,
-            agent._docs_answer_cfg.helper_max_snippet_chars,
-            agent._docs_answer_cfg.excerpt_target_chars * 2,
-        )
-        if len(excerpt_text) > max_collected_excerpt_chars:
-            excerpt_text = excerpt_text[:max_collected_excerpt_chars].rstrip()
-        candidates.append(
-            _DocsEvidenceCandidate(
-                snippet=DocsAnswerSnippet(
-                    title=title_text,
-                    source=source_text,
-                    excerpt=excerpt_text,
-                ),
-                source_channel=channel,
-                source_type=agent._infer_docs_source_type(
-                    source=source_text,
-                    title=title_text,
-                    source_type_hint=source_type_hint,
-                ),
-                section=" ".join(str(section or "").split()).strip(),
-                semantic_score=semantic_score,
-                topic_score=0.0,
-                quality_score=0.0,
-                low_value_reasons=(),
-                procedural=False,
-            )
-        )
-
-    for payload, channel in (
-        (semantic_manual, "semantic_manual"),
-        (semantic_tutorial, "semantic_tutorial"),
-    ):
-        if payload.get("ok") is not True:
-            continue
-        for row in payload.get("results", []):
-            if not isinstance(row, dict):
-                continue
-            provenance = row.get("provenance")
-            source = None
-            if isinstance(provenance, dict):
-                source = provenance.get("url") or provenance.get("path")
-            semantic_raw = row.get("vector_score_raw")
-            semantic_score = (
-                float(semantic_raw)
-                if isinstance(semantic_raw, int | float)
-                else None
-            )
-            _append(
-                record_id=row.get("record_id"),
-                title=row.get("title"),
-                source=source,
-                excerpt=row.get("excerpt"),
-                section=row.get("section"),
-                channel=channel,
-                semantic_score=semantic_score,
-                source_type_hint=str(row.get("source_type") or ""),
-            )
-    return candidates
+def collect_docs_candidates(agent) -> list[_DocsEvidenceCandidate]:
+    return []
 
 def rank_docs_candidates(
     agent,

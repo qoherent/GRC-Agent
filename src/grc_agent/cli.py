@@ -33,18 +33,6 @@ from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
 from grc_agent.paths import collect_package_paths
 from grc_agent.retrieval import initialize_retrieval
-from grc_agent.retrieval.vector import (
-    DEFAULT_EMBEDDING_MODEL,
-    VALID_MISS_CATEGORIES,
-    VALID_MISS_SOURCES,
-    build_vector_index,
-    propose_vector_metadata,
-    prune_vector_collections,
-    record_vector_miss,
-    semantic_search_grc,
-    summarize_vector_misses,
-    vector_index_stats,
-)
 from grc_agent.runtime.clarification import render_clarification_prompt
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
 from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
@@ -119,10 +107,7 @@ def _build_parser(config: AppConfig | None = None) -> argparse.ArgumentParser:
         required=True,
         help="Path to write the redacted debug bundle JSON.",
     )
-    debug_bundle_parser.add_argument(
-        "--vector-index-dir",
-        help="Optional local vector index directory to inspect.",
-    )
+
 
     chat_epilog = """
 Examples:
@@ -212,179 +197,6 @@ Examples:
         "--args",
         default="{}",
         help="JSON object of tool arguments.",
-    )
-
-    vector_parser = subparsers.add_parser(
-        "vector",
-        help="Build and query the local read-only vector retrieval index.",
-    )
-    vector_subparsers = vector_parser.add_subparsers(dest="vector_command")
-    vector_subparsers.required = True
-    vector_build_parser = vector_subparsers.add_parser(
-        "build",
-        help="Build the local Qdrant/FastEmbed vector index.",
-    )
-    vector_build_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
-    vector_build_parser.add_argument("--catalog-root", help="Optional GNU Radio catalog root.")
-    vector_build_parser.add_argument(
-        "--embedding-model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=(
-            "FastEmbed model to download/cache locally and use for the index. "
-            f"Default: {DEFAULT_EMBEDDING_MODEL}."
-        ),
-    )
-    vector_build_parser.add_argument(
-        "--docs-only",
-        action="store_true",
-        help="Build a non-release docs-only index when GNU Radio catalog metadata is unavailable.",
-    )
-    vector_build_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print build report as JSON.",
-    )
-    vector_stats_parser = vector_subparsers.add_parser(
-        "stats",
-        help="Print local vector index stats.",
-    )
-    vector_stats_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
-    vector_stats_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print stats as JSON.",
-    )
-    vector_gc_parser = vector_subparsers.add_parser(
-        "gc",
-        help="Garbage-collect old local vector collections after release evidence is captured.",
-    )
-    vector_gc_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
-    vector_gc_parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Delete stale collections. Without this flag, only print a dry-run report.",
-    )
-    vector_gc_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print garbage-collection report as JSON.",
-    )
-    vector_search_parser = vector_subparsers.add_parser(
-        "search",
-        help="Search the local read-only vector index.",
-    )
-    vector_search_parser.add_argument("query", help="Semantic query text.")
-    vector_search_parser.add_argument("--index-dir", help="Optional local Qdrant index directory.")
-    vector_search_parser.add_argument(
-        "--scope",
-        choices=["all", "catalog", "manual", "tutorial"],
-        default="all",
-        help="Record scope to search.",
-    )
-    vector_search_parser.add_argument(
-        "--k",
-        type=int,
-        default=5,
-        help="Maximum number of results.",
-    )
-    vector_search_parser.add_argument(
-        "--embedding-model",
-        default=None,
-        help=(
-            "FastEmbed model to use for the query. Defaults to the model recorded "
-            "in the active vector index manifest."
-        ),
-    )
-    vector_search_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print search payload as JSON.",
-    )
-    vector_miss_parser = vector_subparsers.add_parser(
-        "record-miss",
-        aliases=["miss"],
-        help="Record a sanitized real-user vector retrieval miss as JSONL evidence.",
-    )
-    vector_miss_parser.add_argument("query", help="User query that missed expected retrieval.")
-    vector_miss_parser.add_argument(
-        "--expected-block",
-        action="append",
-        default=[],
-        dest="expected_block_ids",
-        help="Expected canonical block ID. May be repeated.",
-    )
-    vector_miss_parser.add_argument(
-        "--actual-top-id",
-        action="append",
-        default=[],
-        dest="actual_top_ids",
-        help="Actual top vector result ID. May be repeated.",
-    )
-    vector_miss_parser.add_argument(
-        "--observed-top-id",
-        action="append",
-        dest="observed_top_ids",
-        help="Deprecated alias for --actual-top-id.",
-    )
-    vector_miss_parser.add_argument(
-        "--scope",
-        choices=["all", "catalog", "manual", "tutorial"],
-        default="all",
-        help="Search scope where the miss occurred.",
-    )
-    vector_miss_parser.add_argument(
-        "--category",
-        choices=sorted(VALID_MISS_CATEGORIES),
-        default="untriaged",
-        help="Initial triage category.",
-    )
-    vector_miss_parser.add_argument(
-        "--source",
-        choices=sorted(VALID_MISS_SOURCES),
-        default="real_user",
-        help="Evidence source.",
-    )
-    vector_miss_parser.add_argument(
-        "--notes",
-        default="",
-        help="Short human note. Do not include graph mutation recipes.",
-    )
-    vector_miss_parser.add_argument(
-        "--intake-path",
-        help="Optional JSONL path. Defaults to reports/retrieval/real_user_misses.jsonl.",
-    )
-    vector_miss_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print recorded miss payload as JSON.",
-    )
-    vector_misses_parser = vector_subparsers.add_parser(
-        "list-misses",
-        aliases=["misses"],
-        help="Summarize and deduplicate recorded vector retrieval misses.",
-    )
-    vector_misses_parser.add_argument(
-        "--intake-path",
-        help="Optional JSONL path. Defaults to reports/retrieval/real_user_misses.jsonl.",
-    )
-    vector_misses_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print miss summary as JSON.",
-    )
-    vector_proposals_parser = vector_subparsers.add_parser(
-        "list-proposals",
-        aliases=["proposals"],
-        help="Generate a human-review metadata proposal report from miss clusters.",
-    )
-    vector_proposals_parser.add_argument(
-        "--intake-path",
-        help="Optional JSONL path. Defaults to reports/retrieval/real_user_misses.jsonl.",
-    )
-    vector_proposals_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print proposal report as JSON.",
     )
 
     model_parser = subparsers.add_parser(
@@ -687,7 +499,7 @@ Examples:
     )
     paths_parser = subparsers.add_parser(
         "paths",
-        help="Print every filesystem location the package uses (config, history, vector index, caches).",
+        help="Print every filesystem location the package uses (config, history, caches).",
     )
     paths_parser.add_argument(
         "--json",
@@ -716,7 +528,6 @@ def _maybe_translate_legacy_args(argv: list[str]) -> list[str]:
         "debug-bundle",
         "chat",
         "tool",
-        "vector",
         "dogfood",
         "history",
         "init",
@@ -1044,8 +855,7 @@ def _print_cli_error(payload: dict[str, Any], *, as_json: bool = False) -> None:
     elif error_type == ErrorCode.RETRIEVAL_NOT_READY:
         hint = (
             "Hint: run `uv run grc-agent doctor` and ensure GNU Radio catalog "
-            "metadata is discoverable. Run `uv run grc-agent vector build` to build "
-            "the local index."
+            "metadata is discoverable."
         )
     elif error_type == ErrorCode.LLAMA_SERVER_MISSING:
         hint = (
@@ -1731,7 +1541,6 @@ def _build_release_manifest(config: AppConfig) -> dict[str, Any]:
             "lint_src_tests": "uv run ruff check src/ tests/",
             "lint_repo": "uv run ruff check",
             "unit": "uv run python -m unittest",
-            "vector_regression": "uv run python -m tests.retrieval_eval.vector_regression",
             "docs_answer_eval": "uv run python -m tests.retrieval_eval.grc_docs_answer_eval",
             "doctor": "uv run grc-agent doctor",
             "health": "uv run grc-agent health",
@@ -1752,10 +1561,7 @@ def _run_debug_bundle_command(
     config: AppConfig,
     config_path: str | None,
     output_path: str,
-    vector_index_dir: str | None,
 ) -> int:
-    """Write a redacted debug bundle and print a compact summary."""
-
     doctor_report = run_doctor(
         config_path=config_path,
         check_retrieval=True,
@@ -1763,13 +1569,6 @@ def _run_debug_bundle_command(
     )
     health_report = _build_health_report(config)
     release_manifest = _build_release_manifest(config)
-    try:
-        vector_stats = vector_index_stats(index_dir=vector_index_dir)
-    except Exception as exc:
-        vector_stats = build_error_payload(
-            error_type=ErrorCode.INTERNAL_ERROR,
-            message=str(exc),
-        )
     repo_root = Path(__file__).resolve().parents[2]
     payload = build_debug_bundle(
         config=config,
@@ -1777,95 +1576,11 @@ def _run_debug_bundle_command(
         doctor_report=doctor_report,
         health_report=health_report,
         release_manifest=release_manifest,
-        vector_stats=vector_stats,
         repo_root=repo_root,
     )
     written = write_debug_bundle(output_path, payload)
     print(json.dumps(debug_bundle_summary(payload, written), indent=2, sort_keys=True))
     return 0
-
-
-def _print_vector_payload(payload: dict[str, Any], *, json_output: bool) -> None:
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return
-    if not payload.get("ok"):
-        print(payload.get("message", "Vector command failed."))
-        if str(payload.get("error_type")) == "missing_index":
-            print("Hint: build the local index first with `uv run grc-agent vector build`.")
-        return
-    if "would_delete_collections" in payload:
-        mode = "dry run" if payload.get("dry_run") else "applied"
-        print(f"Vector GC {mode}: {len(payload.get('would_delete_collections', []))} old collections")
-        if payload.get("retention_policy"):
-            print(f"Retention: {payload.get('retention_policy')}")
-        if payload.get("active_collection"):
-            print(f"Active: {payload.get('active_collection')}")
-        if payload.get("previous_collection"):
-            print(f"Previous: {payload.get('previous_collection')}")
-        for name in payload.get("would_delete_collections", []):
-            prefix = "Would delete" if payload.get("dry_run") else "Deleted"
-            print(f"{prefix}: {name}")
-        return
-    if payload.get("tool") == "record_vector_miss":
-        record = payload.get("record", {})
-        print(f"Recorded vector miss: {record.get('query', '')}")
-        print(f"Path: {payload.get('intake_path', '')}")
-        if record.get("category"):
-            print(f"Category: {record.get('category')}")
-        return
-    if payload.get("tool") == "summarize_vector_misses":
-        print(
-            f"Vector misses: {payload.get('total_records', 0)} records, "
-            f"{payload.get('cluster_count', 0)} clusters"
-        )
-        for cluster in payload.get("clusters", [])[:10]:
-            queries = ", ".join(cluster.get("queries", [])[:3])
-            expected = ", ".join(cluster.get("expected_block_ids", [])) or "unknown"
-            print(
-                f"- {cluster.get('count')}x {expected}: {queries} "
-                f"[{cluster.get('recommended_action')}]"
-            )
-        for warning in payload.get("warnings", []) or []:
-            print(f"Warning: {warning}")
-        return
-    if payload.get("tool") == "propose_vector_metadata":
-        print(f"Metadata proposal candidates: {payload.get('candidate_count', 0)}")
-        for candidate in payload.get("candidates", [])[:10]:
-            print(
-                f"- {candidate.get('proposed_block')}: "
-                f"{candidate.get('proposed_stable_capability_phrase')}"
-            )
-        blocked = payload.get("blocked_clusters", [])
-        if blocked:
-            print(f"Blocked clusters: {len(blocked)}")
-        for warning in payload.get("warnings", []) or []:
-            print(f"Warning: {warning}")
-        return
-    if "results" in payload:
-        print(f"Vector search: {payload.get('query', '')}")
-        for index, result in enumerate(payload.get("results", []), start=1):
-            print(
-                f"\n{index}. {result.get('title')} "
-                f"({result.get('source_type')}, score={result.get('vector_score_raw')})"
-            )
-            if result.get("canonical_block_id"):
-                print(f"Block: {result.get('canonical_block_id')}")
-            print(result.get("excerpt", ""))
-            provenance = result.get("provenance", {})
-            if isinstance(provenance, dict):
-                print(f"Source: {provenance.get('path')}")
-        for warning in payload.get("warnings", []) or []:
-            print(f"Warning: {warning}")
-        return
-    print(
-        f"Vector index {payload.get('collection_alias', '')}: "
-        f"{payload.get('record_count', payload.get('points_count', 0))} records"
-    )
-    records_by_source_type = payload.get("records_by_source_type")
-    if isinstance(records_by_source_type, dict):
-        for source_type, count in sorted(records_by_source_type.items()):
-            print(f"  {source_type}: {count}")
 
 
 def _print_dogfood_payload(payload: dict[str, Any], *, json_output: bool) -> None:
@@ -1994,70 +1709,6 @@ def _run_history_command(args: argparse.Namespace) -> int:
             message=str(exc),
         )
         _print_history_payload(payload, json_output=getattr(args, "json", False))
-        return 1
-    return 2
-
-
-def _run_vector_command(args: argparse.Namespace) -> int:
-    try:
-        if args.vector_command == "build":
-            payload = build_vector_index(
-                index_dir=args.index_dir,
-                catalog_root=args.catalog_root,
-                docs_only=args.docs_only,
-                embedding_model=args.embedding_model,
-            )
-            _print_vector_payload(payload, json_output=args.json)
-            return 0
-        if args.vector_command == "stats":
-            payload = vector_index_stats(index_dir=args.index_dir)
-            _print_vector_payload(payload, json_output=args.json)
-            return 0 if payload.get("ok") else 1
-        if args.vector_command == "gc":
-            payload = prune_vector_collections(
-                index_dir=args.index_dir,
-                dry_run=not args.apply,
-            )
-            _print_vector_payload(payload, json_output=args.json)
-            return 0 if payload.get("ok") else 1
-        if args.vector_command == "search":
-            payload = semantic_search_grc(
-                args.query,
-                scope=args.scope,
-                k=args.k,
-                index_dir=args.index_dir,
-                embedding_model=args.embedding_model,
-            )
-            _print_vector_payload(payload, json_output=args.json)
-            return 0 if payload.get("ok") else 1
-        if args.vector_command == "miss":
-            actual_top_ids = args.actual_top_ids or args.observed_top_ids or []
-            payload = record_vector_miss(
-                args.query,
-                expected_block_ids=args.expected_block_ids,
-                actual_top_ids=actual_top_ids,
-                scope=args.scope,
-                category=args.category,
-                source=args.source,
-                notes=args.notes,
-                intake_path=args.intake_path,
-            )
-            _print_vector_payload(payload, json_output=args.json)
-            return 0 if payload.get("ok") else 1
-        if args.vector_command == "misses":
-            payload = summarize_vector_misses(intake_path=args.intake_path)
-            _print_vector_payload(payload, json_output=args.json)
-            return 0 if payload.get("ok") else 1
-        if args.vector_command == "proposals":
-            payload = propose_vector_metadata(intake_path=args.intake_path)
-            _print_vector_payload(payload, json_output=args.json)
-            return 0 if payload.get("ok") else 1
-    except Exception as exc:
-        payload = build_error_payload(
-            error_type=ErrorCode.INTERNAL_ERROR,
-            message=str(exc),
-        )
-        _print_vector_payload(payload, json_output=getattr(args, "json", False))
         return 1
     return 2
 
@@ -2687,7 +2338,6 @@ def main(argv: list[str] | None = None) -> int:
             config=app_config,
             config_path=args.config,
             output_path=args.output,
-            vector_index_dir=args.vector_index_dir,
         )
 
     if args.command == "chat":
@@ -2729,9 +2379,6 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         return _run_tool_command(args.tool_name, tool_kwargs, args.file, app_config)
-
-    if args.command == "vector":
-        return _run_vector_command(args)
 
     if args.command == "dogfood":
         return _run_dogfood_command(args)

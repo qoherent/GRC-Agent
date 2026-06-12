@@ -52,6 +52,10 @@ def inspect_graph(
             output_truncated=False,
         )
 
+    if targets and any(t.strip().lower() in ("*", "all") for t in targets):
+        targets = []
+        selected_view = "overview"
+
     gc = agent._guardrails_cfg
     normalized_targets = _normalize_string_list(targets, limit=gc.max_inspect_targets)
     normalized_params = _normalize_string_list(params, limit=gc.max_inspect_params)
@@ -152,6 +156,9 @@ def _overview(
         incoming=incoming,
         outgoing=outgoing,
     )
+    limit = gc.max_graph_summary_blocks
+    if summary.get("blocks_truncated"):
+        block_rows = block_rows[:limit]
     overview = {
         "graph_name": _graph_name(agent),
         "counts": {

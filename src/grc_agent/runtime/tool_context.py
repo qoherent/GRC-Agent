@@ -51,14 +51,6 @@ def compact_tool_entry(
         summary = content.get("summary")
         if isinstance(summary, str) and summary:
             compact["summary"] = summary
-    if tool_name == "semantic_search_grc":
-        for key in ("query", "scope"):
-            value = content.get(key)
-            if isinstance(value, str) and value:
-                compact[key] = value
-        results_preview = semantic_search_result_preview(content.get("results"))
-        if results_preview:
-            compact["results_preview"] = results_preview
     if not compact:
         compact["ok"] = content.get("ok", False)
         compact["message"] = "result truncated"
@@ -110,12 +102,6 @@ def tool_history_content_as_text(
             "connection_preview": active_session.get("connection_preview"),
         }
 
-    if tool_name == "semantic_search_grc":
-        compact.pop("results", None)
-        history_preview = semantic_search_result_preview(content.get("results"))
-        if history_preview:
-            compact["results_preview"] = history_preview
-
     if tool_name == "get_grc_context":
         compact.pop("nodes", None)
         target = compact.get("target")
@@ -142,10 +128,6 @@ def tool_history_content_as_text(
     if tool_name == "get_grc_context":
         lines.append(
             "next_step_note: inspection data is routing only."
-        )
-    if tool_name == "semantic_search_grc":
-        lines.append(
-            "next_step_note: read-only candidate discovery."
         )
     if tool_name == "inspect_graph" and compact.get("view") == "overview":
         return _render_inspect_overview_result(lines, compact)

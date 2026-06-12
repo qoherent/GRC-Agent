@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,11 @@ def preflight_transaction(
     operations: Any,
     catalog_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Validate one ordered transaction without mutating the live session."""
+    """Validate one ordered transaction without mutating the live session.
+
+    All operations are validated before returning so the caller receives
+    every detectable error rather than only the first.
+    """
     if session.flowgraph is None:
         return build_preflight_payload(
             errors=[
@@ -44,23 +49,36 @@ def preflight_transaction(
         )
 
     snapshot = SessionSnapshot.from_session(session)
-    warnings = []
+    warnings: list[Any] = []
     affected_block_names: set[str] = set()
+    all_errors: list[Any] = []
+    has_errors = False
+
     for op_index, operation in enumerate(normalized_operations):
+        target = copy.deepcopy(snapshot) if has_errors else snapshot
         errors, op_warnings = validate_and_apply_operation(
-            snapshot,
+            target,
             operation,
             op_index=op_index,
             catalog_root=catalog_root,
         )
         warnings.extend(op_warnings)
         if errors:
-            return build_preflight_payload(
-                errors=errors,
-                warnings=warnings,
-                normalized_operations=[operation.to_dict() for operation in normalized_operations],
-            )
-        affected_block_names.update(_affected_blocks_for_operation(operation))
+            all_errors.extend(errors)
+            has_errors = True
+        else:
+            if not has_errors:
+                snapshot = target
+                affected_block_names.update(
+                    _affected_blocks_for_operation(operation)
+                )
+
+    if all_errors:
+        return build_preflight_payload(
+            errors=all_errors,
+            warnings=warnings,
+            normalized_operations=[op.to_dict() for op in normalized_operations],
+        )
 
     integrity_errors, integrity_warnings = validate_snapshot_integrity(
         snapshot,
@@ -73,13 +91,13 @@ def preflight_transaction(
         return build_preflight_payload(
             errors=integrity_errors,
             warnings=warnings,
-            normalized_operations=[operation.to_dict() for operation in normalized_operations],
+            normalized_operations=[op.to_dict() for op in normalized_operations],
         )
 
     return build_preflight_payload(
         errors=[],
         warnings=warnings,
-        normalized_operations=[operation.to_dict() for operation in normalized_operations],
+        normalized_operations=[op.to_dict() for op in normalized_operations],
     )
 
 

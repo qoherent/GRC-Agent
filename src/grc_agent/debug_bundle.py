@@ -174,36 +174,6 @@ def summarize_recent_traces(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def summarize_vector_stats(vector_stats: dict[str, Any]) -> dict[str, Any]:
-    """Keep vector diagnostics useful without dumping source-hash/path maps."""
-
-    if vector_stats.get("ok") is not True:
-        return {
-            "ok": False,
-            "error_type": vector_stats.get("error_type"),
-            "message": vector_stats.get("message"),
-        }
-    keys = (
-        "ok",
-        "collection_alias",
-        "active_collection",
-        "previous_collection",
-        "record_count",
-        "points_count",
-        "embedding_model",
-        "embedding_size",
-        "docs_only",
-        "gnuradio_version",
-        "catalog_root",
-        "records_by_source_type",
-        "corpus_hash",
-        "corpus_version",
-        "index_schema_version",
-        "build_timestamp",
-    )
-    return {key: vector_stats.get(key) for key in keys if key in vector_stats}
-
-
 def _read_pyvenv_cfg() -> dict[str, str]:
     cfg_path = Path(sys.prefix) / "pyvenv.cfg"
     if not cfg_path.exists():
@@ -272,7 +242,6 @@ def build_debug_bundle(
     doctor_report: dict[str, Any],
     health_report: dict[str, Any],
     release_manifest: dict[str, Any],
-    vector_stats: dict[str, Any],
     repo_root: Path,
 ) -> dict[str, Any]:
     """Build a redacted debug bundle payload."""
@@ -311,7 +280,6 @@ def build_debug_bundle(
         "release_manifest": redact_for_debug_bundle(release_manifest),
         "tool_surface": redact_for_debug_bundle(release_manifest.get("tool_surface", {})),
         "hashes": redact_for_debug_bundle(release_manifest.get("hashes", {})),
-        "vector_index": redact_for_debug_bundle(summarize_vector_stats(vector_stats)),
         "gnu_radio": {
             "runtime": detect_gnu_radio_runtime(),
             "doctor_checks": [
@@ -362,18 +330,12 @@ def debug_bundle_summary(payload: dict[str, Any], output_path: Path) -> dict[str
     """Return a compact CLI summary for a generated bundle."""
 
     health = payload.get("health", {}) if isinstance(payload.get("health"), dict) else {}
-    vector_index = (
-        payload.get("vector_index", {})
-        if isinstance(payload.get("vector_index"), dict)
-        else {}
-    )
     return {
         "ok": True,
         "output": str(output_path),
         "schema_version": payload.get("schema_version"),
         "health_status": health.get("status"),
         "health_status_reasons": health.get("status_reasons", []),
-        "vector_index_ok": vector_index.get("ok"),
         "secrets_redacted": True,
     }
 
@@ -385,6 +347,5 @@ __all__ = [
     "detect_gnu_radio_runtime",
     "debug_bundle_summary",
     "redact_for_debug_bundle",
-    "summarize_vector_stats",
     "write_debug_bundle",
 ]

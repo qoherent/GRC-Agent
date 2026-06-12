@@ -1,4 +1,4 @@
-"""Vector-backed retrieval package."""
+"""Retrieval package — pure lexical FTS5 search."""
 
 from .readiness import (
     DEFAULT_GRC_CATALOG_ROOTS,
@@ -6,12 +6,10 @@ from .readiness import (
     discover_catalog_root,
     initialize_retrieval,
 )
-from .vector import semantic_search_grc
 
 __all__ = [
     "DEFAULT_GRC_CATALOG_ROOTS",
     "RetrievalReadinessError",
     "discover_catalog_root",
     "initialize_retrieval",
-    "semantic_search_grc",
 ]

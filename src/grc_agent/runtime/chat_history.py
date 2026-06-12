@@ -17,13 +17,10 @@ missing closing brackets.
 from __future__ import annotations
 
 import uuid
-from typing import Iterable
 
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
-    TextContent,
-    ToolCallContent,
     ToolCallResultContent,
 )
 
