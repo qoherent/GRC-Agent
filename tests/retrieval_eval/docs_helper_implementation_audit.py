@@ -18,7 +18,7 @@ from urllib import request
 from grc_agent.agent import GrcAgent
 from grc_agent.config import default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.docs_answer_advisor import (
+from grc_agent.runtime.doc_answer import (
     DocsAnswerSnippet,
     run_docs_answer_advisor_diagnostic,
 )

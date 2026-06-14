@@ -9,8 +9,11 @@ from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
-from grc_agent.runtime.clarification_state import pending_clarification_reminder
+from grc_agent.runtime.clarification import (
+    ClarificationOption,
+    ClarificationRequest,
+    pending_clarification_reminder,
+)
 from grc_agent.session_ops import connection_id
 
 DATA_DIR = Path(__file__).resolve().parent / "data"

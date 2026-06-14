@@ -75,7 +75,7 @@ def release_cases() -> list[LiveScenario]:
             allowed_tool_names=MVP_RELEASE_MODEL_TOOLS,
         ):
             raise RuntimeError(
-                f"R1 release case contains non-MVP expected tools: {scenario.name}"
+                f"R2 release case contains non-MVP expected tools: {scenario.name}"
             )
     return list(R2_CASES)
 
@@ -109,7 +109,7 @@ def _render_status(case: LiveScenario, run: dict) -> str:
 
 
 def _build_report(case: LiveScenario, runs: list, n_runs: int, threshold: float) -> dict:
-    mc = sum(1 for r in runs if r["matched"])
+    mc = sum(1 for r in runs if r.get("matched"))
     return {
         "category": case.category,
         "name": case.name,
@@ -159,7 +159,7 @@ def main() -> int:
     # Collect force telemetry from all runs
     for case_report in report.get("cases", []):
         for run in case_report.get("runs", []):
-            for turn_result in run.get("turn_results", []):
+            for turn_result in (run.get("turn_results") or []):
                 _collect_force_telemetry(turn_result)
 
     force_metrics = {

@@ -113,7 +113,7 @@ class SessionRecord:
     backend: str | None
     title: str
     message_count: int
-    graph_exists: bool
+    graph_exists: bool = True
 
 
 @dataclass(frozen=True)
@@ -248,6 +248,7 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
             isolation_level=None,
             check_same_thread=False,
         )
+        conn.row_factory = sqlite3.Row
     except sqlite3.DatabaseError as exc:
         raise SessionStoreCorrupt(
             f"sessions DB at {db_path} could not be opened: {exc}"
@@ -348,7 +349,6 @@ class SessionStore:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = (db_path or default_sessions_db_path()).expanduser()
-        self._lock = threading.Lock()
         self._q: queue.Queue[_PendingMessage] = queue.Queue(maxsize=_QUEUE_MAX)
         self._closed_sessions: queue.Queue[int] = queue.Queue()
         self._session_seq: dict[int, int] = {}
@@ -546,7 +546,6 @@ class SessionStore:
         """
         conn = _open_db(self._db_path)
         try:
-            conn.row_factory = sqlite3.Row
             yield conn
         finally:
             conn.close()
@@ -601,23 +600,12 @@ class SessionStore:
         return [_row_to_message(r) for r in rows]
 
     def search_messages(self, query: str, *, limit: int = 50) -> list[MessageRecord]:
-        """FTS5 lexical search over message text.
-
-        Returns matching messages ordered by FTS5 rank. The query
-        is passed verbatim to ``MATCH``; callers should sanitize
-        user input (escape double quotes, etc.) if they accept
-        untrusted queries. We do not do that here because the
-        call sites are the GUI search box and the CLI's
-        ``sessions search`` (future work); both are trusted
-        contexts.
-        """
         with self._read_conn() as conn:
             rows = conn.execute(
                 "SELECT m.id, m.session_id, m.sequence, m.role, m.text, "
                 "m.payload, m.created_at "
                 "FROM messages_fts f JOIN messages m ON m.rowid = f.rowid "
-                "WHERE messages_fts MATCH ? "
-                "ORDER BY rank LIMIT ?",
+                "WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?",
                 (query, int(limit)),
             ).fetchall()
         return [_row_to_message(r) for r in rows]
@@ -839,7 +827,6 @@ def append_message_sync(
     """Append one message in a short-lived connection."""
     conn = _open_db(db_path)
     try:
-        conn.row_factory = sqlite3.Row
         msg_id = str(uuid.uuid4())
         seq_row = conn.execute(
             "SELECT COALESCE(MAX(sequence), -1) + 1 AS next "
@@ -877,7 +864,6 @@ def list_sessions_sync(
     """Read-only list helper used by the CLI."""
     conn = _open_db(db_path)
     try:
-        conn.row_factory = sqlite3.Row
         sql = (
             "SELECT id, graph_path, graph_hash, started_at, ended_at, "
             "model_alias, backend, title, message_count, graph_exists "
@@ -904,7 +890,6 @@ def list_sessions_sync(
 def get_session_sync(db_path: Path, session_id: int) -> SessionRecord | None:
     conn = _open_db(db_path)
     try:
-        conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT id, graph_path, graph_hash, started_at, ended_at, "
             "model_alias, backend, title, message_count, graph_exists "
@@ -919,7 +904,6 @@ def get_session_sync(db_path: Path, session_id: int) -> SessionRecord | None:
 def list_messages_sync(db_path: Path, session_id: int) -> list[MessageRecord]:
     conn = _open_db(db_path)
     try:
-        conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, session_id, sequence, role, text, payload, created_at "
             "FROM messages WHERE session_id = ? ORDER BY sequence ASC",

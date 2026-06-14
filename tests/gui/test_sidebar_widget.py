@@ -1,16 +1,16 @@
 import os
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
-from pathlib import Path
 from PySide6.QtCore import Qt
 
 # Add src to system path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 
-from grc_agent_gui.sidebar_widget import SidebarWidget
 from grc_agent.sessions_store import SessionRecord, SessionStore
 from grc_agent_gui.main_window import MainWindow
+from grc_agent_gui.sidebar_widget import SidebarWidget
 
 
 def _make_session(id: int = 1, **overrides) -> SessionRecord:
@@ -33,7 +33,7 @@ def _make_session(id: int = 1, **overrides) -> SessionRecord:
 def test_sidebar_widget_builds_and_populates(qtbot):
     widget = SidebarWidget()
     qtbot.addWidget(widget)
-    
+
     sessions = [
         _make_session(id=1, title="Alpha", message_count=3),
         _make_session(id=2, title="Beta", message_count=1),
@@ -50,7 +50,7 @@ def test_sidebar_widget_builds_and_populates(qtbot):
 def test_sidebar_signals_emitted(qtbot):
     widget = SidebarWidget()
     qtbot.addWidget(widget)
-    
+
     sessions = [_make_session(id=42, title="Target")]
     widget.populate_sessions(sessions)
 
@@ -93,17 +93,17 @@ def test_main_window_sidebar_integration(qtbot, tmp_path, monkeypatch):
     mock_agent = MagicMock()
     mock_agent.session = None
     mock_provider = MagicMock()
-    
+
     window = MainWindow(mock_agent, mock_provider)
     qtbot.addWidget(window)
-    
+
     assert window.sidebar_widget is not None
     assert not window.sidebar_widget.isHidden()
-    
+
     # Test toggle sidebar
     window.toggle_sidebar()
     assert window.sidebar_widget.isHidden()
-    
+
     window.toggle_sidebar()
     assert not window.sidebar_widget.isHidden()
 
@@ -113,12 +113,12 @@ def test_main_window_sidebar_integration(qtbot, tmp_path, monkeypatch):
     # Test new session creation on user prompt
     window.chat_input.setText("Testing sidebar integration")
     window.send_prompt()
-    
+
     assert window.active_session_id is not None
-    
+
     # Flush SQLite operations to guarantee it is written
     window.sessions_store.flush(timeout=2.0)
-    
+
     # Checking if the database has it
     sessions = window.sessions_store._writer_conn.execute("SELECT id, title FROM sessions").fetchall()
     assert len(sessions) == 1
@@ -139,7 +139,7 @@ def test_open_past_session_autoloads_graph(qtbot, tmp_path, monkeypatch):
     mock_agent = MagicMock()
     mock_agent.session = None
     mock_provider = MagicMock()
-    
+
     window = MainWindow(mock_agent, mock_provider)
     qtbot.addWidget(window)
 
@@ -179,7 +179,6 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
     same session.
     """
     import datetime
-    import json
 
     db_path = tmp_path / "sessions.db"
     import grc_agent_gui.main_window

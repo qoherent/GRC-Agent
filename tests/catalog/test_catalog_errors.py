@@ -6,18 +6,11 @@ import unittest
 from pathlib import Path
 
 import yaml
-from grc_agent.catalog.describe import _describe_block_with_root
-from grc_agent.catalog.loaders import clear_catalog_snapshot_cache
+from grc_agent.catalog.loaders import _describe_block_with_root
 
 
 class CatalogErrorEnvelopeTests(unittest.TestCase):
     """Ensure malformed metadata stays inside the public error payload shape."""
-
-    def setUp(self) -> None:
-        clear_catalog_snapshot_cache()
-
-    def tearDown(self) -> None:
-        clear_catalog_snapshot_cache()
 
     def test_malformed_block_yaml_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -64,7 +64,7 @@ class OllamaBackendStatus:
     model_alias: str
     model_available: bool
     available_models: list[str] = field(default_factory=list)
-    start_command: str = "ollama serve"
+    start_command: str = ""
     pull_command: str = ""
     hint: str = ""
 

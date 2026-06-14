@@ -7,10 +7,12 @@ import os
 import unittest
 from pathlib import Path
 
-from grc_agent.runtime.prompt import __version__ as PROMPT_VERSION
-from grc_agent.runtime.prompt import build_system_prompt
+from grc_agent.runtime.model_context import (
+    MVP_MODEL_TOOL_NAMES,
+    __version__ as PROMPT_VERSION,
+    build_system_prompt,
+)
 from grc_agent.runtime.tool_schemas import build_tool_schemas
-from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOC_PATH = REPO_ROOT / "docs" / "MODEL_CONTEXT_BIBLE.md"
@@ -33,7 +35,7 @@ def render_model_context_bible() -> str:
         "<!-- GENERATED: do not edit by hand. -->\n"
         "\n"
         "This file is generated from the runtime prompt and model-facing tool "
-        "schemas. To update it after changing `src/grc_agent/runtime/prompt.py` "
+        "schemas. To update it after changing `src/grc_agent/runtime/model_context.py` "
         "or `src/grc_agent/runtime/tool_schemas.py`, run:\n"
         "\n"
         "```bash\n"

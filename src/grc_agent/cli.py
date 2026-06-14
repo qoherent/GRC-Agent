@@ -15,7 +15,7 @@ from typing import Any
 from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.agent import GrcAgent
 from grc_agent.config import AppConfig, ConfigError, default_app_config, load_app_config
-from grc_agent.debug_bundle import (
+from grc_agent.doctor import (
     build_debug_bundle,
     debug_bundle_summary,
     write_debug_bundle,
@@ -31,12 +31,12 @@ from grc_agent.dogfood import (
 )
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
-from grc_agent.paths import collect_package_paths
+from grc_agent.config import collect_package_paths
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.runtime.clarification import render_clarification_prompt
 from grc_agent.runtime.tool_schemas import PUBLIC_TOOL_NAMES
-from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
-from grc_agent.session.load import load_grc as load_grc_session
+from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
+from grc_agent.session import load_grc as load_grc_session
 from grc_agent.toolagents_runtime import (
     ToolAgentsLlamaProviderConfig,
     run_bounded_toolagents_turn,
@@ -565,7 +565,6 @@ def _parse_config_override(argv: list[str]) -> str | None:
 
 
 class Colors:
-    HEADER = "\033[95m"
     BLUE = "\033[94m"
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
@@ -946,7 +945,7 @@ def _run_llama_runtime(
     # Interactive provider picker on first launch (no prior choice
     # recorded in user preferences). Skipped when stdin is not a
     # TTY (piped input, CI, scripted runs).
-    from grc_agent.cli_setup import run_cli_setup
+    from grc_agent.config import run_cli_setup
 
     if not run_cli_setup(config=config, is_tty=sys.stdin.isatty()):
         print("Provider selection cancelled; exiting.", flush=True)
@@ -2283,7 +2282,7 @@ def main(argv: list[str] | None = None) -> int:
     # onto the config. Preferences win over ``grc_agent.toml`` for
     # the model field; everything else is preserved.
     try:
-        from grc_agent.preferences import (
+        from grc_agent.config import (
             apply_user_preferences_to_llama_config,
             load_user_preferences,
         )

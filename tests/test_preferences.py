@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from grc_agent.config import LlamaConfig
-from grc_agent.preferences import (
+from grc_agent.config import (
     PREFERENCES_SCHEMA_VERSION,
     PREFS_FILE_NAME,
     LastModel,
@@ -77,7 +77,7 @@ class LoadTests(unittest.TestCase):
         # Make the preferences logger verbose and attach an
         # in-memory handler so we can assert on INFO messages
         # without depending on a root-level handler.
-        self._logger = logging.getLogger("grc_agent.preferences")
+        self._logger = logging.getLogger("grc_agent.config")
         self._original_level = self._logger.level
         self._logger.setLevel(logging.DEBUG)
         self._records: list[logging.LogRecord] = []

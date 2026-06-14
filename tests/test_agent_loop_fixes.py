@@ -17,6 +17,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from grc_agent.agent import GrcAgent
+from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.runtime.model_context import render_model_messages
+from grc_agent.runtime.model_context import build_system_prompt
+from grc_agent.runtime.change_graph import (
+    _update_state_operation,
+)
+from grc_agent.toolagents_runtime import (
+    _tool_retry_reminder,
+)
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
@@ -24,17 +34,6 @@ from ToolAgents.data_models.messages import (
     TextContent,
     ToolCallContent,
     ToolCallResultContent,
-)
-
-from grc_agent.agent import GrcAgent
-from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.model_context import render_model_messages
-from grc_agent.runtime.prompt import build_system_prompt
-from grc_agent.runtime.wrappers.change_graph.dispatcher import (
-    _update_state_operation,
-)
-from grc_agent.toolagents_runtime import (
-    _tool_retry_reminder,
 )
 
 # ---------------------------------------------------------------------------
@@ -502,7 +501,7 @@ class Fix1CommitResultTests(unittest.TestCase):
             errors=errors,
         )
         self.assertIsNone(op)
-        self.assertTrue(any("state must be" in e for e in errors), errors)
+        self.assertTrue(any("state expected to be" in e for e in errors), errors)
 
 
 # ---------------------------------------------------------------------------

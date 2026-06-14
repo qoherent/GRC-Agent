@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 from grc_agent.cli import _run_paths_command
-from grc_agent.paths import collect_package_paths
+from grc_agent.config import collect_package_paths
 
 
 def _parse_args(argv):
@@ -26,8 +26,6 @@ class PathsCommandTests(unittest.TestCase):
             "config_user",
             "history",
             "history_env_var",
-            "vector_index_default",
-            "fastembed_cache",
             "grc_agent_state",
             "grc_agent_cache",
             "preferences",

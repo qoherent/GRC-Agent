@@ -24,8 +24,7 @@ from ToolAgents.data_models.messages import (
 )
 
 from grc_agent._payload import ErrorCode
-from grc_agent.catalog import describe_block
-from grc_agent.catalog.loaders import build_catalog_snapshot
+from grc_agent.catalog.loaders import build_catalog_snapshot, describe_block
 from grc_agent.config import AgentConfig, default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import (
@@ -35,145 +34,81 @@ from grc_agent.history import (
     operation_type_from_result,
     snapshot_session,
 )
-from grc_agent.runtime.clarification_payloads import (
+from grc_agent.runtime.tool_context import compact_chat_history
+from grc_agent.runtime.clarification import (
     connection_clarification_payload as connection_clarification_payload_wrapper,
-)
-from grc_agent.runtime.clarification_payloads import (
     duplicate_block_clarification_payload as duplicate_block_clarification_payload_wrapper,
-)
-from grc_agent.runtime.clarification_payloads import (
+    normalize_pending_clarification,
+    resolve_pending_clarification_state,
     rewire_clarification_payload as rewire_clarification_payload_wrapper,
-)
-from grc_agent.runtime.clarification_payloads import (
     rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
 )
-from grc_agent.runtime.clarification_state import (
-    normalize_pending_clarification,
-    parse_clarification_option_label,
-    pending_clarification_reminder,
-    resolve_pending_clarification_state,
-)
-from grc_agent.runtime.docs_answer import (
+from grc_agent.runtime.doc_answer import (
     _DocsComparisonSides,
     _DocsEvidenceCandidate,
-)
-from grc_agent.runtime.docs_answer import (
     ask_grc_docs as ask_grc_docs_wrapper,
-)
-from grc_agent.runtime.docs_answer import (
+    build_catalog_assisted_candidate,
     build_docs_source_quality as build_docs_source_quality_wrapper,
-)
-from grc_agent.runtime.docs_answer import (
+    build_fallback_answer,
     build_typed_docs_answer as build_typed_docs_answer_wrapper,
-)
-from grc_agent.runtime.docs_answer import (
-    collect_docs_candidates as collect_docs_candidates_wrapper,
-)
-from grc_agent.runtime.docs_answer import (
-    rank_docs_candidates as rank_docs_candidates_wrapper,
-)
-from grc_agent.runtime.docs_answer.advisor import (
-    classify_docs_advisor_error,
-    probe_docs_advisor_server,
-)
-from grc_agent.runtime.docs_answer.advisor import (
-    run_docs_answer_advisor as run_docs_answer_advisor_wrapper,
-)
-from grc_agent.runtime.docs_answer.formatting import (
     catalog_block_purpose_sentence,
+    classify_docs_answer_type,
     clean_catalog_summary_for_answer,
     clean_docs_excerpt,
     clip_docs_snippets_for_helper,
+    collect_docs_candidates as collect_docs_candidates_wrapper,
     docs_low_value_reasons,
     docs_primary_terms,
-    docs_title_aliases,
     docs_topic_terms,
     extract_block_definition_subject,
+    extract_comparison_sides,
     extract_docs_subject,
-    infer_docs_source_type,
+    helper_candidates_for_docs_answer,
+    helper_eligibility_for_docs_answer,
     is_block_definition_query,
     is_procedural_walkthrough_text,
     is_tutorial_or_howto_query,
-    normalize_docs_source_key,
-)
-from grc_agent.runtime.docs_answer.selection import (
-    build_catalog_assisted_candidate,
-    build_fallback_answer,
-    classify_docs_answer_type,
-    extract_comparison_sides,
-    helper_candidates_for_docs_answer,
-    helper_eligibility_for_docs_answer,
-    is_docs_evidence_strong,
     minimum_required_term_hits,
-    normalized_docs_retrieval_query,
     pick_typed_sentence,
+    rank_docs_candidates as rank_docs_candidates_wrapper,
     required_terms_for_answer_type,
+    run_docs_answer_advisor as run_docs_answer_advisor_wrapper,
     select_docs_candidates_for_answer_type,
     sentence_list,
     should_catalog_assist,
     text_matches_term_or_synonym,
 )
-from grc_agent.runtime.docs_answer_advisor import DocsAnswerSnippet
+from grc_agent.runtime.doc_answer import DocsAnswerSnippet
 from grc_agent.runtime.model_context import (
     render_model_messages,
 )
-from grc_agent.runtime.output_policy import is_meaningful
-from grc_agent.runtime.path_safety import (
-    resolved_path as resolve_runtime_path,
-)
-from grc_agent.runtime.path_safety import (
-    unsafe_graph_root_for_path,
-)
-from grc_agent.runtime.chat_history import compact_chat_history
-from grc_agent.runtime.prompt import build_system_prompt
-from grc_agent.runtime.tool_context import (
-    tool_history_content_as_text as tool_history_content_as_text_wrapper,
-)
-from grc_agent.runtime.tool_schemas import build_tool_schemas
-from grc_agent.runtime.tool_surface import (
+from grc_agent.runtime.tool_context import is_meaningful, unsafe_graph_root_for_path
+from grc_agent.runtime.model_context import (
     MODEL_TOOL_NAMES_ORDERED,
     MVP_MODEL_TOOL_NAMES,
     MVP_TOOL_SURFACE,
+    build_system_prompt,
 )
+from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime.transaction_normalization import TransactionNormalizer
-from grc_agent.runtime.wrappers.change_graph.disconnect_resolution import (
-    resolve_disconnect_connection_id,
-)
-from grc_agent.runtime.wrappers.change_graph.dispatcher import (
-    dispatch_flat_change_graph_batch,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+from grc_agent.runtime.change_graph import (
     connection_endpoint_candidates as connection_endpoint_candidates_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    dispatch_flat_change_graph_batch,
     has_endpoint_value,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     loaded_block_by_name as loaded_block_by_name_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     loaded_block_has_port as loaded_block_has_port_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
+    resolve_disconnect_connection_id,
     resolve_old_rewire_connection_id as resolve_old_rewire_connection_id_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     resolve_rewire_new_endpoint_args as resolve_rewire_new_endpoint_args_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     rewire_new_endpoint_candidates as rewire_new_endpoint_candidates_wrapper,
-)
-from grc_agent.runtime.wrappers.change_graph.rewire_resolution import (
     rewire_new_endpoint_is_exact as rewire_new_endpoint_is_exact_wrapper,
 )
-from grc_agent.runtime.wrappers.get_grc_context_internal import (
+from grc_agent.runtime.inspect_graph import (
     get_grc_context_internal as get_grc_context_internal_wrapper,
 )
-from grc_agent.runtime.wrappers.inspect_graph import inspect_graph as inspect_graph_wrapper
-from grc_agent.runtime.wrappers.search_blocks import (
+from grc_agent.runtime.inspect_graph import inspect_graph as inspect_graph_wrapper
+from grc_agent.runtime.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
 from grc_agent.runtime_tool_validation import (
@@ -181,16 +116,13 @@ from grc_agent.runtime_tool_validation import (
     validate_runtime_tool_call,
 )
 from grc_agent.session import get_grc_context, load_grc, summarize_graph
-from grc_agent.session.insertion_suggestions import suggest_insertions
+from grc_agent.session import suggest_insertions
 from grc_agent.transaction import apply_edit, propose_edit
 
 logger = logging.getLogger(__name__)
 
 ToolResult = dict[str, Any]
 ToolCallable = Callable[..., ToolResult]
-HistoryEntry = dict[str, Any]
-
-
 def _user_text_of(message: ChatMessage) -> str:
     parts: list[str] = []
     for item in message.content:
@@ -223,27 +155,6 @@ def _normalize_alias_key(value: str) -> str:
     return normalized
 
 
-def _alias_candidates_for_block(block_id: str, label: str) -> set[str]:
-    candidates = {
-        block_id.lower().strip(),
-        label.lower().strip(),
-        _normalize_alias_key(block_id),
-        _normalize_alias_key(label),
-        f"catalog:block:{block_id}".lower(),
-        _normalize_alias_key(f"catalog:block:{block_id}"),
-    }
-    suffix = block_id
-    if "." in suffix:
-        suffix = suffix.rsplit(".", 1)[-1]
-    if "_" in suffix:
-        suffix = suffix.split("_", 1)[-1]
-    suffix = suffix.strip().lower()
-    if suffix:
-        candidates.add(suffix)
-        candidates.add(_normalize_alias_key(suffix))
-    return {item for item in candidates if item}
-
-
 def _compact_block_summary(summary: Any) -> str:
     if not isinstance(summary, str):
         return ""
@@ -269,23 +180,7 @@ def _compact_save_file_integrity(file_integrity: dict[str, Any]) -> dict[str, An
     return {key: value for key, value in compact.items() if is_meaningful(value)}
 
 
-@lru_cache(maxsize=4)
-def _catalog_alias_to_block_map(catalog_root: str | None) -> dict[str, str]:
-    snapshot = build_catalog_snapshot(catalog_root)
-    first_seen: dict[str, str] = {}
-    ambiguous: set[str] = set()
-    for block_id, block in snapshot.blocks.items():
-        label = str(block.payload.get("label", "")).strip()
-        for alias in _alias_candidates_for_block(block_id, label):
-            existing = first_seen.get(alias)
-            if existing is None:
-                first_seen[alias] = block_id
-                continue
-            if existing != block_id:
-                ambiguous.add(alias)
-    for alias in ambiguous:
-        first_seen.pop(alias, None)
-    return first_seen
+
 
 
 @lru_cache(maxsize=4)
@@ -760,20 +655,7 @@ class GrcAgent:
                 unique.setdefault(expanded, Path(expanded))
         return list(unique.values())
 
-    def _current_user_text(self) -> str:
-        if isinstance(self._turn_user_message, str) and self._turn_user_message.strip():
-            return self._turn_user_message.strip()
-        for message in reversed(self.chat_history.get_messages()):
-            if message.role != ChatMessageRole.User:
-                continue
-            text = _user_text_of(message)
-            if text:
-                return text.strip()
-        return ""
 
-    @staticmethod
-    def _resolved_path(path_value: str | Path) -> Path:
-        return resolve_runtime_path(path_value)
 
     def _unsafe_graph_root_for_path(self, path_value: str | Path) -> str | None:
         return unsafe_graph_root_for_path(
@@ -895,14 +777,6 @@ class GrcAgent:
             }
         return resolution
 
-    @staticmethod
-    def _parse_clarification_option_label(
-        raw: str,
-        *,
-        labels: set[str],
-    ) -> str | None:
-        return parse_clarification_option_label(raw, labels=labels)
-
     def _record_clarification_option_call(
         self,
         raw_reply: str,
@@ -961,9 +835,6 @@ class GrcAgent:
                 updated_at=now,
             )
         )
-
-    def _pending_clarification_reminder(self) -> str:
-        return pending_clarification_reminder(self._pending_clarification)
 
     def _store_pending_clarification(self, payload: dict[str, Any]) -> None:
         """Store a clarification produced by a tool for user resolution."""
@@ -1103,7 +974,7 @@ class GrcAgent:
         return render_model_messages(
             self.chat_history,
             system_prompt=self.get_system_prompt(),
-            semantic_search_result_preview=lambda *a, **kw: [],
+            semantic_search_result_preview=lambda *_, **kw: [],
             reminder=reminder,
         )
 
@@ -1130,27 +1001,6 @@ class GrcAgent:
     # ------------------------------------------------------------------- #
     # History content formatting
     # ------------------------------------------------------------------- #
-
-    def _history_content_as_text(
-        self, content: Any, *, tool_name: str | None = None
-    ) -> str:
-        return history_content_as_text_wrapper(
-            content,
-            tool_name=tool_name,
-            semantic_search_result_preview=lambda *a, **kw: [],
-        )
-
-    def _tool_history_content_as_text(
-        self,
-        content: dict[str, Any],
-        *,
-        tool_name: str,
-    ) -> str:
-        return tool_history_content_as_text_wrapper(
-            content,
-            tool_name=tool_name,
-            semantic_search_result_preview=lambda *a, **kw: [],
-        )
 
     # ------------------------------------------------------------------- #
     # Tool registry builders
@@ -1533,7 +1383,7 @@ class GrcAgent:
         domain: str,
         debug: bool = False,
     ) -> ToolResult:
-        from grc_agent.runtime.wrappers.query_knowledge import query_knowledge as _qk
+        from grc_agent.runtime.inspect_graph import query_knowledge as _qk
         return _qk(self, query=query, domain=domain, debug=debug)
 
     def _search_blocks(
@@ -1600,29 +1450,8 @@ class GrcAgent:
         return docs_primary_terms(query)
 
     @staticmethod
-    def _normalize_docs_source_key(source: str) -> str:
-        return normalize_docs_source_key(source)
-
-    @staticmethod
     def _clean_docs_excerpt(excerpt: str) -> str:
         return clean_docs_excerpt(excerpt)
-
-    @staticmethod
-    def _docs_title_aliases(title: str) -> list[str]:
-        return docs_title_aliases(title)
-
-    def _infer_docs_source_type(
-        self,
-        *,
-        source: str,
-        title: str,
-        source_type_hint: str | None = None,
-    ) -> str:
-        return infer_docs_source_type(
-            source=source,
-            title=title,
-            source_type_hint=source_type_hint,
-        )
 
     def _docs_low_value_reasons(self, *, candidate: _DocsEvidenceCandidate) -> list[str]:
         return docs_low_value_reasons(candidate=candidate)
@@ -1658,20 +1487,8 @@ class GrcAgent:
         return should_catalog_assist(question, ranked_candidates)
 
     @staticmethod
-    def _is_docs_evidence_strong(
-        ranked_candidates: list[_DocsEvidenceCandidate],
-        *,
-        question: str,
-    ) -> bool:
-        return is_docs_evidence_strong(ranked_candidates, question=question)
-
-    @staticmethod
     def _classify_docs_answer_type(question: str) -> str:
         return classify_docs_answer_type(question)
-
-    @staticmethod
-    def _normalized_docs_retrieval_query(*, question: str, answer_type: str) -> str:
-        return normalized_docs_retrieval_query(question=question, answer_type=answer_type)
 
     @staticmethod
     def _text_matches_term_or_synonym(text: str, term: str) -> bool:
@@ -1809,10 +1626,6 @@ class GrcAgent:
             evidence_strong=evidence_strong,
         )
 
-    @staticmethod
-    def _classify_docs_advisor_error(message: str) -> str:
-        return classify_docs_advisor_error(message)
-
     def _run_docs_answer_advisor(
         self,
         *,
@@ -1829,12 +1642,8 @@ class GrcAgent:
             focus=focus,
         )
 
-    def _probe_docs_advisor_server(self) -> bool:
-        return probe_docs_advisor_server(self)
-
     def _change_graph(
         self,
-        reasoning: str = "",
         add_blocks: list[Any] | None = None,
         remove_blocks: list[Any] | None = None,
         update_params: list[Any] | None = None,
@@ -1855,30 +1664,6 @@ class GrcAgent:
             force=bool(force),
             debug=debug,
         )
-
-    # ------------------------------------------------------------------- #
-    @staticmethod
-    def _compact_inspect_payload(mode: str, payload: dict[str, Any]) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "ok": bool(payload.get("ok")),
-            "mode": mode,
-            "message": payload.get("message"),
-        }
-        for key in (
-            "summary",
-            "valid",
-            "errors",
-            "target",
-            "nodes",
-            "warnings",
-            "block_count",
-            "connection_count",
-            "variable_count",
-            "dirty",
-        ):
-            if key in payload:
-                out[key] = payload.get(key)
-        return out
 
     def _attach_wrapper_dispatch_telemetry(
         self,
@@ -2078,7 +1863,7 @@ class GrcAgent:
         max_candidates: int = 10,
     ) -> ToolResult:
         """Bounded agentic insert workflow: search, score, try, commit or clarify."""
-        from grc_agent.session.auto_insert import auto_insert_block
+        from grc_agent.session import auto_insert_block
 
         missing_session = self._missing_session_result("auto_insert_block")
         if missing_session is not None:

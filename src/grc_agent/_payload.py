@@ -1,11 +1,11 @@
 """Shared lightweight payload helpers used across the package."""
 
+from dataclasses import dataclass, field
 from typing import Any
 
 
 class ErrorCode:
     MISSING_SESSION = "missing_session"
-    MISSING_BLOCK_TYPE = "missing_block_type"
     FILE_LOAD_ERROR = "file_load_error"
     INVALID_GRC = "invalid_grc"
     VALIDATION_ERROR = "validation_error"
@@ -19,11 +19,6 @@ class ErrorCode:
     RETRIEVAL_NOT_READY = "retrieval_not_ready"
     SAVE_REFUSED = "save_refused"
     BLOCK_NOT_FOUND = "block_not_found"
-    CONNECTION_NOT_FOUND = "connection_not_found"
-    AMBIGUOUS_CONNECTION = "ambiguous_connection"
-    CONNECTION_ENDPOINT_MISMATCH = "connection_endpoint_mismatch"
-    BLOCK_ALREADY_EXISTS = "block_already_exists"
-    CONNECTION_ALREADY_EXISTS = "connection_already_exists"
     UNSUPPORTED_OP = "unsupported_op"
     CATALOG_LOAD_ERROR = "catalog_load_error"
     INTERNAL_ERROR = "internal_error"
@@ -56,3 +51,37 @@ def build_error_payload(
 def join_non_empty(*parts: str) -> str:
     """Join non-empty string parts with single spaces."""
     return " ".join(part for part in parts if part).strip()
+
+
+@dataclass
+class Block:
+    """Represents one GNU Radio block instance."""
+
+    instance_name: str
+    block_type: str
+    params: dict[str, Any] = field(default_factory=dict)
+    block_uid: str = ""
+
+
+@dataclass
+class Connection:
+    """Represents one wire between two block ports.
+
+    Stream connections use integer port indices.  Message connections
+    use string port names (e.g. ``"strobe"``, ``"pdus"``).
+    """
+
+    src_block: str
+    src_port: int | str
+    dst_block: str
+    dst_port: int | str
+
+
+@dataclass
+class Flowgraph:
+    """In-memory model of a full flowgraph."""
+
+    blocks: list[Block] = field(default_factory=list)
+    connections: list[Connection] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    raw_data: dict[str, Any] = field(default_factory=dict)

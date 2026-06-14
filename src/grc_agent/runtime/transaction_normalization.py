@@ -11,7 +11,7 @@ import json
 import re
 from typing import Any
 
-from grc_agent.runtime.output_policy import is_variable_block
+from grc_agent.runtime.tool_context import is_variable_block
 
 
 class TransactionNormalizer:
@@ -336,10 +336,6 @@ class TransactionNormalizer:
     # ------------------------------------------------------------------- #
     # Static helpers
     # ------------------------------------------------------------------- #
-
-    @staticmethod
-    def transaction_hint() -> str:
-        return ""
 
     @staticmethod
     def looks_like_transaction_payload(payload: Any) -> bool:

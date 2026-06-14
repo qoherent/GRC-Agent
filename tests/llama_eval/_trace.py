@@ -1,4 +1,7 @@
-"""Structured trace helpers for live eval runs."""
+"""Structured trace helpers for live eval runs.
+
+Relocated from src/grc_agent/trace.py — only used by test harness.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +10,6 @@ from typing import Any
 
 
 def classify_failure_category(*, model_contract_pass: Any, runtime_safety_pass: Any, semantic_pass: Any, passed: Any) -> str:
-    """Classify a turn-level failure bucket for reporting without changing scoring."""
-
     if passed is True:
         return "none"
     if model_contract_pass is False:
@@ -35,8 +36,6 @@ def build_live_eval_turn_trace(
     semantic_pass: Any,
     passed: Any,
 ) -> dict[str, Any]:
-    """Build a fixed-shape trace blob for one live turn result."""
-
     tool_results: list[dict[str, Any]] = []
     validation_result: dict[str, Any] | None = None
     for call in executed_tool_calls:

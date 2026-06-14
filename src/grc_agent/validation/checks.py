@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from grc_agent.runtime.output_policy import is_variable_block
+from grc_agent.runtime.tool_context import is_variable_block
 
 logger = logging.getLogger(__name__)
 
 from grc_agent._payload import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.models import Block, Connection
+from grc_agent._payload import Block, Connection
 from grc_agent.session_ops import (
     block_name_is_referenced_elsewhere,
     connection_entry_to_tuple,
@@ -25,12 +25,7 @@ from grc_agent.session_ops import (
     raw_connection_entry,
 )
 
-from .errors import ValidationIssue, make_issue
-from .messages import (
-    format_allowed_values,
-    format_endpoint,
-    format_port_range,
-)
+from .errors import ValidationIssue, format_allowed_values, format_endpoint, format_port_range, make_issue
 from .rules import (
     ResolvedPort,
     ValidationOperation,
@@ -1439,13 +1434,6 @@ def _require_unique_block(
 
     raw_index, raw_entry = raw_matches[0]
     return parsed_matches[0], raw_entry, raw_index, []
-
-
-def _is_full_block_uid(value: str) -> bool:
-    if not value.startswith("block:") or len(value) != len("block:") + 16:
-        return False
-    suffix = value.split(":", 1)[1]
-    return all(char in "0123456789abcdef" for char in suffix)
 
 
 def _require_block_rules(

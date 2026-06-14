@@ -23,7 +23,7 @@ from pathlib import Path
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.tool_schemas import build_tool_schemas
-from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
+from grc_agent.runtime.model_context import MVP_MODEL_TOOL_NAMES
 
 
 class ReliabilityHardeningTests(unittest.TestCase):

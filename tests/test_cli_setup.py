@@ -6,7 +6,7 @@ import io
 import unittest
 from unittest import mock
 
-from grc_agent.cli_setup import (
+from grc_agent.config import (
     PROVIDER_OLLAMA,
     PROVIDER_OPENROUTER,
     run_cli_setup,
@@ -29,7 +29,7 @@ class RunCliSetupTests(unittest.TestCase):
 
     def test_already_chosen_returns_true_without_prompting(self) -> None:
         with mock.patch(
-            "grc_agent.preferences.load_user_preferences",
+            "grc_agent.config.load_user_preferences",
             return_value=mock.Mock(provider_chosen="ollama"),
         ):
             with mock.patch("builtins.input") as input_mock:
@@ -38,7 +38,7 @@ class RunCliSetupTests(unittest.TestCase):
 
     def test_non_tty_skips_prompt(self) -> None:
         with mock.patch(
-            "grc_agent.preferences.load_user_preferences",
+            "grc_agent.config.load_user_preferences",
             return_value=mock.Mock(provider_chosen=""),
         ):
             with mock.patch("builtins.input") as input_mock:
@@ -47,7 +47,7 @@ class RunCliSetupTests(unittest.TestCase):
 
     def test_user_quits_returns_false(self) -> None:
         with mock.patch(
-            "grc_agent.preferences.load_user_preferences",
+            "grc_agent.config.load_user_preferences",
             return_value=mock.Mock(provider_chosen=""),
         ):
             with mock.patch("builtins.input", return_value="q"):
@@ -55,11 +55,11 @@ class RunCliSetupTests(unittest.TestCase):
 
     def test_user_picks_ollama_persists_choice(self) -> None:
         with mock.patch(
-            "grc_agent.preferences.load_user_preferences",
+            "grc_agent.config.load_user_preferences",
             return_value=mock.Mock(provider_chosen=""),
         ):
             with mock.patch(
-                "grc_agent.preferences.update_provider_chosen"
+                "grc_agent.config.update_provider_chosen"
             ) as update_mock:
                 with mock.patch("builtins.input", return_value="1"):
                     self.assertTrue(
@@ -69,11 +69,11 @@ class RunCliSetupTests(unittest.TestCase):
 
     def test_user_picks_openrouter_persists_choice(self) -> None:
         with mock.patch(
-            "grc_agent.preferences.load_user_preferences",
+            "grc_agent.config.load_user_preferences",
             return_value=mock.Mock(provider_chosen=""),
         ):
             with mock.patch(
-                "grc_agent.preferences.update_provider_chosen"
+                "grc_agent.config.update_provider_chosen"
             ) as update_mock:
                 with mock.patch("builtins.input", return_value="2"):
                     self.assertTrue(
@@ -83,11 +83,11 @@ class RunCliSetupTests(unittest.TestCase):
 
     def test_persist_failure_does_not_abort(self) -> None:
         with mock.patch(
-            "grc_agent.preferences.load_user_preferences",
+            "grc_agent.config.load_user_preferences",
             return_value=mock.Mock(provider_chosen=""),
         ):
             with mock.patch(
-                "grc_agent.preferences.update_provider_chosen",
+                "grc_agent.config.update_provider_chosen",
                 side_effect=OSError("disk full"),
             ):
                 with mock.patch("builtins.input", return_value="1"):
@@ -160,9 +160,9 @@ class CliOllamaProbeTests(unittest.TestCase):
             ),
         )
 
-        from grc_agent import cli, cli_setup, model_manager
+        from grc_agent import cli, config as cfg_module, model_manager
 
-        with mock.patch.object(cli_setup, "run_cli_setup", return_value=True):
+        with mock.patch.object(cfg_module, "run_cli_setup", return_value=True):
             with mock.patch.object(model_manager, "probe_ollama_backend", return_value=fake_status):
                 with mock.patch.object(__import__("sys").stdin, "isatty", return_value=False):
                     exit_code, captured = self._capture(
@@ -208,7 +208,7 @@ class CliOllamaProbeTests(unittest.TestCase):
             ),
         )
 
-        from grc_agent import cli, cli_setup, model_manager
+        from grc_agent import cli, config as cfg_module, model_manager
         from grc_agent import startup as startup_module
 
         provider = ToolAgentsLlamaProviderConfig(
@@ -225,7 +225,7 @@ class CliOllamaProbeTests(unittest.TestCase):
 
         bootstrap_mock = mock.MagicMock(return_value=fake_result)
 
-        with mock.patch.object(cli_setup, "run_cli_setup", return_value=True):
+        with mock.patch.object(cfg_module, "run_cli_setup", return_value=True):
             with mock.patch.object(model_manager, "probe_ollama_backend", return_value=fake_status):
                 with mock.patch.object(startup_module, "bootstrap_runtime", bootstrap_mock):
                     with mock.patch.object(__import__("sys").stdin, "isatty", return_value=False):
@@ -273,7 +273,7 @@ class CliOllamaProbeTests(unittest.TestCase):
             ),
         )
 
-        from grc_agent import cli, cli_setup, model_manager
+        from grc_agent import cli, config as cfg_module, model_manager
         from grc_agent import startup as startup_module
 
         config = self._config()
@@ -304,7 +304,7 @@ class CliOllamaProbeTests(unittest.TestCase):
 
         bootstrap_mock = mock.MagicMock(return_value=fake_result)
 
-        with mock.patch.object(cli_setup, "run_cli_setup", return_value=True):
+        with mock.patch.object(cfg_module, "run_cli_setup", return_value=True):
             with mock.patch.object(model_manager, "probe_ollama_backend", return_value=fake_status):
                 with mock.patch.object(startup_module, "bootstrap_runtime", bootstrap_mock):
                     with mock.patch.object(__import__("sys").stdin, "isatty", return_value=False):
@@ -353,11 +353,11 @@ class CliOllamaProbeTests(unittest.TestCase):
             ),
         )
 
-        from grc_agent import cli, cli_setup, model_manager
+        from grc_agent import cli, config as cfg_module, model_manager
 
         probe_mock = mock.MagicMock()
 
-        with mock.patch.object(cli_setup, "run_cli_setup", return_value=True):
+        with mock.patch.object(cfg_module, "run_cli_setup", return_value=True):
             with mock.patch.object(model_manager, "probe_ollama_backend", probe_mock):
                 with mock.patch.object(__import__("sys").stdin, "isatty", return_value=False):
                     # The probe is gated on ``backend == "ollama"``;

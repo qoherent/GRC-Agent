@@ -47,7 +47,7 @@ def generate_nbfm_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    for _i in range(count):
         case_seed = rng.randint(0, 2**31 - 1)
         zmq_address = rng.choice(ZMQ_ADDRESSES)
         quad_multiplier = rng.choice(QUAD_MULTIPLIERS)

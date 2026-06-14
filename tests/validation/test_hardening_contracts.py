@@ -93,7 +93,7 @@ class HardeningContractTests(unittest.TestCase):
             left_name="op_type",
         )
         apply_op_types = self._collect_op_types(
-            self._module_path("transaction", "edit.py"),
+            self._module_path("transaction.py"),
             left_name="op_type",
         )
 

@@ -14,16 +14,16 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Any
 
-from grc_agent.session_roles import (
+from grc_agent.session_ops import (
     ASSISTANT_MODEL_ROLE,
     TOOL_MODEL_ROLE,
     chat_message_payload,
 )
 from grc_agent.toolagents_runtime import ToolAgentsRunner
-from PySide6.QtCore import QMetaObject, QObject, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, Qt, Signal
 from ToolAgents.data_models.messages import (
     ChatMessage,
     ChatMessageRole,
@@ -70,9 +70,6 @@ class AgentWorker(QObject):
         self.provider_config = provider_config
         self.runner: ToolAgentsRunner | None = None
         self._is_cancelled = False
-        self._stream_timer: QTimer | None = None
-        self._pending_result: dict[str, Any] | None = None
-
         # Wire the cross-thread callback via a Qt signal so the
         # GUI-level handler always runs on the main thread.
         if on_backend_unreachable is not None:
@@ -133,95 +130,6 @@ class AgentWorker(QObject):
         finally:
             self.runner = None
 
-    def run_turn_streaming(self) -> None:
-        """Stream a turn via ``ToolAgentsRunner.stream_turn`` (or fall back).
-
-        Streaming requires the provider to expose
-        ``ChatAPIProvider.get_streaming_response``. When that path is
-        unavailable the worker falls back to the bounded non-streaming
-        ``run_turn`` and emits the final text in one chunk.
-        """
-        self.started.emit()
-
-        try:
-            self.runner = ToolAgentsRunner(self.provider_config)
-        except Exception as exc:
-            logger.exception("AgentWorker failed to initialize ToolAgentsRunner")
-            self.turn_finished.emit(
-                {
-                    "ok": False,
-                    "error_type": "runner_init_error",
-                    "assistant_text": (
-                        f"Background worker failed to initialize execution runner: {exc}"
-                    ),
-                }
-            )
-            return
-
-        try:
-            if self._is_cancelled:
-                raise RuntimeError("Worker execution cancelled before starting.")
-
-            events: Iterator[dict[str, Any]] = self.runner.stream_turn(
-                self.agent,
-                self.user_message,
-                on_tool_start=self._emit_tool_started,
-                on_tool_end=self._emit_tool_finished,
-            )
-
-            final: dict[str, Any] | None = None
-            for event in events:
-                if self._is_cancelled:
-                    raise RuntimeError("Worker execution cancelled mid-stream.")
-                kind = event.get("event")
-                if kind == "chunk":
-                    self.response_chunk.emit(str(event.get("text", "")))
-                elif kind == "model_message":
-                    self.model_message_added.emit(
-                        str(event.get("role", "")),
-                        json.dumps(event.get("payload", {}), sort_keys=True),
-                    )
-                elif kind == "final":
-                    final = event.get("result")
-            if final is None:
-                final = {
-                    "ok": False,
-                    "error_type": "stream_no_final",
-                    "assistant_text": "Stream completed without a final event.",
-                }
-            if not self._is_cancelled:
-                if "model_messages" in final:
-                    for role, payload in final["model_messages"]:
-                        self.model_message_added.emit(role, json.dumps(payload, sort_keys=True))
-                # Surface the typed backend-unreachable hint into the
-                # chat bubble (the stream had no incremental tokens) and
-                # notify the GUI so it can re-enter degraded mode.
-                # The ``backend_unreachable`` signal ensures all GUI
-                # mutations run on the main thread.
-                if final.get("error_type") == "backend_unreachable":
-                    text = final.get("assistant_text", "")
-                    if text:
-                        self.response_chunk.emit(text)
-                    self.backend_unreachable.emit(final)
-                self.turn_finished.emit(final)
-        except AttributeError as exc:
-            logger.warning("stream_turn unavailable, falling back to run_turn: %s", exc)
-            self.run_turn()
-            return
-        except Exception as exc:
-            logger.exception("AgentWorker failed during streaming turn")
-            self.turn_finished.emit(
-                {
-                    "ok": False,
-                    "error_type": "worker_error",
-                    "assistant_text": (
-                        f"An execution error occurred in the background worker: {exc}"
-                    ),
-                }
-            )
-        finally:
-            self.runner = None
-
     def _emit_typed_messages(self, messages: list[ChatMessage]) -> None:
         for message in messages:
             role = _role_to_model_role(message)
@@ -239,14 +147,6 @@ class AgentWorker(QObject):
         if self._is_cancelled:
             return
         self.tool_finished.emit(name, json.dumps(result, sort_keys=True, default=str))
-
-    @Slot()
-    def _stop_stream_and_clear(self) -> None:
-        if self._stream_timer is not None:
-            self._stream_timer.stop()
-            self._stream_timer.deleteLater()
-            self._stream_timer = None
-        self._pending_result = None
 
     def cancel(self) -> None:
         self._is_cancelled = True

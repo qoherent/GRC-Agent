@@ -21,7 +21,6 @@ uv venv --system-site-packages --python /usr/bin/python3
 uv sync --locked --python .venv/bin/python
 uv run grc-agent doctor
 uv run grc-agent init
-uv run grc-agent vector build
 ```
 
 ---
@@ -64,7 +63,7 @@ Features include:
 uv run grc-agent doctor                         # Verify dependencies
 uv run grc-agent health                         # Check LLM connection status
 uv run grc-agent paths                          # Show data/config/preferences paths
-uv run grc-agent vector search "audio sink"     # Semantic search in catalog
+
 uv run grc-agent history list                   # List graph checkpoints
 uv run grc-agent model list                     # List .gguf files in the local HF cache
 uv run grc-agent model specs                    # Print local machine GPU/VRAM/RAM/CPU

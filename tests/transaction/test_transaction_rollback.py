@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from grc_agent import FlowgraphSession, apply_edit
-from grc_agent.transaction.rollback import capture_session_state, restore_session_state
+from grc_agent.transaction import capture_session_state, restore_session_state
 
 
 class TransactionRollbackTests(unittest.TestCase):
@@ -67,7 +67,7 @@ class TransactionRollbackTests(unittest.TestCase):
         original_dirty = session.is_dirty
 
         with mock.patch(
-            "grc_agent.transaction.apply.commit_candidate_session",
+            "grc_agent.transaction.commit_candidate_session",
             side_effect=RuntimeError("injected commit swap failure"),
         ):
             payload = apply_edit(

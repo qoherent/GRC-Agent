@@ -7,17 +7,18 @@ or reload past sessions directly inside the main window.
 from __future__ import annotations
 
 import logging
+
+from grc_agent.sessions_store import SessionRecord
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
     QHBoxLayout,
-    QPushButton,
+    QLabel,
     QListWidget,
     QListWidgetItem,
-    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
-from grc_agent.sessions_store import SessionRecord
 
 logger = logging.getLogger(__name__)
 

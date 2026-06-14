@@ -346,15 +346,9 @@ class ProcessManager(QObject):
     def _terminate_with_fallback(
         self,
         proc: QProcess,
-        timer_attr: QTimer | None,
         label: str,
     ) -> None:
-        """Send SIGTERM and schedule a 2s SIGKILL fallback.
-
-        ``timer_attr`` is a reference to one of the per-slot timer attributes
-        (``self._compile_kill_timer`` or ``self._run_kill_timer``) and is used
-        to cancel/overwrite any previously-scheduled kill for the same slot.
-        """
+        """Send SIGTERM and schedule a 2s SIGKILL fallback."""
         self.status_message.emit(f"Terminating {label} process (Phase 1)...")
         proc.terminate()
 
@@ -442,10 +436,6 @@ class ProcessManager(QObject):
 
         # 4. Persistent directory cleanup
         self.cleanup_temp_dir()
-
-    def compile_and_run(self, session) -> None:
-        self._should_run_after_compile = True
-        self.validate_graph(session)
 
     def cleanup_temp_dir(self) -> None:
         """Removes the persistent temp directory containing the compiled artifact."""

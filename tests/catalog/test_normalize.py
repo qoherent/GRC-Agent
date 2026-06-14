@@ -3,8 +3,8 @@
 import unittest
 from pathlib import Path
 
-from grc_agent.catalog.errors import CatalogLoadError
-from grc_agent.catalog.normalize import (
+from grc_agent.catalog.loaders import CatalogLoadError
+from grc_agent.catalog.schema import (
     build_signature,
     compact_text,
     normalize_parameter,

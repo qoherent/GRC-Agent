@@ -23,7 +23,7 @@ def test_tdd_imports_exist():
 
 def test_thread_safety_boundary():
     """Assert that the AgentWorker contains zero references to QWidget or QMainWindow types.
-    
+
     This enforces the strict signal-only boundary separating processing from the GUI.
     """
     assert AgentWorker is not None, "AgentWorker must be implemented"

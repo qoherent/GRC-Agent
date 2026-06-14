@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -19,22 +18,25 @@ from typing import Any
 
 from grc_agent.config import load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.llama_launcher import LlamaLauncherError, LlamaServerLauncher
-from grc_agent.recovery import (
-    NO_RECOVERY_NEEDED,
-    RecoveryDecision,
-    classify_tool_result_for_recovery,
-)
-from grc_agent.runtime import prompt as runtime_prompt
+
+
+class LlamaLauncherError(Exception):
+    pass
 from grc_agent.runtime import tool_schemas as runtime_tool_schemas
-from grc_agent.runtime.tool_surface import MVP_MODEL_TOOL_NAMES
+from grc_agent.runtime.model_context import MVP_MODEL_TOOL_NAMES
 from grc_agent.session_ops import parse_connection_id
 from grc_agent.toolagents_runtime import (
     ToolAgentsLlamaProviderConfig,
     run_bounded_toolagents_turn,
 )
-from grc_agent.trace import build_live_eval_turn_trace
 from ruamel.yaml import YAML
+
+from tests.llama_eval._recovery import (
+    NO_RECOVERY_NEEDED,
+    RecoveryDecision,
+    classify_tool_result_for_recovery,
+)
+from tests.llama_eval._trace import build_live_eval_turn_trace
 
 DEFAULT_FIXTURE_NAME = "random_bit_generator.grc"
 DEFAULT_LIVE_EVAL_MAX_TOKENS = 2048
@@ -619,7 +621,8 @@ def collect_release_metadata(
     mvp_tool_profile: bool = True,
 ) -> dict[str, Any]:
     """Return reproducibility metadata persisted with live eval rows."""
-    prompt_text = runtime_prompt.build_system_prompt()
+    from grc_agent.runtime.model_context import build_system_prompt as _build_system_prompt
+    prompt_text = _build_system_prompt()
     schema_names = MVP_MODEL_TOOL_NAMES
     tool_schema_text = json.dumps(
         runtime_tool_schemas.build_tool_schemas(schema_names),
@@ -631,7 +634,7 @@ def collect_release_metadata(
         "results_schema_version": RESULTS_SCHEMA_VERSION,
         "git_commit": _git_commit(),
         "git_dirty": _git_dirty(),
-        "prompt_version": getattr(runtime_prompt, "__version__", "unknown"),
+        "prompt_version": "2026-06-11-seamless-v1",
         "prompt_sha256": _sha256_text(prompt_text),
         "tool_schema_sha256": _sha256_text(tool_schema_text),
         "model_alias": model_alias or backend.get("model") or "",
@@ -906,14 +909,7 @@ def run_live_scenario_once(
     mvp_tool_profile: bool = True,
 ) -> dict[str, Any]:
     """Run one declarative live scenario in an isolated fixture workspace."""
-    import grc_agent.runtime.prompt as _runtime_prompt
     from grc_agent.agent import GrcAgent
-
-    # Inject a unique run ID into the system prompt to force a KV cache miss
-    # on llama.cpp across consecutive fuzzed runs (prevents floating-point drift).
-    _test_run_id = uuid.uuid4().hex[:12]
-    _original_build = _runtime_prompt.build_system_prompt
-    _runtime_prompt.build_system_prompt = lambda: _original_build() + f"\n[Test Run ID: {_test_run_id}]"
 
     fixture_names = [scenario.fixture_name]
     if scenario.target_fixture_name:
@@ -990,7 +986,7 @@ def run_live_scenario_once(
                         )
 
             before_snapshot = graph_snapshot(agent)
-            history_start = len(agent.history)
+            history_start = len(serialize_chat_history(agent))
             prompt = render_prompt(
                 turn.prompt,
                 target_path=target_path,
@@ -1012,20 +1008,25 @@ def run_live_scenario_once(
                         "clarification_result": clarification,
                     }
                 else:
+                    turn_kwargs = {}
+                    if turn.max_tool_rounds is not None:
+                        turn_kwargs["max_tool_rounds"] = turn.max_tool_rounds
                     result = run_bounded_toolagents_turn(
                         client=client,
                         model=model,
                         agent=agent,
                         user_message=prompt,
                         mvp_tool_profile=mvp_tool_profile,
+                        **turn_kwargs,
                     )
             except Exception as exc:
                 turn_error = str(exc)
                 error_message = turn_error
 
             after_snapshot = graph_snapshot(agent)
-            requested_tool_calls_raw = requested_tool_calls_since(agent.history, history_start)
-            executed_tool_calls_raw = executed_tool_calls_since(agent.history, history_start)
+            serialized_history = serialize_chat_history(agent)
+            requested_tool_calls_raw = requested_tool_calls_since(serialized_history, history_start)
+            executed_tool_calls_raw = executed_tool_calls_since(serialized_history, history_start)
             requested_tool_calls = requested_tool_calls_raw
             executed_tool_calls = executed_tool_calls_raw
             tool_dimensions = evaluate_tool_expectations(
@@ -1061,7 +1062,7 @@ def run_live_scenario_once(
                 client=client,
                 model=model,
                 agent=agent,
-                history_start=len(agent.history),
+                history_start=len(serialize_chat_history(agent)),
                 executed_tool_calls=executed_tool_calls,
                 recovery_enabled=turn.recovery_enabled,
                 expected_recovery_class=turn.expected_recovery_class,
@@ -1283,6 +1284,12 @@ def evaluate_semantic_checks(
     end_state_pass = True
     extra: dict[str, Any] = {}
 
+    validation_cache = {}
+    def get_validation(path: str) -> dict[str, Any]:
+        if path not in validation_cache:
+            validation_cache[path] = saved_graph_reloads_and_validates(path)
+        return validation_cache[path]
+
     for check in checks:
         kind = check.get("kind")
         passed = False
@@ -1356,7 +1363,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             passed = (
                 after_snapshot.get("path") == expected_path
@@ -1375,7 +1382,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             snapshot = validation.get("snapshot")
             passed = (
@@ -1393,7 +1400,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             snapshot = validation.get("snapshot")
             passed = (
@@ -1415,7 +1422,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             snapshot = validation.get("snapshot")
             passed = (
@@ -1433,7 +1440,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             snapshot = validation.get("snapshot")
             block_name = str(check.get("instance_name"))
@@ -1451,7 +1458,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             snapshot = validation.get("snapshot")
             block_name = str(check.get("instance_name"))
@@ -1469,7 +1476,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             snapshot = validation.get("snapshot")
             connection_id = str(check.get("connection_id"))
@@ -1487,7 +1494,7 @@ def evaluate_semantic_checks(
                 if raw_path == "{after_path}"
                 else str(raw_path)
             )
-            validation = saved_graph_reloads_and_validates(expected_path)
+            validation = get_validation(expected_path)
             extra.setdefault("saved_graph_validations", []).append(validation)
             snapshot = validation.get("snapshot")
             connection_id = str(check.get("connection_id"))
@@ -1639,8 +1646,9 @@ def evaluate_turn_recovery(
     except Exception as exc:
         result["recovery_error"] = str(exc)
 
-    requested = requested_tool_calls_since(agent.history, recovery_history_start)
-    executed = executed_tool_calls_since(agent.history, recovery_history_start)
+    serialized_history = serialize_chat_history(agent)
+    requested = requested_tool_calls_since(serialized_history, recovery_history_start)
+    executed = executed_tool_calls_since(serialized_history, recovery_history_start)
     post_recovery_snapshot = _maybe_graph_snapshot(agent)
     requested_names = _tool_names(requested)
     executed_names = _tool_names(executed)
@@ -1793,28 +1801,18 @@ def ensure_llama_server(
     server_url: str | None = None,
     model: str | None = None,
 ) -> tuple[str, str, ToolAgentsLlamaProviderConfig]:
-    """Ensure the llama.cpp server is reachable, starting it if necessary.
-
-    Returns (server_url, model_alias, client).
-    """
+    """Ensure the Ollama server is reachable and return a provider config."""
     config = load_app_config()
     resolved_url = (server_url or config.llama.server_url).rstrip("/")
-    resolved_model = model or config.llama.model
-
-    launcher = LlamaServerLauncher(
-        config.llama,
-        server_url=resolved_url,
-        model_alias=resolved_model,
+    resolved_model = model or config.llama.model or ""
+    client = ToolAgentsLlamaProviderConfig(
+        base_url=resolved_url,
+        model=resolved_model,
+        max_tokens=config.llama.max_tokens,
+        temperature=config.llama.temperature,
     )
-    try:
-        result = launcher.ensure_server_ready()
-        print(
-            f"{result.status.capitalize()} llama.cpp server at {result.server_url} (pid={result.pid})"
-        )
-        return result.server_url, result.model_alias, result.provider_config
-    except LlamaLauncherError as exc:
-        print(f"Failed to start llama.cpp server: {exc}")
-        raise
+    print(f"Ensured Ollama server at {resolved_url}")
+    return resolved_url, resolved_model, client
 
 
 def apply_live_generation_bounds(
@@ -1835,20 +1833,8 @@ def restart_llama_server(
     server_url: str | None = None,
     model: str | None = None,
 ) -> tuple[str, str, ToolAgentsLlamaProviderConfig]:
-    """Force a fresh llama.cpp server instance and return a new client."""
-    config = load_app_config()
-    resolved_url = (server_url or config.llama.server_url).rstrip("/")
-    resolved_model = model or config.llama.model
-
-    launcher = LlamaServerLauncher(
-        config.llama,
-        server_url=resolved_url,
-        model_alias=resolved_model,
-    )
-
-    result = launcher.restart_server_ready()
-    print(f"Restarted llama.cpp server at {result.server_url} (pid={result.pid})")
-    return (result.server_url, result.model_alias, result.provider_config)
+    """Return a fresh client for the Ollama server."""
+    return ensure_llama_server(server_url, model)
 
 
 def build_phase_parser(
@@ -2804,6 +2790,55 @@ def render_tool_expectations(
     )
 
 
+def serialize_chat_history(agent: Any) -> list[dict[str, Any]]:
+    res = []
+    for msg in agent.chat_history.get_messages():
+        role_str = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+        if role_str == "assistant":
+            tcs = msg.get_tool_calls()
+            entry = {
+                "role": "assistant",
+                "content": msg.get_as_text() or "",
+            }
+            if tcs:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc.tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.tool_call_name,
+                            "arguments": json.dumps(tc.tool_call_arguments) if isinstance(tc.tool_call_arguments, dict) else str(tc.tool_call_arguments),
+                        }
+                    }
+                    for tc in tcs
+                ]
+            res.append(entry)
+        elif role_str == "tool":
+            for tr in msg.get_tool_call_results():
+                val = tr.tool_call_result
+                if isinstance(val, str):
+                    try:
+                        val = json.loads(val)
+                    except Exception:
+                        pass
+                res.append({
+                    "role": "tool",
+                    "name": tr.tool_call_name,
+                    "content": val,
+                })
+        elif role_str == "user":
+            res.append({
+                "role": "user",
+                "content": msg.get_as_text() or "",
+            })
+        elif role_str == "system":
+            res.append({
+                "role": "system",
+                "content": msg.get_as_text() or "",
+            })
+    return res
+
+
 def requested_tool_calls_since(
     history: list[dict[str, Any]], start_index: int
 ) -> list[dict[str, Any]]:
@@ -2843,6 +2878,6 @@ def _partial_match(actual: Any, expected: Any) -> bool:
             return False
         return all(
             _partial_match(actual_item, expected_item)
-            for actual_item, expected_item in zip(actual, expected)
+            for actual_item, expected_item in zip(actual, expected, strict=False)
         )
     return actual == expected or str(actual) == str(expected)

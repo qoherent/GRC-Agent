@@ -227,7 +227,6 @@ class OllamaSetupWidget(QWidget):
         self.setObjectName("ollamaSetupWidget")
         self._server_url = str(server_url)
         self._current_model = str(current_model)
-        self._last_status: OllamaBackendStatus | None = None
 
         # Outer layout centers the inner card.
         outer = QVBoxLayout(self)
@@ -378,11 +377,6 @@ class OllamaSetupWidget(QWidget):
             model_name=model_name,
         )
 
-    def last_status(self) -> OllamaBackendStatus | None:
-        """Expose the most recent :class:`OllamaBackendStatus` for callers
-        that need to introspect the probe result (e.g. tests)."""
-        return self._last_status
-
     def _populate_models(self, status: OllamaBackendStatus) -> None:
         previous_text = self.models_list.currentItem().text().strip() if self.models_list.currentItem() else ""
         self.models_list.blockSignals(True)
@@ -407,7 +401,6 @@ class OllamaSetupWidget(QWidget):
         self.models_list.blockSignals(False)
 
     def _set_status(self, status: OllamaBackendStatus) -> None:
-        self._last_status = status
         if not status.server_reachable:
             self.status_label.setText(
                 f"Ollama server is not reachable at {status.server_url}."
@@ -449,57 +442,10 @@ class OllamaSetupWidget(QWidget):
         self._refresh_diagnostics()
 
     def _refresh_diagnostics(self) -> None:
-        import shutil
-        import subprocess
-
-        try:
-            import psutil
-
-            vm = psutil.virtual_memory()
-            total_gb = round(vm.total / (1024**3), 1)
-            used_gb = round(vm.used / (1024**3), 1)
-            self.ram_label.setText(f"{used_gb} / {total_gb} GB used")
-            self.ram_label.setStyleSheet("color: #cdd6f4; font-size: 12px;")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("psutil RAM read failed: %s", exc)
-            self.ram_label.setText("RAM: unavailable")
-            self.ram_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
-
-        try:
-            if shutil.which("nvidia-smi") is None:
-                self.vram_label.setText("(no NVIDIA GPU detected)")
-                self.vram_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
-                return
-            proc = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=memory.total,memory.used",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2.0,
-                check=False,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(f"nvidia-smi exit {proc.returncode}")
-            total_mb = 0
-            used_mb = 0
-            for line in proc.stdout.strip().splitlines():
-                parts = line.split(",")
-                if len(parts) >= 2:
-                    total_mb += int(parts[0].strip())
-                    used_mb += int(parts[1].strip())
-            if total_mb <= 0:
-                raise RuntimeError("zero VRAM parsed")
-            total_gb = round(total_mb / 1024.0, 1)
-            used_gb = round(used_mb / 1024.0, 1)
-            self.vram_label.setText(f"{used_gb} / {total_gb} GB used")
-            self.vram_label.setStyleSheet("color: #cdd6f4; font-size: 12px;")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("nvidia-smi VRAM read failed: %s", exc)
-            self.vram_label.setText("(no NVIDIA GPU detected)")
-            self.vram_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        self.ram_label.setText("RAM: decoupled")
+        self.ram_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        self.vram_label.setText("VRAM: decoupled")
+        self.vram_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
 
     def _on_confirm(self) -> None:
         # Always enabled: the user clicks whenever they are ready.
@@ -540,7 +486,6 @@ class OllamaStartHintWidget(QWidget):
         self._pull_command = (
             f"ollama pull {current_model}" if current_model else "ollama pull <model_name>"
         )
-        self._last_status: OllamaBackendStatus | None = None
 
         outer = QVBoxLayout(self)
         outer.addStretch(1)
@@ -675,7 +620,6 @@ class OllamaStartHintWidget(QWidget):
         "done" — :meth:`confirm` emits the shared
         ``OllamaSetupSelection`` signal and the wizard moves on.
         """
-        self._last_status = status
         if status.server_reachable:
             self.status_label.setText(
                 f"Connected to Ollama at {status.server_url} · "
@@ -688,9 +632,6 @@ class OllamaStartHintWidget(QWidget):
                 "commands above in another terminal, then click Next again."
             )
             self.status_label.setStyleSheet("color: #f38ba8; font-size: 12px;")
-
-    def last_status(self) -> OllamaBackendStatus | None:
-        return self._last_status
 
     def _on_next(self) -> None:
         status = probe_ollama_backend(self._server_url, self._current_model)

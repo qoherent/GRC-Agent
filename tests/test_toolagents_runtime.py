@@ -10,7 +10,7 @@ from unittest import mock
 
 from grc_agent.agent import GrcAgent
 from grc_agent.runtime.tool_schemas import build_tool_schemas
-from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
+from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
 from grc_agent.toolagents_runtime import (
     ToolAgentsHistoryAdapter,
     ToolAgentsRegistryBuilder,
@@ -408,7 +408,7 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
             base_url="http://127.0.0.1:11434",
             model="qwen-1.5b",
         )
-        settings = cfg.create_settings(mock_provider)
+        cfg.create_settings(mock_provider)
         set_value_calls = [call[0] for call in mock_settings.set_value.call_args_list]
         self.assertNotIn("extra_body", [c[0] for c in set_value_calls])
 
@@ -426,7 +426,7 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
                 base_url="https://openrouter.ai/api",
                 model="qwen-1.5b",
             )
-            settings = cfg.create_settings(mock_provider)
+            cfg.create_settings(mock_provider)
 
         mock_settings.set_value.assert_any_call("extra_body", {
             "provider": {

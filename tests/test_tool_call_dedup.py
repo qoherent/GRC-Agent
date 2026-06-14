@@ -9,24 +9,21 @@ exhausting the chat history with no progress.
 
 from __future__ import annotations
 
-import json
 import unittest
 from typing import Any
 from unittest import mock
 
+from grc_agent.agent import GrcAgent
+from grc_agent.toolagents_runtime import (
+    ToolAgentsLlamaProviderConfig,
+    ToolAgentsRunner,
+    _canonicalize_args,
+)
 from ToolAgents.data_models.messages import (
     ChatMessage,
     ChatMessageRole,
     TextContent,
     ToolCallContent,
-    ToolCallResultContent,
-)
-
-from grc_agent.agent import GrcAgent
-from grc_agent.toolagents_runtime import (
-    _canonicalize_args,
-    ToolAgentsLlamaProviderConfig,
-    ToolAgentsRunner,
 )
 
 
@@ -225,24 +222,26 @@ class EndToEndRetryStormTests(unittest.TestCase):
         """A 5-call retry storm against ``query_knowledge`` with
         identical args must result in exactly 1 underlying call.
         """
+        from unittest import mock
+
         from grc_agent.toolagents_runtime import (
             ToolAgentsLlamaProviderConfig,
             ToolAgentsRunner,
         )
-        from unittest import mock
 
         agent, counter = self._build_agent_with_query_knowledge()
 
         # Stub the chat agent to return the same tool call 5 times,
         # then a final text. The real ``_run_turn_events`` loop must
         # short-circuit the duplicates.
+        import datetime
+
         from ToolAgents.data_models.messages import (
             ChatMessage,
             ChatMessageRole,
             TextContent,
             ToolCallContent,
         )
-        import datetime
         now = datetime.datetime.now()
 
         def make_tool_call() -> ChatMessage:
@@ -328,18 +327,19 @@ class EndToEndRetryStormTests(unittest.TestCase):
         """Sanity: different queries each get their own underlying
         call. The dedup must not over-match.
         """
+        import datetime
+        from unittest import mock
+
         from grc_agent.toolagents_runtime import (
             ToolAgentsLlamaProviderConfig,
             ToolAgentsRunner,
         )
-        from unittest import mock
         from ToolAgents.data_models.messages import (
             ChatMessage,
             ChatMessageRole,
             TextContent,
             ToolCallContent,
         )
-        import datetime
         now = datetime.datetime.now()
 
         agent, counter = self._build_agent_with_query_knowledge()

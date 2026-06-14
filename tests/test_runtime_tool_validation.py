@@ -43,8 +43,8 @@ class RuntimeToolValidationTests(unittest.TestCase):
 
     def test_unsupported_extra_argument_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "semantic_search_grc",
-            {"query": "samp_rate", "scope": "catalog", "unexpected": True},
+            "search_blocks",
+            {"query": "throttle", "unexpected": True},
             self._schema_map(),
         )
 
@@ -53,12 +53,12 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(result["validation_errors"][0]["field"], "unexpected")
         self.assertTrue(result["schema_repair_instruction"]["no_tool_ran"])
-        self.assertEqual(result["schema_repair_instruction"]["tool"], "semantic_search_grc")
+        self.assertEqual(result["schema_repair_instruction"]["tool"], "search_blocks")
 
     def test_invalid_argument_type_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "semantic_search_grc",
-            {"query": "samp_rate", "scope": "catalog", "k": "five"},
+            "search_blocks",
+            {"query": "samp_rate", "k": "five"},
             self._schema_map(),
         )
 
@@ -69,15 +69,15 @@ class RuntimeToolValidationTests(unittest.TestCase):
 
     def test_invalid_enum_value_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "semantic_search_grc",
-            {"query": "samp_rate", "scope": "everywhere"},
+            "query_knowledge",
+            {"query": "samp_rate", "domain": "everywhere"},
             self._schema_map(),
         )
 
         assert result is not None
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_enum")
-        self.assertEqual(result["validation_errors"][0]["field"], "scope")
+        self.assertEqual(result["validation_errors"][0]["field"], "domain")
 
     def test_empty_inspect_params_is_valid(self) -> None:
         result = validate_runtime_tool_call(

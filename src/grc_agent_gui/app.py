@@ -11,7 +11,7 @@ from pathlib import Path
 from grc_agent.agent import GrcAgent
 from grc_agent.config import AppConfig, load_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.session.load import load_grc
+from grc_agent.session import load_grc
 from grc_agent.startup import bootstrap_runtime
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
@@ -300,7 +300,7 @@ def main() -> None:
     # prefs file is logged and ignored by the loader; a load failure
     # here is non-fatal.
     try:
-        from grc_agent.preferences import (
+        from grc_agent.config import (
             apply_user_preferences_to_llama_config,
             load_user_preferences,
         )

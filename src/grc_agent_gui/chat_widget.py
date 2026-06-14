@@ -212,30 +212,30 @@ class ChatWidget(QWidget):
         if self._streaming:
             self._history[-1]["text"] += text
             self._history[-1]["_rendered"] = None
-            
+
             cursor = self.chat_display.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
-            
+
             if not self._stream_header_printed:
                 # Break out of any previous block (like a user message or a tool status block)
                 cursor.insertBlock(QTextBlockFormat())
-                
+
                 # Insert the styled "Agent:" header
                 cursor.insertHtml(
                     '<div style="margin-top: 12px; margin-bottom: 4px;">'
                     '<b style="color: #a6e3a1;">Agent:</b>'
                     '</div>'
                 )
-                
+
                 # Move to the end of the header and start the indented block for streaming
                 cursor.movePosition(QTextCursor.MoveOperation.End)
                 block_format = QTextBlockFormat()
                 block_format.setLeftMargin(8)
                 block_format.setTopMargin(4)
                 cursor.insertBlock(block_format)
-                
+
                 self._stream_header_printed = True
-                
+
             self.chat_display.setTextCursor(cursor)
             self.chat_display.insertPlainText(text)
             self.chat_display.ensureCursorVisible()

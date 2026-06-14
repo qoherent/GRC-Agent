@@ -168,7 +168,7 @@ class RoundTripTests(_StoreTestCase):
         """Rows with role ``assistant_model`` / ``tool_model`` carry the
         full ``ChatMessage`` payload and round-trip through the DB so
         the resume path can rebuild the agent's ``ChatHistory``."""
-        from grc_agent.session_roles import (
+        from grc_agent.session_ops import (
             ASSISTANT_MODEL_ROLE,
             TOOL_MODEL_ROLE,
             chat_message_payload,
@@ -189,6 +189,7 @@ class RoundTripTests(_StoreTestCase):
             tool_call_arguments={"view": "overview"},
         )
         from datetime import datetime
+
         from ToolAgents.data_models.messages import ChatMessage
         now = datetime.now()
         asst_msg = ChatMessage(

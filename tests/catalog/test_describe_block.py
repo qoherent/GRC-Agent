@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from grc_agent import describe_block
-from grc_agent.catalog.loaders import clear_catalog_snapshot_cache, discover_catalog_root
+from grc_agent.catalog.loaders import discover_catalog_root
 
 
 class DescribeBlockTests(unittest.TestCase):
@@ -16,9 +16,6 @@ class DescribeBlockTests(unittest.TestCase):
             return discover_catalog_root()
         except Exception as exc:  # pragma: no cover - depends on host GNU install.
             self.skipTest(str(exc))
-
-    def setUp(self) -> None:
-        clear_catalog_snapshot_cache()
 
     def test_public_describe_signature_stays_narrow(self) -> None:
         signature = inspect.signature(describe_block)

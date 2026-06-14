@@ -250,31 +250,31 @@ def test_block_nesting_prevention(qtbot):
     """Verify that appending status blocks, errors, mutations, and stream chunks does not nest them in previous HTML blocks."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    
+
     widget.append_message("user", "Hello")
     widget.append_status("my_tool", "my_args")
     widget.append_mutation("ok")
     widget.append_error("some error")
-    
+
     # Check that they exist in the display before finalization
     plain_text_before = widget.chat_display.toPlainText()
     lines_before = [line.strip() for line in plain_text_before.split("\n") if line.strip()]
-    
+
     assert "You:" in lines_before
     assert "Hello" in lines_before
     assert "⚡ my_tool" in lines_before
     assert "✓ Graph updated" in lines_before
     assert "✗ some error" in lines_before
-    
+
     # Stream some chunks
     widget.start_stream()
     widget.append_stream_chunk("response text")
-    
+
     plain_text_during = widget.chat_display.toPlainText()
     lines_during = [line.strip() for line in plain_text_during.split("\n") if line.strip()]
     assert "Agent:" in lines_during
     assert "response text" in lines_during
-    
+
     # Finalize
     widget.finalize_stream("response text")
 

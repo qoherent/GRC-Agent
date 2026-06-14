@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from grc_agent.runtime.tool_context import tool_history_content_as_text
@@ -33,7 +34,6 @@ from ToolAgents.data_models.messages import (
     ChatMessage,
     ChatMessageRole,
     TextContent,
-    ToolCallContent,
     ToolCallResultContent,
 )
 
@@ -199,5 +199,77 @@ def render_model_messages(
         messages.append(ChatMessage.create_user_message(wrapped))
     return messages
 
+
+
+# -- system prompt (was prompt.py) --
+
+__version__ = "2026-06-11-seamless-v1"
+def build_system_prompt(session_id: str | None = None) -> str:
+    """Return the full MVP wrapper-only system prompt shipped to the model, optionally isolated by session_id."""
+    prefix = f"Session ID: {session_id}\n" if session_id else ""
+    return prefix + (
+        "You are a GNU Radio graph editing assistant. "
+        "First, echo the user's complete request in your own words by explicitly listing "
+        "every block and connection required, and then immediately execute the necessary "
+        "tools to fulfill it. "
+        "Keep these structural rules in mind while editing: "
+        "variables are blocks (use add_blocks, update_params, remove_blocks). "
+        "To insert a block on an existing wire, you must batch remove_connections, "
+        "add_blocks, and add_connections together in a single payload. "
+        "An input port can only accept one connection. "
+        "To deactivate a block without severing paths, use update_states with 'bypass'. "
+        "Use force=true only if you must commit an invalid intermediate graph state to progress."
+    )
+
+# -- tool surface (was tool_surface.py) --
+
+PUBLIC_TOOL_NAMES: tuple[str, ...] = (
+    "new_grc",
+    "load_grc",
+    "summarize_graph",
+    "get_grc_context",
+    "describe_block",
+    "suggest_compatible_insertions",
+    "insert_block_on_connection",
+    "auto_insert_block",
+    "remove_connection",
+    "rewire_connection",
+    "apply_edit",
+    "propose_edit",
+    "validate_graph",
+    "save_graph",
+    "search_blocks",
+    "ask_grc_docs",
+)
+MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
+    "inspect_graph",
+    "query_knowledge",
+    "change_graph",
+)
+MODEL_TOOL_NAMES_ORDERED: tuple[str, ...] = (
+    *PUBLIC_TOOL_NAMES,
+    *MVP_MODEL_TOOL_NAMES,
+)
+@dataclass(frozen=True)
+class ToolSurface:
+    """Runtime policy for one model-facing tool profile."""
+    name: str
+    model_tool_names: tuple[str, ...]
+    internal_tool_names: tuple[str, ...]
+    assistant_text_fallback_enabled: bool
+    default_max_tool_rounds: int
+    @property
+    def model_tool_count(self) -> int:
+        return len(self.model_tool_names)
+    @property
+    def internal_tool_count(self) -> int:
+        return len(self.internal_tool_names)
+MVP_TOOL_SURFACE = ToolSurface(
+    name="mvp",
+    model_tool_names=MVP_MODEL_TOOL_NAMES,
+    internal_tool_names=PUBLIC_TOOL_NAMES,
+    assistant_text_fallback_enabled=False,
+    default_max_tool_rounds=8,
+)
 
 __all__ = ["render_model_messages"]

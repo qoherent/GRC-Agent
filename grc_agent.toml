@@ -21,8 +21,6 @@ helper_max_total_context_chars = 900
 max_sources = 3
 answer_target_chars = 320
 excerpt_target_chars = 180
-semantic_manual_enabled = true
-semantic_tutorial_enabled = true
 probe_timeout_seconds = 0.5
 retry_interval_on_failure_seconds = 3.0
 retry_interval_on_success_seconds = 1.5
@@ -35,7 +33,7 @@ search_blocks_default_k = 5
 search_blocks_max_k = 10
 ask_grc_docs_default_k = 3
 ask_grc_docs_max_k = 6
-conceptual_cache_size = 64
+lexical_cache_size = 64
 
 [agent.history]
 checkpoint_retention = 100

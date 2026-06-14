@@ -50,8 +50,7 @@ def _run(command: list[str], *, cwd: Path, timeout_seconds: int) -> dict[str, An
             command,
             cwd=cwd,
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=timeout_seconds,
         )
@@ -142,8 +141,6 @@ def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]
         isinstance(health_payload, dict)
         and health_payload.get("context_verified") is True
     )
-    vector_stats = steps.get("vector_stats", {})
-    vector_index_ready = vector_stats.get("returncode") == 0
     retrieval_catalog_ready = retrieval_ready
     model_runtime_ready = llama_ready and context_verified
     end_to_end_ready = (
@@ -151,7 +148,6 @@ def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]
         and gnu_radio_ready
         and grcc_ready
         and retrieval_catalog_ready
-        and vector_index_ready
         and model_runtime_ready
     )
     if (
@@ -159,7 +155,6 @@ def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]
         and gnu_radio_ready
         and grcc_ready
         and retrieval_ready
-        and vector_index_ready
         and model_runtime_ready
     ):
         classification = "runtime_ready"
@@ -177,8 +172,6 @@ def _build_readiness_summary(steps: dict[str, dict[str, Any]]) -> dict[str, Any]
         "grcc_path": grcc_check.get("path") if grcc_check else None,
         "retrieval_ready": retrieval_ready,
         "retrieval_catalog_ready": retrieval_catalog_ready,
-        "vector_index_ready": vector_index_ready,
-        "vector_index_state": "ready" if vector_index_ready else "missing_or_unavailable",
         "llama_ready": llama_ready,
         "health_status": health_status,
         "context_verified": context_verified,
@@ -202,7 +195,6 @@ def _smoke_ok(
     steps: dict[str, dict[str, Any]],
     mode: str,
     readiness: dict[str, Any],
-    require_vector_index: bool,
     require_llama: bool,
 ) -> bool:
     return (
@@ -213,7 +205,6 @@ def _smoke_ok(
             mode != SYSTEM_SITE_VENV_MODE
             or steps["create_system_site_venv"]["returncode"] == 0
         )
-        and (not require_vector_index or readiness["vector_index_ready"])
         and (not require_llama or readiness["model_runtime_ready"])
     )
 
@@ -225,8 +216,6 @@ def run_install_smoke(
     output_path: Path | None = None,
     keep_workspace: bool = False,
     timeout_seconds: int = 180,
-    build_vector_index: bool = False,
-    require_vector_index: bool = False,
     require_llama: bool = False,
 ) -> dict[str, Any]:
     if mode not in {DEFAULT_UV_MODE, SYSTEM_SITE_VENV_MODE}:
@@ -258,23 +247,6 @@ def run_install_smoke(
         "doctor": ["uv", "run", "grc-agent", "doctor", "--json"],
         "health": ["uv", "run", "grc-agent", "health"],
     }
-    if build_vector_index:
-        commands["vector_build"] = [
-            "uv",
-            "run",
-            "grc-agent",
-            "vector",
-            "build",
-            "--json",
-        ]
-    commands["vector_stats"] = [
-        "uv",
-        "run",
-        "grc-agent",
-        "vector",
-        "stats",
-        "--json",
-    ]
     commands["production_tests"] = [
         "uv",
         "run",
@@ -288,25 +260,17 @@ def run_install_smoke(
     expected_failures = {
         "doctor": _classify_doctor(steps["doctor"]) if steps["doctor"]["returncode"] else [],
         "health": _classify_health(steps["health"]) if steps["health"]["returncode"] else [],
-        "vector_stats": (
-            ["missing_vector_index"]
-            if steps["vector_stats"]["returncode"]
-            else []
-        ),
     }
     readiness = _build_readiness_summary(steps)
     result = {
         "schema_version": INSTALL_SMOKE_SCHEMA_VERSION,
         "mode": mode,
         "selected_python": selected_python,
-        "build_vector_index": build_vector_index,
-        "require_vector_index": require_vector_index,
         "require_llama": require_llama,
         "ok": _smoke_ok(
             steps=steps,
             mode=mode,
             readiness=readiness,
-            require_vector_index=require_vector_index,
             require_llama=require_llama,
         ),
         "workspace": str(workspace),
@@ -340,16 +304,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Python executable for --mode system-site-venv. Defaults to python3 on PATH.",
     )
     parser.add_argument(
-        "--build-vector-index",
-        action="store_true",
-        help="Also run vector index build. Off by default to avoid downloads/long runs.",
-    )
-    parser.add_argument(
-        "--require-vector-index",
-        action="store_true",
-        help="Fail the smoke when vector stats reports a missing/unavailable index.",
-    )
-    parser.add_argument(
         "--require-llama",
         action="store_true",
         help=(
@@ -367,8 +321,6 @@ def main(argv: list[str] | None = None) -> int:
         output_path=Path(args.output) if args.output else None,
         keep_workspace=args.keep_workspace,
         timeout_seconds=args.timeout_seconds,
-        build_vector_index=args.build_vector_index,
-        require_vector_index=args.require_vector_index,
         require_llama=args.require_llama,
     )
     print(json.dumps(result, indent=2, sort_keys=True))

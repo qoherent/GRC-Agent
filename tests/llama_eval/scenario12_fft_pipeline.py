@@ -41,7 +41,7 @@ def generate_fft_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    for _i in range(count):
         case_seed = rng.randint(0, 2**31 - 1)
         fft_size_val = rng.choice(FFT_SIZE_VALS)
 

@@ -9,10 +9,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from grc_agent._payload import ErrorCode
-from grc_agent.catalog import describe_block
-from grc_agent.catalog.errors import CatalogError
-from grc_agent.catalog.loaders import get_catalog_snapshot
-from grc_agent.runtime.output_policy import is_meaningful
+from grc_agent.catalog.loaders import CatalogError, describe_block, get_catalog_snapshot
+from grc_agent.runtime.tool_context import is_meaningful
 
 # ---------------------------------------------------------------------------
 # Block-specific FTS synonym injection (Fix: search tuning, not prompt tuning)
@@ -502,22 +500,6 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
     )
 
 
-def _is_exact_catalog_query(query: str, *, block_id: str, name: str) -> bool:
-    import grc_agent.agent as agent_module
-
-    query_raw = query.casefold()
-    query_norm = agent_module._normalize_alias_key(query)
-    return (
-        bool(block_id)
-        and query_raw in {block_id.casefold(), f"catalog:block:{block_id}".casefold()}
-        or bool(query_norm)
-        and query_norm
-        in {
-            agent_module._normalize_alias_key(block_id),
-            agent_module._normalize_alias_key(name),
-        }
-    )
-
 
 def _compact_catalog_details(block_id: str) -> dict[str, Any]:
     details = describe_block(block_id)
@@ -751,7 +733,7 @@ def _id_label_values(value: Any) -> list[str]:
         option_labels = _string_list_values(item.get("option_labels"))
         if options:
             if option_labels and len(option_labels) == len(options):
-                pairs = [f"{o} ({lbl})" for o, lbl in zip(options, option_labels)]
+                pairs = [f"{o} ({lbl})" for o, lbl in zip(options, option_labels, strict=False)]
                 desc += ": " + ", ".join(pairs)
             else:
                 desc += ": " + "/".join(options)

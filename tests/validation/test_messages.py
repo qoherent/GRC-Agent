@@ -2,7 +2,7 @@
 
 import unittest
 
-from grc_agent.validation.messages import (
+from grc_agent.validation.errors import (
     format_allowed_values,
     format_catalog_lookup_message,
     format_endpoint,

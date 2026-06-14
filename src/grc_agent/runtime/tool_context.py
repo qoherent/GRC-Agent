@@ -1,14 +1,24 @@
-"""Tool-history compaction and model-visible formatting helpers."""
+"""Tool-history compaction, model-visible formatting, output policy, and path safety.
+
+Consolidated from tool_context.py + output_policy.py + path_safety.py + capabilities.py.
+"""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from typing import Any
+import uuid
+from collections.abc import Callable, Iterable
+from pathlib import Path
+from typing import Any, TypeVar
 
-from grc_agent.runtime.output_policy import is_meaningful, truncate_text
+from ToolAgents.data_models.chat_history import ChatHistory
+from ToolAgents.data_models.messages import (
+    ChatMessage,
+    ToolCallResultContent,
+)
 
-HistoryEntry = dict[str, Any]
+_T = TypeVar("_T")
+
 PreviewCallback = Callable[..., list[dict[str, Any]]]
 _MODEL_WRAPPER_NAMES = {
     "inspect_graph",
@@ -17,49 +27,6 @@ _MODEL_WRAPPER_NAMES = {
     "change_graph",
 }
 
-
-def compact_tool_entry(
-    turn: HistoryEntry,
-    *,
-    semantic_search_result_preview: PreviewCallback,
-) -> HistoryEntry:
-    content = turn.get("content")
-    if not isinstance(content, dict):
-        return turn
-    tool_name = turn.get("name")
-    if isinstance(tool_name, str) and tool_name in _MODEL_WRAPPER_NAMES:
-        return {
-            "role": turn.get("role"),
-            "tool_call_id": turn.get("tool_call_id"),
-            "name": tool_name,
-            "content": _compact_wrapper_result(tool_name, content),
-        }
-    compact: dict[str, Any] = {}
-    for key in (
-        "ok",
-        "message",
-        "error_type",
-        "active_session",
-        "tool",
-        "valid",
-        "hint",
-        "suggested_next_tools",
-    ):
-        if key in content:
-            compact[key] = content[key]
-    if tool_name == "summarize_graph":
-        summary = content.get("summary")
-        if isinstance(summary, str) and summary:
-            compact["summary"] = summary
-    if not compact:
-        compact["ok"] = content.get("ok", False)
-        compact["message"] = "result truncated"
-    return {
-        "role": turn.get("role"),
-        "tool_call_id": turn.get("tool_call_id"),
-        "name": turn.get("name"),
-        "content": compact,
-    }
 
 
 def tool_history_content_as_text(
@@ -659,47 +626,6 @@ def _compact_error_rows(value: Any) -> list[str]:
     return rows
 
 
-def _autosave_brief(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    return _drop_empty(
-        {
-            "ok": value.get("ok"),
-            "skipped": value.get("skipped"),
-            "path": value.get("path"),
-            "dirty": value.get("dirty"),
-            "error_type": value.get("error_type"),
-            "message": _short_text(value.get("message"), 160),
-        }
-    )
-
-
-def _graph_delta_brief(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    keys = (
-        "changed",
-        "added_blocks",
-        "removed_blocks",
-        "changed_blocks",
-        "added_connections",
-        "removed_connections",
-        "validation_status",
-        "validation_returncode",
-    )
-    return _drop_empty({key: value.get(key) for key in keys})
-
-
-def _validation_result_brief(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    return _drop_empty(
-        {
-            "valid": value.get("valid"),
-            "status": value.get("status"),
-            "returncode": value.get("returncode"),
-        }
-    )
 
 
 def _validation_status_brief(value: Any) -> dict[str, Any] | None:
@@ -725,19 +651,6 @@ def _truncation_brief(value: Any) -> dict[str, Any] | None:
     )
 
 
-def _active_session_brief(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    validation = value.get("validation")
-    return _drop_empty(
-        {
-            "path": value.get("path"),
-            "state_revision": value.get("state_revision"),
-            "dirty": value.get("dirty"),
-            "validation": _validation_result_brief(validation),
-        }
-    )
-
 
 def _short_text(value: Any, limit: int) -> str | None:
     if not isinstance(value, str):
@@ -752,3 +665,242 @@ def _list(value: Any) -> list[Any]:
 
 def _drop_empty(value: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if is_meaningful(item)}
+
+
+# -- output policy (was output_policy.py) --
+
+
+def is_meaningful(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and value == "":
+        return False
+    if isinstance(value, list) and len(value) == 0:
+        return False
+    if isinstance(value, dict) and len(value) == 0:
+        return False
+    return True
+
+
+def is_variable_block(block_type: str) -> bool:
+    if not isinstance(block_type, str):
+        return False
+    return block_type == "variable" or block_type.startswith("variable_")
+
+
+def truncate_list(items: list[_T], max_items: int) -> tuple[list[_T], list[_T]]:
+    if max_items < 0:
+        raise ValueError("max_items must be >= 0")
+    shown = items[:max_items]
+    omitted = items[max_items:]
+    return shown, omitted
+
+
+def truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    overrun = int(max_chars * 0.2)
+    window = min(max_chars + overrun, len(text))
+    for boundary in (". ", "? ", "! "):
+        idx = text.rfind(boundary, max_chars, window)
+        if idx != -1:
+            return text[: idx + len(boundary)] + "…"
+    idx = text.rfind(" ", max_chars, window)
+    if idx != -1:
+        return text[:idx] + " …"
+    return text[:max_chars] + "…"
+
+
+# -- path safety (was path_safety.py) --
+
+
+def resolved_path(path_value: str | Path) -> Path:
+    return Path(path_value).expanduser().resolve(strict=False)
+
+
+def unsafe_graph_root_for_path(
+    path_value: str | Path,
+    *,
+    installed_graph_roots: Iterable[Path],
+    canonical_fixture_root: Path,
+) -> str | None:
+    candidate = resolved_path(path_value)
+    roots = (*installed_graph_roots, canonical_fixture_root)
+    for root in roots:
+        resolved_root = root.expanduser().resolve(strict=False)
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError:
+            continue
+        return str(resolved_root)
+    return None
+
+
+# --- merged from chat_history.py ---
+
+_TRUNCATION_SENTINEL_TEMPLATE = (
+    "... [TRUNCATED by chat-history compactor: was {original} chars, "
+    "kept {kept}]"
+)
+
+
+def _shorten_tool_result(
+    content: ToolCallResultContent,
+    *,
+    max_chars: int,
+    original_length: int | None = None,
+) -> ToolCallResultContent:
+    original = content.tool_call_result
+    if len(original) <= max_chars:
+        return content
+    if original_length is None:
+        original_length = len(original)
+    sentinel = _TRUNCATION_SENTINEL_TEMPLATE.format(
+        original=original_length, kept=max_chars - 1
+    )
+    budget = max(0, max_chars - len(sentinel) - 1)
+    kept = original[:budget].rstrip()
+    return ToolCallResultContent(
+        tool_call_result_id=content.tool_call_result_id or str(uuid.uuid4()),
+        tool_call_id=content.tool_call_id,
+        tool_call_name=content.tool_call_name,
+        tool_call_result=f"{kept} {sentinel}",
+    )
+
+
+def _replace_tool_result(
+    message: ChatMessage,
+    original: ToolCallResultContent,
+    replacement: ToolCallResultContent,
+) -> ChatMessage:
+    new_content = []
+    for item in message.content:
+        if item is original:
+            new_content.append(replacement)
+        else:
+            new_content.append(item)
+    if new_content == list(message.content):
+        return message
+    return ChatMessage(
+        id=message.id,
+        role=message.role,
+        content=new_content,
+        created_at=message.created_at,
+        updated_at=message.updated_at,
+        additional_fields=message.additional_fields,
+        additional_information=message.additional_information,
+    )
+
+
+def compact_chat_history(
+    chat_history: ChatHistory,
+    *,
+    budget_chars: int,
+    max_tool_result_chars: int = 4000,
+) -> bool:
+    """Shorten tool results in ``chat_history`` until the total is under budget.
+
+    Returns ``True`` if any message was rewritten, ``False`` if the history
+    already fit. The function is idempotent: calling it twice with the same
+    arguments is a no-op on the second call.
+
+    ``max_tool_result_chars`` caps any individual ``ToolCallResultContent``
+    payload. The previous hard-coded cap of 800 was starving the model of
+    ``query_knowledge`` results: a single GNU Radio catalog block
+    definition (name, IO signature, full param list) can easily exceed
+    800 chars, so the compactor was deleting the exact block ID the
+    model had just retrieved. 4000 chars is roughly 1,000 tokens — large
+    enough to fit a full catalog JSON object, small enough that even
+    ten such payloads still fit comfortably inside the 100K-char
+    ``history_compact_budget`` and the 256K-token context window of
+    even the smallest local model.
+
+    Algorithm: one pass. We split the history into an immutable
+    "shell" (system message, user messages, assistant text, tool-call
+    arguments) and a mutable sum of tool-result payload lengths. We
+    compute the exact new payload size for each candidate by
+    proportional allocation against the remaining budget, then slice
+    each payload once. No iteration, no per-cycle length re-computation.
+    """
+    if budget_chars <= 0:
+        return False
+    messages = chat_history.get_messages()
+    if not messages:
+        return False
+
+    floor = 64
+
+    def _payload_length(content: ToolCallResultContent) -> int:
+        return len(content.tool_call_result)
+
+    def _shell_length(message: ChatMessage) -> int:
+        full = len(message.get_as_text())
+        payload_total = sum(
+            _payload_length(c)
+            for c in message.content
+            if isinstance(c, ToolCallResultContent)
+        )
+        return full - payload_total
+
+    shell_total = 0
+    candidate_payloads: list[tuple[ChatMessage, ToolCallResultContent, int]] = []
+    candidate_total = 0
+    for message in messages:
+        shell_total += _shell_length(message)
+        for content in message.content:
+            if (
+                isinstance(content, ToolCallResultContent)
+                and len(content.tool_call_result) > floor
+            ):
+                length = _payload_length(content)
+                candidate_payloads.append((message, content, length))
+                candidate_total += length
+
+    if not candidate_payloads:
+        return False
+
+    total = shell_total + candidate_total
+    if total <= budget_chars:
+        return False
+
+    mutable_budget = max(
+        0, budget_chars - shell_total
+    )
+    floor_total = floor * len(candidate_payloads)
+    if mutable_budget < floor_total:
+        mutable_budget = floor_total
+
+    extra = mutable_budget - floor_total
+    new_sizes: list[int] = []
+    if candidate_total == 0:
+        new_sizes = [floor] * len(candidate_payloads)
+    else:
+        for _, _, current_length in candidate_payloads:
+            share = int(round(extra * (current_length / candidate_total)))
+            new_sizes.append(floor + share)
+
+    changed = False
+    for (message, content, current_length), new_length in zip(
+        candidate_payloads, new_sizes, strict=False
+    ):
+        target = min(max_tool_result_chars, new_length)
+        if target >= current_length:
+            continue
+        if target < floor:
+            target = floor
+        new_content = _shorten_tool_result(
+            content,
+            max_chars=target,
+            original_length=current_length,
+        )
+        if new_content is content:
+            continue
+        idx_in_history = chat_history.messages.index(message)
+        old_message = chat_history.messages[idx_in_history]
+        new_message = _replace_tool_result(old_message, content, new_content)
+        if new_message is not old_message:
+            chat_history.messages[idx_in_history] = new_message
+            changed = True
+    return changed
+
+

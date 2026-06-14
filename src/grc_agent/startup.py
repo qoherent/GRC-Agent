@@ -128,11 +128,9 @@ def _probe_generic(
         except Exception:
             pass
 
-        # Build health evidence. The probe verified the server is
-        # reachable and the model id appears in /v1/models, so the
-        # "probe_ok" launch_status is the truthful readiness signal.
-        # Context window is not actually measured here — we report
-        # the configured max_tokens as the requested window.
+        result.server_url = effective_server_url
+        result.model_alias = effective_model
+        result.launch_status = "probe_ok"
         result.health_evidence = {
             "server_url": effective_server_url,
             "model": effective_model,
@@ -141,9 +139,6 @@ def _probe_generic(
             "context_verified": False,
             "actual_context_tokens": config.llama.max_tokens,
         }
-        result.server_url = effective_server_url
-        result.model_alias = effective_model
-        result.launch_status = "probe_ok"
 
         # For Ollama, check if the model's template supports tool calling
         if backend == "ollama":
@@ -161,8 +156,8 @@ def _probe_generic(
             except Exception:
                 pass
     except Exception as exc:
-        result.health_evidence = None
         result.launch_status = "probe_failed"
+        result.health_evidence = None
         message = f"Failed to reach {backend} server at {effective_server_url}: {exc}"
         result.errors.append(message)
         result.error_type = _classify_launcher_error(exc, effective_server_url)

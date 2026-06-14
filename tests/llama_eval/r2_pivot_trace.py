@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.prompt import build_system_prompt
+from grc_agent.runtime.model_context import build_system_prompt
 
 FIXTURE = Path(__file__).resolve().parent.parent / "data" / "random_bit_generator.grc"
 
@@ -36,7 +36,9 @@ def _make_provider():
 
 def _run_turn(agent, provider, prompt):
     from grc_agent.toolagents_runtime import run_bounded_toolagents_turn
-    start = len(agent.history)
+
+    from tests.llama_eval.harness import serialize_chat_history
+    start = len(serialize_chat_history(agent))
     result = run_bounded_toolagents_turn(
         agent=agent,
         user_message=prompt,
@@ -45,7 +47,8 @@ def _run_turn(agent, provider, prompt):
         mvp_tool_profile=True,
     )
     trace = []
-    for turn in agent.history[start:]:
+    serialized = serialize_chat_history(agent)
+    for turn in serialized[start:]:
         role = turn.get("role")
         if role == "assistant":
             for tc in turn.get("tool_calls", []):

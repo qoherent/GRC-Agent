@@ -42,7 +42,7 @@ R2_CASES: list[LiveScenario] = [
             ),
             LiveTurnSpec(
                 prompt=(
-                    "Now change the sample rate to 96000 and disable "
+                    "Now change the sample rate to 96000 and bypass "
                     "the blocks_throttle2_0 block."
                 ),
                 expected_tool_calls=(
@@ -53,7 +53,7 @@ R2_CASES: list[LiveScenario] = [
                     {"kind": "variable_equals",
                      "name": "samp_rate", "value": "96000"},
                     {"kind": "block_state_equals",
-                     "instance_name": "blocks_throttle2_0", "state": "disabled"},
+                     "instance_name": "blocks_throttle2_0", "state": "bypass"},
                 ),
             ),
         ),

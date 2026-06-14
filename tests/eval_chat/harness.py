@@ -73,16 +73,11 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
-import importlib
-import importlib.util
 import json
 import sys
-import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
-
-import contextlib
 
 _EVAL_DIR = Path(__file__).resolve().parent
 _FIXTURES_DIR = _EVAL_DIR / "fixtures"
@@ -178,11 +173,12 @@ def _model_responses_from_fixture(raw_responses: list[dict[str, Any]]) -> list[A
         # ``from_dictionaries`` only handles simple role+content.
         # For assistant tool_calls, build the ChatMessage directly.
         if msg.get("tool_calls"):
+            import json as _json
+
             from ToolAgents.data_models.messages import (
                 ChatMessageRole,
                 ToolCallContent,
             )
-            import json as _json
             now = _now()
             content = []
             if msg.get("content"):
@@ -242,7 +238,7 @@ class EvalResult:
 def run_fixture(fixture_path: Path) -> EvalResult:
     """Run one fixture end-to-end. Returns the outcome."""
     import time
-    from ToolAgents.data_models.chat_history import ChatHistory
+
 
     started = time.perf_counter()
     raw = json.loads(fixture_path.read_text(encoding="utf-8"))

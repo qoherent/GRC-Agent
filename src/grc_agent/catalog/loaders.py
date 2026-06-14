@@ -1,4 +1,7 @@
-"""Shared GNU catalog discovery and raw metadata loading."""
+"""Shared GNU catalog discovery, raw metadata loading, and block description.
+
+Consolidated from loaders.py + errors.py + describe.py.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +13,21 @@ from typing import Any
 
 import yaml
 
-from .errors import BlockNotFoundError, CatalogLoadError
-from .schema import CatalogFiles, CatalogSnapshot, RawCatalogBlock
+from grc_agent._payload import ErrorCode, build_error_payload
+from .schema import (
+    BlockDescription,
+    CatalogFiles,
+    CatalogSnapshot,
+    RawCatalogBlock,
+    build_signature,
+    hierarchy_warnings,
+    normalize_parameter,
+    normalize_port,
+    optional_string,
+    preserved_string_values,
+    select_category_path,
+    string_values,
+)
 
 DEFAULT_GRC_CATALOG_ROOTS = (
     Path("/usr/share/gnuradio/grc/blocks"),
@@ -20,12 +36,33 @@ DEFAULT_GRC_CATALOG_ROOTS = (
 
 try:
     _YAML_SAFE_LOADER = yaml.CSafeLoader
-except AttributeError:  # pragma: no cover - depends on libyaml availability.
+except AttributeError:
     _YAML_SAFE_LOADER = yaml.SafeLoader
 
 _CategoryCallback = Callable[[tuple[str, ...]], None]
 _BlockCallback = Callable[[tuple[str, ...], str], None]
 
+
+# -- errors --
+
+class CatalogError(RuntimeError):
+    """Base class for catalog metadata and description failures."""
+
+
+class CatalogLoadError(CatalogError):
+    """Raised when the GNU block catalog cannot be discovered or loaded."""
+
+
+class BlockNotFoundError(CatalogError):
+    """Raised when a block id is absent from the resolved GNU catalog."""
+
+    def __init__(self, block_id: str, *, catalog_root: str) -> None:
+        self.block_id = block_id
+        self.catalog_root = catalog_root
+        super().__init__(f"Block '{block_id}' not found in catalog.")
+
+
+# -- loaders --
 
 def discover_catalog_root(catalog_root: str | Path | None = None) -> Path:
     """Return the GNU catalog root used by retrieval and block description."""
@@ -147,11 +184,6 @@ def walk_tree_entries(
         )
 
 
-def clear_catalog_snapshot_cache() -> None:
-    """Clear the cached raw GNU catalog snapshot."""
-    _get_cached_catalog_snapshot.cache_clear()
-
-
 def get_catalog_snapshot(catalog_root: str | Path | None = None) -> CatalogSnapshot:
     """Return the cached raw GNU catalog snapshot for the resolved root."""
     root = discover_catalog_root(catalog_root).resolve()
@@ -209,3 +241,106 @@ def _build_catalog_snapshot_for_root(root: Path) -> CatalogSnapshot:
         )
 
     return CatalogSnapshot(root=root, files=files, blocks=blocks)
+
+
+# -- describe --
+
+def describe_block(block_id: str) -> dict[str, Any]:
+    """Return structured GNU catalog truth for one block id."""
+    return _describe_block_with_root(block_id)
+
+
+def _describe_block_with_root(
+    block_id: str,
+    *,
+    catalog_root: str | Path | None = None,
+) -> dict[str, Any]:
+    normalized_block_id = _normalize_block_id(block_id)
+    if normalized_block_id is None:
+        return build_error_payload(
+            error_type=ErrorCode.TOOL_CALL_INVALID,
+            message="block_id must be a non-empty string.",
+        )
+
+    try:
+        raw_block = find_block_source(normalized_block_id, catalog_root=catalog_root)
+        description = _build_block_description(raw_block)
+    except BlockNotFoundError as exc:
+        return build_error_payload(
+            error_type=ErrorCode.BLOCK_NOT_FOUND,
+            message=str(exc),
+            details={
+                "block_id": exc.block_id,
+            },
+        )
+    except CatalogError as exc:
+        return build_error_payload(
+            error_type=ErrorCode.CATALOG_LOAD_ERROR,
+            message=str(exc),
+        )
+
+    return description.to_payload()
+
+
+def _normalize_block_id(block_id: Any) -> str | None:
+    if not isinstance(block_id, str):
+        return None
+    normalized = " ".join(block_id.split())
+    return normalized or None
+
+
+def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
+    payload = raw_block.payload
+    label = optional_string(payload.get("label"))
+    if label is None:
+        raise CatalogLoadError(f"{raw_block.path} is missing a non-empty 'label' field.")
+
+    parameter_payloads = _mapping_list_or_error(payload, "parameters", raw_block.path)
+    input_payloads = _mapping_list_or_error(payload, "inputs", raw_block.path)
+    output_payloads = _mapping_list_or_error(payload, "outputs", raw_block.path)
+
+    category_path, warnings = select_category_path(raw_block)
+    warnings.extend(hierarchy_warnings(raw_block))
+
+    parameters = [
+        normalize_parameter(parameter_payload, source_path=raw_block.path)
+        for parameter_payload in parameter_payloads
+    ]
+    inputs = [normalize_port(port_payload) for port_payload in input_payloads]
+    outputs = [normalize_port(port_payload) for port_payload in output_payloads]
+
+    return BlockDescription(
+        block_id=raw_block.block_id,
+        label=label,
+        category_path=category_path,
+        flags=string_values(payload.get("flags")),
+        parameters=parameters,
+        inputs=inputs,
+        outputs=outputs,
+        asserts=preserved_string_values(payload.get("asserts")),
+        documentation=optional_string(payload.get("documentation")),
+        doc_url=optional_string(payload.get("doc_url")),
+        warnings=warnings,
+        signature=build_signature(raw_block.block_id, parameters),
+    )
+
+
+def _mapping_list_or_error(
+    payload: dict[str, Any],
+    key: str,
+    source_path: Path,
+) -> list[dict[str, Any]]:
+    value = payload.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise CatalogLoadError(f"{source_path} has an invalid '{key}' section.")
+
+    normalized_items: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise CatalogLoadError(
+                f"{source_path} has a non-mapping item in '{key}' at index {index}."
+            )
+        normalized_items.append(item)
+    return normalized_items

@@ -2,7 +2,7 @@
 
 <!-- GENERATED: do not edit by hand. -->
 
-This file is generated from the runtime prompt and model-facing tool schemas. To update it after changing `src/grc_agent/runtime/prompt.py` or `src/grc_agent/runtime/tool_schemas.py`, run:
+This file is generated from the runtime prompt and model-facing tool schemas. To update it after changing `src/grc_agent/runtime/model_context.py` or `src/grc_agent/runtime/tool_schemas.py`, run:
 
 ```bash
 UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_bible
@@ -105,7 +105,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
         "properties": {
           "reasoning": {
             "type": "string",
-            "description": "Briefly explain the current graph state and your step-by-step plan for this batch."
+            "description": "Plan and reasoning for this batch."
           },
           "add_blocks": {
             "type": "array",

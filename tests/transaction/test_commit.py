@@ -4,11 +4,7 @@ import unittest
 from pathlib import Path
 
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.transaction.commit import (
-    build_apply_failure_payload,
-    build_apply_success_payload,
-)
-from grc_agent.transaction.edit import AffectedChanges
+from grc_agent.transaction import AffectedChanges, build_apply_failure_payload, build_apply_success_payload
 
 
 class TransactionCommitPayloadTests(unittest.TestCase):

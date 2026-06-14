@@ -7,7 +7,6 @@ import datetime
 import json
 import logging
 import re
-import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,8 +27,8 @@ from ToolAgents.provider import OpenAIChatAPI
 from ToolAgents.provider.llm_provider import ProviderSettings
 
 from grc_agent._payload import ErrorCode
-from grc_agent.runtime.tool_surface import MVP_TOOL_SURFACE
-from grc_agent.session_roles import (
+from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
+from grc_agent.session_ops import (
     ASSISTANT_MODEL_ROLE,
     TOOL_MODEL_ROLE,
     chat_message_payload,
@@ -254,22 +253,9 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
                     self.id = tc_id
                     self.function = function
 
-            class MockChatCompletionMessage:
-                def __init__(self, content: str | None, tool_calls: list[MockToolCall] | None) -> None:
-                    self.content = content
-                    self.tool_calls = tool_calls
-
-            class MockChatCompletionChoice:
-                def __init__(self, message: MockChatCompletionMessage) -> None:
-                    self.message = message
-
             class MockChatCompletion:
                 def __init__(self, response_data: dict[str, Any]) -> None:
                     self.raw_data = response_data
-                    self.model_extra: dict[str, Any] = {}
-                    if "error" in response_data:
-                        self.model_extra = {"error": response_data["error"]}
-
                     message_data = response_data["choices"][0]["message"]
 
                     tcs = []
@@ -284,15 +270,6 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
                                     ),
                                 )
                             )
-                    self.choices = [
-                        MockChatCompletionChoice(
-                            MockChatCompletionMessage(
-                                content=message_data.get("content"),
-                                tool_calls=tcs if tcs else None,
-                            )
-                        )
-                    ]
-
                 def model_dump(self) -> dict[str, Any]:
                     return self.raw_data
 
@@ -1246,57 +1223,6 @@ class ToolAgentsJsonClient:
         self.provider = self.provider_config.create_provider()
         self.agent = ChatToolAgent(chat_api=self.provider)
 
-    def create_chat_completion(
-        self,
-        *,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] = "none",
-        response_format: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        del tools
-        started = time.perf_counter()
-        settings = self.provider_config.create_settings(
-            self.provider,
-            tool_choice=tool_choice,
-            response_format=response_format,
-            max_tokens=self.provider_config.max_tokens,
-        )
-        chat_messages = ToolAgentsHistoryAdapter.from_openai_messages(messages)
-        response = self.agent.step(
-            chat_messages,
-            tool_registry=ToolRegistry(),
-            settings=settings,
-        )
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        return _chat_message_as_openai_response(response, elapsed_ms=elapsed_ms, model=model)
-
-    def create_chat_completion_raw(
-        self,
-        *,
-        model: str,
-        messages: list[dict[str, Any]],
-        response_format: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        started = time.perf_counter()
-        response = self.create_chat_completion(
-            model=model,
-            messages=messages,
-            tools=[],
-            tool_choice="none",
-            response_format=response_format,
-        )
-        raw_response_text = json.dumps(response, sort_keys=True)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        return {
-            "raw_response_text": raw_response_text,
-            "http_request_ms": 0,
-            "generation_ms": elapsed_ms,
-            "roundtrip_ms": elapsed_ms,
-        }
-
-
 def run_bounded_toolagents_turn(
     agent: GrcAgent,
     provider_config: ToolAgentsLlamaProviderConfig | None = None,
@@ -1379,20 +1305,6 @@ def _is_primitive_item_schema(items: dict[str, Any]) -> bool:
     return "type" in items and "properties" not in items
 
 
-def _tool_call_as_history_payload(tool_call: ToolCallContent) -> dict[str, Any]:
-    arguments = tool_call.tool_call_arguments
-    if isinstance(arguments, dict):
-        argument_text = json.dumps(arguments, sort_keys=True)
-    else:
-        argument_text = str(arguments)
-    return {
-        "id": tool_call.tool_call_id,
-        "type": "function",
-        "function": {
-            "name": tool_call.tool_call_name,
-            "arguments": argument_text,
-        },
-    }
 
 
 def _message_text(message: ChatMessage) -> str:
@@ -1474,36 +1386,6 @@ def _replace_last_assistant_text(chat_history: ChatHistory, text: str) -> None:
                 additional_information=messages[index].additional_information,
             )
             return
-
-
-def _chat_message_as_openai_response(
-    message: ChatMessage,
-    *,
-    elapsed_ms: int,
-    model: str,
-) -> dict[str, Any]:
-    tool_calls = [
-        _tool_call_as_history_payload(tool_call)
-        for tool_call in message.get_tool_calls()
-    ]
-    response_message: dict[str, Any] = {
-        "role": "assistant",
-        "content": _message_text(message),
-    }
-    if tool_calls:
-        response_message["tool_calls"] = tool_calls
-    return {
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "tool_calls" if tool_calls else "stop",
-                "message": response_message,
-            }
-        ],
-        "usage": {},
-        "grc_agent_transport_ms": elapsed_ms,
-    }
 
 
 def _maybe_enable_wrapper_eval_telemetry(

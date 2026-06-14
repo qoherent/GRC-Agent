@@ -41,8 +41,6 @@ class InspectorWidget(QWidget):
     view, which is intentionally out of scope for this sidebar widget.
     """
 
-    CATEGORY_KEYS = ("variables", "sources", "sinks", "filters", "other_blocks")
-
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
         self.grc_file_path = ""

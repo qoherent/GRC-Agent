@@ -13,7 +13,6 @@ from typing import Any
 from grc_agent.agent import GrcAgent
 from grc_agent.config import default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.retrieval.vector import semantic_search_grc
 
 from tests.retrieval_eval._eval_gate_lock import acquire_retrieval_eval_lock
 
@@ -387,10 +386,10 @@ def run_eval(
     samples: list[dict[str, Any]] = []
     for row in rows:
         for _ in range(max(1, runs_per_question)):
-            semantic_manual = semantic_search_grc(row.question, scope="manual", k=docs_k)
-            semantic_tutorial = semantic_search_grc(row.question, scope="tutorial", k=docs_k)
-            sem_manual_top_title, sem_manual_top_source, _sem_manual_excerpt = _extract_top_source(semantic_manual)
-            sem_tutorial_top_title, sem_tutorial_top_source, _sem_tutorial_excerpt = _extract_top_source(semantic_tutorial)
+            sem_manual_top_title = None
+            sem_manual_top_source = None
+            sem_tutorial_top_title = None
+            sem_tutorial_top_source = None
 
             started = time.perf_counter()
             result = agent.execute_tool(

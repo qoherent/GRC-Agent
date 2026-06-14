@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from grc_agent.models import Block, Connection
-from grc_agent.runtime.block_semantics import build_block_semantics_by_type
-from grc_agent.runtime.editable_parameters import (
+from grc_agent._payload import ErrorCode
+from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent._payload import Block, Connection
+from grc_agent.runtime.block_semantics import (
     EditableParameterCandidate,
+    build_block_semantics_by_type,
     build_editable_parameter_candidates,
 )
-from grc_agent.runtime.output_policy import is_meaningful, is_variable_block, truncate_list
+from grc_agent.runtime.tool_context import is_meaningful, is_variable_block, truncate_list
 from grc_agent.session import summarize_graph
 from grc_agent.session_ops import connection_id as render_connection_id
 
@@ -980,3 +984,80 @@ def _compact_value(value: Any) -> str:
 def _graph_name(agent: GrcAgent) -> str | None:
     path = agent.session.path
     return path.name if path is not None else None
+
+
+# --- merged from get_grc_context_internal.py ---
+
+ContextFn = Callable[..., dict[str, Any]]
+SymbolResolver = Callable[[str], str | None]
+
+
+def get_grc_context_internal(
+    node_id: str,
+    *,
+    hops: int,
+    max_nodes: int | None,
+    session: FlowgraphSession,
+    catalog_root: Path | None,
+    default_max_nodes: int,
+    symbol_resolver: SymbolResolver,
+    context_fn: ContextFn,
+) -> dict[str, Any]:
+    resolved_node_id = symbol_resolver(node_id) or node_id
+    resolved_max_nodes = default_max_nodes if max_nodes is None else max_nodes
+    payload = context_fn(
+        session,
+        resolved_node_id,
+        hops=hops,
+        max_nodes=resolved_max_nodes,
+    )
+    if payload.get("ok"):
+        payload["hint"] = (
+            "This is inspection data only. "
+            "If the user also asked for a real change after inspecting, call `apply_edit` next."
+        )
+    if payload.get("ok") is False and payload.get("error_type") == ErrorCode.BLOCK_NOT_FOUND:
+        if session.flowgraph is not None:
+            fallback_candidates = [
+                b.instance_name for b in session.flowgraph.blocks[: min(5, max_nodes)]
+            ]
+            if fallback_candidates:
+                payload["candidate_nodes"] = fallback_candidates
+                payload["hint"] = (
+                    "Use an exact loaded session name. "
+                    f"Examples: {', '.join(fallback_candidates)}."
+                )
+    return payload
+
+
+# --- merged from query_knowledge.py ---
+
+
+def query_knowledge(
+    agent: GrcAgent,
+    query: str,
+    domain: str,
+    debug: bool = False,
+) -> ToolResult:
+    """Query GNU Radio knowledge — catalog (block IDs/params) or docs (concepts)."""
+    started = time.monotonic()
+
+    if domain not in {"catalog", "docs"}:
+        return agent._tool_result(
+            "query_knowledge",
+            ok=False,
+            message=f"Invalid domain '{domain}'.",
+            error_type="invalid_request",
+        )
+
+    if domain == "catalog":
+        from grc_agent.runtime.search_blocks import search_blocks as _search
+        result = _search(agent, query=query, debug=debug)
+    else:
+        from grc_agent.runtime.doc_answer import ask_grc_docs as _docs
+        result = _docs(agent, question=query, debug=debug)
+
+    if isinstance(result, dict):
+        result["domain"] = domain
+        result["query_knowledge_time"] = round(time.monotonic() - started, 3)
+    return result

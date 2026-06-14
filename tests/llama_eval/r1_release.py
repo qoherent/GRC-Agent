@@ -76,17 +76,18 @@ R1_CASES: list[LiveScenario] = [
     LiveScenario(
         category="mutation",
         name="disable_throttle",
-        description="Disable the throttle block via update_states.",
+        description="Bypass the throttle block via update_states (bypass is the valid GRC "
+                    "state for mid-chain blocks; 'disabled' severs connections and invalidates the graph).",
         fixture_name="random_bit_generator.grc",
         release_profile="R1_SET_STATE",
         turns=(
             LiveTurnSpec(
-                prompt="Disable the blocks_throttle2_0 block.",
-                expected_tool_calls=_set_state("blocks_throttle2_0", "disabled"),
+                prompt="Bypass the blocks_throttle2_0 block.",
+                expected_tool_calls=_set_state("blocks_throttle2_0", "bypass"),
                 semantic_checks=(
                     {"kind": "mutation"},
                     {"kind": "block_state_equals",
-                     "instance_name": "blocks_throttle2_0", "state": "disabled"},
+                     "instance_name": "blocks_throttle2_0", "state": "bypass"},
                 ),
             ),
         ),
@@ -147,6 +148,7 @@ R1_CASES: list[LiveScenario] = [
                     {"kind": "mutation"},
                     {"kind": "variable_equals",
                      "name": "samp_rate", "value": "32000"},
+                    {"kind": "saved_block_absent", "path": "{after_path}", "instance_name": "unused_var"},
                 ),
             ),
         ),
@@ -155,24 +157,29 @@ R1_CASES: list[LiveScenario] = [
     LiveScenario(
         category="mutation",
         name="add_null_sink",
-        description="Add a null sink and connect it to the random source's unused output.",
+        description="Add a null sink and connect it to the random source's output. "
+                    "Source analog_random_source_x_0 outputs byte, so null_sink "
+                    "must be type=byte to satisfy dtype preflight constraints.",
         fixture_name="random_bit_generator.grc",
         release_profile="R2_DISCONNECT",
         turns=(
             LiveTurnSpec(
                 prompt=(
-                    "Add a blocks_null_sink block named 'null_sink' with type=float. "
+                    "Add a blocks_null_sink block named 'null_sink' with type=byte. "
                     "Connect it from analog_random_source_x_0 port 0. "
                     "Keep the existing connections intact."
                 ),
                 expected_tool_calls=(
                     ToolExpectation("change_graph"),
                 ),
+                max_tool_rounds=15,
                 semantic_checks=(
                     {"kind": "mutation"},
                     {"kind": "block_param_equals",
                      "instance_name": "null_sink", "param": "type",
-                     "value": "float"},
+                     "value": "byte"},
+                    {"kind": "connection_present",
+                     "connection_id": "analog_random_source_x_0:0->null_sink:0"},
                 ),
             ),
         ),

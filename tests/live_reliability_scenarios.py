@@ -165,13 +165,13 @@ def scenario_a_tool_confusion(provider: ToolAgentsLlamaProviderConfig) -> bool:
         print("\n  ~ PARTIAL: Model hit inspect_graph error, guided hint fired.")
         print("    The model saw the search_blocks recovery hint but may not have acted on it.")
         print("    This is better than the pre-fix loop — the model is not stuck.")
-        return True
+        return False
     elif used_inspect_without_search:
         print("\n  ✗ FAIL: Model only called inspect_graph with no recovery.")
         return False
     else:
         print("\n  ? UNKNOWN: Model took an unexpected path — check assistant text.")
-        return True
+        return False
 
 
 # ------------------------------------------------------------------ #
@@ -203,8 +203,8 @@ def scenario_b_state_blindness(provider: ToolAgentsLlamaProviderConfig) -> bool:
     was_added = "carrier_freq" in block_names_after_step1
     print(f"  carrier_freq added: {was_added}")
     if not was_added:
-        print("  ✗ Skipping: Step 1 did not add the block — can't test state blindness")
-        return True  # Step 1 failure is not what we're testing
+        print("  ✗ FAIL: Step 1 did not add the block — setup failed")
+        return False
 
     # Step 2: Ask it to add the SAME block again (state blindness scenario)
     print("\n  STEP 2: Ask to add carrier_freq again (state blindness)")
@@ -263,8 +263,8 @@ def scenario_b_state_blindness(provider: ToolAgentsLlamaProviderConfig) -> bool:
         return True
     else:
         # Check if graph is safe anyway
-        print("\n  ~ PARTIAL: Graph is safe (no duplicate committed), but error path unclear.")
-        return True
+        print("\n  ✗ FAIL: Graph is safe (no duplicate committed), but error path unclear.")
+        return False
 
 
 def main() -> None:

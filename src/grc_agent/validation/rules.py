@@ -9,10 +9,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from grc_agent.catalog.describe import _describe_block_with_root
+from grc_agent.catalog.loaders import _describe_block_with_root
 
-from .errors import ValidationIssue, make_issue
-from .messages import format_catalog_lookup_message
+from .errors import ValidationIssue, format_catalog_lookup_message, make_issue
 
 OperationType = Literal[
     "update_params",
@@ -1083,7 +1082,7 @@ class _SafeExpressionEvaluator(ast.NodeVisitor):
 
     def visit_Compare(self, node: ast.Compare) -> Any:
         left = self.visit(node.left)
-        for operator, comparator_node in zip(node.ops, node.comparators):
+        for operator, comparator_node in zip(node.ops, node.comparators, strict=False):
             right = self.visit(comparator_node)
             if isinstance(operator, ast.Eq):
                 matched = left == right
@@ -1134,5 +1133,4 @@ class _SafeExpressionEvaluator(ast.NodeVisitor):
     def visit_Tuple(self, node: ast.Tuple) -> Any:
         return tuple(self.visit(item) for item in node.elts)
 
-    def generic_visit(self, node: ast.AST) -> Any:
-        raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+

@@ -575,16 +575,16 @@ def test_validation_label_states(qtbot):
     # Simulate process stdout/stderr, then process finished
     window.on_validate_clicked() # clears validation buffers
     window.on_process_stdout("Validation passed output\n")
-    
+
     # We patch refresh_inspector to run synchronously for test inspection
     with patch.object(window, "refresh_inspector") as mock_refresh:
         window.on_process_finished(0)
         mock_refresh.assert_called_once()
-        
+
     assert mock_session.last_validation_ok is True
     assert mock_session.last_validation_returncode == 0
     assert mock_session.last_validation_stdout == "Validation passed output\n"
-    
+
     # Trigger refreshed callback directly to check label update
     window.on_inspector_refreshed({"validation_result": {"status": "valid"}})
     assert window.validation_label.text() == "🟢 Valid"
@@ -593,15 +593,15 @@ def test_validation_label_states(qtbot):
     # 4. Validation failure (exit code 1)
     window.on_validate_clicked()
     window.on_process_stderr("Validation error details\n")
-    
+
     with patch.object(window, "refresh_inspector") as mock_refresh:
         window.on_process_finished(1)
         mock_refresh.assert_called_once()
-        
+
     assert mock_session.last_validation_ok is False
     assert mock_session.last_validation_returncode == 1
     assert mock_session.last_validation_stderr == "Validation error details\n"
-    
+
     window.on_inspector_refreshed({"validation_result": {"status": "invalid"}})
     assert window.validation_label.text() == "🔴 Invalid"
     assert "color: #f38ba8;" in window.validation_label.styleSheet()

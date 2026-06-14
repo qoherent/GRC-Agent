@@ -91,11 +91,15 @@ def generate_notch_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    attempts = 0
+    while len(results) < count and attempts < 1000:
+        attempts += 1
         case_seed = rng.randint(0, 2**31 - 1)
         sr = rng.choice(NOTCH_SAMP_RATES)
         center = rng.choice(NOTCH_CENTERS)
         bw = rng.choice(NOTCH_BANDWIDTHS)
+        if center >= sr / 2:
+            continue
         low = center - bw // 2
         high = center + bw // 2
 
@@ -163,7 +167,7 @@ def generate_qam_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    for _i in range(count):
         case_seed = rng.randint(0, 2**31 - 1)
         order = rng.choice(MODULATION_ORDERS)
 
@@ -219,7 +223,7 @@ def generate_mac_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    for _i in range(count):
         case_seed = rng.randint(0, 2**31 - 1)
         rng.random()  # consume entropy for future fuzzing dimensions
 
@@ -279,7 +283,7 @@ def generate_inline_swap_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    for _i in range(count):
         case_seed = rng.randint(0, 2**31 - 1)
 
         prompt = (
@@ -329,7 +333,7 @@ def generate_cascade_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    for _i in range(count):
         case_seed = rng.randint(0, 2**31 - 1)
         sr = rng.choice(MID_TIER_SAMP_RATES)
         doubled = sr * 2
@@ -383,7 +387,7 @@ def generate_typo_scenarios(
     rng = random.Random(seed)
     results: list[FuzzedScenario] = []
 
-    for i in range(count):
+    for _i in range(count):
         case_seed = rng.randint(0, 2**31 - 1)
 
         prompt = "Add an AGC block to the flowgraph."
@@ -432,7 +436,7 @@ GENERATOR_REGISTRY: dict[str, callable] = {
 def generate_all(seed: int = 0) -> list[FuzzedScenario]:
     """Generate one round of scenarios from every generator."""
     results: list[FuzzedScenario] = []
-    for name, gen in GENERATOR_REGISTRY.items():
+    for _name, gen in GENERATOR_REGISTRY.items():
         results.extend(gen(seed=seed))
     return results
 
@@ -440,7 +444,7 @@ def generate_all(seed: int = 0) -> list[FuzzedScenario]:
 def generate_all_with_count(seed: int = 0, count: int = 5) -> list[FuzzedScenario]:
     """Generate scenarios from every generator with a specific count per type."""
     results: list[FuzzedScenario] = []
-    for name, gen in GENERATOR_REGISTRY.items():
+    for _name, gen in GENERATOR_REGISTRY.items():
         results.extend(gen(seed=seed, count=count))
     return results
 

@@ -1,8 +1,6 @@
 """Typed recovery policy for failed tool outcomes.
 
-This module classifies failures; it does not execute retries or synthesize graph
-repairs. The live harness and any future runtime executor should share these
-classes so recovery behavior stays measured and bounded.
+Relocated from src/grc_agent/recovery.py — only used by test harness.
 """
 
 from __future__ import annotations
@@ -37,7 +35,6 @@ def classify_tool_result_for_recovery(
     tool_name: str,
     result: dict[str, Any],
 ) -> RecoveryDecision:
-    """Classify one tool result for bounded recovery handling."""
     if result.get("ok") is True:
         return RecoveryDecision(
             recovery_class=NO_RECOVERY_NEEDED,

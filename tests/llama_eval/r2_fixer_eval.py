@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.prompt import build_system_prompt
+from grc_agent.runtime.model_context import build_system_prompt
 
 FIXTURE = Path(__file__).resolve().parent.parent / "data" / "r2_broken_fixer.grc"
 
@@ -43,8 +43,10 @@ def _make_provider():
 
 
 def _extract_trace(agent: GrcAgent, start_index: int) -> list[dict]:
+    from tests.llama_eval.harness import serialize_chat_history
+    serialized = serialize_chat_history(agent)
     trace = []
-    for turn in agent.history[start_index:]:
+    for turn in serialized[start_index:]:
         role = turn.get("role")
         if role == "assistant":
             for tc in turn.get("tool_calls", []):
@@ -108,7 +110,8 @@ def main() -> int:
         print(f"  validation: {session.validation_state().get('status', 'unknown')}")
 
         # Record history start
-        start_index = len(agent.history)
+        from tests.llama_eval.harness import serialize_chat_history
+        start_index = len(serialize_chat_history(agent))
         system_prompt = build_system_prompt()
         print(f"\n=== System Prompt ({len(system_prompt)} chars) ===")
         print(f"  {system_prompt[:200]}...")

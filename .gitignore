@@ -40,7 +40,7 @@ reports/
 .ruff_cache/
 *.saved.grc
 !setup.py
-!tests/data/retrieval/vector_eval_governed_metadata.json
+
 tmp/
 *.tmp.grc
 .venv

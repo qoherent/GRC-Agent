@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 
 from grc_agent.model_manager import discover_ollama_models
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,

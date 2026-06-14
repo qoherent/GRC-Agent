@@ -40,7 +40,6 @@ from .model_dialog import (
     ModelDialogSelection,
 )
 from .process_manager import ProcessManager
-from .recent_sessions_dialog import RecentSessionsDialog
 from .setup_panel import (
     PROVIDER_OLLAMA,
     PROVIDER_OPENROUTER,
@@ -207,7 +206,7 @@ class InspectorRunnable(QRunnable):
 
     def run(self) -> None:
         try:
-            from grc_agent.runtime.wrappers.inspect_graph import inspect_graph
+            from grc_agent.runtime.inspect_graph import inspect_graph
             overview_data = inspect_graph(self.agent, view="overview", targets=[], params=[])
             if self.agent.session and self.agent.session.flowgraph:
                 params_map = {}
@@ -239,7 +238,6 @@ class MainWindow(QMainWindow):
         self.provider_config = provider_config
         self.llama_config = llama_config
         self.worker = None
-        self._model_swap_runnable = None
         self._pending_swap_selection = None
         self.thread = None
         self.process_manager = None
@@ -302,7 +300,6 @@ class MainWindow(QMainWindow):
 
         # Model Menu (Phase 2 of the model-selector rollout)
         model_menu = menubar.addMenu("&Model")
-        self._model_menu = model_menu  # keep ref so we can update the "currently loaded" entry
 
         self.select_model_action = QAction("&Select Model...", self)
         self.select_model_action.setShortcut("Ctrl+M")
@@ -1105,7 +1102,7 @@ class MainWindow(QMainWindow):
         a ``QMessageBox`` on failure so the user gets a clear error
         rather than a tiny status-bar message.
         """
-        from grc_agent.session.load import load_grc
+        from grc_agent.session import load_grc
         try:
             loaded = load_grc(file_path)
         except Exception as exc:
@@ -1134,7 +1131,7 @@ class MainWindow(QMainWindow):
                 "No flowgraph is currently loaded. Open a `.grc` first.",
             )
             return
-        from grc_agent.runtime.wrappers.change_graph import _write_committed_changes
+        from grc_agent.runtime.change_graph import _write_committed_changes
         success = _write_committed_changes(self.agent.session)
         if success:
             self.status_bar.showMessage("Graph saved.")
@@ -1220,7 +1217,6 @@ class MainWindow(QMainWindow):
         runnable.signals.finished.connect(self._on_model_swap_finished)
         runnable.signals.error.connect(self._on_model_swap_error)
         runnable.signals.progress.connect(self._on_model_swap_progress)
-        self._model_swap_runnable = runnable
         QThreadPool.globalInstance().start(runnable)
 
     def _on_model_swap_progress(self, message: str) -> None:
@@ -1291,7 +1287,6 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     logger.warning("Failed to persist to grc_agent.toml: %s", exc)
 
-        self._model_swap_runnable = None
         self._pending_swap_selection = None
         self.provider_config = new_provider
         self._set_swap_in_progress(False)
@@ -1314,7 +1309,6 @@ class MainWindow(QMainWindow):
     def _on_model_swap_error(self, message: str) -> None:
         """Surface a swap failure and re-enable the controls."""
         self._set_swap_in_progress(False)
-        self._model_swap_runnable = None
         self._pending_swap_selection = None
         self.status_bar.showMessage(f"Model swap failed: {message}", 8000)
         self.chat_widget.append_message(
@@ -1357,54 +1351,6 @@ class MainWindow(QMainWindow):
         self.sidebar_widget.list_widget.clearSelection()
         self.status_bar.showMessage("Started a fresh chat session.", 5000)
 
-    def open_recent_sessions_dialog(self) -> None:
-        """Open the ``File > Recent Sessions...`` dialog.
-
-        Loads the most recent sessions from the local store,
-        shows a list with a markdown preview, and on double-click
-        clears the chat widget and replays the session's
-        messages. Per the agreed design, the chat history is
-        always overwritten when the user reopens a session; the
-        agent's in-memory history is also reset so the model
-        starts the next turn fresh.
-        """
-        from grc_agent.sessions_store import list_sessions_sync
-
-        try:
-            sessions = list_sessions_sync(
-                _default_sessions_db(),
-                limit=200,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to list recent sessions: %s", exc)
-            self.status_bar.showMessage(
-                f"Recent Sessions unavailable: {exc}", 5000
-            )
-            return
-
-        dialog = RecentSessionsDialog(
-            sessions=sessions,
-            message_preview_loader=self._load_session_preview,
-            parent=self,
-        )
-        dialog.session_opened.connect(self._open_past_session)
-        dialog.exec()
-
-    def _load_session_preview(self, session_id: int) -> list:
-        """Load a session's messages synchronously for the preview pane.
-
-        Uses the sync API so the dialog's preview is consistent
-        regardless of the writer thread's progress. Errors are
-        logged and surfaced as empty previews.
-        """
-        from grc_agent.sessions_store import list_messages_sync
-
-        try:
-            return list_messages_sync(_default_sessions_db(), session_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to load session preview: %s", exc)
-            return []
-
     def _open_past_session(self, session_id: int) -> None:
         """Clear the chat widget, autoload the associated .grc graph, and replay past messages.
 
@@ -1420,7 +1366,7 @@ class MainWindow(QMainWindow):
         the agent's ``ChatHistory`` so the next model step has the
         same inspect/search/change evidence the user originally saw.
         """
-        from grc_agent.session_roles import (
+        from grc_agent.session_ops import (
             DISPLAY_ROLES,
             chat_message_from_payload,
         )
@@ -1594,72 +1540,8 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Ready (last execution exit code: {exit_code})")
 
         session = self.agent.session
-        if session:
-            session.last_validation_ok = (exit_code == 0)
-            session.last_validation_returncode = exit_code
-            session.last_validation_stdout = getattr(self, "_validation_stdout", "")
-            session.last_validation_stderr = getattr(self, "_validation_stderr", "")
-            session.last_validation_revision = session.state_revision
 
         self.refresh_inspector()
-
-    def closeEvent(self, event: Any) -> None:
-        """Intercept application close to ensure background threads and run processes are reaped."""
-        is_running = False
-        if self.process_manager:
-            if (
-                self.process_manager.compile_process
-                and self.process_manager.compile_process.state()
-                == QProcess.ProcessState.Running
-            ):
-                is_running = True
-            if (
-                self.process_manager.run_process
-                and self.process_manager.run_process.state()
-                == QProcess.ProcessState.Running
-            ):
-                is_running = True
-
-        worker_running = self.thread is not None and self.thread.isRunning()
-
-        if (is_running or worker_running) and not self._safe_to_close:
-            if not self._pending_close:
-                event.ignore()
-                self._pending_close = True
-                self.on_process_status(
-                    "Shutting down running processes and thread workers..."
-                )
-                self.validate_btn.setEnabled(False)
-                self.chat_input.setEnabled(False)
-
-                if self.worker:
-                    self.worker.cancel()
-
-                if is_running:
-                    self.process_manager.stop()
-            else:
-                event.ignore()
-        else:
-            self._settings.setValue("window/geometry", self.saveGeometry())
-            self._settings.setValue("window/h_splitter", self.h_splitter.saveState())
-            self._settings.setValue("window/v_splitter", self.v_splitter.saveState())
-            # Drop the model-dialog reference so we never touch a
-            # destroyed C++ QDialog after the parent QMainWindow is
-            # gone.
-            self._model_dialog = None
-            # Close sessions store to flush pending database operations
-            if hasattr(self, "sessions_store") and self.sessions_store:
-                try:
-                    self.sessions_store.close()
-                except Exception:
-                    logger.debug("Failed to close sessions store on window exit", exc_info=True)
-            # Safe path: clean up temp directories and thread workers
-            if self.process_manager:
-                self.process_manager.cleanup_temp_dir()
-            if self.worker:
-                self.worker.cancel()
-            self.cleanup_thread()
-            event.accept()
 
     def on_deferred_close(self, *args: Any) -> None:
         """Wait until all running subprocesses and threads are stopped before closing window."""
@@ -1691,30 +1573,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # File drag-and-drop
     # ------------------------------------------------------------------
-    def dragEnterEvent(self, event: Any) -> None:
-        """Accept the drag if it contains at least one .grc file."""
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(".grc"):
-                    event.acceptProposedAction()
-                    return
-        event.ignore()
-
-    def dropEvent(self, event: Any) -> None:
-        """Open the first .grc file dropped onto the window."""
-        for url in event.mimeData().urls():
-            if url.isLocalFile() and url.toLocalFile().lower().endswith(".grc"):
-                self.open_file(Path(url.toLocalFile()))
-                event.acceptProposedAction()
-                return
-        event.ignore()
-
     # ------------------------------------------------------------------
     # File menu: Open Output Folder, Export Chat
     # ------------------------------------------------------------------
     def open_output_folder(self) -> None:
         """Open the directory where the package writes its state."""
-        from grc_agent.paths import collect_package_paths
+        from grc_agent.config import collect_package_paths
         paths = collect_package_paths()
         # Prefer the launcher-logs dir (most useful for triage), fall back
         # to the user-state dir.

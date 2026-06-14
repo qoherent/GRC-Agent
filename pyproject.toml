@@ -34,9 +34,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ToolAgents==0.3.0",
     "numpy<2 ; python_full_version < '3.13'",
-    "psutil>=5.9.0",
     "pyyaml>=6.0.3",
-    "qdrant-client[fastembed]>=1.14.2",
 ]
 
 [project.optional-dependencies]

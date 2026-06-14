@@ -6,7 +6,6 @@ These fixtures are auto-discovered by pytest but are also importable from
 
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
 from pathlib import Path

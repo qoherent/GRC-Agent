@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from grc_agent.runtime.tool_context import compact_chat_history
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
@@ -26,8 +27,6 @@ from ToolAgents.data_models.messages import (
     ToolCallContent,
     ToolCallResultContent,
 )
-
-from grc_agent.runtime.chat_history import compact_chat_history
 
 
 def _assistant_tool_call_message(text: str = "calling inspect") -> ChatMessage:
@@ -126,7 +125,7 @@ class CompactChatHistoryTests(unittest.TestCase):
     def test_truncation_sentinel_keeps_payload_under_budget(self) -> None:
         history = _make_history()
         compact_chat_history(history, budget_chars=300)
-        result = history.get_messages()[2].get_tool_call_results()[0]
+        history.get_messages()[2].get_tool_call_results()[0]
         # Total history must be under the budget after compaction.
         total = sum(len(m.get_as_text()) for m in history.get_messages())
         self.assertLessEqual(total, 300 + 200)  # small slack for the sentinel
@@ -145,7 +144,6 @@ class CompactChatHistoryTests(unittest.TestCase):
         one call.
         """
         from ToolAgents.data_models.messages import (
-            ChatMessage,
             ToolCallResultContent,
         )
 
@@ -264,7 +262,7 @@ class ResumeReplaysToolMessagesTests(unittest.TestCase):
     """
 
     def test_resume_replays_assistant_tool_calls_and_results(self) -> None:
-        from grc_agent.session_roles import (
+        from grc_agent.session_ops import (
             ASSISTANT_MODEL_ROLE,
             TOOL_MODEL_ROLE,
             chat_message_from_payload,
@@ -310,7 +308,7 @@ class ResumeReplaysToolMessagesTests(unittest.TestCase):
         self.assertEqual(len(tool_result.tool_call_result), 4000)
 
     def test_resume_skips_corrupt_payload(self) -> None:
-        from grc_agent.session_roles import chat_message_from_payload
+        from grc_agent.session_ops import chat_message_from_payload
 
         self.assertIsNone(chat_message_from_payload(None))
         self.assertIsNone(chat_message_from_payload({}))

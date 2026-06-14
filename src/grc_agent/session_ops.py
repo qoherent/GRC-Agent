@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections import defaultdict
 from typing import Any
 
-from .models import Block, Connection
+from ToolAgents.data_models.messages import ChatMessage
+
+from ._payload import Block, Connection
+
+logger = logging.getLogger(__name__)
 
 FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS: tuple[str, ...] = (
     "_parse_blocks",
@@ -19,6 +24,13 @@ FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS: tuple[str, ...] = (
     "_raw_connection_entry",
 )
 
+DISPLAY_ROLES: frozenset[str] = frozenset(
+    {"user", "assistant", "tool_started", "tool_finished", "mutation", "error"}
+)
+MODEL_ROLES: frozenset[str] = frozenset({"assistant_model", "tool_model"})
+
+ASSISTANT_MODEL_ROLE = "assistant_model"
+TOOL_MODEL_ROLE = "tool_model"
 
 ConnectionPort = int | str
 """Type alias for a port that is either an integer index (stream) or a string name (message)."""
@@ -270,11 +282,38 @@ def _value_references_identifier(value: Any, identifier: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Session-store model-side helpers (from session_roles.py)
+# ---------------------------------------------------------------------------
+
+
+def chat_message_payload(message: ChatMessage) -> dict[str, Any]:
+    """Serialize a ``ChatMessage`` for the ``payload`` column."""
+    return message.model_dump(mode="json")
+
+
+def chat_message_from_payload(payload: dict[str, Any] | None) -> ChatMessage | None:
+    """Deserialize a ``ChatMessage`` from a ``payload`` column value."""
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return ChatMessage.from_dict(payload)
+    except Exception as exc:
+        logger.warning("Failed to decode ChatMessage payload: %s", exc)
+        return None
+
+
 __all__ = [
+    "ASSISTANT_MODEL_ROLE",
     "ConnectionPort",
     "connection_id",
+    "DISPLAY_ROLES",
     "FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS",
+    "MODEL_ROLES",
+    "TOOL_MODEL_ROLE",
     "block_name_is_referenced_elsewhere",
+    "chat_message_from_payload",
+    "chat_message_payload",
     "connection_entry_to_tuple",
     "default_block_states",
     "parse_connection_id",

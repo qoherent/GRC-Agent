@@ -17,16 +17,21 @@ Runs against the 9B model. Reports pass/fail per scenario with key metrics.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-BLANK_GRC = PROJECT_ROOT / "playground" / "blank.grc"
+BLANK_GRC = Path("/tmp/test_workspace.grc")
+FIXTURE_BLANK = PROJECT_ROOT / "examples" / "blank.grc"
 TMP_OUT = Path("/tmp/wireless_matrix_out.json")
 TMP_LOG = Path("/tmp/wireless_matrix_log.txt")
 MODEL = "qwen3.5:9b-q4_K_M"
+for _idx, _arg in enumerate(sys.argv):
+    if _arg == "--model" and _idx + 1 < len(sys.argv):
+        MODEL = sys.argv[_idx + 1]
 
 _BLANK_TEMPLATE = """options:
   parameters:
@@ -71,7 +76,10 @@ metadata:
 
 
 def reset_blank():
-    BLANK_GRC.write_text(_BLANK_TEMPLATE)
+    if FIXTURE_BLANK.is_file():
+        shutil.copy2(FIXTURE_BLANK, BLANK_GRC)
+    else:
+        BLANK_GRC.write_text(_BLANK_TEMPLATE)
 
 
 def run_chat(message: str) -> dict:
@@ -83,8 +91,10 @@ def run_chat(message: str) -> dict:
         "--message", message,
         "--model", MODEL,
         "--json",
+        "--max-tool-rounds", "15",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    TMP_LOG.write_text(f"--- STDOUT ---\n{proc.stdout}\n\n--- STDERR ---\n{proc.stderr}")
     try:
         return json.loads(proc.stdout.strip() or "{}")
     except json.JSONDecodeError:
@@ -102,8 +112,13 @@ def score_result(result: dict, expected_blocks: int = 0) -> dict:
 
     # Check graph on disk
     content = BLANK_GRC.read_text()
-    blocks_count = content.count("\n- name:")
-    conns_count = content.count("\nconnections:")
+    try:
+        import yaml
+        graph_dict = yaml.safe_load(content) or {}
+    except Exception:
+        graph_dict = {}
+    blocks_count = len(graph_dict.get("blocks", []))
+    conns_count = len(graph_dict.get("connections", []))
 
     return {
         "committed": committed,
@@ -125,7 +140,7 @@ SCENARIOS = [
     ("02_throttle_add", "Add an analog signal source, a throttle block, and a null sink. Connect source -> throttle -> sink in series.", 3),
     ("03_param_update", "Add an analog signal source and a null sink, connected. Set the source frequency to 2400 Hz and amplitude to 0.5.", 2),
     ("04_notch_filter", "Add an analog signal source and a null sink connected. Insert a band-reject filter between the source and sink with a center frequency of 1000 Hz.", 3),
-    ("05_block_swap", "Add an analog signal source, a throttle block, and a null sink connected in series.", 3),
+    ("05_block_swap", "Add an analog signal source, a throttle block, and a null sink connected in series. Then replace the throttle block with a band-reject filter.", 3),
     ("06_double_samp_rate", "Add an analog signal source and a null sink connected. Set the source sample rate to 2e6 and frequency to 100e3.", 2),
     ("07_fft_chain", "Add a complex signal source with frequency 1000 Hz, stream to vector with 1024 items, forward FFT, complex to mag squared, and null sink all connected in series.", 5),
     ("08_variable_cascade", "Add a variable named samp_rate with value 1e6. Add an analog signal source using samp_rate as the sample rate parameter. Add a null sink. Connect source to sink.", 2),
@@ -135,7 +150,7 @@ SCENARIOS = [
 def main():
     print(f"Wireless Engineering Matrix — {len(SCENARIOS)} scenarios")
     print(f"Model: {MODEL}  |  Harness: Seamless + sanitized")
-    print(f"Commit: 2b85a52 (slop eradicated)")
+    print("Commit: 2b85a52 (slop eradicated)")
     print("=" * 70)
 
     results = []

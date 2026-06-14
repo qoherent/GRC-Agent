@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from grc_agent.runtime.tool_surface import (
+from grc_agent.runtime.model_context import (
     MODEL_TOOL_NAMES_ORDERED,
     MVP_MODEL_TOOL_NAMES,
     PUBLIC_TOOL_NAMES,

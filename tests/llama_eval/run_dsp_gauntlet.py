@@ -95,7 +95,7 @@ def build_gauntlet_cases(seed: int = 0, count: int = 50) -> list[LiveScenario]:
     cases: list[LiveScenario] = []
     # Distribute seeds round-robin across categories for diversity
     per_cat = max(1, count // max(len(GENERATOR_REGISTRY), 1))
-    for cat_name, generator in GENERATOR_REGISTRY.items():
+    for _cat_name, generator in GENERATOR_REGISTRY.items():
         cat_cases = generator(seed=seed, count=per_cat)
         cases.extend(fuzzed_to_live(fz) for fz in cat_cases)
     # Shuffle so seeds interleave rather than block-per-category

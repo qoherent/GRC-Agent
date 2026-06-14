@@ -38,8 +38,7 @@ class NoCheatsTests(unittest.TestCase):
         mutation_paths = [
             repo_root / "src" / "grc_agent" / "transaction",
             repo_root / "src" / "grc_agent" / "validation",
-            repo_root / "src" / "grc_agent" / "session" / "auto_insert.py",
-            repo_root / "src" / "grc_agent" / "session" / "insertion_suggestions.py",
+            repo_root / "src" / "grc_agent" / "session" / "insertion.py",
         ]
 
         offenders: list[str] = []
