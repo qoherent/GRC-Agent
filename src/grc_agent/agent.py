@@ -10,7 +10,6 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -34,29 +33,62 @@ from grc_agent.history import (
     operation_type_from_result,
     snapshot_session,
 )
-from grc_agent.runtime.tool_context import compact_chat_history
+from grc_agent.runtime.change_graph import (
+    connection_endpoint_candidates as connection_endpoint_candidates_wrapper,
+)
+from grc_agent.runtime.change_graph import (
+    dispatch_flat_change_graph_batch,
+    has_endpoint_value,
+    resolve_disconnect_connection_id,
+)
+from grc_agent.runtime.change_graph import (
+    loaded_block_by_name as loaded_block_by_name_wrapper,
+)
+from grc_agent.runtime.change_graph import (
+    loaded_block_has_port as loaded_block_has_port_wrapper,
+)
+from grc_agent.runtime.change_graph import (
+    resolve_old_rewire_connection_id as resolve_old_rewire_connection_id_wrapper,
+)
+from grc_agent.runtime.change_graph import (
+    resolve_rewire_new_endpoint_args as resolve_rewire_new_endpoint_args_wrapper,
+)
+from grc_agent.runtime.change_graph import (
+    rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
+)
+from grc_agent.runtime.change_graph import (
+    rewire_new_endpoint_candidates as rewire_new_endpoint_candidates_wrapper,
+)
+from grc_agent.runtime.change_graph import (
+    rewire_new_endpoint_is_exact as rewire_new_endpoint_is_exact_wrapper,
+)
 from grc_agent.runtime.clarification import (
     connection_clarification_payload as connection_clarification_payload_wrapper,
+)
+from grc_agent.runtime.clarification import (
     duplicate_block_clarification_payload as duplicate_block_clarification_payload_wrapper,
+)
+from grc_agent.runtime.clarification import (
     normalize_pending_clarification,
     resolve_pending_clarification_state,
+)
+from grc_agent.runtime.clarification import (
     rewire_clarification_payload as rewire_clarification_payload_wrapper,
+)
+from grc_agent.runtime.clarification import (
     rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
 )
 from grc_agent.runtime.doc_answer import (
+    DocsAnswerSnippet,
     _DocsComparisonSides,
     _DocsEvidenceCandidate,
-    ask_grc_docs as ask_grc_docs_wrapper,
     build_catalog_assisted_candidate,
-    build_docs_source_quality as build_docs_source_quality_wrapper,
     build_fallback_answer,
-    build_typed_docs_answer as build_typed_docs_answer_wrapper,
     catalog_block_purpose_sentence,
     classify_docs_answer_type,
     clean_catalog_summary_for_answer,
     clean_docs_excerpt,
     clip_docs_snippets_for_helper,
-    collect_docs_candidates as collect_docs_candidates_wrapper,
     docs_low_value_reasons,
     docs_primary_terms,
     docs_topic_terms,
@@ -70,53 +102,56 @@ from grc_agent.runtime.doc_answer import (
     is_tutorial_or_howto_query,
     minimum_required_term_hits,
     pick_typed_sentence,
-    rank_docs_candidates as rank_docs_candidates_wrapper,
     required_terms_for_answer_type,
-    run_docs_answer_advisor as run_docs_answer_advisor_wrapper,
     select_docs_candidates_for_answer_type,
     sentence_list,
     should_catalog_assist,
     text_matches_term_or_synonym,
 )
-from grc_agent.runtime.doc_answer import DocsAnswerSnippet
-from grc_agent.runtime.model_context import (
-    render_model_messages,
+from grc_agent.runtime.doc_answer import (
+    ask_grc_docs as ask_grc_docs_wrapper,
 )
-from grc_agent.runtime.tool_context import is_meaningful, unsafe_graph_root_for_path
-from grc_agent.runtime.model_context import (
-    MODEL_TOOL_NAMES_ORDERED,
-    MVP_MODEL_TOOL_NAMES,
-    MVP_TOOL_SURFACE,
-    build_system_prompt,
+from grc_agent.runtime.doc_answer import (
+    build_docs_source_quality as build_docs_source_quality_wrapper,
 )
-from grc_agent.runtime.tool_schemas import build_tool_schemas
-from grc_agent.runtime.transaction_normalization import TransactionNormalizer
-from grc_agent.runtime.change_graph import (
-    connection_endpoint_candidates as connection_endpoint_candidates_wrapper,
-    dispatch_flat_change_graph_batch,
-    has_endpoint_value,
-    loaded_block_by_name as loaded_block_by_name_wrapper,
-    loaded_block_has_port as loaded_block_has_port_wrapper,
-    resolve_disconnect_connection_id,
-    resolve_old_rewire_connection_id as resolve_old_rewire_connection_id_wrapper,
-    resolve_rewire_new_endpoint_args as resolve_rewire_new_endpoint_args_wrapper,
-    rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
-    rewire_new_endpoint_candidates as rewire_new_endpoint_candidates_wrapper,
-    rewire_new_endpoint_is_exact as rewire_new_endpoint_is_exact_wrapper,
+from grc_agent.runtime.doc_answer import (
+    build_typed_docs_answer as build_typed_docs_answer_wrapper,
+)
+from grc_agent.runtime.doc_answer import (
+    collect_docs_candidates as collect_docs_candidates_wrapper,
+)
+from grc_agent.runtime.doc_answer import (
+    rank_docs_candidates as rank_docs_candidates_wrapper,
+)
+from grc_agent.runtime.doc_answer import (
+    run_docs_answer_advisor as run_docs_answer_advisor_wrapper,
 )
 from grc_agent.runtime.inspect_graph import (
     get_grc_context_internal as get_grc_context_internal_wrapper,
 )
 from grc_agent.runtime.inspect_graph import inspect_graph as inspect_graph_wrapper
+from grc_agent.runtime.model_context import (
+    MODEL_TOOL_NAMES_ORDERED,
+    MVP_MODEL_TOOL_NAMES,
+    MVP_TOOL_SURFACE,
+    build_system_prompt,
+    render_model_messages,
+)
 from grc_agent.runtime.search_blocks import (
     search_blocks as search_blocks_wrapper,
 )
+from grc_agent.runtime.tool_context import (
+    compact_chat_history,
+    is_meaningful,
+    unsafe_graph_root_for_path,
+)
+from grc_agent.runtime.tool_schemas import build_tool_schemas
+from grc_agent.runtime.transaction_normalization import TransactionNormalizer
 from grc_agent.runtime_tool_validation import (
     build_tool_schema_map,
     validate_runtime_tool_call,
 )
-from grc_agent.session import get_grc_context, load_grc, summarize_graph
-from grc_agent.session import suggest_insertions
+from grc_agent.session import get_grc_context, load_grc, suggest_insertions, summarize_graph
 from grc_agent.transaction import apply_edit, propose_edit
 
 logger = logging.getLogger(__name__)
@@ -183,8 +218,15 @@ def _compact_save_file_integrity(file_integrity: dict[str, Any]) -> dict[str, An
 
 
 
-@lru_cache(maxsize=4)
 def _catalog_version_token(catalog_root: str | None) -> str:
+    """Compute a freshness token for the search cache key.
+
+    The expensive catalog parse (``build_catalog_snapshot``) is already
+    ``lru_cache``d in ``catalog.loaders``. This function only does cheap
+    ``stat()`` calls over the cached file list to detect on-disk changes,
+    so it is NOT cached here — caching it would freeze the mtime and
+    defeat the invalidation it exists to provide.
+    """
     snapshot = build_catalog_snapshot(catalog_root)
     newest_mtime = 0
     for path in [*snapshot.files.block, *snapshot.files.tree, *snapshot.files.domain]:
@@ -229,6 +271,13 @@ class GrcAgent:
         "propose_edit",
         "insert_block_on_connection",
         "auto_insert_block",
+    )
+    _UNSUPPORTED_OPERATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("undo", ("undo",)),
+        ("redo", ("redo",)),
+        ("Python export", ("export", "python")),
+        ("standalone Python export", ("standalone", "python")),
+        ("code generation", ("generate", "code")),
     )
 
     def __init__(
@@ -671,13 +720,12 @@ class GrcAgent:
         *,
         model_tool_call: bool = False,
     ) -> ToolResult | None:
-        """Validate one runtime tool call against the declared public schema."""
-        surface_gate = self._surface_tool_gate_result(
-            tool_name=tool_name,
-            model_tool_call=model_tool_call,
-        )
-        if surface_gate is not None:
-            return surface_gate
+        """Validate one runtime tool call against the declared public schema.
+
+        Callers (``execute_tool`` and ``ToolAgentsToolDelegate.invoke``)
+        normalize kwargs and run the surface gate before calling this,
+        so neither is repeated here.
+        """
         if (
             model_tool_call
             and tool_name in MVP_MODEL_TOOL_NAMES
@@ -690,11 +738,8 @@ class GrcAgent:
                 message="Debug telemetry is not available through the model-facing tool surface.",
                 error_type=ErrorCode.INVALID_REQUEST,
             )
-        kwargs = self.normalize_tool_call_arguments(
-            tool_name,
-            kwargs,
-            model_tool_call=model_tool_call,
-        )
+        if not isinstance(kwargs, dict):
+            kwargs = {}
         validation_kwargs = {
             k: v for k, v in kwargs.items()
             if k != "view"
@@ -849,8 +894,26 @@ class GrcAgent:
         self._pending_clarification = None
         self._pending_clarification_revision = None
 
+    @staticmethod
+    def _guard_result(assistant_text: str) -> dict[str, Any]:
+        """Structured result for a guard-level refusal (no tool execution)."""
+        return {
+            "ok": True,
+            "model": "guard",
+            "steps": 0,
+            "tool_rounds_used": 0,
+            "tool_calls_executed": 0,
+            "assistant_text": assistant_text,
+        }
+
     def check_unsupported_request(self, user_message: str) -> dict[str, Any] | None:
-        """Return a refusal response for unsupported runtime actions."""
+        """Return a factual refusal for unsupported runtime actions.
+
+        Messages state the fact of what is unsupported (AGENTS.md: error
+        strings return facts, never what to do about it). The available
+        tool surface — declared in the system prompt — is the sole guide
+        for what to call instead.
+        """
         lowered = user_message.lower()
         if self._active_tool_surface.name == "mvp":
             for tool_name in self._INTERNAL_TOOL_NAMES_BLOCKED_IN_MVP:
@@ -861,50 +924,17 @@ class GrcAgent:
                         rf"\b{re.escape(verb)}\b(?:\W+\w+){{0,4}}\W+{re.escape(tool_name)}\b",
                         lowered,
                     ):
-                        return {
-                            "ok": True,
-                            "model": "guard",
-                            "steps": 0,
-                            "tool_rounds_used": 0,
-                            "tool_calls_executed": 0,
-                            "assistant_text": (
-                                "That tool is not available through the model-facing surface."
-                            ),
-                        }
+                        return self._guard_result(
+                            f"{tool_name} is not part of the model-facing tool surface."
+                        )
         for keywords in self._RAW_YAML_EDIT_PATTERNS:
             if all(kw in lowered for kw in keywords):
-                return {
-                    "ok": True,
-                    "model": "guard",
-                    "steps": 0,
-                    "tool_rounds_used": 0,
-                    "tool_calls_executed": 0,
-                    "assistant_text": (
-                        "Raw .grc YAML editing is unsupported. "
-                        "Use the approved model-facing wrappers instead: change_graph for "
-                        "validated graph changes."
-                    ),
-                }
-        unsupported_operations: tuple[tuple[str, tuple[str, ...]], ...] = (
-            ("undo", ("undo",)),
-            ("redo", ("redo",)),
-            ("Python export", ("export", "python")),
-            ("standalone Python export", ("standalone", "python")),
-            ("code generation", ("generate", "code")),
-        )
-        for label, keywords in unsupported_operations:
+                return self._guard_result(
+                    "Raw .grc YAML editing is not supported through this surface."
+                )
+        for label, keywords in self._UNSUPPORTED_OPERATIONS:
             if all(kw in lowered for kw in keywords):
-                return {
-                    "ok": True,
-                    "model": "guard",
-                    "steps": 0,
-                    "tool_rounds_used": 0,
-                    "tool_calls_executed": 0,
-                    "assistant_text": (
-                        f"{label} is unsupported. I cannot perform that action "
-                        "through the current verified GRC tool contract."
-                    ),
-                }
+                return self._guard_result(f"{label} is not supported.")
         return None
 
     def validate_turn_route(
@@ -933,10 +963,6 @@ class GrcAgent:
             error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
             allowed_tools=sorted(effective_allowed),
         )
-
-    @staticmethod
-    def looks_like_transaction_payload(payload: Any) -> bool:
-        return TransactionNormalizer.looks_like_transaction_payload(payload)
 
     def health_check(self) -> dict[str, Any]:
         """Return a structured health payload describing agent readiness."""
@@ -2393,25 +2419,6 @@ class GrcAgent:
                     dirty=self.session.is_dirty,
                     validation=validation,
                 )
-
-        if (
-            not allow_invalid
-            and (
-            not self._last_validation_ok
-            or self._last_validated_state_revision != self.session.state_revision
-            )
-        ):
-            return self._tool_result(
-                tool_name="save_graph",
-                ok=False,
-                message=(
-                    "Refusing to save before successful validation. "
-                    "Fix the graph and validate again before saving."
-                ),
-                error_type=ErrorCode.SAVE_REFUSED,
-                requires_validation=True,
-                dirty=self.session.is_dirty,
-            )
 
         try:
             self.session.save(path, validate=not allow_invalid)

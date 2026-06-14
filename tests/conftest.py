@@ -26,18 +26,23 @@ def tmp_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def no_real_prefs_writes() -> Any:
-    """Fail if any test modifies the real ``preferences.json``."""
+    """Fail if any test modifies or creates the real ``preferences.json``."""
     real_path = Path.home() / ".config" / "grc_agent" / "preferences.json"
+    existed_before = real_path.exists()
     mtime_before: float | None = None
-    if real_path.exists():
+    if existed_before:
         mtime_before = real_path.stat().st_mtime
     yield
-    if mtime_before is not None and real_path.exists():
-        mtime_after = real_path.stat().st_mtime
-        if mtime_after != mtime_before:
+    if real_path.exists():
+        if not existed_before:
+            raise AssertionError(
+                f"Test created {real_path}. Redirect "
+                "XDG_CONFIG_HOME in your test setUp."
+            )
+        if real_path.stat().st_mtime != mtime_before:
             raise AssertionError(
                 f"Test modified {real_path} (mtime changed from "
-                f"{mtime_before} to {mtime_after}). Redirect "
+                f"{mtime_before} to {real_path.stat().st_mtime}). Redirect "
                 "XDG_CONFIG_HOME in your test setUp."
             )
 

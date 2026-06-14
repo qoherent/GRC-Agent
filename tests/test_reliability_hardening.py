@@ -22,8 +22,8 @@ from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime.model_context import MVP_MODEL_TOOL_NAMES
+from grc_agent.runtime.tool_schemas import build_tool_schemas
 
 
 class ReliabilityHardeningTests(unittest.TestCase):
@@ -124,13 +124,18 @@ class ReliabilityHardeningTests(unittest.TestCase):
             "State revision must not change after rejected duplicate block")
         # samp_rate value must be unchanged
         assert agent.session.flowgraph is not None
+        found_samp_rate = False
         for block in agent.session.flowgraph.blocks:
             if block.instance_name == "samp_rate":
+                found_samp_rate = True
                 params = block.params.get("parameters", {})
                 val = params.get("value")
                 self.assertNotEqual(str(val), "99999",
                     "samp_rate must not be overwritten by rejected duplicate add")
-                break
+        self.assertTrue(
+            found_samp_rate,
+            "fixture must contain a samp_rate block for this assertion to be meaningful",
+        )
 
     # ------------------------------------------------------------------ #
     # End-to-end: schema descriptions pass size budget                     #

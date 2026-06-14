@@ -16,14 +16,14 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.model_context import render_model_messages
-from grc_agent.runtime.model_context import build_system_prompt
 from grc_agent.runtime.change_graph import (
     _update_state_operation,
 )
+from grc_agent.runtime.model_context import build_system_prompt, render_model_messages
 from grc_agent.toolagents_runtime import (
     _tool_retry_reminder,
 )
@@ -414,6 +414,110 @@ class Fix2ReminderGenerationTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Fix #2 (loop-level): reminder is injected through _run_turn_events
+# ---------------------------------------------------------------------------
+
+
+class ReminderLoopInjectionTests(unittest.TestCase):
+    """Verify the END-TO-END reminder control flow in _run_turn_events.
+
+    The pure-function ``_tool_retry_reminder`` tests above pass hand-set
+    booleans. These tests drive the REAL loop with only ``chat_agent.step``
+    mocked and assert that a non-None reminder is wired into chat_history
+    as a ``<runtime_directive>`` user message, and that the model is
+    re-invoked (correction_retries_used increments).
+    """
+
+    def _build_runner(self) -> tuple[Any, Any]:
+        from unittest import mock
+
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+
+        chat_agent = mock.MagicMock()
+        chat_agent.get_default_settings.return_value = mock.MagicMock()
+        runner = ToolAgentsRunner.__new__(ToolAgentsRunner)
+        runner.provider_config = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:1", model="m"
+        )
+        runner.provider = mock.MagicMock()
+        runner.chat_agent = chat_agent
+        return runner, chat_agent
+
+    def test_mutation_request_injects_reminder_into_history(self) -> None:
+        """Same scenario but we hold the agent reference and assert the
+        ``<runtime_directive>`` wrapper actually lands in chat_history."""
+        runner, chat_agent = self._build_runner()
+        agent = GrcAgent()
+        chat_agent.step.side_effect = [
+            _assistant_message("Sure, done!"),
+            _assistant_message("I added the block now."),
+        ]
+
+        list(
+            runner._run_turn_events(
+                agent,
+                "Add a new low pass filter block to the graph.",
+                model=None,
+                wrapper_eval_telemetry=False,
+                max_tool_rounds=4,
+                on_tool_start=None,
+                on_tool_end=None,
+            )
+        )
+
+        directive_messages = [
+            m
+            for m in agent.chat_history.get_messages()
+            if m.role == ChatMessageRole.User
+            and "<runtime_directive>" in m.get_as_text()
+        ]
+        self.assertGreaterEqual(
+            len(directive_messages),
+            1,
+            "expected a <runtime_directive> user message in chat_history",
+        )
+
+    def test_reminder_not_re_injected_on_second_pass(self) -> None:
+        """A given reminder key fires at most once (retry_reminders_used
+        dedup). The second text-only answer must NOT trigger a second
+        injection — the loop terminates instead."""
+        runner, chat_agent = self._build_runner()
+        agent = GrcAgent()
+        chat_agent.step.side_effect = [
+            _assistant_message("Sure, done!"),
+            _assistant_message("Done again."),
+        ]
+
+        events = list(
+            runner._run_turn_events(
+                agent,
+                "Add a new low pass filter block to the graph.",
+                model=None,
+                wrapper_eval_telemetry=False,
+                max_tool_rounds=4,
+                on_tool_start=None,
+                on_tool_end=None,
+            )
+        )
+        final_events = [e for e in events if e.get("event") == "final"]
+        self.assertEqual(len(final_events), 1)
+        result = final_events[0]["result"]
+        # Exactly one retry — the second identical reminder is suppressed.
+        self.assertEqual(result.get("correction_retries_used"), 1, result)
+        # Only one <runtime_directive> message in history.
+        directive_count = sum(
+            1
+            for m in agent.chat_history.get_messages()
+            if m.role == ChatMessageRole.User
+            and "<runtime_directive>" in m.get_as_text()
+        )
+        self.assertEqual(directive_count, 1)
+
+
+# ---------------------------------------------------------------------------
 # Fix #1: No premature exit on commit — commit result is role:"tool"
 # ---------------------------------------------------------------------------
 
@@ -422,6 +526,22 @@ class Fix1CommitResultTests(unittest.TestCase):
     """Commit results flow as role:"tool" — no fake assistant synthesis."""
 
     def test_commit_result_appended_as_tool_role(self) -> None:
+        """Drive the REAL loop: after a committed change_graph, the
+        tool result must be recorded as role:Tool — no fabricated
+        assistant synthesis message is inserted between the tool call
+        and the tool result.
+
+        The previous version of this test only asserted ``ok``/``committed``
+        on the raw execute_tool result and never inspected chat_history,
+        so the Fix #1 invariant was unverified.
+        """
+        from unittest import mock
+
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         src = _fixture_path("random_bit_generator.grc")
@@ -431,20 +551,85 @@ class Fix1CommitResultTests(unittest.TestCase):
         session.load(dst)
         agent = GrcAgent(session)
 
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "update_params": [
+        change_call = _assistant_with_tool_calls(
+            [
+                (
+                    "c1",
+                    "change_graph",
                     {
-                        "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
-                    }
-                ],
-            },
-            model_tool_call=True,
+                        "update_params": [
+                            {
+                                "instance_name": "samp_rate",
+                                "params": {"value": "48000"},
+                            }
+                        ]
+                    },
+                )
+            ]
         )
+        final_text_msg = _assistant_message("I updated the sample rate to 48000.")
+
+        chat_agent = mock.MagicMock()
+        chat_agent.step.side_effect = [change_call, final_text_msg]
+        chat_agent.get_default_settings.return_value = mock.MagicMock()
+
+        runner = ToolAgentsRunner.__new__(ToolAgentsRunner)
+        runner.provider_config = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:1", model="m"
+        )
+        runner.provider = mock.MagicMock()
+        runner.chat_agent = chat_agent
+
+        events = list(
+            runner._run_turn_events(
+                agent,
+                "Set the sample rate to 48000.",
+                model=None,
+                wrapper_eval_telemetry=False,
+                max_tool_rounds=4,
+                on_tool_start=None,
+                on_tool_end=None,
+            )
+        )
+
+        final_events = [e for e in events if e.get("event") == "final"]
+        self.assertEqual(len(final_events), 1)
+        result = final_events[0]["result"]
         self.assertTrue(result.get("ok"), result)
-        self.assertTrue(result.get("committed"), result)
+        self.assertTrue(result.get("committed") or result.get("tool_calls_executed"), result)
+
+        # The commit result must flow as role:Tool, never as a fabricated
+        # assistant synthesis message. Inspect the recorded chat history.
+        messages = agent.chat_history.get_messages()
+        tool_messages = [
+            m for m in messages if m.role == ChatMessageRole.Tool
+        ]
+        # At least one Tool-role message exists (the change_graph result).
+        self.assertGreaterEqual(
+            len(tool_messages), 1, "change_graph result must be recorded as role:Tool"
+        )
+        # The change_graph committed — verify the tool result carries ok=True.
+        committed_tool_payload = None
+        for m in tool_messages:
+            for item in m.content:
+                if isinstance(item, ToolCallResultContent):
+                    payload = json.loads(item.tool_call_result)
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("tool") == "change_graph"
+                        and payload.get("committed") is True
+                    ):
+                        committed_tool_payload = payload
+        self.assertIsNotNone(
+            committed_tool_payload,
+            "expected a committed change_graph result recorded as role:Tool",
+        )
+        # The final assistant text is the model's real output, not a
+        # synthesis fabricated by the loop.
+        self.assertEqual(
+            result.get("assistant_text"),
+            "I updated the sample rate to 48000.",
+        )
 
     def test_dispatcher_backward_compat_accepts_flat_state_string(self) -> None:
         errors: list[str] = []
@@ -625,6 +810,29 @@ class Fix4UpdateStatesEnumTests(unittest.TestCase):
                 for e in result.get("validation_errors", [])
             ),
             str(result.get("validation_errors", "")),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cache invalidation: _catalog_version_token must reflect on-disk changes
+# ---------------------------------------------------------------------------
+
+
+class CatalogCacheInvalidationTests(unittest.TestCase):
+    """The search-blocks cache key embeds ``_catalog_version_token`` to
+    detect catalog file changes. If that function is ``lru_cache``d, the
+    mtime freezes and the cache never invalidates — search returns stale
+    results for the entire process lifetime.
+    """
+
+    def test_catalog_version_token_is_not_lru_cached(self) -> None:
+        from grc_agent.agent import _catalog_version_token
+
+        # lru_cache-decorated functions expose cache_info/cache_clear.
+        self.assertFalse(
+            hasattr(_catalog_version_token, "cache_info"),
+            "_catalog_version_token must not be lru_cached — freezing the mtime "
+            "defeats the cache invalidation it exists to provide.",
         )
 
 

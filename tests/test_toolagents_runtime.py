@@ -9,8 +9,8 @@ from typing import Any
 from unittest import mock
 
 from grc_agent.agent import GrcAgent
-from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
+from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.toolagents_runtime import (
     ToolAgentsHistoryAdapter,
     ToolAgentsRegistryBuilder,
@@ -434,6 +434,55 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
                 "allow_fallbacks": False
             }
         })
+
+
+class OpenRouterDelegatesToSDKTests(unittest.TestCase):
+    """The OpenRouter path must use the OpenAI SDK, not a hand-rolled
+    ``requests.post`` + Mock response shim.
+
+    The previous custom ``get_response`` override built a broken
+    ``MockChatCompletion`` that never exposed ``.choices[0].message``
+    (AttributeError on every call) and used an undeclared ``requests``
+    dependency whose exceptions bypassed graceful degradation. This test
+    guards against its reintroduction.
+    """
+
+    def test_get_response_is_not_overridden(self) -> None:
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI
+        from ToolAgents.provider.chat_api_provider.open_ai import OpenAIChatAPI
+
+        # The subclass must delegate get_response to the parent SDK path.
+        self.assertIs(
+            GrcOpenAIChatAPI.get_response,
+            OpenAIChatAPI.get_response,
+        )
+
+    def test_no_requests_dependency_or_mock_classes(self) -> None:
+        import inspect
+
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI
+
+        source = inspect.getsource(GrcOpenAIChatAPI)
+        self.assertNotIn("requests.post", source)
+        self.assertNotIn("MockChatCompletion", source)
+        self.assertNotIn("MockToolCall", source)
+        self.assertNotIn("MockFunction", source)
+        self.assertNotIn("_is_openrouter", source)
+
+    def test_openrouter_provider_uses_sdk_client(self) -> None:
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI
+        from openai import OpenAI
+
+        provider = GrcOpenAIChatAPI(
+            api_key="sk-test",
+            model="m",
+            base_url="https://openrouter.ai/api/v1",
+            timeout_seconds=30.0,
+        )
+        # The client is a real OpenAI SDK instance bound to the
+        # OpenRouter base_url — the SDK forwards extra_body natively.
+        self.assertIsInstance(provider.client, OpenAI)
+        self.assertEqual(str(provider.client.base_url), "https://openrouter.ai/api/v1/")
 
 
 class ToolAgentsRunnerBackendUnreachableTests(unittest.TestCase):

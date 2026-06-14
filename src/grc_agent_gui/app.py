@@ -340,13 +340,9 @@ def main() -> None:
 
     agent = GrcAgent(session=session)
 
-    # The provider picker + Ollama setup flow is now embedded in the
-    # main window itself (setup_mode=True).  No pre-launch modal
-    # dialogs.  The user sees the picker inside the main view on
-    # every launch, picks their provider, and on Confirm the window
-    # swaps to the chat / inspector work area.  If the daemon is
-    # down, the existing Phase 2 ``backend_unreachable`` degraded
-    # path handles it inside the chat view.
+    # The inline model toolbar (ModelToolbar) replaces the old setup wizard
+    # and Model > Select Model dialog. It lives permanently at the top of
+    # the chat pane. No pre-launch modal dialogs.
 
     print("Checking model server...", flush=True)
     result = bootstrap_runtime(config, init_retrieval=True)

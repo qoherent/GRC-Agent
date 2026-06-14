@@ -22,8 +22,8 @@ class RawYamlAndSavePathTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["model"], "guard")
         self.assertEqual(result["tool_calls_executed"], 0)
-        self.assertIn("Raw .grc YAML editing is unsupported", result["assistant_text"])
-        self.assertIn("change_graph", result["assistant_text"])
+        self.assertIn("YAML editing is not supported", result["assistant_text"])
+        # Guard messages state facts only (AGENTS.md) — no internal tool names leaked.
         self.assertNotIn("apply_edit", result["assistant_text"])
         self.assertNotIn("propose_edit", result["assistant_text"])
 

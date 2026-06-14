@@ -8,10 +8,11 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import httpx as _httpx
 from openai import APIConnectionError, OpenAI
 from ToolAgents import FunctionTool, ToolRegistry
 from ToolAgents.agents import ChatToolAgent
@@ -128,8 +129,6 @@ class ToolAgentsRuntimeError(RuntimeError):
 # transport errors that surface from a missing local Ollama/OpenRouter
 # endpoint. Kept as a tuple so the runner can ``except (_BACKEND_...)``
 # once and stay flat against the SDK version.
-import httpx as _httpx
-
 _BACKEND_CONNECTION_ERRORS = (
     APIConnectionError,
     _httpx.ConnectError,
@@ -190,7 +189,14 @@ def _assistant_text_message(text: str) -> ChatMessage:
 
 
 class GrcOpenAIChatAPI(OpenAIChatAPI):
-    """OpenAI-compatible provider."""
+    """OpenAI-compatible provider.
+
+    Delegates ``get_response``/``get_streaming_response`` to the parent,
+    which calls ``self.client.chat.completions.create(**request_kwargs)``.
+    The OpenAI SDK natively supports OpenAI-compatible backends (Ollama,
+    OpenRouter) via ``base_url`` and forwards ``extra_body`` (used by
+    OpenRouter routing controls set in ``create_settings``).
+    """
 
     def __init__(
         self,
@@ -203,90 +209,11 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
         super().__init__(api_key=api_key, model=model, base_url=base_url)
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
-        self._is_openrouter = "openrouter" in (base_url or "").lower()
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout_seconds,
         )
-
-    def get_response(
-        self,
-        messages: list[ChatMessage],
-        settings=None,
-        tools: list[FunctionTool] | None = None,
-    ) -> ChatMessage:
-        if self._is_openrouter:
-            request_kwargs = self._prepare_request(messages, settings, tools)
-            request_kwargs["stream"] = False
-
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-
-            json_payload = {}
-            for k, v in request_kwargs.items():
-                if k == "extra_body" and isinstance(v, dict):
-                    json_payload.update(v)
-                else:
-                    json_payload[k] = v
-
-            import requests
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=json_payload,
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            # Mock classes to mimic OpenAI's API responses for ToolAgents' response converter
-            class MockFunction:
-                def __init__(self, name: str, arguments: str) -> None:
-                    self.name = name
-                    self.arguments = arguments
-
-            class MockToolCall:
-                def __init__(self, tc_id: str, function: MockFunction) -> None:
-                    self.id = tc_id
-                    self.function = function
-
-            class MockChatCompletion:
-                def __init__(self, response_data: dict[str, Any]) -> None:
-                    self.raw_data = response_data
-                    message_data = response_data["choices"][0]["message"]
-
-                    tcs = []
-                    if "tool_calls" in message_data and message_data["tool_calls"]:
-                        for tc in message_data["tool_calls"]:
-                            tcs.append(
-                                MockToolCall(
-                                    tc_id=tc["id"],
-                                    function=MockFunction(
-                                        name=tc["function"]["name"],
-                                        arguments=tc["function"]["arguments"],
-                                    ),
-                                )
-                            )
-                def model_dump(self) -> dict[str, Any]:
-                    return self.raw_data
-
-            mock_completion = MockChatCompletion(data)
-            return self.response_converter.from_provider_response(mock_completion)
-        else:
-            return super().get_response(messages, settings=settings, tools=tools)
-
-    def get_streaming_response(
-        self,
-        messages: list[ChatMessage],
-        settings=None,
-        tools: list[FunctionTool] | None = None,
-    ):
-        if self._is_openrouter:
-            raise NotImplementedError("Streaming is not supported for openrouter backend.")
-        return super().get_streaming_response(messages, settings=settings, tools=tools)
 
 
 @dataclass
@@ -602,6 +529,25 @@ class ToolAgentsRunner:
         on_tool_end: Callable[[str, Any], None] | None,
     ) -> Iterator[dict[str, Any]]:
         resolved_model = model or self.provider_config.model
+        if not isinstance(resolved_model, str) or not resolved_model.strip():
+            no_model_text = "No model selected. Use Model > Select Model to pick a model before sending messages."
+            agent.chat_history.add_assistant_message(no_model_text)
+            yield {"event": "chunk", "text": no_model_text}
+            yield {
+                "event": "final",
+                "result": {
+                    "ok": False,
+                    "error_type": ErrorCode.MODEL_NOT_FOUND,
+                    "model": "",
+                    "steps": 0,
+                    "tool_rounds_used": 0,
+                    "tool_calls_requested": 0,
+                    "tool_calls_executed": 0,
+                    "assistant_text": no_model_text,
+                    "message": no_model_text,
+                },
+            }
+            return
         if max_tool_rounds is None:
             max_tool_rounds = MVP_TOOL_SURFACE.default_max_tool_rounds
         if hasattr(agent, 'config') and hasattr(agent.config, 'llama') and agent.config.llama.max_tool_rounds:

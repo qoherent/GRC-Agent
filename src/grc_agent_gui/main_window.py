@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
-    QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -35,19 +34,8 @@ from PySide6.QtWidgets import (
 
 from .chat_widget import ChatWidget
 from .inspector import InspectorWidget
-from .model_dialog import (
-    ModelDialog,
-    ModelDialogSelection,
-)
+from .model_toolbar import ModelToolbar
 from .process_manager import ProcessManager
-from .setup_panel import (
-    PROVIDER_OLLAMA,
-    PROVIDER_OPENROUTER,
-    OllamaSetupSelection,
-    OllamaSetupWidget,
-    OllamaStartHintWidget,
-    ProviderPickerWidget,
-)
 from .sidebar_widget import SidebarWidget
 from .workers import AgentWorker
 
@@ -298,19 +286,6 @@ class MainWindow(QMainWindow):
         self.recent_sessions_action.triggered.connect(self.toggle_sidebar)
         file_menu.addAction(self.recent_sessions_action)
 
-        # Model Menu (Phase 2 of the model-selector rollout)
-        model_menu = menubar.addMenu("&Model")
-
-        self.select_model_action = QAction("&Select Model...", self)
-        self.select_model_action.setShortcut("Ctrl+M")
-        self.select_model_action.triggered.connect(self.open_model_dialog)
-        model_menu.addAction(self.select_model_action)
-
-        model_menu.addSeparator()
-        self.current_model_action = QAction("Currently loaded: (unknown)", self)
-        self.current_model_action.setEnabled(False)
-        model_menu.addAction(self.current_model_action)
-
         # Help Menu
         help_menu = menubar.addMenu("&Help")
         about_action = QAction("&About GRC Agent", self)
@@ -338,8 +313,7 @@ class MainWindow(QMainWindow):
         # Instantiate primary vertical splitter
         v_splitter = QSplitter(Qt.Vertical, central_widget)
         self.v_splitter = v_splitter
-        # NOTE: v_splitter is added to the main_stack below so the
-        # setup panel can take over the central area on launch.
+        # NOTE: v_splitter is added to main_layout below the model toolbar.
 
         # Instantiate horizontal splitter for upper sidepanels
         splitter = QSplitter(Qt.Horizontal, v_splitter)
@@ -400,67 +374,22 @@ class MainWindow(QMainWindow):
         v_splitter.addWidget(console_panel)
         v_splitter.setSizes([450, 150])
 
-        # --- Setup flow: shown in the central area on every launch ---
-        # Three pages, controlled by signals:
-        #   0 = ProviderPickerWidget (Ollama / OpenRouter)
-        #   1 = OllamaSetupWidget (status + model dropdown + cancel/confirm/next)
-        #   2 = OllamaStartHintWidget (start-the-server copy boxes, only
-        #       shown when the probe shows the server is unreachable)
-        self.setup_stack = QStackedWidget(central_widget)
-        self.provider_picker = ProviderPickerWidget(self.setup_stack)
-        ollama_url = (
-            str(getattr(self.llama_config, "server_url", "http://localhost:11434"))
-            if self.llama_config is not None
-            else "http://localhost:11434"
+        # --- Inline model toolbar (replaces the setup wizard + Model dialog) ---
+        current_backend = getattr(self.llama_config, "backend", "ollama") if self.llama_config else "ollama"
+        current_model = getattr(self.llama_config, "model", "") if self.llama_config else ""
+        if self.provider_config is not None:
+            pm = getattr(self.provider_config, "model", "")
+            if pm:
+                current_model = str(pm)
+        self.model_toolbar = ModelToolbar(
+            backend=current_backend,
+            model=current_model,
         )
-        ollama_current_model = (
-            str(getattr(self.llama_config, "model", ""))
-            if self.llama_config is not None
-            else ""
-        )
-        self.ollama_setup_widget = OllamaSetupWidget(
-            server_url=ollama_url,
-            current_model=ollama_current_model,
-            parent=self.setup_stack,
-        )
-        self.ollama_start_hint_widget = OllamaStartHintWidget(
-            server_url=ollama_url,
-            current_model=ollama_current_model,
-            parent=self.setup_stack,
-        )
-        self.setup_stack.addWidget(self.provider_picker)            # index 0
-        self.setup_stack.addWidget(self.ollama_setup_widget)        # index 1
-        self.setup_stack.addWidget(self.ollama_start_hint_widget)    # index 2
+        self.model_toolbar.connect_requested.connect(self._on_toolbar_connect)
+        self.model_toolbar.refresh_requested.connect(self._on_toolbar_refresh)
 
-        # Top-level stack: setup flow vs. main work area.
-        #   0 = setup flow (provider picker / ollama setup)
-        #   1 = v_splitter (sidebar, chat, inspector, console)
-        self.main_stack = QStackedWidget(central_widget)
-        self.main_stack.addWidget(self.setup_stack)   # index 0
-        self.main_stack.addWidget(self.v_splitter)    # index 1
-        main_layout.addWidget(self.main_stack)
-
-        # Wire the setup flow signals.
-        self.provider_picker.provider_chosen.connect(self._on_setup_provider_chosen)
-        self.provider_picker.cancelled.connect(self._on_setup_provider_cancelled)
-        self.ollama_setup_widget.confirmed.connect(self._on_setup_ollama_confirmed)
-        self.ollama_setup_widget.cancelled.connect(self._on_setup_ollama_cancelled)
-        self.ollama_setup_widget.next_requested.connect(
-            self._on_setup_ollama_next_requested
-        )
-        self.ollama_start_hint_widget.confirmed.connect(
-            self._on_setup_ollama_confirmed
-        )
-        self.ollama_start_hint_widget.cancelled.connect(
-            self._on_setup_ollama_cancelled
-        )
-
-        # Show the setup flow on launch, or skip straight to the
-        # main work area when the caller (e.g. a test) asks for it.
-        if setup_mode:
-            self.main_stack.setCurrentIndex(0)
-        else:
-            self.main_stack.setCurrentIndex(1)
+        main_layout.addWidget(self.model_toolbar)
+        main_layout.addWidget(v_splitter)
 
         # Aliases for backwards compatibility and automated testing
         self.chat_input = self.chat_widget.chat_input
@@ -510,6 +439,10 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self.validation_label)
         self.update_ui_state()
 
+        # Probe Ollama after the event loop starts (non-blocking).
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._probe_and_populate_models)
+
     def _resolve_model_status(self) -> str:
         """Build a single-line summary of the loaded model for the status bar."""
         cfg = getattr(self, "llama_config", None)
@@ -550,13 +483,10 @@ class MainWindow(QMainWindow):
         self.validate_btn.setEnabled(has_graph and backend_ok)
         self.save_action.setEnabled(has_graph)
         self.export_chat_action.setEnabled(has_graph)
-        # Refresh the "Currently loaded" entry so the menu reflects the
-        # resolved model alias and disk size.
-        self._update_current_model_menu()
 
         if not backend_ok:
             self.chat_input.setPlaceholderText(
-                "Backend unreachable — use Model > Select Model to recover."
+                "Backend unreachable — use the toolbar to retry or select a different model."
             )
             self.validation_label.setText("Backend Down")
             self.validation_label.setStyleSheet("color: #f38ba8;")
@@ -565,36 +495,22 @@ class MainWindow(QMainWindow):
             self.chat_input.setPlaceholderText("Ask the assistant to modify or summarize the flowgraph...")
             self.validation_label.setStyleSheet("color: #a6e3a1;")
         else:
-            self.chat_input.setPlaceholderText("Please load a .grc flowgraph (File -> Open or Drag & Drop) to start chatting...")
+            self.chat_input.setPlaceholderText("Please load a .grc flowgraph (File -> Open) to start chatting...")
             self.validation_label.setText("No Graph")
             self.validation_label.setStyleSheet("color: #a6adc8;")
 
-    def _update_current_model_menu(self) -> None:
-        """Refresh the Model menu's 'Currently loaded' entry."""
-        if not hasattr(self, "current_model_action"):
-            return
-        alias = self._display_model_alias()
-        backend = getattr(self.llama_config, "backend", "ollama")
-        if alias:
-            self.current_model_action.setText(f"Currently loaded: {alias} ({backend})")
-        else:
-            self.current_model_action.setText(f"Currently loaded: (none) ({backend})")
-
     def _on_backend_unreachable(self, result: dict[str, Any]) -> None:
-        """Worker callback: backend is unreachable, switch to degraded mode.
-
-        The user can still navigate the GUI and reach the Model menu to
-        swap to a different backend. The chat input is locked because
-        every further attempt would fail with the same connection error.
-        """
+        """Worker callback: backend is unreachable, switch to degraded mode."""
         self.backend_reachable = False
         self._backend_unreachable_hint = str(
             result.get("assistant_text") or "Backend unreachable."
         )
         self.status_bar.showMessage(
             f"Backend unreachable at {self._server_url_display()} — chat disabled, "
-            f"use Model > Select Model to recover."
+            f"use the toolbar to retry or select a different model."
         )
+        if hasattr(self, "model_toolbar"):
+            self.model_toolbar.set_status(connected=False)
         self.update_ui_state()
 
     def _on_backend_recovered(self) -> None:
@@ -626,95 +542,66 @@ class MainWindow(QMainWindow):
         self.chat_widget.append_error(f"{marker} {hint}")
 
     # ------------------------------------------------------------------
-    # Setup flow (provider picker -> Ollama setup -> main view)
+    # Model toolbar handlers (replace the setup wizard + Model dialog)
     # ------------------------------------------------------------------
-    def _on_setup_provider_chosen(self, backend: str) -> None:
-        """User picked a provider in the picker. Show the next step."""
-        if backend == PROVIDER_OLLAMA:
-            # Probe the server before routing so we can skip the setup
-            # widget when the daemon is clearly down. The user lands
-            # straight on the start-hint page in that case and never
-            # has to click through a useless dropdown.
-            self._route_ollama_setup_or_hint()
-        elif backend == PROVIDER_OPENROUTER:
-            # OpenRouter: nothing more to ask, jump straight to main.
-            import dataclasses
-            if self.llama_config is not None:
-                self.llama_config = dataclasses.replace(
-                    self.llama_config, backend=PROVIDER_OPENROUTER
-                )
-            self._finish_setup_and_swap_to_main()
+    def _on_toolbar_connect(self, backend: str, model_name: str) -> None:
+        """User picked a provider/model in the toolbar — run the swap."""
+        if not model_name or model_name == "(select model)":
+            return
+        if self.thread is not None and self.thread.isRunning():
+            self.status_bar.showMessage("Cannot swap model while a chat turn is running.")
+            return
+        if getattr(self, "llama_config", None) is None:
+            self.status_bar.showMessage("Cannot swap model: no llama_config on this session.")
+            return
+
+        self._set_swap_in_progress(True)
+        self.status_bar.showMessage(f"Connecting to {backend} ({model_name})...")
+
+        from .model_dialog import ModelDialogSelection
+        self._pending_swap_selection = ModelDialogSelection(
+            backend=backend,
+            ollama_model_name=model_name,
+        )
+
+        runnable = ModelSwapRunnable(
+            llama_config=self.llama_config,
+            backend=backend,
+            ollama_model_name=model_name,
+        )
+        runnable.signals.finished.connect(self._on_model_swap_finished)
+        runnable.signals.error.connect(self._on_model_swap_error)
+        runnable.signals.progress.connect(self._on_model_swap_progress)
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_toolbar_refresh(self) -> None:
+        """User clicked refresh — re-probe and repopulate the model list."""
+        self._probe_and_populate_models()
+
+    def _probe_and_populate_models(self) -> None:
+        """Probe Ollama and populate the toolbar's model dropdown."""
+        from grc_agent.model_manager import discover_ollama_models
+
+        backend = self.model_toolbar.current_backend()
+        if backend != "ollama":
+            return
+
+        server_url = getattr(self.llama_config, "server_url", "http://localhost:11434")
+        try:
+            models = discover_ollama_models(server_url)
+        except Exception as exc:
+            logger.warning("Model discovery failed: %s", exc)
+            models = []
+
+        current = self.model_toolbar.current_model()
+        self.model_toolbar.set_models(models, current=current or (models[0] if models else ""))
+        if models:
+            self.model_toolbar.set_status(connected=True)
+            self.backend_reachable = True
         else:
-            logger.warning("Unknown backend from provider picker: %r", backend)
-
-    def _on_setup_provider_cancelled(self) -> None:
-        """User clicked Quit on the provider picker; close the app."""
-        logger.info("Provider picker cancelled; closing main window")
-        self.close()
-
-    def _on_setup_ollama_confirmed(self, selection: OllamaSetupSelection) -> None:
-        """User picked a model in the Ollama setup; swap to main view."""
-        import dataclasses
-        if self.llama_config is not None:
-            self.llama_config = dataclasses.replace(
-                self.llama_config,
-                backend=PROVIDER_OLLAMA,
-                server_url=selection.server_url,
-                model=selection.model_name,
-            )
-        if self.provider_config is not None:
-            self.provider_config.model = selection.model_name
-            self.provider_config.base_url = selection.server_url
-        logger.info(
-            "Ollama setup confirmed: server=%s model=%s",
-            selection.server_url, selection.model_name,
-        )
-        self._finish_setup_and_swap_to_main()
-
-    def _on_setup_ollama_cancelled(self) -> None:
-        """User clicked Back on either Ollama page; return to picker."""
-        self.setup_stack.setCurrentIndex(0)
-
-    def _on_setup_ollama_next_requested(self) -> None:
-        """User clicked **Start the server** on the setup page; advance to the start-hint page."""
-        self.setup_stack.setCurrentIndex(2)
-
-    def _route_ollama_setup_or_hint(self) -> None:
-        """Run the probe once and route to the right Ollama setup page.
-
-        The probe is shared between the CLI and the GUI (see
-        :func:`grc_agent.model_manager.probe_ollama_backend`). If the
-        server is reachable we land on the regular setup page so the
-        user can pick a model; if not we skip straight to the
-        start-hint page so the user has the exact commands to run.
-        """
-        from grc_agent.model_manager import probe_ollama_backend
-
-        ollama_url = str(
-            getattr(self.ollama_setup_widget, "_server_url", "http://localhost:11434")
-        )
-        ollama_model = str(
-            getattr(self.ollama_setup_widget, "_current_model", "")
-        )
-        status = probe_ollama_backend(ollama_url, ollama_model)
-        if status.server_reachable:
-            self.setup_stack.setCurrentIndex(1)
-        else:
-            self.ollama_start_hint_widget.update_status(status)
-            self.setup_stack.setCurrentIndex(2)
-
-    def _finish_setup_and_swap_to_main(self) -> None:
-        """Swap the central area from setup flow to the main work area."""
-        # Reset reachability to "unknown"; if the backend is down the
-        # first chat turn will surface ``backend_unreachable`` via
-        # the Phase 2 handler which then flips ``backend_reachable``
-        # to ``False`` and disables the chat input.
-        self.backend_reachable = None
-        self._backend_unreachable_hint = None
-        self._update_model_status_label()
+            self.model_toolbar.set_status(connected=False)
+            self.backend_reachable = False
         self.update_ui_state()
-        self.main_stack.setCurrentIndex(1)
-        self.status_bar.showMessage("Connected.", 5000)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.chat_input and event.type() == QEvent.Type.KeyPress:
@@ -853,7 +740,7 @@ class MainWindow(QMainWindow):
                 or prompt.startswith("\\client")
             ):
                 self.chat_widget.append_message("user", prompt)
-                self.open_model_dialog()
+                self._on_toolbar_refresh()
                 return
             self.chat_widget.append_message("user", prompt)
 
@@ -906,9 +793,8 @@ class MainWindow(QMainWindow):
     def on_worker_started(self) -> None:
         """Lock input interface to prevent race conditions during generation."""
         self.chat_input.setEnabled(False)
-        if hasattr(self, "select_model_action"):
-            # Block model switches mid-turn per the agreed design.
-            self.select_model_action.setEnabled(False)
+        if hasattr(self, "model_toolbar"):
+            self.model_toolbar.setEnabled(False)
         self.status_bar.showMessage("Agent is thinking...")
         self.chat_widget.start_stream()
 
@@ -976,8 +862,8 @@ class MainWindow(QMainWindow):
     def on_turn_finished(self, result: dict[str, Any]) -> None:
         """Unlock the interface and clear status fields."""
         self.chat_input.setEnabled(True)
-        if hasattr(self, "select_model_action"):
-            self.select_model_action.setEnabled(True)
+        if hasattr(self, "model_toolbar"):
+            self.model_toolbar.setEnabled(True)
         assistant_text = result.get("assistant_text", "")
         tool_calls_executed = int(result.get("tool_calls_executed", 0))
         if not assistant_text.strip() and tool_calls_executed > 0:
@@ -1145,80 +1031,6 @@ class MainWindow(QMainWindow):
     def on_inspector_error(self, err_msg: str) -> None:
         logger.error(f"Failed to refresh inspector asynchronously: {err_msg}")
 
-    def open_model_dialog(self) -> None:
-        """Open the non-modal model-selector dialog."""
-
-        # Reuse an open dialog rather than spawning duplicates.
-        if (
-            hasattr(self, "_model_dialog")
-            and self._model_dialog is not None
-            and self._model_dialog.isVisible()
-        ):
-            self._model_dialog.raise_()
-            self._model_dialog.activateWindow()
-            return
-
-        current_backend = getattr(self.llama_config, "backend", "ollama")
-        current_ollama_model = ""
-        ollama_server_url = "http://localhost:11434"
-        if self.llama_config is not None:
-            if current_backend == "ollama":
-                current_ollama_model = getattr(self.llama_config, "model", "")
-                ollama_server_url = getattr(self.llama_config, "server_url", "http://localhost:11434")
-
-        dialog = ModelDialog(
-            current_backend=current_backend,
-            current_ollama_model=current_ollama_model,
-            ollama_server_url=ollama_server_url,
-            parent=self,
-        )
-        self._model_dialog = dialog
-        dialog.model_accepted.connect(self._on_model_dialog_accepted)
-        dialog.finished.connect(self._on_model_dialog_finished)
-        dialog.show()
-
-    def _on_model_dialog_accepted(self, selection: ModelDialogSelection) -> None:
-        """Handle a confirmed model selection from the dialog.
-
-        Starts a background :class:`ModelSwapRunnable` and disables the
-        chat input + Validate button while the swap is running.
-        """
-        assert isinstance(selection, ModelDialogSelection)
-
-        if self.thread is not None and self.thread.isRunning():
-            self.status_bar.showMessage(
-                "Cannot swap model while a chat turn is running."
-            )
-            return
-
-        if getattr(self, "llama_config", None) is None:
-            self.status_bar.showMessage(
-                "Cannot swap model: no llama_config on this session."
-            )
-            return
-
-        self._set_swap_in_progress(True)
-        if selection.backend == "ollama":
-            self.status_bar.showMessage(
-                f"Swapping backend to Ollama (model: {selection.ollama_model_name})..."
-            )
-        elif selection.backend == "openrouter":
-            self.status_bar.showMessage(
-                "Swapping backend to OpenRouter..."
-            )
-
-        self._pending_swap_selection = selection
-
-        runnable = ModelSwapRunnable(
-            llama_config=self.llama_config,
-            backend=selection.backend,
-            ollama_model_name=selection.ollama_model_name,
-        )
-        runnable.signals.finished.connect(self._on_model_swap_finished)
-        runnable.signals.error.connect(self._on_model_swap_error)
-        runnable.signals.progress.connect(self._on_model_swap_progress)
-        QThreadPool.globalInstance().start(runnable)
-
     def _on_model_swap_progress(self, message: str) -> None:
         """Update the status bar with progress from the swap worker."""
         self.status_bar.showMessage(message)
@@ -1291,7 +1103,20 @@ class MainWindow(QMainWindow):
         self.provider_config = new_provider
         self._set_swap_in_progress(False)
         self._update_model_status_label()
-        self._update_current_model_menu()
+        # Sync the toolbar with the new model.
+        if hasattr(self, "model_toolbar"):
+            backend = getattr(self.llama_config, "backend", "ollama")
+            self.model_toolbar.set_backend(backend)
+            self.model_toolbar.set_current_model(model_name)
+            self.model_toolbar.set_status(connected=True)
+        # Persist to preferences.json so the selection survives restarts.
+        try:
+            from grc_agent.config import update_last_model, update_provider_chosen
+            backend_str = getattr(self.llama_config, "backend", "ollama")
+            update_last_model(model_name)
+            update_provider_chosen(backend_str)
+        except Exception as exc:
+            logger.warning("Failed to persist model selection to preferences: %s", exc)
         # Recovery path: a successful swap means the (possibly
         # different) backend is reachable. Drop the degraded mode and
         # re-enable the chat input.
@@ -1315,9 +1140,8 @@ class MainWindow(QMainWindow):
             "assistant",
             f"[model selector] Model swap failed: {message}",
         )
-        # Refresh the menu so the "Currently loaded" entry stays in
-        # sync with reality.
-        self._update_current_model_menu()
+        if hasattr(self, "model_toolbar"):
+            self.model_toolbar.set_status(connected=False)
 
     def refresh_sidebar_sessions(self) -> None:
         """Fetch all sessions from the database and populate the sidebar list."""
@@ -1465,13 +1289,7 @@ class MainWindow(QMainWindow):
         )
 
     def _set_swap_in_progress(self, busy: bool) -> None:
-        """Lock or unlock the chat input / Validate button around a swap.
-
-        Mirrors the existing lock pattern used by
-        :meth:`on_process_started` and :meth:`on_worker_started`. The
-        ``select_model_action`` is left disabled for the duration of
-        the swap so the user cannot fire a second swap concurrently.
-        """
+        """Lock or unlock the chat input / Validate button around a swap."""
         if not hasattr(self, "chat_input"):
             return
         self.chat_input.setEnabled(not busy and (
@@ -1483,22 +1301,8 @@ class MainWindow(QMainWindow):
                 self.agent.session is not None
                 and self.agent.session.flowgraph is not None
             ))
-        if hasattr(self, "select_model_action"):
-            self.select_model_action.setEnabled(not busy)
-
-    def _on_model_dialog_finished(self, _result: int) -> None:
-        """Drop the dialog reference when it closes so a future menu
-        click re-opens it cleanly."""
-        if hasattr(self, "_model_dialog"):
-            self._model_dialog = None
-
-    def _display_model_alias(self) -> str:
-        """Return the user-facing model name for the status bar / menu."""
-        cfg = getattr(self, "llama_config", None)
-        if cfg is None:
-            return ""
-        model = (getattr(cfg, "model", None) or "").strip()
-        return model
+        if hasattr(self, "model_toolbar"):
+            self.model_toolbar.setEnabled(not busy)
 
     def on_validate_clicked(self) -> None:
         """Handler for 'Validate' button click."""

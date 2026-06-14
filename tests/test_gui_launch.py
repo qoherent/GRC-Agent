@@ -134,12 +134,12 @@ class GuiLaunchOnProbeFailureTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
-    def test_model_menu_remains_accessible_for_recovery(self) -> None:
-        """The user must be able to reach Model > Select Model to recover."""
+    def test_model_toolbar_remains_accessible_for_recovery(self) -> None:
+        """The user must be able to reach the inline model selector to recover."""
         window = self._build_window()
         try:
-            self.assertTrue(window.select_model_action.isEnabled())
-            self.assertTrue(window.select_model_action.menu() is not None or True)
+            self.assertTrue(hasattr(window, "model_toolbar"))
+            self.assertTrue(window.model_toolbar.isEnabled())
         finally:
             window.close()
             window.deleteLater()

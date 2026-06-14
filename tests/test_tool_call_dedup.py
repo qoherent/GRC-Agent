@@ -85,108 +85,87 @@ class CanonicalizeArgsTests(unittest.TestCase):
         self.assertGreater(len(result), 0)
 
 
-class ToolCallDedupTests(unittest.TestCase):
-    """Drive ``_run_turn_events`` with a stubbed chat_agent to verify
-    that an identical tool call short-circuits on its second
-    appearance in the same turn."""
+class DedupInvalidationOnMutationTests(unittest.TestCase):
+    """The dedup cache (``seen_tool_calls``) MUST clear after any tool
+    execution that bumps ``state_revision`` (i.e. a committed mutation).
 
-    def _build_runner(
-        self,
-        step_responses: list[ChatMessage],
-        delegate_result: dict[str, Any],
-    ) -> tuple[ToolAgentsRunner, GrcAgent, mock.MagicMock]:
-        agent = GrcAgent()
-        agent.get_tool_schemas_for_turn = mock.MagicMock(return_value=[])  # type: ignore[assignment]
+    AGENTS.md names this the most critical correctness invariant:
+    "Otherwise the next ``inspect_graph`` returns stale topology."
 
+    This test drives the REAL loop with a REAL loaded flowgraph and the
+    REAL ``change_graph``/``inspect_graph`` wrappers. Only ``chat_agent.step``
+    is mocked. If the cache failed to clear, the second identical
+    ``inspect_graph`` after a commit would be wrongly dedup'd.
+    """
+
+    def _fixture_path(self, name: str = "random_bit_generator.grc") -> str:
+        import pathlib
+        return str(pathlib.Path(__file__).resolve().parent / "data" / name)
+
+    def _load_agent(self) -> GrcAgent:
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        from grc_agent.flowgraph_session import FlowgraphSession
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dst = Path(tmp.name) / "test.grc"
+        shutil.copy2(self._fixture_path(), dst)
+        session = FlowgraphSession()
+        session.load(dst)
+        return GrcAgent(session)
+
+    def _build_runner(self, agent: GrcAgent, step_responses: list[ChatMessage]) -> ToolAgentsRunner:
         chat_agent = mock.MagicMock()
         chat_agent.step.side_effect = step_responses
         chat_agent.get_default_settings.return_value = mock.MagicMock()
 
-        provider_config = ToolAgentsLlamaProviderConfig(
+        runner = ToolAgentsRunner.__new__(ToolAgentsRunner)
+        runner.provider_config = ToolAgentsLlamaProviderConfig(
             base_url="http://127.0.0.1:1", model="m"
         )
-        provider = mock.MagicMock()
-        provider.get_response.return_value = step_responses[0]
-
-        runner = ToolAgentsRunner.__new__(ToolAgentsRunner)
-        runner.provider_config = provider_config
-        runner.provider = provider
+        runner.provider = mock.MagicMock()
         runner.chat_agent = chat_agent
+        return runner
 
-        # Stub the registry builder so the loop sees one delegate.
-        registry_builder = mock.MagicMock()
-        delegate = mock.MagicMock()
-        delegate.invoke.return_value = mock.MagicMock(
-            result=delegate_result, executed=True
-        )
-        registry_builder.delegates = {"query_knowledge": delegate}
-        registry_builder.build.return_value = mock.MagicMock()
-        # Patch the symbol the loop imports.
-        import grc_agent.toolagents_runtime as rt
-        original = rt.ToolAgentsRegistryBuilder
-        rt.ToolAgentsRegistryBuilder = mock.MagicMock(return_value=registry_builder)
-        self.addCleanup(lambda: setattr(rt, "ToolAgentsRegistryBuilder", original))
-        return runner, agent, delegate
-
-    def test_identical_call_short_circuits_on_second_appearance(self) -> None:
-        # Two turns: first model step has a tool call, second model
-        # step has the same tool call again, then a final text answer.
-        args = {"domain": "catalog", "query": "analog_noise_source_x"}
-        call = _make_assistant_with_tool_call("query_knowledge", args, "c1")
-        final = _make_assistant_text("Here is what I found.")
-        delegate_result = {
-            "ok": True,
-            "results": [{"block_id": "analog_noise_source_x"}],
+    def test_inspect_after_commit_is_not_deduped(self) -> None:
+        agent = self._load_agent()
+        inspect_args = {"view": "overview"}
+        change_args = {
+            "update_params": [
+                {"instance_name": "samp_rate", "params": {"value": "48000"}}
+            ]
         }
-        runner, agent, delegate = self._build_runner(
-            [call, call, final], delegate_result
-        )
+        steps = [
+            _make_assistant_with_tool_call("inspect_graph", inspect_args, "c1"),
+            _make_assistant_with_tool_call("change_graph", change_args, "c2"),
+            _make_assistant_with_tool_call("inspect_graph", inspect_args, "c3"),
+            _make_assistant_text("Done."),
+        ]
+        runner = self._build_runner(agent, steps)
         events = list(
             runner._run_turn_events(
                 agent,
-                "hi",
+                "Inspect the graph, change the sample rate, then inspect again.",
                 model=None,
                 wrapper_eval_telemetry=False,
-                max_tool_rounds=4,
+                max_tool_rounds=8,
                 on_tool_start=None,
                 on_tool_end=None,
             )
         )
-        # The delegate's ``invoke`` should have been called exactly
-        # once across the two identical tool calls.
-        self.assertEqual(delegate.invoke.call_count, 1)
-        # The final event carries the assistant text.
         final_events = [e for e in events if e.get("event") == "final"]
         self.assertEqual(len(final_events), 1)
-        self.assertEqual(
-            final_events[0]["result"].get("assistant_text"),
-            "Here is what I found.",
-        )
-
-    def test_different_args_do_not_short_circuit(self) -> None:
-        call1 = _make_assistant_with_tool_call(
-            "query_knowledge", {"domain": "catalog", "query": "foo"}, "c1"
-        )
-        call2 = _make_assistant_with_tool_call(
-            "query_knowledge", {"domain": "catalog", "query": "bar"}, "c2"
-        )
-        final = _make_assistant_text("done")
-        delegate_result = {"ok": True, "results": []}
-        runner, agent, delegate = self._build_runner(
-            [call1, call2, final], delegate_result
-        )
-        list(
-            runner._run_turn_events(
-                agent,
-                "hi",
-                model=None,
-                wrapper_eval_telemetry=False,
-                max_tool_rounds=4,
-                on_tool_start=None,
-                on_tool_end=None,
-            )
-        )
-        self.assertEqual(delegate.invoke.call_count, 2)
+        result = final_events[0]["result"]
+        # The change_graph committed, bumping state_revision and clearing
+        # the dedup cache. The second inspect_graph therefore re-executes
+        # rather than being wrongly dedup'd. tool_calls_executed == 3
+        # (inspect + change_graph + inspect). If the cache were NOT cleared,
+        # this would be 2 (the second inspect dedup'd -> stale topology).
+        self.assertEqual(result.get("tool_calls_executed"), 3, result)
+        self.assertEqual(result.get("tool_calls_requested"), 3, result)
 
 
 class EndToEndRetryStormTests(unittest.TestCase):
