@@ -48,7 +48,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -133,7 +133,6 @@ class _PendingMessage:
 
     id: str
     session_id: int
-    sequence: int
     role: str
     text: str
     payload: str | None  # pre-serialized JSON; matches the column name
@@ -351,8 +350,6 @@ class SessionStore:
         self._db_path = (db_path or default_sessions_db_path()).expanduser()
         self._q: queue.Queue[_PendingMessage] = queue.Queue(maxsize=_QUEUE_MAX)
         self._closed_sessions: queue.Queue[int] = queue.Queue()
-        self._session_seq: dict[int, int] = {}
-        self._session_seq_lock = threading.Lock()
         # ``_drained`` is cleared on every enqueue and set by the
         # writer when it has nothing to do. ``flush()`` blocks on
         # it.
@@ -367,15 +364,6 @@ class SessionStore:
         # connection is touched by a thread other than the one
         # that created it.
         self._writer_conn = _open_db(self._db_path)
-        # Pre-populate the per-session sequence counter from the DB
-        # so reopened sessions continue with the next sequence.
-        # This read happens before the writer thread starts, so
-        # using ``self._writer_conn`` here is safe.
-        for sid, max_seq in self._writer_conn.execute(
-            "SELECT session_id, COALESCE(MAX(sequence), -1) "
-            "FROM messages GROUP BY session_id"
-        ):
-            self._session_seq[int(sid)] = int(max_seq) + 1
         # The writer's run() loop body.
         self._stop = threading.Event()
         self._writer = threading.Thread(
@@ -425,8 +413,6 @@ class SessionStore:
                 ),
             )
             session_id = int(cur.lastrowid)
-        with self._session_seq_lock:
-            self._session_seq[session_id] = 0
         return session_id
 
     def append(
@@ -443,13 +429,9 @@ class SessionStore:
         specific message even before the writer commits it.
         """
         msg_id = str(uuid.uuid4())
-        with self._session_seq_lock:
-            seq = self._session_seq.get(session_id, 0)
-            self._session_seq[session_id] = seq + 1
         rec = _PendingMessage(
             id=msg_id,
             session_id=session_id,
-            sequence=seq,
             role=role,
             text=text,
             payload=json.dumps(payload) if payload is not None else None,
@@ -662,13 +644,27 @@ class SessionStore:
                 try:
                     self._writer_conn.execute("BEGIN")
                     if batch:
-                        self._writer_conn.executemany(
-                            "INSERT INTO messages "
-                            "(id, session_id, sequence, role, text, payload, created_at) "
-                            "VALUES (:id, :session_id, :sequence, :role, "
-                            ":text, :payload, :created_at)",
-                            [asdict(r) for r in batch],
-                        )
+                        for r in batch:
+                            row = self._writer_conn.execute(
+                                "SELECT COALESCE(MAX(sequence), -1) + 1 "
+                                "FROM messages WHERE session_id = ?",
+                                (r.session_id,),
+                            ).fetchone()
+                            next_seq = int(row[0])
+                            self._writer_conn.execute(
+                                "INSERT INTO messages "
+                                "(id, session_id, sequence, role, text, payload, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    r.id,
+                                    r.session_id,
+                                    next_seq,
+                                    r.role,
+                                    r.text,
+                                    r.payload,
+                                    r.created_at,
+                                ),
+                            )
                     if closed:
                         for sid in closed:
                             self._writer_conn.execute(

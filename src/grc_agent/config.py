@@ -73,21 +73,10 @@ class LlamaConfig:
 class DocsAnswerConfig:
     """Configurable defaults for ask_grc_docs grounded-answer behavior."""
 
-    enabled: bool
-    helper_mode: str
-    helper_max_output_tokens: int
-    helper_timeout_seconds: float
-    helper_max_snippet_chars: int
-    helper_max_total_context_chars: int
     max_sources: int
     answer_target_chars: int
     excerpt_target_chars: int
-    probe_timeout_seconds: float
-    retry_interval_on_failure_seconds: float
-    retry_interval_on_success_seconds: float
-    fallback_enabled: bool
     answer_cache_size: int
-    helper_prompt_version: str
 
 
 @dataclass(frozen=True)
@@ -129,21 +118,10 @@ class GuardrailsConfig:
 
 
 DEFAULT_DOCS_ANSWER_CONFIG = DocsAnswerConfig(
-    enabled=True,
-    helper_mode="never",
-    helper_max_output_tokens=320,
-    helper_timeout_seconds=3.5,
-    helper_max_snippet_chars=320,
-    helper_max_total_context_chars=900,
     max_sources=2,
     answer_target_chars=300,
     excerpt_target_chars=220,
-    probe_timeout_seconds=0.5,
-    retry_interval_on_failure_seconds=3.0,
-    retry_interval_on_success_seconds=1.5,
-    fallback_enabled=True,
     answer_cache_size=64,
-    helper_prompt_version="v3_compact",
 )
 
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
@@ -455,21 +433,10 @@ def _docs_answer_config(
     defaults: DocsAnswerConfig,
 ) -> DocsAnswerConfig:
     return DocsAnswerConfig(
-        enabled=_optional_bool(table, "enabled", default=defaults.enabled, context="[agent.docs_answer]"),
-        helper_mode=_optional_non_empty_string(table, "helper_mode", default=defaults.helper_mode, context="[agent.docs_answer]"),
-        helper_max_output_tokens=_optional_positive_int(table, "helper_max_output_tokens", default=defaults.helper_max_output_tokens, context="[agent.docs_answer]"),
-        helper_timeout_seconds=_optional_positive_float(table, "helper_timeout_seconds", default=defaults.helper_timeout_seconds, context="[agent.docs_answer]"),
-        helper_max_snippet_chars=_optional_positive_int(table, "helper_max_snippet_chars", default=defaults.helper_max_snippet_chars, context="[agent.docs_answer]"),
-        helper_max_total_context_chars=_optional_positive_int(table, "helper_max_total_context_chars", default=defaults.helper_max_total_context_chars, context="[agent.docs_answer]"),
         max_sources=_optional_positive_int(table, "max_sources", default=defaults.max_sources, context="[agent.docs_answer]"),
         answer_target_chars=_optional_positive_int(table, "answer_target_chars", default=defaults.answer_target_chars, context="[agent.docs_answer]"),
         excerpt_target_chars=_optional_positive_int(table, "excerpt_target_chars", default=defaults.excerpt_target_chars, context="[agent.docs_answer]"),
-        probe_timeout_seconds=_optional_positive_float(table, "probe_timeout_seconds", default=defaults.probe_timeout_seconds, context="[agent.docs_answer]"),
-        retry_interval_on_failure_seconds=_optional_positive_float(table, "retry_interval_on_failure_seconds", default=defaults.retry_interval_on_failure_seconds, context="[agent.docs_answer]"),
-        retry_interval_on_success_seconds=_optional_positive_float(table, "retry_interval_on_success_seconds", default=defaults.retry_interval_on_success_seconds, context="[agent.docs_answer]"),
-        fallback_enabled=_optional_bool(table, "fallback_enabled", default=defaults.fallback_enabled, context="[agent.docs_answer]"),
         answer_cache_size=_optional_positive_int(table, "answer_cache_size", default=defaults.answer_cache_size, context="[agent.docs_answer]"),
-        helper_prompt_version=_optional_non_empty_string(table, "helper_prompt_version", default=defaults.helper_prompt_version, context="[agent.docs_answer]"),
     )
 
 
@@ -533,10 +500,6 @@ def _validate_cross_field_constraints(config: AppConfig) -> None:
     if docs_answer.max_sources > retrieval.ask_grc_docs_max_k:
         raise ConfigError(
             "[agent.docs_answer].max_sources must be <= [agent.retrieval].ask_grc_docs_max_k."
-        )
-    if docs_answer.helper_max_snippet_chars > docs_answer.helper_max_total_context_chars:
-        raise ConfigError(
-            "[agent.docs_answer].helper_max_snippet_chars must be <= helper_max_total_context_chars."
         )
     if guardrails.max_compact_list_items < 1:
         raise ConfigError(

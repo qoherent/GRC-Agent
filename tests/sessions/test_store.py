@@ -326,7 +326,7 @@ class AsyncWriterTests(_StoreTestCase):
         small_q: queue.Queue = queue.Queue(maxsize=1)
         # Pre-fill the small queue so the next put_nowait raises
         # queue.Full.
-        small_q.put_nowait(_make_pending(sid, 0, "user", "first"))
+        small_q.put_nowait(_make_pending(sid, "user", "first"))
         self.store._q = small_q
         try:
             with self.assertLogs(
@@ -375,14 +375,13 @@ class AsyncWriterTests(_StoreTestCase):
         self.assertEqual(sorted(m.sequence for m in b_msgs), list(range(50)))
 
 
-def _make_pending(session_id: int, sequence: int, role: str, text: str):
+def _make_pending(session_id: int, role: str, text: str):
     """Build a ``_PendingMessage`` without touching the writer."""
     from grc_agent.sessions_store import _PendingMessage
 
     return _PendingMessage(
         id="00000000-0000-0000-0000-000000000000",
         session_id=session_id,
-        sequence=sequence,
         role=role,
         text=text,
         payload=None,

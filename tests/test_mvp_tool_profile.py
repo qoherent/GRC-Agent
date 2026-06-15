@@ -502,7 +502,7 @@ class MvpToolProfileTests(unittest.TestCase):
 
     def test_ask_grc_docs_uses_semantic_docs_without_mutation_payloads(self) -> None:
         agent = self._load_agent()
-        object.__setattr__(agent._docs_answer_cfg, "helper_mode", "never")
+
         candidates = [
             _DocsEvidenceCandidate(
                 snippet=DocsAnswerSnippet(
@@ -535,7 +535,7 @@ class MvpToolProfileTests(unittest.TestCase):
 
     def test_ask_grc_docs_strips_instruction_like_source_text(self) -> None:
         agent = self._load_agent()
-        object.__setattr__(agent._docs_answer_cfg, "helper_mode", "never")
+
         candidates = [
             _DocsEvidenceCandidate(
                 snippet=DocsAnswerSnippet(
@@ -568,7 +568,7 @@ class MvpToolProfileTests(unittest.TestCase):
 
     def test_ask_grc_docs_comparison_prefers_direct_contrast_sentence(self) -> None:
         agent = self._load_agent()
-        object.__setattr__(agent._docs_answer_cfg, "helper_mode", "never")
+
         candidates = [
             _DocsEvidenceCandidate(
                 snippet=DocsAnswerSnippet(
@@ -605,7 +605,7 @@ class MvpToolProfileTests(unittest.TestCase):
 
     def test_ask_grc_docs_keeps_same_page_chunks_and_orders_answer_source_first(self) -> None:
         agent = self._load_agent()
-        object.__setattr__(agent._docs_answer_cfg, "helper_mode", "never")
+
         source_url = "https://wiki.gnuradio.org/index.php?title=Message_Passing&oldid=14248"
         candidates = [
             _DocsEvidenceCandidate(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from functools import lru_cache
 from typing import Any
 
@@ -14,8 +15,27 @@ from grc_agent.session_ops import connection_id as render_connection_id
 
 logger = logging.getLogger(__name__)
 
-_CONTROL_CATEGORY_HINTS = {"variables", "gui widgets"}
-_SEMANTIC_FLAG_NAMES = {"not_dsp", "disable_bypass", "throttle"}
+
+class BlockRole(StrEnum):
+    """Semantic role of a GNU Radio block within a flowgraph."""
+
+    VARIABLE_OR_CONTROL = "variable_or_control"
+    SOURCE = "source"
+    SINK = "sink"
+    TRANSFORM = "transform"
+    MESSAGE_OR_EVENT = "message_or_event"
+    METADATA = "metadata"
+
+
+class PortDomain(StrEnum):
+    """Domain classification for a block port."""
+
+    STREAM = "stream"
+    MESSAGE = "message"
+
+
+_CONTROL_CATEGORY_HINTS: frozenset[str] = frozenset({"variables", "gui widgets"})
+_SEMANTIC_FLAG_NAMES: frozenset[str] = frozenset({"not_dsp", "disable_bypass", "throttle"})
 
 
 def build_block_semantics_by_type(
@@ -38,7 +58,7 @@ def _block_semantics(
 ) -> dict[str, Any]:
     catalog_payload = _describe_block_with_root(block_type, catalog_root=catalog_root)
     if not catalog_payload.get("ok"):
-        return {"role": "metadata", "source": "fallback"}
+        return {"role": BlockRole.METADATA, "source": "fallback"}
 
     platform = _gnu_platform_block_metadata(block_type)
     flags = sorted(
@@ -102,24 +122,24 @@ def _semantic_role(
 ) -> str:
     flag_set = {flag.lower() for flag in flags}
     category_set = {item.lower() for item in category_path}
-    has_stream_input = input_domains.get("stream", 0) > 0
-    has_stream_output = output_domains.get("stream", 0) > 0
+    has_stream_input = input_domains.get(PortDomain.STREAM, 0) > 0
+    has_stream_output = output_domains.get(PortDomain.STREAM, 0) > 0
     has_any_input = any(count > 0 for count in input_domains.values())
     has_any_output = any(count > 0 for count in output_domains.values())
 
     if "not_dsp" in flag_set:
-        return "variable_or_control"
+        return BlockRole.VARIABLE_OR_CONTROL
     if not has_any_input and not has_any_output and category_set & _CONTROL_CATEGORY_HINTS:
-        return "variable_or_control"
+        return BlockRole.VARIABLE_OR_CONTROL
     if has_stream_output and not has_stream_input:
-        return "source"
+        return BlockRole.SOURCE
     if has_stream_input and not has_stream_output:
-        return "sink"
+        return BlockRole.SINK
     if has_stream_input and has_stream_output:
-        return "transform"
+        return BlockRole.TRANSFORM
     if has_any_input or has_any_output:
-        return "message_or_event"
-    return "metadata"
+        return BlockRole.MESSAGE_OR_EVENT
+    return BlockRole.METADATA
 
 
 def _domain_counts(ports: list[dict[str, Any]]) -> dict[str, int]:
@@ -127,7 +147,7 @@ def _domain_counts(ports: list[dict[str, Any]]) -> dict[str, int]:
     for port in ports:
         domain = port.get("domain")
         if not isinstance(domain, str) or not domain.strip():
-            domain = "stream"
+            domain = PortDomain.STREAM
         key = domain.strip().lower()
         counts[key] = counts.get(key, 0) + 1
     return counts

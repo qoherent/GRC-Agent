@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from grc_agent.runtime.block_semantics import PortDomain
 from grc_agent.runtime.tool_context import is_variable_block
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,13 @@ class SessionSnapshot:
     blocks: list[Block]
     connections: list[Connection]
     state_revision: int | None = None
+    _eval_revision: int = field(default=0, init=False, repr=False, compare=False)
+    _eval_params_cache: dict[str, dict[str, Any]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _eval_errors_cache: list[tuple[str, str, str]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @classmethod
     def from_session(cls, session: FlowgraphSession) -> SessionSnapshot:
@@ -62,6 +70,9 @@ class SessionSnapshot:
     def refresh(self) -> None:
         self.blocks = parse_blocks(self.raw_data.get("blocks"))
         self.connections = parse_connections(self.raw_data.get("connections"))
+        self._eval_revision += 1
+        self._eval_params_cache = None
+        self._eval_errors_cache = None
 
     def raw_blocks(self) -> list[Any]:
         raw_blocks = self.raw_data.get("blocks")
@@ -573,8 +584,8 @@ def _resolve_single_stream_ports(
         direction="outputs",
     )
 
-    stream_inputs = [p for p in ins if p.domain == "stream"]
-    stream_outputs = [p for p in outs if p.domain == "stream"]
+    stream_inputs = [p for p in ins if p.domain == PortDomain.STREAM]
+    stream_outputs = [p for p in outs if p.domain == PortDomain.STREAM]
 
     if not stream_inputs or not stream_outputs:
         return 0, 0, [
@@ -946,7 +957,7 @@ def _apply_add_connection(
     if any(
         connection.dst_block == dst_block_name and connection.dst_port == dst_port
         for connection in snapshot.connections
-    ) and destination_port.domain != "message":
+    ) and destination_port.domain != PortDomain.MESSAGE:
         return [
             make_issue(
                 op_index=op_index,
@@ -958,8 +969,8 @@ def _apply_add_connection(
         ], warnings
 
     if (
-        source_port.domain == "stream"
-        and destination_port.domain == "stream"
+        source_port.domain == PortDomain.STREAM
+        and destination_port.domain == PortDomain.STREAM
         and source_port.dtype is not None
         and destination_port.dtype is not None
         and source_port.dtype != destination_port.dtype
@@ -979,7 +990,7 @@ def _apply_add_connection(
                 desired_dtype=destination_port.dtype,
                 catalog_root=catalog_root,
             )
-        hint_text = None
+        hint_text = specific_hint
         return [
             make_issue(
                 op_index=op_index,
@@ -995,8 +1006,8 @@ def _apply_add_connection(
         ], warnings
 
     if (
-        source_port.domain == "stream"
-        and destination_port.domain == "stream"
+        source_port.domain == PortDomain.STREAM
+        and destination_port.domain == PortDomain.STREAM
         and source_port.vlen is not None
         and destination_port.vlen is not None
         and source_port.vlen != destination_port.vlen
@@ -1025,18 +1036,14 @@ def _apply_add_connection(
 def _is_name_error(e: Exception) -> bool:
     if isinstance(e, NameError):
         return True
-    if isinstance(e, SyntaxError):
-        return True
-    if isinstance(e, TypeError):
-        return True
     if isinstance(getattr(e, "__context__", None), NameError):
         return True
     if isinstance(getattr(e, "__cause__", None), NameError):
         return True
-    err_str = str(e)
-    if "is not defined" in err_str:
-        return True
     return False
+
+
+_cached_platform: Any = None
 
 
 def _evaluate_snapshot_params(
@@ -1045,22 +1052,42 @@ def _evaluate_snapshot_params(
     affected_block_names: set[str] | None = None,
     op_index: int = 0,
 ) -> tuple[dict[str, dict[str, Any]], list[ValidationIssue]]:
-    """Evaluate block parameters natively using GRC Platform."""
-    evaluated_parameters_by_block = {}
-    errors: list[ValidationIssue] = []
+    """Evaluate block parameters natively using GRC Platform.
 
-    import gnuradio.digital as digital
-    import gnuradio.filter as filter_mod
-    from gnuradio import gr
-    from gnuradio.grc.core.platform import Platform
+    Results are memoized on the snapshot keyed on its eval revision,
+    so repeated calls within one preflight (e.g. the insert path) skip
+    the expensive Platform rebuild + import + evaluate cycle.
+    """
+    if snapshot._eval_params_cache is not None:
+        evaluated_parameters_by_block = snapshot._eval_params_cache
+        errors: list[ValidationIssue] = []
+        if affected_block_names is not None and snapshot._eval_errors_cache is not None:
+            for block_name, param_key, err_msg in snapshot._eval_errors_cache:
+                if block_name in affected_block_names:
+                    errors.append(
+                        make_issue(
+                            op_index=op_index,
+                            op_type="transaction",
+                            field=f"params.{block_name}.{param_key}",
+                            code="parameter_evaluation_failed",
+                            message=f"Block {block_name} parameter '{param_key}' failed evaluation: {err_msg}",
+                        )
+                    )
+        return evaluated_parameters_by_block, errors
+
+    evaluated_parameters_by_block = {}
+    raw_errors: list[tuple[str, str, str]] = []
 
     global _cached_platform
-    if "_cached_platform" not in globals():
+    if _cached_platform is None:
         try:
+            from gnuradio import gr
+            from gnuradio.grc.core.platform import Platform
+
             _cached_platform = Platform(
                 version=gr.version(),
                 version_parts=(gr.major_version(), gr.api_version(), gr.minor_version()),
-                prefs=gr.prefs()
+                prefs=gr.prefs(),
             )
             _cached_platform.build_library()
         except Exception as e:
@@ -1069,6 +1096,9 @@ def _evaluate_snapshot_params(
 
     if _cached_platform is not None:
         try:
+            import gnuradio.digital as digital
+            import gnuradio.filter as filter_mod
+
             fg = _cached_platform.make_flow_graph()
 
             orig_eval = fg.evaluate
@@ -1088,24 +1118,29 @@ def _evaluate_snapshot_params(
                         val = param.evaluate()
                         block_eval_params[param.key] = val
                     except Exception as e:
-                        # Report evaluation failure if it is a SyntaxError/TypeError etc.
-                        # but IGNORE NameError (which indicates reference to undefined variables)
-                        # so that it gets deferred to final native compiler validation.
                         if not _is_name_error(e):
-                            if affected_block_names is not None and grc_block.name in affected_block_names:
-                                errors.append(
-                                    make_issue(
-                                        op_index=op_index,
-                                        op_type="transaction",
-                                        field=f"params.{grc_block.name}.{param.key}",
-                                        code="parameter_evaluation_failed",
-                                        message=f"Block {grc_block.name} parameter '{param.key}' failed evaluation: {e}",
-                                    )
-                                )
+                            raw_errors.append((grc_block.name, param.key, str(e)))
                         block_eval_params[param.key] = param.get_value()
                 evaluated_parameters_by_block[grc_block.name] = block_eval_params
         except Exception as e:
             logger.debug("Snapshot native evaluation failed: %s", e)
+
+    snapshot._eval_params_cache = evaluated_parameters_by_block
+    snapshot._eval_errors_cache = raw_errors
+
+    errors = []
+    if affected_block_names is not None:
+        for block_name, param_key, err_msg in raw_errors:
+            if block_name in affected_block_names:
+                errors.append(
+                    make_issue(
+                        op_index=op_index,
+                        op_type="transaction",
+                        field=f"params.{block_name}.{param_key}",
+                        code="parameter_evaluation_failed",
+                        message=f"Block {block_name} parameter '{param_key}' failed evaluation: {err_msg}",
+                    )
+                )
 
     return evaluated_parameters_by_block, errors
 
@@ -1316,7 +1351,7 @@ def validate_snapshot_integrity(
             ], warnings
 
         if (
-            destination_port.domain != "message"
+            destination_port.domain != PortDomain.MESSAGE
             and input_counts.get((connection.dst_block, connection.dst_port), 0) > 1
         ):
             return [
@@ -1333,8 +1368,8 @@ def validate_snapshot_integrity(
             ], warnings
 
         if (
-            source_port.domain == "stream"
-            and destination_port.domain == "stream"
+            source_port.domain == PortDomain.STREAM
+            and destination_port.domain == PortDomain.STREAM
             and source_port.dtype is not None
             and destination_port.dtype is not None
             and source_port.dtype != destination_port.dtype
@@ -1406,7 +1441,6 @@ def _require_unique_block(
         message = f"Block not found: {instance_name}"
         if block_type:
             message += f" (type: {block_type})"
-        hint = None
         return None, None, None, [
             make_issue(
                 op_index=op_index,
@@ -1414,7 +1448,6 @@ def _require_unique_block(
                 field=field,
                 code="block_not_found",
                 message=message,
-                hint=hint,
             )
         ]
 

@@ -34,6 +34,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ToolAgents==0.3.0",
     "numpy<2 ; python_full_version < '3.13'",
+    "pydantic>=2.0",
     "pyyaml>=6.0.3",
 ]
 

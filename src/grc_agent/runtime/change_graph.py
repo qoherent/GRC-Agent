@@ -12,7 +12,7 @@ from typing import Any
 from grc_agent._payload import ErrorCode
 from grc_agent.catalog.loaders import describe_block
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.block_semantics import _block_semantics
+from grc_agent.runtime.block_semantics import BlockRole, _block_semantics
 from grc_agent.runtime.tool_context import is_meaningful, is_variable_block
 from grc_agent.session_ops import connection_id as render_connection_id
 from grc_agent.session_ops import parse_connection_id
@@ -492,10 +492,6 @@ def _aggregate_hints(
     if occupancy_hint:
         hints.append(occupancy_hint)
 
-    ofdm_hint = _ofdm_carrier_hint(operations, errors_payload)
-    if ofdm_hint:
-        hints.append(ofdm_hint)
-
     repair_hint = _repair_hint_for_validation_failure(operations, validation_result)
     if repair_hint:
         hints.append(repair_hint)
@@ -599,7 +595,7 @@ def _bypass_hint(
             semantics = _block_semantics(block_type, catalog_root)
             role = semantics.get("role", "")
             semantic_flags = semantics.get("evidence", {}).get("semantic_flags", [])
-            if role in ("source", "sink", "variable_or_control", "metadata") or "disable_bypass" in semantic_flags:
+            if role in (BlockRole.SOURCE, BlockRole.SINK, BlockRole.VARIABLE_OR_CONTROL, BlockRole.METADATA) or "disable_bypass" in semantic_flags:
                 all_are_stream_transforms = False
         else:
             all_are_stream_transforms = False
@@ -608,13 +604,6 @@ def _bypass_hint(
         return "Block disabled — port connections severed. Cannot disable block with active connections."
 
     return "Terminal/control block cannot be bypassed."
-
-
-def _ofdm_carrier_hint(
-    operations: list[dict[str, Any]],
-    errors_payload: Any,
-) -> str | None:
-    return None
 
 
 def _port_discovery_hint(

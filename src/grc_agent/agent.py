@@ -79,7 +79,6 @@ from grc_agent.runtime.clarification import (
     rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
 )
 from grc_agent.runtime.doc_answer import (
-    DocsAnswerSnippet,
     _DocsComparisonSides,
     _DocsEvidenceCandidate,
     build_catalog_assisted_candidate,
@@ -88,15 +87,12 @@ from grc_agent.runtime.doc_answer import (
     classify_docs_answer_type,
     clean_catalog_summary_for_answer,
     clean_docs_excerpt,
-    clip_docs_snippets_for_helper,
     docs_low_value_reasons,
     docs_primary_terms,
     docs_topic_terms,
     extract_block_definition_subject,
     extract_comparison_sides,
     extract_docs_subject,
-    helper_candidates_for_docs_answer,
-    helper_eligibility_for_docs_answer,
     is_block_definition_query,
     is_procedural_walkthrough_text,
     is_tutorial_or_howto_query,
@@ -122,9 +118,6 @@ from grc_agent.runtime.doc_answer import (
 )
 from grc_agent.runtime.doc_answer import (
     rank_docs_candidates as rank_docs_candidates_wrapper,
-)
-from grc_agent.runtime.doc_answer import (
-    run_docs_answer_advisor as run_docs_answer_advisor_wrapper,
 )
 from grc_agent.runtime.inspect_graph import (
     get_grc_context_internal as get_grc_context_internal_wrapper,
@@ -337,19 +330,9 @@ class GrcAgent:
         self._transaction_normalizer = TransactionNormalizer(session=self.session)
         self._pending_clarification: dict[str, Any] | None = None
         self._pending_clarification_revision: int | None = None
-        self._docs_advisor_probe_at: float = 0.0
-        self._docs_advisor_reachable: bool = True
         self._last_docs_advisor_meta: dict[str, Any] = {
-            "advisor_attempted": False,
-            "advisor_success": False,
-            "fallback_reason": "not_attempted",
-            "helper_latency_ms": None,
-            "prompt_chars": 0,
             "snippet_count": 0,
-            "schema_valid": False,
-            "timeout_ms": int(self._docs_answer_cfg.helper_timeout_seconds * 1000),
-            "cache_hit": False,
-            "helper_finish_reason": None,
+            "source_quality": {},
         }
         self._ask_grc_docs_cache: OrderedDict[tuple[str, ...], dict[str, Any]] = (
             OrderedDict()
@@ -1379,8 +1362,6 @@ class GrcAgent:
             str(focus or ""),
             retrieval_mode,
             source_digest.hexdigest(),
-            self._docs_answer_cfg.helper_prompt_version,
-            self._docs_answer_cfg.helper_mode,
         )
 
     def _ask_grc_docs_cache_get(
@@ -1456,12 +1437,6 @@ class GrcAgent:
             question=question,
             candidates=candidates,
         )
-
-    def _clip_docs_snippets_for_helper(
-        self,
-        snippets: list[DocsAnswerSnippet],
-    ) -> list[DocsAnswerSnippet]:
-        return clip_docs_snippets_for_helper(self, snippets)
 
     @staticmethod
     def _is_tutorial_or_howto_query(query: str) -> bool:
@@ -1584,38 +1559,6 @@ class GrcAgent:
             selected_candidates=selected_candidates,
         )
 
-    def _helper_eligibility_for_docs_answer(
-        self,
-        *,
-        question: str,
-        answer_type: str,
-        source_quality: dict[str, Any],
-        selected_candidates: list[_DocsEvidenceCandidate],
-        typed_answer: str,
-        typed_insufficient: bool,
-    ) -> tuple[bool, str]:
-        return helper_eligibility_for_docs_answer(
-            question=question,
-            answer_type=answer_type,
-            source_quality=source_quality,
-            selected_candidates=selected_candidates,
-            typed_answer=typed_answer,
-            typed_insufficient=typed_insufficient,
-        )
-
-    def _helper_candidates_for_docs_answer(
-        self,
-        *,
-        question: str,
-        answer_type: str,
-        ranked_candidates: list[_DocsEvidenceCandidate],
-    ) -> list[_DocsEvidenceCandidate]:
-        return helper_candidates_for_docs_answer(
-            question=question,
-            answer_type=answer_type,
-            ranked_candidates=ranked_candidates,
-        )
-
     @staticmethod
     def _clean_catalog_summary_for_answer(name: str, summary: str) -> str:
         return clean_catalog_summary_for_answer(name, summary)
@@ -1650,22 +1593,6 @@ class GrcAgent:
             question=question,
             ranked_candidates=ranked_candidates,
             evidence_strong=evidence_strong,
-        )
-
-    def _run_docs_answer_advisor(
-        self,
-        *,
-        question: str,
-        answer_type: str,
-        snippets: list[DocsAnswerSnippet],
-        focus: str | None,
-    ) -> dict[str, Any] | None:
-        return run_docs_answer_advisor_wrapper(
-            self,
-            question=question,
-            answer_type=answer_type,
-            snippets=snippets,
-            focus=focus,
         )
 
     def _change_graph(

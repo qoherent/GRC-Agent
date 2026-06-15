@@ -9,9 +9,38 @@ from __future__ import annotations
 
 import json
 import re
+from enum import StrEnum
 from typing import Any
 
 from grc_agent.runtime.tool_context import is_variable_block
+
+
+class OpType(StrEnum):
+    """Single source of truth for transaction operation types."""
+
+    UPDATE_PARAMS = "update_params"
+    UPDATE_STATES = "update_states"
+    ADD_CONNECTION = "add_connection"
+    REMOVE_CONNECTION = "remove_connection"
+    REMOVE_BLOCK = "remove_block"
+    ADD_BLOCK = "add_block"
+    INSERT_BLOCK_ON_CONNECTION = "insert_block_on_connection"
+
+
+_TRANSACTION_FIELD_NAMES: tuple[str, ...] = (
+    "op_type",
+    "instance_name",
+    "block_type",
+    "params",
+    "parameters",
+    "state",
+    "states",
+    "connection_id",
+    "src_block",
+    "src_port",
+    "dst_block",
+    "dst_port",
+)
 
 
 class TransactionNormalizer:
@@ -144,12 +173,7 @@ class TransactionNormalizer:
             normalized = normalized[:-1].rstrip()
         normalized = normalized.strip("\"'")
         if normalized:
-            for candidate in (
-                "update_params", "update_states", "add_connection", "remove_connection",
-                "remove_block", "add_block", "insert_block_on_connection",
-                "op_type", "instance_name", "params",
-                "parameters", "state", "src_block", "src_port", "dst_block", "dst_port", "block_type",
-            ):
+            for candidate in (*OpType, *_TRANSACTION_FIELD_NAMES):
                 if re.search(rf"\b{re.escape(candidate)}\b", normalized):
                     return candidate
             return normalized
@@ -347,15 +371,7 @@ class TransactionNormalizer:
 
     @staticmethod
     def _supported_transaction_op_types() -> tuple[str, ...]:
-        return (
-            "update_params",
-            "update_states",
-            "add_connection",
-            "remove_connection",
-            "remove_block",
-            "add_block",
-            "insert_block_on_connection",
-        )
+        return tuple(OpType)
 
     @staticmethod
     def _tool_argument_candidates() -> tuple[str, ...]:

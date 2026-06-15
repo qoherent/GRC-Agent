@@ -401,7 +401,7 @@ Examples:
     )
     history_parser.add_argument(
         "--journal-path",
-        help="Optional history JSONL path. Defaults to .grc_agent/history/journal.jsonl.",
+        help="Optional history DB path. Defaults to .grc_agent/history/journal.db.",
     )
     history_subparsers = history_parser.add_subparsers(dest="history_command")
     history_subparsers.required = True
@@ -1540,7 +1540,6 @@ def _build_release_manifest(config: AppConfig) -> dict[str, Any]:
             "lint_src_tests": "uv run ruff check src/ tests/",
             "lint_repo": "uv run ruff check",
             "unit": "uv run python -m unittest",
-            "docs_answer_eval": "uv run python -m tests.retrieval_eval.grc_docs_answer_eval",
             "doctor": "uv run grc-agent doctor",
             "health": "uv run grc-agent health",
         },

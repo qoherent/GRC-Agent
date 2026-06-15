@@ -162,9 +162,13 @@ def preflight_transaction(
     affected_block_names: set[str] = set()
     all_errors: list[Any] = []
     has_errors = False
+    checkpoint: SessionSnapshot | None = None
 
     for op_index, operation in enumerate(normalized_operations):
-        target = copy.deepcopy(snapshot) if has_errors else snapshot
+        if has_errors:
+            target = checkpoint if checkpoint is not None else snapshot
+        else:
+            target = snapshot
         errors, op_warnings = validate_and_apply_operation(
             target,
             operation,
@@ -174,7 +178,9 @@ def preflight_transaction(
         warnings.extend(op_warnings)
         if errors:
             all_errors.extend(errors)
-            has_errors = True
+            if not has_errors:
+                checkpoint = copy.deepcopy(snapshot)
+                has_errors = True
         else:
             if not has_errors:
                 snapshot = target

@@ -45,9 +45,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
-        self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 320)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 64)
-        self.assertEqual(config.agent.docs_answer.helper_prompt_version, "v3_compact")
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 5)
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
         self.assertEqual(config.agent.guardrails.max_validation_stderr_chars, 1200)
@@ -132,9 +130,9 @@ class RuntimeConfigTests(unittest.TestCase):
                     "history_compact_budget = 5000\n"
                     "max_tool_result_chars = 8000\n"
                     "\n[agent.docs_answer]\n"
-                    "helper_max_output_tokens = 512\n"
+                    "max_sources = 5\n"
                     "answer_cache_size = 32\n"
-                    "helper_prompt_version = 'custom_prompt_v1'\n"
+                    "answer_target_chars = 250\n"
                     "\n[agent.retrieval]\n"
                     "search_blocks_default_k = 7\n"
                     "\n[agent.history]\n"
@@ -151,9 +149,9 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(config.llama.enable_thinking)
         self.assertEqual(config.llama.max_tool_rounds, 42)
         self.assertEqual(config.agent.max_tool_result_chars, 8000)
-        self.assertEqual(config.agent.docs_answer.helper_max_output_tokens, 512)
+        self.assertEqual(config.agent.docs_answer.max_sources, 5)
         self.assertEqual(config.agent.docs_answer.answer_cache_size, 32)
-        self.assertEqual(config.agent.docs_answer.helper_prompt_version, "custom_prompt_v1")
+        self.assertEqual(config.agent.docs_answer.answer_target_chars, 250)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 7)
         self.assertEqual(config.agent.history.checkpoint_retention, 140)
 
@@ -174,8 +172,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "history_compact_budget=1000\n"
                     "\n[agent.docs_answer]\n"
                     "max_sources=10\n"
-                    "helper_max_snippet_chars=2000\n"
-                    "helper_max_total_context_chars=1000\n"
                     "\n[agent.retrieval]\n"
                     "ask_grc_docs_max_k=3\n"
                 ),

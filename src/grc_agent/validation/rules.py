@@ -47,71 +47,11 @@ class ValidationOperation:
     payload: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
-        if self.op_type == "update_params":
-            res = {
-                "op_type": self.op_type,
-                "params": copy.deepcopy(self.payload["params"]),
-            }
-            if "instance_name" in self.payload:
-                res["instance_name"] = self.payload["instance_name"]
-            if "block_type" in self.payload:
-                res["block_type"] = self.payload["block_type"]
-            return res
-        if self.op_type == "update_states":
-            res = {
-                "op_type": self.op_type,
-                "state": self.payload["state"],
-            }
-            if "instance_name" in self.payload:
-                res["instance_name"] = self.payload["instance_name"]
-            if "block_type" in self.payload:
-                res["block_type"] = self.payload["block_type"]
-            return res
-        if self.op_type in {"add_connection", "remove_connection"}:
-            res = {
-                "op_type": self.op_type,
-            }
-            if "connection_id" in self.payload:
-                res["connection_id"] = self.payload["connection_id"]
-            if all(
-                field_name in self.payload
-                for field_name in ("src_block", "src_port", "dst_block", "dst_port")
-            ):
-                res.update(
-                    {
-                        "src_block": self.payload["src_block"],
-                        "src_port": self.payload["src_port"],
-                        "dst_block": self.payload["dst_block"],
-                        "dst_port": self.payload["dst_port"],
-                    }
-                )
-            return res
-        if self.op_type == "remove_block":
-            res = {
-                "op_type": self.op_type,
-            }
-            if "instance_name" in self.payload:
-                res["instance_name"] = self.payload["instance_name"]
-            if "block_type" in self.payload:
-                res["block_type"] = self.payload["block_type"]
-            return res
-
-        rendered = {
-            "op_type": self.op_type,
-            "instance_name": self.payload["instance_name"],
-            "block_type": self.payload["block_type"],
-        }
-        if self.op_type == "insert_block_on_connection":
-            rendered["connection_id"] = self.payload["connection_id"]
-            # "params" maps to "parameters" for add_block compatibility
-            params = self.payload.get("params", {})
-            rendered["parameters"] = copy.deepcopy(params)
-        else:
-            rendered["parameters"] = copy.deepcopy(self.payload["parameters"])
-        states = self.payload.get("states")
-        if states is not None:
-            rendered["states"] = copy.deepcopy(states)
-        return rendered
+        res: dict[str, Any] = {"op_type": self.op_type}
+        res.update(self.payload)
+        if self.op_type == "insert_block_on_connection" and "params" in res:
+            res["parameters"] = res.pop("params")
+        return res
 
 
 @dataclass(frozen=True)
@@ -308,7 +248,7 @@ def resolve_port_slots(
 
         domain = _resolve_text_expression(port_rule.domain, context)
         dtype = _resolve_text_expression(port_rule.dtype, context)
-        vlen = _resolve_port_vlen(port_rule.vlen, context)
+        vlen = _resolve_port_multiplicity(port_rule.vlen, context)
         if vlen is None:
             warnings.append(
                 f"Could not resolve {direction} port vector length for template {template_index}."
@@ -906,20 +846,6 @@ def _resolve_optional_value(value: bool | int | str | None, context: dict[str, A
         return bool(resolved)
     if isinstance(resolved, str):
         return _coerce_bool_literal(resolved)
-    return None
-
-
-def _resolve_port_vlen(value: int | str | None, context: dict[str, Any]) -> int | None:
-    if value is None:
-        return 1
-
-    resolved = _resolve_expression_value(value, context)
-    if isinstance(resolved, bool):
-        return int(resolved)
-    if isinstance(resolved, int):
-        return resolved
-    if isinstance(resolved, str):
-        return _coerce_int_literal(resolved)
     return None
 
 

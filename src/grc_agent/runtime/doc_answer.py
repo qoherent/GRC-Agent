@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-import socket
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
 from grc_agent._payload import ErrorCode
-from grc_agent.toolagents_runtime import (
-    ToolAgentsJsonClient,
-    ToolAgentsLlamaProviderConfig,
-)
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
@@ -179,38 +172,6 @@ _DOCS_GENERIC_TOPIC_TERMS = frozenset(
         "type",
     }
 )
-
-
-def clip_docs_snippets_for_helper(
-    agent: Any,
-    snippets: list[DocsAnswerSnippet],
-) -> list[DocsAnswerSnippet]:
-    clipped: list[DocsAnswerSnippet] = []
-    total_chars = 0
-    for snippet in snippets:
-        excerpt_text = snippet.excerpt
-        if len(excerpt_text) > agent._docs_answer_cfg.helper_max_snippet_chars:
-            excerpt_text = (
-                excerpt_text[
-                    : agent._docs_answer_cfg.helper_max_snippet_chars - 1
-                ].rstrip()
-                + "…"
-            )
-        candidate = DocsAnswerSnippet(
-            title=snippet.title,
-            source=snippet.source,
-            excerpt=excerpt_text,
-        )
-        chunk_chars = len(candidate.title) + len(candidate.source) + len(candidate.excerpt)
-        if (
-            clipped
-            and total_chars + chunk_chars
-            > agent._docs_answer_cfg.helper_max_total_context_chars
-        ):
-            break
-        clipped.append(candidate)
-        total_chars += chunk_chars
-    return clipped or snippets[:1]
 
 
 def is_tutorial_or_howto_query(query: str) -> bool:
@@ -1052,98 +1013,6 @@ def required_terms_for_answer_type(
     return tuple(docs_primary_terms(subject) or docs_topic_terms(subject))
 
 
-def helper_eligibility_for_docs_answer(
-    *,
-    question: str,
-    answer_type: str,
-    source_quality: dict[str, Any],
-    selected_candidates: list[_DocsEvidenceCandidate],
-    typed_answer: str,
-    typed_insufficient: bool,
-) -> tuple[bool, str]:
-    quality = str(source_quality.get("quality") or "weak")
-    question_lower = question.lower()
-    if "hierarchical block" in question_lower:
-        return (False, "special_case_hier_block")
-    if "embedded python block" in question_lower:
-        return (False, "special_case_embedded_python")
-    if answer_type == "insufficient":
-        return (False, "unsupported_question")
-    if quality == "weak":
-        return (False, "weak_evidence")
-    if not bool(source_quality.get("supports_answer_type")):
-        return (False, "answer_type_not_supported")
-    if answer_type == "comparison":
-        if quality != "strong":
-            return (False, "comparison_requires_strong_evidence")
-        if typed_insufficient:
-            return (False, "comparison_deterministic_insufficient")
-        if len(selected_candidates) < 2:
-            return (False, "comparison_missing_side_evidence")
-        if "difference:" in typed_answer.lower() and typed_answer.count(":") >= 3:
-            return (False, "high_confidence_simple_comparison")
-        return (True, "eligible_comparison_synthesis")
-    if answer_type == "definition":
-        if any(w in question_lower for w in ("helper", "function", "generator", "class", "reference", "api")):
-            return (True, "helper_function_query_requires_synthesis")
-        if typed_insufficient and len(selected_candidates) >= 2:
-            return (True, "eligible_definition_recovery")
-        if len(selected_candidates) < 2:
-            return (False, "single_source_definition")
-        return (False, "high_confidence_simple_definition")
-    if answer_type == "procedural_how_to":
-        has_tutorial = any(
-            candidate.source_type == "tutorial" for candidate in selected_candidates
-        )
-        if quality == "strong" and has_tutorial and typed_insufficient:
-            return (True, "eligible_procedural_recovery")
-        if quality == "strong" and has_tutorial and len(typed_answer) > 180:
-            return (True, "eligible_procedural_synthesis")
-        return (False, "procedural_deterministic_sufficient")
-    if answer_type == "tool_command_concept":
-        if typed_insufficient:
-            return (False, "tool_command_missing_evidence")
-        return (False, "tool_command_deterministic_sufficient")
-    if answer_type == "block_definition":
-        lower = typed_answer.lower()
-        if lower.startswith("according to the local block catalog"):
-            return (False, "concise_catalog_answer")
-        return (False, "block_definition_deterministic_only")
-    return (False, "unsupported_answer_type")
-
-
-def helper_candidates_for_docs_answer(
-    *,
-    question: str,
-    answer_type: str,
-    ranked_candidates: list[_DocsEvidenceCandidate],
-) -> list[_DocsEvidenceCandidate]:
-    severe = {
-        "generic_gnuradio_page",
-        "menu_index_page",
-        "navigation_boilerplate",
-        "toc_dominated",
-    }
-    base_candidates = [
-        candidate
-        for candidate in ranked_candidates
-        if not any(reason in severe for reason in candidate.low_value_reasons)
-    ]
-    if answer_type == "comparison":
-        selected = select_docs_candidates_for_answer_type(
-            question=question,
-            answer_type=answer_type,
-            ranked_candidates=(base_candidates or ranked_candidates),
-            limit=3,
-        )
-        return selected[:3]
-    if answer_type == "procedural_how_to":
-        helper_candidates = [candidate for candidate in base_candidates if candidate.source_type == "tutorial"]
-        return helper_candidates[:3] or (base_candidates[:3] or ranked_candidates[:2])
-    helper_candidates = base_candidates[:3]
-    return helper_candidates or ranked_candidates[:2]
-
-
 def build_fallback_answer(
     agent: Any,
     *,
@@ -1188,7 +1057,6 @@ def ask_grc_docs(
     focus: str | None = None,
     debug: bool = False,
 ) -> ToolResult:
-    import time
 
     started = time.monotonic()
     before_revision = agent.session.state_revision
@@ -1350,19 +1218,8 @@ def ask_grc_docs(
         excerpt_chars=agent._docs_answer_cfg.excerpt_target_chars,
     )
     agent._last_docs_advisor_meta = {
-        "advisor_attempted": False,
-        "advisor_success": False,
-        "fallback_reason": "not_attempted",
-        "helper_latency_ms": None,
-        "prompt_chars": 0,
         "snippet_count": len(snippets),
-        "schema_valid": False,
-        "timeout_ms": int(agent._docs_answer_cfg.helper_timeout_seconds * 1000),
-        "cache_hit": False,
-        "helper_finish_reason": None,
         "source_quality": dict(source_quality),
-        "helper_eligible": False,
-        "helper_skipped_reason": "not_evaluated",
     }
     evidence_strong = str(source_quality.get("quality")) == "strong"
     cache_key = agent._ask_grc_docs_cache_key(
@@ -1380,155 +1237,34 @@ def ask_grc_docs(
         insufficient_evidence = bool(cached_docs_answer.get("insufficient_evidence"))
         fallback_used = bool(cached_docs_answer.get("fallback_used"))
         fallback_reason = str(cached_docs_answer.get("fallback_reason") or "cache_hit")
-        helper_eligible = bool(cached_docs_answer.get("helper_eligible", False))
-        helper_skipped_reason = str(
-            cached_docs_answer.get("helper_skipped_reason") or "cache_hit"
-        )
         cached_quality = cached_docs_answer.get("source_quality")
         if isinstance(cached_quality, dict):
             source_quality = dict(cached_quality)
         agent._last_docs_advisor_meta.update(
             {
-                "advisor_attempted": False,
-                "advisor_success": True,
-                "fallback_reason": "none",
-                "helper_latency_ms": 0,
-                "prompt_chars": 0,
                 "snippet_count": len(snippets),
-                "schema_valid": True,
-                "cache_hit": True,
-                "helper_finish_reason": "cache_hit",
                 "source_quality": dict(source_quality),
-                "helper_eligible": bool(helper_eligible),
-                "helper_skipped_reason": helper_skipped_reason,
+                "cache_hit": True,
             }
         )
-    helper_sources_selected = False
-    if snippets and cached_docs_answer is None:
-        helper_eligible = False
-        helper_skipped_reason = "not_evaluated"
-        typed_answer = "Local docs did not contain enough direct evidence for this question."
-        typed_insufficient = True
+    elif snippets:
         if str(source_quality.get("quality")) != "weak":
-            typed_answer, typed_insufficient = agent._build_typed_docs_answer(
+            answer, typed_insufficient = agent._build_typed_docs_answer(
                 question=question_text,
                 ranked_candidates=selected_candidates,
                 answer_type=answer_type,
             )
-            helper_eligible, helper_skipped_reason = agent._helper_eligibility_for_docs_answer(
-                question=question_text,
-                answer_type=answer_type,
-                source_quality=source_quality,
-                selected_candidates=selected_candidates,
-                typed_answer=typed_answer,
-                typed_insufficient=typed_insufficient,
-            )
+            insufficient_evidence = bool(typed_insufficient)
         else:
-            helper_skipped_reason = "weak_evidence"
-        answer = typed_answer
-        insufficient_evidence = bool(typed_insufficient)
+            answer = ""
+            insufficient_evidence = True
         fallback_used = True
-        fallback_reason = "typed_fallback"
-        helper_input_candidates = agent._helper_candidates_for_docs_answer(
-            question=question_text,
-            answer_type=answer_type,
-            ranked_candidates=selected_pool,
-        )
-        helper_input = agent._clip_docs_snippets_for_helper(
-            [candidate.snippet for candidate in helper_input_candidates]
-        )
-        helper_result = None
-        agent._last_docs_advisor_meta.update(
-            {
-                "source_quality": dict(source_quality),
-                "helper_eligible": bool(helper_eligible),
-                "helper_skipped_reason": helper_skipped_reason,
-            }
-        )
-        if agent._docs_answer_cfg.enabled and helper_eligible:
-            helper_mode = agent._docs_answer_cfg.helper_mode
-            run_helper = False
-            if helper_mode in {"always", "auto"}:
-                run_helper = True
-            elif helper_mode == "never":
-                helper_skipped_reason = "helper_mode_never"
-            if run_helper:
-                helper_result = agent._run_docs_answer_advisor(
-                    question=question_text,
-                    answer_type=answer_type,
-                    snippets=helper_input,
-                    focus=focus_text,
-                )
-            elif (
-                agent._last_docs_advisor_meta.get("fallback_reason", "not_attempted")
-                == "not_attempted"
-            ):
-                agent._last_docs_advisor_meta["fallback_reason"] = helper_skipped_reason
-        elif not agent._docs_answer_cfg.enabled:
-            helper_skipped_reason = "helper_disabled"
-        else:
-            agent._last_docs_advisor_meta["fallback_reason"] = helper_skipped_reason
-
-        advisor_meta = dict(agent._last_docs_advisor_meta)
-        if helper_result is not None:
-            helper_answer = str(helper_result.get("answer") or "").strip()
-            helper_answer_l = helper_answer.lower()
-            helper_invalid = (
-                answer_type == "block_definition"
-                and any(
-                    marker in helper_answer_l
-                    for marker in ("input port(s)", "output port(s)", "parameter(s)")
-                )
-            )
-            if helper_invalid:
-                fallback_used = True
-                fallback_reason = "helper_answer_low_value"
-                agent._last_docs_advisor_meta["fallback_reason"] = "helper_answer_low_value"
-                agent._last_docs_advisor_meta["helper_finish_reason"] = "low_value"
-            else:
-                answer = helper_answer
-                selected_sources: list[dict[str, str]] = []
-                source_indexes = helper_result.get("source_indexes")
-                if isinstance(source_indexes, list):
-                    for index in source_indexes:
-                        if not isinstance(index, int):
-                            continue
-                        if index < 0 or index >= len(helper_input):
-                            continue
-                        snippet = helper_input[index]
-                        selected_sources.append(
-                            {
-                                "title": snippet.title,
-                                "source": snippet.source,
-                                "excerpt": snippet.excerpt[
-                                    : agent._docs_answer_cfg.excerpt_target_chars
-                                ],
-                            }
-                        )
-                if selected_sources:
-                    sources = selected_sources[:source_limit]
-                    helper_sources_selected = True
-                insufficient_evidence = bool(helper_result.get("insufficient_evidence"))
-                fallback_used = False
-                fallback_reason = "none"
-                agent._last_docs_advisor_meta["helper_finish_reason"] = str(
-                    helper_result.get("helper_finish_reason") or "stop"
-                )
-        else:
-            fallback_used = True
-            fallback_reason = str(advisor_meta.get("fallback_reason") or "advisor_failed")
-            if not agent._last_docs_advisor_meta.get("helper_finish_reason"):
-                agent._last_docs_advisor_meta["helper_finish_reason"] = fallback_reason
-            if helper_eligible and agent._docs_answer_cfg.helper_mode != "never":
-                warnings.append("docs_answer_advisor_fallback")
-        agent._last_docs_advisor_meta["helper_eligible"] = bool(helper_eligible)
-        agent._last_docs_advisor_meta["helper_skipped_reason"] = helper_skipped_reason
-        agent._last_docs_advisor_meta["source_quality"] = dict(source_quality)
-    elif not snippets:
+        fallback_reason = "typed_answer"
+        agent._last_docs_advisor_meta["helper_finish_reason"] = "typed_answer"
+    else:
         fallback_used = True
         fallback_reason = "retrieval_empty"
         agent._last_docs_advisor_meta["helper_finish_reason"] = "retrieval_empty"
-        agent._last_docs_advisor_meta["helper_skipped_reason"] = "retrieval_empty"
 
     if not answer:
         answer, insufficient_evidence = agent._build_fallback_answer(
@@ -1539,7 +1275,7 @@ def ask_grc_docs(
     answer = " ".join(answer.split())
     if len(answer) > agent._docs_answer_cfg.answer_target_chars:
         answer = answer[: agent._docs_answer_cfg.answer_target_chars - 1].rstrip() + "…"
-    if cached_docs_answer is None and snippets and not helper_sources_selected:
+    if cached_docs_answer is None and snippets:
         sources = _sources_from_candidates(
             selected_candidates,
             answer=answer,
@@ -1554,12 +1290,6 @@ def ask_grc_docs(
             "fallback_used": bool(fallback_used or degraded_retrieval),
             "fallback_reason": fallback_reason,
             "source_quality": dict(source_quality),
-            "helper_eligible": bool(
-                agent._last_docs_advisor_meta.get("helper_eligible", False)
-            ),
-            "helper_skipped_reason": str(
-                agent._last_docs_advisor_meta.get("helper_skipped_reason") or ""
-            ),
         }
         agent._ask_grc_docs_cache_put(
             cache_key,
@@ -2497,170 +2227,6 @@ def _shorten_docs_comparison_sentence(sentence: str, limit: int = 120) -> str:
     return compact[: limit - 1].rstrip(" ,;:.") + "…"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# advisor.py — helper-advisor orchestration
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def classify_docs_advisor_error(message: str) -> str:
-    lower = message.lower()
-    if "timed out" in lower or "timeout" in lower:
-        return "timeout"
-    if "unsupported keys" in lower or "missing keys" in lower or "must be" in lower:
-        return "schema_parse_failure"
-    if "malformed json" in lower or "must be object" in lower:
-        return "malformed_helper_output"
-    if "context" in lower and "length" in lower:
-        return "prompt_too_large"
-    if "http 400" in lower or "http 404" in lower:
-        if "model" in lower:
-            return "config_issue"
-        return "implementation_bug"
-    if "transport failure" in lower:
-        return "llama_server_unavailable"
-    return "implementation_bug"
-
-
-def run_docs_answer_advisor(
-    agent: Any,
-    *,
-    question: str,
-    answer_type: str,
-    snippets: list[DocsAnswerSnippet],
-    focus: str | None,
-) -> dict[str, Any] | None:
-    estimated_prompt_chars = (
-        len(question)
-        + (len(focus) if isinstance(focus, str) else 0)
-        + sum(
-            len(snippet.title) + len(snippet.source) + len(snippet.excerpt)
-            for snippet in snippets
-        )
-    )
-    agent._last_docs_advisor_meta = {
-        "advisor_attempted": False,
-        "advisor_success": False,
-        "fallback_reason": "not_attempted",
-        "helper_latency_ms": None,
-        "prompt_chars": 0,
-        "snippet_count": len(snippets),
-        "schema_valid": False,
-        "timeout_ms": int(agent._docs_answer_cfg.helper_timeout_seconds * 1000),
-        "cache_hit": False,
-        "helper_finish_reason": None,
-    }
-    if not agent._llama_server_url.strip() or not agent._llama_model.strip():
-        agent._last_docs_advisor_meta["fallback_reason"] = "helper_disabled"
-        agent._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
-        return None
-    if not snippets:
-        agent._last_docs_advisor_meta["fallback_reason"] = "retrieval_empty"
-        agent._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
-        return None
-    now = time.monotonic()
-    if now >= agent._docs_advisor_probe_at:
-        agent._docs_advisor_reachable = probe_docs_advisor_server(agent)
-        agent._docs_advisor_probe_at = now + (
-            agent._docs_answer_cfg.retry_interval_on_success_seconds
-            if agent._docs_advisor_reachable
-            else agent._docs_answer_cfg.retry_interval_on_failure_seconds
-        )
-    if not agent._docs_advisor_reachable:
-        agent._last_docs_advisor_meta["fallback_reason"] = "llama_server_unavailable"
-        agent._last_docs_advisor_meta["prompt_chars"] = estimated_prompt_chars
-        return None
-    agent._last_docs_advisor_meta["advisor_attempted"] = True
-    started = time.perf_counter()
-    try:
-        provider_config = ToolAgentsLlamaProviderConfig(
-            base_url=agent._llama_server_url,
-            model=agent._llama_model,
-            api_key=None,
-            timeout_seconds=min(
-                agent._llama_request_timeout_seconds,
-                agent._docs_answer_cfg.helper_timeout_seconds,
-            ),
-            max_tokens=agent._docs_answer_cfg.helper_max_output_tokens,
-            temperature=0.0,
-            enable_thinking=False,
-        )
-        client = ToolAgentsJsonClient(
-            provider_config,
-            timeout_seconds=provider_config.timeout_seconds,
-            max_tokens=provider_config.max_tokens,
-            temperature=0.0,
-            enable_thinking=False,
-        )
-        result = _run_docs_answer_advisor_rag(
-            client=client,
-            model=agent._llama_model,
-            question=question,
-            answer_type=answer_type,
-            snippets=snippets,
-            focus=focus,
-            max_answer_chars=agent._docs_answer_cfg.answer_target_chars,
-            max_excerpt_chars=agent._docs_answer_cfg.excerpt_target_chars,
-            max_sources=agent._docs_answer_cfg.max_sources,
-        )
-        agent._last_docs_advisor_meta.update(
-            {
-                "advisor_success": True,
-                "fallback_reason": "none",
-                "helper_latency_ms": int(result.get("advisor_latency_ms") or 0),
-                "prompt_chars": int(result.get("prompt_chars") or 0),
-                "snippet_count": int(result.get("snippet_count") or len(snippets)),
-                "schema_valid": bool(result.get("schema_valid")),
-                "timeout_ms": int(
-                    result.get("timeout_ms")
-                    or int(agent._docs_answer_cfg.helper_timeout_seconds * 1000)
-                ),
-                "cache_hit": False,
-                "helper_finish_reason": result.get("helper_finish_reason"),
-            }
-        )
-        return result
-    except Exception as exc:
-        logger.info("docs_answer_advisor_failed error=%s", exc)
-        agent._last_docs_advisor_meta.update(
-            {
-                "advisor_success": False,
-                "fallback_reason": classify_docs_advisor_error(str(exc)),
-                "helper_latency_ms": int((time.perf_counter() - started) * 1000),
-                "prompt_chars": estimated_prompt_chars,
-                "helper_finish_reason": "error",
-            }
-        )
-        return None
-
-
-def probe_docs_advisor_server(agent: Any) -> bool:
-    """Cheap connectivity probe to avoid repeated long helper timeouts."""
-    try:
-        parsed = urlsplit(agent._llama_server_url)
-        host = parsed.hostname
-        port = parsed.port
-        if not host or not port:
-            return False
-        with socket.create_connection(
-            (host, int(port)),
-            timeout=agent._docs_answer_cfg.probe_timeout_seconds,
-        ):
-            return True
-    except Exception:
-        return False
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# __all__
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# --- merged from docs_answer_advisor.py ---
-
-
-class DocsAnswerAdvisorError(RuntimeError):
-    """Raised when docs answer synthesis fails validation or transport."""
-
-
 @dataclass(frozen=True)
 class DocsAnswerSnippet:
     """One bounded snippet used for docs answer synthesis."""
@@ -2668,90 +2234,6 @@ class DocsAnswerSnippet:
     title: str
     source: str
     excerpt: str
-
-
-def _run_docs_answer_advisor_rag(
-    *,
-    client: Any,
-    question: str,
-    answer_type: str,
-    snippets: list[DocsAnswerSnippet],
-    focus: str | None = None,
-    max_sources: int = 3,
-) -> dict[str, Any]:
-    """Synthesize a concise grounded answer from bounded snippets (RAG mode, no nested LLM)."""
-    selected_snippets = snippets[:max_sources]
-    lines = []
-    for index, snippet in enumerate(selected_snippets):
-        lines.append(f"### Source [{index}]: {snippet.title} ({snippet.source})\n{snippet.excerpt}\n")
-    answer = "\n".join(lines)
-
-    return {
-        "answer": answer,
-        "source_indexes": list(range(len(selected_snippets))),
-        "insufficient_evidence": len(selected_snippets) == 0,
-        "advisor_latency_ms": 0,
-        "prompt_chars": 0,
-        "snippet_count": len(snippets),
-        "schema_valid": True,
-        "timeout_ms": 0,
-        "helper_finish_reason": "pure_rag_retrieval",
-    }
-
-
-def run_docs_answer_advisor_diagnostic(
-    *,
-    client: Any,
-    question: str,
-    answer_type: str,
-    snippets: list[DocsAnswerSnippet],
-    focus: str | None = None,
-    max_sources: int = 3,
-    response_mode: str = "json_object",
-) -> dict[str, Any]:
-    """Run a single diagnostic helper attempt with phase telemetry and raw output (RAG mode, no nested LLM)."""
-    selected_snippets = snippets[:max_sources]
-    lines = []
-    for index, snippet in enumerate(selected_snippets):
-        lines.append(f"### Source [{index}]: {snippet.title} ({snippet.source})\n{snippet.excerpt}\n")
-    answer = "\n".join(lines)
-
-    return {
-        "ok": True,
-        "response_mode": response_mode,
-        "question": question,
-        "answer_type": answer_type,
-        "prompt_chars": 0,
-        "snippet_count": len(snippets),
-        "timeout_ms": 0,
-        "result": {
-            "answer": answer,
-            "source_indexes": list(range(len(selected_snippets))),
-            "insufficient_evidence": len(selected_snippets) == 0,
-            "helper_finish_reason": "pure_rag_retrieval",
-        },
-        "raw_response_text": json.dumps({
-            "answer": answer,
-            "source_indexes": list(range(len(selected_snippets))),
-            "insufficient_evidence": len(selected_snippets) == 0,
-        }),
-        "raw_model_output": "",
-        "finish_reason": "stop",
-        "error_kind": "",
-        "error_message": "",
-        "response_parse_error": "",
-        "payload_parse_error": "",
-        "validation_error": "",
-        "phase_ms": {
-            "prompt_build": 0,
-            "http_request": 0,
-            "generation": 0,
-            "parsing": 0,
-            "validation": 0,
-            "total": 0,
-        },
-        "messages": [],
-    }
 
 
 __all__ = [
@@ -2765,12 +2247,9 @@ __all__ = [
     "build_typed_docs_answer",
     "catalog_block_purpose_sentence",
     "classify_docs_answer_type",
-    "classify_docs_advisor_error",
     "clean_catalog_summary_for_answer",
     "clean_docs_excerpt",
-    "clip_docs_snippets_for_helper",
     "collect_docs_candidates",
-    "DocsAnswerAdvisorError",
     "DocsAnswerSnippet",
     "docs_low_value_reasons",
     "docs_primary_terms",
@@ -2779,8 +2258,6 @@ __all__ = [
     "extract_block_definition_subject",
     "extract_comparison_sides",
     "extract_docs_subject",
-    "helper_candidates_for_docs_answer",
-    "helper_eligibility_for_docs_answer",
     "infer_docs_source_type",
     "is_block_definition_query",
     "is_docs_evidence_strong",
@@ -2790,11 +2267,8 @@ __all__ = [
     "normalize_docs_source_key",
     "normalized_docs_retrieval_query",
     "pick_typed_sentence",
-    "probe_docs_advisor_server",
     "rank_docs_candidates",
     "required_terms_for_answer_type",
-    "run_docs_answer_advisor",
-    "run_docs_answer_advisor_diagnostic",
     "select_docs_candidates_for_answer_type",
     "sentence_list",
     "should_catalog_assist",

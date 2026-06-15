@@ -1,7 +1,7 @@
 """Local graph checkpoint and edit-journal storage.
 
-The journal is intentionally CLI/runtime-local infrastructure. It does not add
-model-facing tools and restore always writes to a caller-provided copy path.
+SQLite-backed history with atomic transactions and lineage-scoped retention.
+Restore always writes to a caller-provided copy path.
 """
 
 from __future__ import annotations
@@ -10,7 +10,9 @@ import copy
 import difflib
 import hashlib
 import json
+import logging
 import os
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,15 +22,18 @@ from typing import Any
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session_ops import connection_id as render_connection_id
 
+logger = logging.getLogger(__name__)
+
 MAX_ACCEPTED_VERSIONS_PER_LINEAGE = 100
 HISTORY_ENV_VAR = "GRC_AGENT_HISTORY_PATH"
+_SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 def default_history_path() -> Path:
     override = os.environ.get(HISTORY_ENV_VAR)
     if override:
         return Path(override).expanduser()
-    return Path(".grc_agent") / "history" / "journal.jsonl"
+    return Path(".grc_agent") / "history" / "journal.db"
 
 
 @dataclass(frozen=True)
@@ -133,7 +138,7 @@ def graph_delta(before: GraphSnapshot | None, after: GraphSnapshot) -> dict[str,
 
 def snapshot_to_payload(snapshot: GraphSnapshot) -> dict[str, Any]:
     return {
-        "raw_data": copy.deepcopy(snapshot.raw_data),
+        "raw_data": snapshot.raw_data,
         "graph_hash": snapshot.graph_hash,
         "block_count": len(snapshot.blocks_by_uid),
         "connection_count": len(snapshot.connections),
@@ -154,7 +159,7 @@ def _dict_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]
 
 
 class GraphHistoryJournal:
-    """Append-only JSONL history with retention for accepted checkpoints."""
+    """SQLite-backed graph checkpoint history with lineage-scoped retention."""
 
     def __init__(
         self,
@@ -164,6 +169,44 @@ class GraphHistoryJournal:
     ) -> None:
         self.path = Path(path) if path is not None else default_history_path()
         self.accepted_retention = max(1, int(accepted_retention))
+        self._init_db()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    def _init_db(self) -> None:
+        if self.path.exists():
+            with open(self.path, "rb") as handle:
+                header = handle.read(16)
+            if header[:16] != _SQLITE_HEADER:
+                raise ValueError(
+                    f"Legacy history format detected at {self.path}. "
+                    "History journal storage has migrated to SQLite. "
+                    "Remove the old file and re-record checkpoints."
+                )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._conn() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS history_records (
+                    id TEXT PRIMARY KEY,
+                    lineage_key TEXT NOT NULL,
+                    record_type TEXT NOT NULL,
+                    accepted INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_history_lineage
+                    ON history_records(lineage_key, accepted, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_history_ts
+                    ON history_records(timestamp);
+                """
+            )
+            conn.commit()
 
     def record_checkpoint(
         self,
@@ -193,7 +236,7 @@ class GraphHistoryJournal:
         )
         record["graph_delta"] = graph_delta(before, after)
         record["graph_snapshot"] = snapshot_to_payload(after)
-        self._append(record)
+        self._insert(record)
         self._prune_accepted_versions(lineage_key)
         return record
 
@@ -228,20 +271,29 @@ class GraphHistoryJournal:
         record["message"] = result.get("message", "")
         record["graph_delta"] = graph_delta(before, current) if before is not None else {}
         record["graph_snapshot"] = snapshot_to_payload(current)
-        self._append(record)
+        self._insert(record)
         return record
 
     def list_records(self, *, accepted_only: bool = False) -> list[dict[str, Any]]:
-        records = self._read_records()
-        if accepted_only:
-            records = [record for record in records if record.get("accepted") is True]
-        return records
+        with self._conn() as conn:
+            if accepted_only:
+                rows = conn.execute(
+                    "SELECT payload FROM history_records WHERE accepted=1 ORDER BY timestamp"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload FROM history_records ORDER BY timestamp"
+                ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
 
     def get_record(self, record_id: str) -> dict[str, Any]:
-        for record in self._read_records():
-            if record.get("id") == record_id:
-                return record
-        raise KeyError(record_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT payload FROM history_records WHERE id=?", (record_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(record_id)
+        return json.loads(row["payload"])
 
     def diff_records(self, first_id: str, second_id: str) -> dict[str, Any]:
         first = self.get_record(first_id)
@@ -278,11 +330,9 @@ class GraphHistoryJournal:
             }
         snapshot = _snapshot_from_record(record)
         session = FlowgraphSession.from_raw_data(snapshot.raw_data, path=target)
-        session.save(target)
-        reloaded = FlowgraphSession()
-        reloaded.load(target)
-        valid = reloaded.validate()
-        validation = reloaded.validation_state()
+        session.save(target, validate=False)
+        valid = session.validate()
+        validation = session.validation_state()
         return {
             "ok": True,
             "id": record_id,
@@ -324,50 +374,45 @@ class GraphHistoryJournal:
             "save_path": save_path,
         }
 
-    def _append(self, record: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-
-    def _read_records(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        records: list[dict[str, Any]] = []
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    records.append(record)
-        return records
-
-    def _write_records(self, records: list[dict[str, Any]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(record, sort_keys=True) + "\n")
+    def _insert(self, record: dict[str, Any]) -> None:
+        payload = json.dumps(record, sort_keys=True)
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO history_records "
+                "(id, lineage_key, record_type, accepted, timestamp, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    record["id"],
+                    record["lineage_key"],
+                    record["record_type"],
+                    int(record["accepted"]),
+                    record["timestamp"],
+                    payload,
+                ),
+            )
+            conn.commit()
 
     def _prune_accepted_versions(self, lineage_key: str) -> None:
-        records = self._read_records()
-        accepted_for_lineage = [
-            index
-            for index, record in enumerate(records)
-            if record.get("accepted") is True
-            and record.get("record_type") == "checkpoint"
-            and record.get("lineage_key") == lineage_key
-        ]
-        excess = len(accepted_for_lineage) - self.accepted_retention
-        if excess <= 0:
-            return
-        drop_indexes = set(accepted_for_lineage[:excess])
-        self._write_records([
-            record for index, record in enumerate(records) if index not in drop_indexes
-        ])
+        with self._conn() as conn:
+            excess_ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM history_records "
+                    "WHERE lineage_key=? AND accepted=1 AND record_type='checkpoint' "
+                    "ORDER BY timestamp",
+                    (lineage_key,),
+                ).fetchall()
+            ]
+            excess = len(excess_ids) - self.accepted_retention
+            if excess <= 0:
+                return
+            drop_ids = excess_ids[:excess]
+            placeholders = ",".join("?" * len(drop_ids))
+            conn.execute(
+                f"DELETE FROM history_records WHERE id IN ({placeholders})",
+                drop_ids,
+            )
+            conn.commit()
 
 
 def _snapshot_from_record(record: dict[str, Any]) -> GraphSnapshot:
@@ -390,8 +435,9 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
     if session.flowgraph is None:
         return "unloaded"
     path = str(session.path) if session.path is not None else "<memory>"
-    snapshot = snapshot_session(session)
-    digest = hashlib.sha256(f"{path}\n{snapshot.graph_hash}".encode()).hexdigest()[:16]
+    serialized = FlowgraphSession._serialize_raw_data(session.flowgraph.raw_data)
+    graph_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{path}\n{graph_hash}".encode()).hexdigest()[:16]
     return f"lineage:{digest}"
 
 

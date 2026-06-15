@@ -389,6 +389,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "toolagents" },
 ]
@@ -408,6 +409,7 @@ gui = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", marker = "python_full_version < '3.13'", specifier = "<2" },
+    { name = "pydantic", specifier = ">=2.0" },
     { name = "pygments", marker = "extra == 'gui'", specifier = ">=2.17.0" },
     { name = "pyside6", marker = "extra == 'gui'", specifier = ">=6.5.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },

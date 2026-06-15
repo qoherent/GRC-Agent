@@ -12,21 +12,10 @@ history_compact_budget = 100000
 max_tool_result_chars = 4000
 
 [agent.docs_answer]
-enabled = true
-helper_mode = "auto"
-helper_max_output_tokens = 320
-helper_timeout_seconds = 3.5
-helper_max_snippet_chars = 320
-helper_max_total_context_chars = 900
 max_sources = 3
 answer_target_chars = 320
 excerpt_target_chars = 180
-probe_timeout_seconds = 0.5
-retry_interval_on_failure_seconds = 3.0
-retry_interval_on_success_seconds = 1.5
-fallback_enabled = true
 answer_cache_size = 64
-helper_prompt_version = "v3_compact"
 
 [agent.retrieval]
 search_blocks_default_k = 5
