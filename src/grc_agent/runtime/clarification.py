@@ -144,7 +144,7 @@ def render_clarification_prompt(payload: dict[str, Any]) -> str:
     custom_title = custom.get("title", "Other / custom")
     lines.append(f"{custom_label}) {custom_title} (free text)")
     lines.append("")
-    lines.append("Reply with the letter of your choice (A/B/C/D) or type free text.")
+    lines.append("Reply format: A/B/C/D or free text.")
     return "\n".join(lines)
 
 
@@ -242,8 +242,8 @@ def resolve_pending_clarification_state(
             "mode": "reminder",
             "text": (
                 f"'{label_reply}' is not a valid option. "
-                f"Choose one of: {', '.join(o.label for o in req.options)}. "
-                f"Or use D / free text to describe what you want instead."
+                f"Valid options: {', '.join(o.label for o in req.options)}. "
+                f"Custom reply: {req.custom_option.label} or free text."
             ),
         }
 
@@ -293,7 +293,7 @@ def connection_clarification_payload(
         )
     request = ClarificationRequest(
         kind="connection_disambiguation",
-        question="Multiple existing connections match. Choose the one to remove.",
+        question="Multiple existing connections match the provided endpoints.",
         options=options,
         state_revision=revision,
     )
@@ -345,7 +345,7 @@ def rewire_new_endpoint_clarification_payload(
         )
     request = ClarificationRequest(
         kind="rewire_new_endpoint_disambiguation",
-        question="Multiple executable new endpoints match. Choose the exact rewire target.",
+        question="Multiple executable new endpoints match the provided hints.",
         options=options,
         state_revision=revision,
     )
@@ -398,7 +398,7 @@ def rewire_clarification_payload(
         )
     request = ClarificationRequest(
         kind="rewire_connection_disambiguation",
-        question="Multiple old connections match. Choose the exact edge to rewire.",
+        question="Multiple old connections match the provided endpoint hints.",
         options=options,
         state_revision=revision,
     )
@@ -487,7 +487,7 @@ def duplicate_block_clarification_payload(
 
     request = ClarificationRequest(
         kind="block_disambiguation",
-        question=f"Multiple blocks are named `{instance_name}`. Choose the exact target.",
+        question=f"Multiple blocks match the requested instance_name `{instance_name}`.",
         options=options,
         state_revision=revision,
     )
@@ -495,10 +495,7 @@ def duplicate_block_clarification_payload(
     clarification.update(
         {
             "ok": False,
-            "message": (
-                "Multiple blocks match the requested instance_name. "
-                "Choose one candidate before mutating."
-            ),
+            "message": "Multiple blocks match the requested instance_name.",
             "error_type": "ambiguous_block",
             "errors": copy.deepcopy(errors),
             "normalized_operations": copy.deepcopy(operations),

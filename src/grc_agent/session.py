@@ -179,80 +179,7 @@ def validate_raw_flowgraph(raw_data: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-class GnuPreflightResult:
-    """Result container for GNU Radio preflight validation."""
 
-    def __init__(self, ok: bool, errors: list[str], warnings: list[str]) -> None:
-        self.ok = ok
-        self.errors = errors
-        self.warnings = warnings
-
-
-def validate_graph(
-    blocks: list[Block], connections: list[Connection]
-) -> GnuPreflightResult | None:
-    """Run GNU Radio structural validation on a graph.
-
-    Returns ``None`` when the GNU API is unavailable (fallback to grcc).
-    """
-    platform = _ensure_platform()
-    if platform is None:
-        logger.debug("GNU Platform unavailable; skipping preflight")
-        return None
-
-    try:
-        fg = platform.make_flow_graph()
-        raw = _to_raw_data(blocks, connections)
-        fg.import_data(raw)
-        fg.validate()
-
-        errors: list[str] = []
-        warnings: list[str] = []
-        for msg in fg.iter_error_messages():
-            level = getattr(msg, "level", "error")
-            text = str(msg)
-            if level in ("error", "critical"):
-                errors.append(text)
-            else:
-                warnings.append(text)
-
-        return GnuPreflightResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
-    except Exception as exc:
-        logger.debug("GNU preflight validation failed: %s", exc)
-        return None
-
-
-def _to_raw_data(blocks: list[Block], connections: list[Connection]) -> dict[str, Any]:
-    """Rebuild a minimal GRC raw dict from our typed models."""
-    raw_blocks: list[dict[str, Any]] = []
-    for block in blocks:
-        raw: dict[str, Any] = {
-            "name": block.instance_name,
-            "id": block.block_type,
-        }
-        params = block.params.get("parameters") if isinstance(block.params, dict) else None
-        if isinstance(params, dict):
-            raw["parameters"] = dict(params)
-        states = block.params.get("states") if isinstance(block.params, dict) else None
-        if isinstance(states, dict):
-            raw["states"] = dict(states)
-        raw_blocks.append(raw)
-
-    raw_connections: list[list[Any]] = []
-    for conn in connections:
-        raw_connections.append(
-            [conn.src_block, str(conn.src_port), conn.dst_block, str(conn.dst_port)]
-        )
-
-    return {
-        "options": {
-            "parameters": {"id": "top_block", "generate_options": "qt_gui", "output_language": "python"},
-            "states": {"state": "enabled", "coordinate": [0, 0], "rotation": 0},
-        },
-        "blocks": raw_blocks,
-        "connections": raw_connections,
-        "metadata": {"file_format": 1},
-    }
 
 
 # =========================================================================
@@ -811,11 +738,14 @@ def _build_clarification_payload(
 
     req = ClarificationRequest(
         kind="choose_insert_candidate",
-        question="Multiple compatible blocks were found for the goal. Which one should be inserted?",
+        question="Multiple compatible blocks were found for the requested insertion goal.",
         options=options,
+        state_revision=session.state_revision,
     )
 
     payload = req.to_dict()
+    if len(validated) > _MAX_MCQ_OPTIONS:
+        payload["options_truncated"] = f"... [TRUNCATED by chat-history compactor: was {len(validated)} items, kept {_MAX_MCQ_OPTIONS}]"
     payload["ok"] = False
     payload["attempted"] = attempted
     payload["attempt_count"] = len(attempted)
@@ -872,12 +802,10 @@ def _classify_goal(goal: str, preferred_block_type: str | None) -> dict[str, Any
     """Classify user goal to determine insertion mode.
 
     Returns dict with:
-        mode: "generic" | "explicit_family" | "preferred_type" | "unsupported"
+        mode: "generic" | "explicit_family" | "preferred_type"
         family_tokens: list[str] — tokens identifying the desired block family
         min_score: int — minimum relevance score for explicit-family goals
     """
-    goal_lower = goal.lower().strip()
-
     if preferred_block_type and preferred_block_type.strip():
         return {
             "mode": "preferred_type",
@@ -885,28 +813,9 @@ def _classify_goal(goal: str, preferred_block_type: str | None) -> dict[str, Any
             "min_score": 0,
         }
 
-    stripped = re.sub(
-        r"\b(insert|add|put|place|compatible|block|into|the|a|an|some|one|this|that"
-        r"|current|existing|flowgraph|graph|loaded|main|path|signal|stream)\b",
-        "",
-        goal_lower,
-    )
-    stripped = re.sub(r"\s+", " ", stripped).strip()
-
-    if re.search(r"\b(sink|source|variable)\b", stripped):
-        return {"mode": "unsupported", "family_tokens": [], "min_score": 0}
-
-    tokens = [t for t in _extract_tokens(stripped) if len(t) > 2]
+    tokens = _extract_tokens(goal)
     freq = _catalog_token_frequency()
-    family_tokens = [t for t in tokens if freq.get(t, 999) <= 5]
-
-    if "filter" in stripped and len(tokens) >= 2:
-        family_tokens = list(set(family_tokens))
-        family_tokens.append("filter")
-
-    if "throttle" in stripped:
-        family_tokens = list(set(family_tokens))
-        family_tokens.append("throttle")
+    family_tokens = [t for t in tokens if len(t) > 2 and freq.get(t, 0) > 0]
 
     if family_tokens:
         return {
@@ -961,8 +870,13 @@ def _score_candidates(
     preferred_block_type: str | None,
 ) -> list[tuple[int, str, InsertionCandidate]]:
     """Score candidates using generic signals only."""
-    goal_lower = goal.lower()
     scored: list[tuple[int, str, InsertionCandidate]] = []
+    freq = _catalog_token_frequency()
+    goal_words = [
+        w
+        for w in _extract_tokens(goal)
+        if len(w) > 2 and freq.get(w, 0) > 0
+    ]
     for conn_id, candidate in candidates:
         score = 0
         block_type = candidate.block_type
@@ -971,11 +885,6 @@ def _score_candidates(
         elif preferred_block_type and preferred_block_type in block_type:
             score += 3
 
-        goal_words = [
-            w
-            for w in goal_lower.split()
-            if len(w) > 2 and w not in {"block", "into", "the", "a", "an", "insert", "add", "remove"}
-        ]
         for word in goal_words:
             if word in block_type.lower():
                 score += 3
@@ -1028,8 +937,7 @@ def auto_insert_block(
     if intent["mode"] == "unsupported":
         return _error(
             "UNSUPPORTED_GOAL_FOR_AUTO_INSERT",
-            f"Goal '{goal}' is not supported for automated insertion. "
-            "Use `insert_block_on_connection` with exact block_type and connection_id.",
+            f"Goal '{goal}' is not supported for automated insertion.",
         )
 
     suggest_k = 500 if intent["mode"] in ("explicit_family", "preferred_type") else 5
@@ -1057,8 +965,7 @@ def auto_insert_block(
                 "AUTO_INSERT_NO_GOAL_MATCH",
                 f"No compatible candidates match goal '{goal}'. "
                 f"Tried {len(all_candidates)} compatible candidates across {len(stream_connections)} connections; "
-                f"none matched block family {intent['family_tokens']}. "
-                f"Try a different goal or use `insert_block_on_connection` with exact block_type.",
+                f"none matched block family {intent['family_tokens']}.",
             )
         all_candidates = filtered
 

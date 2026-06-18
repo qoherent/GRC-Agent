@@ -37,84 +37,6 @@ from grc_agent.session_ops import (
 
 logger = logging.getLogger(__name__)
 
-_AGENTIC_TOOL_REMINDER = "Current tool evidence may be insufficient for this answer."
-_MUTATION_TOOL_REMINDER = "The user requested a graph mutation that has not been executed."
-_INVALID_CHANGE_GRAPH_REMINDER = "The previous change_graph call had invalid or missing arguments."
-_MUTATION_NOT_COMMITTED_REMINDER = "No graph edit has succeeded yet for this request."
-_WRONG_INSERT_REPAIR_REMINDER = "Wire insertion validation failed. Review occupied ports."
-_TOOL_NEED_PATTERNS = (
-    re.compile(
-        r"\b(?:need|needs|needed|would need|must|should)\b.{0,80}\b(?:inspect|search|look up|check|query)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:inspect|search|look up|check|query)\b.{0,80}\b(?:would be needed|is needed|are needed|required)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:use|call|run)\b.{0,40}\b(?:inspect_graph|search_blocks|ask_grc_docs)\b",
-        re.IGNORECASE,
-    ),
-)
-_GRAPH_LOCAL_FACT_TERMS = (
-    "active graph",
-    "this graph",
-    "loaded graph",
-    "current graph",
-    "flowgraph",
-    "block",
-    "blocks",
-    "source",
-    "sink",
-    "connection",
-    "wire",
-    "port",
-    "parameter",
-    "param",
-    "value",
-    "frequency",
-    "freq",
-    "sample rate",
-    "sampling rate",
-    "waveform",
-    "cosine",
-    "sine",
-    "amplitude",
-    "variable",
-)
-_GRAPH_MUTATION_TERMS = (
-    "add",
-    "change",
-    "connect",
-    "delete",
-    "disable",
-    "disconnect",
-    "edit",
-    "enable",
-    "insert",
-    "make",
-    "modify",
-    "remove",
-    "rewire",
-    "set",
-    "turn off",
-    "turn on",
-)
-_GRAPH_MUTATION_CONTEXT_TERMS = (
-    "block",
-    "connection",
-    "freq",
-    "frequency",
-    "graph",
-    "parameter",
-    "param",
-    "sample rate",
-    "samp_rate",
-    "signal source",
-    "source",
-    "variable",
-    "wire",
-)
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent
@@ -142,13 +64,10 @@ def _backend_unreachable_hint(server_url: str) -> str:
 
     No ``systemctl`` / ``journalctl`` / Linux-specific text. Applies on
     macOS and Windows where Ollama is a desktop application that the
-    user starts from the menu bar / Start menu.
+    user starts from the menu bar / Start menu. The string is a fact
+    (refused connection at URL) — no in-band behavioral directives.
     """
-    return (
-        "Connection refused. Is Ollama running? "
-        "Ensure the Ollama application is active or check the system "
-        f"service at {server_url}."
-    )
+    return f"Connection refused at {server_url}."
 
 
 def _backend_unreachable_payload(
@@ -530,7 +449,7 @@ class ToolAgentsRunner:
     ) -> Iterator[dict[str, Any]]:
         resolved_model = model or self.provider_config.model
         if not isinstance(resolved_model, str) or not resolved_model.strip():
-            no_model_text = "No model selected. Use Model > Select Model to pick a model before sending messages."
+            no_model_text = "No model configured."
             agent.chat_history.add_assistant_message(no_model_text)
             yield {"event": "chunk", "text": no_model_text}
             yield {
@@ -564,13 +483,6 @@ class ToolAgentsRunner:
             agent._record_active_session_history(reason="turn_refresh")
         agent.chat_history.add_user_message(user_message)
 
-        unsupported = agent.check_unsupported_request(user_message)
-        if unsupported is not None:
-            agent.chat_history.add_assistant_message(unsupported["assistant_text"])
-            logger.info("unsupported_request_blocked message=%s", user_message[:80])
-            yield {"event": "final", "result": unsupported}
-            return
-
         agent._turn_user_message = user_message
 
         tool_calls_executed = 0
@@ -578,15 +490,7 @@ class ToolAgentsRunner:
         tool_names_requested: list[str] = []
         tool_rounds_used = 0
         assistant_turns = 0
-        correction_retries_used = 0
-        retry_reminders_used: set[str] = set()
         seen_tool_calls: dict[tuple[str, str], dict[str, Any]] = {}
-        change_graph_schema_failure_pending = False
-        change_graph_committed = False
-        change_graph_control_response = False
-        change_graph_wrong_insert_pending = False
-        change_graph_missing_evidence_pending = False
-        graph_ambiguity_pending = False
         tool_context_chars = 0
         truncated_tool_output = False
 
@@ -644,11 +548,8 @@ class ToolAgentsRunner:
 
             if tool_calls and tool_rounds_used >= max_tool_rounds:
                 ceiling_text = (
-                    "The model ran for the maximum number of tool rounds "
-                    f"({max_tool_rounds}) without producing a final answer. "
-                    "This can happen when a small local model loops on the "
-                    "same question. Please rephrase your request or be more "
-                    "specific."
+                    f"Tool-round ceiling reached ({max_tool_rounds} rounds) "
+                    "without a final answer."
                 )
                 yield {"event": "chunk", "text": ceiling_text}
                 yield {
@@ -703,8 +604,8 @@ class ToolAgentsRunner:
                             "ok": False,
                             "deduplicated": True,
                             "message": (
-                                "Duplicate tool call detected with identical arguments. "
-                                "Request ignored. Reformulate your query or change parameters."
+                                "Duplicate tool call with identical arguments; "
+                                "not executed."
                             ),
                         }
                         logger.info(
@@ -738,45 +639,12 @@ class ToolAgentsRunner:
                         )
                         result = delegate_result.result
                         executed = delegate_result.executed
-                    if tool_name == "change_graph":
-                        if executed:
-                            change_graph_schema_failure_pending = False
-                            if isinstance(result, dict):
-                                if result.get("ok") is True and result.get("committed") is True:
-                                    change_graph_committed = True
-                                error_type = result.get("error_type")
-                                wrong_insert = _is_repairable_insert_in_connection_response(
-                                    result
-                                )
-                                if wrong_insert:
-                                    change_graph_wrong_insert_pending = True
-                                if (
-                                    not wrong_insert
-                                    and (
-                                        error_type
-                                        in {
-                                            "clarification_required",
-                                            ErrorCode.UNSUPPORTED_OP,
-                                        }
-                                        or _is_terminal_change_graph_failure(result)
-                                    )
-                                ):
-                                    change_graph_control_response = True
-                                    if _is_terminal_change_graph_failure(result):
-                                        stopping_failure = result
-                                        break
-                                if _is_missing_graph_evidence_response(result):
-                                    change_graph_missing_evidence_pending = True
-                        elif isinstance(result, dict) and result.get("ok") is False:
-                            change_graph_schema_failure_pending = True
                     if executed:
                         tool_calls_executed += 1
                         tool_context_chars += len(str(result))
                         truncated_tool_output = truncated_tool_output or bool(
                             result.get("output_truncated")
                         )
-                        if isinstance(result, dict) and _is_ambiguous_tool_result(result):
-                            graph_ambiguity_pending = True
                         if (
                             isinstance(result, dict)
                             and result.get("ok") is True
@@ -813,7 +681,6 @@ class ToolAgentsRunner:
                             "assistant_text": assistant_text,
                             "error_type": stopping_failure.get("error_type"),
                             "message": assistant_text,
-                            "correction_retries_used": correction_retries_used,
                         },
                     }
                     return
@@ -823,35 +690,6 @@ class ToolAgentsRunner:
                 agent.chat_history, _message_text(assistant_message)
             )
             _replace_last_assistant_text(agent.chat_history, assistant_text)
-            retry_reminder = _tool_retry_reminder(
-                user_message=user_message,
-                assistant_text=assistant_text,
-                tool_calls_requested=tool_calls_requested,
-                tool_calls_executed=tool_calls_executed,
-                tool_names_requested=tool_names_requested,
-                change_graph_schema_failure_pending=change_graph_schema_failure_pending,
-                change_graph_committed=change_graph_committed,
-                change_graph_control_response=change_graph_control_response,
-                change_graph_wrong_insert_pending=change_graph_wrong_insert_pending,
-                change_graph_missing_evidence_pending=change_graph_missing_evidence_pending,
-                graph_ambiguity_pending=graph_ambiguity_pending,
-            )
-            retry_key = _retry_reminder_key(retry_reminder)
-            if (
-                retry_key not in retry_reminders_used
-                and tool_rounds_used < max_tool_rounds
-                and retry_reminder is not None
-            ):
-                retry_reminders_used.add(retry_key)
-                correction_retries_used += 1
-                wrapped = f"<runtime_directive>\n{retry_reminder}\n</runtime_directive>"
-                agent.chat_history.add_user_message(wrapped)
-                logger.info(
-                    "tool_evidence_retry retries=%d message=%s",
-                    correction_retries_used,
-                    user_message[:80],
-                )
-                continue
             logger.info(
                 "turn_end ok=True steps=%d tool_rounds=%d tool_calls=%d",
                 assistant_turns,
@@ -872,7 +710,6 @@ class ToolAgentsRunner:
                         "tool_rounds_used": tool_rounds_used,
                         "tool_calls_requested": tool_calls_requested,
                         "tool_calls_executed": tool_calls_executed,
-                        "correction_retries_used": correction_retries_used,
                         "assistant_text": assistant_text,
                     },
                     enabled=wrapper_eval_telemetry,
@@ -884,264 +721,6 @@ class ToolAgentsRunner:
                 ),
             }
             return
-
-
-def _tool_retry_reminder(
-    *,
-    user_message: str,
-    assistant_text: str,
-    tool_calls_requested: int,
-    tool_calls_executed: int,
-    tool_names_requested: list[str],
-    change_graph_schema_failure_pending: bool,
-    change_graph_committed: bool,
-    change_graph_control_response: bool,
-    change_graph_wrong_insert_pending: bool,
-    change_graph_missing_evidence_pending: bool,
-    graph_ambiguity_pending: bool,
-) -> str | None:
-    if (
-        graph_ambiguity_pending
-        and not change_graph_committed
-        and _looks_like_graph_mutation_request(user_message)
-        and _assistant_asks_for_clarification(assistant_text)
-    ):
-        return None
-    if (
-        tool_calls_executed > 0
-        and not change_graph_committed
-        and _looks_like_graph_mutation_request(user_message)
-        and _assistant_asks_for_clarification(assistant_text)
-    ):
-        return None
-    if (
-        change_graph_missing_evidence_pending
-        and not change_graph_committed
-        and _looks_like_graph_mutation_request(user_message)
-    ):
-        return _AGENTIC_TOOL_REMINDER
-    if (
-        change_graph_schema_failure_pending
-        and _looks_like_graph_mutation_request(user_message)
-    ):
-        return _INVALID_CHANGE_GRAPH_REMINDER
-    if (
-        change_graph_wrong_insert_pending
-        and not change_graph_committed
-        and _looks_like_graph_mutation_request(user_message)
-    ):
-        return _WRONG_INSERT_REPAIR_REMINDER
-    if (
-        "change_graph" in tool_names_requested
-        and not change_graph_committed
-        and not change_graph_control_response
-        and _looks_like_graph_mutation_request(user_message)
-    ):
-        return _MUTATION_NOT_COMMITTED_REMINDER
-    if (
-        tool_calls_executed == 0
-        and _looks_like_graph_mutation_request(user_message)
-        and _assistant_asks_for_clarification(assistant_text)
-    ):
-        return _AGENTIC_TOOL_REMINDER
-    if (
-        "change_graph" not in tool_names_requested
-        and _looks_like_graph_mutation_request(user_message)
-    ):
-        return _MUTATION_TOOL_REMINDER
-    if _assistant_says_tool_needed(assistant_text):
-        if _assistant_says_missing_runtime_prerequisite(assistant_text):
-            return None
-        if tool_calls_executed > 0 or tool_calls_requested == 0:
-            return _AGENTIC_TOOL_REMINDER
-        return None
-    if tool_calls_requested > 0 or tool_calls_executed > 0:
-        return None
-    if _looks_like_graph_local_fact_question(user_message):
-        return _AGENTIC_TOOL_REMINDER
-    return None
-
-
-def _is_ambiguous_tool_result(result: dict[str, Any]) -> bool:
-    ambiguity = result.get("ambiguity")
-    if isinstance(ambiguity, dict) and ambiguity.get("has_ambiguity") is True:
-        return True
-    for key in ("errors", "validation_errors"):
-        rows = result.get(key)
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if isinstance(row, dict) and str(row.get("code") or "").startswith("ambiguous"):
-                return True
-    return False
-
-
-def _assistant_asks_for_clarification(text: str) -> bool:
-    lowered = text.lower()
-    return (
-        "?" in text
-        or "please specify" in lowered
-        or "please provide" in lowered
-        or "which " in lowered
-        or "clarify" in lowered
-    )
-
-
-def _retry_reminder_key(reminder: str | None) -> str:
-    if reminder is None:
-        return ""
-    if reminder == _AGENTIC_TOOL_REMINDER:
-        return "missing_tool_evidence"
-    if reminder == _MUTATION_TOOL_REMINDER:
-        return "missing_change_graph"
-    if reminder == _INVALID_CHANGE_GRAPH_REMINDER:
-        return "invalid_change_graph_args"
-    if reminder == _MUTATION_NOT_COMMITTED_REMINDER:
-        return "mutation_not_committed"
-    if reminder == _WRONG_INSERT_REPAIR_REMINDER:
-        return "wrong_insert_operation"
-    return reminder
-
-
-def _is_repairable_insert_in_connection_response(result: dict[str, Any]) -> bool:
-    """Return true when the tool itself says insertion is the wrong edit shape."""
-    if result.get("ok") is True:
-        return False
-    if result.get("error_type") != "clarification_required":
-        return False
-    haystack_parts = [str(result.get("message") or "")]
-    options = result.get("clarification_options")
-    if isinstance(options, list):
-        haystack_parts.extend(str(option) for option in options)
-    haystack = " ".join(haystack_parts).lower()
-    return "parallel source" in haystack and "not the same operation" in haystack
-
-
-def _is_missing_graph_evidence_response(result: dict[str, Any]) -> bool:
-    if result.get("ok") is True:
-        return False
-    if result.get("error_type") not in {
-        "clarification_required",
-        ErrorCode.PREFLIGHT_REJECTED,
-        ErrorCode.INVALID_REQUEST,
-    }:
-        return False
-    haystack_parts = [str(result.get("message") or "")]
-    options = result.get("clarification_options")
-    if isinstance(options, list):
-        haystack_parts.extend(str(option) for option in options)
-    for key in ("errors", "validation_errors"):
-        rows = result.get(key)
-        if isinstance(rows, list):
-            haystack_parts.extend(str(row) for row in rows[:6])
-    hint = result.get("hint")
-    if isinstance(hint, str):
-        haystack_parts.append(hint)
-    haystack = " ".join(haystack_parts).lower()
-    return (
-        "no editable parameter target matched" in haystack
-        or "inspect parameters/details" in haystack
-        or "inspect the target block details" in haystack
-        or "run search_blocks" in haystack
-        or "unknown_block_id" in haystack
-        or "parameter_not_found" in haystack
-        or "port_out_of_range" in haystack
-        or (
-            "block_not_found" in haystack
-            and "include add_blocks and add_connections in the same" in haystack
-        )
-    )
-
-
-def _is_terminal_change_graph_failure(result: dict[str, Any]) -> bool:
-    if result.get("ok") is True or result.get("committed") is True:
-        return False
-    if _is_missing_graph_evidence_response(result):
-        return False
-    error_type = result.get("error_type")
-    if error_type == ErrorCode.GNU_VALIDATION_FAILED and _has_clear_change_graph_repair(result):
-        return False
-    if error_type in {
-        ErrorCode.VALIDATION_ERROR,
-        ErrorCode.VALIDATION_TIMEOUT,
-        ErrorCode.STALE_REVISION,
-    }:
-        return True
-    if error_type == ErrorCode.INVALID_REQUEST:
-        message = str(result.get("message") or "").lower()
-        return any(term in message for term in ("stale", "invalid", "unknown"))
-    validation_result = result.get("validation_result")
-    if isinstance(validation_result, dict):
-        status = str(validation_result.get("status") or "").lower()
-        if status and status not in {"valid", "pass", "ok"}:
-            return False
-    return False
-
-
-def _has_clear_change_graph_repair(result: dict[str, Any]) -> bool:
-    hint = result.get("hint")
-    if not isinstance(hint, str):
-        return False
-    lowered = hint.lower()
-    return "retry with" in lowered and "add_blocks" in lowered and ".params." in lowered
-
-
-def _assistant_says_tool_needed(text: str) -> bool:
-    if not isinstance(text, str) or not text.strip():
-        return False
-    return any(pattern.search(text) for pattern in _TOOL_NEED_PATTERNS)
-
-
-def _assistant_says_missing_runtime_prerequisite(text: str) -> bool:
-    if not isinstance(text, str) or not text.strip():
-        return False
-    lowered = text.lower()
-    return (
-        "loaded graph" in lowered
-        and any(word in lowered for word in ("need", "needs", "required"))
-    )
-
-
-def _looks_like_graph_local_fact_question(text: str) -> bool:
-    if not isinstance(text, str) or not text.strip():
-        return False
-    lowered = text.lower()
-    if not any(term in lowered for term in _GRAPH_LOCAL_FACT_TERMS):
-        return False
-    if "?" in text:
-        return True
-    return any(
-        lowered.startswith(prefix)
-        for prefix in (
-            "tell me",
-            "show me",
-            "summarize",
-            "explain",
-            "what",
-            "which",
-            "where",
-            "is ",
-            "are ",
-            "does ",
-            "do ",
-        )
-    )
-
-
-def _looks_like_graph_mutation_request(text: str) -> bool:
-    if not isinstance(text, str) or not text.strip():
-        return False
-    lowered = text.lower()
-    if lowered.startswith(("how do i ", "how can i ", "how would i ")):
-        return False
-    if "?" in text and not any(
-        marker in lowered
-        for marker in ("please", "can you", "could you", "i want", "do it")
-    ):
-        return False
-    if not any(term in lowered for term in _GRAPH_MUTATION_TERMS):
-        return False
-    return any(term in lowered for term in _GRAPH_MUTATION_CONTEXT_TERMS)
 
 
 class ToolAgentsJsonClient:
@@ -1366,10 +945,6 @@ def _tool_failure_text(result: dict[str, Any]) -> str:
         if native_errors:
             lines.append("Native GRC validation reported:")
             lines.extend(f"- {error}" for error in native_errors[:3] if str(error))
-        lines.append(
-            "Please choose the intended next step: adjust related graph objects "
-            "to keep the graph valid, or explicitly force an invalid intermediate graph."
-        )
         return "\n".join(lines)
     message = result.get("message")
     if isinstance(message, str) and message.strip():
@@ -1452,10 +1027,7 @@ def _resolve_final_assistant_text(
         detail = raw_message or error_type or "the tool reported a failure"
         return f"I attempted to call {tool_name} but it failed: {detail}."
 
-    return (
-        f"{tool_name} completed. Let me know what to do next "
-        "(e.g. inspect a block, change a parameter, or save the graph)."
-    )
+    return f"{tool_name} completed."
 
 
 def _attach_context_budget_telemetry(
