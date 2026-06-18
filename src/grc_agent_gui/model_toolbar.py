@@ -159,8 +159,9 @@ class ModelToolbar(QFrame):
         editable = backend == _BACKEND_OLLAMA
         self.model_combo.setEditable(editable)
         if not editable:
-            import os
-            env_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+            from grc_agent.config import default_openrouter_model
+
+            env_model = default_openrouter_model()
             self.model_combo.clear()
             self.model_combo.setEditText(env_model)
             self._update_status(env_model)

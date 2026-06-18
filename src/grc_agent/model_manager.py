@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 
+from grc_agent.config import DEFAULT_OLLAMA_URL
+
 logger = logging.getLogger(__name__)
 
 
@@ -233,7 +235,7 @@ def check_ollama_tool_support(
 def pull_ollama_model(
     model_name: str,
     *,
-    server_url: str = "http://localhost:11434",
+    server_url: str = DEFAULT_OLLAMA_URL,
 ) -> dict[str, Any]:
     """Pull an Ollama model from the registry using ``ollama pull``.
 
@@ -243,7 +245,7 @@ def pull_ollama_model(
     Returns a dict with ``ok`` and either ``model`` or ``error``.
     """
     env: dict[str, str] = {}
-    if server_url and server_url != "http://localhost:11434":
+    if server_url and server_url != DEFAULT_OLLAMA_URL:
         env["OLLAMA_HOST"] = server_url
     try:
         proc = subprocess.run(
@@ -266,7 +268,7 @@ def pull_ollama_model(
 def stream_ollama_pull(
     model_name: str,
     *,
-    server_url: str = "http://localhost:11434",
+    server_url: str = DEFAULT_OLLAMA_URL,
 ) -> Any:
     """Stream ``ollama pull`` progress as a generator of status dicts.
 
@@ -278,7 +280,7 @@ def stream_ollama_pull(
     Callers iterate until exhaustion; the final yield is always an ``ok`` dict.
     """
     env: dict[str, str] = {}
-    if server_url and server_url != "http://localhost:11434":
+    if server_url and server_url != DEFAULT_OLLAMA_URL:
         env["OLLAMA_HOST"] = server_url
 
     try:

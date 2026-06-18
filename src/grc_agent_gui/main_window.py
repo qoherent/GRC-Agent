@@ -4,6 +4,11 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from grc_agent.config import (
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_OPENROUTER_URL,
+    default_openrouter_model,
+)
 from grc_agent.sessions_store import open_session_store
 from PySide6.QtCore import (
     QEvent,
@@ -141,11 +146,11 @@ class ModelSwapRunnable(QRunnable):
             from grc_agent.config import AppConfig, default_app_config
             from grc_agent.startup import bootstrap_runtime
 
-            new_url = getattr(self.llama_config, "server_url", "http://localhost:11434")
+            new_url = getattr(self.llama_config, "server_url", DEFAULT_OLLAMA_URL)
             new_model = getattr(self.llama_config, "model", "")
 
             if self.backend == "ollama":
-                new_url = "http://localhost:11434"
+                new_url = DEFAULT_OLLAMA_URL
                 from grc_agent.config import default_app_config
                 model_name = (
                     self.ollama_model_name
@@ -194,9 +199,8 @@ class ModelSwapRunnable(QRunnable):
                     pass
 
             elif self.backend == "openrouter":
-                new_url = "https://openrouter.ai/api"
-                import os
-                new_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+                new_url = DEFAULT_OPENROUTER_URL
+                new_model = default_openrouter_model()
 
             target_llama_config = dataclasses.replace(
                 self.llama_config,
@@ -620,7 +624,7 @@ class MainWindow(QMainWindow):
         if backend != "ollama":
             return
 
-        server_url = getattr(self.llama_config, "server_url", "http://localhost:11434")
+        server_url = getattr(self.llama_config, "server_url", DEFAULT_OLLAMA_URL)
         try:
             models = discover_ollama_models(server_url)
         except Exception as exc:
@@ -1101,7 +1105,7 @@ class MainWindow(QMainWindow):
                 self.llama_config = dataclasses.replace(
                     self.llama_config,
                     backend=selection.backend,
-                    server_url="http://localhost:11434",
+                    server_url=DEFAULT_OLLAMA_URL,
                     model=selection.ollama_model_name,
                 )
                 try:
@@ -1110,19 +1114,18 @@ class MainWindow(QMainWindow):
                     if config_path:
                         update_toml_config_file(config_path, {
                             "backend": "ollama",
-                            "server_url": "http://localhost:11434",
+                            "server_url": DEFAULT_OLLAMA_URL,
                             "model": selection.ollama_model_name,
                         })
                 except Exception as exc:
                     logger.warning("Failed to persist to grc_agent.toml: %s", exc)
 
             elif selection.backend == "openrouter":
-                import os
-                env_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+                env_model = default_openrouter_model()
                 self.llama_config = dataclasses.replace(
                     self.llama_config,
                     backend=selection.backend,
-                    server_url="https://openrouter.ai/api",
+                    server_url=DEFAULT_OPENROUTER_URL,
                     model=env_model,
                 )
                 model_name = env_model
@@ -1132,7 +1135,7 @@ class MainWindow(QMainWindow):
                     if config_path:
                         update_toml_config_file(config_path, {
                             "backend": "openrouter",
-                            "server_url": "https://openrouter.ai/api",
+                            "server_url": DEFAULT_OPENROUTER_URL,
                             "model": env_model,
                         })
                 except Exception as exc:

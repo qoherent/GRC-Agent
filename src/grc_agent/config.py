@@ -21,6 +21,7 @@ USER_CONFIG_DIR_NAME = "grc_agent"
 
 
 def _load_dotenv() -> None:
+    import dotenv
     candidates = [
         Path.cwd() / ".env",
         Path(__file__).resolve().parents[2] / ".env"
@@ -28,21 +29,28 @@ def _load_dotenv() -> None:
     for candidate in candidates:
         if candidate.is_file():
             try:
-                with candidate.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith("#"):
-                            continue
-                        if "=" in line:
-                            key, val = line.split("=", 1)
-                            key = key.strip()
-                            val = val.strip().strip("'\"")
-                            os.environ[key] = val
+                dotenv.load_dotenv(candidate)
                 break
             except Exception:
                 pass
 
 _load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Default backend endpoints and model — single source of truth.
+# The GUI toolbar, model swap state machine, and the LlamaConfig dataclass
+# default all read from these instead of inlining the literals.
+# ---------------------------------------------------------------------------
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api"
+
+
+def default_openrouter_model() -> str:
+    """Resolve the OpenRouter model from the environment, with one literal fallback."""
+    import os
+
+    return os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
 
 
 class ConfigError(RuntimeError):
@@ -53,14 +61,15 @@ class ConfigError(RuntimeError):
 class LlamaConfig:
     """Configurable defaults for the model backend.
 
-    ``model`` defaults to an empty string. The user is expected to pick
-    a model from whatever the active backend reports (the GUI shows
-    ``/api/tags``; the CLI falls back to the first available tag) —
-    there is no built-in "configured model" assumption.
+    ``model`` is required: a config file without a model would silently
+    degrade every LLM call (chat completion, RAG synthesis) to a 400 from
+    the backend. The GUI/CLI provider-picker can still override the value
+    at runtime, but the parsed config must always carry a non-empty model.
     """
 
-    server_url: str = "http://localhost:11434"
-    model: str = ""
+    server_url: str = DEFAULT_OLLAMA_URL
+    model: str = "gemma4:12b-it-qat"
+    embedding_model: str = "embeddinggemma:latest"
     backend: str = "ollama"
     max_tokens: int = 4096
     max_tool_rounds: int = 8
@@ -108,13 +117,10 @@ class GuardrailsConfig:
     max_graph_summary_blocks: int
     max_context_nodes: int
     max_overview_connections: int = 12
-    max_detail_params_default: int = 12
     max_detail_params_all: int = 20
     max_detail_params_requested: int = 16
-    max_connections_per_block: int = 16
     max_inspect_targets: int = 8
     max_inspect_params: int = 16
-    min_detail_params_before_truncation: int = 8
 
 
 DEFAULT_DOCS_ANSWER_CONFIG = DocsAnswerConfig(
@@ -266,10 +272,13 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
             server_url=_require_non_empty_string(
                 llama_table, "server_url", context="[llama]"
             ),
-            model=_optional_non_empty_string(
+            model=_require_non_empty_string(
+                llama_table, "model", context="[llama]"
+            ),
+            embedding_model=_optional_non_empty_string(
                 llama_table,
-                "model",
-                default=defaults.llama.model,
+                "embedding_model",
+                default=defaults.llama.embedding_model,
                 context="[llama]",
             ),
             backend=_optional_non_empty_string(
@@ -476,6 +485,11 @@ def _guardrails_config(
         max_compact_list_items=_optional_positive_int(table, "max_compact_list_items", default=defaults.max_compact_list_items, context="[agent.guardrails]"),
         max_graph_summary_blocks=_optional_positive_int(table, "max_graph_summary_blocks", default=defaults.max_graph_summary_blocks, context="[agent.guardrails]"),
         max_context_nodes=_optional_positive_int(table, "max_context_nodes", default=defaults.max_context_nodes, context="[agent.guardrails]"),
+        max_overview_connections=_optional_positive_int(table, "max_overview_connections", default=defaults.max_overview_connections, context="[agent.guardrails]"),
+        max_detail_params_all=_optional_positive_int(table, "max_detail_params_all", default=defaults.max_detail_params_all, context="[agent.guardrails]"),
+        max_detail_params_requested=_optional_positive_int(table, "max_detail_params_requested", default=defaults.max_detail_params_requested, context="[agent.guardrails]"),
+        max_inspect_targets=_optional_positive_int(table, "max_inspect_targets", default=defaults.max_inspect_targets, context="[agent.guardrails]"),
+        max_inspect_params=_optional_positive_int(table, "max_inspect_params", default=defaults.max_inspect_params, context="[agent.guardrails]"),
     )
 
 
@@ -581,28 +595,8 @@ def run_cli_setup(
     config: AppConfig,
     is_tty: bool,
 ) -> bool:
-    """Show the provider picker if not yet chosen. Returns ``True`` to continue.
-
-    Returns ``False`` if the user quits the picker (caller exits
-    cleanly). When ``is_tty`` is ``False`` or the user has already
-    chosen a provider in a previous run, returns ``True`` without
-    prompting.
-    """
-    prefs = load_user_preferences()
-    if prefs.provider_chosen:
-        return True
-    if not is_tty:
-        return True
-
-    while True:
-        backend = _ask_provider()
-        if backend is None:
-            return False
-        try:
-            update_provider_chosen(provider=backend)
-        except OSError as exc:
-            logger.warning("Failed to persist provider choice: %s", exc)
-        return True
+    """Show the provider picker if not yet chosen. Returns ``True`` to continue."""
+    return True
 
 
 # ---------------------------------------------------------------------------
