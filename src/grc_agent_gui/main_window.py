@@ -2,7 +2,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from grc_agent.sessions_store import open_session_store
 from PySide6.QtCore import (
@@ -68,6 +68,40 @@ def _default_sessions_db() -> "Path":
     from grc_agent.sessions_store import default_sessions_db_path
 
     return default_sessions_db_path()
+
+
+# ---------------------------------------------------------------------------
+# Slash-command dispatch (uniform rule — one canonical '/' prefix)
+# ---------------------------------------------------------------------------
+# Each handler is a bound-method lookup keyed on the canonical command name.
+# Forward-slash only; the legacy backslash alternates were a per-command
+# special case and have been removed. Add new commands here, not inline.
+
+def _slash_command_name(prompt: str) -> str | None:
+    """Return the canonical slash-command name (e.g. 'save') or None.
+
+    Recognises only a single leading '/'; any other input (including the
+    legacy '\\save' form) returns None and falls through to the agent.
+    """
+    if not prompt.startswith("/"):
+        return None
+    token = prompt[1:].split(maxsplit=1)[0]
+    return token.lower() if token else None
+
+
+def _slash_save(window: "MainWindow") -> None:
+    window.save_file()
+
+
+def _slash_refresh_model(window: "MainWindow") -> None:
+    window._on_toolbar_refresh()
+
+
+_SLASH_COMMANDS: dict[str, Callable[["MainWindow"], None]] = {
+    "save": _slash_save,
+    "model": _slash_refresh_model,
+    "client": _slash_refresh_model,
+}
 
 
 class InspectorWorkerSignals(QObject):
@@ -669,13 +703,7 @@ class MainWindow(QMainWindow):
                     graph_hash = "unknown"
 
         model_alias = getattr(self.provider_config, "model", None)
-        if model_alias is not None:
-            if type(model_alias).__name__ in ("MagicMock", "Mock"):
-                model_alias = "mock-model"
-            else:
-                model_alias = str(model_alias)
-        else:
-            model_alias = "unknown"
+        model_alias = str(model_alias) if model_alias is not None else "unknown"
         backend = getattr(self.llama_config, "backend", "ollama")
 
         # Create a title using the first 40 chars of the user's prompt
@@ -727,32 +755,30 @@ class MainWindow(QMainWindow):
     def send_prompt(self) -> None:
         """Read the input box, format as a user message, and start worker generation."""
         prompt = self.chat_input.text().strip()
-        if prompt:
-            self.chat_input.clear()
-            if prompt.startswith("/save") or prompt.startswith("\\save"):
-                self.chat_widget.append_message("user", prompt)
-                self.save_file()
-                return
-            if (
-                prompt.startswith("/model")
-                or prompt.startswith("\\model")
-                or prompt.startswith("/client")
-                or prompt.startswith("\\client")
-            ):
-                self.chat_widget.append_message("user", prompt)
-                self._on_toolbar_refresh()
-                return
+        if not prompt:
+            return
+        self.chat_input.clear()
+
+        # Slash-command dispatch. One uniform rule: a single canonical '/'
+        # prefix routes to a registered handler. Unknown commands fall
+        # through to the agent.
+        slash_handler = _SLASH_COMMANDS.get(_slash_command_name(prompt))
+        if slash_handler is not None:
             self.chat_widget.append_message("user", prompt)
+            slash_handler(self)
+            return
 
-            # Auto-save
-            self._ensure_active_session_db_record(prompt)
-            if self.active_session_id is not None:
-                try:
-                    self.sessions_store.append(self.active_session_id, "user", prompt)
-                except Exception as exc:
-                    logger.exception("Failed to save user prompt to DB: %s", exc)
+        self.chat_widget.append_message("user", prompt)
 
-            self.start_generation(prompt)
+        # Auto-save
+        self._ensure_active_session_db_record(prompt)
+        if self.active_session_id is not None:
+            try:
+                self.sessions_store.append(self.active_session_id, "user", prompt)
+            except Exception as exc:
+                logger.exception("Failed to save user prompt to DB: %s", exc)
+
+        self.start_generation(prompt)
 
     def start_generation(self, prompt: str) -> None:
         """Initialize and run the AgentWorker inside a QThread."""
@@ -850,10 +876,23 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _result_is_error(result_str: str) -> bool:
-        for marker in ("'ok': False", '"ok": false', "'ok': false"):
-            if marker in result_str.lower().replace(" ", ""):
+        """Read the structured result, not a substring of its serialization.
+
+        Tool results are JSON objects with an ``ok`` flag (or an
+        ``error_type`` field). Deserializing once is uniform and avoids the
+        ad-hoc "'ok': False" / '"ok": false' / "'ok\": false" triple that
+        the old substring scan needed.
+        """
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return result_str.strip().lower().startswith("error")
+        if isinstance(parsed, dict):
+            if "ok" in parsed:
+                return not bool(parsed["ok"])
+            if "error_type" in parsed:
                 return True
-        return result_str.lower().startswith("error")
+        return False
 
     def on_response_chunk(self, text: str) -> None:
         """Append stream token chunks directly to the display."""

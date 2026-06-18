@@ -178,42 +178,35 @@ class InspectorWidget(QWidget):
             self.variables_table.setItem(row_idx, 1, val_item)
 
         # 4. Repopulate Blocks Tree (grouped categorisation)
+        # Categories are derived solely from the native block ``role`` emitted
+        # by ``runtime/block_semantics.py`` (BlockRole StrEnum). There is no
+        # substring matching on block_type/role — one uniform rule.
         self.blocks_tree.clear()
 
         categories: dict[str, list[dict[str, Any]]] = {
             "variables": [],
             "sources": [],
             "sinks": [],
-            "filters": [],
             "other_blocks": [],
         }
         display_names = {
             "variables": "Variables",
             "sources": "Sources",
             "sinks": "Sinks",
-            "filters": "Filters",
             "other_blocks": "Other Blocks",
+        }
+        # Native BlockRole -> GUI category. Roles not listed here
+        # (transform, message_or_event, metadata, unknown) fold into
+        # ``other_blocks``.
+        category_for_role = {
+            "variable_or_control": "variables",
+            "source": "sources",
+            "sink": "sinks",
         }
 
         for block in blocks:
             role = str(block.get("role", "")).lower()
-            btype = str(block.get("block_type", "")).lower()
-
-            if role == "variable" or btype == "variable":
-                categories["variables"].append(block)
-            elif "source" in role or "source" in btype:
-                categories["sources"].append(block)
-            elif "sink" in role or "sink" in btype:
-                categories["sinks"].append(block)
-            elif (
-                "filter" in role
-                or "filter" in btype
-                or "resampler" in btype
-                or "decimator" in btype
-            ):
-                categories["filters"].append(block)
-            else:
-                categories["other_blocks"].append(block)
+            categories[category_for_role.get(role, "other_blocks")].append(block)
 
         for cat_key, cat_blocks in categories.items():
             if not cat_blocks:

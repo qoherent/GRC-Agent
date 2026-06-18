@@ -27,8 +27,8 @@ def test_variables_table_mapping(qtbot):
         "state_revision": 1,
         "summary": {
             "blocks": [
-                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable", "value": "32000"},
-                {"instance_name": "freq", "block_type": "variable", "role": "variable", "value": "1000"},
+                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable_or_control", "value": "32000"},
+                {"instance_name": "freq", "block_type": "variable", "role": "variable_or_control", "value": "1000"},
                 {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"}
             ]
         }
@@ -62,9 +62,9 @@ def test_blocks_tree_mapping(qtbot):
         "state_revision": 1,
         "summary": {
             "blocks": [
-                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable", "value": "32000"},
+                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable_or_control", "value": "32000"},
                 {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"},
-                {"instance_name": "blocks_throttle_0", "block_type": "blocks_throttle", "role": "throttle"}
+                {"instance_name": "blocks_throttle_0", "block_type": "blocks_throttle", "role": "transform"}
             ]
         }
     }
@@ -92,7 +92,7 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
         "state_revision": 1,
         "summary": {
             "blocks": [
-                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable", "value": "32000"},
+                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable_or_control", "value": "32000"},
                 {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"}
             ]
         }
