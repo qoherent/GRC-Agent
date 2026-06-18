@@ -15,7 +15,10 @@ from grc_agent.runtime.block_semantics import (
     EditableParameterCandidate,
     build_block_semantics_by_type,
     build_editable_parameter_candidates,
+    evaluated_param_hides,
 )
+from grc_agent.runtime.block_semantics import _connection_summaries
+from grc_agent.runtime.text_utils import compact_whitespace, tokenize_identifier
 from grc_agent.runtime.tool_context import is_meaningful, is_variable_block, truncate_list
 from grc_agent.session import summarize_graph
 from grc_agent.session_ops import connection_id as render_connection_id
@@ -86,10 +89,10 @@ def inspect_graph(
         )
     elif selected_view == "overview":
         result = _overview(agent, targets=normalized_targets, params=normalized_params)
-        output_truncated = bool(result.get("truncation", {}).get("truncated"))
+        output_truncated = bool(result.get("omitted"))
     else:
         result = _details(agent, targets=normalized_targets, params=normalized_params)
-        output_truncated = bool(result.get("truncation", {}).get("truncated"))
+        output_truncated = bool(result.get("omitted"))
 
     tool_result = agent._payload_result(
         "inspect_graph",
@@ -116,7 +119,10 @@ def _overview(
     targets: list[str],
     params: list[str],
 ) -> dict[str, Any]:
-    del targets, params
+    del targets
+    param_filter = (
+        None if (_params_request_all(params) or not params) else set(_specific_params(params))
+    )
     summary = summarize_graph(
         agent.session,
         max_blocks=agent._guardrails_cfg.max_graph_summary_blocks,
@@ -125,8 +131,6 @@ def _overview(
         return _base_payload(
             agent,
             ok=False,
-            view="overview",
-            complete=False,
             errors=[
                 {
                     "code": str(summary.get("error_type") or "inspect_failed"),
@@ -159,11 +163,12 @@ def _overview(
         semantics_by_type=semantics_by_type,
         incoming=incoming,
         outgoing=outgoing,
+        param_filter=param_filter,
     )
     limit = gc.max_graph_summary_blocks
     if summary.get("blocks_truncated"):
         block_rows = block_rows[:limit]
-    overview = {
+    graph = {
         "graph_name": _graph_name(agent),
         "counts": {
             "blocks": summary.get("block_count", 0),
@@ -174,7 +179,6 @@ def _overview(
         "connections": shown_connections,
     }
     omitted_blocks = int(summary.get("blocks_truncated") or 0)
-    truncated = omitted_blocks > 0 or omitted_connections > 0
     omitted_counts: dict[str, int] = {}
     if omitted_blocks:
         omitted_counts["blocks"] = omitted_blocks
@@ -183,14 +187,8 @@ def _overview(
     return _base_payload(
         agent,
         ok=True,
-        view="overview",
-        complete=not truncated,
-        summary=overview,
-        truncation={
-            "truncated": truncated,
-            "reason": "overview_limit" if truncated else None,
-            "omitted_counts": omitted_counts,
-        },
+        graph=graph,
+        omitted=omitted_counts,
     )
 
 
@@ -204,9 +202,6 @@ def _details(
         return _base_payload(
             agent,
             ok=False,
-            view="details",
-            complete=False,
-            params_filter=_params_filter(params, []),
             errors=[
                 {
                     "code": "target_required",
@@ -226,10 +221,8 @@ def _details(
     connections = list(agent.session.flowgraph.connections)
     incoming, outgoing = _connection_summaries(connections)
     resolved_rows: list[dict[str, Any]] = []
-    target_matches: list[dict[str, Any]] = []
     matched_params: set[str] = set()
     matched_requested_params: set[str] = set()
-    has_ambiguity = False
     errors: list[dict[str, Any]] = []
     truncated = False
     omitted_counts: dict[str, int] = {}
@@ -242,19 +235,33 @@ def _details(
             params=_specific_params(params),
             connections=connections,
         )
-        if match.status != "resolved":
-            target_matches.append(match.match_payload())
         if match.status == "ambiguous":
-            has_ambiguity = True
+            matched_names = sorted(
+                str(c.get("instance_name") or "")
+                for c in match.candidates
+                if c.get("instance_name")
+            )
             errors.append(
                 {
                     "code": "ambiguous_target",
-                    "message": f"Target {requested_target!r} matched multiple graph objects.",
+                    "message": (
+                        f"Target {requested_target!r} matched multiple graph objects: "
+                        f"{', '.join(matched_names)}."
+                    ),
                 }
             )
             continue
         if match.status == "not_found" or match.block is None:
-            message = match.message or f"Target {requested_target!r} did not match any active block instance or connection in the graph."
+            valid_names = [
+                block.instance_name for block in agent.session.flowgraph.blocks
+            ]
+            if match.message:
+                message = match.message
+            else:
+                message = (
+                    f"Target {requested_target!r} not found. "
+                    f"Valid block names: {_format_valid_block_names(valid_names)}."
+                )
             errors.append(
                 {
                     "code": "target_not_found",
@@ -264,6 +271,9 @@ def _details(
             continue
 
         block_candidates = by_block.get(match.block.block_uid, [])
+        block_param_values = match.block.params.get("parameters") if isinstance(match.block.params, dict) else {}
+        block_param_values = block_param_values if isinstance(block_param_values, dict) else {}
+        evaluated_hides = evaluated_param_hides(match.block.block_type, block_param_values)
         row, row_matched_params, row_matched_requested, row_truncated = _block_details_row(
             match.block,
             block_candidates,
@@ -274,6 +284,7 @@ def _details(
             incoming_connections=incoming.get(match.block.instance_name, ()),
             outgoing_connections=outgoing.get(match.block.instance_name, ()),
             variable_values=variable_values,
+            evaluated_hides=evaluated_hides,
             gc=gc,
         )
         resolved_rows.append(row)
@@ -295,30 +306,13 @@ def _details(
             for param in params
             if _normalize_text(param) not in matched_requested_norm
         ]
-    complete = not has_ambiguity and not errors and not truncated
     return _base_payload(
         agent,
         ok=not errors,
-        view="details",
-        complete=complete,
+        graph={"graph_name": _graph_name(agent), "counts": {"blocks": len(agent.session.flowgraph.blocks)}},
         targets=resolved_rows,
-        target_matches=target_matches,
-        params_filter=_params_filter(
-            params,
-            sorted(matched_params),
-            unmatched=unmatched_params,
-        ),
-        ambiguity={
-            "has_ambiguity": has_ambiguity,
-            "reason": "Target matched multiple graph objects."
-            if has_ambiguity
-            else None,
-        },
-        truncation={
-            "truncated": truncated,
-            "reason": "parameter_limit" if truncated else None,
-            "omitted_counts": omitted_counts,
-        },
+        unmatched_params=unmatched_params,
+        omitted=omitted_counts,
         errors=errors,
     )
 
@@ -341,15 +335,7 @@ class _TargetMatch:
         self.candidates = candidates or []
         self.message = message
 
-    def match_payload(self) -> dict[str, Any]:
-        return {
-            "request": self.request,
-            "status": self.status,
-            "resolved_name": self.block.instance_name if self.block is not None else None,
-            "matched_by": self.matched_by,
-            "candidates": self.candidates,
-            "message": self.message,
-        }
+
 
 
 def _resolve_target(
@@ -379,11 +365,7 @@ def _resolve_target(
                     "reason": f"unknown parameter key {param_key!r}",
                 }
             ],
-            message=(
-                f"Target {request!r} uses unknown parameter key {param_key!r}. "
-                "Use an exact block.param reference or pass the block in targets "
-                "and the parameter key in params."
-            ),
+            message=f"Target {request!r} uses unknown parameter key {param_key!r}.",
         )
 
     exact_blocks = [
@@ -540,6 +522,7 @@ def _block_details_row(
     incoming_connections: tuple[str, ...],
     outgoing_connections: tuple[str, ...],
     variable_values: dict[str, Any],
+    evaluated_hides: dict[str, str],
     gc: Any,
 ) -> tuple[dict[str, Any], set[str], set[str], bool]:
     specific_params = _specific_params(params)
@@ -549,7 +532,7 @@ def _block_details_row(
     selected_candidates: list[EditableParameterCandidate] = []
     for candidate in candidates:
         if not params:
-            if len(candidates) <= gc.min_detail_params_before_truncation or _default_detail_param(candidate):
+            if _is_configured_or_prominent(candidate, evaluated_hides, variable_values):
                 selected_candidates.append(candidate)
                 matched_params.add(candidate.param_key)
         elif _params_request_all(params):
@@ -565,19 +548,30 @@ def _block_details_row(
                 selected_candidates.append(candidate)
                 matched_params.add(candidate.param_key)
                 matched_requested_params.update(matched_requests)
-    if not params and len(candidates) <= gc.min_detail_params_before_truncation and not selected_candidates:
-        selected_candidates = candidates[:gc.min_detail_params_before_truncation]
-    elif _params_request_all(params) and not selected_candidates:
+    if _params_request_all(params) and not selected_candidates:
         selected_candidates = candidates[:gc.max_detail_params_requested]
 
+    if selected_candidates and not specific_params:
+        selected_candidates.sort(
+            key=lambda candidate: (
+                0 if evaluated_hides.get(candidate.param_key) == "none"
+                else 1 if evaluated_hides.get(candidate.param_key) == "part"
+                else 2
+            )
+        )
+
     if not params:
-        param_limit = gc.max_detail_params_default
+        param_limit = None
     elif _params_request_all(params):
         param_limit = gc.max_detail_params_all
     else:
         param_limit = gc.max_detail_params_requested
-    params_truncated = len(selected_candidates) > param_limit
-    returned_candidates = selected_candidates[:param_limit]
+    if param_limit is None:
+        returned_candidates = selected_candidates
+        params_truncated = False
+    else:
+        params_truncated = len(selected_candidates) > param_limit
+        returned_candidates = selected_candidates[:param_limit]
     parameters = [
         _parameter_payload(candidate, variable_values=variable_values)
         for candidate in returned_candidates
@@ -585,7 +579,6 @@ def _block_details_row(
     available_param_count = len(candidates)
     returned_param_count = len(returned_candidates)
     omitted_param_count = max(0, len(selected_candidates) - returned_param_count)
-    more_params_available = available_param_count > returned_param_count
     incoming = _connection_dicts(incoming_connections)
     outgoing = _connection_dicts(outgoing_connections)
     row: dict[str, Any] = {
@@ -595,22 +588,26 @@ def _block_details_row(
         "block_type": block.block_type,
         "name": block.instance_name,
         "type": block.block_type,
+        "role": _block_role(
+            block,
+            semantics={},
+            incoming=incoming_connections,
+            outgoing=outgoing_connections,
+        ),
         "catalog_label": _block_label(candidates),
     }
     if parameters:
         row["parameters"] = parameters
     if incoming or outgoing:
         row["connections"] = {
-            "incoming": incoming[:gc.max_connections_per_block],
-            "outgoing": outgoing[:gc.max_connections_per_block],
+            "incoming": incoming,
+            "outgoing": outgoing,
         }
     if params_truncated:
         row["params_truncated"] = True
         row["omitted_param_count"] = omitted_param_count
-    elif not params and more_params_available:
-        row["more_params_available"] = True
+    if not params and available_param_count > returned_param_count:
         row["available_param_count"] = available_param_count
-        row["params_omitted"] = True
     return row, matched_params, matched_requested_params, params_truncated
 
 
@@ -636,6 +633,108 @@ def _parameter_payload(
     if candidate.param_option_labels:
         payload["option_labels"] = list(candidate.param_option_labels)
     return {key: value for key, value in payload.items() if is_meaningful(value)}
+
+
+def _is_configured_or_prominent(
+    candidate: EditableParameterCandidate,
+    evaluated_hides: dict[str, str],
+    variable_values: dict[str, Any],
+) -> bool:
+    if evaluated_hides.get(candidate.param_key) == "all":
+        return False
+    value = _compact_value(candidate.current_value)
+    if not is_meaningful(value):
+        return False
+    if evaluated_hides.get(candidate.param_key) == "none":
+        return True
+    if isinstance(variable_values, dict) and value in variable_values:
+        return True
+    default = _compact_value(candidate.param_default)
+    if not is_meaningful(default):
+        return False
+    return value != default
+
+
+def _variable_reference_map(
+    blocks: list[Block],
+    variable_values: dict[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    refs: dict[str, list[dict[str, str]]] = {}
+    for block in blocks:
+        params = block.params.get("parameters") if isinstance(block.params, dict) else None
+        if not isinstance(params, dict):
+            continue
+        for key, value in params.items():
+            if isinstance(value, str) and value in variable_values:
+                refs.setdefault(value, []).append(
+                    {"block": block.instance_name, "param": key}
+                )
+    return refs
+
+
+def _all_variable_references(
+    blocks: list[Block],
+    variable_values: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Lifted from the ``param_filter`` gate: every variable → its references.
+
+    The previous implementation only computed references for variables the
+    model explicitly requested via ``params=[...]``. Surfacing the full map on
+    every call means the model can answer "what uses variable X" without
+    first asking for a narrower view, and never needs to fall back to the
+    catalog to discover block/param names.
+    """
+    if not variable_values:
+        return {}
+    ref_map = _variable_reference_map(blocks, variable_values)
+    return {
+        name: {
+            "value": variable_values[name],
+            "referenced_by": ref_map.get(name, []),
+        }
+        for name in variable_values
+    }
+
+
+def _format_valid_block_names(names: list[str], *, limit: int = 20) -> str:
+    """Format a sorted, capped list of valid block names for an error message.
+
+    Sort: deterministic order. Cap: at most ``limit`` names plus a ``+N more`` suffix.
+    The cap is uniform across all `target_not_found` errors so a 50-block graph
+    does not produce a 900-char message.
+    """
+    deduped = sorted(set(n for n in names if n))
+    if len(deduped) <= limit:
+        return ", ".join(deduped)
+    shown = deduped[:limit]
+    remainder = len(deduped) - limit
+    return f"{', '.join(shown)}, +{remainder} more"
+
+
+def _param_keys_by_block(blocks: list[Block]) -> dict[str, list[str]]:
+    """Native answer to "what params does this block have?".
+
+    Filters to user-visible params (``hide != 'all'``) using GRC's evaluated
+    ``hide`` value, so the model doesn't see GUI-config noise (Qt coordinates,
+    color slots, etc.). ``hide='part'`` params ARE included (GRC shows them
+    in a reduced form). Falls back to the full key list if the platform is
+    unavailable (e.g. before GRC is initialized).
+    """
+    keys: dict[str, list[str]] = {}
+    for block in blocks:
+        params = block.params.get("parameters") if isinstance(block.params, dict) else None
+        if not isinstance(params, dict):
+            keys[block.instance_name] = []
+            continue
+        evaluated = evaluated_param_hides(block.block_type, params)
+        if evaluated:
+            visible = sorted(
+                str(key) for key, hide in evaluated.items() if hide != "all"
+            )
+            keys[block.instance_name] = visible
+        else:
+            keys[block.instance_name] = sorted(str(key) for key in params)
+    return keys
 
 
 def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:
@@ -666,40 +765,48 @@ def _base_payload(
     agent: GrcAgent,
     *,
     ok: bool,
-    view: str,
-    complete: bool,
-    summary: Any = None,
+    graph: dict[str, Any] | None = None,
     targets: list[dict[str, Any]] | None = None,
-    target_matches: list[dict[str, Any]] | None = None,
-    params_filter: dict[str, Any] | None = None,
-    ambiguity: dict[str, Any] | None = None,
-    truncation: dict[str, Any] | None = None,
     errors: list[dict[str, Any]] | None = None,
+    unmatched_params: list[str] | None = None,
+    omitted: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    validation = _validation_status(agent)
+    """Uniform model-visible payload for ``inspect_graph``.
+
+    Shape (every call has the same five fields; ``errors`` and ``targets`` are
+    populated only when relevant):
+
+    - ``errors``: list of ``{code, message}`` — first-class, not nested in JSON.
+    - ``unmatched_params``: param strings the model asked for that didn't match.
+    - ``variable_references``: every variable → ``{value, referenced_by: [{block, param}]}``.
+      Lifted from the previous ``param_filter`` gate so the model can answer
+      "what uses X" without first requesting a narrower view.
+    - ``param_keys_by_block``: every block → sorted list of its param keys.
+      Surfaces ``GrcAgent._inspect_param_keys_by_block`` at the model boundary
+      so the model can see what valid ``targets`` / ``params`` look like.
+    - ``graph``: ``{graph_name, counts, blocks, connections}`` for overview,
+      or just ``{graph_name, counts}`` for details.
+    - ``targets`` (details only): block details rows.
+    - ``omitted`` (optional): ``{blocks, connections, parameters}`` counts.
+
+    The renderer in ``tool_context.py`` promotes every ``errors[i].message``
+    to a structural line so failure facts are never buried inside a JSON dump.
+    """
+    assert agent.session.flowgraph is not None
+    blocks = agent.session.flowgraph.blocks
+    variable_values = _graph_variable_values(blocks)
     payload: dict[str, Any] = {
         "ok": ok,
-        "view": view,
-        "state_revision": agent.session.state_revision,
-        "complete": complete,
-        "validation_status": validation,
+        "errors": list(errors) if errors else [],
+        "unmatched_params": list(unmatched_params) if unmatched_params else [],
+        "variable_references": _all_variable_references(blocks, variable_values),
+        "param_keys_by_block": _param_keys_by_block(blocks),
+        "graph": graph if graph is not None else {},
     }
-    if validation.get("errors"):
-        payload["validation_errors"] = validation["errors"]
-    if summary is not None:
-        payload["summary"] = summary
     if targets:
         payload["targets"] = targets
-    if target_matches:
-        payload["target_matches"] = target_matches
-    if params_filter and params_filter.get("unmatched"):
-        payload["params_filter"] = params_filter
-    if ambiguity and ambiguity.get("has_ambiguity"):
-        payload["ambiguity"] = ambiguity
-    if truncation and truncation.get("truncated"):
-        payload["truncation"] = truncation
-    if errors:
-        payload["errors"] = errors
+    if omitted:
+        payload["omitted"] = omitted
     return payload
 
 
@@ -710,68 +817,12 @@ def _invalid_request(
     code: str,
     message: str,
 ) -> dict[str, Any]:
+    del view
     return _base_payload(
         agent,
         ok=False,
-        view=view,
-        complete=False,
         errors=[{"code": code, "message": message}],
     )
-
-
-def _validation_status(agent: GrcAgent) -> dict[str, Any]:
-    if not agent.session.flowgraph:
-        return {"status": "unknown"}
-    agent.session.validate()
-    state = agent.session.validation_state()
-    result: dict[str, Any] = {
-        "status": state.get("status"),
-        "last_checked_revision": state.get("state_revision"),
-    }
-    raw_stderr = state.get("stderr") or ""
-    raw_stdout = state.get("stdout") or ""
-    error_text = raw_stdout or raw_stderr
-    if error_text.strip() and result["status"] == "invalid":
-        result["summary"] = error_text.strip()
-        errors: list[str] = []
-        in_errors = False
-        for line in error_text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("*"):
-                continue
-            if "errors from flowgraph" in line:
-                in_errors = True
-                continue
-            if line.startswith(">>>") or "Welcome" in line:
-                continue
-            if in_errors:
-                if line:
-                    errors.append(line.strip("\t"))
-        if errors:
-            result["errors"] = errors[:12]
-    return result
-
-
-def _params_filter(
-    requested: list[str],
-    matched: list[str],
-    *,
-    unmatched: list[str] | None = None,
-) -> dict[str, Any]:
-    matched_norm = {_normalize_text(item) for item in matched}
-    if _params_request_all(requested):
-        return {
-            "requested": requested,
-            "matched": matched,
-            "unmatched": [],
-        }
-    return {
-        "requested": requested,
-        "matched": matched,
-        "unmatched": unmatched
-        if unmatched is not None
-        else [item for item in requested if _normalize_text(item) not in matched_norm],
-    }
 
 
 def _group_candidates_by_block(
@@ -783,28 +834,8 @@ def _group_candidates_by_block(
     return grouped
 
 
-def _connection_summaries(
-    connections: list[Connection],
-) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]]:
-    incoming: dict[str, list[str]] = {}
-    outgoing: dict[str, list[str]] = {}
-    for connection in connections:
-        conn_id = render_connection_id(
-            connection.src_block,
-            connection.src_port,
-            connection.dst_block,
-            connection.dst_port,
-        )
-        outgoing.setdefault(connection.src_block, []).append(conn_id)
-        incoming.setdefault(connection.dst_block, []).append(conn_id)
-    return (
-        {key: tuple(value) for key, value in incoming.items()},
-        {key: tuple(value) for key, value in outgoing.items()},
-    )
-
-
 def _candidate_payloads(blocks: list[Block], *, max_candidates: int = 12) -> list[dict[str, Any]]:
-    return [
+    payloads = [
         {
             "instance_name": block.instance_name,
             "block_type": block.block_type,
@@ -816,6 +847,9 @@ def _candidate_payloads(blocks: list[Block], *, max_candidates: int = 12) -> lis
         }
         for block in blocks[:max_candidates]
     ]
+    if len(blocks) > max_candidates:
+        payloads.append({"_truncated": f"was {len(blocks)}, kept {max_candidates}"})
+    return payloads
 
 
 def _dedupe_blocks(blocks: list[Block]) -> list[Block]:
@@ -838,6 +872,7 @@ def _overview_block_rows(
     semantics_by_type: dict[str, dict[str, Any]],
     incoming: dict[str, tuple[str, ...]],
     outgoing: dict[str, tuple[str, ...]],
+    param_filter: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for block in blocks:
@@ -857,27 +892,18 @@ def _overview_block_rows(
             params = block.params.get("parameters", {})
             if isinstance(params, dict) and "value" in params:
                 row["value"] = params["value"]
-            meaningful = {k: v for k, v in params.items() if is_meaningful(v) and k != "value"}
-            if meaningful:
-                row["params"] = meaningful
-        else:
+            if param_filter:
+                meaningful = {k: v for k, v in params.items() if is_meaningful(v) and k != "value" and k in param_filter}
+                if meaningful:
+                    row["params"] = meaningful
+        elif param_filter:
             block_params = block.params.get("parameters", {})
             if isinstance(block_params, dict):
-                meaningful = {k: v for k, v in block_params.items() if is_meaningful(v)}
+                meaningful = {k: v for k, v in block_params.items() if is_meaningful(v) and k in param_filter}
                 if meaningful:
                     row["params"] = meaningful
         rows.append({key: value for key, value in row.items() if is_meaningful(value)})
     return rows
-
-
-def _default_detail_param(candidate: EditableParameterCandidate) -> bool:
-    hide = str(candidate.param_hide or "").strip().lower()
-    if hide and hide != "none":
-        return False
-    if isinstance(candidate.param_label, str) and candidate.param_label.strip():
-        value = _compact_value(candidate.current_value)
-        return is_meaningful(value)
-    return False
 
 
 def _block_label(candidates: list[EditableParameterCandidate]) -> str | None:
@@ -951,15 +977,11 @@ def _any_field_matches(
 
 
 def _tokens(text: str) -> set[str]:
-    return {
-        token
-        for token in _normalize_text(text).replace("_", " ").replace("-", " ").split()
-        if token
-    }
+    return set(tokenize_identifier(text))
 
 
 def _normalize_text(text: Any) -> str:
-    return " ".join(str(text).lower().strip().split())
+    return compact_whitespace(str(text).lower())
 
 
 def _normalize_string_list(values: list[str], *, limit: int) -> list[str]:
@@ -1011,11 +1033,6 @@ def get_grc_context_internal(
         hops=hops,
         max_nodes=resolved_max_nodes,
     )
-    if payload.get("ok"):
-        payload["hint"] = (
-            "This is inspection data only. "
-            "If the user also asked for a real change after inspecting, call `apply_edit` next."
-        )
     if payload.get("ok") is False and payload.get("error_type") == ErrorCode.BLOCK_NOT_FOUND:
         if session.flowgraph is not None:
             fallback_candidates = [
@@ -1024,8 +1041,8 @@ def get_grc_context_internal(
             if fallback_candidates:
                 payload["candidate_nodes"] = fallback_candidates
                 payload["hint"] = (
-                    "Use an exact loaded session name. "
-                    f"Examples: {', '.join(fallback_candidates)}."
+                    "Specified block name was not found. "
+                    f"Available block names: {', '.join(fallback_candidates)}."
                 )
     return payload
 

@@ -828,9 +828,10 @@ def _classify_goal(goal: str, preferred_block_type: str | None) -> dict[str, Any
 
 
 def _extract_tokens(text: str) -> list[str]:
-    """Extract normalized tokens from text."""
-    tokens = re.split(r"[^a-z0-9]", text.lower())
-    return [t for t in tokens if len(t) > 1]
+    """Extract normalized tokens from text, dropping any single-character noise."""
+    from grc_agent.runtime.text_utils import tokenize_identifier
+
+    return [t for t in tokenize_identifier(text) if len(t) > 1]
 
 
 def _candidate_matches_family(candidate: InsertionCandidate, family_tokens: list[str]) -> bool:

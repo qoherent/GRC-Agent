@@ -13,6 +13,7 @@ from grc_agent._payload import ErrorCode
 from grc_agent.catalog.loaders import describe_block
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.block_semantics import BlockRole, _block_semantics
+from grc_agent.runtime.integrity import compact_file_integrity
 from grc_agent.runtime.tool_context import is_meaningful, is_variable_block
 from grc_agent.session_ops import connection_id as render_connection_id
 from grc_agent.session_ops import parse_connection_id
@@ -97,7 +98,7 @@ def resolve_disconnect_connection_id(
                 {
                     "code": "missing_required",
                     "field": "connection_id",
-                    "message": "Provide connection_id or endpoint fields.",
+                    "message": "Missing connection_id and endpoint fields.",
                 }
             ],
         )
@@ -192,9 +193,9 @@ def dispatch_flat_change_graph_batch(
                 "error_type": ErrorCode.STALE_REVISION,
                 "message": (
                     "The active graph file changed on disk after this session "
-                    "loaded or saved it. Reload the graph before committing."
+                    "loaded or saved it."
                 ),
-                "file_integrity": _compact_file_integrity(file_integrity),
+                "file_integrity": compact_file_integrity(file_integrity),
                 "state_revision": agent.session.state_revision,
             },
         )
@@ -264,7 +265,6 @@ def dispatch_flat_change_graph_batch(
         {
             "ok": ok,
             "committed": ok,
-            "operation_summary": "batch",
             "state_revision": agent.session.state_revision,
             "effect": operation_effects[0] if len(operation_effects) == 1 else None,
             "effects": operation_effects if len(operation_effects) > 1 else None,
@@ -484,51 +484,9 @@ def _aggregate_hints(
     if bypass_hint:
         hints.append(bypass_hint)
 
-    port_hint = _port_discovery_hint(agent, operations, errors_payload)
-    if port_hint:
-        hints.append(port_hint)
-
-    occupancy_hint = _port_occupancy_hint(errors_payload)
-    if occupancy_hint:
-        hints.append(occupancy_hint)
-
     repair_hint = _repair_hint_for_validation_failure(operations, validation_result)
     if repair_hint:
         hints.append(repair_hint)
-
-    # Check for preflight incompatible_dtype error to produce the same precise config hint
-    if isinstance(errors_payload, list):
-        for err in errors_payload:
-            if not isinstance(err, dict):
-                continue
-            if err.get("code") == "incompatible_dtype" and err.get("message"):
-                msg = err["message"]
-                match = re.search(
-                    r"Source IO type \"([^\"]+)\" does not match sink IO type \"([^\"]+)\" connecting ([a-zA-Z0-9_]+)\(([^)]+)\) to ([a-zA-Z0-9_]+)\(([^)]+)\)",
-                    msg
-                )
-                if match:
-                    src_dt = match.group(1)
-                    dst_dt = match.group(2)
-                    hints.append(f"Stream dtype mismatch: {src_dt} -> {dst_dt}.")
-                else:
-                    match = re.search(
-                        r"Cannot connect ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\) to ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\)",
-                        msg
-                    )
-                    if match:
-                        src_dt = match.group(3)
-                        dst_dt = match.group(6)
-                        hints.append(f"Stream dtype mismatch: {src_dt} -> {dst_dt}.")
-                    else:
-                        match = re.search(
-                            r"Existing connection became invalid: ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\) -> ([a-zA-Z0-9_]+)\(([^)]+)\) \(([^)]+)\)",
-                            msg
-                        )
-                        if match:
-                            src_dt = match.group(3)
-                            dst_dt = match.group(6)
-                            hints.append(f"Stream dtype mismatch: {src_dt} -> {dst_dt}.")
 
     var_hint = _undefined_variable_hint(operations, errors_payload)
     if var_hint:
@@ -538,10 +496,7 @@ def _aggregate_hints(
     if first:
         hints.append(first)
 
-    if not hints:
-        return _flat_change_graph_hint()
-
-    return " ".join(hints)
+    return " ".join(hints) if hints else None
 
 
 def _bypass_hint(
@@ -561,19 +516,15 @@ def _bypass_hint(
     if not disabled_ops:
         return None
 
-    native_errors = _native_validation_error_text(validation_result)
-    port_disconnected = any(
-        "port is not connected" in err.lower()
-        for err in native_errors
+    port_disconnected = isinstance(errors_payload, list) and any(
+        isinstance(row, dict)
+        and row.get("code") in ("port_out_of_range", "occupied_input_port", "invalid_port")
+        for row in errors_payload
     )
 
-    if isinstance(errors_payload, list):
-        for row in errors_payload:
-            if isinstance(row, dict):
-                msg = str(row.get("message", "")).lower()
-                if "port" in msg or "source" in msg:
-                    port_disconnected = True
-                    break
+    if not port_disconnected:
+        native_errors = _native_validation_error_text(validation_result)
+        port_disconnected = any("port is not connected" in err.lower() for err in native_errors)
 
     if not port_disconnected:
         return None
@@ -606,37 +557,6 @@ def _bypass_hint(
     return "Terminal/control block cannot be bypassed."
 
 
-def _port_discovery_hint(
-    agent: Any,
-    operations: list[dict[str, Any]],
-    errors_payload: Any,
-) -> str | None:
-    if not isinstance(errors_payload, list):
-        return None
-    has_port_error = any(
-        isinstance(row, dict)
-        and (
-            row.get("code") in ("port_out_of_range", "catalog_block_unavailable", "invalid_port")
-            or "port" in str(row.get("field", "")).lower()
-        )
-        for row in errors_payload
-    )
-    if not has_port_error:
-        return None
-    return "Connection failed — message ports require string identifiers."
-
-
-def _port_occupancy_hint(errors_payload: Any) -> str | None:
-    if not isinstance(errors_payload, list):
-        return None
-    for row in errors_payload:
-        if not isinstance(row, dict):
-            continue
-        msg = str(row.get("message", "")).lower()
-        if "port is already connected" in msg or "already in use" in msg:
-            return "Input port already occupied."
-    return None
-
 
 def _undefined_variable_hint(
     operations: list[dict[str, Any]],
@@ -662,9 +582,6 @@ def _undefined_variable_hint(
     return None
 
 
-def _flat_change_graph_hint() -> str:
-    return ""
-
 
 def _repair_hint_for_validation_failure(
     operations: list[dict[str, Any]],
@@ -677,12 +594,6 @@ def _repair_hint_for_validation_failure(
     native_errors = _native_validation_error_text(validation_result)
     if not native_errors:
         return None
-    param_pattern = re.compile(r"Param - [^(]+\(([^)]+)\):\s*Expression[\s\S]*?is\s+invalid", re.IGNORECASE)
-    for error in native_errors:
-        param_match = param_pattern.search(error)
-        if param_match:
-            param_name = param_match.group(1)
-            return f"Invalid or missing value for parameter '{param_name}'."
 
     dtype_pair = _first_dtype_mismatch(native_errors)
     if dtype_pair is None:
@@ -940,19 +851,6 @@ def _drop_empty_result_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if is_meaningful(value)}
 
 
-def _compact_file_integrity(file_integrity: dict[str, Any]) -> dict[str, Any]:
-    def _short_hash(value: Any) -> str | None:
-        return value[:12] if isinstance(value, str) and value else None
-
-    compact = {
-        "status": file_integrity.get("status"),
-        "path": file_integrity.get("path"),
-        "persisted_sha256": _short_hash(file_integrity.get("persisted_sha256")),
-        "current_sha256": _short_hash(file_integrity.get("current_sha256")),
-    }
-    return _drop_empty_result_fields(compact)
-
-
 def _operation_effects(operations: Any) -> list[str]:
     if not isinstance(operations, list):
         return []
@@ -1126,7 +1024,7 @@ def resolve_rewire_new_endpoint_args(
                     "code": "missing_required",
                     "field": missing_side,
                     "message": (
-                        "Provide exact fields or at least one bounded hint for "
+                        "Missing exact fields or bounded hint for "
                         "this new endpoint side."
                     ),
                 }
@@ -1153,8 +1051,8 @@ def resolve_rewire_new_endpoint_args(
                     "code": "missing_required",
                     "field": field,
                     "message": (
-                        "Provide an exact new endpoint field or enough endpoint "
-                        "hints to resolve executable candidates."
+                        "Missing exact new endpoint or sufficient endpoint "
+                        "hints to resolve candidates."
                     ),
                 }
                 for field in missing_fields
@@ -1168,7 +1066,7 @@ def resolve_rewire_new_endpoint_args(
             "ok": False,
             "message": (
                 "Too many executable new endpoint candidates match. "
-                "Provide exact new source and destination endpoints."
+                "Ambiguous new endpoints; exact new source and destination endpoints are required."
             ),
             "error_type": "ambiguous_rewire_endpoint",
             "state_revision": agent.session.state_revision,
@@ -1375,8 +1273,8 @@ def resolve_old_rewire_connection_id(
                 return {
                     "ok": False,
                     "message": (
-                        "Multiple old connections match. Provide an exact old "
-                        "connection before resolving partial new endpoint hints."
+                        "Multiple old connections match. An exact old "
+                        "connection is required before resolving partial new endpoint hints."
                     ),
                     "error_type": "ambiguous_connection",
                     "state_revision": agent.session.state_revision,
@@ -1414,7 +1312,7 @@ def resolve_old_rewire_connection_id(
                 {
                     "code": "missing_required",
                     "field": "old_connection_id",
-                    "message": "Provide old_connection_id or old endpoint fields.",
+                    "message": "Missing old_connection_id and old endpoint fields.",
                 }
             ],
         }
@@ -1452,8 +1350,8 @@ def resolve_old_rewire_connection_id(
             return {
                 "ok": False,
                 "message": (
-                    "Multiple old connections match. Provide an exact old "
-                    "connection before resolving partial new endpoint hints."
+                    "Multiple old connections match. An exact old "
+                    "connection is required before resolving partial new endpoint hints."
                 ),
                 "error_type": "ambiguous_connection",
                 "state_revision": agent.session.state_revision,

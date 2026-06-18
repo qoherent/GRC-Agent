@@ -12,19 +12,6 @@ from grc_agent._payload import ErrorCode
 from grc_agent.catalog.loaders import CatalogError, describe_block, get_catalog_snapshot
 from grc_agent.runtime.tool_context import is_meaningful
 
-# ---------------------------------------------------------------------------
-# Block-specific FTS synonym injection (Fix: search tuning, not prompt tuning)
-# Maps block_id -> extra terms appended to that block's FTS body so that
-# natural-language queries surface the correct block without prompt coaching.
-# ---------------------------------------------------------------------------
-_BLOCK_SEARCH_SYNONYMS: dict[str, tuple[str, ...]] = {
-    # 'variable' block: model queries 'constant value block', 'named value', etc.
-    "variable": ("constant", "value", "named value", "static", "scalar",
-                  "flowgraph variable", "define variable", "set variable"),
-    "analog_sig_source_x": ("complex source", "signal source", "sine wave",
-                             "cosine wave", "waveform generator"),
-}
-
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
@@ -240,35 +227,8 @@ def search_blocks(
     output_truncated = len(candidates) > len(limited)
     text_lines: list[str] = []
 
-    # ── Tier 1 / Tier 2 detection ──────────────────────────────────────
-    has_exact_hit = any(
-        str(item.get("match_type", "")) in {"exact_block_id", "exact_label"}
-        for item in limited
-    )
-    # Promote to Tier-2 when the query explicitly names a known block_id.
-    # e.g. query='blocks_null_sink parameters' contains 'blocks_null_sink'.
-    if not has_exact_hit:
-        query_tokens = set(re.findall(r"[a-z0-9_]+", q.casefold()))
-        has_exact_hit = any(
-            str(item.get("block_id", "")).casefold() in query_tokens
-            or str(item.get("block_id", "")).casefold() in q.casefold()
-            for item in limited
-        )
-
-    if not debug and not enrich and not has_exact_hit:
-        # Tier 1 — concept search: ultra-compact, no JSON bloat.
-        # Return only block_id + name so the model's attention
-        # heads land directly on the IDs it needs to copy.
-        compact = []
-        for idx, item in enumerate(limited, 1):
-            bid = str(item.get("block_id", ""))
-            name = str(item.get("name", ""))
-            text_lines.append(f"{idx}. ID: {bid} | Name: {name}")
-            compact.append({"block_id": bid, "name": name})
-        limited = compact
-
-    elif not debug:
-        # Tier 2 — exact match or debug: full catalog details.
+    if not debug:
+        # Uniform output: always include catalog details for the first N items.
         for idx, item in enumerate(limited):
             block_id = str(item.get("block_id", ""))
             if idx < _CATALOG_DETAIL_LIMIT:
@@ -278,7 +238,6 @@ def search_blocks(
         limited = [
             {
                 "block_id": str(item.get("block_id", "")),
-                "catalog_label": str(item.get("name", "")),
                 "name": str(item.get("name", "")),
                 "summary": str(item.get("summary", "")),
                 "match_type": str(item.get("match_type", "")),
@@ -291,7 +250,6 @@ def search_blocks(
             }
             for item in limited
         ]
-        # Build text summary for Tier 2 as well
         for idx, item in enumerate(limited, 1):
             bid = str(item.get("block_id", ""))
             name = str(item.get("name", ""))
@@ -373,7 +331,17 @@ def _lexical_catalog_candidates(
             item["match_type"] = match_type
             evidence = _catalog_match_evidence(query_terms, entry)
             if evidence:
-                item["why"] = "matched catalog metadata: " + ", ".join(evidence[:6])
+                _MAX_EVIDENCE = 6
+                if len(evidence) > _MAX_EVIDENCE:
+                    from grc_agent.runtime.text_utils import format_truncation_flag
+                    truncated = ", ".join(evidence[:_MAX_EVIDENCE])
+                    item["why"] = (
+                        "matched catalog metadata: "
+                        + truncated
+                        + format_truncation_flag("catalog_evidence", len(evidence), _MAX_EVIDENCE, unit="items")
+                    )
+                else:
+                    item["why"] = "matched catalog metadata: " + ", ".join(evidence)
             scored_by_id[entry.block_id] = (float(score), match_type, item)
 
     fts_ranked, fts_error = _fts5_catalog_rank(
@@ -449,15 +417,12 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
         ]
         documentation = _string_value(payload.get("documentation")) or ""
         fields = [raw_block.block_id, label, *params, *inputs, *outputs, *categories]
-        synonyms = _BLOCK_SEARCH_SYNONYMS.get(raw_block.block_id, ())
-        fts_text = " ".join([*fields, documentation, *synonyms])
+        fts_text = " ".join([*fields, documentation])
         fts_records.append((raw_block.block_id, fts_text))
         field_norms = {_normalize_for_search(field) for field in fields if field}
         field_tokens: set[str] = set()
         for field in fields:
             field_tokens.update(_search_terms(field))
-        for synonym in synonyms:
-            field_tokens.update(_search_terms(synonym))
         item = {
             "block_id": raw_block.block_id,
             "name": label,
@@ -484,7 +449,7 @@ def _build_catalog_search_index(*, snapshot: Any) -> _CatalogSearchIndex:
                 item=item,
                 field_norms=field_norms,
                 field_tokens=field_tokens,
-                doc_tokens=_search_terms(documentation[:1200]) | _search_terms(" ".join(synonyms)),
+                doc_tokens=_search_terms(documentation[:1200]),
                 label=label,
                 params=params + raw_param_ids,
                 ports=[*inputs, *outputs],
@@ -506,7 +471,8 @@ def _compact_catalog_details(block_id: str) -> dict[str, Any]:
     if details.get("ok") is not True:
         return {}
     params = []
-    for raw_param in details.get("parameters", [])[:10]:
+    raw_params = details.get("parameters", [])
+    for raw_param in raw_params[:10]:
         if not isinstance(raw_param, dict):
             continue
         param = {
@@ -517,14 +483,21 @@ def _compact_catalog_details(block_id: str) -> dict[str, Any]:
         options = raw_param.get("options")
         if isinstance(options, list) and options:
             param["options"] = options[:8]
+            if len(options) > 8:
+                param["options"].append(f"... [TRUNCATED options: was {len(options)}, kept 8]")
         labels = raw_param.get("option_labels")
         if isinstance(labels, list) and labels:
             param["option_labels"] = labels[:8]
+            if len(labels) > 8:
+                param["option_labels"].append(f"... [TRUNCATED option_labels: was {len(labels)}, kept 8]")
         params.append(param)
+    if len(raw_params) > 10:
+        params.append({"_truncated": f"was {len(raw_params)}, kept 10"})
     ports = {}
     for direction in ("inputs", "outputs"):
         compact_ports = []
-        for raw_port in details.get(direction, [])[:8]:
+        raw_ports = details.get(direction, [])
+        for raw_port in raw_ports[:8]:
             if not isinstance(raw_port, dict):
                 continue
             compact_ports.append(
@@ -534,6 +507,8 @@ def _compact_catalog_details(block_id: str) -> dict[str, Any]:
                     if is_meaningful(raw_port.get(key))
                 }
             )
+        if len(raw_ports) > 8:
+            compact_ports.append({"_truncated": f"was {len(raw_ports)}, kept 8"})
         if compact_ports:
             ports[direction] = compact_ports
     return {
@@ -695,11 +670,20 @@ def _catalog_summary(
         return " ".join(documentation.split())
     parts: list[str] = []
     if inputs:
-        parts.append("inputs: " + ", ".join(inputs[:4]))
+        inp_str = ", ".join(inputs[:4])
+        if len(inputs) > 4:
+            inp_str += f" ... [TRUNCATED inputs: was {len(inputs)}, kept 4]"
+        parts.append("inputs: " + inp_str)
     if outputs:
-        parts.append("outputs: " + ", ".join(outputs[:4]))
+        out_str = ", ".join(outputs[:4])
+        if len(outputs) > 4:
+            out_str += f" ... [TRUNCATED outputs: was {len(outputs)}, kept 4]"
+        parts.append("outputs: " + out_str)
     if params:
-        parts.append("params: " + "; ".join(params[:4]))
+        par_str = "; ".join(params[:4])
+        if len(params) > 4:
+            par_str += f" ... [TRUNCATED params: was {len(params)}, kept 4]"
+        parts.append("params: " + par_str)
     if categories:
         parts.append("category: " + categories[0])
     if templates_make:

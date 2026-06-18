@@ -125,7 +125,14 @@ def render_clarification_prompt(payload: dict[str, Any]) -> str:
         block_type = tool_args.get("block_type", "")
         conn_id = tool_args.get("connection_id", "")
         params = tool_args.get("params", {})
-        params_summary = ", ".join(f"{k}={v!r}" for k, v in list(params.items())[:3])
+        _MAX_PARAMS_PREVIEW = 3
+        params_items = list(params.items())[:_MAX_PARAMS_PREVIEW]
+        params_summary = ", ".join(f"{k}={v!r}" for k, v in params_items)
+        if len(params) > _MAX_PARAMS_PREVIEW:
+            from grc_agent.runtime.text_utils import format_truncation_flag
+            params_summary += format_truncation_flag(
+                "params_preview", len(params), _MAX_PARAMS_PREVIEW, unit="items"
+            )
         line = f"{label}) {title}"
         parts: list[str] = []
         if block_type:

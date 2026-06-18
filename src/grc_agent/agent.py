@@ -26,6 +26,7 @@ from grc_agent._payload import ErrorCode
 from grc_agent.catalog.loaders import build_catalog_snapshot, describe_block
 from grc_agent.config import AgentConfig, default_app_config
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.runtime.integrity import compact_file_integrity
 from grc_agent.history import (
     GraphHistoryJournal,
     GraphSnapshot,
@@ -79,45 +80,7 @@ from grc_agent.runtime.clarification import (
     rewire_new_endpoint_clarification_payload as rewire_new_endpoint_clarification_payload_wrapper,
 )
 from grc_agent.runtime.doc_answer import (
-    _DocsComparisonSides,
-    _DocsEvidenceCandidate,
-    build_catalog_assisted_candidate,
-    build_fallback_answer,
-    catalog_block_purpose_sentence,
-    classify_docs_answer_type,
-    clean_catalog_summary_for_answer,
-    clean_docs_excerpt,
-    docs_low_value_reasons,
-    docs_primary_terms,
-    docs_topic_terms,
-    extract_block_definition_subject,
-    extract_comparison_sides,
-    extract_docs_subject,
-    is_block_definition_query,
-    is_procedural_walkthrough_text,
-    is_tutorial_or_howto_query,
-    minimum_required_term_hits,
-    pick_typed_sentence,
-    required_terms_for_answer_type,
-    select_docs_candidates_for_answer_type,
-    sentence_list,
-    should_catalog_assist,
-    text_matches_term_or_synonym,
-)
-from grc_agent.runtime.doc_answer import (
     ask_grc_docs as ask_grc_docs_wrapper,
-)
-from grc_agent.runtime.doc_answer import (
-    build_docs_source_quality as build_docs_source_quality_wrapper,
-)
-from grc_agent.runtime.doc_answer import (
-    build_typed_docs_answer as build_typed_docs_answer_wrapper,
-)
-from grc_agent.runtime.doc_answer import (
-    collect_docs_candidates as collect_docs_candidates_wrapper,
-)
-from grc_agent.runtime.doc_answer import (
-    rank_docs_candidates as rank_docs_candidates_wrapper,
 )
 from grc_agent.runtime.inspect_graph import (
     get_grc_context_internal as get_grc_context_internal_wrapper,
@@ -159,8 +122,6 @@ def _user_text_of(message: ChatMessage) -> str:
     return "\n".join(p for p in parts if p)
 
 
-_SAVE_PATH_HINT_PATTERN = re.compile(r"(?P<path>(?:~|/)[^\s'\"`]+\.grc)\b")
-_ALIAS_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
 _SEARCH_BLOCK_SUMMARY_MAX_CHARS = 120
 _INSTALLED_GRAPH_ROOTS = (
     Path("/usr/share/gnuradio/examples"),
@@ -176,36 +137,26 @@ _JOURNALED_MUTATION_TOOLS = {
     "change_graph",
 }
 def _normalize_alias_key(value: str) -> str:
-    normalized = " ".join(value.split()).strip().lower()
-    if not normalized:
-        return ""
-    normalized = _ALIAS_TOKEN_PATTERN.sub(" ", normalized).strip()
-    return normalized
+    """Canonical alias normalizer: whitespace + lowercase + alphanumeric-only."""
+    from grc_agent.runtime.text_utils import compact_whitespace, tokenize_identifier
+
+    return compact_whitespace(" ".join(tokenize_identifier(value)))
 
 
 def _compact_block_summary(summary: Any) -> str:
     if not isinstance(summary, str):
         return ""
     compact = " ".join(summary.split())
-    if len(compact) <= _SEARCH_BLOCK_SUMMARY_MAX_CHARS:
+    original_len = len(compact)
+    if original_len <= _SEARCH_BLOCK_SUMMARY_MAX_CHARS:
         return compact
-    return compact[: _SEARCH_BLOCK_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+    kept_len = _SEARCH_BLOCK_SUMMARY_MAX_CHARS - 1
+    return compact[:kept_len].rstrip() + f"... [TRUNCATED by chat-history compactor: was {original_len} chars, kept {kept_len}]"
 
 
 def _compact_save_file_integrity(file_integrity: dict[str, Any]) -> dict[str, Any]:
-    def _short_hash(value: Any) -> str | None:
-        return value[:12] if isinstance(value, str) and value else None
-
-    compact: dict[str, Any] = {
-        "status": file_integrity.get("status"),
-        "path": file_integrity.get("path"),
-        "persisted_sha256": _short_hash(file_integrity.get("persisted_sha256")),
-        "current_sha256": _short_hash(file_integrity.get("current_sha256")),
-    }
-    error = file_integrity.get("error")
-    if isinstance(error, str) and error:
-        compact["error"] = error
-    return {key: value for key, value in compact.items() if is_meaningful(value)}
+    """Thin wrapper for the unified integrity compactor (legacy name)."""
+    return compact_file_integrity(file_integrity)
 
 
 
@@ -233,45 +184,7 @@ def _catalog_version_token(catalog_root: str | None) -> str:
 class GrcAgent:
     """A thin integration layer between a language model and package-level owners."""
 
-    _RAW_YAML_EDIT_PATTERNS: tuple[tuple[str, ...], ...] = (
-        ("yaml", "direct"),
-        ("yaml", "manual"),
-        ("yaml", "text"),
-        ("yaml", "raw"),
-        (".grc", "yaml", "edit"),
-        (".grc", "yaml", "direct"),
-        (".grc", "yaml", "raw"),
-        ("raw", ".grc"),
-        ("raw", "yaml"),
-        ("patch", "yaml"),
-        ("modify", "yaml", "text"),
-        ("edit", "yaml", "remove"),
-        ("edit", "yaml", "block"),
-    )
-    _INTERNAL_TOOL_NAME_REQUEST_VERBS: tuple[str, ...] = (
-        "call",
-        "use",
-        "invoke",
-        "run",
-        "execute",
-    )
-    _INTERNAL_TOOL_NAMES_BLOCKED_IN_MVP: tuple[str, ...] = (
-        "apply_edit",
-        "remove_connection",
-        "rewire_connection",
-        "save_graph",
-        "validate_graph",
-        "propose_edit",
-        "insert_block_on_connection",
-        "auto_insert_block",
-    )
-    _UNSUPPORTED_OPERATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("undo", ("undo",)),
-        ("redo", ("redo",)),
-        ("Python export", ("export", "python")),
-        ("standalone Python export", ("standalone", "python")),
-        ("code generation", ("generate", "code")),
-    )
+
 
     def __init__(
         self,
@@ -301,6 +214,7 @@ class GrcAgent:
             if isinstance(llama_model, str) and llama_model.strip()
             else llama_defaults.model
         )
+        self._embedding_model = llama_defaults.embedding_model
         self._llama_request_timeout_seconds = (
             float(llama_request_timeout_seconds)
             if isinstance(llama_request_timeout_seconds, int | float)
@@ -345,6 +259,22 @@ class GrcAgent:
     def get_system_prompt(self) -> str:
         return build_system_prompt(self.chat_session_id)
 
+    def warmup_vector_index(self) -> None:
+        """Kick off background vector-DB ingestion for ask_grc_docs.
+
+        Production entry points (CLI, GUI) call this once after constructing
+        the agent. Tests MUST NOT call it: the ingestion thread writes to the
+        real DB_PATH and would be affected by test-time mocks of
+        ``grc_agent.runtime.doc_answer.get_embedding``.
+        """
+        import threading
+        from grc_agent.runtime.doc_answer import DB_PATH, initialize_vector_db_background
+        threading.Thread(
+            target=initialize_vector_db_background,
+            args=(DB_PATH, self._llama_server_url),
+            daemon=True,
+        ).start()
+
     def reset_chat_session(self) -> None:
         """Reset the chat session history and generate a new session ID to clear KV cache matching."""
         self.chat_history.clear()
@@ -384,20 +314,15 @@ class GrcAgent:
         """Reject disallowed model-driven tools for the active surface profile."""
         if not model_tool_call:
             return None
-        if tool_name in MVP_MODEL_TOOL_NAMES:
-            return None
-        if tool_name in self._tools:
+        if tool_name in self._active_tool_surface.model_tool_names:
             return None
         return self._tool_result(
             tool_name=tool_name,
             ok=False,
-            message=(
-                "[TOOL_NOT_ALLOWED_FOR_SURFACE] "
-                f"Tool '{tool_name}' is not allowed for MVP model-facing execution."
-            ),
+            message=f"Tool '{tool_name}' is not allowed for MVP model-facing execution.",
             error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
             active_tool_surface=self._active_tool_surface.name,
-            allowed_model_tools=list(MVP_MODEL_TOOL_NAMES),
+            allowed_model_tools=list(self._active_tool_surface.model_tool_names),
         )
 
     def execute_tool(
@@ -499,8 +424,7 @@ class GrcAgent:
             if key == "transaction":
                 value = self._transaction_normalizer.normalize_transaction_instance_names(value)
             normalized[key] = value
-        if tool_name == "save_graph":
-            normalized = self._normalize_save_graph_path(normalized)
+
         if tool_name == "inspect_graph":
             normalized = self._normalize_inspect_graph_args(normalized)
         if tool_name == "change_graph":
@@ -546,7 +470,6 @@ class GrcAgent:
             view = normalized["view"]
         if isinstance(view, str) and view.strip().lower() == "overview":
             normalized["targets"] = []
-            normalized["params"] = []
         elif isinstance(view, str) and view.strip().lower() == "details":
             normalized = self._normalize_inspect_parameter_targets(normalized)
             params = normalized.get("params")
@@ -603,16 +526,14 @@ class GrcAgent:
         return normalized
 
     def _inspect_param_keys_by_block(self) -> dict[str, set[str]]:
+        from grc_agent.runtime.inspect_graph import _param_keys_by_block
         flowgraph = self.session.flowgraph
         if flowgraph is None:
             return {}
-        result: dict[str, set[str]] = {}
-        for block in flowgraph.blocks:
-            params = block.params.get("parameters") if isinstance(block.params, dict) else None
-            if not isinstance(params, dict):
-                continue
-            result[block.instance_name] = {str(key) for key in params}
-        return result
+        return {
+            name: set(keys)
+            for name, keys in _param_keys_by_block(flowgraph.blocks).items()
+        }
 
     @staticmethod
     def _split_inspect_parameter_ref(
@@ -631,61 +552,7 @@ class GrcAgent:
                 return block_name, param_key
         return None
 
-    def _normalize_save_graph_path(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        raw_path = kwargs.get("path")
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            return kwargs
-        requested = Path(raw_path.strip()).expanduser()
-        requested_dir = requested.parent
-        if requested_dir.exists():
-            return kwargs
 
-        candidates = self._save_path_candidates_from_user_text()
-        if not candidates:
-            return kwargs
-        compatible = [
-            candidate
-            for candidate in candidates
-            if candidate.name == requested.name and candidate.parent.exists()
-        ]
-        if len(compatible) != 1:
-            return kwargs
-
-        recovered = compatible[0]
-        if recovered == requested:
-            return kwargs
-        kwargs = dict(kwargs)
-        kwargs["path"] = str(recovered)
-        logger.info(
-            "save_graph_path_recovered requested=%s recovered=%s",
-            str(requested),
-            str(recovered),
-        )
-        return kwargs
-
-    def _save_path_candidates_from_user_text(self) -> list[Path]:
-        texts: list[str] = []
-        if isinstance(self._turn_user_message, str) and self._turn_user_message.strip():
-            texts.append(self._turn_user_message)
-        for message in reversed(self.chat_history.get_messages()):
-            if message.role != ChatMessageRole.User:
-                continue
-            text = _user_text_of(message)
-            if text:
-                texts.append(text)
-                break
-        if not texts:
-            return []
-
-        unique: dict[str, Path] = {}
-        for text in texts:
-            for match in _SAVE_PATH_HINT_PATTERN.finditer(text):
-                candidate = match.group("path").strip()
-                if not candidate:
-                    continue
-                expanded = str(Path(candidate).expanduser())
-                unique.setdefault(expanded, Path(expanded))
-        return list(unique.values())
 
 
 
@@ -877,48 +744,7 @@ class GrcAgent:
         self._pending_clarification = None
         self._pending_clarification_revision = None
 
-    @staticmethod
-    def _guard_result(assistant_text: str) -> dict[str, Any]:
-        """Structured result for a guard-level refusal (no tool execution)."""
-        return {
-            "ok": True,
-            "model": "guard",
-            "steps": 0,
-            "tool_rounds_used": 0,
-            "tool_calls_executed": 0,
-            "assistant_text": assistant_text,
-        }
 
-    def check_unsupported_request(self, user_message: str) -> dict[str, Any] | None:
-        """Return a factual refusal for unsupported runtime actions.
-
-        Messages state the fact of what is unsupported (AGENTS.md: error
-        strings return facts, never what to do about it). The available
-        tool surface — declared in the system prompt — is the sole guide
-        for what to call instead.
-        """
-        lowered = user_message.lower()
-        if self._active_tool_surface.name == "mvp":
-            for tool_name in self._INTERNAL_TOOL_NAMES_BLOCKED_IN_MVP:
-                if not re.search(rf"\b{re.escape(tool_name)}\b", lowered):
-                    continue
-                for verb in self._INTERNAL_TOOL_NAME_REQUEST_VERBS:
-                    if re.search(
-                        rf"\b{re.escape(verb)}\b(?:\W+\w+){{0,4}}\W+{re.escape(tool_name)}\b",
-                        lowered,
-                    ):
-                        return self._guard_result(
-                            f"{tool_name} is not part of the model-facing tool surface."
-                        )
-        for keywords in self._RAW_YAML_EDIT_PATTERNS:
-            if all(kw in lowered for kw in keywords):
-                return self._guard_result(
-                    "Raw .grc YAML editing is not supported through this surface."
-                )
-        for label, keywords in self._UNSUPPORTED_OPERATIONS:
-            if all(kw in lowered for kw in keywords):
-                return self._guard_result(f"{label} is not supported.")
-        return None
 
     def validate_turn_route(
         self,
@@ -1041,8 +867,6 @@ class GrcAgent:
             "inspect_graph": self._inspect_graph,
             "query_knowledge": self._query_knowledge,
             "change_graph": self._change_graph,
-            "search_blocks": self._search_blocks,
-            "ask_grc_docs": self._ask_grc_docs,
         }
 
     # ------------------------------------------------------------------- #
@@ -1255,21 +1079,26 @@ class GrcAgent:
         for key in ("items", "results", "sources"):
             value = compact.get(key)
             if isinstance(value, list) and len(value) > max_list_items:
+                original_len = len(value)
                 compact[key] = value[:max_list_items]
+                compact[f"{key}_truncated"] = f"... [TRUNCATED: was {original_len} items, kept {max_list_items}]"
                 compact["output_truncated"] = True
         validation_errors = compact.get("validation_errors")
         if (
             isinstance(validation_errors, list)
             and len(validation_errors) > max_validation_errors
         ):
+            original_len = len(validation_errors)
             compact["validation_errors"] = validation_errors[:max_validation_errors]
+            compact["validation_errors_truncated"] = f"... [TRUNCATED: was {original_len} items, kept {max_validation_errors}]"
             compact["output_truncated"] = True
         validation = compact.get("validation_result")
         if isinstance(validation, dict):
             stderr = validation.get("stderr")
             if isinstance(stderr, str) and len(stderr) > max_stderr_chars:
                 validation = dict(validation)
-                validation["stderr"] = stderr[: max_stderr_chars - 1].rstrip() + "…"
+                original_len = len(stderr)
+                validation["stderr"] = stderr[: max_stderr_chars - 1].rstrip() + f"… [TRUNCATED: was {original_len} chars, kept {max_stderr_chars}]"
                 compact["validation_result"] = validation
                 compact["output_truncated"] = True
         compact["output_bytes"] = min(size, max_bytes)
@@ -1423,177 +1252,7 @@ class GrcAgent:
             debug=debug,
         )
 
-    def _collect_docs_candidates(self) -> list[_DocsEvidenceCandidate]:
-        return collect_docs_candidates_wrapper(self)
 
-    def _rank_docs_candidates(
-        self,
-        *,
-        question: str,
-        candidates: list[_DocsEvidenceCandidate],
-    ) -> list[_DocsEvidenceCandidate]:
-        return rank_docs_candidates_wrapper(
-            self,
-            question=question,
-            candidates=candidates,
-        )
-
-    @staticmethod
-    def _is_tutorial_or_howto_query(query: str) -> bool:
-        return is_tutorial_or_howto_query(query)
-
-    @staticmethod
-    def _docs_topic_terms(query: str) -> list[str]:
-        return docs_topic_terms(query)
-
-    @staticmethod
-    def _docs_primary_terms(query: str) -> list[str]:
-        return docs_primary_terms(query)
-
-    @staticmethod
-    def _clean_docs_excerpt(excerpt: str) -> str:
-        return clean_docs_excerpt(excerpt)
-
-    def _docs_low_value_reasons(self, *, candidate: _DocsEvidenceCandidate) -> list[str]:
-        return docs_low_value_reasons(candidate=candidate)
-
-    @staticmethod
-    def _is_procedural_walkthrough_text(text: str) -> bool:
-        return is_procedural_walkthrough_text(text)
-
-    @staticmethod
-    def _is_block_definition_query(question: str) -> bool:
-        return is_block_definition_query(question)
-
-    @staticmethod
-    def _extract_block_definition_subject(question: str) -> str | None:
-        return extract_block_definition_subject(question)
-
-    @staticmethod
-    def _extract_docs_subject(question: str) -> str | None:
-        return extract_docs_subject(question)
-
-    def _build_catalog_assisted_candidate(
-        self,
-        *,
-        question: str,
-    ) -> _DocsEvidenceCandidate | None:
-        return build_catalog_assisted_candidate(self, question=question)
-
-    def _should_catalog_assist(
-        self,
-        question: str,
-        ranked_candidates: list[_DocsEvidenceCandidate],
-    ) -> bool:
-        return should_catalog_assist(question, ranked_candidates)
-
-    @staticmethod
-    def _classify_docs_answer_type(question: str) -> str:
-        return classify_docs_answer_type(question)
-
-    @staticmethod
-    def _text_matches_term_or_synonym(text: str, term: str) -> bool:
-        return text_matches_term_or_synonym(text, term)
-
-    def _select_docs_candidates_for_answer_type(
-        self,
-        *,
-        question: str,
-        answer_type: str,
-        ranked_candidates: list[_DocsEvidenceCandidate],
-        limit: int,
-    ) -> list[_DocsEvidenceCandidate]:
-        return select_docs_candidates_for_answer_type(
-            question=question,
-            answer_type=answer_type,
-            ranked_candidates=ranked_candidates,
-            limit=limit,
-        )
-
-    @staticmethod
-    def _extract_comparison_sides(question: str) -> _DocsComparisonSides | None:
-        return extract_comparison_sides(question)
-
-    @staticmethod
-    def _sentence_list(text: str) -> list[str]:
-        return sentence_list(text)
-
-    def _pick_typed_sentence(
-        self,
-        *,
-        candidate: _DocsEvidenceCandidate,
-        required_terms: tuple[str, ...],
-        allow_procedural: bool,
-        min_term_hits: int = 1,
-    ) -> str:
-        return pick_typed_sentence(
-            candidate=candidate,
-            required_terms=required_terms,
-            allow_procedural=allow_procedural,
-            min_term_hits=min_term_hits,
-        )
-
-    @staticmethod
-    def _minimum_required_term_hits(required_terms: tuple[str, ...]) -> int:
-        return minimum_required_term_hits(required_terms)
-
-    def _required_terms_for_answer_type(
-        self,
-        *,
-        question: str,
-        answer_type: str,
-    ) -> tuple[str, ...]:
-        return required_terms_for_answer_type(question=question, answer_type=answer_type)
-
-    def _build_docs_source_quality(
-        self,
-        *,
-        question: str,
-        answer_type: str,
-        selected_candidates: list[_DocsEvidenceCandidate],
-    ) -> dict[str, Any]:
-        return build_docs_source_quality_wrapper(
-            self,
-            question=question,
-            answer_type=answer_type,
-            selected_candidates=selected_candidates,
-        )
-
-    @staticmethod
-    def _clean_catalog_summary_for_answer(name: str, summary: str) -> str:
-        return clean_catalog_summary_for_answer(name, summary)
-
-    @staticmethod
-    def _catalog_block_purpose_sentence(name: str, summary: str) -> str:
-        return catalog_block_purpose_sentence(name, summary)
-
-    def _build_typed_docs_answer(
-        self,
-        *,
-        question: str,
-        ranked_candidates: list[_DocsEvidenceCandidate],
-        answer_type: str,
-    ) -> tuple[str, bool]:
-        return build_typed_docs_answer_wrapper(
-            self,
-            question=question,
-            ranked_candidates=ranked_candidates,
-            answer_type=answer_type,
-        )
-
-    def _build_fallback_answer(
-        self,
-        *,
-        question: str,
-        ranked_candidates: list[_DocsEvidenceCandidate],
-        evidence_strong: bool,
-    ) -> tuple[str, bool]:
-        return build_fallback_answer(
-            self,
-            question=question,
-            ranked_candidates=ranked_candidates,
-            evidence_strong=evidence_strong,
-        )
 
     def _change_graph(
         self,
@@ -1681,7 +1340,7 @@ class GrcAgent:
         result = self._tool_result(
             "new_grc",
             ok=True,
-            message="Empty flowgraph session created. Use apply_edit to add blocks and connections.",
+            message="Empty flowgraph session created.",
         )
         result["provenance"] = self.session.session_provenance()
         return result
@@ -2233,7 +1892,7 @@ class GrcAgent:
             return self._tool_result(
                 tool_name="validate_graph",
                 ok=False,
-                message="Graph validation timed out. Try again or simplify the graph.",
+                message="Graph validation timed out.",
                 error_type=ErrorCode.VALIDATION_TIMEOUT,
                 stderr=self.session.last_validation_stderr,
             )
@@ -2270,7 +1929,7 @@ class GrcAgent:
             return self._tool_result(
                 tool_name="save_graph",
                 ok=False,
-                message="This new graph has no file path yet. Call save_graph(path=\"...\").",
+                message="This new graph has no file path yet.",
                 error_type="SAVE_PATH_REQUIRED",
             )
         explicit_path = isinstance(path, str) and bool(path.strip())
@@ -2282,10 +1941,7 @@ class GrcAgent:
                 return self._tool_result(
                     tool_name="save_graph",
                     ok=False,
-                    message=(
-                        "Refusing to write to protected canonical/example graph paths. "
-                        f"Choose a copied working path outside {unsafe_root}."
-                    ),
+                    message=f"Refusing to write to protected canonical/example graph paths under {unsafe_root}.",
                     error_type=ErrorCode.SAVE_REFUSED,
                 )
             current_path = (
@@ -2318,8 +1974,7 @@ class GrcAgent:
                         ok=False,
                         message=(
                             "Refusing to save because the active graph file changed "
-                            "on disk after this session loaded or saved it. Reload "
-                            "the graph before saving."
+                            "on disk after this session loaded or saved it."
                         ),
                         error_type=ErrorCode.STALE_REVISION,
                         path=str(resolved_target),
@@ -2337,10 +1992,7 @@ class GrcAgent:
                 return self._tool_result(
                     tool_name="save_graph",
                     ok=False,
-                    message=(
-                        "Refusing to save before successful validation. "
-                        "Fix the graph and validate again before saving."
-                    ),
+                    message="Refusing to save before successful validation.",
                     error_type=ErrorCode.SAVE_REFUSED,
                     requires_validation=True,
                     dirty=self.session.is_dirty,

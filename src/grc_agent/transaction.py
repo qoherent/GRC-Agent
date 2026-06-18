@@ -202,12 +202,27 @@ def _validation_error_summary(validation: dict[str, Any]) -> str:
     message = validation.get("message")
     if isinstance(message, str) and message.strip():
         return message.strip()
+    _MAX_VALIDATION_OUTPUT_CHARS = 300
     stderr = validation.get("stderr")
     if isinstance(stderr, str) and stderr.strip():
-        return " ".join(stderr.strip().split())[:300]
+        compact = " ".join(stderr.strip().split())
+        if len(compact) > _MAX_VALIDATION_OUTPUT_CHARS:
+            from grc_agent.runtime.text_utils import format_truncation_flag
+            return (
+                compact[:_MAX_VALIDATION_OUTPUT_CHARS]
+                + format_truncation_flag("stderr", len(compact), _MAX_VALIDATION_OUTPUT_CHARS)
+            )
+        return compact
     stdout = validation.get("stdout")
     if isinstance(stdout, str) and stdout.strip():
-        return " ".join(stdout.strip().split())[:300]
+        compact = " ".join(stdout.strip().split())
+        if len(compact) > _MAX_VALIDATION_OUTPUT_CHARS:
+            from grc_agent.runtime.text_utils import format_truncation_flag
+            return (
+                compact[:_MAX_VALIDATION_OUTPUT_CHARS]
+                + format_truncation_flag("stdout", len(compact), _MAX_VALIDATION_OUTPUT_CHARS)
+            )
+        return compact
     status = validation.get("status")
     return str(status or "unknown validation failure")
 

@@ -944,7 +944,19 @@ def _tool_failure_text(result: dict[str, Any]) -> str:
         native_errors = _native_validation_errors_from_result(result)
         if native_errors:
             lines.append("Native GRC validation reported:")
-            lines.extend(f"- {error}" for error in native_errors[:3] if str(error))
+            _MAX_NATIVE_ERRORS = 3
+            shown = [e for e in native_errors[:_MAX_NATIVE_ERRORS] if str(e)]
+            if len(native_errors) > _MAX_NATIVE_ERRORS:
+                from grc_agent.runtime.text_utils import format_truncation_flag
+                shown.append(
+                    format_truncation_flag(
+                        "native_validation_errors",
+                        len(native_errors),
+                        _MAX_NATIVE_ERRORS,
+                        unit="items",
+                    )
+                )
+            lines.extend(f"- {error}" for error in shown)
         return "\n".join(lines)
     message = result.get("message")
     if isinstance(message, str) and message.strip():
