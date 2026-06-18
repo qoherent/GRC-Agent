@@ -314,6 +314,10 @@ def _apply_add_block(
         return name_issues, []
 
     if is_variable_block(block_type):
+        # Variable blocks have an implicit ``comment`` parameter added by
+        # GRC's _build.py that the YAML-only catalog loader never sees.
+        # Keep the allowlist until the catalog loader is taught to merge
+        # implicit params from the GRC Block class.
         parameter_issues = _validate_parameter_updates(
             block_type=block_type,
             params=parameters,
@@ -346,7 +350,6 @@ def _apply_add_block(
             block_type=block_type,
             params=raw_parameters,
             parameter_rules=lookup.parameters,
-            allowed_parameter_ids=set(),
             op_index=op_index,
             op_type=op_type,
             field_prefix="parameters",
@@ -584,8 +587,8 @@ def _resolve_single_stream_ports(
         direction="outputs",
     )
 
-    stream_inputs = [p for p in ins if p.domain == PortDomain.STREAM]
-    stream_outputs = [p for p in outs if p.domain == PortDomain.STREAM]
+    stream_inputs = [(i, p) for i, p in enumerate(ins) if p.domain == PortDomain.STREAM]
+    stream_outputs = [(i, p) for i, p in enumerate(outs) if p.domain == PortDomain.STREAM]
 
     if not stream_inputs or not stream_outputs:
         return 0, 0, [
@@ -609,7 +612,7 @@ def _resolve_single_stream_ports(
             )
         ]
 
-    return 0, 0, []
+    return stream_inputs[0][0], stream_outputs[0][0], []
 
 
 def _apply_remove_block(
@@ -1096,20 +1099,41 @@ def _evaluate_snapshot_params(
 
     if _cached_platform is not None:
         try:
-            import gnuradio.digital as digital
-            import gnuradio.filter as filter_mod
-
             fg = _cached_platform.make_flow_graph()
 
             orig_eval = fg.evaluate
             def custom_eval(expr, namespace=None, local_namespace=None):
-                fg.namespace["digital"] = digital
-                fg.namespace["filter"] = filter_mod
-                fg.namespace["firdes"] = filter_mod.firdes
-                return orig_eval(expr, namespace, local_namespace)
+                try:
+                    return orig_eval(expr, namespace, local_namespace)
+                except NameError as e:
+                    import importlib
+                    import re
+                    match = re.search(r"name '([A-Za-z0-9_]+)' is not defined", str(e))
+                    if match:
+                        name = match.group(1)
+                        try:
+                            try:
+                                mod = importlib.import_module(f"gnuradio.{name}")
+                            except ImportError:
+                                mod = importlib.import_module(name)
+                            fg.namespace[name] = mod
+                            if name == "filter":
+                                fg.namespace["firdes"] = mod.firdes
+                            return orig_eval(expr, namespace, local_namespace)
+                        except ImportError:
+                            pass
+                    raise
             fg.evaluate = custom_eval
 
             fg.import_data(snapshot.raw_data)
+
+            for grc_block in fg.blocks:
+                if grc_block.is_import:
+                    for param in grc_block.params.values():
+                        try:
+                            param.evaluate()
+                        except Exception:
+                            pass
 
             for grc_block in fg.blocks:
                 block_eval_params = {}
@@ -1300,8 +1324,10 @@ def validate_snapshot_integrity(
             and connection.dst_block not in affected_block_names
         ):
             continue
-        src_outputs = resolved_blocks.get(connection.src_block, ([], [], None))[1]
-        dst_inputs = resolved_blocks.get(connection.dst_block, ([], [], None))[0]
+        src_tuple = resolved_blocks.get(connection.src_block, ([], [], None))
+        dst_tuple = resolved_blocks.get(connection.dst_block, ([], [], None))
+        src_outputs = src_tuple[1]
+        dst_inputs = dst_tuple[0]
 
         src_issue = _validate_port_index(
             ports=src_outputs,
@@ -1390,8 +1416,8 @@ def validate_snapshot_integrity(
             ], warnings
 
         if (
-            source_port.domain == "stream"
-            and destination_port.domain == "stream"
+            source_port.domain == PortDomain.STREAM
+            and destination_port.domain == PortDomain.STREAM
             and source_port.vlen is not None
             and destination_port.vlen is not None
             and source_port.vlen != destination_port.vlen
@@ -1497,7 +1523,7 @@ def _validate_parameter_updates(
     block_type: str,
     params: dict[str, Any],
     parameter_rules: dict[str, Any],
-    allowed_parameter_ids: set[str],
+    allowed_parameter_ids: set[str] = set(),
     op_index: int,
     op_type: str,
     field_prefix: str,
@@ -1514,7 +1540,9 @@ def _validate_parameter_updates(
                     code="parameter_not_found",
                     message=f"Unknown parameter for block type {block_type}: {parameter_id}",
                     hint=(
-                        f"Unknown param_id. Available parameters: {', '.join(sorted(allowed_parameter_ids)[:12])}."
+                        f"Unknown param_id. Available parameters: {', '.join(sorted(allowed_parameter_ids)[:12])}"
+                        + (f"... [TRUNCATED by chat-history compactor: was {len(allowed_parameter_ids)} items, kept 12]" if len(allowed_parameter_ids) > 12 else "")
+                        + "."
                     ),
                 )
             )
@@ -1598,9 +1626,6 @@ def _validate_port_index(
         message=(
             f"{direction.capitalize()} port {port_index} is out of range for {block_name} "
             f"(available: {format_port_range(len(ports))})."
-        ),
-        hint=(
-            "Port not found on the specified block."
         ),
     )
 
@@ -1735,4 +1760,4 @@ def _preflight_dtype_param_hint(
     if suggested_val is None:
         return None
 
-    return f"set the '{param_id}' parameter of '{instance_name}' to '{suggested_val}'"
+    return f"Parameter '{param_id}' of '{instance_name}' has matching type option '{suggested_val}'."

@@ -76,7 +76,8 @@ def _block_semantics(
     outputs = _port_list(catalog_payload.get("outputs"))
     input_domains = _domain_counts(inputs)
     output_domains = _domain_counts(outputs)
-    role = _semantic_role(
+    native_role = platform.get("native_role")
+    role = native_role if native_role is not None else _semantic_role(
         flags=flags,
         category_path=category_path,
         input_domains=input_domains,
@@ -114,7 +115,25 @@ def _gnu_platform_block_metadata(block_type: str) -> dict[str, Any]:
     return {
         "flags": _string_list(getattr(block_class, "flags", None)),
         "category_path": _string_list(getattr(block_class, "category", None)),
+        # Native block class booleans — canonical role discriminators.
+        # These are lazy_property on the GRC Block class and are the
+        # authoritative source. Fall back to _semantic_role heuristic
+        # when the platform is unavailable.
+        "native_role": _native_role_from_block_class(block_class),
     }
+
+
+def _native_role_from_block_class(block_class: Any) -> str | None:
+    """Return the canonical BlockRole from GRC's native block class booleans."""
+    if getattr(block_class, "is_variable", False):
+        return BlockRole.VARIABLE_OR_CONTROL
+    if getattr(block_class, "is_import", False):
+        return BlockRole.METADATA
+    if getattr(block_class, "is_snippet", False):
+        return BlockRole.METADATA
+    if getattr(block_class, "is_virtual_or_pad", False):
+        return BlockRole.MESSAGE_OR_EVENT
+    return None
 
 
 _EVALUATED_HIDE_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, str]] = {}
