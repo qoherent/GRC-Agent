@@ -689,9 +689,7 @@ def _catalog_summary(
     if templates_make:
         usage = _string_value(templates_make)
         if usage:
-            # Strip Mako template syntax ${...} → flat names so the model
-            # does not leak raw compiler syntax into JSON payloads.
-            parts.append("Usage: " + re.sub(r"\$\{([^}]+)\}", r"\1", usage))
+            parts.append("Usage: " + usage)
     return "; ".join(parts)
 
 
