@@ -37,7 +37,78 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 - `grc_agent_gui/app.py` previously called `sys.exit(1)` when the Ollama
   probe failed. Per AGENTS.md "Non-blocking flow", the GUI now launches into
   degraded mode (`MainWindow.backend_reachable = False`, status-bar message)
-  so the user can recover via the inline model toolbar. (Pending — Phase 3.6.)
+  so the user can recover via the inline model toolbar.
+- `sys.exit(2)` on graph-load failure replaced with in-window error surfacing.
+- Dead `_register_server_cleanup` path removed (bootstrap never returns
+  `launch_status='started'`). Unused `atexit`/`signal` imports cleaned up.
+
+### Refactored — GUI block taxonomy, slash commands, error detection
+- `inspector.py:198-216` block classification: 5-arm substring cascade
+  replaced with dispatch table on native `BlockRole` StrEnum. Fabricated
+  `filters` category removed.
+- `main_window.py:732-744` slash-command routing: prefix ladder replaced
+  with dispatch table. Legacy `\\`-prefixed alternates dropped.
+- `main_window.py:851-856` `_result_is_error`: substring-scan of
+  re-serialized JSON replaced with `json.loads` + structured field read.
+- `main_window.py:673-674` MagicMock test leak removed (production was
+  special-casing `type(model_alias).__name__ in ("MagicMock","Mock")`).
+- Magic strings (OpenRouter URL, Ollama URL, default model) hoisted to
+  `config.py` as `DEFAULT_OLLAMA_URL` / `DEFAULT_OPENROUTER_URL` /
+  `default_openrouter_model()` — single source of truth for 12+ sites.
+
+### Refactored — system prompt (declarative contract)
+- `build_system_prompt` in `model_context.py:191` rewritten from imperative
+  prose ("First, echo the user's request...", "you must batch...",
+  "Use X only if...") into labeled "Routing contract" and "Structural
+  contract" bullet lists. Every routing/structural fact preserved;
+  no imperatives remain.
+
+### Removed — in-band behavioral directives from model-visible strings
+- All `toolagents_runtime.py` assistant/historical strings: `no_model_text`,
+  `ceiling_text`, `dedup_result.message`, `_backend_unreachable_hint`
+  stripped of "Please", "Reformulate", "Rephrase", "Ensure" commands.
+- All `clarification.py` + `session.py` clarification `question` and
+  `message` fields stripped of "Choose the one to remove",
+  "Which one should be inserted", "Choose one candidate" directives.
+  Now pure fact statements.
+
+### Refactored — centralized runtime helpers
+- New `runtime/text_utils.py` with `format_truncation_flag` (one uniform
+  truncation sentinel), `tokenize_identifier` (canonical casefold+
+  alphanumeric tokenizer replacing 6 near-duplicate normalizers), and
+  `compact_whitespace` (one whitespace compactor).
+- New `runtime/enums.py` with `BlockState`, `ValidationStatus`,
+  `SearchDomain`, `ValidationErrorCode` StrEnums replacing
+  hardcoded string tuples across change_graph/tool_schemas/inspect_graph.
+- New `runtime/integrity.py` with unified `compact_file_integrity` (full
+  SHA preserved). Both agent.py and change_graph.py had divergent
+  copies — one clipped silently to 12 chars.
+- High-impact silent truncations flagged: `transaction.py:207/210`
+  (stderr/stdout), `search_blocks.py:334` (evidence),
+  `toolagents_runtime.py:947` (native errors), `clarification.py:128`
+  (params preview).
+- `_tool_argument_candidates` now derived from `build_tool_schemas()`
+  (was a 13-element hardcoded tuple that drifted — contained `scope`
+  which no tool exposes).
+- Three tokenization helpers + dead `_ALIAS_TOKEN_PATTERN` removed.
+
+### Removed — regex/dtype heuristics, hardcoded allowlists
+- `_first_dtype_mismatch` / `_is_port_occupancy_error` regex heuristics
+  parsing GRC's free-text error strings removed per maintainer decision
+  (model relies on structured error codes from `errors_payload`).
+- `block:` prefix stripped from `stable_block_uid`; downstream consumer
+  workarounds (`agent.py:453` strip loop, `change_graph.py:761`
+  `startswith` check) deleted. `_normalize_change_graph_args` inlined.
+- `_is_core_block` / `_is_hardware_or_external` substring allowlists
+  replaced with exact path-component matching via named frozensets.
+- Port error-code tuple replaced with `ValidationErrorCode` StrEnum.
+- State decoding replaced with `BlockState` StrEnum.
+- Validation status check replaced with `ValidationStatus` StrEnum.
+- Domain check replaced with `SearchDomain` StrEnum.
+- `validation_error_summary` status check uses `ValidationStatus`.
+- `_NUMERIC_SHORTHAND_RE` dead regex removed.
+- `_compact_block_summary` truncation flag corrected from
+  "chat-history compactor" to "block-summary".
 
 ---
 
