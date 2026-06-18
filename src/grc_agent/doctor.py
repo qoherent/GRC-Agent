@@ -180,20 +180,6 @@ def run_doctor(
     }
 
 
-def print_doctor_report(report: dict[str, Any], *, json_output: bool = False) -> None:
-    """Print the doctor report in JSON or compact human-readable form."""
-    if json_output:
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return
-
-    print("Checking local environment...\n")
-    for check in report["checks"]:
-        status = "PASS" if check["ok"] else "FAIL"
-        print(f"[{status}] {check['name']}: {check['detail']}")
-    print()
-    print(report["summary"])
-
-
 # ---------------------------------------------------------------------------
 # Debug bundle helpers (from debug_bundle.py)
 # ---------------------------------------------------------------------------
@@ -508,7 +494,6 @@ def debug_bundle_summary(payload: dict[str, Any], output_path: Path) -> dict[str
 
 
 __all__ = [
-    "print_doctor_report",
     "run_doctor",
     "DEBUG_BUNDLE_SCHEMA_VERSION",
     "build_debug_bundle",
