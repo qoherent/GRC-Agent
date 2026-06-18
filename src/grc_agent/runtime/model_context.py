@@ -100,8 +100,6 @@ def _is_human_user_message(message: ChatMessage) -> bool:
 
 
 def _strip_tool_content(message: ChatMessage) -> ChatMessage | None:
-    if message.role == ChatMessageRole.Tool:
-        return None
     if message.role == ChatMessageRole.User:
         text = message.get_as_text() if hasattr(message, "get_as_text") else ""
         if not text:
@@ -109,20 +107,6 @@ def _strip_tool_content(message: ChatMessage) -> ChatMessage | None:
             text = "".join(parts)
         if "<runtime_directive>" in text:
             return None
-        return message
-    if message.role == ChatMessageRole.Assistant:
-        text_only = [c for c in message.content if isinstance(c, TextContent)]
-        if text_only and any(t.content.strip() for t in text_only):
-            return ChatMessage(
-                id=message.id,
-                role=message.role,
-                content=text_only,
-                created_at=message.created_at,
-                updated_at=message.updated_at,
-                additional_fields=message.additional_fields,
-                additional_information=message.additional_information,
-            )
-        return None
     return message
 
 
@@ -203,22 +187,22 @@ def render_model_messages(
 
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-06-11-seamless-v1"
+__version__ = "2026-06-18-declarative-prompt"
+
 def build_system_prompt(session_id: str | None = None) -> str:
     """Return the full MVP wrapper-only system prompt shipped to the model, optionally isolated by session_id."""
     prefix = f"Session ID: {session_id}\n" if session_id else ""
     return prefix + (
-        "You are a GNU Radio graph editing assistant. "
-        "First, echo the user's complete request in your own words by explicitly listing "
-        "every block and connection required, and then immediately execute the necessary "
-        "tools to fulfill it. "
-        "Keep these structural rules in mind while editing: "
-        "variables are blocks (use add_blocks, update_params, remove_blocks). "
-        "To insert a block on an existing wire, you must batch remove_connections, "
-        "add_blocks, and add_connections together in a single payload. "
-        "An input port can only accept one connection. "
-        "To deactivate a block without severing paths, use update_states with 'bypass'. "
-        "Use force=true only if you must commit an invalid intermediate graph state to progress."
+        "Role: GNU Radio graph editing assistant.\n"
+        "Routing contract:\n"
+        "- Questions about the active flowgraph (blocks, connections, parameter values, variable references): inspect_graph.\n"
+        "- GNU Radio documentation or concept questions (PMT, data types, stream tags, 'how do I'): query_knowledge with domain='docs'.\n"
+        "Structural contract:\n"
+        "- Variables are blocks; their lifecycle tools are add_blocks / update_params / remove_blocks.\n"
+        "- A block inserted on an existing wire requires a single change_graph payload containing remove_connections + add_blocks + add_connections.\n"
+        "- An input port accepts at most one connection.\n"
+        "- A block is deactivated without severing paths by update_states with state='bypass'.\n"
+        "- force=true is valid only for committing an invalid intermediate graph state required to progress.\n"
     )
 
 # -- tool surface (was tool_surface.py) --
