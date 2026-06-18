@@ -7,276 +7,290 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 
 ## [Unreleased]
 
+### Changed — CLI removed; GUI is the sole surface
+- **The `grc-agent` console script is gone.** `src/grc_agent/cli.py`,
+  `src/grc_agent/__main__.py`, and the `[project.scripts]` entry are deleted.
+  Only `grc-agent-gui` (`grc_agent_gui.app:main`) remains. The GUI already
+  had zero coupling to `grc_agent.cli` (verified by import audit).
+- **Library logic preserved.** `doctor.run_doctor`, `sessions_store.*`,
+  `history.GraphHistoryJournal`, `model_manager.*`, `config.collect_package_paths`,
+  and the rest of `src/grc_agent/` are unchanged and available to the GUI.
+- **Trapped CLI helpers deleted.** `_build_health_report`,
+  `_build_release_manifest`, and `_render_init_template` had no library caller;
+  they are removed with `cli.py`. `doctor.print_doctor_report` (CLI-only
+  printer) is also removed; the structured `run_doctor` dict remains.
+- **`dogfood.py` is dormant.** No production caller remains; the module is
+  retained as a standalone library for eval/test pipelines.
+- **Tests pruned.** CLI-only tests deleted; library-level tests rewritten to
+  call the underlying modules directly (`collect_package_paths`,
+  `GraphHistoryJournal.list_records/get_record/diff_records/restore_record`,
+  etc.).
+
+### Removed — dead GUI wizard/dialog code (~1200 LOC)
+- `setup_panel.py` (ProviderPickerWidget / OllamaSetupWidget /
+  OllamaStartHintWidget), `provider_picker_dialog.py`,
+  `recent_sessions_dialog.py`, and the `ModelDialog` class were orphaned when
+  the inline `ModelToolbar` replaced the setup wizard. Only
+  `ModelDialogSelection` is kept (still imported by `main_window`).
+
+### Fixed — GUI no longer `sys.exit`s on backend failure
+- `grc_agent_gui/app.py` previously called `sys.exit(1)` when the Ollama
+  probe failed. Per AGENTS.md "Non-blocking flow", the GUI now launches into
+  degraded mode (`MainWindow.backend_reachable = False`, status-bar message)
+  so the user can recover via the inline model toolbar. (Pending — Phase 3.6.)
+
+---
+
+### Fixed (RAG audit remediation — findings S1–S10)
+- **S1 — Vector DB no longer polluted by the test suite.** `GrcAgent.__init__`
+  used to spawn an unconditional background ingestion thread that wrote to
+  the real `.grc_agent/vectors/docs_v1.db`. When tests instantiated an agent
+  with `get_embedding` patched, the patched (constant-valued) vectors were
+  written into the production DB, permanently defeating retrieval. Ingestion
+  is now an explicit `GrcAgent.warmup_vector_index()` call wired only at the
+  CLI/GUI production entry points. A new `is_db_usable()` gate rejects any DB
+  whose stored embeddings have zero variance (the exact pollution signature).
+  `tests/conftest.py` redirects `GRC_AGENT_VECTORS_DIR` to a per-session tmp
+  dir at module load and asserts the real production path is never touched.
+- **S2 — `[llama].model` is now required.** A config file without a model
+  silently degraded every LLM call (chat completion, RAG synthesis) to a
+  backend 400. `config.py` now uses `_require_non_empty_string` for `model`
+  and the repo `grc_agent.toml` carries `model = "gemma4:12b-it-qat"`. The
+  GUI/CLI provider-picker can still override at runtime.
+- **S4 — Removed `sanitize_text` denylist.** The hand-rolled regex list
+  (`["ignore previous", "system prompt", …]`) violated the "no hand-picked
+  heuristics" and "no silent transformation" rules. Source excerpts now
+  roundtrip verbatim.
+- **S5 — Removed in-band control flow.** The docs-synthesis system prompt no
+  longer tells the model to "reply exactly with" a fixed phrase, and
+  `ask_grc_docs` no longer sniffs that phrase from the answer. Confidence is
+  now derived purely from the retrieval distance.
+- **S6 — Calibrated distance thresholds.** `DISTANCE_THRESHOLD_HIGH=0.35`,
+  `DISTANCE_THRESHOLD_MEDIUM=0.50`, `INSUFFICIENT_EVIDENCE_DISTANCE=0.65` —
+  sourced from `tests/retrieval_eval/calibrate_thresholds.py` against the live
+  wiki corpus (histogram in `docs/MODEL_CONTEXT_BIBLE.md`).
+- **S7 — Embedding model is configurable.** `[llama].embedding_model` (default
+  `embeddinggemma:latest`) threads through to `get_embedding`.
+- **S8 — gemma-3 task prefixes applied uniformly.** Every query and every
+  document chunk is prefixed (`task: search result | query: …` /
+  `… | document: …`) per Google's gemma-3-embedding spec.
+- **S9 — Resource safety and truthful flags.** `search()` and
+  `ingest_if_needed()` use `try/finally`; the CWD-relative `vec1.so` fallback
+  is gone (raises a clear error if not found); `output_truncated` is now
+  derived from a `K=limit+1` probe rather than `len(sources) >= limit`.
+- **S10 — Chunking overhaul.** Sections track the full heading hierarchy
+  (each chunk's embed text carries `title > heading_path > excerpt`); a
+  uniform markdown-noise stripper drops bare image/nav lines; chunks are
+  256 words with 100-word overlap (was 400 words, no overlap).
+
 ### Added
-- **First-launch provider picker** embedded in the main GUI (not a pre-launch
-  modal). On every launch the user picks Ollama (local) or OpenRouter (cloud).
-  - **Ollama setup screen** shows daemon reachability, VRAM/RAM (via `psutil`
-    and `nvidia-smi`), a model dropdown with Refresh, and Back/Confirm buttons.
-  - Confirm is disabled when the daemon is unreachable; the user is told to
-    start the daemon externally and click Refresh.
-  - No daemon management: the application never spawns or kills `ollama serve`.
-- **Degraded mode** when the backend is unreachable at launch:
-  - The main window still opens (no crash, no forced exit).
-  - Chat input and Validate button are disabled.
-  - A platform-agnostic banner ("Connection refused. Is Ollama running? …")
-    renders in the chat view.
-  - Model > Select Model remains accessible as the recovery path.
-- **Backend-unreachable error handling** during active turns:
-  - `openai.APIConnectionError` and `httpx.ConnectError` are caught in the
-    manual turn loop, producing a typed `backend_unreachable` payload with
-    the server URL. The error is surfaced as a chat bubble hint.
-  - Cross-thread signal (`backend_unreachable` Qt Signal) ensures GUI
-    mutations always run on the main thread.
-- `ErrorCode.BACKEND_UNREACHABLE` in `_payload.py`.
-- `UserPreferences.provider_chosen` field and `update_provider_chosen()` helper.
-- `ProviderPickerWidget` and `OllamaSetupWidget` in `setup_panel.py`.
-- `psutil>=5.9.0` dependency for RAM diagnostics.
+- **RAG live-integration tests** (`tests/retrieval_eval/test_rag_integration.py`)
+  gated behind `GRC_AGENT_LIVE_RAG=1`. Verify real ingestion, real vec1
+  retrieval, and real LLM synthesis end-to-end. These would have caught S1
+  and S2 before they shipped. The mock-based tests in
+  `test_mvp_tool_profile.py` remain for fast unit coverage of wrapper logic.
+- **`GrcAgent.warmup_vector_index()`** — explicit production hook for
+  background vector-DB ingestion. Called from `cli.py` (main chat loop,
+  single-tool path) and `grc_agent_gui/app.py`. Tests must not call it.
+- **`is_db_usable(db_path)`** in `doc_answer.py` — uniform sanity gate that
+  rejects empty DBs and DBs whose stored embeddings have zero variance.
+- **`[llama].embedding_model`** config knob.
+
+### Multi-backend LLM support (pre-existing)
+- **Multi-backend LLM support.** `[llama].backend` selects the active backend
+  at startup; `config.py` accepts only `ollama` (default) or `openrouter`.
+  - **Ollama**: probed via `GET /v1/models` over the OpenAI-compatible path;
+    model discovery via `/api/tags`; tool-calling template support is checked
+    and the user is warned if the model's chat template lacks the `{{ .Tools }}`
+    section. The application never spawns or stops `ollama serve`.
+  - **OpenRouter**: `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are read from
+    the root `.env` and reached through the same OpenAI-compatible provider
+    (no separate HTTP client).
+  - `grc-agent model list [--backend {ollama,openrouter}]` lists models in the
+    active backend; `grc-agent model swap [--backend ...] [--model ...]`
+    switches backend/model and persists the choice.
+- **GUI inline model toolbar** (`src/grc_agent_gui/model_toolbar.py`): a
+  provider combo, model combo, status dot, and refresh button living
+  permanently above the chat pane. Replaces the pre-launch setup wizard and
+  the `Model > Select Model…` dialog; the live swap persists to both
+  `preferences.json` and `config.toml`.
+- **First-launch provider picker** (embedded, not a modal): Ollama (local) or
+  OpenRouter (cloud); persisted to `~/.config/grc_agent/preferences.json`.
+- **Degraded mode** when the backend probe fails at launch: the main window
+  still opens (no crash, no forced exit); chat input and Validate are
+  disabled; the model toolbar remains the recovery path. A cross-thread
+  `backend_unreachable` Qt signal keeps GUI mutations on the main thread.
+- **Backend-unreachable handling during turns**: `httpx.ConnectError`,
+  `ConnectTimeout`, and `ReadTimeout` in the turn loop produce a typed
+  `backend_unreachable` payload (`ErrorCode.BACKEND_UNREACHABLE`) with the
+  server URL, surfaced as a chat hint.
+- `UserPreferences.provider_chosen` field and `update_provider_chosen()`.
+- **User preferences (System A)**: `~/.config/grc_agent/preferences.json`
+  persists the last-loaded model, deliberately separate from the hand-edited
+  `grc_agent.toml` so UI writes never clobber user config. Listed under
+  `grc-agent paths`.
+- **Local chat-session history (System B)**: SQLite + FTS5 store at
+  `~/.grc_agent/sessions.db`. The async writer runs on a dedicated daemon
+  thread with a 1000-message bounded queue, drop-oldest backpressure, and
+  batched WAL commits, so the GUI main thread never blocks on SQLite I/O.
+  New `grc-agent sessions {list,show,export,gc}` subcommand and a
+  `File > Recent Sessions…` browser.
+- **Session-history sidebar** (System B part 2): persistent left-side
+  `SidebarWidget` (resizable, collapsible via `Ctrl+Shift+H`); double-clicking
+  a session autoloads the associated `.grc` and resumes that session.
 
 ### Changed
-- GUI launch no longer aborts when the backend probe fails; the application
-  enters degraded mode instead.
+- **Conversation model is now a typed `ChatHistory`** (`ToolAgents==0.3.0`).
+  The ad-hoc `list[dict]` history is gone; `GrcAgent.history` becomes
+  `GrcAgent.chat_history`; the runtime appends the typed `ChatMessage`
+  returned by `chat_agent.step` directly. The "session" pseudo-role is gone;
+  the graph snapshot is kept out-of-band on the agent. A reduced adapter and
+  `_resolve_final_assistant_text` are retained for the JSON-only helper path.
+- **Real-token streaming** via `ToolAgentsRunner.stream_turn`. The previous
+  post-hoc QTimer throttle of finished output is replaced by a generator that
+  yields `chunk` / `tool_start` / `tool_end` / `model_message` / `final`
+  events. `AgentWorker.run_turn_streaming` consumes it and falls back to the
+  bounded non-streaming `run_turn` when the provider cannot stream.
+- **Retry-storm guard** in the tool-call loop: a repeated
+  `(name, canonicalized-args)` call in one turn short-circuits to a
+  `deduplicated: True` result that reuses the prior output. Prevents small
+  local models from exhausting the history with identical calls.
+  `tests/test_tool_call_dedup.py` covers a 5-call storm → 1 execution.
+- **One-pass proportional compaction** in `compact_chat_history`. Truncated
+  payloads end with `... [TRUNCATED by chat-history compactor: was N chars,
+  kept M]` so the model can tell the JSON was cut off.
+- **Reminder** is wrapped in `<runtime_directive>` tags and emitted as a
+  `user`-role message, keeping the control plane's voice distinct from the
+  human user's while avoiding non-standard wire roles.
+- **Empty assistant bubble dropped** when a turn ends with only tool calls
+  (`ChatWidget.drop_last_assistant()`); the persistence layer also skips the
+  empty flat `assistant` display row.
+- **GUI sidebar width halved** (18% → 9%).
+- **Eval harness** (`tests/eval_chat/`): JSON-fixture scenarios driving the
+  real `ToolAgentsRunner._run_turn_events` loop with a stubbed
+  `chat_agent.step` (no real llama.cpp). `write_measured_behavior_block()`
+  emits the baseline summary for this changelog.
 
 ### Removed
 - `src/grc_agent/llama_launcher.py` and `src/grc_agent/llama_probe.py`
-  (obsoleted by the ToolAgents-backed runtime).
-
-- **Multi-backend LLM support** (`llama_cpp`, `ollama`, `openrouter`).
-  - `[llama].backend` config field selects the active backend at startup.
-  - **Ollama**: probed via `GET /v1/models` through the standard OpenAI-compat
-    path; model discovery via `/api/tags`; on-demand GGUF registration uses
-    `ollama create <name> -f <tmpModelfile>` so any cached HF model can be
-    loaded without a manual pull.
-  - **OpenRouter**: API key (`OPENROUTER_API_KEY`) and model name
-    (`OPENROUTER_MODEL`) loaded exclusively from the root `.env`; no
-    hardcoding in source. Uses the `requests`-based OpenRouter client.
-  - New `grc-agent model list --backend {llama_cpp,ollama}` and
-    `grc-agent model swap --backend {llama_cpp,ollama,openrouter}` CLI paths.
-  - **GUI client/model switcher**: `ModelDialog` now lists all three backends
-    in a "Client" combo. The `llama_cpp` and `ollama` model combos both show
-    the full local HF cache (5 models) so users can select any cached GGUF
-    regardless of backend. Pulled-only Ollama models appear beneath with an
-    "(Ollama Pulled)" suffix; duplicates are suppressed by normalised name.
-  - Chat input accepts `/client`, `\client`, `/model`, `\model` slash-commands
-    to open the switcher dialog from the keyboard.
-  - Status bar shows the active backend next to the loaded model name.
+  (obsoleted by the ToolAgents-backed runtime). The app no longer manages a
+  `llama-server`/daemon lifecycle.
+- `llama_cpp` as a backend option (`[llama].backend` is now `ollama` or
+  `openrouter` only), along with the `hf_repo` / `hf_model` / `model_path`
+  config fields and the HF-cache GGUF discovery path that supported it.
 
 ### Fixed
-- **`'LlamaConfig' object has no attribute 'llama'` on OpenRouter/Ollama swap**:
-  `ModelSwapRunnable` was passing a bare `LlamaConfig` to `bootstrap_runtime`,
-  which expects an `AppConfig`. Fixed by wrapping the mutated `LlamaConfig`
-  in a fresh `AppConfig` before calling `bootstrap_runtime`.
-- **Ollama model dialog showed only already-pulled models**: The dialog now
-  lists all locally cached HF GGUF files for the Ollama backend and registers
-  them on demand, matching the `llama_cpp` model list.
-- **Switch button not enabled when changing backends**: `_refresh_button_state`
-  now enables the button whenever the selected backend differs from the active
-  one, independent of the selected model.
-
-  - New module `grc_agent.model_manager` with `discover_cached_models()`
-    (scans `~/.cache/huggingface/hub/` and an optional
-    `[llama].models_dir`; preserves original GGUF filenames from HF
-    snapshot symlinks; skips in-progress downloads; filters
-    `mmproj-*` projection files that the launcher would refuse to
-    load) and `list_system_specs()` (VRAM/GPU from `nvidia-smi`,
-    RAM from `/proc/meminfo`, CPU from `/proc/cpuinfo`; returns
-    `None` per field on unsupported platforms).
-  - New CLI subcommand `grc-agent model {list,specs,swap}`.
-    `swap` is a stub that surfaces a clear "Phase 3 not yet wired"
-    error so scripts can be authored against the final shape.
-  - New optional config field `[llama].models_dir` for hand-placed
-    `.gguf` directories that are not under the HF cache.
-
-- **Model selector (Phase 2 of 3)**: GUI model-selector dialog and
-  Model menu.
-  - New `Model` menu in the menubar with `Select Model...` (Ctrl+M)
-    and a disabled `Currently loaded: <name>` status entry that
-    resolves through `cfg.model`, then `cfg.hf_model`'s filename,
-    then `cfg.model_path` basename.
-  - New non-modal `ModelDialog` (`src/grc_agent_gui/model_dialog.py`)
-    with a dropdown listing every discovered `.gguf`, a confirm
-    strip whose "Switch model" button is enabled only when a
-    different model is picked, and a system-specs panel showing
-    compact one-liner (full names in tooltip).
-  - The `Select Model...` action is disabled while a chat turn is
-    in flight, mirroring the existing mid-turn protection.
-  - Confirming a selection in this phase appends a system-style
-    "Phase 3 not yet wired" note to the chat; the live swap ships
-    in Phase 3.
-
-- **Model selector (Phase 3 of 3)**: live model swap wired into the
-  GUI and the CLI.
-  - New `LlamaServerLauncher.swap_model(new_hf_repo, new_filename,
-    new_alias=None)` builds a fresh `LlamaConfig` (preserving
-    server URL, device, GPU layers, context window, and timeout)
-    and delegates to `ensure_server_ready` on a new launcher.
-    Server URL and health-evidence contract are preserved across
-    the swap.
-  - `grc-agent model swap --hf-repo <repo> --filename <name>
-    [--alias <name>]` now performs the live swap; on success it
-    prints the new model alias, server URL, status, and
-    health-evidence keys. `LlamaLauncherError` is surfaced as
-    rc=1 with a human-readable message.
-  - The GUI dispatches the swap through a `ModelSwapRunnable`
-    (QRunnable) so the UI does not freeze during HF download
-    (which can take minutes for an uncached model). The chat
-    input and Validate button are locked for the duration; the
-    "Currently loaded" menu and the model status label are
-    refreshed on success; failures are surfaced in both the
-    status bar and the chat panel.
-  - The model dialog's "Currently loaded" preselect now matches
-    `cfg.hf_repo:cfg.filename` (repo-aware) before falling back
-    to filename-only or stem matching.
-  - The chat history is preserved across a swap; the next model
-    turn sees the same messages.
-
-- **User preferences (System A)**: small JSON file at
-  `~/.config/grc_agent/preferences.json` persists the model the
-  user most recently loaded through the GUI or CLI. The file is
-  deliberately separate from `grc_agent.toml` (which is
-  hand-edited) so auto-written UI prefs do not clobber user
-  config. After a successful `grc-agent model swap` (CLI) or a
-  GUI `Switch model` confirmation, `last_model.{hf_repo,
-  filename, alias, saved_at}` is written atomically. On next
-  startup, preferences overlay `model` and `hf_model` onto the
-  in-memory `LlamaConfig` and clear `model_path` to match the
-  live-swap behavior. Failure to write is non-fatal (warning,
-  swap itself is not rolled back). The file path is listed in
-  `grc-agent paths` output as `preferences`. 17 unit tests.
-
-- **Local chat-session history (System B)**: SQLite-backed
-  store at `~/.grc_agent/sessions.db` (FTS5-indexed) holds
-  the user's chat history. The async writer runs on a dedicated
-  daemon thread with a 1000-message bounded queue,
-  drop-oldest backpressure, and 64-message batched commits
-  under WAL — the GUI's main thread is never blocked on
-  SQLite I/O. New `grc-agent sessions {list, show, export,
-  gc}` subcommand. New `File > Recent Sessions...` menu in
-  the GUI opens a browser dialog with a markdown preview;
-  double-click a row to clear the chat widget and replay the
-  session's messages. Per the agreed design, opening a `.grc`
-  always starts a fresh chat session; the user explicitly
-  reopens a past session via the dialog. The on-disk graph
-  file is unchanged by the new system. 26 unit tests + 7 GUI
-  tests.
-
-- **Session history sidebar (System B — Part 2)**: `SidebarWidget`
-  replaces the modal `File > Recent Sessions...` dialog with a
-  persistent left-side panel inside the main splitter.
-  - Defaults to 18% width (max 20%); resizable and collapsable via
-    the `◀` chevron button, `File > Session Sidebar` menu item, or
-    `Ctrl+Shift+H`.
-  - Double-clicking a session autoloads the associated `.grc` graph
-    **and** resumes that session: `active_session_id` is preserved,
-    `agent.history` is reconstructed from the DB `user`/`assistant`
-    messages, and subsequent sends append to the same SQLite record.
-  - `ChatWidget` event roles (`tool_started`, `mutation`, `error`,
-    `tool_finished`) now write to `self._history` and render through
-    `_render_chat()` — fixing display drift on turns that include
-    tool use.
-  - Splitter state restored in `showEvent` (after window geometry is
-    fully realized) instead of `__init__`; `setStretchFactor(1, 1)`
-    on the chat pane keeps the sidebar and inspector at fixed widths
-    on window resize. 5 GUI tests (116 total, all green).
-
-### Fixed
-- **GUI layout — sidebar over-wide / inspector collapsed on
-  relaunch**: `QSplitter.restoreState` was called in `__init__`
-  before `window.show()`, so `self.width()` returned the
-  pre-geometry value (~92 px). Size-correction arithmetic based on
-  that value produced wrong proportions. Moved restoration to
-  `showEvent` (fires once when the window is first mapped) where
-  `self.width()` returns the true resolved width. Added
-  `setStretchFactor` so only the chat pane grows on window resize.
-
-- **Session resumption — new session created instead of continuing**:
-  `_open_past_session` was unconditionally setting
-  `active_session_id = None` after loading a past session, so the
-  next `send_prompt` call created a fresh DB record instead of
-  appending to the resumed one. Now `active_session_id` is set to
-  the loaded session's ID. `agent.history` is rebuilt from the
-  stored `user`/`assistant` messages so the model sees prior
-  context on continuation turns.
-
-- **Resume dropped tool evidence — model lost inspect/search context**:
-  The previous resume path reconstructed `agent.history` from DB rows
-  by filtering on `role in {"user", "assistant"}`. Every
-  `tool`-role row and every `assistant` row that carried
-  `tool_calls` was silently dropped, so a resumed session started
-  with no `inspect_graph` / `search_blocks` evidence in the model's
-  context. The first mutation after a resume would force a re-inspect.
-  The new path persists typed `ChatMessage` payloads in the
-  `payload` column (`assistant_model` / `tool_model` roles) and
-  replays them via `ChatMessage.from_dict` on resume. See
+- **`'LlamaConfig' object has no attribute 'llama'` on OpenRouter/Ollama
+  swap**: `ModelSwapRunnable` was passing a bare `LlamaConfig` to
+  `bootstrap_runtime`, which expects an `AppConfig`. Fixed by wrapping the
+  mutated `LlamaConfig` in a fresh `AppConfig`.
+- **GUI layout — sidebar over-wide / inspector collapsed on relaunch**:
+  splitter state is now restored in `showEvent` (after window geometry is
+  realized) instead of `__init__`, with `setStretchFactor` keeping the
+  sidebar and inspector at fixed widths on resize.
+- **Session resumption created a new session instead of continuing**:
+  `_open_past_session` now preserves `active_session_id` instead of clearing
+  it.
+- **Resume dropped tool evidence**: the old path rebuilt the model history
+  from only `user`/`assistant` rows, dropping every tool result and every
+  `tool_calls`-bearing assistant row, so a resumed session had no
+  `inspect_graph` / `search_blocks` evidence in context. The new path
+  persists typed `ChatMessage` payloads in the `payload` column
+  (`assistant_model` / `tool_model` roles) and replays them via
+  `ChatMessage.from_dict` on resume. See
   `docs/superpowers/specs/2026-06-09-chat-history-refactor-design.md`.
+- **Legacy resume fallback removed.** Per AGENTS.md (no backward-compat
+  shims), `_open_past_session` refuses to resume a pre-typed-history session
+  (no model rows → `active_session_id = None` with a status-bar hint to start
+  a new chat). Enforced by `test_open_legacy_session_refuses_to_resume`.
 
-### Changed
-- **Conversation model is now a typed `ChatHistory`** (ToolAgents
-  `ToolAgents==0.3.0`). The previous ad-hoc `list[dict]` history is
-  gone; the `ToolAgentsHistoryAdapter` collapses to a thin shim used
-  only by the JSON-only helper path (`ToolAgentsJsonClient`).
-  `GrcAgent.history` becomes `GrcAgent.chat_history`; the runtime
-  appends the typed `ChatMessage` returned by `chat_agent.step`
-  directly. The "session" pseudo-role is gone; the graph snapshot
-  is kept out-of-band on the agent.
+### `inspect_graph` data-layer refactor
+- **Uniform 5-field `_base_payload` shape** (`runtime/inspect_graph.py`):
+  `ok`, `errors`, `unmatched_params`, `variable_references`,
+  `param_keys_by_block`, `graph`. Same fields for every view, every
+  call path, success and failure.
+- **`variable_references` lifted from the `param_filter` gate.** The
+  reverse map (variable → `{value, referenced_by}`) is now always present,
+  so a model answering "what uses variable X" needs no second call. The
+  prior behavior required `params=['X']` to surface the map.
+- **`param_keys_by_block` filtered to GRC-evaluated `hide != 'all'`.**
+  Uses the native `evaluated_param_hides` (lru_cached, calls GRC's
+  `platform.make_flow_graph().new_block(...).rewrite()`). 87-key blocks
+  collapse to 3 visible params; `-42%` model-visible payload for overview.
+- **`role` added to details rows** (mirrors the overview row's `role`).
+- **Renderer (`tool_context.py`)** promotes every `errors[i].message` to
+  a structural `error: {code} — {message}` line (was: first only). Uses
+  the same `f"{label}: {value}"` pattern as the existing `message`/`hint`
+  promotion. Applies uniformly to all tools.
+- **`ambiguous_target` error** now lists the matched candidate names
+  (sorted, native from `_resolve_target(...).candidates`). No more second
+  `inspect_graph(view='overview')` to recover.
+- **`target_not_found` error** lists valid block names via the native
+  `flowgraph.blocks` iterator, sorted, capped at 20 with `+N more`
+  suffix — no magic number in the call site, no hand-tuned limit.
+- **`is_variable_block` bridged to native GRC `Block.is_variable`** via
+  the platform registry. Catches 6 variable types the string-prefix
+  heuristic missed (`json_config`, `yaml_config`, `qtgui_dialgauge`,
+  `qtgui_levelgauge`, `qtgui_msgdigitalnumbercontrol`, `uhd_rfnoc_graph`).
+  String-prefix fallback retained for platform-unavailable paths.
+- **Schema documentation**: `targets` description now lists `['all']` /
+  `['*']` as the documented way to request overview. `query_knowledge`
+  description is dual-purpose (catalog + docs).
+- **System prompt**: catalog soft-escape-hatch clause removed (Variant A
+  experiment verified safe via 3 R0 runs). Model now routes variable-
+  reference questions to `inspect_graph` because the data layer makes the
+  right tool obvious.
+- **Dead code removed**: `_validation_status` (30 lines), `_params_filter`
+  (20 lines), `block_semantics._compact_value` (one of 3 copies,
+  zero callers), 3 dead `GuardrailsConfig` fields
+  (`max_detail_params_default`, `max_connections_per_block`,
+  `min_detail_params_before_truncation`).
+- **`_connection_summaries` consolidated**: removed duplicate from
+  `inspect_graph.py`, imported from `block_semantics.py`.
+- **`output_truncated` telemetry bug fixed**: was reading
+  `result.get("truncation", {})` (renamed to `omitted` in the refactor),
+  always returning `False`. Now reads `omitted` correctly.
+- **5 `GuardrailsConfig` fields wired into TOML loader**
+  (`max_overview_connections`, `max_detail_params_all`,
+  `max_detail_params_requested`, `max_inspect_targets`,
+  `max_inspect_params`): previously defined with defaults but silently
+  ignored by the TOML loader.
+- **FTS5 wiki index**: in-memory SQLite FTS5 over the bundled
+  `grc_agent/wiki_gnuradio_org` corpus. `tokenize='porter unicode61
+  remove_diacritics 2'` for English-prose recall (verified 36× more
+  results on "filtering" vs. plain unicode61). Section truncation
+  removed (was 600-char cap dropping 49% of text; bm25 was distorted
+  by length normalization). BM25F column weights `bm25(wiki_fts, 8.0,
+  4.0, 1.0)` replace hand-tuned `title_hits * 2.0` /
+  `heading_hits * 1.5` multipliers. Three accidental cargo-cult items
+  removed (`PRAGMA temp_store`, `PRAGMA cache_size`, `prefix='2 3'`,
+  `optimize`): 0 ms benefit on `:memory:` DBs, +2 MB index size, +70%
+  build time.
+- **Ranking constants cleaned**: 3 class-C hand-picked heuristics
+  dropped from `rank_docs_candidates` (`off_topic_curated_penalty`
+  per-doc `6.0` for "Variables in Flowgraphs", `preferred_source_bonus`
+  per-query allowlist `3.5` + its `_preferred_docs_source_markers`
+  function, `weak_absence_penalty` `< 0.74` threshold). The 6-way
+  `source_pref` if/elif collapsed to a module-level
+  `_SOURCE_PREF_WEIGHTS: dict[tuple[bool, bool, str], float]`.
+- **Live R0 (`gemma4:e4b-it-qat`)**: 3 consecutive runs at 14/14
+  after each fix batch. Unit tests: 404 passing, 0 fail.
+- **Ground-truth set**: 97 wiki-title-based queries + 5 verified
+  queries, used for I6 ranking experiments.
 
-- **Real-token streaming via `ToolAgentsRunner.stream_turn`**. The
-  GUI's previous post-hoc 16-char QTimer throttle of the *finished*
-  model output is replaced by a `stream_turn` generator that yields
-  `chunk` / `tool_start` / `tool_end` / `model_message` / `final`
-  events. `AgentWorker.run_turn_streaming` consumes the iterator and
-  falls back to the bounded non-streaming `run_turn` when streaming
-  is not exposed by the provider.
-
-- **Retry-storm guard** in the tool-call loop: when the model issues
-  the same tool call (`(name, canonicalized-args)`) more than once
-  in a turn and the first call returned successfully, the duplicate
-  short-circuits to a `deduplicated: True` result that reuses the
-  prior result. Prevents small local models that loop on themselves
-  from exhausting the chat history with identical calls. `tests/test_tool_call_dedup.py::EndToEndRetryStormTests`
-  covers a 5-call storm → 1 underlying execution.
-
-- **One-pass proportional compaction**: `compact_chat_history` does
-  a single pass over the candidates, computing each new payload size
-  by proportional allocation against the remaining budget. No
-  iterative shave-loop, no per-cycle length re-computation. Truncated
-  payloads end with `... [TRUNCATED by chat-history compactor: was N
-  chars, kept M]` so the model can tell the JSON was cut off.
-
-- **Reminder is wrapped in `<runtime_directive>`** tags and emitted
-  as a `user`-role message. The `user` role dodges both the
-  "system mid-stream" template rejection and the "non-standard
-  wire role" rejection that an earlier `Custom`-role tag design
-  introduced. The XML wrapper keeps the control plane's voice
-  distinct from the human user's.
-
-- **Empty assistant bubble dropped** when a turn ends with the model
-  producing only tool calls (no final text). The chat widget no
-  longer shows an empty "Agent:" header; the typed `assistant_model`
-  row already carries the message for resume. New
-  `drop_last_assistant()` method on `ChatWidget`; the persistence
-  layer also skips writing the empty flat `assistant` display row.
-
-- **GUI sidebar width halved from 18% to 9%** (per UX feedback).
-  `toggle_sidebar`'s reopen-size and the showEvent size-guard clamp
-  both updated to match.
-
-- **Eval harness (`tests/eval_chat/`)**: 10 JSON-fixture-driven
-  scenarios driving the real `ToolAgentsRunner._run_turn_events`
-  loop with a stubbed `chat_agent.step`. No real llama.cpp, runs
-  in CI. Captures the runtime's contract for the retry-storm
-  guard, surface-gate refusal, schema validation, safety ceiling,
-  and edge-case JSON parsing. Baseline: 10/10 PASS. New
-  capabilities must ship with fixtures for their failure modes —
-  documented in BLUEPRINT's "Measured Behavior" section.
-
-- **Legacy resume fallback removed.** AGENTS.md now explicitly
-  forbids backward-compat shims, fallback syntheses, and dual-format
-  persistence. `_open_past_session` refuses to resume a session
-  written before the typed-history format: no model rows → no
-  typed history → `active_session_id = None` and a status-bar
-  message tells the user to start a new chat. The test
-  `test_open_legacy_session_refuses_to_resume` enforces the
-  refusal.
+### Known surface items needing maintainer sign-off
+- **`get_grc_context` is a 4th model-facing tool** with in-band control
+  flow (`hint: "If the user also asked for a real change after
+  inspecting, call \`apply_edit\` next."` at
+  `runtime/inspect_graph.py:1051`). AGENTS.md §"Active MVP surface"
+  states 3 tools; this is a 4th. Flag for maintainer decision (unify
+  or accept).
+- **`(semantic_score - 0.62) * 7.0`** in `rank_docs_candidates:1764` is
+  the last remaining magic pair. It's calibrated to the
+  `1/(1+rank)` semantic-score scale and cannot be changed without
+  re-calibrating the whole composite. Flag for maintainer: replace
+  with normalized bm25 magnitude (subagent's `M1 = -bm25 /
+  (1+abs(bm25))`), which would also drop the `0.62`/`7.0` pair.
 
 ## [0.1.0] - 2026-06-05
 

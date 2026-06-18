@@ -13,7 +13,6 @@ LLM assistant for GNU Radio Companion `.grc` flowgraphs.
 git clone https://github.com/qoherent/grc-agent
 cd grc-agent
 uv sync --locked --extra dev --extra gui
-uv run grc-agent doctor
 uv run pytest                  # GUI tests (pytest-qt)
 uv run python -m unittest      # unit/integration tests
 uv run ruff check .            # lint
@@ -24,12 +23,11 @@ uv run ruff format .           # format
 
 - **Python >= 3.12**, ruff-formatted, 100-column line length, type hints on
   all public functions.
-- **CLI is the contract.** The GUI is a thin PySide6 shell over the same
-  `GrcAgent` runtime. Add features to `src/grc_agent/` first; wire the GUI
-  second.
+- **GUI is the contract.** The PySide6 GUI in `src/grc_agent_gui/` is the
+  only user-facing surface; add features to `src/grc_agent/` first as
+  library logic, then wire the GUI second.
 - **Safety first.** Mutations go through `change_graph`; the model is never
-  given raw YAML or `grcc` access. See `docs/BLUEPRINT.md` for the safety
-  contract.
+  given raw YAML or `grcc` access. See `AGENTS.md` for the safety contract.
 - **No bypasses.** Don't add prompt folklore, regex-based routing, or
   fixture-specific shortcuts. Fix the authoritative data path.
 - **Tests required for runtime changes.** Deterministic tests live under
@@ -40,8 +38,8 @@ uv run ruff format .           # format
 
 - `AGENTS.md` — internal contributor contract (mission, architecture,
   what not to do).
-- `docs/BLUEPRINT.md` — design contract, source of truth for wrappers and the
-  safety surface.
+- `docs/superpowers/specs/` — dated design specs (ChatHistory refactor, inline
+  model toolbar).
 - `docs/MODEL_CONTEXT_BIBLE.md` — model-facing prompt + tool schema wrapper
   spec.
 - `docs/CHANGELOG.md` — release history and the deferred harder-wins roadmap.
@@ -177,8 +175,9 @@ mitigation within 30 days for high-severity issues.
 GRC Agent is a local-first tool: it does not phone home, does not require
 network access for any core feature, and does not collect telemetry. The
 default install path keeps every user artifact (chat history, vector index,
-launcher state) under `~/.grc_agent/` and `~/.cache/grc_agent/`. See
-`grc-agent paths` for a full list.
+launcher state) under `~/.grc_agent/` and `~/.cache/grc_agent/`. Run
+`python -c "from grc_agent.config import collect_package_paths; print(collect_package_paths())"`
+for a full list.
 
 If you find that any version of GRC Agent unexpectedly sends user data to a
 remote endpoint, that is a security issue and should be reported as above.
