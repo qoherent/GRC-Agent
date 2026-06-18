@@ -1,8 +1,6 @@
-import atexit
 import logging
 import os
 import shutil
-import signal
 import sys
 import tempfile
 import time
@@ -316,29 +314,33 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001 - defensive
         logger.debug("Failed to apply user preferences: %s", exc)
 
+    # Graph load failures are non-fatal: capture the error and surface it
+    # in-window so the user can open a different file. AGENTS.md 'non-blocking
+    # flow' — never sys.exit on a load failure.
+    graph_load_error: str | None = None
     session: FlowgraphSession | None = None
     if len(sys.argv) > 1:
         grc_path = Path(sys.argv[1])
         if not grc_path.is_file():
-            print(f"Error: graph file not found: {grc_path}", file=sys.stderr)
-            sys.exit(2)
-        loaded = load_grc(grc_path)
-        if isinstance(loaded, dict):
-            print(
-                f"Error: failed to load graph: {loaded.get('message', 'unknown error')}",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        if not loaded.validate():
-            print(
-                f"Warning: loaded graph with validation failure "
-                f"(state={loaded.validation_state().get('state', 'unknown')}). "
-                f"Fix the graph using the agent before compiling.",
-                file=sys.stderr,
-            )
-        session = loaded
+            graph_load_error = f"Graph file not found: {grc_path}"
+        else:
+            loaded = load_grc(grc_path)
+            if isinstance(loaded, dict):
+                graph_load_error = (
+                    f"Failed to load graph: {loaded.get('message', 'unknown error')}"
+                )
+            else:
+                if not loaded.validate():
+                    print(
+                        f"Warning: loaded graph with validation failure "
+                        f"(state={loaded.validation_state().get('state', 'unknown')}). "
+                        f"Fix the graph using the agent before compiling.",
+                        file=sys.stderr,
+                    )
+                session = loaded
 
     agent = GrcAgent(session=session)
+    agent.warmup_vector_index()
 
     # The inline model toolbar (ModelToolbar) replaces the old setup wizard
     # and Model > Select Model dialog. It lives permanently at the top of
@@ -353,28 +355,11 @@ def main() -> None:
     if result.catalog_root:
         agent.catalog_root = result.catalog_root
 
-    if result.launch_status == "failed":
-        print(
-            f"Error: {result.errors[-1] if result.errors else 'Server startup failed'}",
-            file=sys.stderr,
-        )
-        if result.error_type == "backend_server_missing":
-            print(
-                "Hint: ensure the backend server is installed and on PATH. "
-                "See the README install table.",
-                file=sys.stderr,
-            )
-        elif result.error_type == "model_not_found":
-            print(
-                "Hint: set [llama].model to a valid model name for your backend. "
-                "Use `uv run grc-agent init` to write a starter config.",
-                file=sys.stderr,
-            )
-        sys.exit(1)
-
-    if result.launch_status == "started" and result.launch_pid is not None:
-        _register_server_cleanup(result.launch_pid)
-
+    # AGENTS.md 'non-blocking flow': never sys.exit on network failure.
+    # MainWindow self-configures degraded mode (backend_reachable=False)
+    # when bootstrap_result.launch_status in {"probe_failed","failed"} —
+    # see main_window.py around line 274. The user recovers via the inline
+    # model toolbar.
     window = MainWindow(
         agent,
         provider_config=result.provider_config,
@@ -385,12 +370,20 @@ def main() -> None:
     app.aboutToQuit.connect(window.process_manager.shutdown)
     window.show()
 
+    # Surface launch / load status in the status bar (and chat on error).
     model = result.model_alias or config.llama.model
     status = result.launch_status
-    if status == "probe_failed":
+    if graph_load_error:
+        window.status_bar.showMessage(graph_load_error)
+        window.chat_widget.append_error(graph_load_error)
+    elif status == "failed":
+        detail = result.errors[-1] if result.errors else "Backend unreachable"
         window.status_bar.showMessage(
-            f"Backend unreachable at {result.server_url} — chat disabled, "
-            f"use Model > Select Model to recover."
+            f"Backend unreachable — chat disabled ({detail}). Recover via the model toolbar."
+        )
+    elif status == "probe_failed":
+        window.status_bar.showMessage(
+            f"Backend unreachable at {result.server_url} — chat disabled. Recover via the model toolbar."
         )
     elif status == "started":
         window.status_bar.showMessage(f"Started {model} — ready")
@@ -399,19 +392,6 @@ def main() -> None:
 
     print("GRC Agent GUI started — check your desktop for the window.", flush=True)
     sys.exit(app.exec())
-
-
-def _register_server_cleanup(pid: int) -> None:
-    """Arrange to terminate the backend server process when this process exits."""
-
-    def _cleanup():
-        try:
-            os.kill(pid, 0)
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-
-    atexit.register(_cleanup)
 
 
 if __name__ == "__main__":
