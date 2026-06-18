@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import ast
-import importlib
 import inspect
-import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -156,9 +153,6 @@ class BlockDescription:
         if self.warnings:
             payload["warnings"] = list(self.warnings)
         return payload
-
-
-_MAKE_TARGET_PATTERN = re.compile(r"([A-Za-z_][\w\.]*)\s*\(")
 
 
 def compact_text(value: Any) -> str:
@@ -416,84 +410,62 @@ def _looks_hierarchical(
 def _resolves_to_hierarchical_class(
     imports_text: str | None, make_text: str | None
 ) -> bool:
+    """Resolve the make() target through the imports and check MRO for hier_block2.
+
+    Note: ``platform.block_classes[id]`` returns GRC's metadata Block class,
+    not the runtime ``gnuradio.gr.hier_block2`` subclass. The MRO check for
+    ``hier_block2`` only works against the actual imported Python module,
+    so the importlib chain is the correct path here (not the platform
+    registry).
+    """
+    import ast
+    import importlib
+    import re
+
     if not imports_text or not make_text:
         return False
 
-    target_expression = _extract_make_target(make_text)
-    if target_expression is None:
+    match = re.compile(r"([A-Za-z_][\w\.]*)\s*\(").search(make_text)
+    if match is None:
         return False
+    target_expression = match.group(1)
 
     try:
-        aliases = _parse_import_aliases(imports_text)
-        resolved = _resolve_target(aliases, target_expression)
-    except (
-        AttributeError,
-        ImportError,
-        ModuleNotFoundError,
-        SyntaxError,
-        TypeError,
-        ValueError,
-    ):
-        return False
-    return _is_hierarchical_class(resolved)
+        tree = ast.parse(imports_text)
+        aliases: dict[str, tuple[str, str, str | None]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local_name = alias.asname or alias.name.split(".")[0]
+                    aliases[local_name] = ("import", alias.name, None)
+            if isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    aliases[local_name] = ("from", node.module, alias.name)
 
-
-def _extract_make_target(make_text: str) -> str | None:
-    match = _MAKE_TARGET_PATTERN.search(make_text)
-    if match is None:
-        return None
-    return match.group(1)
-
-
-def _parse_import_aliases(imports_text: str) -> dict[str, tuple[str, str, str | None]]:
-    aliases: dict[str, tuple[str, str, str | None]] = {}
-    tree = ast.parse(imports_text)
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                local_name = alias.asname or alias.name.split(".")[0]
-                aliases[local_name] = ("import", alias.name, None)
-            continue
-        if isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                local_name = alias.asname or alias.name
-                aliases[local_name] = ("from", node.module, alias.name)
-    return aliases
-
-
-def _resolve_target(
-    aliases: dict[str, tuple[str, str, str | None]],
-    target_expression: str,
-) -> object:
-    target_parts = target_expression.split(".")
-    if not target_parts:
-        raise ValueError("Missing target expression.")
-
-    binding = aliases.get(target_parts[0])
-    if binding is None:
-        raise ValueError(f"Unknown import alias: {target_parts[0]}")
-
-    import_kind, module_name, imported_name = binding
-    if import_kind == "import":
-        resolved: object = importlib.import_module(module_name)
-    else:
-        module = importlib.import_module(module_name)
-        if imported_name is None:
-            raise ValueError("Missing imported symbol name.")
-        if hasattr(module, imported_name):
-            resolved = getattr(module, imported_name)
+        parts = target_expression.split(".")
+        if not parts:
+            return False
+        binding = aliases.get(parts[0])
+        if binding is None:
+            return False
+        kind, mod_name, imp_name = binding
+        if kind == "import":
+            resolved: object = importlib.import_module(mod_name)
         else:
-            resolved = importlib.import_module(f"{module_name}.{imported_name}")
+            mod = importlib.import_module(mod_name)
+            if imp_name and hasattr(mod, imp_name):
+                resolved = getattr(mod, imp_name)
+            else:
+                resolved = importlib.import_module(f"{mod_name}.{imp_name}")
+        for part in parts[1:]:
+            resolved = getattr(resolved, part)
+    except Exception:
+        return False
 
-    for part in target_parts[1:]:
-        resolved = getattr(resolved, part)
-    return resolved
-
-
-def _is_hierarchical_class(candidate: object) -> bool:
-    if not inspect.isclass(candidate):
+    if not inspect.isclass(resolved):
         return False
     return any(
         base.__name__ == "hier_block2" and base.__module__.startswith("gnuradio")
-        for base in candidate.__mro__
+        for base in resolved.__mro__
     )
