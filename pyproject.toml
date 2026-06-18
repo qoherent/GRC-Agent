@@ -57,7 +57,6 @@ Issues = "https://github.com/qoherent/grc-agent/issues"
 Changelog = "https://github.com/qoherent/grc-agent/blob/main/docs/CHANGELOG.md"
 
 [project.scripts]
-grc-agent = "grc_agent.cli:main"
 grc-agent-gui = "grc_agent_gui.app:main"
 
 [tool.hatch.build.targets.wheel]
@@ -79,9 +78,12 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]  # asserts are fine in tests
-"src/grc_agent/cli.py" = ["B008"]  # function call in default arg is intentional (argparse)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
 qt_api = "pyside6"
+markers = [
+    "gui: tests that require a PySide6 QApplication",
+    "live_rag: tests that touch the real vector DB / live ollama (only run under GRC_AGENT_LIVE_RAG=1)",
+]
