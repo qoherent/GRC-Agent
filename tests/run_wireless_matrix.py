@@ -28,7 +28,7 @@ BLANK_GRC = Path("/tmp/test_workspace.grc")
 FIXTURE_BLANK = PROJECT_ROOT / "examples" / "blank.grc"
 TMP_OUT = Path("/tmp/wireless_matrix_out.json")
 TMP_LOG = Path("/tmp/wireless_matrix_log.txt")
-MODEL = "qwen3.5:9b-q4_K_M"
+MODEL = "gemma4:e4b-it-qat"
 for _idx, _arg in enumerate(sys.argv):
     if _arg == "--model" and _idx + 1 < len(sys.argv):
         MODEL = sys.argv[_idx + 1]
@@ -76,29 +76,60 @@ metadata:
 
 
 def reset_blank():
-    if FIXTURE_BLANK.is_file():
-        shutil.copy2(FIXTURE_BLANK, BLANK_GRC)
-    else:
-        BLANK_GRC.write_text(_BLANK_TEMPLATE)
+    # Always write the truly-empty template. The on-disk fixture
+    # (examples/blank.grc) carries a pre-existing samp_rate variable
+    # that makes scenario 08 impossible and inflates blocks_on_disk.
+    BLANK_GRC.write_text(_BLANK_TEMPLATE)
 
 
 def run_chat(message: str) -> dict:
-    TMP_OUT.unlink(missing_ok=True)
-    TMP_LOG.unlink(missing_ok=True)
-    cmd = [
-        "uv", "run", "grc-agent", "chat",
-        str(BLANK_GRC),
-        "--message", message,
-        "--model", MODEL,
-        "--json",
-        "--max-tool-rounds", "15",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    TMP_LOG.write_text(f"--- STDOUT ---\n{proc.stdout}\n\n--- STDERR ---\n{proc.stderr}")
+    """Run one chat turn via the library API (CLI was removed)."""
+    from grc_agent.agent import GrcAgent
+    from grc_agent.config import DEFAULT_OLLAMA_URL
+    from grc_agent.toolagents_runtime import (
+        ToolAgentsLlamaProviderConfig,
+        run_bounded_toolagents_turn,
+    )
+
+    agent = GrcAgent()
+    load_result = agent.execute_tool("load_grc", {"file_path": str(BLANK_GRC)})
+    if not load_result.get("ok"):
+        return {"ok": False, "error": "load_failed", "detail": load_result}
+
+    provider = ToolAgentsLlamaProviderConfig(
+        base_url=DEFAULT_OLLAMA_URL,
+        model=MODEL,
+    )
     try:
-        return json.loads(proc.stdout.strip() or "{}")
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "json_parse_failed", "stdout": proc.stdout[:200], "stderr": proc.stderr[:200]}
+        turn = run_bounded_toolagents_turn(
+            agent=agent,
+            provider_config=provider,
+            user_message=message,
+            mvp_tool_profile=True,
+            max_tool_rounds=15,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    # Adapt the turn result to the shape score_result expects.
+    # Tool names aren't in the result dict; extract from chat history.
+    operations: list[dict] = []
+    for m in agent.chat_history.get_messages():
+        for c in m.content:
+            if type(c).__name__ == "ToolCallContent":
+                operations.append({"name": c.tool_call_name})
+    session = getattr(agent, "session", None)
+    state_revision = getattr(session, "state_revision", 0) if session else 0
+    val_state = session.validation_state() if session and hasattr(session, "validation_state") else {}
+    return {
+        "ok": turn.get("ok", False),
+        "operations": operations,
+        "state_revision": state_revision,
+        "validation_status": val_state.get("status"),
+        "assistant_text": turn.get("assistant_text", ""),
+        "tool_rounds_used": turn.get("tool_rounds_used", 0),
+        "tool_calls_executed": turn.get("tool_calls_executed", 0),
+    }
 
 
 def score_result(result: dict, expected_blocks: int = 0) -> dict:
@@ -163,8 +194,8 @@ def main():
         start = time.monotonic()
         try:
             result = run_chat(message)
-        except subprocess.TimeoutExpired:
-            result = {"ok": False, "error": "timeout"}
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)}
         elapsed = time.monotonic() - start
 
         score = score_result(result)

@@ -254,9 +254,25 @@ def resolve_pending_clarification_state(
             ),
         }
 
+    # Uniform word-boundary search: if the reply contains any valid option
+    # label as a standalone word, select that option. Handles natural-
+    # language replies like "Option A", "The answer is B", "I'll go with C".
+    # One rule applied to every reply — no magic-length heuristic.
+    import re
+    option_by_label = {opt.label.upper(): opt for opt in req.options}
+    upper_raw = raw.upper()
+    for label, opt in option_by_label.items():
+        if re.search(rf"\b{re.escape(label)}\b", upper_raw):
+            return {
+                "mode": "selected",
+                "raw_reply": raw,
+                "option": opt,
+            }
+
+    # No option label found in the reply → treat as custom free text.
     custom_label = req.custom_option.label.upper()
     custom_selected = parse_clarification_option_label(raw, labels={custom_label})
-    if custom_selected == custom_label or len(raw) > 1:
+    if custom_selected == custom_label or raw.strip():
         return {
             "mode": "custom",
             "clear_pending": True,

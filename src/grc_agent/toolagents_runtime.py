@@ -689,7 +689,8 @@ class ToolAgentsRunner:
             assistant_text = _resolve_final_assistant_text(
                 agent.chat_history, _message_text(assistant_message)
             )
-            _replace_last_assistant_text(agent.chat_history, assistant_text)
+            if assistant_text:
+                _replace_last_assistant_text(agent.chat_history, assistant_text)
             logger.info(
                 "turn_end ok=True steps=%d tool_rounds=%d tool_calls=%d",
                 assistant_turns,
@@ -1010,36 +1011,13 @@ def _resolve_final_assistant_text(
     if assistant_content.strip():
         return assistant_content
 
-    tool_payloads: list[dict[str, Any]] = []
-    for message in reversed(chat_history.get_messages()):
-        if message.role != ChatMessageRole.Tool:
-            continue
-        for content in message.content:
-            if isinstance(content, ToolCallResultContent):
-                try:
-                    payload = json.loads(content.tool_call_result)
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(payload, dict):
-                    tool_payloads.append(payload)
-                    message_text = payload.get("message")
-                    if isinstance(message_text, str) and message_text.strip():
-                        return message_text
-
-    if not tool_payloads:
-        return "Request completed."
-
-    last_payload = tool_payloads[-1]
-    tool_name = str(last_payload.get("tool") or "the tool")
-    is_ok = last_payload.get("ok") is True
-    error_type = str(last_payload.get("error_type") or "").strip()
-    raw_message = str(last_payload.get("message") or "").strip()
-
-    if not is_ok:
-        detail = raw_message or error_type or "the tool reported a failure"
-        return f"I attempted to call {tool_name} but it failed: {detail}."
-
-    return f"{tool_name} completed."
+    # The model emitted no final text. Return empty — the tool results
+    # are already in the history as tool messages and are visible to the
+    # model on the next turn. Per AGENTS.md 'no silent transformation',
+    # we must not substitute a tool's message field as the model's own
+    # words (that would make the model "see itself saying" something it
+    # never said on the next turn).
+    return ""
 
 
 def _attach_context_budget_telemetry(
