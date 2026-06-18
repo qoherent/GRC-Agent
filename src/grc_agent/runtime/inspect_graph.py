@@ -351,6 +351,21 @@ def _resolve_target(
     if not request:
         return _TargetMatch(request=request, status="not_found")
 
+    # Reject glob placeholders like "*block_name*" — these are
+    # documentation-style examples, not real identifiers. Without this
+    # guard, "*block_name*" can match real blocks via fuzzy scoring
+    # (the tokens "block" and "name" overlap with most block names),
+    # giving a misleading "success" that hides the model's mistake.
+    if request.startswith("*") and request.endswith("*") and len(request) > 2:
+        return _TargetMatch(
+            request=request,
+            status="not_found",
+            message=(
+                f"Target {request!r} looks like a documentation placeholder. "
+                "Use a real block instance_name, block_uid, or block_type."
+            ),
+        )
+
     invalid_ref = _unknown_parameter_ref(request, blocks, candidates)
     if invalid_ref is not None:
         block, param_key = invalid_ref
