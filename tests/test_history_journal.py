@@ -1,15 +1,11 @@
-"""Tests for local graph checkpointing and CLI-only restore."""
+"""Tests for local graph checkpointing and library-level restore."""
 
-import json
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
-from io import StringIO
 from pathlib import Path
 
 from grc_agent.agent import GrcAgent
-from grc_agent.cli import main as cli_main
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import GraphHistoryJournal
 
@@ -225,10 +221,15 @@ class GraphHistoryJournalTests(unittest.TestCase):
         self.assertEqual(current_text, original_text)
         self.assertIsNotNone(agent)
 
-    def test_history_cli_list_show_diff_restore(self) -> None:
+    def test_history_library_list_get_diff_restore(self) -> None:
+        """Exercise GraphHistoryJournal list/get/diff/restore directly.
+
+        Previously this went through the ``grc-agent history`` CLI subcommand;
+        the CLI was removed, so the library methods are tested directly.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             journal_path = Path(tmpdir) / "journal.jsonl"
-            restore_path = Path(tmpdir) / "cli_restore.grc"
+            restore_path = Path(tmpdir) / "restored.grc"
             agent, _session = _load_agent(journal_path)
             edit = agent.execute_tool(
                 "apply_edit",
@@ -241,68 +242,23 @@ class GraphHistoryJournalTests(unittest.TestCase):
                 },
             )
             self.assertTrue(edit["ok"], edit)
+
+            journal = GraphHistoryJournal(journal_path)
             baseline_id, edit_id = [
-                record["id"] for record in _records(journal_path, accepted_only=True)
+                record["id"]
+                for record in journal.list_records(accepted_only=True)
             ]
 
-            stdout = StringIO()
-            with redirect_stdout(stdout):
-                list_code = cli_main([
-                    "history",
-                    "--journal-path",
-                    str(journal_path),
-                    "list",
-                    "--json",
-                ])
-            listed = json.loads(stdout.getvalue())
+            listed = journal.list_records(accepted_only=True)
+            shown = journal.get_record(edit_id)
+            diffed = journal.diff_records(baseline_id, edit_id)
+            restored = journal.restore_record(edit_id, restore_path)
 
-            stdout = StringIO()
-            with redirect_stdout(stdout):
-                show_code = cli_main([
-                    "history",
-                    "--journal-path",
-                    str(journal_path),
-                    "show",
-                    edit_id,
-                    "--json",
-                ])
-            shown = json.loads(stdout.getvalue())
-
-            stdout = StringIO()
-            with redirect_stdout(stdout):
-                diff_code = cli_main([
-                    "history",
-                    "--journal-path",
-                    str(journal_path),
-                    "diff",
-                    baseline_id,
-                    edit_id,
-                    "--json",
-                ])
-            diffed = json.loads(stdout.getvalue())
-
-            stdout = StringIO()
-            with redirect_stdout(stdout):
-                restore_code = cli_main([
-                    "history",
-                    "--journal-path",
-                    str(journal_path),
-                    "restore",
-                    edit_id,
-                    "--to",
-                    str(restore_path),
-                    "--json",
-                ])
-            restored = json.loads(stdout.getvalue())
-
-        self.assertEqual(list_code, 0)
-        self.assertEqual(show_code, 0)
-        self.assertEqual(diff_code, 0)
-        self.assertEqual(restore_code, 0)
-        self.assertEqual(len(listed["records"]), 2)
+        self.assertEqual(len(listed), 2)
         self.assertEqual(shown["id"], edit_id)
         self.assertTrue(diffed["graph_delta"]["changed"])
-        self.assertTrue(restored["valid"])
+        self.assertTrue(restored["ok"], restored)
+        self.assertTrue(restored["valid"], restored)
 
 
 if __name__ == "__main__":

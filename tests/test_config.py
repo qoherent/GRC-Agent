@@ -1,12 +1,10 @@
-"""Tests for runtime config resolution and packaged CLI defaults."""
+"""Tests for runtime config resolution and packaged defaults."""
 
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from grc_agent.cli import _build_parser, _maybe_translate_legacy_args
 from grc_agent.config import (
     CONFIG_ENV_VAR,
     ConfigError,
@@ -27,12 +25,11 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(default_config_path().is_file())
         self.assertEqual(config.llama.server_url, "http://localhost:11434")
         self.assertEqual(config.llama.backend, "ollama")
-        # The repo config no longer carries a hardcoded ``model``
-        # entry — the user is expected to pick from the installed
-        # tags at runtime, so the default resolves to the empty
-        # string. The CLI falls back to the first installed tag
-        # when this is empty.
-        self.assertEqual(config.llama.model, "")
+        # The repo config carries a non-empty ``model``: an empty model
+        # silently degrades every LLM call (chat completion, RAG synthesis)
+        # to a backend 400. The GUI/CLI provider-picker can override at
+        # runtime, but the parsed config must always carry a usable model.
+        self.assertEqual(config.llama.model, "gemma4:12b-it-qat")
         self.assertEqual(config.llama.max_tokens, 4096)
         # The default per-payload truncation cap is 4000 chars —
         # large enough to fit a full GNU Radio catalog JSON object
@@ -50,57 +47,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
         self.assertEqual(config.agent.guardrails.max_validation_stderr_chars, 1200)
         self.assertEqual(config.agent.guardrails.max_compact_list_items, 3)
-
-    def test_cli_parser_defaults_come_from_repo_config(self) -> None:
-        config = load_app_config()
-        parser = _build_parser(config)
-
-        args = parser.parse_args(
-            ["chat", "fixture.grc", "--message", "Summarize the graph."]
-        )
-
-        self.assertEqual(args.model, config.llama.model)
-        self.assertFalse(args.agentic)
-        self.assertIsNone(args.max_tool_rounds)
-
-    def test_cli_parser_accepts_agentic_tool_budget_override(self) -> None:
-        config = load_app_config()
-        parser = _build_parser(config)
-
-        args = parser.parse_args(
-            [
-                "chat",
-                "fixture.grc",
-                "--agentic",
-                "--max-tool-rounds",
-                "24",
-            ]
-        )
-
-        self.assertTrue(args.agentic)
-        self.assertEqual(args.max_tool_rounds, 24)
-
-    def test_legacy_message_translation_preserves_global_options(self) -> None:
-        translated = _maybe_translate_legacy_args(
-            ["--verbose", "--message", "Summarize it.", "fixture.grc"]
-        )
-
-        self.assertEqual(
-            translated,
-            ["--verbose", "chat", "--message", "Summarize it.", "fixture.grc"],
-        )
-
-    def test_legacy_message_translation_does_not_rewrite_modern_chat(self) -> None:
-        argv = [
-            "--verbose",
-            "chat",
-            "--agentic",
-            "--message",
-            "Summarize it.",
-            "fixture.grc",
-        ]
-
-        self.assertEqual(_maybe_translate_legacy_args(argv), argv)
 
     def test_load_app_config_falls_back_to_builtin_defaults_when_no_file_exists(
         self,
@@ -183,6 +129,34 @@ class RuntimeConfigTests(unittest.TestCase):
             ):
                 load_app_config(config_path)
 
+    def test_load_app_config_rejects_missing_model(self) -> None:
+        """A config file without [llama].model must be a hard error.
+
+        An empty model silently degrades every LLM call (chat completion,
+        RAG synthesis) to a backend 400 — exactly the S2 audit finding.
+        The GUI/CLI provider-picker can override at runtime, but a parsed
+        config must always carry a non-empty model.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "no_model.toml"
+            config_path.write_text(
+                (
+                    "[llama]\n"
+                    'server_url = "http://localhost:11434"\n'
+                    'backend = "ollama"\n'
+                    "max_tokens = 1024\n"
+                    "max_tool_rounds = 1\n"
+                    "temperature = 0.0\n"
+                    "enable_thinking = false\n"
+                    "request_timeout_seconds = 1.0\n"
+                    "\n[agent]\n"
+                    "history_compact_budget = 1000\n"
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "model"):
+                load_app_config(config_path)
+
     def test_resolve_config_path_prefers_env_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_config = Path(tmpdir) / "env.toml"
@@ -256,12 +230,3 @@ class RuntimeConfigTests(unittest.TestCase):
                 ConfigError, "backend must be"
             ):
                 load_app_config(invalid_path)
-
-    def test_pyproject_declares_console_script_entrypoint(self) -> None:
-        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
-        payload = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(
-            payload["project"]["scripts"]["grc-agent"],
-            "grc_agent.cli:main",
-        )

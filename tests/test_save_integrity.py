@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from grc_agent._payload import ErrorCode
 from grc_agent.agent import GrcAgent
-from grc_agent.cli import _run_repl_save_command
 from grc_agent.flowgraph_session import FlowgraphSession
 
 FIXTURE = Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
@@ -132,26 +129,6 @@ class SaveIntegrityTests(unittest.TestCase):
             self.assertEqual(result.get("error_type"), ErrorCode.STALE_REVISION)
             self.assertEqual(result.get("file_integrity", {}).get("status"), "modified")
             self.assertIn("# external edit", session.path.read_text(encoding="utf-8"))
-
-    def test_repl_save_refuses_externally_modified_active_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            session = _load_temp_session(tmpdir)
-            assert session.path is not None
-            agent = GrcAgent(session)
-            _mark_agent_valid(agent)
-            session.path.write_text(
-                session.path.read_text(encoding="utf-8") + "\n# external edit\n",
-                encoding="utf-8",
-            )
-
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                exit_code = _run_repl_save_command(agent, "/save")
-
-            self.assertEqual(exit_code, 1)
-            output = stdout.getvalue()
-            self.assertIn("Save FAILED", output)
-            self.assertIn("changed on disk", output)
 
     def test_change_graph_commit_refuses_externally_modified_active_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

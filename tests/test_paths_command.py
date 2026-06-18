@@ -1,23 +1,18 @@
-"""Tests for the `grc-agent paths` subcommand."""
+"""Tests for the library-level ``collect_package_paths`` helper.
 
-import json
+The ``grc-agent paths`` CLI subcommand was removed; only the underlying
+``config.collect_package_paths`` library helper remains (used by the GUI
+and other tooling). These tests exercise the helper directly.
+"""
+
 import unittest
-from unittest import mock
+from pathlib import Path
 
-from grc_agent.cli import _run_paths_command
 from grc_agent.config import collect_package_paths
 
 
-def _parse_args(argv):
-    """Helper: parse argv into a Namespace as `_run_paths_command` would see it."""
-    import argparse
-    parser = argparse.ArgumentParser(prog="grc-agent paths")
-    parser.add_argument("--json", action="store_true")
-    return parser.parse_args(argv)
-
-
-class PathsCommandTests(unittest.TestCase):
-    """The `paths` subcommand must list every filesystem location the package uses."""
+class PackagePathsTests(unittest.TestCase):
+    """``collect_package_paths`` lists every filesystem location the package uses."""
 
     def test_collect_package_paths_includes_expected_keys(self) -> None:
         paths = collect_package_paths()
@@ -38,31 +33,8 @@ class PathsCommandTests(unittest.TestCase):
         paths = collect_package_paths()
         self.assertEqual(paths["history_env_var"], "GRC_AGENT_HISTORY_PATH")
 
-    def test_json_output_is_valid_json(self) -> None:
-        args = _parse_args(["--json"])
-        with mock.patch("builtins.print") as mock_print:
-            rc = _run_paths_command(args)
-        self.assertEqual(rc, 0)
-        printed = mock_print.call_args.args[0]
-        payload = json.loads(printed)
-        self.assertIn("config_user", payload)
-        self.assertIn("sessions_db", payload)
-
-    def test_human_output_lists_all_keys(self) -> None:
-        args = _parse_args([])
-        with mock.patch("builtins.print") as mock_print:
-            rc = _run_paths_command(args)
-        self.assertEqual(rc, 0)
-        printed_text = "".join(
-            str(call.args[0]) for call in mock_print.call_args_list
-        )
-        paths = collect_package_paths()
-        for key in paths:
-            self.assertIn(key, printed_text)
-
     def test_paths_are_absolute(self) -> None:
         """All paths should be absolute."""
-        from pathlib import Path
         paths = collect_package_paths()
         for key, value in paths.items():
             if key == "history_env_var":
