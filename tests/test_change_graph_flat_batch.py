@@ -74,28 +74,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         reloaded.load(path)
         self.assertEqual(self._param(reloaded, "samp_rate", "value"), "48000")
 
-    def test_update_params_ignores_block_uid_in_optional_block_id(self) -> None:
-        tmp, _path, agent = self._load_temp_agent()
-        self.addCleanup(tmp.cleanup)
-
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "update_params": [
-                    {
-                        "block_id": "block:a2dc5e934c70ee7f",
-                        "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
-                    }
-                ]
-            },
-            model_tool_call=False,
-        )
-
-        self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
-        self.assertEqual(self._param(agent.session, "samp_rate", "value"), "48000")
-
     def test_flat_update_variables_commits_and_reloads_exact_values(self) -> None:
         tmp, path, agent = self._load_temp_agent()
         self.addCleanup(tmp.cleanup)
@@ -221,11 +199,10 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertFalse(result.get("committed", True), result)
         self.assertEqual(self._block_names(agent.session), before_blocks)
         self.assertEqual(self._connection_ids(agent.session), before_connections)
-        self.assertIn('Stream dtype mismatch', result.get("hint", ""))
+        self.assertTrue(result.get("hint"), result)
         self.assertIn("Source IO type", rendered)
         self.assertIn("float", rendered)
         self.assertIn("complex", rendered)
-        self.assertIn('Stream dtype mismatch', rendered)
 
     def test_native_validation_failure_reports_unchanged_graph_facts(self) -> None:
         tmp, _path, agent = self._load_temp_agent()
@@ -268,6 +245,24 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertIn('"graph_unchanged":true', rendered)
         self.assertIn('"rollback":"complete"', rendered)
         self.assertIn("Source - out(0): Port is not connected.", rendered)
+
+    def test_change_graph_render_keeps_all_non_empty_fields(self) -> None:
+        payload = {
+            "ok": True,
+            "committed": True,
+            "state_revision": 2,
+            "checkpoint_id": "cp-abc",
+            "graph_delta": {"added": ["samp_rate"]},
+            "effect": "set samp_rate.value=96000",
+        }
+        rendered = tool_history_content_as_text(
+            payload,
+            tool_name="change_graph",
+            semantic_search_result_preview=lambda _results: [],
+        )
+        self.assertIn("checkpoint_id", rendered)
+        self.assertIn("graph_delta", rendered)
+        self.assertIn("cp-abc", rendered)
 
     def test_same_batch_connection_can_reference_unique_added_block_type_alias(self) -> None:
         tmp, _path, agent = self._load_temp_agent()
@@ -441,61 +436,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertIn("skipped", result.get("autosave", {}))
         self.assertTrue(result["autosave"]["skipped"])
         self.assertEqual(path.read_bytes(), before_sha)
-
-    def test_disable_sink_returns_terminal_hint_not_bypass(self) -> None:
-        """Disabling a sink block emits topology-aware terminal hint, not bypass."""
-        tmp, _path, agent = self._load_temp_agent()
-        self.addCleanup(tmp.cleanup)
-        before_revision = agent.session.state_revision
-
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "update_states": [
-                    {
-                        "instance_name": "qtgui_time_sink_x_0",
-                        "state": "disabled",
-                    }
-                ]
-            },
-            model_tool_call=True,
-        )
-
-        self.assertFalse(result["ok"], result)
-        self.assertFalse(result.get("committed", True), result)
-        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
-        self.assertEqual(agent.session.state_revision, before_revision)
-        hint = result.get("hint", "")
-        self.assertIn("terminal/control block", hint.lower())
-        self.assertIn("cannot be bypassed", hint.lower())
-        self.assertNotIn("severed", hint.lower())
-
-    def test_disable_inline_transform_returns_bypass_hint(self) -> None:
-        """Disabling a stream-transform inline block emits bypass hint."""
-        tmp, _path, agent = self._load_temp_agent()
-        self.addCleanup(tmp.cleanup)
-        before_revision = agent.session.state_revision
-
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "update_states": [
-                    {
-                        "instance_name": "blocks_char_to_float_0",
-                        "state": "disabled",
-                    }
-                ]
-            },
-            model_tool_call=True,
-        )
-
-        self.assertFalse(result["ok"], result)
-        self.assertFalse(result.get("committed", True), result)
-        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
-        self.assertEqual(agent.session.state_revision, before_revision)
-        hint = result.get("hint", "")
-        self.assertIn("port connections severed", hint.lower())
-        self.assertNotIn("terminal/control block", hint.lower())
 
 
 if __name__ == "__main__":

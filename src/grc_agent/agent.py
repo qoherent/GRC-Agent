@@ -151,7 +151,7 @@ def _compact_block_summary(summary: Any) -> str:
     if original_len <= _SEARCH_BLOCK_SUMMARY_MAX_CHARS:
         return compact
     kept_len = _SEARCH_BLOCK_SUMMARY_MAX_CHARS - 1
-    return compact[:kept_len].rstrip() + f"... [TRUNCATED by chat-history compactor: was {original_len} chars, kept {kept_len}]"
+    return compact[:kept_len].rstrip() + f"... [TRUNCATED block-summary: was {original_len} chars, kept {kept_len}]"
 
 
 def _compact_save_file_integrity(file_integrity: dict[str, Any]) -> dict[str, Any]:
@@ -428,30 +428,7 @@ class GrcAgent:
         if tool_name == "inspect_graph":
             normalized = self._normalize_inspect_graph_args(normalized)
         if tool_name == "change_graph":
-            normalized = self._normalize_change_graph_args(
-                normalized,
-                model_tool_call=model_tool_call,
-            )
-        return normalized
-
-    def _normalize_change_graph_args(
-        self,
-        kwargs: dict[str, Any],
-        *,
-        model_tool_call: bool,
-    ) -> dict[str, Any]:
-        """Normalize common exact-identifier slips before schema validation."""
-        normalized = copy.deepcopy(kwargs)
-        for field_name in ("update_params", "update_states"):
-            rows = normalized.get(field_name)
-            if not isinstance(rows, list):
-                continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                block_id = row.get("block_id")
-                if isinstance(block_id, str) and block_id.strip().startswith("block:"):
-                    row.pop("block_id", None)
+            normalized = copy.deepcopy(normalized)
         return normalized
 
     def _normalize_inspect_graph_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
@@ -34,6 +33,11 @@ class PortDomain(StrEnum):
     MESSAGE = "message"
 
 
+# Categories whose blocks are control/variable even when the
+# ``not_dsp`` flag is absent. Mirrors GRC's own variable/widget
+# category names — the fallback is needed when the platform
+# initializer is unavailable and the descriptor only carries
+# category metadata.
 _CONTROL_CATEGORY_HINTS: frozenset[str] = frozenset({"variables", "gui widgets"})
 _SEMANTIC_FLAG_NAMES: frozenset[str] = frozenset({"not_dsp", "disable_bypass", "throttle"})
 
@@ -113,6 +117,54 @@ def _gnu_platform_block_metadata(block_type: str) -> dict[str, Any]:
     }
 
 
+_EVALUATED_HIDE_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, str]] = {}
+
+
+def evaluated_param_hides(block_type: str, param_values: dict[str, Any]) -> dict[str, str]:
+    """GRC-core-evaluated 'hide' value ('none'|'part'|'all') per param key."""
+    cache_key = (
+        block_type,
+        tuple(sorted((str(key), "" if value is None else str(value)) for key, value in param_values.items())),
+    )
+    cached = _EVALUATED_HIDE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    hides = _compute_evaluated_param_hides(block_type, param_values)
+    _EVALUATED_HIDE_CACHE[cache_key] = hides
+    return hides
+
+
+def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]) -> dict[str, str]:
+    try:
+        from grc_agent.session import _ensure_platform
+
+        platform = _ensure_platform()
+    except Exception:
+        return {}
+    if platform is None:
+        return {}
+    try:
+        flow_graph = platform.make_flow_graph()
+        block = flow_graph.new_block(block_type)
+    except Exception:
+        return {}
+    for key, value in param_values.items():
+        param = block.params.get(key) if hasattr(block.params, "get") else None
+        if param is not None:
+            try:
+                param.value = "" if value is None else str(value)
+            except Exception:
+                pass
+    try:
+        flow_graph.rewrite()
+    except Exception:
+        pass
+    try:
+        return {str(name): str(param.hide) for name, param in block.params.items()}
+    except Exception:
+        return {}
+
+
 def _semantic_role(
     *,
     flags: list[str],
@@ -174,8 +226,6 @@ def _drop_empty(value: dict[str, Any]) -> dict[str, Any]:
 
 
 # --- merged from editable_parameters.py ---
-
-_NUMERIC_SHORTHAND_RE = re.compile(r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))([kKmM])\s*$")
 
 
 @dataclass(frozen=True)
@@ -364,11 +414,3 @@ def _parameter_map(block: Block) -> dict[str, Any]:
     if not isinstance(parameters, dict):
         return {}
     return {str(key): value for key, value in parameters.items()}
-
-
-def _compact_value(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, str):
-        return " ".join(value.split())
-    return str(value)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +12,7 @@ from grc_agent._payload import ErrorCode
 from grc_agent.catalog.loaders import describe_block
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.block_semantics import BlockRole, _block_semantics
+from grc_agent.runtime.enums import BlockState, ValidationErrorCode, ValidationStatus
 from grc_agent.runtime.integrity import compact_file_integrity
 from grc_agent.runtime.tool_context import is_meaningful, is_variable_block
 from grc_agent.session_ops import connection_id as render_connection_id
@@ -516,15 +516,21 @@ def _bypass_hint(
     if not disabled_ops:
         return None
 
+    # Per AGENTS.md 'fix at source': the bypass hint fires only on
+    # structured port error codes emitted by the validator. The
+    # previous regex/substring fallback against GRC's free-text error
+    # strings is removed — the model now relies on the structured
+    # error codes in ``errors_payload`` (or, when the validator hasn't
+    # caught it, on the generic native error summary).
     port_disconnected = isinstance(errors_payload, list) and any(
         isinstance(row, dict)
-        and row.get("code") in ("port_out_of_range", "occupied_input_port", "invalid_port")
+        and row.get("code") in (
+            ValidationErrorCode.PORT_OUT_OF_RANGE,
+            ValidationErrorCode.OCCUPIED_INPUT_PORT,
+            ValidationErrorCode.INVALID_PORT,
+        )
         for row in errors_payload
     )
-
-    if not port_disconnected:
-        native_errors = _native_validation_error_text(validation_result)
-        port_disconnected = any("port is not connected" in err.lower() for err in native_errors)
 
     if not port_disconnected:
         return None
@@ -589,20 +595,17 @@ def _repair_hint_for_validation_failure(
 ) -> str | None:
     if not isinstance(validation_result, dict):
         return None
-    if str(validation_result.get("status") or "").lower() not in {"invalid", "failed"}:
+    status = ValidationStatus(str(validation_result.get("status") or "").lower())
+    if status not in {ValidationStatus.INVALID, ValidationStatus.FAILED}:
         return None
     native_errors = _native_validation_error_text(validation_result)
     if not native_errors:
         return None
-
-    dtype_pair = _first_dtype_mismatch(native_errors)
-    if dtype_pair is None:
-        if _is_port_occupancy_error(native_errors):
-            return "Input port already occupied."
-        return f"Native GNU validation error: {native_errors[0]}"
-
-    source_dtype, destination_dtype = dtype_pair
-    return f"Stream dtype mismatch: {source_dtype} -> {destination_dtype}."
+    # Per AGENTS.md 'fix at source': the previous dtype/port-occupancy
+    # regex heuristics have been removed. The model receives the first
+    # native validation error verbatim — the structured error code lives
+    # in errors_payload (handled by the caller).
+    return f"Native GNU validation error: {native_errors[0]}"
 
 
 def _resolve_added_block_endpoint_alias(
@@ -733,11 +736,11 @@ def _update_state_operation(
             errors.append(f"{field_name}[{index}].state expected to be an enum or .states expected to be a non-empty object.")
             return None
         state = states.get("state")
-        if state is None and "enabled" in states:
-            state = "enabled" if bool(states.get("enabled")) else "disabled"
-        if state is None and "disabled" in states:
-            state = "disabled" if bool(states.get("disabled")) else "enabled"
-    if state not in {"enabled", "disabled", "bypass"}:
+        if state is None and BlockState.ENABLED in states:
+            state = BlockState.ENABLED if bool(states.get(BlockState.ENABLED)) else BlockState.DISABLED
+        if state is None and BlockState.DISABLED in states:
+            state = BlockState.DISABLED if bool(states.get(BlockState.DISABLED)) else BlockState.ENABLED
+    if state not in set(BlockState):
         errors.append(f"{field_name}[{index}].state expected to be enabled/disabled/bypass.")
         return None
     op: dict[str, Any] = {"op_type": "update_states", "state": state}
@@ -752,11 +755,11 @@ def _update_state_operation(
 
 
 def _optional_catalog_block_id(value: Any) -> str | None:
-    """Return a catalog block id, ignoring inspected block UID values."""
+    """Return a catalog block id, or None if the value is empty."""
     if not isinstance(value, str):
         return None
     text = value.strip()
-    if not text or text.startswith("block:"):
+    if not text:
         return None
     return text
 
@@ -933,25 +936,6 @@ def _native_validation_error_text(validation_result: dict[str, Any]) -> list[str
     if not isinstance(errors, list):
         return []
     return [" ".join(str(error).split()) for error in errors if str(error).strip()]
-
-
-def _first_dtype_mismatch(errors: list[str]) -> tuple[str, str] | None:
-    pattern = re.compile(
-        r'Source IO type "([^"]+)" does not match sink IO type "([^"]+)"'
-    )
-    for error in errors:
-        match = pattern.search(error)
-        if match:
-            return match.group(1), match.group(2)
-    return None
-
-
-def _is_port_occupancy_error(native_errors: list[str]) -> bool:
-    """Return whether the model hit a port occupancy / multi-connection error."""
-    return any(
-        "port is already connected" in error.lower()
-        for error in native_errors
-    )
 
 
 # ── Rewire resolution ──────────────────────────────────────────────────

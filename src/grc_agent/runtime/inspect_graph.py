@@ -18,6 +18,7 @@ from grc_agent.runtime.block_semantics import (
     evaluated_param_hides,
 )
 from grc_agent.runtime.block_semantics import _connection_summaries
+from grc_agent.runtime.enums import SearchDomain
 from grc_agent.runtime.text_utils import compact_whitespace, tokenize_identifier
 from grc_agent.runtime.tool_context import is_meaningful, is_variable_block, truncate_list
 from grc_agent.session import summarize_graph
@@ -1059,7 +1060,7 @@ def query_knowledge(
     """Query GNU Radio knowledge — catalog (block IDs/params) or docs (concepts)."""
     started = time.monotonic()
 
-    if domain not in {"catalog", "docs"}:
+    if domain not in {SearchDomain.CATALOG, SearchDomain.DOCS}:
         return agent._tool_result(
             "query_knowledge",
             ok=False,
@@ -1067,7 +1068,7 @@ def query_knowledge(
             error_type="invalid_request",
         )
 
-    if domain == "catalog":
+    if domain == SearchDomain.CATALOG:
         from grc_agent.runtime.search_blocks import search_blocks as _search
         result = _search(agent, query=query, debug=debug)
     else:

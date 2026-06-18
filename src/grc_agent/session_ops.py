@@ -145,7 +145,11 @@ def stable_block_uid(raw_block: dict[str, Any], *, occurrence: int = 0) -> str:
         "occurrence": occurrence,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return f"block:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
+    # No 'block:' prefix — that prefix was leaking into model-visible
+    # fields, and the consumer had to strip it. The bare 16-char hex
+    # hash is enough to be stable + collision-resistant for the size
+    # of a flowgraph's block set.
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def _block_uid_key(raw_block: dict[str, Any]) -> str:

@@ -263,8 +263,14 @@ def _is_template(value: str | None) -> bool:
 def _has_safe_defaults(
     desc: BlockDescription, resolved_dtype: str | None = None
 ) -> tuple[bool, dict[str, Any], list[str]]:
+    from grc_agent.runtime.block_semantics import evaluated_param_hides
+
     required_params: dict[str, Any] = {}
     missing: list[str] = []
+    # Use the GRC-core-evaluated 'hide' so any expression that references
+    # other params is resolved consistently with the rest of the runtime.
+    # Falls back to static 'none' if the platform evaluator is unavailable.
+    evaluated_hides = evaluated_param_hides(desc.block_type, {})
     for param in desc.parameters:
         if param.default is not None:
             required_params[param.id] = param.default
@@ -277,27 +283,32 @@ def _has_safe_defaults(
             else:
                 required_params[param.id] = param.options[0]
         else:
-            if param.hide not in ("all", "part"):
+            hide = evaluated_hides.get(param.id, str(param.hide))
+            if hide not in ("all", "part"):
                 missing.append(param.id)
     return (not missing, required_params, missing)
 
 
+# ---------------------------------------------------------------------------
+# Block classification — one uniform rule per category, no substring matching.
+# Categories are matched by exact path component; flags by exact membership.
+# Add new categories / flags here, not inline.
+# ---------------------------------------------------------------------------
+_CORE_CATEGORIES: frozenset[str] = frozenset({"core", "general", "filters", "math"})
+_HARDWARE_OR_EXTERNAL_CATEGORIES: frozenset[str] = frozenset(
+    {"hardware", "uhd", "usrp", "rfnoc", "oot", "external"}
+)
+_HARDWARE_OR_EXTERNAL_FLAGS: frozenset[str] = frozenset({"python_module"})
+
+
 def _is_core_block(desc: BlockDescription) -> bool:
-    path = "/".join(desc.category_path).lower()
-    return "core" in path or "general" in path or "filters" in path or "math" in path
+    return bool({p.lower() for p in desc.category_path} & _CORE_CATEGORIES)
 
 
 def _is_hardware_or_external(desc: BlockDescription) -> bool:
-    path = "/".join(desc.category_path).lower()
-    flags = [f.lower() for f in desc.flags]
-    return (
-        "hardware" in path
-        or "uhd" in path
-        or "usrp" in path
-        or "rfnoc" in path
-        or "oot" in path
-        or "external" in path
-        or "python_module" in flags
+    return bool(
+        {p.lower() for p in desc.category_path} & _HARDWARE_OR_EXTERNAL_CATEGORIES
+        or {f.lower() for f in desc.flags} & _HARDWARE_OR_EXTERNAL_FLAGS
     )
 
 

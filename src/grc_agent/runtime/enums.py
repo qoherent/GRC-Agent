@@ -47,3 +47,19 @@ class SearchDomain(StrEnum):
 
     CATALOG = "catalog"
     DOCS = "docs"
+
+
+class ValidationErrorCode(StrEnum):
+    """Structured codes emitted by the validation layer.
+
+    Consumer sites (``change_graph.py``, etc.) check these codes
+    uniformly instead of substring-matching GRC's free-text error
+    strings. Adding a new error code: define the member here and
+    emit it at the producer site in ``validation/checks.py``.
+    """
+
+    OCCUPIED_INPUT_PORT = "occupied_input_port"
+    PORT_OUT_OF_RANGE = "port_out_of_range"
+    INVALID_PORT = "invalid_port"
+    BLOCK_NOT_FOUND = "block_not_found"
+    PARAMETER_NOT_FOUND = "parameter_not_found"
