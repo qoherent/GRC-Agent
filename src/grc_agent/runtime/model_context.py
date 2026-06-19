@@ -187,17 +187,18 @@ def render_model_messages(
 
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-06-19-minimal-prompt"
+__version__ = "2026-06-19-grounded-prompt"
 
 def build_system_prompt(session_id: str | None = None) -> str:
     """Return the system prompt shipped to the model."""
     prefix = f"Session ID: {session_id}\n" if session_id else ""
     return prefix + (
         "Role: GNU Radio graph editing assistant.\n"
-        "inspect_graph: read topology, blocks, connections, parameters, and validation status.\n"
+        "inspect_graph: read topology, blocks, connections, field values, and validation status.\n"
         "query_knowledge: search catalog blocks or GNU Radio documentation.\n"
-        "change_graph: add/remove blocks, update parameters, add/remove connections.\n"
-        "Variables are blocks; use block_id \"variable\" to add one.\n"
+        "change_graph: add/remove blocks, edit field values, add/remove connections.\n"
+        "Variables are blocks; use block_id \"variable\" (not \"parameter\") to add one.\n"
+        "Every GNU Radio fact must be grounded in query_knowledge, not memory.\n"
     )
 
 # -- tool surface (was tool_surface.py) --
