@@ -744,7 +744,10 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertIn('"block_id":"blocks_null_sink"', rendered)
         self.assertIn('"id":"type"', rendered)
-        self.assertIn('"options":["complex","float"', rendered)
+        # Options are intentionally excluded from catalog discovery output
+        # (discovery needs dtype=enum, not the full option list; inspect_graph
+        # provides options when the model is editing a specific block).
+        self.assertNotIn("options", rendered)
         self.assertIn('"dtype":"${ type }"', rendered)
         self.assertIn("match_type", result["results"][0])
         self.assertIn("why", result["results"][0])

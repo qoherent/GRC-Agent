@@ -22,6 +22,18 @@ from grc_agent.runtime.catalog_vector import (
     is_catalog_db_usable,
 )
 
+# GRC-native param-category constants (see docs/GNU_NATIVE_METHODS.md)
+try:
+    from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB, DEFAULT_PARAM_TAB
+except ImportError:
+    ADVANCED_PARAM_TAB = "Advanced"
+    DEFAULT_PARAM_TAB = "General"
+
+# Categories that contain only non-essential params:
+#   ADVANCED_PARAM_TAB — GRC auto-added metadata (alias, affinity, comment, buffers)
+#   "Config"           — 100% styling (colors, alphas, markers, styles; verified across 564 blocks)
+_EXCLUDED_PARAM_CATEGORIES: frozenset[str] = frozenset({ADVANCED_PARAM_TAB, "Config"})
+
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
@@ -409,6 +421,31 @@ def _catalog_summary(
     return "; ".join(parts)
 
 
+def _param_categories(block_id: str) -> dict[str, str]:
+    """Read GRC's native ``category`` attribute for each param.
+
+    Instantiates a throwaway flow graph block (same pattern as
+    :func:`evaluated_param_hides`) and reads ``param.category`` for each
+    parameter. Falls back to an empty dict if the platform is unavailable.
+    """
+    try:
+        from grc_agent.session import _ensure_platform
+
+        platform = _ensure_platform()
+        if platform is None:
+            return {}
+        flow_graph = platform.make_flow_graph()
+        block = flow_graph.new_block(block_id)
+        if block is None:
+            return {}
+        return {
+            str(name): str(getattr(param, "category", DEFAULT_PARAM_TAB))
+            for name, param in block.params.items()
+        }
+    except Exception:
+        return {}
+
+
 def _compact_catalog_details(
     block_id: str,
     param_values: dict[str, Any] | None = None,
@@ -416,24 +453,26 @@ def _compact_catalog_details(
 ) -> dict[str, Any]:
     """Build the per-result ``catalog`` payload using GRC's own evaluation.
 
-    Uses :func:`evaluated_param_hides` (the same call
-    :func:`inspect_graph._param_keys_by_block` and
-    :func:`catalog_vector._visible_param_keys` use) to:
+    Applies three native GRC filters (see ``docs/GNU_NATIVE_METHODS.md``):
 
-    1. Drop ``hide='all'`` params (color slots, alpha grids, per-channel
-       device knobs — same filter GRC's own GUI applies).
-    2. Sort the remaining params by GRC prominence: ``hide='none'`` first
-       (always user-visible), then ``hide='part'`` (visible in reduced
-       form). Same ordering as :func:`inspect_graph._param_detail_payload`.
+    1. **``hide != 'all'``** — GRC's evaluated param visibility. Drops
+       params GRC itself hides at runtime (per-channel device knobs
+       beyond active channels, conditional GUI grids, etc.).
+    2. **``category != ADVANCED_PARAM_TAB``** — drops GRC's auto-added
+       metadata (alias, affinity, comment, minoutbuf, maxoutbuf). These
+       are the same for every block; they're not block-specific.
+    3. **``category != 'Config'``** — drops 100%-styling params (colors,
+       alphas, markers, line styles). Verified across all 564 catalog
+       blocks: Config contains zero functional params.
 
-    No cap, no [:N] slicing, no truncated-flag strings — GRC tells us
-    exactly which params are user-relevant, and we return all of them
-    with their full option lists. 97% of blocks have ≤20 visible params
-    (measured across 564 blocks), so a cap would only mask information
-    for the 3% that need it.
+    Remaining params are sorted by GRC prominence (``hide='none'`` first,
+    then ``hide='part'``) and returned with ``id``, ``label``, ``dtype``,
+    ``default`` only — no ``options``/``option_labels`` (discovery context;
+    ``inspect_graph`` provides options when the model is editing a specific
+    block).
 
-    Falls back to the raw describe_block output (no hide filter, no
-    prominence sort) if the GRC platform is unavailable.
+    Falls back to raw ``describe_block`` output (no filtering) if the GRC
+    platform is unavailable.
     """
     details = describe_block(block_id)
     if details.get("ok") is not True:
@@ -446,22 +485,28 @@ def _compact_catalog_details(
 
     hides = evaluated_param_hides(block_id, param_values)
 
-    # No GRC evaluation — return raw details, no filtering, no sorting
+    # No GRC evaluation — return raw details, no filtering
     if not hides:
         return _raw_catalog_details(raw_params, details)
 
-    # Filter to visible params, then sort by GRC prominence
-    def prominence_key(p: dict[str, Any]) -> tuple[int, int]:
-        pid = str(p.get("id", ""))
-        hid = hides.get(pid, "all")
-        rank = 0 if hid == "none" else 1 if hid == "part" else 2
-        return (rank, len(pid))  # tiebreak: shorter id first
+    # Get param categories from the live GRC block
+    param_cats = _param_categories(block_id)
 
+    # Filter: visible (hide != 'all') AND not Advanced AND not Config
     visible_params = [
         p for p in raw_params
         if isinstance(p, dict)
         and hides.get(str(p.get("id", "")), "all") != "all"
+        and param_cats.get(str(p.get("id", "")), DEFAULT_PARAM_TAB) not in _EXCLUDED_PARAM_CATEGORIES
     ]
+
+    # Sort by GRC prominence: hide='none' first, then 'part'
+    def prominence_key(p: dict[str, Any]) -> tuple[int, str]:
+        pid = str(p.get("id", ""))
+        hid = hides.get(pid, "all")
+        rank = 0 if hid == "none" else 1 if hid == "part" else 2
+        return (rank, pid)
+
     visible_params.sort(key=prominence_key)
 
     params = [_format_param(p) for p in visible_params]
@@ -482,19 +527,18 @@ def _raw_catalog_details(
 
 
 def _format_param(raw_param: dict[str, Any]) -> dict[str, Any]:
-    """One param dict, with all meaningful fields, no truncation."""
-    param: dict[str, Any] = {
+    """One param dict for discovery: id/label/dtype/default only.
+
+    No ``options``/``option_labels`` — those are for the editing context
+    (``inspect_graph`` on a specific block), not for browsing catalog
+    results. The ``dtype`` field (e.g. ``"enum"``) is enough signal that
+    the param has a fixed set of values.
+    """
+    return {
         key: raw_param.get(key)
         for key in ("id", "label", "dtype", "default")
         if is_meaningful(raw_param.get(key))
     }
-    options = raw_param.get("options")
-    if isinstance(options, list) and options:
-        param["options"] = list(options)
-    labels = raw_param.get("option_labels")
-    if isinstance(labels, list) and labels:
-        param["option_labels"] = list(labels)
-    return param
 
 
 def _build_details_payload(

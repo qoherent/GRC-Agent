@@ -735,12 +735,22 @@ def _format_valid_block_names(names: list[str], *, limit: int = 20) -> str:
 def _param_keys_by_block(blocks: list[Block]) -> dict[str, list[str]]:
     """Native answer to "what params does this block have?".
 
-    Filters to user-visible params (``hide != 'all'``) using GRC's evaluated
-    ``hide`` value, so the model doesn't see GUI-config noise (Qt coordinates,
-    color slots, etc.). ``hide='part'`` params ARE included (GRC shows them
-    in a reduced form). Falls back to the full key list if the platform is
-    unavailable (e.g. before GRC is initialized).
+    Applies three GRC-native filters (see ``docs/GNU_NATIVE_METHODS.md``):
+
+    1. ``hide != 'all'`` — drops params GRC hides at runtime.
+    2. ``category != ADVANCED_PARAM_TAB`` — drops GRC auto-added metadata
+       (alias, affinity, comment, minoutbuf, maxoutbuf).
+    3. ``category != 'Config'`` — drops 100%-styling params (colors,
+       alphas, markers, line styles; verified across 564 blocks).
+
+    Falls back to the full key list if the platform is unavailable.
     """
+    try:
+        from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB
+    except ImportError:
+        ADVANCED_PARAM_TAB = "Advanced"
+    _excluded = {ADVANCED_PARAM_TAB, "Config"}
+
     keys: dict[str, list[str]] = {}
     for block in blocks:
         params = block.params.get("parameters") if isinstance(block.params, dict) else None
@@ -749,13 +759,45 @@ def _param_keys_by_block(blocks: list[Block]) -> dict[str, list[str]]:
             continue
         evaluated = evaluated_param_hides(block.block_type, params)
         if evaluated:
+            # Read categories from the live GRC platform block (same
+            # pattern as evaluated_param_hides — the session's Block
+            # wrapper stores plain values, not Param objects).
+            param_cats = _platform_param_categories(block.block_type)
             visible = sorted(
-                str(key) for key, hide in evaluated.items() if hide != "all"
+                str(key)
+                for key, hide in evaluated.items()
+                if hide != "all"
+                and param_cats.get(str(key), "General") not in _excluded
             )
             keys[block.instance_name] = visible
         else:
             keys[block.instance_name] = sorted(str(key) for key in params)
     return keys
+
+
+def _platform_param_categories(block_type: str) -> dict[str, str]:
+    """Read GRC's native ``category`` attribute for each param of a block type.
+
+    Instantiates a throwaway flow graph block (same pattern as
+    :func:`evaluated_param_hides`) and reads ``param.category`` for each
+    parameter. Falls back to an empty dict if the platform is unavailable.
+    """
+    try:
+        from grc_agent.session import _ensure_platform
+
+        platform = _ensure_platform()
+        if platform is None:
+            return {}
+        flow_graph = platform.make_flow_graph()
+        block = flow_graph.new_block(block_type)
+        if block is None:
+            return {}
+        return {
+            str(name): str(getattr(param, "category", "General"))
+            for name, param in block.params.items()
+        }
+    except Exception:
+        return {}
 
 
 def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:
