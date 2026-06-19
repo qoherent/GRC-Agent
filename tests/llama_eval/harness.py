@@ -1812,31 +1812,38 @@ def ensure_llama_server(
         temperature=config.llama.temperature,
     )
     print(f"Ensured Ollama server at {resolved_url}")
-    _warmup_docs_index(resolved_url)
+    _warmup_knowledge_index(resolved_url)
     return resolved_url, resolved_model, client
 
 
-def _warmup_docs_index(server_url: str) -> None:
-    """Synchronously build the docs vector index if not already populated.
+def _warmup_knowledge_index(server_url: str) -> None:
+    """Build the docs and catalog vector indexes synchronously.
 
-    The eval harness runs live model evaluations (not unit tests), so the
-    docs index must be ready before any query_knowledge(domain='docs')
-    call. Without this, docs scenarios silently get 0 sources and the
-    model answers from memory — a false pass.
+    The eval harness cannot rely on background warmup — if the index is
+    empty when a scenario runs, the tool returns 'not ready' and the
+    model answers from memory (a false pass). This is the same fix as
+    commit 75d2150, extended to the catalog.
     """
-    from grc_agent.runtime.doc_answer import DB_PATH, is_db_populated, VectorDocsStore
+    from grc_agent.runtime.doc_answer import DB_PATH as DOCS_DB, VectorDocsStore
+    from grc_agent.retrieval import warmup_catalog_vector_index
+    from grc_agent.config import default_app_config
+    import logging
+    log = logging.getLogger(__name__)
 
-    if is_db_populated(DB_PATH):
-        print(f"Docs index already populated at {DB_PATH}")
-        return
-    print(f"Warming up docs index at {DB_PATH} (synchronous)...")
+    # Docs
+    store = VectorDocsStore(DOCS_DB, server_url)
     try:
-        store = VectorDocsStore(DB_PATH, server_url)
         store.ingest_if_needed()
-        print(f"Docs index ready: {is_db_populated(DB_PATH)}")
+        log.info("Docs index ready: %s", DOCS_DB)
     except Exception as exc:
-        print(f"Docs index warmup failed: {exc}")
-    return resolved_url, resolved_model, client
+        log.warning("Docs warmup skipped: %s", exc)
+
+    # Catalog
+    try:
+        warmup_catalog_vector_index(server_url=server_url)
+        log.info("Catalog index ready.")
+    except Exception as exc:
+        log.warning("Catalog warmup skipped: %s", exc)
 
 
 def apply_live_generation_bounds(
