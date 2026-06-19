@@ -4,6 +4,7 @@ These tests require:
   * ``vec1.so`` at the repo root.
   * Ollama running at $GRC_AGENT_LLAMA_SERVER_URL (default http://localhost:11434).
   * The ``embeddinggemma:latest`` model pulled.
+  * A populated catalog DB at ``.grc_agent/vectors/catalog_v1.db``.
 
 They are GATED behind ``GRC_AGENT_LIVE_EMBED=1`` so the deterministic unit
 suite (no Ollama) still runs by default. Run with:
@@ -27,8 +28,13 @@ import pytest
 
 LIVE = os.environ.get("GRC_AGENT_LIVE_EMBED") == "1"
 # conftest.py sets GRC_AGENT_VECTORS_DIR to a tmpdir at session start so unit
-# tests don't touch the real DB. These live tests need the real DB instead.
-REAL_VECTORS_DIR = Path(".grc_agent/vectors")
+# tests don't touch the real DB. We must point at the real DB BEFORE any
+# import of grc_agent.runtime.catalog_vector, because CATALOG_DB_PATH is
+# captured at module load. Tests in this module run only when LIVE is set,
+# so the env override is safe.
+_REAL_VECTORS_DIR = Path(".grc_agent/vectors").resolve()
+if LIVE and Path(_REAL_VECTORS_DIR / "catalog_v1.db").exists():
+    os.environ["GRC_AGENT_VECTORS_DIR"] = str(_REAL_VECTORS_DIR)
 
 
 @unittest.skipUnless(LIVE, "set GRC_AGENT_LIVE_EMBED=1 to run live embed tests")
@@ -37,14 +43,17 @@ class VectorCatalogLiveTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # Point at the real DB before importing the module so CATALOG_DB_PATH
-        # captures the right path.
-        os.environ["GRC_AGENT_VECTORS_DIR"] = str(REAL_VECTORS_DIR.resolve())
         from grc_agent.runtime.catalog_vector import (
             CATALOG_DB_PATH,
             VectorCatalogStore,
             embed_query,
         )
+
+        if not Path(CATALOG_DB_PATH).exists():
+            raise unittest.SkipTest(
+                f"catalog DB not found at {CATALOG_DB_PATH}; "
+                "run grc_agent.retrieval.warmup_catalog_vector_index first"
+            )
 
         # Copy the live DB so the test is read-only against production.
         cls.tmpdir = tempfile.mkdtemp(prefix="cat_live_")
