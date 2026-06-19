@@ -1142,7 +1142,7 @@ class GrcAgent:
     ) -> None:
         self._search_blocks_cache[key] = copy.deepcopy(payload)
         self._search_blocks_cache.move_to_end(key)
-        while len(self._search_blocks_cache) > self._retrieval_cfg.lexical_cache_size:
+        while len(self._search_blocks_cache) > self._retrieval_cfg.vector_cache_size:
             self._search_blocks_cache.popitem(last=False)
 
     def _ask_grc_docs_cache_key(
