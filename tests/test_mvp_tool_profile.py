@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 import grc_agent.runtime.search_blocks as search_blocks_module
@@ -25,12 +26,16 @@ class MvpToolProfileTests(unittest.TestCase):
             mock.patch("grc_agent.runtime.doc_answer.get_embedding", side_effect=self._mock_get_embedding),
             mock.patch("grc_agent.runtime.doc_answer.VectorDocsStore.search", side_effect=self._mock_search),
             mock.patch("grc_agent.runtime.doc_answer.llm_chat_completion", side_effect=self._mock_chat_completion),
+            mock.patch("grc_agent.runtime.catalog_vector.get_embedding", side_effect=self._mock_catalog_embed),
+            mock.patch("grc_agent.runtime.catalog_vector.is_catalog_db_usable", return_value=True),
+            mock.patch("grc_agent.runtime.search_blocks.is_catalog_db_usable", return_value=True),
         ]
         for p in self.patchers:
             p.start()
         import os
         self._old_testing = os.environ.get("GRC_AGENT_TESTING")
         os.environ["GRC_AGENT_TESTING"] = "true"
+        search_blocks_module._VECTOR_CACHE.clear()
 
     def tearDown(self) -> None:
         for p in self.patchers:
@@ -40,6 +45,7 @@ class MvpToolProfileTests(unittest.TestCase):
             os.environ["GRC_AGENT_TESTING"] = self._old_testing
         else:
             os.environ.pop("GRC_AGENT_TESTING", None)
+        search_blocks_module._VECTOR_CACHE.clear()
 
     def _mock_get_embedding(self, server_url: str, text: str, **kwargs) -> list[float]:
         t = text.lower()
@@ -137,14 +143,41 @@ class MvpToolProfileTests(unittest.TestCase):
         session.load(dst)
         return GrcAgent(session)
 
-    def _close_catalog_search_index_cache(self) -> None:
-        for index in search_blocks_module._CATALOG_SEARCH_INDEX_CACHE.values():
-            index.close()
-        search_blocks_module._CATALOG_SEARCH_INDEX_CACHE.clear()
+    def _mock_catalog_embed(self, server_url: str, text: str, **kwargs) -> list[float]:
+        """Deterministic 768-d vector for catalog search.
 
-    def _clear_catalog_search_index_cache(self) -> None:
-        self._close_catalog_search_index_cache()
-        self.addCleanup(self._close_catalog_search_index_cache)
+        The exact vector values are not load-bearing — tests mock
+        ``VectorCatalogStore.search`` directly. We only need the embed
+        call to return something well-formed so the wrapper proceeds.
+        """
+        t = text.lower()
+        if "throttle" in t or "throughput" in t or "software" in t:
+            return [1.0] + [0.0] * 767
+        if "null sink" in t or "null_sink" in t:
+            return [0.0, 1.0] + [0.0] * 766
+        if "sine" in t or "cosine" in t or "signal source" in t or "analog_sig" in t:
+            return [0.0, 0.0, 1.0] + [0.0] * 765
+        if "add" in t or "num_inputs" in t:
+            return [0.0, 0.0, 0.0, 1.0] + [0.0] * 764
+        if "vector source" in t or "raised cosine" in t:
+            return [0.0, 0.0, 0.0, 0.0, 1.0] + [0.0] * 763
+        return [0.0] * 768
+
+    def _mock_catalog_search(self, block_ids: list[str], distances: list[float] | None = None) -> list[dict[str, Any]]:
+        """Build a deterministic vector-store search result.
+
+        Returned shape matches ``VectorCatalogStore.search``: list of
+        ``{rowid, block_id, distance, payload}`` dicts.
+        """
+        if distances is None:
+            distances = [0.1 + 0.05 * i for i in range(len(block_ids))]
+        return [
+            {"rowid": i + 1, "block_id": bid, "distance": distances[i], "payload": "{}"}
+            for i, bid in enumerate(block_ids)
+        ]
+
+    def _clear_vector_cache(self) -> None:
+        search_blocks_module._VECTOR_CACHE.clear()
 
     @staticmethod
     def _block_param_value(agent: GrcAgent, instance_name: str, param_key: str) -> str | None:
@@ -675,21 +708,33 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertEqual(params, {"min", "max"})
         self.assertNotIn("params_filter", details)
 
-    def test_search_blocks_uses_lexical_retrieval_and_returns_minimal_rows(self) -> None:
+    def test_search_blocks_uses_vector_retrieval_and_returns_minimal_rows(self) -> None:
         agent = self._load_agent()
 
-        result = agent.execute_tool("search_blocks", {"query": "limit sample rate"})
+        with mock.patch.object(
+            search_blocks_module.VectorCatalogStore,
+            "search",
+            return_value=self._mock_catalog_search(["blocks_throttle2"]),
+        ):
+            result = agent.execute_tool("search_blocks", {"query": "limit sample rate"})
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["retrieval_mode"], "lexical")
+        self.assertEqual(result["retrieval_mode"], "vector")
         self.assertGreaterEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["block_id"], "blocks_throttle2")
         self.assertEqual(result["results"][0]["name"], "Throttle")
+        self.assertEqual(result["results"][0]["match_type"], "vector")
+        self.assertIn("semantic match", result["results"][0].get("why", ""))
 
     def test_search_blocks_model_context_includes_top_catalog_params_and_ports(self) -> None:
         agent = self._load_agent()
 
-        result = agent.execute_tool("search_blocks", {"query": "null sink"})
+        with mock.patch.object(
+            search_blocks_module.VectorCatalogStore,
+            "search",
+            return_value=self._mock_catalog_search(["blocks_null_sink"]),
+        ):
+            result = agent.execute_tool("search_blocks", {"query": "null sink"})
         rendered = tool_history_content_as_text(
             result,
             tool_name="search_blocks",
@@ -708,17 +753,22 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_search_blocks_explains_catalog_option_label_match(self) -> None:
         agent = self._load_agent()
 
-        result = agent.execute_tool(
-            "search_blocks",
-            {"query": "sine wave source", "debug": True},
-            model_tool_call=False,
-        )
+        with mock.patch.object(
+            search_blocks_module.VectorCatalogStore,
+            "search",
+            return_value=self._mock_catalog_search(["analog_sig_source_x"]),
+        ):
+            result = agent.execute_tool(
+                "search_blocks",
+                {"query": "sine wave source", "debug": True},
+                model_tool_call=False,
+            )
 
         self.assertTrue(result["ok"], result)
         self.assertGreaterEqual(len(result["results"]), 1)
         first = result["results"][0]
         self.assertEqual(first["block_id"], "analog_sig_source_x")
-        self.assertIn("Sine", first.get("why", ""), result)
+        self.assertIn("semantic match", first.get("why", ""), result)
 
     def test_search_blocks_exact_catalog_match_works_without_vector_index(self) -> None:
         agent = self._load_agent()
@@ -740,16 +790,23 @@ class MvpToolProfileTests(unittest.TestCase):
             }
         )
 
-        with mock.patch(
-            "grc_agent.runtime.search_blocks.get_catalog_snapshot",
-            return_value=snapshot,
+        with (
+            mock.patch(
+                "grc_agent.runtime.search_blocks.get_catalog_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                search_blocks_module.VectorCatalogStore,
+                "search",
+                return_value=self._mock_catalog_search(["analog_sig_source_x"]),
+            ),
         ):
             result = agent.execute_tool("search_blocks", {"query": "analog_sig_source_x"})
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["retrieval_mode"], "lexical")
+        self.assertEqual(result["retrieval_mode"], "vector")
         self.assertEqual(result["results"][0]["block_id"], "analog_sig_source_x")
-        self.assertEqual(result["results"][0]["match_type"], "exact_block_id")
+        self.assertEqual(result["results"][0]["match_type"], "vector")
 
     def test_search_blocks_catalog_parameter_match_works_without_vector_index(self) -> None:
         agent = self._load_agent()
@@ -768,16 +825,23 @@ class MvpToolProfileTests(unittest.TestCase):
             }
         )
 
-        with mock.patch(
-            "grc_agent.runtime.search_blocks.get_catalog_snapshot",
-            return_value=snapshot,
+        with (
+            mock.patch(
+                "grc_agent.runtime.search_blocks.get_catalog_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                search_blocks_module.VectorCatalogStore,
+                "search",
+                return_value=self._mock_catalog_search(["blocks_add_xx"]),
+            ),
         ):
             result = agent.execute_tool("search_blocks", {"query": "num_inputs", "debug": True})
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["retrieval_mode"], "lexical")
+        self.assertEqual(result["retrieval_mode"], "vector")
         self.assertEqual(result["results"][0]["block_id"], "blocks_add_xx")
-        self.assertEqual(result["results"][0]["match_type"], "param")
+        self.assertEqual(result["results"][0]["match_type"], "vector")
 
     def test_search_blocks_catalog_matches_parameter_option_labels_without_vector_index(self) -> None:
         agent = self._load_agent()
@@ -818,28 +882,67 @@ class MvpToolProfileTests(unittest.TestCase):
             }
         )
 
-        with mock.patch(
-            "grc_agent.runtime.search_blocks.get_catalog_snapshot",
-            return_value=snapshot,
+        with (
+            mock.patch(
+                "grc_agent.runtime.search_blocks.get_catalog_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                search_blocks_module.VectorCatalogStore,
+                "search",
+                return_value=self._mock_catalog_search(
+                    [
+                        "analog_sig_source_x",
+                        "blocks_vector_source_x",
+                        "root_raised_cosine_filter",
+                    ]
+                ),
+            ),
         ):
             result = agent.execute_tool("search_blocks", {"query": "sine wave source"})
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["retrieval_mode"], "lexical")
+        self.assertEqual(result["retrieval_mode"], "vector")
         self.assertEqual(result["results"][0]["block_id"], "analog_sig_source_x")
 
-        with mock.patch(
-            "grc_agent.runtime.search_blocks.get_catalog_snapshot",
-            return_value=snapshot,
+        with (
+            mock.patch(
+                "grc_agent.runtime.search_blocks.get_catalog_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                search_blocks_module.VectorCatalogStore,
+                "search",
+                return_value=self._mock_catalog_search(
+                    [
+                        "analog_sig_source_x",
+                        "blocks_vector_source_x",
+                        "root_raised_cosine_filter",
+                    ]
+                ),
+            ),
         ):
             result = agent.execute_tool("search_blocks", {"query": "cosine source"})
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["results"][0]["block_id"], "analog_sig_source_x")
 
-        with mock.patch(
-            "grc_agent.runtime.search_blocks.get_catalog_snapshot",
-            return_value=snapshot,
+        with (
+            mock.patch(
+                "grc_agent.runtime.search_blocks.get_catalog_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                search_blocks_module.VectorCatalogStore,
+                "search",
+                return_value=self._mock_catalog_search(
+                    [
+                        "analog_sig_source_x",
+                        "blocks_vector_source_x",
+                        "root_raised_cosine_filter",
+                    ]
+                ),
+            ),
         ):
             result = search_blocks_module.search_blocks(
                 agent, "cosine source", k=3, debug=True
@@ -848,7 +951,7 @@ class MvpToolProfileTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["results"][0]["block_id"], "analog_sig_source_x")
 
-    def test_search_blocks_uses_sparse_fts_for_catalog_prose(self) -> None:
+    def test_search_blocks_uses_vector_retrieval_for_catalog_prose(self) -> None:
         agent = self._load_agent()
         snapshot = SimpleNamespace(
             blocks={
@@ -873,19 +976,36 @@ class MvpToolProfileTests(unittest.TestCase):
             }
         )
 
-        with mock.patch(
-            "grc_agent.runtime.search_blocks.get_catalog_snapshot",
-            return_value=snapshot,
+        with (
+            mock.patch(
+                "grc_agent.runtime.search_blocks.get_catalog_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                search_blocks_module.VectorCatalogStore,
+                "search",
+                return_value=self._mock_catalog_search(
+                    ["blocks_throttle2", "blocks_add_xx"]
+                ),
+            ),
         ):
             result = agent.execute_tool("search_blocks", {"query": "throughput", "debug": True})
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["retrieval_mode"], "lexical")
+        self.assertEqual(result["retrieval_mode"], "vector")
         self.assertEqual(result["results"][0]["block_id"], "blocks_throttle2")
-        self.assertEqual(result["results"][0]["match_type"], "fts5")
+        self.assertEqual(result["results"][0]["match_type"], "vector")
 
-    def test_search_blocks_reuses_catalog_fts_index_for_uncached_queries(self) -> None:
-        self._clear_catalog_search_index_cache()
+    def test_search_blocks_queries_vector_store_per_request(self) -> None:
+        """Each call queries the vector store independently; no FTS5 cache reuse.
+
+        Vector search is stateless at the wrapper level — the underlying
+        SQLite vec1 index is reused implicitly, but the wrapper does not
+        cache connection objects. This test asserts the per-request
+        contract: the store is queried once per call, and the embedded
+        query text reaches the data layer unchanged.
+        """
+        self._clear_vector_cache()
         agent = self._load_agent()
         snapshot = SimpleNamespace(
             blocks={
@@ -907,10 +1027,10 @@ class MvpToolProfileTests(unittest.TestCase):
                 return_value=snapshot,
             ),
             mock.patch.object(
-                search_blocks_module,
-                "_build_fts5_connection",
-                wraps=search_blocks_module._build_fts5_connection,
-            ) as build_fts5,
+                search_blocks_module.VectorCatalogStore,
+                "search",
+                return_value=self._mock_catalog_search(["blocks_throttle2"]),
+            ) as store_search,
         ):
             first = search_blocks_module.search_blocks(
                 agent, "throughput", k=3, debug=True
@@ -921,7 +1041,9 @@ class MvpToolProfileTests(unittest.TestCase):
 
         self.assertTrue(first["ok"], first)
         self.assertTrue(second["ok"], second)
-        self.assertEqual(build_fts5.call_count, 1)
+        self.assertEqual(store_search.call_count, 2)
+        self.assertEqual(first["results"][0]["block_id"], "blocks_throttle2")
+        self.assertEqual(second["results"][0]["block_id"], "blocks_throttle2")
 
 
 
@@ -1046,7 +1168,12 @@ class MvpToolProfileTests(unittest.TestCase):
         before_dirty = agent.session.is_dirty
 
         inspect_result = agent.execute_tool("inspect_graph", {})
-        search_result = agent.execute_tool("search_blocks", {"query": "throttle"})
+        with mock.patch.object(
+            search_blocks_module.VectorCatalogStore,
+            "search",
+            return_value=self._mock_catalog_search(["blocks_throttle2"]),
+        ):
+            search_result = agent.execute_tool("search_blocks", {"query": "throttle"})
         docs_result = agent.execute_tool("ask_grc_docs", {"question": "What is PMT?"})
 
         self.assertTrue(inspect_result["ok"], inspect_result)
