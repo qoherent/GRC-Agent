@@ -1509,13 +1509,49 @@ def _require_block_rules(
         return lookup.rules, None
 
     code = block_not_found_code if lookup.error_type == ErrorCode.BLOCK_NOT_FOUND else "catalog_block_unavailable"
+    suggestions = (
+        tuple(_block_id_suggestions(block_type, catalog_root))
+        if code == "unknown_block_id"
+        else None
+    )
     return None, make_issue(
         op_index=op_index,
         op_type=op_type,
         field=field,
         code=code,
         message=lookup.message or f"Could not resolve block type: {block_type}",
+        suggestions=suggestions,
     )
+
+
+# Core/special blocks that every GRC graph uses. These are the
+# non-DSP blocks for variables, parameters, configuration, etc.
+_CORE_BLOCK_IDS: tuple[str, ...] = (
+    "variable", "variable_config", "parameter", "options",
+    "import", "snippet", "epy_block", "epy_module",
+)
+
+
+def _block_id_suggestions(requested: str, catalog_root: str | Path | None) -> list[str]:
+    """Return catalog block_ids close to the requested name + core blocks."""
+    try:
+        snap = get_catalog_snapshot(catalog_root)
+        all_ids = sorted(snap.blocks.keys())
+    except Exception:
+        return list(_CORE_BLOCK_IDS)
+    # Fuzzy: block_ids containing the requested string as a substring.
+    needle = requested.lower()
+    fuzzy = [bid for bid in all_ids if needle in bid.lower()][:5]
+    # Always include core blocks so the model knows about 'variable' etc.
+    core_present = [bid for bid in _CORE_BLOCK_IDS if bid in all_ids]
+    # Dedupe, preserve order.
+    seen: set[str] = set()
+    result: list[str] = []
+    for bid in fuzzy + core_present:
+        if bid not in seen:
+            seen.add(bid)
+            result.append(bid)
+    return result[:10]
 
 
 def _validate_parameter_updates(

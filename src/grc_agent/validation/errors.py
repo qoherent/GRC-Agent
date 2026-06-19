@@ -24,6 +24,7 @@ class ValidationIssue:
     code: str
     message: str
     hint: str | None = None
+    suggestions: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -35,6 +36,8 @@ class ValidationIssue:
         }
         if self.hint is not None:
             payload["hint"] = self.hint
+        if self.suggestions:
+            payload["suggestions"] = list(self.suggestions)
         return payload
 
 
@@ -46,6 +49,7 @@ def make_issue(
     code: str,
     message: str,
     hint: str | None = None,
+    suggestions: tuple[str, ...] | None = None,
 ) -> ValidationIssue:
     """Create one stable issue record."""
     return ValidationIssue(
@@ -55,6 +59,7 @@ def make_issue(
         code=code,
         message=message,
         hint=hint,
+        suggestions=suggestions,
     )
 
 
