@@ -334,21 +334,21 @@ def build_tool_schemas(
     mvp_schemas = [
         _schema(
             "inspect_graph",
-            "Read-only inspection of the active graph. Returns topology, block instances, connections, and parameter values.",
+            "Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.",
             {
                 "targets": {
                     "type": "array",
                     "maxItems": 5,
                     "items": {"type": "string"},
                     "description": (
-                        "Block/conn/handle/exact block.param. No bare param or '.param'."
+                        "Block, connection, or parameter target identifiers, or ['all']/['*'] for an overview."
                     ),
                 },
                 "params": {
                     "type": "array",
                     "maxItems": 12,
                     "items": {"type": "string"},
-                    "description": "Param keys or ['all']. For X on Y: targets=['Y'], params=['X'].",
+                    "description": "Filter to specific parameter keys or ['all'].",
                 },
                 "debug": {
                     "type": "boolean",
@@ -360,7 +360,7 @@ def build_tool_schemas(
         ),
         _schema(
             "query_knowledge",
-            "Search the GNU Radio catalog for accurate block IDs, port names, and parameter keys.",
+            "Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (GNU Radio documentation and concepts such as PMT, sample rate, stream tags, and 'how do I' questions).",
             {
                 "query": {
                     "type": "string",
@@ -383,19 +383,15 @@ def build_tool_schemas(
             "change_graph",
             "Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction.",
             {
-                "reasoning": {
-                    "type": "string",
-                    "description": "Plan and reasoning for this batch.",
-                },
                 "add_blocks": {
                     "type": "array",
-                    "description": "Add blocks with optional initial params/states. Use installed block_id.",
+                    "description": "Add blocks with optional initial params/states using installed catalog block_ids.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
                             "block_id": {
-                                "type": "string",
+                               "type": "string",
                                 "description": "Installed GNU Radio catalog block ID.",
                             },
                             "instance_name": {
@@ -417,7 +413,7 @@ def build_tool_schemas(
                 },
                 "remove_blocks": {
                     "type": "array",
-                    "description": "Remove/delete existing blocks; for disable/turn off use update_states.",
+                    "description": "Remove/delete existing blocks from the graph.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -428,7 +424,7 @@ def build_tool_schemas(
                 },
                 "update_params": {
                     "type": "array",
-                    "description": "Update params on existing blocks. Use exact GNU param_id. For variables, use update_params on their instance_name with params={value}.",
+                    "description": "Update parameters on existing blocks keyed by parameter ID.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -447,7 +443,7 @@ def build_tool_schemas(
                 },
                 "update_states": {
                     "type": "array",
-                    "description": "Enable/disable/bypass existing blocks; invalid candidates require force=true.",
+                    "description": "Modify target block enablement state.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -496,15 +492,15 @@ def build_tool_schemas(
                 },
                 "remove_connections": {
                     "type": "array",
-                    "description": "Exact connection_id strings from inspect_graph to remove.",
+                    "description": "Exact connection_id strings to remove.",
                     "items": {"type": "string"},
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "Commit a GNU-grounded candidate despite final validation failure when an invalid intermediate graph fits the user goal.",
+                    "description": "Bypass final validation compilation check to force apply intermediate graph state.",
                 },
             },
-            required=["reasoning"],
+            required=[],
             strict=True,
         ),
     ]

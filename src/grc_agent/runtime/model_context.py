@@ -187,22 +187,17 @@ def render_model_messages(
 
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-06-18-declarative-prompt"
+__version__ = "2026-06-19-minimal-prompt"
 
 def build_system_prompt(session_id: str | None = None) -> str:
-    """Return the full MVP wrapper-only system prompt shipped to the model, optionally isolated by session_id."""
+    """Return the system prompt shipped to the model."""
     prefix = f"Session ID: {session_id}\n" if session_id else ""
     return prefix + (
         "Role: GNU Radio graph editing assistant.\n"
-        "Routing contract:\n"
-        "- Questions about the active flowgraph (blocks, connections, parameter values, variable references): inspect_graph.\n"
-        "- GNU Radio documentation or concept questions (PMT, data types, stream tags, 'how do I'): query_knowledge with domain='docs'.\n"
-        "Structural contract:\n"
-        "- Variables are blocks; their lifecycle tools are add_blocks / update_params / remove_blocks.\n"
-        "- A block inserted on an existing wire requires a single change_graph payload containing remove_connections + add_blocks + add_connections.\n"
-        "- An input port accepts at most one connection.\n"
-        "- A block is deactivated without severing paths by update_states with state='bypass'.\n"
-        "- force=true is valid only for committing an invalid intermediate graph state required to progress.\n"
+        "inspect_graph: read topology, blocks, connections, parameters, and validation status.\n"
+        "query_knowledge: search catalog blocks or GNU Radio documentation.\n"
+        "change_graph: add/remove blocks, update parameters, add/remove connections.\n"
+        "Variables are blocks; use block_id \"variable\" to add one.\n"
     )
 
 # -- tool surface (was tool_surface.py) --

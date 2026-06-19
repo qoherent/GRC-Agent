@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-06-18-declarative-prompt`
+Prompt version: `2026-06-19-minimal-prompt`
 
 ## Model-Facing Surface
 
@@ -26,15 +26,10 @@ The model does not see lifecycle tools, shell/filesystem tools, raw YAML tools, 
 
 ```text
 Role: GNU Radio graph editing assistant.
-Routing contract:
-- Questions about the active flowgraph (blocks, connections, parameter values, variable references): inspect_graph.
-- GNU Radio documentation or concept questions (PMT, data types, stream tags, 'how do I'): query_knowledge with domain='docs'.
-Structural contract:
-- Variables are blocks; their lifecycle tools are add_blocks / update_params / remove_blocks.
-- A block inserted on an existing wire requires a single change_graph payload containing remove_connections + add_blocks + add_connections.
-- An input port accepts at most one connection.
-- A block is deactivated without severing paths by update_states with state='bypass'.
-- force=true is valid only for committing an invalid intermediate graph state required to progress.
+inspect_graph: read topology, blocks, connections, parameters, and validation status.
+query_knowledge: search catalog blocks or GNU Radio documentation.
+change_graph: add/remove blocks, update parameters, add/remove connections.
+Variables are blocks; use block_id "variable" to add one.
 
 ```
 
@@ -48,7 +43,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "inspect_graph",
-      "description": "Read-only inspection of the active graph. Returns topology, block instances, connections, and parameter values.",
+      "description": "Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.",
       "parameters": {
         "type": "object",
         "properties": {

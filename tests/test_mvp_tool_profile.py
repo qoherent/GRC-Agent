@@ -193,8 +193,9 @@ class MvpToolProfileTests(unittest.TestCase):
         # well within the context window of any local model.
         self.assertLess(len(prompt), 1900)
         self.assertIn("GNU Radio graph editing assistant", prompt)
-        self.assertIn("variables are blocks", prompt.lower())
-        self.assertIn("bypass", prompt)
+        self.assertIn("variable", prompt.lower())
+        self.assertIn("inspect_graph", prompt)
+        self.assertIn("change_graph", prompt)
         self.assertNotIn("Use one tool call", prompt)
         for forbidden in ("apply_edit", "propose_edit", "semantic_search_grc", "save_graph"):
             self.assertNotIn(forbidden, prompt)

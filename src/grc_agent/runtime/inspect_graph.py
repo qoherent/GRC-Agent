@@ -169,6 +169,7 @@ def _overview(
     limit = gc.max_graph_summary_blocks
     if summary.get("blocks_truncated"):
         block_rows = block_rows[:limit]
+    val_state = agent.session.validation_state()
     graph = {
         "graph_name": _graph_name(agent),
         "counts": {
@@ -178,6 +179,10 @@ def _overview(
         },
         "blocks": block_rows,
         "connections": shown_connections,
+        "validation": {
+            "status": val_state.get("status", "unknown"),
+            "returncode": val_state.get("returncode"),
+        },
     }
     omitted_blocks = int(summary.get("blocks_truncated") or 0)
     omitted_counts: dict[str, int] = {}
