@@ -42,20 +42,30 @@ def warmup_catalog_vector_index(
     from grc_agent.catalog.loaders import get_catalog_snapshot
 
     snapshot = get_catalog_snapshot(catalog_root)
-    blocks_payload = [
-        {
+    blocks_payload = []
+    for bid, b in snapshot.blocks.items():
+        raw_params = b.payload.get("parameters") or []
+        param_ids = [p.get("id") for p in raw_params if p.get("id")]
+        # Defaults let GRC evaluate conditional ``hide`` expressions
+        # (e.g. "${ ('none' if len(name) > 0 else 'part') }"). Without
+        # values, those expressions fall back to their unevaluated state
+        # and ``hide='all'`` GUI-styling params leak into the embed.
+        param_values = {
+            str(p.get("id")): "" if p.get("default") is None else str(p.get("default"))
+            for p in raw_params if p.get("id")
+        }
+        blocks_payload.append({
             "block_id": bid,
             "label": (b.payload.get("label") or bid),
             "categories": list(getattr(b, "category_paths", ())),
-            "parameters": [p.get("id") for p in (b.payload.get("parameters") or []) if p.get("id")],
+            "parameters": param_ids,
+            "param_values": param_values,
             "ports": (
                 [p.get("id") for p in (b.payload.get("inputs") or []) if p.get("id")] +
                 [p.get("id") for p in (b.payload.get("outputs") or []) if p.get("id")]
             ),
             "documentation": b.payload.get("documentation") or "",
-        }
-        for bid, b in snapshot.blocks.items()
-    ]
+        })
     store = VectorCatalogStore(CATALOG_DB_PATH, server_url)
     store.ingest_if_needed(blocks=blocks_payload, server_url=server_url)
     return {

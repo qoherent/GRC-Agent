@@ -7,23 +7,28 @@ The same uniform rules apply:
     with the same task descriptor. We use the same prefix as docs.
   * ``vec1`` provides cosine-distance nearest-neighbour over a flat packed
     index of 768-d float32 vectors.
+
+Param filtering for the embed text uses the same GRC-native
+``evaluated_param_hides`` that :func:`inspect_graph._param_keys_by_block`
+uses. GRC itself marks GUI-only parameters with ``hide='all'`` (color
+grids, alpha slots, per-channel device knobs); reading that attribute is
+the native answer to "which params should the embedding model see".
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import re
 import sqlite3
 import struct
-from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from grc_agent.runtime.block_semantics import evaluated_param_hides
 from grc_agent.runtime.doc_answer import get_embedding
 
 if TYPE_CHECKING:
-    from grc_agent.agent import GrcAgent, ToolResult
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -39,35 +44,26 @@ _DOCUMENT_PREFIX = "task: search result | document: "
 # --- Embed-text body cap (mirrors doc_answer.CHUNK_MAX_WORDS) ---------------
 _CATALOG_EMBED_MAX_WORDS = 256
 
-# Pattern for a param name with a numeric suffix, e.g. "alpha1", "color10".
-# Captures the alphabetic/underscore prefix (group 1) and the digits (group 2).
-_NUMERIC_SUFFIX_RE = re.compile(r"^([a-z_]+?)(\d+)$")
 
+def _visible_param_keys(
+    block_id: str,
+    params: list[str] | tuple[str, ...],
+    param_values: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return param keys that GRC's own ``hide`` evaluation marks as visible.
 
-def _filter_noise_params(params: list[str] | tuple[str, ...]) -> list[str]:
-    r"""Drop params that are part of a high-cardinality repeated pattern.
-
-    A single uniform rule applied to every block: if a param name matches
-    ``^[a-z_]+(\d+)$`` and the alphabetic prefix (e.g. ``alpha`` in
-    ``alpha1``) appears 3+ times in the param list, all params sharing
-    that prefix are dropped. This catches GUI-styling grids like
-    ``alpha1..alpha10`` and ``color1..color10`` that pollute the embed
-    text with low-signal fields.
-
-    Returns a new list; the input is not mutated.
+    Delegates to :func:`evaluated_param_hides` (the same call
+    :func:`inspect_graph._param_keys_by_block` uses). Params with
+    ``hide='all'`` (color slots, alpha grids, per-channel knobs) are
+    excluded. ``hide='part'`` and ``hide='none'`` are kept. If the GRC
+    platform is unavailable, the function returns the full list
+    unchanged — never silently drops a parameter that might be useful.
     """
-    bases: list[str] = []
-    for p in params:
-        m = _NUMERIC_SUFFIX_RE.match(p)
-        bases.append(m.group(1) if m else p)
-    base_counts = Counter(bases)
-    kept: list[str] = []
-    for p in params:
-        m = _NUMERIC_SUFFIX_RE.match(p)
-        if m and base_counts[m.group(1)] >= 3:
-            continue
-        kept.append(p)
-    return kept
+    evaluated = evaluated_param_hides(block_id, param_values or {})
+    if not evaluated:
+        return list(params)
+    visible = [key for key in params if evaluated.get(str(key)) != "all"]
+    return visible
 
 
 def _cap_embed_body(parts: list[str], max_words: int) -> str:
@@ -118,12 +114,12 @@ def compose_block_embed_text(
     pipeline's ``_compose_chunk_text`` in spirit (title + heading + body)
     so the embedding model sees a consistent shape.
 
-    Params that are part of a high-cardinality repeated pattern
-    (e.g. ``alpha1..alpha10``) are dropped before the body is composed.
-    The resulting body is capped at 256 words; if the cap fires, a
-    visible ``[TRUNCATED ...]`` flag is appended.
+    Param filtering is the caller's responsibility
+    (see :func:`_visible_param_keys`); this function trusts the
+    ``parameters`` argument as the already-filtered list. The resulting
+    body is capped at 256 words; if the cap fires, a visible
+    ``[TRUNCATED ...]`` flag is appended.
     """
-    filtered_params = _filter_noise_params(list(parameters))
     parts: list[str] = []
     if label:
         parts.append(f"label: {label}")
@@ -131,8 +127,8 @@ def compose_block_embed_text(
         parts.append(f"block_id: {block_id}")
     if categories:
         parts.append("category: " + "/".join(categories))
-    if filtered_params:
-        parts.extend(f"param: {p}" for p in filtered_params)
+    if parameters:
+        parts.extend(f"param: {p}" for p in parameters)
     if ports:
         parts.extend(f"port: {p}" for p in ports)
     if documentation:
@@ -232,12 +228,15 @@ class VectorCatalogStore:
                 if not block_id:
                     continue
                 raw_params = tuple(str(p) for p in (block.get("parameters") or ()))
-                filtered_params = tuple(_filter_noise_params(list(raw_params)))
+                param_values = block.get("param_values") or {}
+                visible_params = tuple(
+                    _visible_param_keys(block_id, raw_params, param_values)
+                )
                 body = compose_block_embed_text(
                     block_id=block_id,
                     label=str(block.get("label", "") or ""),
                     categories=_flatten_categories(block.get("categories") or ()),
-                    parameters=filtered_params,
+                    parameters=visible_params,
                     ports=tuple(str(p) for p in (block.get("ports") or ())),
                     documentation=str(block.get("documentation", "") or ""),
                 )

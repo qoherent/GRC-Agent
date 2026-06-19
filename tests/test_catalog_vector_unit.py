@@ -1,59 +1,94 @@
 """Deterministic unit tests for the catalog embed-text helpers.
 
-No Ollama / no live embedding model required. These guard the noise-param
-filter and the 256-word cap that fix vector-search pollution for GUI blocks
-like ``qtgui_time_sink_x`` (84 params, dominated by ``alpha1..10``,
-``color1..10``, ``label1..10``).
+No Ollama / no live embedding model required. The param filter delegates
+to GRC's native ``evaluated_param_hides`` (same call
+``inspect_graph._param_keys_by_block`` uses), so the live tests need a
+working GRC platform; the mock-based tests below don't.
 """
 from __future__ import annotations
 
+from unittest import mock
+
 from grc_agent.runtime.catalog_vector import (
-    _filter_noise_params,
+    _visible_param_keys,
     compose_block_embed_text,
 )
 
 
-def test_filter_drops_3plus_numeric_suffix_groups():
-    assert _filter_noise_params(["alpha1", "alpha2", "alpha3", "type", "name"]) == [
-        "type",
-        "name",
-    ]
+# --- _visible_param_keys ---------------------------------------------------
+
+def test_visible_params_drops_hide_all_keys():
+    """When GRC evaluates a param with hide='all', it is dropped."""
+    fake_eval = {
+        "type": "none",
+        "name": "none",
+        "alpha1": "all",
+        "alpha2": "all",
+        "color1": "all",
+    }
+    with mock.patch(
+        "grc_agent.runtime.catalog_vector.evaluated_param_hides",
+        return_value=fake_eval,
+    ):
+        result = _visible_param_keys(
+            "fake_block",
+            ["type", "name", "alpha1", "alpha2", "color1"],
+        )
+    assert result == ["type", "name"]
 
 
-def test_filter_keeps_pairs_of_2():
-    assert _filter_noise_params(["alpha1", "alpha2", "type"]) == [
-        "alpha1",
-        "alpha2",
-        "type",
-    ]
+def test_visible_params_keeps_hide_part_keys():
+    """hide='part' (reduced-form visible) is KEPT, not dropped."""
+    fake_eval = {
+        "ylabel": "part",
+        "type": "none",
+    }
+    with mock.patch(
+        "grc_agent.runtime.catalog_vector.evaluated_param_hides",
+        return_value=fake_eval,
+    ):
+        result = _visible_param_keys(
+            "fake_block",
+            ["ylabel", "type", "not_in_eval"],
+        )
+    # ylabel kept (part), type kept (none), not_in_eval kept (unknown)
+    assert "ylabel" in result
+    assert "type" in result
+    assert "not_in_eval" in result
 
 
-def test_filter_keeps_unique_numbered():
-    assert sorted(_filter_noise_params(["gain1", "freq1", "samp_rate1"])) == [
-        "freq1",
-        "gain1",
-        "samp_rate1",
-    ]
+def test_visible_params_falls_back_when_grc_unavailable():
+    """If GRC is unavailable, return the full list (no silent drop)."""
+    with mock.patch(
+        "grc_agent.runtime.catalog_vector.evaluated_param_hides",
+        return_value={},
+    ):
+        result = _visible_param_keys(
+            "fake_block",
+            ["a", "b", "c"],
+        )
+    assert result == ["a", "b", "c"]
 
 
-def test_filter_handles_underscore_prefix():
-    assert _filter_noise_params(["_alpha1", "_alpha2", "_alpha3", "type"]) == [
-        "type",
-    ]
+# --- compose_block_embed_text ---------------------------------------------
 
+def test_compose_includes_passed_params_verbatim():
+    """compose is a pure composer — it does NOT filter on its own.
 
-def test_compose_drops_noise_params():
+    Filtering is the caller's job (see ``_visible_param_keys``). The
+    compose function trusts the ``parameters`` argument.
+    """
     text = compose_block_embed_text(
-        block_id="qtgui_time_sink_x",
-        label="QT GUI Time Sink",
-        categories=("Core", "Instrumentation", "QT"),
-        parameters=tuple(f"alpha{i}" for i in range(1, 11)) + ("type", "name"),
+        block_id="x",
+        label="X",
+        categories=("C",),
+        parameters=("alpha1", "type"),
         ports=(),
-        documentation="Time-domain signal visualization.",
+        documentation="d",
     )
-    assert "alpha" not in text
-    assert "type" in text
-    assert "name" in text
+    # Both params are in the body — no silent filter at compose time.
+    assert "param: alpha1" in text
+    assert "param: type" in text
 
 
 def test_compose_caps_at_256_words():
@@ -67,11 +102,44 @@ def test_compose_caps_at_256_words():
         documentation=long_doc,
     )
     # The cap is 256 words; allow a small slack for the prefix parts
-    # (label, block_id, category) that share the budget. The key
-    # invariant: body is well under the untruncated 506 words.
+    # (label, block_id, category) that share the budget.
     body_only = text.split("[TRUNCATED")[0]
     word_count = len(body_only.split())
     assert word_count <= 270, f"body has {word_count} words, expected <= 270"
     assert word_count < 506, "truncation did not happen"
     assert "TRUNCATED" in text
     assert "was 506 words, kept 256" in text
+
+
+# --- integration with the real GRC platform -------------------------------
+
+def test_visible_params_filters_real_qtgui_time_sink_x():
+    """The native GRC filter removes the GUI-styling alpha/color/label
+    grids from the time-sink block.
+
+    This is the regression test for the "time sink" vector search miss
+    (the actual block was outranked by digital_packet_sink because the
+    embed text was dominated by 49 hide='all' GUI params).
+
+    GRC evaluates ``hide`` against actual param values, so the first
+    few alpha/color/label slots are ``hide='part'`` (visible in a
+    reduced form) while extras beyond that are ``hide='all'``. The
+    test asserts the high-N extras are filtered.
+    """
+    visible = _visible_param_keys(
+        "qtgui_time_sink_x",
+        [
+            "type", "name", "ylabel", "yunit", "size", "srate", "grid",
+            "alpha1", "alpha2", "alpha3", "alpha4", "alpha5",
+            "alpha6", "alpha7", "alpha8", "alpha9", "alpha10",
+            "color1", "color2", "color3", "color4", "color5",
+            "label1", "label2", "label3", "label4", "label5",
+        ],
+    )
+    # GUI-styling params with hide='all' (the high-N extras) must be gone.
+    for gui in ("alpha6", "alpha7", "alpha8", "alpha9", "alpha10",
+                "color4", "color5", "label4", "label5"):
+        assert gui not in visible, f"{gui} should be filtered (hide=all)"
+    # Semantically meaningful params must be kept.
+    for kept in ("type", "name", "srate"):
+        assert kept in visible, f"{kept} must be kept"

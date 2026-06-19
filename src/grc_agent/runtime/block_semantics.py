@@ -167,18 +167,24 @@ def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]
         block = flow_graph.new_block(block_type)
     except Exception:
         return {}
-    for key, value in param_values.items():
-        param = block.params.get(key) if hasattr(block.params, "get") else None
-        if param is not None:
-            try:
-                param.value = "" if value is None else str(value)
-            except Exception:
-                pass
+    # ``new_block`` returns None for control blocks (variable, parameter,
+    # options, etc.) — the platform does not model them as instance blocks
+    # in a flow graph. Return an empty hide map; the caller falls back to
+    # the full param list.
+    if block is None:
+        return {}
     try:
-        flow_graph.rewrite()
-    except Exception:
-        pass
-    try:
+        for key, value in param_values.items():
+            param = block.params.get(key) if hasattr(block.params, "get") else None
+            if param is not None:
+                try:
+                    param.value = "" if value is None else str(value)
+                except Exception:
+                    pass
+        try:
+            flow_graph.rewrite()
+        except Exception:
+            pass
         return {str(name): str(param.hide) for name, param in block.params.items()}
     except Exception:
         return {}

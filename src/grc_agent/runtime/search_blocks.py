@@ -107,29 +107,25 @@ def search_blocks(
         # Try to (re-)ingest on the fly so the model isn't stuck behind a missing index.
         try:
             snapshot = get_catalog_snapshot(agent.catalog_root)
-            blocks_payload = [
-                {
+            blocks_payload = []
+            for bid, b in snapshot.blocks.items():
+                raw_params = b.payload.get("parameters") or []
+                param_values = {
+                    str(p.get("id")): "" if p.get("default") is None else str(p.get("default"))
+                    for p in raw_params if p.get("id")
+                }
+                blocks_payload.append({
                     "block_id": bid,
                     "label": _string_value(b.payload.get("label")) or bid,
                     "categories": list(getattr(b, "category_paths", ())),
-                    "parameters": [
-                        p.get("id")
-                        for p in (b.payload.get("parameters") or [])
-                        if p.get("id")
-                    ],
-                    "ports": [
-                        p.get("id")
-                        for p in (b.payload.get("inputs") or [])
-                        if p.get("id")
-                    ] + [
-                        p.get("id")
-                        for p in (b.payload.get("outputs") or [])
-                        if p.get("id")
-                    ],
+                    "parameters": [p.get("id") for p in raw_params if p.get("id")],
+                    "param_values": param_values,
+                    "ports": (
+                        [p.get("id") for p in (b.payload.get("inputs") or []) if p.get("id")] +
+                        [p.get("id") for p in (b.payload.get("outputs") or []) if p.get("id")]
+                    ),
                     "documentation": _string_value(b.payload.get("documentation")) or "",
-                }
-                for bid, b in snapshot.blocks.items()
-            ]
+                })
             store = VectorCatalogStore(CATALOG_DB_PATH, agent._llama_server_url)
             store.ingest_if_needed(
                 blocks=blocks_payload, server_url=agent._llama_server_url
