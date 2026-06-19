@@ -1812,6 +1812,30 @@ def ensure_llama_server(
         temperature=config.llama.temperature,
     )
     print(f"Ensured Ollama server at {resolved_url}")
+    _warmup_docs_index(resolved_url)
+    return resolved_url, resolved_model, client
+
+
+def _warmup_docs_index(server_url: str) -> None:
+    """Synchronously build the docs vector index if not already populated.
+
+    The eval harness runs live model evaluations (not unit tests), so the
+    docs index must be ready before any query_knowledge(domain='docs')
+    call. Without this, docs scenarios silently get 0 sources and the
+    model answers from memory — a false pass.
+    """
+    from grc_agent.runtime.doc_answer import DB_PATH, is_db_populated, VectorDocsStore
+
+    if is_db_populated(DB_PATH):
+        print(f"Docs index already populated at {DB_PATH}")
+        return
+    print(f"Warming up docs index at {DB_PATH} (synchronous)...")
+    try:
+        store = VectorDocsStore(DB_PATH, server_url)
+        store.ingest_if_needed()
+        print(f"Docs index ready: {is_db_populated(DB_PATH)}")
+    except Exception as exc:
+        print(f"Docs index warmup failed: {exc}")
     return resolved_url, resolved_model, client
 
 
