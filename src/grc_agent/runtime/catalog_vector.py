@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import struct
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +36,72 @@ CATALOG_DB_PATH = DB_DIR / "catalog_v1.db"
 _QUERY_PREFIX = "task: search result | query: "
 _DOCUMENT_PREFIX = "task: search result | document: "
 
+# --- Embed-text body cap (mirrors doc_answer.CHUNK_MAX_WORDS) ---------------
+_CATALOG_EMBED_MAX_WORDS = 256
+
+# Pattern for a param name with a numeric suffix, e.g. "alpha1", "color10".
+# Captures the alphabetic/underscore prefix (group 1) and the digits (group 2).
+_NUMERIC_SUFFIX_RE = re.compile(r"^([a-z_]+?)(\d+)$")
+
+
+def _filter_noise_params(params: list[str] | tuple[str, ...]) -> list[str]:
+    r"""Drop params that are part of a high-cardinality repeated pattern.
+
+    A single uniform rule applied to every block: if a param name matches
+    ``^[a-z_]+(\d+)$`` and the alphabetic prefix (e.g. ``alpha`` in
+    ``alpha1``) appears 3+ times in the param list, all params sharing
+    that prefix are dropped. This catches GUI-styling grids like
+    ``alpha1..alpha10`` and ``color1..color10`` that pollute the embed
+    text with low-signal fields.
+
+    Returns a new list; the input is not mutated.
+    """
+    bases: list[str] = []
+    for p in params:
+        m = _NUMERIC_SUFFIX_RE.match(p)
+        bases.append(m.group(1) if m else p)
+    base_counts = Counter(bases)
+    kept: list[str] = []
+    for p in params:
+        m = _NUMERIC_SUFFIX_RE.match(p)
+        if m and base_counts[m.group(1)] >= 3:
+            continue
+        kept.append(p)
+    return kept
+
+
+def _cap_embed_body(parts: list[str], max_words: int) -> str:
+    """Join ``parts`` with newlines, capping total words at ``max_words``.
+
+    If the body would exceed ``max_words``, the body is truncated to
+    ``max_words`` words and a visible flag is appended:
+    ``[TRUNCATED by catalog embed: was N words, kept M]``. This mirrors
+    the docs pipeline's ``CHUNK_MAX_WORDS = 256`` cap and the
+    ``[TRUNCATED ...]`` convention from ``text_utils``.
+    """
+    body = "\n".join(parts)
+    words = body.split()
+    if len(words) <= max_words:
+        return body
+    original = len(words)
+    truncated: list[str] = []
+    word_count = 0
+    for part in parts:
+        part_words = part.split()
+        if not part_words:
+            continue
+        if word_count + len(part_words) > max_words:
+            remaining = max_words - word_count
+            if remaining > 0:
+                truncated.append(" ".join(part_words[:remaining]))
+            break
+        truncated.append(part)
+        word_count += len(part_words)
+    return (
+        "\n".join(truncated)
+        + f"\n[TRUNCATED by catalog embed: was {original} words, kept {max_words}]"
+    )
+
 
 def compose_block_embed_text(
     *,
@@ -49,7 +117,13 @@ def compose_block_embed_text(
     The format is fixed and applied to every block. It mirrors the docs
     pipeline's ``_compose_chunk_text`` in spirit (title + heading + body)
     so the embedding model sees a consistent shape.
+
+    Params that are part of a high-cardinality repeated pattern
+    (e.g. ``alpha1..alpha10``) are dropped before the body is composed.
+    The resulting body is capped at 256 words; if the cap fires, a
+    visible ``[TRUNCATED ...]`` flag is appended.
     """
+    filtered_params = _filter_noise_params(list(parameters))
     parts: list[str] = []
     if label:
         parts.append(f"label: {label}")
@@ -57,13 +131,13 @@ def compose_block_embed_text(
         parts.append(f"block_id: {block_id}")
     if categories:
         parts.append("category: " + "/".join(categories))
-    if parameters:
-        parts.extend(f"param: {p}" for p in parameters)
+    if filtered_params:
+        parts.extend(f"param: {p}" for p in filtered_params)
     if ports:
         parts.extend(f"port: {p}" for p in ports)
     if documentation:
         parts.append(documentation.strip())
-    body = "\n".join(parts)
+    body = _cap_embed_body(parts, _CATALOG_EMBED_MAX_WORDS)
     return _DOCUMENT_PREFIX + body
 
 
@@ -157,11 +231,13 @@ class VectorCatalogStore:
                 block_id = str(block.get("block_id", "")).strip()
                 if not block_id:
                     continue
+                raw_params = tuple(str(p) for p in (block.get("parameters") or ()))
+                filtered_params = tuple(_filter_noise_params(list(raw_params)))
                 body = compose_block_embed_text(
                     block_id=block_id,
                     label=str(block.get("label", "") or ""),
                     categories=_flatten_categories(block.get("categories") or ()),
-                    parameters=tuple(str(p) for p in (block.get("parameters") or ())),
+                    parameters=filtered_params,
                     ports=tuple(str(p) for p in (block.get("ports") or ())),
                     documentation=str(block.get("documentation", "") or ""),
                 )
