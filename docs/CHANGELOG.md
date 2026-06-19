@@ -154,6 +154,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
   uniform markdown-noise stripper drops bare image/nav lines; chunks are
   256 words with 100-word overlap (was 400 words, no overlap).
 
+### Changed — catalog search swapped from FTS5 to vector
+- **Backend: FTS5 → vector search (embeddinggemma 300M + vec1 cosine).**
+  `query_knowledge(domain="catalog")` now uses the same vec1+embeddinggemma
+  pipeline as `domain="docs"`, against a new per-catalog DB at
+  `.grc_agent/vectors/catalog_v1.db`. The old FTS5 lexical backend was
+  missing the plain `variable` block for queries like "block id for
+  constant value source" because BM25 under-ranks short doc strings.
+  Vector search is semantically robust.
+- **`retrieval_backend` reports `"vector"`** (was `"lexical_fts5"`).
+  `match_type` is now uniformly `"vector"`. The block metadata payload
+  shape is unchanged from the model's perspective.
+- **Lazy ingest.** The catalog vector DB is built on first `search_blocks`
+  call if it isn't already populated, sourced from
+  `grc_agent.retrieval.warmup_catalog_vector_index`. No setup wizard.
+- **Eval harness now warms both indexes.** `_warmup_knowledge_index` in
+  `tests/llama_eval/harness.py` builds `docs_v1.db` and `catalog_v1.db`
+  synchronously before the first scenario runs, mirroring the
+  `_warmup_docs_index` fix from earlier.
+- **`lexical_cache_size` renamed to `vector_cache_size`** in
+  `RetrievalConfig` (one field, one default, one parser site). Cache
+  semantics are unchanged (LRU, keyed on `(query, k, catalog_version)`).
+- **Test updates.** `tests/test_mvp_tool_profile.py` now asserts
+  `retrieval_mode == "vector"` and mocks `VectorCatalogStore.search`
+  instead of the FTS5 connection. The 33 mechanical updates preserve
+  the dispatch and payload-shape contracts.
+
 ### Added
 - **RAG live-integration tests** (`tests/retrieval_eval/test_rag_integration.py`)
   gated behind `GRC_AGENT_LIVE_RAG=1`. Verify real ingestion, real vec1
