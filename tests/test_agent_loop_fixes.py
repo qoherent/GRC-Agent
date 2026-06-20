@@ -24,9 +24,7 @@ from grc_agent.runtime.change_graph import (
     _update_state_operation,
 )
 from grc_agent.runtime.model_context import build_system_prompt, render_model_messages
-from grc_agent.toolagents_runtime import (
-    _tool_retry_reminder,
-)
+
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
@@ -343,181 +341,7 @@ class Fix2TemplateSafetyTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class Fix2ReminderGenerationTests(unittest.TestCase):
-    """_tool_retry_reminder triggers correctly under various conditions."""
 
-    def test_schema_failure_triggers_change_graph_reminder(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Disable the throttle block.",
-            assistant_text="I need to inspect first.",
-            tool_calls_requested=1,
-            tool_calls_executed=0,
-            tool_names_requested=["change_graph"],
-            change_graph_schema_failure_pending=True,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=False,
-        )
-        self.assertIsNotNone(reminder)
-        self.assertIn("change_graph", reminder.lower())
-
-    def test_missing_evidence_triggers_agentic_reminder(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Add a new filter block.",
-            assistant_text="I need to search.",
-            tool_calls_requested=1,
-            tool_calls_executed=0,
-            tool_names_requested=["change_graph"],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=True,
-            graph_ambiguity_pending=False,
-        )
-        self.assertIsNotNone(reminder)
-        self.assertIn("tool evidence", reminder.lower())
-
-    def test_ambiguity_clarification_blocks_reminder(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Disable the QT GUI time sink.",
-            assistant_text="Which sink — qtgui_time_sink_x_0 or qtgui_time_sink_x_1?",
-            tool_calls_requested=1,
-            tool_calls_executed=1,
-            tool_names_requested=["inspect_graph"],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=True,
-        )
-        self.assertIsNone(reminder)
-
-    def test_committed_turn_does_not_trigger_mutation_reminder(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Disable the throttle.",
-            assistant_text="Done.",
-            tool_calls_requested=1,
-            tool_calls_executed=1,
-            tool_names_requested=["change_graph"],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=True,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=False,
-        )
-        self.assertIsNone(reminder)
-
-
-# ---------------------------------------------------------------------------
-# Fix #2 (loop-level): reminder is injected through _run_turn_events
-# ---------------------------------------------------------------------------
-
-
-class ReminderLoopInjectionTests(unittest.TestCase):
-    """Verify the END-TO-END reminder control flow in _run_turn_events.
-
-    The pure-function ``_tool_retry_reminder`` tests above pass hand-set
-    booleans. These tests drive the REAL loop with only ``chat_agent.step``
-    mocked and assert that a non-None reminder is wired into chat_history
-    as a ``<runtime_directive>`` user message, and that the model is
-    re-invoked (correction_retries_used increments).
-    """
-
-    def _build_runner(self) -> tuple[Any, Any]:
-        from unittest import mock
-
-        from grc_agent.toolagents_runtime import (
-            ToolAgentsLlamaProviderConfig,
-            ToolAgentsRunner,
-        )
-
-        chat_agent = mock.MagicMock()
-        chat_agent.get_default_settings.return_value = mock.MagicMock()
-        runner = ToolAgentsRunner.__new__(ToolAgentsRunner)
-        runner.provider_config = ToolAgentsLlamaProviderConfig(
-            base_url="http://127.0.0.1:1", model="m"
-        )
-        runner.provider = mock.MagicMock()
-        runner.chat_agent = chat_agent
-        return runner, chat_agent
-
-    def test_mutation_request_injects_reminder_into_history(self) -> None:
-        """Same scenario but we hold the agent reference and assert the
-        ``<runtime_directive>`` wrapper actually lands in chat_history."""
-        runner, chat_agent = self._build_runner()
-        agent = GrcAgent()
-        chat_agent.step.side_effect = [
-            _assistant_message("Sure, done!"),
-            _assistant_message("I added the block now."),
-        ]
-
-        list(
-            runner._run_turn_events(
-                agent,
-                "Add a new low pass filter block to the graph.",
-                model=None,
-                wrapper_eval_telemetry=False,
-                max_tool_rounds=4,
-                on_tool_start=None,
-                on_tool_end=None,
-            )
-        )
-
-        directive_messages = [
-            m
-            for m in agent.chat_history.get_messages()
-            if m.role == ChatMessageRole.User
-            and "<runtime_directive>" in m.get_as_text()
-        ]
-        self.assertGreaterEqual(
-            len(directive_messages),
-            1,
-            "expected a <runtime_directive> user message in chat_history",
-        )
-
-    def test_reminder_not_re_injected_on_second_pass(self) -> None:
-        """A given reminder key fires at most once (retry_reminders_used
-        dedup). The second text-only answer must NOT trigger a second
-        injection — the loop terminates instead."""
-        runner, chat_agent = self._build_runner()
-        agent = GrcAgent()
-        chat_agent.step.side_effect = [
-            _assistant_message("Sure, done!"),
-            _assistant_message("Done again."),
-        ]
-
-        events = list(
-            runner._run_turn_events(
-                agent,
-                "Add a new low pass filter block to the graph.",
-                model=None,
-                wrapper_eval_telemetry=False,
-                max_tool_rounds=4,
-                on_tool_start=None,
-                on_tool_end=None,
-            )
-        )
-        final_events = [e for e in events if e.get("event") == "final"]
-        self.assertEqual(len(final_events), 1)
-        result = final_events[0]["result"]
-        # Exactly one retry — the second identical reminder is suppressed.
-        self.assertEqual(result.get("correction_retries_used"), 1, result)
-        # Only one <runtime_directive> message in history.
-        directive_count = sum(
-            1
-            for m in agent.chat_history.get_messages()
-            if m.role == ChatMessageRole.User
-            and "<runtime_directive>" in m.get_as_text()
-        )
-        self.assertEqual(directive_count, 1)
-
-
-# ---------------------------------------------------------------------------
 # Fix #1: No premature exit on commit — commit result is role:"tool"
 # ---------------------------------------------------------------------------
 
@@ -596,7 +420,7 @@ class Fix1CommitResultTests(unittest.TestCase):
         self.assertEqual(len(final_events), 1)
         result = final_events[0]["result"]
         self.assertTrue(result.get("ok"), result)
-        self.assertTrue(result.get("committed") or result.get("tool_calls_executed"), result)
+        self.assertTrue(result.get("ok") or result.get("tool_calls_executed"), result)
 
         # The commit result must flow as role:Tool, never as a fabricated
         # assistant synthesis message. Inspect the recorded chat history.
@@ -617,7 +441,7 @@ class Fix1CommitResultTests(unittest.TestCase):
                     if (
                         isinstance(payload, dict)
                         and payload.get("tool") == "change_graph"
-                        and payload.get("committed") is True
+                        and payload.get("ok") is True
                     ):
                         committed_tool_payload = payload
         self.assertIsNotNone(

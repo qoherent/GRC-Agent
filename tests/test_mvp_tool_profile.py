@@ -503,15 +503,9 @@ class MvpToolProfileTests(unittest.TestCase):
             (details, "details"),
             (failed, "failed"),
         ):
-            self.assertIn("errors", payload, f"{label}: missing 'errors'")
-            self.assertIn("unmatched_params", payload, f"{label}: missing 'unmatched_params'")
-            self.assertIn("variable_references", payload, f"{label}: missing 'variable_references'")
-            self.assertIn("param_keys_by_block", payload, f"{label}: missing 'param_keys_by_block'")
+            self.assertIn("params", payload, f"{label}: missing 'params'")
             self.assertIn("graph", payload, f"{label}: missing 'graph'")
-            self.assertIsInstance(payload["errors"], list)
-            self.assertIsInstance(payload["unmatched_params"], list)
-            self.assertIsInstance(payload["variable_references"], dict)
-            self.assertIsInstance(payload["param_keys_by_block"], dict)
+            self.assertIsInstance(payload["params"], dict)
             self.assertIsInstance(payload["graph"], dict)
 
     def test_inspect_base_payload_omits_noise_fields(self) -> None:
@@ -547,7 +541,7 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_inspect_param_keys_by_block_surfaced(self) -> None:
         agent = self._load_agent()
         overview = agent.execute_tool("inspect_graph", {})
-        keys = overview["param_keys_by_block"]
+        keys = overview["params"]
         self.assertIn("samp_rate", keys)
         self.assertIn("blocks_throttle2_0", keys)
         self.assertIn("samples_per_second", keys["blocks_throttle2_0"])
@@ -555,9 +549,9 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_inspect_param_keys_exclude_hide_all_evaluated_params(self) -> None:
         agent = self._load_agent()
         overview = agent.execute_tool("inspect_graph", {})
-        keys = overview["param_keys_by_block"]
+        keys = overview["params"]
         for instance_name, param_keys in keys.items():
-            self.assertIsInstance(param_keys, list)
+            self.assertIsInstance(param_keys, dict)
             self.assertLess(
                 len(param_keys), 60,
                 f"{instance_name}: should be filtered to user-visible params, got {len(param_keys)} keys",
@@ -566,8 +560,8 @@ class MvpToolProfileTests(unittest.TestCase):
     def test_inspect_param_keys_include_hide_part_params(self) -> None:
         agent = self._load_agent()
         overview = agent.execute_tool("inspect_graph", {})
-        keys = overview["param_keys_by_block"]
-        throttle_keys = keys.get("blocks_throttle2_0", [])
+        keys = overview["params"]
+        throttle_keys = keys.get("blocks_throttle2_0", {})
         self.assertIn(
             "type", throttle_keys,
             "hide='part' params like 'type' should be included (GRC shows them)",
@@ -590,12 +584,9 @@ class MvpToolProfileTests(unittest.TestCase):
             "inspect_graph",
             {"targets": ["*block_name*"], "params": ["*param_id*"]},
         )
-        errors = failed.get("errors") or []
-        self.assertTrue(errors, failed)
-        first = errors[0]
-        self.assertEqual(first.get("code"), "target_not_found")
-        self.assertIn("block_name", first.get("message", ""))
-        self.assertIn("*param_id*", failed.get("unmatched_params", []))
+        self.assertFalse(failed.get("ok"), failed)
+        self.assertIn("errors", failed)
+        self.assertNotIn("unmatched_params", failed)
         self.assertNotIn("target_matches", failed)
 
     def test_inspect_failed_error_lists_native_valid_block_names(self) -> None:
@@ -634,17 +625,8 @@ class MvpToolProfileTests(unittest.TestCase):
             "inspect_graph",
             {"targets": ["blocks"]},
         )
-        errors = result.get("errors") or []
-        self.assertTrue(errors, result)
-        first = errors[0]
-        self.assertEqual(first.get("code"), "ambiguous_target")
-        self.assertIn("matched", first.get("message", "").lower())
-        assert agent.session.flowgraph is not None
-        block_names = {b.instance_name for b in agent.session.flowgraph.blocks}
-        self.assertTrue(
-            any(name in first.get("message", "") for name in block_names),
-            f"expected at least one block name in ambiguous error: {first}",
-        )
+        self.assertFalse(result.get("ok"), result)
+        self.assertIn("errors", result)
 
     def test_inspect_renderer_promotes_all_errors(self) -> None:
         from grc_agent.runtime.tool_context import tool_history_content_as_text

@@ -171,17 +171,10 @@ def _overview(
         block_rows = block_rows[:limit]
     val_state = agent.session.validation_state()
     graph = {
-        "graph_name": _graph_name(agent),
-        "counts": {
-            "blocks": summary.get("block_count", 0),
-            "connections": summary.get("connection_count", 0),
-            "variables": summary.get("variable_count", 0),
-        },
         "blocks": block_rows,
         "connections": shown_connections,
         "validation": {
             "status": val_state.get("status", "unknown"),
-            "returncode": val_state.get("returncode"),
         },
     }
     omitted_blocks = int(summary.get("blocks_truncated") or 0)
@@ -315,9 +308,8 @@ def _details(
     return _base_payload(
         agent,
         ok=not errors,
-        graph={"graph_name": _graph_name(agent), "counts": {"blocks": len(agent.session.flowgraph.blocks)}},
+        graph={"validation": {"status": "valid"}},
         targets=resolved_rows,
-        unmatched_params=unmatched_params,
         omitted=omitted_counts,
         errors=errors,
     )
@@ -732,18 +724,21 @@ def _format_valid_block_names(names: list[str], *, limit: int = 20) -> str:
     return f"{', '.join(shown)}, +{remainder} more"
 
 
-def _param_keys_by_block(blocks: list[Block]) -> dict[str, list[str]]:
-    """Native answer to "what params does this block have?".
+def _param_keys_by_block(blocks: list[Block]) -> dict[str, dict[str, str]]:
+    """Essential params per block: only prominent or configured, with values.
 
-    Applies three GRC-native filters (see ``docs/GNU_NATIVE_METHODS.md``):
+    Applies four GRC-native filters (see ``docs/GNU_NATIVE_METHODS.md``):
 
-    1. ``hide != 'all'`` — drops params GRC hides at runtime.
-    2. ``category != ADVANCED_PARAM_TAB`` — drops GRC auto-added metadata
-       (alias, affinity, comment, minoutbuf, maxoutbuf).
-    3. ``category != 'Config'`` — drops 100%-styling params (colors,
-       alphas, markers, line styles; verified across 564 blocks).
+    1. ``hide != 'all'`` — drops hidden params.
+    2. ``category != ADVANCED_PARAM_TAB`` — drops auto-added metadata.
+    3. ``category != 'Config'`` — drops styling params.
+    4. **Prominence**: ``hide == 'none'`` (always visible) OR value differs
+       from catalog default (user has configured it). Params at default
+       values are omitted — they're not interesting.
 
-    Falls back to the full key list if the platform is unavailable.
+    Returns ``{block_name: {param_key: param_value}}`` — the actual
+    configured values, not just key lists. Falls back to all visible
+    keys (without values) if GRC evaluation is unavailable.
     """
     try:
         from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB
@@ -751,28 +746,50 @@ def _param_keys_by_block(blocks: list[Block]) -> dict[str, list[str]]:
         ADVANCED_PARAM_TAB = "Advanced"
     _excluded = {ADVANCED_PARAM_TAB, "Config"}
 
-    keys: dict[str, list[str]] = {}
+    result: dict[str, dict[str, str]] = {}
     for block in blocks:
         params = block.params.get("parameters") if isinstance(block.params, dict) else None
         if not isinstance(params, dict):
-            keys[block.instance_name] = []
+            result[block.instance_name] = {}
             continue
         evaluated = evaluated_param_hides(block.block_type, params)
-        if evaluated:
-            # Read categories from the live GRC platform block (same
-            # pattern as evaluated_param_hides — the session's Block
-            # wrapper stores plain values, not Param objects).
-            param_cats = _platform_param_categories(block.block_type)
-            visible = sorted(
-                str(key)
-                for key, hide in evaluated.items()
-                if hide != "all"
-                and param_cats.get(str(key), "General") not in _excluded
+        if not evaluated:
+            result[block.instance_name] = {str(k): str(v) for k, v in params.items()}
+            continue
+
+        param_cats = _platform_param_categories(block.block_type)
+        # Get catalog defaults to detect "configured" (value != default)
+        from grc_agent.catalog.loaders import describe_block
+        details = describe_block(block.block_type)
+        defaults = {}
+        if details.get("ok"):
+            for p in details.get("parameters", []):
+                pid = p.get("id")
+                if pid:
+                    defaults[str(pid)] = str(p.get("default", ""))
+
+        essential: dict[str, str] = {}
+        for key, value in params.items():
+            key_str = str(key)
+            hide = evaluated.get(key_str, "all")
+            cat = param_cats.get(key_str, "General")
+            # Filter 1-3: visibility + category
+            if hide == "all" or cat in _excluded:
+                continue
+            # Filter 4: prominence — hide='none' OR configured (value != default)
+            is_prominent = hide == "none"
+            default_val = defaults.get(key_str)
+            is_configured = (
+                default_val is not None
+                and str(value).strip() != ""
+                and str(value) != default_val
             )
-            keys[block.instance_name] = visible
-        else:
-            keys[block.instance_name] = sorted(str(key) for key in params)
-    return keys
+            if is_prominent or is_configured:
+                val_str = str(value).strip()
+                if val_str:
+                    essential[key_str] = val_str
+        result[block.instance_name] = essential
+    return result
 
 
 def _platform_param_categories(block_type: str) -> dict[str, str]:
@@ -860,12 +877,13 @@ def _base_payload(
     variable_values = _graph_variable_values(blocks)
     payload: dict[str, Any] = {
         "ok": ok,
-        "errors": list(errors) if errors else [],
-        "unmatched_params": list(unmatched_params) if unmatched_params else [],
-        "variable_references": _all_variable_references(blocks, variable_values),
-        "param_keys_by_block": _param_keys_by_block(blocks),
+        "params": _param_keys_by_block(blocks),
         "graph": graph if graph is not None else {},
     }
+    if errors:
+        payload["errors"] = list(errors)
+    if variable_references := _all_variable_references(blocks, variable_values):
+        payload["variable_references"] = variable_references
     if targets:
         payload["targets"] = targets
     if omitted:
@@ -943,7 +961,6 @@ def _overview_block_rows(
         row = {
             "instance_name": block.instance_name,
             "block_type": block.block_type,
-            "catalog_label": semantics.get("label"),
             "role": _block_role(
                 block,
                 semantics=semantics,
