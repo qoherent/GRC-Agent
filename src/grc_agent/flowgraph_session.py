@@ -741,18 +741,11 @@ class FlowgraphSession:
             and connection.dst_block in included_name_set
         ]
 
-        target = next(node for node in nodes if node["node_id"] == normalized_node_id)
         return {
             "ok": True,
             "node_id": normalized_node_id,
-            "hops": hops,
-            "max_nodes": max_nodes,
-            "target": target,
             "nodes": nodes,
             "edges": edges,
-            "provenance": self.session_provenance(),
-            "dirty": self.is_dirty,
-            "validation": self.validation_state(),
             "truncated": truncated,
         }
 

@@ -19,9 +19,10 @@ class GetGrcContextTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["node_id"], "blocks_throttle2_0")
-        self.assertEqual(payload["target"]["block_type"], "blocks_throttle2")
-        self.assertEqual(payload["target"]["incoming"], ["analog_random_source_x_0"])
-        self.assertEqual(payload["target"]["outgoing"], ["blocks_char_to_float_0"])
+        target = payload["nodes"][0]
+        self.assertEqual(target["block_type"], "blocks_throttle2")
+        self.assertEqual(target["incoming"], ["analog_random_source_x_0"])
+        self.assertEqual(target["outgoing"], ["blocks_char_to_float_0"])
         self.assertEqual([node["node_id"] for node in payload["nodes"]], [
             "blocks_throttle2_0",
             "analog_random_source_x_0",
@@ -54,8 +55,6 @@ class GetGrcContextTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(payload["provenance"]["file_format"], 1)
-        self.assertEqual(payload["provenance"]["grc_version"], "3.10.9.2")
         self.assertFalse(payload["truncated"])
 
     def test_context_marks_truncation_when_max_nodes_is_tight(self) -> None:

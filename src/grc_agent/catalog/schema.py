@@ -11,6 +11,19 @@ from typing import Any
 from grc_agent._payload import join_non_empty
 
 
+# GRC-native param-category constants (see docs/GNU_NATIVE_METHODS.md)
+try:
+    from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB, DEFAULT_PARAM_TAB
+except ImportError:
+    ADVANCED_PARAM_TAB = "Advanced"
+    DEFAULT_PARAM_TAB = "General"
+
+# Categories that contain only non-essential params:
+#   ADVANCED_PARAM_TAB — GRC auto-added metadata (alias, affinity, comment, buffers)
+#   "Config"           — 100% styling (colors, alphas, markers, styles; verified across 564 blocks)
+EXCLUDED_PARAM_CATEGORIES: frozenset[str] = frozenset({ADVANCED_PARAM_TAB, "Config"})
+
+
 @dataclass(frozen=True)
 class CatalogFiles:
     """Resolved GNU catalog file sets under one catalog root."""
