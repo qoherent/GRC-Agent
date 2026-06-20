@@ -261,6 +261,22 @@ def dispatch_flat_change_graph_batch(
             validation_result=validation_result,
         )
     operation_effects = _operation_effects(normalized_operations)
+    # Strip compiler stdout from validation_result — it's ~70 tokens of
+    # boilerplate (welcome banner, block paths) the model never needs.
+    compact_validation = _strip_validation_stdout(validation_result)
+    # Compact autosave to just {ok, skipped} — drop path/message/error_type
+    # (those are internal; tests only assert on .ok and .skipped).
+    raw_autosave = result.get("autosave") if isinstance(result, dict) else None
+    compact_autosave = None
+    if isinstance(raw_autosave, dict):
+        compact_autosave = {
+            "ok": raw_autosave.get("ok"),
+            "skipped": raw_autosave.get("skipped"),
+        }
+        if raw_autosave.get("error_type"):
+            compact_autosave["error_type"] = raw_autosave.get("error_type")
+        if raw_autosave.get("message"):
+            compact_autosave["message"] = raw_autosave.get("message")
     payload: dict[str, Any] = _drop_empty_result_fields(
         {
             "ok": ok,
@@ -269,10 +285,9 @@ def dispatch_flat_change_graph_batch(
             "effect": operation_effects[0] if len(operation_effects) == 1 else None,
             "effects": operation_effects if len(operation_effects) > 1 else None,
             "graph_delta": graph_delta,
-            "validation_result": validation_result,
+            "validation_result": compact_validation,
             "validation_ok": result.get("validation_ok") if isinstance(result, dict) else None,
-            "autosave": result.get("autosave") if isinstance(result, dict) else None,
-            "checkpoint_id": result.get("checkpoint_id") if isinstance(result, dict) else None,
+            "autosave": compact_autosave,
             "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
         }
     )
@@ -852,6 +867,33 @@ def _added_block_types(agent: Any, added_names: set[str]) -> dict[str, str]:
 
 def _drop_empty_result_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if is_meaningful(value)}
+
+
+def _strip_validation_stdout(validation_result: Any) -> dict[str, Any] | None:
+    """Return a compact validation dict without compiler stdout.
+
+    The GRC compiler stdout (welcome banner, block paths, loading
+    messages) is ~70 tokens of boilerplate the model never needs.
+    Keep only: status, returncode, stderr (errors only), and native
+    validation errors if present.
+    """
+    if not isinstance(validation_result, dict):
+        return None
+    compact: dict[str, Any] = {}
+    for key in ("status", "returncode", "state_revision"):
+        val = validation_result.get(key)
+        if val is not None:
+            compact[key] = val
+    stderr = validation_result.get("stderr")
+    if isinstance(stderr, str) and stderr.strip():
+        compact["stderr"] = stderr
+    native = validation_result.get("native")
+    if isinstance(native, dict) and native:
+        compact["native"] = native
+    errors = validation_result.get("errors")
+    if isinstance(errors, list) and errors:
+        compact["errors"] = errors
+    return compact if compact else None
 
 
 def _operation_effects(operations: Any) -> list[str]:
