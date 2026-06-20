@@ -217,17 +217,10 @@ class BlockDescription:
         payload: dict[str, Any] = {
             "ok": True,
             "block_id": self.block_id,
-            "label": self.label,
-            "parameters": [p.to_compact_dict() for p in visible_params],
+            "params": {p.id: f"{p.dtype or '?'}={p.default or ''}" for p in visible_params},
             "inputs": [port.to_compact_dict() for port in self.inputs],
             "outputs": [port.to_compact_dict() for port in self.outputs],
         }
-        if self.documentation is not None:
-            payload["documentation"] = self.documentation
-        if self.asserts:
-            payload["asserts"] = list(self.asserts)
-        if self.warnings:
-            payload["warnings"] = list(self.warnings)
         return payload
 
 

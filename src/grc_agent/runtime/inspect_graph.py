@@ -874,7 +874,6 @@ def _base_payload(
     """
     assert agent.session.flowgraph is not None
     blocks = agent.session.flowgraph.blocks
-    variable_values = _graph_variable_values(blocks)
     payload: dict[str, Any] = {
         "ok": ok,
         "params": _param_keys_by_block(blocks),
@@ -882,8 +881,6 @@ def _base_payload(
     }
     if errors:
         payload["errors"] = list(errors)
-    if variable_references := _all_variable_references(blocks, variable_values):
-        payload["variable_references"] = variable_references
     if targets:
         payload["targets"] = targets
     if omitted:

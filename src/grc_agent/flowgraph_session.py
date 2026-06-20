@@ -726,17 +726,8 @@ class FlowgraphSession:
             for name in included_names
         ]
         edges = [
-            {
-                **self._connection_payload(connection),
-                "source": connection.src_block,
-                "source_port": connection.src_port,
-                "target": connection.dst_block,
-                "target_port": connection.dst_port,
-            }
-            for connection in sorted(
-                flowgraph.connections,
-                key=self._connection_sort_key,
-            )
+            f"{connection.src_block}:{connection.src_port}->{connection.dst_block}:{connection.dst_port}"
+            for connection in sorted(flowgraph.connections, key=self._connection_sort_key)
             if connection.src_block in included_name_set
             and connection.dst_block in included_name_set
         ]
@@ -1345,17 +1336,11 @@ class FlowgraphSession:
         }
 
     def _context_node_payload(self, block: Block, *, distance: int) -> dict[str, Any]:
-        """Render one block into the bounded session-context node payload."""
-        parameters = block.params.get("parameters")
-        parameter_map = parameters if isinstance(parameters, dict) else {}
+        """Render one block — minimal: id, type, distance, connections."""
         return {
-            "node_id": block.instance_name,
-            "block_uid": block.block_uid,
-            "label": block.instance_name,
-            "block_type": block.block_type,
+            "id": block.instance_name,
+            "type": block.block_type,
             "distance": distance,
-            "parameter_count": len(parameter_map),
-            "parameter_sample": self._parameter_sample(parameter_map),
             "incoming": [
                 connection.src_block
                 for connection in self._incoming_connection_cache.get(

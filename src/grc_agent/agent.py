@@ -1025,11 +1025,17 @@ class GrcAgent:
         include_active_session: bool | None = None,
     ) -> ToolResult:
         result = dict(payload)
-        result["tool"] = tool_name
+        # Don't add tool name or active_session for MVP model-facing tools
+        # — the model knows what it called, and active_session is noise.
+        _MVP_TOOLS = {"inspect_graph", "change_graph", "query_knowledge",
+                       "search_blocks", "ask_grc_docs", "get_grc_context",
+                       "describe_block"}
+        if tool_name not in _MVP_TOOLS:
+            result["tool"] = tool_name
         if default_message is not None and "message" not in result:
             result["message"] = default_message
         if include_active_session is None:
-            include_active_session = tool_name != "change_graph"
+            include_active_session = tool_name not in _MVP_TOOLS
         if tool_name == "change_graph":
             result.setdefault("state_revision", self.session.state_revision)
         if include_active_session:
