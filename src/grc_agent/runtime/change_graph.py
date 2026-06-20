@@ -288,44 +288,37 @@ def dispatch_flat_change_graph_batch(
     if ok:
         agent.session._last_failed_ops_hash = None
     if isinstance(result, dict):
-        if result.get("forced_validation_failure"):
-            payload["forced_validation_failure"] = result.get("forced_validation_failure")
-        if result.get("error_type"):
-            payload["error_type"] = result.get("error_type")
-        errors_payload = result.get("errors")
-        if isinstance(errors_payload, list) and errors_payload:
-            payload["errors"] = copy.deepcopy(errors_payload)
-        warnings = result.get("warnings")
-        if isinstance(warnings, list) and warnings:
-            payload["warnings"] = copy.deepcopy(warnings)
         if not ok:
-            payload["planned_operations"] = copy.deepcopy(normalized_operations)
+            # ── Minimal error payload — only what the model needs to recover ──
+            payload = {
+                "ok": False,
+                "error_type": result.get("error_type"),
+                "errors": copy.deepcopy(result.get("errors") or []),
+                "planned_operations": copy.deepcopy(normalized_operations),
+                "message": result.get("message") or "No changes were committed.",
+                "state_revision": agent.session.state_revision,
+                "committed": False,
+            }
             after_graph_id = agent.session.graph_id()
             graph_unchanged = (
                 after_graph_id == before_graph_id
                 and agent.session.state_revision == before_revision
                 and agent.session.is_dirty == before_dirty
             )
-            payload["committed"] = False
-            payload["message"] = (
-                "No changes were committed."
-                if graph_unchanged
-                else "Partial changes applied but final verification failed."
-            )
-            payload["graph_unchanged"] = graph_unchanged
-            payload["rollback"] = "complete" if graph_unchanged else "unknown"
             if result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED:
-                payload["rejected_phase"] = "native_grc_validation"
-                payload["message"] = (
-                    "Graph edit rejected by validation. Changes not committed."
+                payload["message"] = "Graph edit rejected by validation."
+                native_errors = (
+                    _native_validation_error_text(validation_result)
+                    if isinstance(validation_result, dict)
+                    else []
                 )
-            native_errors = (
-                _native_validation_error_text(validation_result)
-                if isinstance(validation_result, dict)
-                else []
-            )
-            if native_errors:
-                payload["native_validation_errors"] = native_errors
+                if native_errors:
+                    payload["native_validation_errors"] = native_errors
+                # GRC validation errors: show stderr (no stdout)
+                if isinstance(validation_result, dict):
+                    stderr = validation_result.get("stderr")
+                    if isinstance(stderr, str) and stderr.strip():
+                        payload["validation_stderr"] = stderr
 
             # ── Phase 3: State-aware repeat-payload escalator ──────────────
             current_ops_hash = json.dumps(normalized_operations, sort_keys=True)
@@ -338,7 +331,7 @@ def dispatch_flat_change_graph_batch(
                 agent=agent,
                 operations=normalized_operations,
                 validation_result=validation_result,
-                errors_payload=errors_payload,
+                errors_payload=payload.get("errors"),
             )
             if isinstance(hint, str) and hint:
                 payload["hint"] = hint

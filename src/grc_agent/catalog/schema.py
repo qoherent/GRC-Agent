@@ -94,10 +94,9 @@ class NormalizedParameter:
         }
 
     def to_compact_dict(self) -> dict[str, Any]:
-        """Discovery shape: id/label/dtype/default only — no options."""
+        """Discovery shape: id/dtype/default only — no options, no label."""
         payload = {
             "id": self.id,
-            "label": self.label,
             "dtype": self.dtype,
             "default": self.default,
         }
