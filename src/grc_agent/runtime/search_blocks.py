@@ -208,10 +208,18 @@ def search_blocks(
         if block is None:
             continue
         label = _string_value(block.payload.get("label")) or bid
-        distance = float(neighbour.get("distance", 1.0))
+        summary = _catalog_summary(
+            documentation=_string_value(block.payload.get("documentation")) or "",
+            params=[p.get("id") for p in (block.payload.get("parameters") or []) if p.get("id")],
+            inputs=[p.get("id") for p in (block.payload.get("inputs") or []) if p.get("id")],
+            outputs=[p.get("id") for p in (block.payload.get("outputs") or []) if p.get("id")],
+            categories=[" ".join(part for part in path if path) for path in getattr(block, "category_paths", ())],
+        )
+        summary = agent_module._compact_block_summary(summary)
         rows.append({
                 "block_id": bid,
                 "name": label,
+                "summary": summary,
             })
 
     limited = rows[:limit]
