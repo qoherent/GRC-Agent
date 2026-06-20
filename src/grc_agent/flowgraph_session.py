@@ -1336,11 +1336,10 @@ class FlowgraphSession:
         }
 
     def _context_node_payload(self, block: Block, *, distance: int) -> dict[str, Any]:
-        """Render one block — minimal: id, type, distance, connections."""
+        """Render one block — minimal: id, type, connections."""
         return {
             "id": block.instance_name,
             "type": block.block_type,
-            "distance": distance,
             "incoming": [
                 connection.src_block
                 for connection in self._incoming_connection_cache.get(

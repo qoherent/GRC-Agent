@@ -210,10 +210,9 @@ def search_blocks(
         label = _string_value(block.payload.get("label")) or bid
         distance = float(neighbour.get("distance", 1.0))
         rows.append({
-            "block_id": bid,
-            "name": label,
-            "distance": distance,
-        })
+                "block_id": bid,
+                "name": label,
+            })
 
     limited = rows[:limit]
     output_truncated = len(rows) > len(limited)

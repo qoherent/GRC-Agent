@@ -289,11 +289,13 @@ def dispatch_flat_change_graph_batch(
         agent.session._last_failed_ops_hash = None
     if isinstance(result, dict):
         if not ok:
-            # ── Minimal error payload ──
+            # ── Minimal error payload — errors + what caused them ──
             payload = {
                 "ok": False,
-                "errors": copy.deepcopy(result.get("errors") or []),
-                "planned_operations": copy.deepcopy(normalized_operations),
+                "errors": [
+                    {k: v for k, v in e.items() if k != "op_type"}
+                    for e in (result.get("errors") or [])
+                ],
             }
             if result.get("error_type"):
                 payload["error_type"] = result.get("error_type")
