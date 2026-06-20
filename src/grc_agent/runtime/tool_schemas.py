@@ -316,7 +316,6 @@ def build_tool_schemas(
                 "query": {"type": "string"},
                 "k": {"type": "integer"},
                 "debug": {"type": "boolean"},
-                "enrich": {"type": "boolean"},
             },
             required=["query"],
         ),

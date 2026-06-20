@@ -253,9 +253,6 @@ class GrcAgent:
         self._ask_grc_docs_cache: OrderedDict[tuple[str, ...], dict[str, Any]] = (
             OrderedDict()
         )
-        self._search_blocks_cache: OrderedDict[
-            tuple[str, int, str], dict[str, Any]
-        ] = OrderedDict()
         self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
@@ -1119,33 +1116,9 @@ class GrcAgent:
             debug=debug,
         )
 
-    def _search_blocks_cache_key(self, *, query: str, k: int) -> tuple[str, int, str]:
-        return (
-            query,
-            k,
-            self._search_blocks_version_token(),
-        )
-
     def _search_blocks_version_token(self) -> str:
         catalog_token = _catalog_version_token(self.catalog_root)
         return f"catalog={catalog_token}"
-
-    def _search_blocks_cache_get(
-        self, key: tuple[str, int, str]
-    ) -> dict[str, Any] | None:
-        hit = self._search_blocks_cache.get(key)
-        if hit is None:
-            return None
-        self._search_blocks_cache.move_to_end(key)
-        return copy.deepcopy(hit)
-
-    def _search_blocks_cache_put(
-        self, key: tuple[str, int, str], payload: dict[str, Any]
-    ) -> None:
-        self._search_blocks_cache[key] = copy.deepcopy(payload)
-        self._search_blocks_cache.move_to_end(key)
-        while len(self._search_blocks_cache) > self._retrieval_cfg.vector_cache_size:
-            self._search_blocks_cache.popitem(last=False)
 
     def _ask_grc_docs_cache_key(
         self,
@@ -1206,14 +1179,12 @@ class GrcAgent:
         query: str,
         k: int | None = None,
         debug: bool = False,
-        enrich: bool = False,
     ) -> ToolResult:
         return search_blocks_wrapper(
             self,
             query=query,
             k=k,
             debug=debug,
-            enrich=enrich,
         )
 
     def _ask_grc_docs(

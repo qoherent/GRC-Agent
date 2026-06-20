@@ -96,7 +96,6 @@ class RetrievalConfig:
     search_blocks_max_k: int
     ask_grc_docs_default_k: int
     ask_grc_docs_max_k: int
-    vector_cache_size: int
 
 
 @dataclass(frozen=True)
@@ -135,7 +134,6 @@ DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
     search_blocks_max_k=12,
     ask_grc_docs_default_k=3,
     ask_grc_docs_max_k=8,
-    vector_cache_size=64,
 )
 
 DEFAULT_HISTORY_CONFIG = HistoryConfig(checkpoint_retention=100)
@@ -459,7 +457,6 @@ def _retrieval_config(
         search_blocks_max_k=_optional_positive_int(table, "search_blocks_max_k", default=defaults.search_blocks_max_k, context="[agent.retrieval]"),
         ask_grc_docs_default_k=_optional_positive_int(table, "ask_grc_docs_default_k", default=defaults.ask_grc_docs_default_k, context="[agent.retrieval]"),
         ask_grc_docs_max_k=_optional_positive_int(table, "ask_grc_docs_max_k", default=defaults.ask_grc_docs_max_k, context="[agent.retrieval]"),
-        vector_cache_size=_optional_positive_int(table, "vector_cache_size", default=defaults.vector_cache_size, context="[agent.retrieval]"),
     )
 
 

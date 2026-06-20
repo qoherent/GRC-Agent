@@ -22,13 +22,10 @@ import os
 import sqlite3
 import struct
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from grc_agent.runtime.block_semantics import evaluated_param_hides
 from grc_agent.runtime.doc_answer import get_embedding
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 

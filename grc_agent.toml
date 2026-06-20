@@ -22,7 +22,6 @@ search_blocks_default_k = 5
 search_blocks_max_k = 10
 ask_grc_docs_default_k = 3
 ask_grc_docs_max_k = 6
-lexical_cache_size = 64
 
 [agent.history]
 checkpoint_retention = 100

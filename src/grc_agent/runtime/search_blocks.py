@@ -50,7 +50,6 @@ def search_blocks(
     query: str,
     k: int | None = None,
     debug: bool = False,
-    enrich: bool = False,
 ) -> "ToolResult":
     """Vector search over the GNU Radio catalog.
 
@@ -80,7 +79,7 @@ def search_blocks(
         else int(k)
     )
     limit = max(1, min(limit_value, agent._retrieval_cfg.search_blocks_max_k))
-    cacheable = not debug and not enrich
+    cacheable = not debug
 
     cache_key: tuple[str, int, str] | None = None
     if cacheable:

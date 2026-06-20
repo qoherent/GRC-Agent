@@ -37,8 +37,6 @@ class PortDomain(StrEnum):
 # Used as a secondary signal when the platform's native role discriminator
 # (is_variable/is_import/is_snippet) is unavailable. Read from the block's
 # YAML flags via the catalog descriptor — not a hardcoded category allowlist.
-_CONTROL_CATEGORY_HINTS: frozenset[str] = frozenset()  # deprecated — kept empty for compat
-_NOT_DSP_FLAG = "not_dsp"
 _SEMANTIC_FLAG_NAMES: frozenset[str] = frozenset({"not_dsp", "disable_bypass", "throttle"})
 
 
