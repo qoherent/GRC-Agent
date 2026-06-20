@@ -122,14 +122,24 @@ def _gnu_platform_block_metadata(block_type: str) -> dict[str, Any]:
 
 
 def _native_role_from_block_class(block_class: Any) -> str | None:
-    """Return the canonical BlockRole from GRC's native block class booleans."""
-    if getattr(block_class, "is_variable", False):
+    """Return the canonical BlockRole from GRC's native block class signals.
+
+    GRC's ``is_variable``/``is_import``/``is_snippet``/``is_virtual_or_pad``
+    are ``lazy_property`` descriptors — accessing them on the CLASS (not an
+    instance) returns the descriptor object itself, which is always truthy.
+    So we can't use ``getattr(cls, 'is_variable', False)`` on the class.
+
+    Instead we use the class-level ``value`` attribute: GRC sets it to the
+    variable's value-param key name (e.g. ``'value'``) for variable blocks,
+    and ``None`` for all other blocks. This is the same discriminator
+    ``is_variable_block`` and ``_native_core_block_ids`` use.
+    """
+    # Variable blocks: cls.value is the name of the value parameter
+    if getattr(block_class, "value", None) is not None:
         return BlockRole.VARIABLE_OR_CONTROL
-    if getattr(block_class, "is_import", False):
-        return BlockRole.METADATA
-    if getattr(block_class, "is_snippet", False):
-        return BlockRole.METADATA
-    if getattr(block_class, "is_virtual_or_pad", False):
+    # Virtual sink/source: check the key name (platform convention)
+    key = getattr(block_class, "key", "")
+    if isinstance(key, str) and key in ("virtual_sink", "virtual_source"):
         return BlockRole.MESSAGE_OR_EVENT
     return None
 
