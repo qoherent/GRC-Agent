@@ -208,98 +208,20 @@ def search_blocks(
         if block is None:
             continue
         label = _string_value(block.payload.get("label")) or bid
-        raw_params = block.payload.get("parameters") or []
-        all_param_ids = [p.get("id") for p in raw_params if p.get("id")]
-        # Build {id: default} so GRC can evaluate conditional ``hide`` expressions
-        def _default(p: dict[str, Any]) -> str:
-            d = p.get("default")
-            return "" if d is None else str(d)
-        param_values = {str(p.get("id")): _default(p) for p in raw_params if p.get("id")}
-        # Filter to essential params using native GRC methods (same filters
-        # as _compact_catalog_details: hide != 'all' + exclude Advanced/Config).
-        # Applied here so the summary also gets essential params, not styling.
-        from grc_agent.runtime.catalog_vector import _visible_param_keys
-        visible_ids = _visible_param_keys(bid, all_param_ids, param_values)
-        param_cats = _param_categories(bid)
-        essential_ids = [
-            pid for pid in visible_ids
-            if param_cats.get(pid, DEFAULT_PARAM_TAB) not in _EXCLUDED_PARAM_CATEGORIES
-        ]
-        categories = [
-            " ".join(part for part in path if path)
-            for path in getattr(block, "category_paths", ())
-        ]
-        summary = agent_module._compact_block_summary(
-            _catalog_summary(
-                documentation=_string_value(block.payload.get("documentation")) or "",
-                params=essential_ids,
-                inputs=[
-                    p.get("id")
-                    for p in (block.payload.get("inputs") or [])
-                    if p.get("id")
-                ],
-                outputs=[
-                    p.get("id")
-                    for p in (block.payload.get("outputs") or [])
-                    if p.get("id")
-                ],
-                categories=categories,
-            )
-        )
-        rows.append(
-            {
-                "block_id": bid,
-                "name": label,
-                "summary": summary,
-                "distance": float(neighbour.get("distance", 1.0)),
-                "match_type": "vector",
-                "why": _vector_why(neighbour, label),
-                "_param_values": param_values,
-                "_raw_params": raw_params,
-            }
-        )
+        distance = float(neighbour.get("distance", 1.0))
+        rows.append({
+            "block_id": bid,
+            "name": label,
+            "distance": distance,
+        })
 
     limited = rows[:limit]
     output_truncated = len(rows) > len(limited)
 
-    if not debug:
-        for item in limited:
-            details = _compact_catalog_details(
-                str(item["block_id"]),
-                item.pop("_param_values", {}),
-                item.pop("_raw_params", []),
-            )
-            if details:
-                    item["catalog"] = details
-        limited = [
-            {
-                "block_id": str(item["block_id"]),
-                "name": str(item["name"]),
-                "summary": str(item["summary"]),
-                "match_type": str(item["match_type"]),
-                "why": str(item["why"]),
-                "distance": float(item.get("distance", 0.0)),
-                **(
-                    {"catalog": item["catalog"]}
-                    if isinstance(item.get("catalog"), dict)
-                    else {}
-                ),
-            }
-            for item in limited
-        ]
-
-    text_lines: list[str] = []
-    if not debug:
-        for idx, item in enumerate(limited, 1):
-            bid = str(item.get("block_id", ""))
-            name = str(item.get("name", ""))
-            text_lines.append(f"{idx}. ID: {bid} | Name: {name}")
-
-    payload = {
+    payload: dict[str, Any] = {
         "ok": True,
         "query": q,
         "results": limited,
-        "retrieval_mode": "vector",
         "output_truncated": output_truncated,
     }
 
