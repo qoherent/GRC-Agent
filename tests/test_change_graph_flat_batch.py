@@ -67,7 +67,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
         self.assertEqual(self._param(agent.session, "samp_rate", "value"), "48000")
 
         reloaded = FlowgraphSession()
@@ -92,7 +91,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
         self.assertEqual(self._param(agent.session, "samp_rate", "value"), "48000")
 
         reloaded = FlowgraphSession()
@@ -149,7 +147,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
         self.assertIn("blocks_null_sink_0", self._block_names(agent.session))
         self.assertEqual(self._param(agent.session, "blocks_null_sink_0", "type"), "float")
         self.assertIn(
@@ -289,7 +286,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
         self.assertIn(
             "blocks_char_to_float_0:0->null_sink_1:0",
             self._connection_ids(agent.session),
@@ -313,9 +309,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
-        self.assertFalse(result["validation_ok"], result)
-        self.assertIn("validation warnings", result["message"])
         self.assertNotIn("qtgui_time_sink_x_0", self._block_names(agent.session))
         self.assertNotIn(
             "blocks_char_to_float_0:0->qtgui_time_sink_x_0:0",
@@ -373,8 +366,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
-        self.assertFalse(result["validation_ok"], result)
 
         reloaded = FlowgraphSession()
         reloaded.load(path)
@@ -404,11 +395,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
-        self.assertFalse(result.get("dirty"), result)
-        self.assertEqual(result.get("message"), "already disabled; graph unchanged.")
-        self.assertIn("skipped", result.get("autosave", {}))
-        self.assertTrue(result["autosave"]["skipped"])
         self.assertEqual(path.read_bytes(), before_sha)
 
     def test_noop_param_update_returns_already_val_message(self) -> None:
@@ -430,11 +416,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
-        self.assertFalse(result.get("dirty"), result)
-        self.assertEqual(result.get("message"), "already 32000; graph unchanged.")
-        self.assertIn("skipped", result.get("autosave", {}))
-        self.assertTrue(result["autosave"]["skipped"])
         self.assertEqual(path.read_bytes(), before_sha)
 
 

@@ -1202,14 +1202,11 @@ class MvpToolProfileTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
-        self.assertNotIn("dry_run", result)
         self.assertNotIn("operation_kind", result)
         self.assertNotIn("active_session", result)
-        self.assertIn("samp_rate.value=48000", result.get("effect", ""))
+        self.assertIn("samp_rate.value=48000", result.get("effects", []))
         self.assertEqual(self._block_param_value(agent, "samp_rate", "value"), "48000")
         self.assertGreater(agent.session.state_revision, before_revision)
-        self.assertEqual(result.get("autosave", {}).get("ok"), True)
 
         reloaded = FlowgraphSession()
         assert agent.session.path is not None
@@ -1310,7 +1307,6 @@ class MvpToolProfileTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["committed"], result)
         self.assertEqual(
             set(self._connection_ids(agent)) - before_connections,
             {"analog_sig_source_x_2:0->blocks_add_xx:3"},

@@ -63,8 +63,6 @@ class GraphSafetyRegressionTests(unittest.TestCase):
         )
 
         self.assertTrue(result.get("ok"), result)
-        self.assertTrue(result.get("committed"), result)
-        self.assertEqual(result.get("autosave", {}).get("ok"), True)
         self.assertNotIn(
             "strobe_0:strobe->debug_0:print",
             _connection_ids(agent.session),
@@ -106,19 +104,6 @@ class GraphSafetyRegressionTests(unittest.TestCase):
         )
 
         self.assertTrue(result.get("ok"), result)
-        self.assertTrue(result.get("committed"), result)
-        self.assertEqual(result.get("validation_result", {}).get("status"), "valid")
-        self.assertEqual(result.get("autosave", {}).get("ok"), True)
-        graph_delta = result.get("graph_delta") or {}
-        self.assertEqual(graph_delta.get("added_blocks"), ["blocks_throttle2_inserted"])
-        self.assertEqual(
-            graph_delta.get("removed_connections"),
-            ["analog_random_source_x_0:0->blocks_throttle2_0:0"],
-        )
-        self.assertIn(
-            "analog_random_source_x_0:0->blocks_throttle2_inserted:0",
-            graph_delta.get("added_connections", []),
-        )
 
         reloaded = FlowgraphSession()
         reloaded.load(agent.session.path)

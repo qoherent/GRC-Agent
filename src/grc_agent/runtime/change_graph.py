@@ -261,36 +261,30 @@ def dispatch_flat_change_graph_batch(
             validation_result=validation_result,
         )
     operation_effects = _operation_effects(normalized_operations)
-    # Strip compiler stdout from validation_result — it's ~70 tokens of
-    # boilerplate (welcome banner, block paths) the model never needs.
-    compact_validation = _strip_validation_stdout(validation_result)
-    # Compact autosave to just {ok, skipped} — drop path/message/error_type
-    # (those are internal; tests only assert on .ok and .skipped).
-    raw_autosave = result.get("autosave") if isinstance(result, dict) else None
-    compact_autosave = None
-    if isinstance(raw_autosave, dict):
-        compact_autosave = {
-            "ok": raw_autosave.get("ok"),
-            "skipped": raw_autosave.get("skipped"),
+    if ok:
+        # Success: minimal payload — just confirmation + what changed.
+        # The model doesn't need validation stdout, autosave paths, or
+        # redundant flags. If it needs to verify, it calls inspect_graph.
+        payload: dict[str, Any] = {
+            "ok": True,
+            "effects": operation_effects,
         }
-        if raw_autosave.get("error_type"):
-            compact_autosave["error_type"] = raw_autosave.get("error_type")
-        if raw_autosave.get("message"):
-            compact_autosave["message"] = raw_autosave.get("message")
-    payload: dict[str, Any] = _drop_empty_result_fields(
-        {
-            "ok": ok,
-            "committed": ok,
-            "state_revision": agent.session.state_revision,
-            "effect": operation_effects[0] if len(operation_effects) == 1 else None,
-            "effects": operation_effects if len(operation_effects) > 1 else None,
-            "graph_delta": graph_delta,
-            "validation_result": compact_validation,
-            "validation_ok": result.get("validation_ok") if isinstance(result, dict) else None,
-            "autosave": compact_autosave,
-            "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
-        }
-    )
+    else:
+        # Failure: full detail so the model can recover.
+        payload: dict[str, Any] = _drop_empty_result_fields(
+            {
+                "ok": False,
+                "committed": False,
+                "state_revision": agent.session.state_revision,
+                "effect": operation_effects[0] if len(operation_effects) == 1 else None,
+                "effects": operation_effects if len(operation_effects) > 1 else None,
+                "graph_delta": graph_delta,
+                "validation_result": _strip_validation_stdout(validation_result),
+                "validation_ok": result.get("validation_ok") if isinstance(result, dict) else None,
+                "autosave": _compact_autosave(result.get("autosave") if isinstance(result, dict) else None),
+                "message": result.get("message") if isinstance(result, dict) else "change_graph failed",
+            }
+        )
     if ok:
         agent.session._last_failed_ops_hash = None
     if isinstance(result, dict):
@@ -870,13 +864,7 @@ def _drop_empty_result_fields(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _strip_validation_stdout(validation_result: Any) -> dict[str, Any] | None:
-    """Return a compact validation dict without compiler stdout.
-
-    The GRC compiler stdout (welcome banner, block paths, loading
-    messages) is ~70 tokens of boilerplate the model never needs.
-    Keep only: status, returncode, stderr (errors only), and native
-    validation errors if present.
-    """
+    """Return a compact validation dict without compiler stdout."""
     if not isinstance(validation_result, dict):
         return None
     compact: dict[str, Any] = {}
@@ -894,6 +882,21 @@ def _strip_validation_stdout(validation_result: Any) -> dict[str, Any] | None:
     if isinstance(errors, list) and errors:
         compact["errors"] = errors
     return compact if compact else None
+
+
+def _compact_autosave(raw_autosave: Any) -> dict[str, Any] | None:
+    """Compact autosave to just {ok, skipped} (+ error fields on failure)."""
+    if not isinstance(raw_autosave, dict):
+        return None
+    compact: dict[str, Any] = {
+        "ok": raw_autosave.get("ok"),
+        "skipped": raw_autosave.get("skipped"),
+    }
+    if raw_autosave.get("error_type"):
+        compact["error_type"] = raw_autosave.get("error_type")
+    if raw_autosave.get("message"):
+        compact["message"] = raw_autosave.get("message")
+    return compact
 
 
 def _operation_effects(operations: Any) -> list[str]:

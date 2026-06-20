@@ -962,12 +962,12 @@ class GrcAgent:
             if (
                 isinstance(checkpoint_id, str)
                 and checkpoint_id
-                and not result.get("checkpoint_id")
             ):
-                result["checkpoint_id"] = checkpoint_id
-            telemetry = result.get("dispatch_telemetry")
-            if isinstance(telemetry, dict):
-                telemetry["checkpoint_created"] = True
+                # Store in telemetry (internal), NOT in the model-visible result.
+                telemetry = result.get("dispatch_telemetry")
+                if isinstance(telemetry, dict):
+                    telemetry["checkpoint_id"] = checkpoint_id
+                    telemetry["checkpoint_created"] = True
         except Exception:
             logger.exception("history_accepted_checkpoint_failed tool=%s", tool_name)
 
@@ -1258,9 +1258,13 @@ class GrcAgent:
             "ambiguous_rewire_new_endpoint",
             "ambiguous_target",
         }
-        checkpoint_created = isinstance(result.get("checkpoint_id"), str) and bool(
-            result.get("checkpoint_id")
-        )
+        # Check if checkpoint was created (stored in dispatch_telemetry by the
+        # history journal, not in the model-visible result dict).
+        dispatch_telem = result.get("dispatch_telemetry")
+        if isinstance(dispatch_telem, dict):
+            checkpoint_created = bool(dispatch_telem.get("checkpoint_id"))
+        else:
+            checkpoint_created = False
         telemetry = {
             "wrapper_name": wrapper_name,
             "wrapper_action": wrapper_action,

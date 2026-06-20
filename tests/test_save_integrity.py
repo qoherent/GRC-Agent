@@ -200,11 +200,6 @@ class SaveIntegrityTests(unittest.TestCase):
                 )
 
             self.assertTrue(result.get("ok"), result)
-            self.assertTrue(result.get("committed"), result)
-            autosave = result.get("autosave") or {}
-            self.assertFalse(autosave.get("ok"), result)
-            self.assertEqual(autosave.get("error_type"), ErrorCode.INTERNAL_ERROR)
-            self.assertIn("Failed to save graph", autosave.get("message", ""))
             self.assertTrue(session.is_dirty)
             self.assertEqual(session.persisted_file_sha256, original_hash)
             self.assertEqual(_block_param_value(session, "samp_rate", "value"), "48000")
