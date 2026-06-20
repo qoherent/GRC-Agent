@@ -1,0 +1,47 @@
+[
+  {
+    "question": "What is a PMT?",
+    "ok": true,
+    "confidence": "low",
+    "degraded_retrieval": true,
+    "fallback_used": true,
+    "top_source": "AcademicPapers",
+    "answer_head": "Failed to connect to the local chat completion service to generate RAG answer."
+  },
+  {
+    "question": "What are stream tags?",
+    "ok": true,
+    "confidence": "low",
+    "degraded_retrieval": true,
+    "fallback_used": true,
+    "top_source": "ALSAPulseAudio",
+    "answer_head": "Failed to connect to the local chat completion service to generate RAG answer."
+  },
+  {
+    "question": "How do message ports differ from stream ports?",
+    "ok": true,
+    "confidence": "low",
+    "degraded_retrieval": true,
+    "fallback_used": true,
+    "top_source": "AcademicPapers",
+    "answer_head": "Failed to connect to the local chat completion service to generate RAG answer."
+  },
+  {
+    "question": "What does the throttle block do?",
+    "ok": true,
+    "confidence": "low",
+    "degraded_retrieval": true,
+    "fallback_used": true,
+    "top_source": "AGC",
+    "answer_head": "Failed to connect to the local chat completion service to generate RAG answer."
+  },
+  {
+    "question": "What is the sample rate?",
+    "ok": true,
+    "confidence": "low",
+    "degraded_retrieval": true,
+    "fallback_used": true,
+    "top_source": "ALSAPulseAudio",
+    "answer_head": "Failed to connect to the local chat completion service to generate RAG answer."
+  }
+]
