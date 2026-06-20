@@ -89,13 +89,8 @@ def search_blocks(
             _VECTOR_CACHE.move_to_end(cache_key)
             payload = {
                 "ok": True,
-                "query": q,
                 "results": cached["results"],
-                "degraded_retrieval": bool(cached.get("degraded_retrieval", False)),
-                "retrieval_mode": "vector",
                 "output_truncated": bool(cached.get("output_truncated", False)),
-                "message": "Block candidates returned.",
-                "cache": "hit",
             }
             result = agent._payload_result(
                 "search_blocks", payload, include_active_session=False
@@ -207,19 +202,10 @@ def search_blocks(
         block = snapshot.blocks.get(bid)
         if block is None:
             continue
-        label = _string_value(block.payload.get("label")) or bid
-        summary = _catalog_summary(
-            documentation=_string_value(block.payload.get("documentation")) or "",
-            params=[p.get("id") for p in (block.payload.get("parameters") or []) if p.get("id")],
-            inputs=[p.get("id") for p in (block.payload.get("inputs") or []) if p.get("id")],
-            outputs=[p.get("id") for p in (block.payload.get("outputs") or []) if p.get("id")],
-            categories=[" ".join(part for part in path if path) for path in getattr(block, "category_paths", ())],
-        )
-        summary = agent_module._compact_block_summary(summary)
+        param_ids = [p.get("id") for p in (block.payload.get("parameters") or []) if p.get("id")][:3]
         rows.append({
-                "block_id": bid,
-                "name": label,
-                "summary": summary,
+                "id": bid,
+                "params": ", ".join(param_ids) if param_ids else "",
             })
 
     limited = rows[:limit]
@@ -235,8 +221,6 @@ def search_blocks(
     if cache_key is not None and cacheable:
         _VECTOR_CACHE[cache_key] = {
             "results": limited,
-            "degraded_retrieval": False,
-            "retrieval_mode": "vector",
             "output_truncated": output_truncated,
         }
         _VECTOR_CACHE.move_to_end(cache_key)

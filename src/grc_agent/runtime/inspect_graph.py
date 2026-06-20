@@ -1152,7 +1152,6 @@ def query_knowledge(
         result = _docs(agent, question=query, debug=debug)
 
     if isinstance(result, dict):
-        result.pop("active_session", None)  # internal snapshot, not needed for discovery
-        result["domain"] = domain
-        result["query_knowledge_time"] = round(time.monotonic() - started, 3)
+        result.pop("active_session", None)
+    return result
     return result
