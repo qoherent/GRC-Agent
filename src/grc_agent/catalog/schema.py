@@ -93,6 +93,16 @@ class NormalizedParameter:
             if value not in (None, [], {})
         }
 
+    def to_compact_dict(self) -> dict[str, Any]:
+        """Discovery shape: id/label/dtype/default only — no options."""
+        payload = {
+            "id": self.id,
+            "label": self.label,
+            "dtype": self.dtype,
+            "default": self.default,
+        }
+        return {k: v for k, v in payload.items() if v is not None}
+
 
 @dataclass(frozen=True)
 class NormalizedPort:
@@ -126,6 +136,15 @@ class NormalizedPort:
             if value is not None
         }
 
+    def to_compact_dict(self) -> dict[str, Any]:
+        """Discovery shape: id/domain/dtype only — no multiplicity/optional."""
+        payload = {
+            "id": self.id,
+            "domain": self.domain,
+            "dtype": self.dtype,
+        }
+        return {k: v for k, v in payload.items() if v is not None}
+
 
 @dataclass(frozen=True)
 class BlockDescription:
@@ -144,25 +163,70 @@ class BlockDescription:
     warnings: list[str]
     signature: str
 
-    def to_payload(self) -> dict[str, Any]:
-        payload = {
+    def to_payload(
+        self,
+        *,
+        hides: dict[str, str] | None = None,
+        param_categories: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Build the discovery-shape payload (what the model sees).
+
+        Applies three native GRC filters (see ``docs/GNU_NATIVE_METHODS.md``):
+
+        1. ``hide != 'all'`` — drops params GRC itself hides at runtime.
+        2. ``category != ADVANCED_PARAM_TAB`` — drops auto-added metadata.
+        3. ``category != 'Config'`` — drops 100%-styling params.
+
+        Remaining params are sorted by GRC prominence (``hide='none'``
+        first, then ``hide='part'``) and returned with ``id``, ``label``,
+        ``dtype``, ``default`` only — no ``options``/``option_labels``
+        (editing context; ``inspect_graph`` provides them when needed).
+        """
+        from grc_agent.catalog.loaders import (
+            evaluated_param_hides_for_block,
+            param_categories_for_block,
+        )
+
+        if param_categories is None:
+            param_categories = param_categories_for_block(self.block_id)
+        if hides is None:
+            hides = evaluated_param_hides_for_block(self.block_id)
+
+        if not hides:
+            hides = {
+                parameter.id: parameter.hide or "none"
+                for parameter in self.parameters
+            }
+
+        cat_by_id = param_categories
+        visible_params: list[NormalizedParameter] = []
+        for parameter in self.parameters:
+            if hides.get(parameter.id, "all") == "all":
+                continue
+            category = cat_by_id.get(parameter.id) or parameter.category or DEFAULT_PARAM_TAB
+            if category in EXCLUDED_PARAM_CATEGORIES:
+                continue
+            visible_params.append(parameter)
+
+        def prominence_key(p: NormalizedParameter) -> tuple[int, str]:
+            hid = hides.get(p.id, "all")
+            rank = 0 if hid == "none" else 1 if hid == "part" else 2
+            return (rank, p.id)
+
+        visible_params.sort(key=prominence_key)
+
+        payload: dict[str, Any] = {
             "ok": True,
             "block_id": self.block_id,
             "label": self.label,
-            "category_path": list(self.category_path),
-            "parameters": [parameter.to_dict() for parameter in self.parameters],
-            "inputs": [port.to_dict() for port in self.inputs],
-            "outputs": [port.to_dict() for port in self.outputs],
-            "signature": self.signature,
+            "parameters": [p.to_compact_dict() for p in visible_params],
+            "inputs": [port.to_compact_dict() for port in self.inputs],
+            "outputs": [port.to_compact_dict() for port in self.outputs],
         }
-        if self.flags:
-            payload["flags"] = list(self.flags)
-        if self.asserts:
-            payload["asserts"] = list(self.asserts)
         if self.documentation is not None:
             payload["documentation"] = self.documentation
-        if self.doc_url is not None:
-            payload["doc_url"] = self.doc_url
+        if self.asserts:
+            payload["asserts"] = list(self.asserts)
         if self.warnings:
             payload["warnings"] = list(self.warnings)
         return payload

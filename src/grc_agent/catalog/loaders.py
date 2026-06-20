@@ -22,10 +22,12 @@ from .schema import (
     CatalogFiles,
     CatalogSnapshot,
     RawCatalogBlock,
+    build_signature,
     hierarchy_warnings,
     normalize_parameter,
     normalize_port,
     optional_string,
+    preserved_string_values,
     select_category_path,
 )
 
@@ -311,7 +313,7 @@ def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
 
     flags = preserved_string_values(payload.get("flags"))
     asserts = preserved_string_values(payload.get("asserts"))
-    signature = build_signature(raw_block.block_id, parameters, inputs, outputs)
+    signature = build_signature(raw_block.block_id, parameters)
 
     return BlockDescription(
         block_id=raw_block.block_id,
