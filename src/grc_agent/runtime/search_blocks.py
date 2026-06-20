@@ -299,11 +299,8 @@ def search_blocks(
         "ok": True,
         "query": q,
         "results": limited,
-        **({"results_text": "\n".join(text_lines)} if text_lines else {}),
-        "degraded_retrieval": False,
         "retrieval_mode": "vector",
         "output_truncated": output_truncated,
-        "message": "Block candidates returned.",
     }
 
     if cache_key is not None and cacheable:

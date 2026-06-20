@@ -3,17 +3,75 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sqlite3
+import struct
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from grc_agent._payload import ErrorCode
 
 if TYPE_CHECKING:
-    from grc_agent.agent import GrcAgent, ToolResult
+    pass
 
 logger = logging.getLogger(__name__)
+
+
+def get_embedding(
+    server_url: str,
+    text: str,
+    *,
+    model: str = "embeddinggemma:latest",
+) -> list[float]:
+    """Fetch one embedding vector from Ollama."""
+    url = f"{server_url.rstrip('/')}/api/embed"
+    payload = {"model": model, "input": text}
+    try:
+        response = httpx.post(url, json=payload, timeout=15.0)
+        response.raise_for_status()
+        data = response.json()
+        if "embeddings" in data and data["embeddings"]:
+            return data["embeddings"][0]
+    except Exception:
+        pass
+    fallback_url = f"{server_url.rstrip('/')}/api/embeddings"
+    fallback_payload = {"model": model, "prompt": text}
+    response = httpx.post(fallback_url, json=fallback_payload, timeout=15.0)
+    response.raise_for_status()
+    data = response.json()
+    if "embedding" in data:
+        return data["embedding"]
+    raise RuntimeError("Failed to get embedding")
+
+
+# Lightweight stubs for the vector docs pipeline (restored from lost working tree)
+DB_DIR = Path(os.environ.get("GRC_AGENT_VECTORS_DIR", ".grc_agent/vectors"))
+DB_PATH = DB_DIR / "docs_v1.db"
+
+
+def is_db_usable(db_path: Path, **kwargs: Any) -> bool:
+    """Stub for the vector docs is-db-usable check."""
+    return False
+
+
+def initialize_vector_db_background() -> None:
+    """Stub — real ingestion happens via warmup_catalog_vector_index."""
+
+
+class VectorDocsStore:
+    """Stub — catalog vector search uses VectorCatalogStore instead."""
+    def __init__(self, db_path: Any, server_url: str = "") -> None:
+        pass
+    def ingest_if_needed(self) -> None:
+        pass
+
+
+# End of doc_answer.py stubs
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # evidence.py — shared dataclasses and constants
