@@ -210,15 +210,22 @@ def search_blocks(
             continue
         label = _string_value(block.payload.get("label")) or bid
         raw_params = block.payload.get("parameters") or []
-        params = [p.get("id") for p in raw_params if p.get("id")]
+        all_param_ids = [p.get("id") for p in raw_params if p.get("id")]
         # Build {id: default} so GRC can evaluate conditional ``hide`` expressions
-        # (e.g. "${ ('none' if len(name) > 0 else 'part') }"). Without values,
-        # expressions fall back to their unevaluated state and ``hide='all'``
-        # GUI-styling params leak into the output.
         def _default(p: dict[str, Any]) -> str:
             d = p.get("default")
             return "" if d is None else str(d)
         param_values = {str(p.get("id")): _default(p) for p in raw_params if p.get("id")}
+        # Filter to essential params using native GRC methods (same filters
+        # as _compact_catalog_details: hide != 'all' + exclude Advanced/Config).
+        # Applied here so the summary also gets essential params, not styling.
+        from grc_agent.runtime.catalog_vector import _visible_param_keys
+        visible_ids = _visible_param_keys(bid, all_param_ids, param_values)
+        param_cats = _param_categories(bid)
+        essential_ids = [
+            pid for pid in visible_ids
+            if param_cats.get(pid, DEFAULT_PARAM_TAB) not in _EXCLUDED_PARAM_CATEGORIES
+        ]
         categories = [
             " ".join(part for part in path if path)
             for path in getattr(block, "category_paths", ())
@@ -226,7 +233,7 @@ def search_blocks(
         summary = agent_module._compact_block_summary(
             _catalog_summary(
                 documentation=_string_value(block.payload.get("documentation")) or "",
-                params=params,
+                params=essential_ids,
                 inputs=[
                     p.get("id")
                     for p in (block.payload.get("inputs") or [])
@@ -394,24 +401,21 @@ def _catalog_summary(
     categories: list[str],
     templates_make: str | None = None,
 ) -> str:
+    """Compose a fallback summary when documentation is absent.
+
+    Params/inputs/outputs are expected to be already filtered by the
+    caller (essential params only, via native GRC methods). No [:N]
+    caps here — the caller's filter is the authority on what's relevant.
+    """
     if documentation:
         return " ".join(documentation.split())
     parts: list[str] = []
     if inputs:
-        inp_str = ", ".join(inputs[:4])
-        if len(inputs) > 4:
-            inp_str += f" ... [TRUNCATED inputs: was {len(inputs)}, kept 4]"
-        parts.append("inputs: " + inp_str)
+        parts.append("inputs: " + ", ".join(inputs))
     if outputs:
-        out_str = ", ".join(outputs[:4])
-        if len(outputs) > 4:
-            out_str += f" ... [TRUNCATED outputs: was {len(outputs)}, kept 4]"
-        parts.append("outputs: " + out_str)
+        parts.append("outputs: " + ", ".join(outputs))
     if params:
-        par_str = "; ".join(params[:4])
-        if len(params) > 4:
-            par_str += f" ... [TRUNCATED params: was {len(params)}, kept 4]"
-        parts.append("params: " + par_str)
+        parts.append("params: " + "; ".join(params))
     if categories:
         parts.append("category: " + categories[0])
     if templates_make:

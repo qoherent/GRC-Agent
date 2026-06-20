@@ -54,18 +54,12 @@ MAX_CONTEXT_HOPS = 4
 MAX_CONTEXT_MAX_NODES = 50
 MAX_CONTEXT_PARAMETER_SAMPLE = 6
 
-
-def _block_role_hint(block_type: str) -> str:
-    lowered = block_type.lower()
-    if "source" in lowered:
-        return "; source"
-    if "sink" in lowered:
-        return "; sink"
-    if "throttle" in lowered:
-        return "; throttle"
-    if "char_to_float" in lowered:
-        return "; converter"
-    return ""
+# Active-session payload preview limits (model-visible every turn).
+# These are display caps for the compact session snapshot, not param/block
+# filters. See GuardrailsConfig for the config-driven equivalents.
+_MAX_CONNECTION_PREVIEW = 8
+_MAX_VARIABLE_PREVIEW = 8
+_MAX_BLOCK_PREVIEW = 6
 
 
 class FlowgraphSession:
@@ -563,6 +557,17 @@ class FlowgraphSession:
         )
         variable_preview: list[str] = []
         block_preview: list[str] = []
+        for block in flowgraph.blocks:
+            if is_variable_block(block.block_type):
+                value = block.params.get("parameters", {}).get("value", "")
+                variable_preview.append(f"{block.instance_name}={value}")
+                continue
+            block_preview.append(
+                f"{block.instance_name} ({block.block_type})"
+            )
+
+        total_connections = len(flowgraph.connections)
+        connections_sorted = sorted(flowgraph.connections, key=self._connection_sort_key)
         connection_preview = [
             shared_connection_id(
                 connection.src_block,
@@ -570,24 +575,25 @@ class FlowgraphSession:
                 connection.dst_block,
                 connection.dst_port,
             )
-            for connection in sorted(
-                flowgraph.connections,
-                key=self._connection_sort_key,
-            )[:8]
+            for connection in connections_sorted[:_MAX_CONNECTION_PREVIEW]
         ]
-        for block in flowgraph.blocks:
-            if is_variable_block(block.block_type):
-                value = block.params.get("parameters", {}).get("value", "")
-                variable_preview.append(f"{block.instance_name}={value}")
-                continue
-            role = _block_role_hint(block.block_type)
-            block_preview.append(
-                f"{block.instance_name} ({block.block_type}{role})"
-            )
+        if total_connections > _MAX_CONNECTION_PREVIEW:
+            connection_preview.append(f"... [TRUNCATED connection_preview: was {total_connections} items, kept {_MAX_CONNECTION_PREVIEW}]")
+
+        total_variables = len(variable_preview)
+        if total_variables > _MAX_VARIABLE_PREVIEW:
+            variable_preview = variable_preview[:_MAX_VARIABLE_PREVIEW]
+            variable_preview.append(f"... [TRUNCATED variable_preview: was {total_variables} items, kept {_MAX_VARIABLE_PREVIEW}]")
+
+        total_non_var_blocks = len(block_preview)
+        if total_non_var_blocks > _MAX_BLOCK_PREVIEW:
+            block_preview = block_preview[:_MAX_BLOCK_PREVIEW]
+            block_preview.append(f"... [TRUNCATED block_preview: was {total_non_var_blocks} items, kept {_MAX_BLOCK_PREVIEW}]")
+
         if variable_preview:
             snapshot["variable_preview"] = variable_preview
         if block_preview:
-            snapshot["block_preview"] = block_preview[:6]
+            snapshot["block_preview"] = block_preview
         if connection_preview:
             snapshot["connection_preview"] = connection_preview
         return snapshot
@@ -1391,19 +1397,27 @@ class FlowgraphSession:
         if isinstance(value, str):
             return " ".join(value.split()) or '""'
         if isinstance(value, (list, tuple)):
-            return (
-                "["
-                + ", ".join(FlowgraphSession._compact_value(item) for item in value[:4])
-                + (", ..." if len(value) > 4 else "")
-                + "]"
-            )
+            n = len(value)
+            if n > 4:
+                return (
+                    "["
+                    + ", ".join(FlowgraphSession._compact_value(item) for item in value[:4])
+                    + f", ... [TRUNCATED list: was {n} items, kept 4]"
+                    + "]"
+                )
+            return "[" + ", ".join(FlowgraphSession._compact_value(item) for item in value) + "]"
         if isinstance(value, dict):
-            items = list(value.items())[:4]
+            n = len(value)
+            if n > 4:
+                items = list(value.items())[:4]
+                body = ", ".join(
+                    f"{key}={FlowgraphSession._compact_value(item)}" for key, item in items
+                )
+                return "{" + body + f", ... [TRUNCATED dict: was {n} keys, kept 4]" + "}"
             body = ", ".join(
-                f"{key}={FlowgraphSession._compact_value(item)}" for key, item in items
+                f"{key}={FlowgraphSession._compact_value(item)}" for key, item in value.items()
             )
-            suffix = ", ..." if len(value) > 4 else ""
-            return "{" + body + suffix + "}"
+            return "{" + body + "}"
         return str(value)
 
     # Parsing and serialization helpers

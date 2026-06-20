@@ -14,6 +14,7 @@ from grc_agent.runtime.tool_context import is_variable_block
 logger = logging.getLogger(__name__)
 
 from grc_agent._payload import ErrorCode
+from grc_agent.catalog.loaders import get_catalog_snapshot
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent._payload import Block, Connection
 from grc_agent.session_ops import (
@@ -1524,12 +1525,71 @@ def _require_block_rules(
     )
 
 
-# Core/special blocks that every GRC graph uses. These are the
-# non-DSP blocks for variables, parameters, configuration, etc.
-_CORE_BLOCK_IDS: tuple[str, ...] = (
-    "variable", "variable_config", "parameter", "options",
-    "import", "snippet", "epy_block", "epy_module",
-)
+def _native_core_block_ids(catalog_root: str | Path | None) -> list[str]:
+    """Return control/core block IDs using GRC's native role discriminators.
+
+    Two native signals:
+      1. Platform ``cls.value`` discriminator + catalog ``Core/Variables``
+         category → identifies variable/control blocks the model can add.
+      2. Platform-internal blocks (those NOT in the catalog YAML —
+         ``import``, ``snippet``, ``epy_block``, ``epy_module``, ``options``)
+         detected by checking which platform keys are absent from the catalog.
+
+    Replaces the stale static ``_CORE_BLOCK_IDS`` tuple. Dynamically
+    adapts when GRC adds new control block types.
+    """
+    core_ids: list[str] = []
+
+    # Signal 1: variable blocks via cls.value + category filter
+    try:
+        from grc_agent.session import _ensure_platform
+
+        platform = _ensure_platform()
+        snap = get_catalog_snapshot(catalog_root)
+        catalog_keys = set(snap.blocks.keys()) if snap else set()
+
+        if platform is not None:
+            for key, cls in getattr(platform, "block_classes", {}).items():
+                key_str = str(key)
+                # cls.value is the native discriminator for variable blocks
+                if getattr(cls, "value", None) is None:
+                    continue
+                # Filter to Core/Variables category (excludes specialized
+                # variable_band_pass_filter_taps etc. in Core/Filters)
+                block = snap.blocks.get(key_str) if snap else None
+                if block:
+                    cats = block.category_paths or ()
+                    cat_flat = "/".join(
+                        part for path in cats for part in path
+                    ).lower()
+                    if "variables" in cat_flat:
+                        core_ids.append(key_str)
+                # Also include variable blocks not in catalog (internal)
+                elif key_str not in catalog_keys and not key_str.startswith("_"):
+                    core_ids.append(key_str)
+    except Exception:
+        pass
+
+    # Signal 2: platform-internal blocks not in catalog (options, import, snippet, etc.)
+    try:
+        from grc_agent.session import _ensure_platform
+
+        platform = _ensure_platform()
+        snap = get_catalog_snapshot(catalog_root)
+        catalog_keys = set(snap.blocks.keys()) if snap else set()
+
+        if platform is not None:
+            for key in getattr(platform, "block_classes", {}):
+                key_str = str(key)
+                if key_str.startswith("_"):
+                    continue
+                if key_str not in catalog_keys and key_str not in core_ids:
+                    # Not in catalog = platform-internal special block
+                    core_ids.append(key_str)
+    except Exception:
+        pass
+
+    return sorted(set(core_ids))
 
 
 def _block_id_suggestions(requested: str, catalog_root: str | Path | None) -> list[str]:
@@ -1538,12 +1598,14 @@ def _block_id_suggestions(requested: str, catalog_root: str | Path | None) -> li
         snap = get_catalog_snapshot(catalog_root)
         all_ids = sorted(snap.blocks.keys())
     except Exception:
-        return list(_CORE_BLOCK_IDS)
+        return _native_core_block_ids(catalog_root)
     # Fuzzy: block_ids containing the requested string as a substring.
     needle = requested.lower()
     fuzzy = [bid for bid in all_ids if needle in bid.lower()][:5]
-    # Always include core blocks so the model knows about 'variable' etc.
-    core_present = [bid for bid in _CORE_BLOCK_IDS if bid in all_ids]
+    # Include core/control blocks via GRC native role discriminators
+    # (is_variable, is_import, is_snippet, is_param) — not a stale allowlist.
+    native_core = set(_native_core_block_ids(catalog_root))
+    core_present = sorted(bid for bid in native_core if bid in all_ids)
     # Dedupe, preserve order.
     seen: set[str] = set()
     result: list[str] = []

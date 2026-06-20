@@ -33,12 +33,12 @@ class PortDomain(StrEnum):
     MESSAGE = "message"
 
 
-# Categories whose blocks are control/variable even when the
-# ``not_dsp`` flag is absent. Mirrors GRC's own variable/widget
-# category names — the fallback is needed when the platform
-# initializer is unavailable and the descriptor only carries
-# category metadata.
-_CONTROL_CATEGORY_HINTS: frozenset[str] = frozenset({"variables", "gui widgets"})
+# GRC's ``not_dsp`` flag is the native signal for control/variable blocks.
+# Used as a secondary signal when the platform's native role discriminator
+# (is_variable/is_import/is_snippet) is unavailable. Read from the block's
+# YAML flags via the catalog descriptor — not a hardcoded category allowlist.
+_CONTROL_CATEGORY_HINTS: frozenset[str] = frozenset()  # deprecated — kept empty for compat
+_NOT_DSP_FLAG = "not_dsp"
 _SEMANTIC_FLAG_NAMES: frozenset[str] = frozenset({"not_dsp", "disable_bypass", "throttle"})
 
 
@@ -206,8 +206,10 @@ def _semantic_role(
 
     if "not_dsp" in flag_set:
         return BlockRole.VARIABLE_OR_CONTROL
-    if not has_any_input and not has_any_output and category_set & _CONTROL_CATEGORY_HINTS:
-        return BlockRole.VARIABLE_OR_CONTROL
+    # No ports + not_dsp already caught above. If we reach here with no
+    # ports, the block is metadata (options, import, snippet, epy_block).
+    if not has_any_input and not has_any_output:
+        return BlockRole.METADATA
     if has_stream_output and not has_stream_input:
         return BlockRole.SOURCE
     if has_stream_input and not has_stream_output:

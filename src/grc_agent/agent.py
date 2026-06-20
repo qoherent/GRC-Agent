@@ -122,6 +122,8 @@ def _user_text_of(message: ChatMessage) -> str:
     return "\n".join(p for p in parts if p)
 
 
+# Display cap for catalog block summaries shown in search_blocks results.
+# Not a param filter — just a prose truncation to keep the discovery view compact.
 _SEARCH_BLOCK_SUMMARY_MAX_CHARS = 120
 _INSTALLED_GRAPH_ROOTS = (
     Path("/usr/share/gnuradio/examples"),
