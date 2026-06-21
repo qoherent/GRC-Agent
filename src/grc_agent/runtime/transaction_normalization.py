@@ -322,7 +322,7 @@ class TransactionNormalizer:
             return None
         if set(params) != {"value"}:
             return None
-        variable_names = [block.instance_name for block in self._session.flowgraph.blocks if is_variable_block(block.block_type)]
+        variable_names = [block.name for block in self._session.flowgraph.blocks if is_variable_block(block.key)]
         if len(variable_names) == 1:
             return variable_names[0]
         return None
@@ -341,7 +341,7 @@ class TransactionNormalizer:
         if self._session is None or self._session.flowgraph is None or not isinstance(identifier, str):
             return None
         exact_match = next(
-            (block.instance_name for block in self._session.flowgraph.blocks if block.instance_name == identifier),
+            (block.name for block in self._session.flowgraph.blocks if block.name == identifier),
             None,
         )
         if exact_match is not None:
@@ -352,7 +352,7 @@ class TransactionNormalizer:
             if not isinstance(parameters, dict):
                 continue
             if parameters.get("id") == identifier:
-                matches.append(block.instance_name)
+                matches.append(block.name)
         if len(matches) == 1:
             return matches[0]
         return None

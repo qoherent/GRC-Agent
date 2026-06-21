@@ -197,7 +197,7 @@ class GraphHistoryJournalTests(unittest.TestCase):
         self.assertTrue(restore["valid"], restore)
         self.assertEqual(
             next(
-                block.params["parameters"]["value"]
+                str(block.params["value"].value)
                 for block in reloaded.flowgraph.blocks
                 if block.name == "samp_rate"
             ),

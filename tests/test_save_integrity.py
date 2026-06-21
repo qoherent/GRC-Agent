@@ -46,7 +46,7 @@ def _block_param_value(session: FlowgraphSession, instance_name: str, param_key:
     assert session.flowgraph is not None
     for block in session.flowgraph.blocks:
         if block.name == instance_name:
-            return block.params["parameters"][param_key]
+            return str(block.params[param_key].value)
     raise AssertionError(f"Block not found: {instance_name}")
 
 

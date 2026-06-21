@@ -34,7 +34,7 @@ class TransactionRollbackTests(unittest.TestCase):
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
         block = next(block for block in session.flowgraph.blocks if block.name == "samp_rate")
-        self.assertEqual(block.params["parameters"]["value"], "32000")
+        self.assertEqual(str(block.params["value"].value), "32000")
 
     def test_apply_edit_preflight_failure_leaves_live_state_unchanged(self) -> None:
         session = self._load_session()

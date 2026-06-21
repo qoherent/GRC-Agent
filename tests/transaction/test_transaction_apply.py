@@ -52,7 +52,7 @@ class TransactionApplyTests(unittest.TestCase):
         self.assertGreater(payload["state_revision_after"], payload["state_revision_before"])
         assert session.flowgraph is not None
         block = next(block for block in session.flowgraph.blocks if block.name == "samp_rate")
-        self.assertEqual(block.params["parameters"]["value"], "48000")
+        self.assertEqual(str(block.params["value"].value), "48000")
         self.assertTrue(session.last_validation_ok)
 
     def test_apply_edit_can_add_detached_variable_block(self) -> None:

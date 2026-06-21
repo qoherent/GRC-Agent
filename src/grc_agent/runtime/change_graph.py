@@ -152,7 +152,8 @@ def dispatch_flat_change_graph_batch(
 
     # Validate the final state.
     validation = validate_and_finalize(fg) if ops_applied else None
-    if errors and not force:
+    validation_ok = validation.native_ok if validation else True
+    if not validation_ok and not force:
         # Rollback: reload from the file to undo in-memory mutations.
         if agent.session.path:
             try:
@@ -160,8 +161,17 @@ def dispatch_flat_change_graph_batch(
                 agent.session.flowgraph = load_flow_graph(agent.session.path)
             except Exception:
                 pass
-
-    committed = len(errors) == 0 or force
+        committed = False
+    elif errors and not force:
+        committed = False
+        if agent.session.path:
+            try:
+                from grc_agent.grc_native_adapter import load_flow_graph
+                agent.session.flowgraph = load_flow_graph(agent.session.path)
+            except Exception:
+                pass
+    else:
+        committed = True
     if committed and ops_applied:
         agent.session.is_dirty = True
         agent.session._bump_state_revision()
@@ -173,7 +183,7 @@ def dispatch_flat_change_graph_batch(
         validation_errors = validation.errors
 
     payload: dict[str, Any] = {
-        "ok": len(errors) == 0,
+        "ok": committed and len(errors) == 0,
         "committed": committed,
         "ops_applied": ops_applied,
         "validation": {"status": validation_status, "errors": validation_errors},
