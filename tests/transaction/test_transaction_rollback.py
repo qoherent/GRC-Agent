@@ -33,12 +33,12 @@ class TransactionRollbackTests(unittest.TestCase):
 
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
-        block = next(block for block in session.flowgraph.blocks if block.instance_name == "samp_rate")
+        block = next(block for block in session.flowgraph.blocks if block.name == "samp_rate")
         self.assertEqual(block.params["parameters"]["value"], "32000")
 
     def test_apply_edit_preflight_failure_leaves_live_state_unchanged(self) -> None:
         session = self._load_session()
-        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_raw = copy.deepcopy(session.flowgraph.export_data())
 
         payload = apply_edit(
             session,
@@ -56,13 +56,13 @@ class TransactionRollbackTests(unittest.TestCase):
         self.assertEqual(payload["error_type"], "preflight_rejected")
         self.assertEqual(payload["errors"][0]["code"], "duplicate_connection")
         assert session.flowgraph is not None
-        self.assertEqual(session.flowgraph.raw_data, original_raw)
+        self.assertEqual(session.flowgraph.export_data(), original_raw)
         self.assertIsNone(session.last_validation_ok)
 
     def test_apply_edit_commit_swap_failure_leaves_live_state_unchanged(self) -> None:
         session = self._load_session()
         assert session.flowgraph is not None
-        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_raw = copy.deepcopy(session.flowgraph.export_data())
         original_revision = session.state_revision
         original_dirty = session.is_dirty
 
@@ -87,7 +87,7 @@ class TransactionRollbackTests(unittest.TestCase):
         self.assertEqual(session.state_revision, original_revision)
         self.assertEqual(session.is_dirty, original_dirty)
         assert session.flowgraph is not None
-        self.assertEqual(session.flowgraph.raw_data, original_raw)
+        self.assertEqual(session.flowgraph.export_data(), original_raw)
 
 
 if __name__ == "__main__":

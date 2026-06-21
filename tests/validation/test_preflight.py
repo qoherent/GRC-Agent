@@ -22,7 +22,7 @@ class PreflightTransactionTests(unittest.TestCase):
 
     def test_valid_update_params_passes_without_mutating_live_session(self) -> None:
         session = self._load_session()
-        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_raw = copy.deepcopy(session.flowgraph.export_data())
 
         payload = preflight_transaction(
             session,
@@ -48,11 +48,11 @@ class PreflightTransactionTests(unittest.TestCase):
         )
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
-        self.assertEqual(session.flowgraph.raw_data, original_raw)
+        self.assertEqual(session.flowgraph.export_data(), original_raw)
 
     def test_valid_update_states_passes_without_mutating_live_session(self) -> None:
         session = self._load_session()
-        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_raw = copy.deepcopy(session.flowgraph.export_data())
 
         payload = preflight_transaction(
             session,
@@ -73,7 +73,7 @@ class PreflightTransactionTests(unittest.TestCase):
         ])
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
-        self.assertEqual(session.flowgraph.raw_data, original_raw)
+        self.assertEqual(session.flowgraph.export_data(), original_raw)
 
     def test_invalid_enum_value_is_rejected(self) -> None:
         session = self._load_session()
@@ -151,7 +151,7 @@ class PreflightTransactionTests(unittest.TestCase):
 
     def test_incompatible_dtype_is_rejected_after_sink_expansion(self) -> None:
         session = self._load_session()
-        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_raw = copy.deepcopy(session.flowgraph.export_data())
 
         payload = preflight_transaction(
             session,
@@ -176,7 +176,7 @@ class PreflightTransactionTests(unittest.TestCase):
         self.assertEqual(payload["errors"][0]["code"], "incompatible_dtype")
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
-        self.assertEqual(session.flowgraph.raw_data, original_raw)
+        self.assertEqual(session.flowgraph.export_data(), original_raw)
 
     def test_add_block_missing_value_is_rejected(self) -> None:
         session = self._load_session()
@@ -197,7 +197,7 @@ class PreflightTransactionTests(unittest.TestCase):
 
     def test_valid_detached_variable_add_passes_without_mutating_live_session(self) -> None:
         session = self._load_session()
-        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_raw = copy.deepcopy(session.flowgraph.export_data())
 
         payload = preflight_transaction(
             session,
@@ -213,7 +213,7 @@ class PreflightTransactionTests(unittest.TestCase):
         self.assertEqual(payload["error_count"], 0)
         self.assertFalse(session.is_dirty)
         assert session.flowgraph is not None
-        self.assertEqual(session.flowgraph.raw_data, original_raw)
+        self.assertEqual(session.flowgraph.export_data(), original_raw)
 
     def test_parameter_edit_revalidates_existing_connection_dtype(self) -> None:
         session = self._load_session()
@@ -263,14 +263,8 @@ class PreflightTransactionTests(unittest.TestCase):
     def test_duplicate_enabled_symbol_ids_are_rejected(self) -> None:
         session = self._load_session()
         assert session.flowgraph is not None
-        session.flowgraph.raw_data["blocks"].append(
-            {
-                "name": "samp_rate",
-                "id": "variable",
-                "parameters": {"value": "123", "comment": ""},
-                "states": {"state": "enabled"},
-            }
-        )
+        # Add a duplicate variable to create a symbol clash.
+        session.add_block("samp_rate", "variable", {"value": "123", "comment": ""})
 
         payload = preflight_transaction(
             session,

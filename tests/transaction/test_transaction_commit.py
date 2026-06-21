@@ -22,7 +22,7 @@ class TransactionCommitTests(unittest.TestCase):
 
     def test_apply_edit_blocks_commit_when_final_gnu_validation_fails(self) -> None:
         session = self._load_session()
-        original_raw = copy.deepcopy(session.flowgraph.raw_data)
+        original_raw = copy.deepcopy(session.flowgraph.export_data())
 
         payload = apply_edit(
             session,
@@ -39,7 +39,7 @@ class TransactionCommitTests(unittest.TestCase):
         self.assertEqual(payload["error_type"], "gnu_validation_failed")
         self.assertEqual(payload["validation"]["status"], "invalid")
         assert session.flowgraph is not None
-        self.assertEqual(session.flowgraph.raw_data, original_raw)
+        self.assertEqual(session.flowgraph.export_data(), original_raw)
         self.assertIsNone(session.last_validation_ok)
 
     def test_apply_edit_commits_repaired_variable_removal_transaction(self) -> None:
@@ -75,7 +75,7 @@ class TransactionCommitTests(unittest.TestCase):
             ["blocks_throttle2_0", "qtgui_time_sink_x_0", "samp_rate"],
         )
         assert session.flowgraph is not None
-        self.assertNotIn("samp_rate", [block.instance_name for block in session.flowgraph.blocks])
+        self.assertNotIn("samp_rate", [block.name for block in session.flowgraph.blocks])
 
     def test_net_zero_rewire_keeps_clean_dirty_state(self) -> None:
         session = self._load_session()

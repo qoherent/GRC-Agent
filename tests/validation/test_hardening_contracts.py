@@ -66,12 +66,15 @@ class HardeningContractTests(unittest.TestCase):
         self.assertEqual(
             set(FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS),
             {
-                "_parse_blocks",
-                "_parse_connections",
-                "_default_block_states",
-                "_block_name_is_referenced_elsewhere",
-                "_connection_entry_to_tuple",
-                "_raw_connection_entry",
+                "_atomic_write_text",
+                "_bump_state_revision",
+                "_fsync_directory",
+                "_read_file_sha256_if_available",
+                "_refuse_ambiguous_save_target",
+                "_save_file_lock",
+                "_serialize_raw_data",
+                "_sha256_text",
+                "_write_save_backup",
             },
         )
 

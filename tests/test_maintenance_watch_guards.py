@@ -25,7 +25,7 @@ def _raw_snapshot(session: FlowgraphSession) -> tuple[int, bool, str]:
     return (
         session.state_revision,
         session.is_dirty,
-        session._serialize_raw_data(session.flowgraph.raw_data),
+        session._serialize_raw_data(session.flowgraph.export_data()),
     )
 
 

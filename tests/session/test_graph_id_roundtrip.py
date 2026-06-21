@@ -17,7 +17,7 @@ class GraphIdRoundTripTests(unittest.TestCase):
         session = FlowgraphSession()
         session.load(self._fixture_path())
         original_graph_id = session.graph_id()
-        serialized = FlowgraphSession._serialize_raw_data(session.flowgraph.raw_data)
+        serialized = FlowgraphSession._serialize_raw_data(session.flowgraph.export_data())
 
         with tempfile.TemporaryDirectory() as tmpdir:
             roundtrip_path = Path(tmpdir) / "roundtrip.grc"
@@ -28,7 +28,7 @@ class GraphIdRoundTripTests(unittest.TestCase):
 
         self.assertEqual(reloaded.graph_id(), original_graph_id)
         self.assertEqual(
-            FlowgraphSession._serialize_raw_data(reloaded.flowgraph.raw_data),
+            FlowgraphSession._serialize_raw_data(reloaded.flowgraph.export_data()),
             serialized,
         )
 

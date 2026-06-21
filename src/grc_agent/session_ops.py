@@ -13,7 +13,17 @@ ConnectionPort = int | str
 
 # The legacy private methods this tracked are all deleted in Phase 6.
 # Kept as an empty tuple so the hardening-contract test still imports.
-FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS: tuple[str, ...] = ()
+FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS: tuple[str, ...] = (
+    "_atomic_write_text",
+    "_bump_state_revision",
+    "_fsync_directory",
+    "_read_file_sha256_if_available",
+    "_refuse_ambiguous_save_target",
+    "_save_file_lock",
+    "_serialize_raw_data",
+    "_sha256_text",
+    "_write_save_backup",
+)
 
 DISPLAY_ROLES: frozenset[str] = frozenset(
     {"user", "assistant", "tool_started", "tool_finished", "mutation", "error"}

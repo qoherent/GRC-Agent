@@ -30,7 +30,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
     def _param(session: FlowgraphSession, instance_name: str, key: str) -> str | None:
         assert session.flowgraph is not None
         for block in session.flowgraph.blocks:
-            if block.instance_name == instance_name:
+            if block.name == instance_name:
                 params = block.params.get("parameters")
                 if isinstance(params, dict) and key in params:
                     return str(params[key])
@@ -39,13 +39,14 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
     @staticmethod
     def _block_names(session: FlowgraphSession) -> list[str]:
         assert session.flowgraph is not None
-        return [block.instance_name for block in session.flowgraph.blocks]
+        return [block.name for block in session.flowgraph.blocks]
 
     @staticmethod
     def _connection_ids(session: FlowgraphSession) -> list[str]:
         assert session.flowgraph is not None
         return [
-            connection_id(conn.src_block, conn.src_port, conn.dst_block, conn.dst_port)
+            connection_id(conn.source_block.name, conn.source_port.key,
+                          conn.sink_block.name, conn.sink_port.key)
             for conn in session.flowgraph.connections
         ]
 
@@ -371,7 +372,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         reloaded.load(path)
         assert reloaded.flowgraph is not None
         state_by_name = {
-            block.instance_name: block.params.get("states", {}).get("state")
+            block.name: (block.states or {}).get("state")
             for block in reloaded.flowgraph.blocks
         }
         self.assertEqual(state_by_name["blocks_throttle2_0"], "disabled")

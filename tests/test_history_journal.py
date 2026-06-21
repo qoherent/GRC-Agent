@@ -199,7 +199,7 @@ class GraphHistoryJournalTests(unittest.TestCase):
             next(
                 block.params["parameters"]["value"]
                 for block in reloaded.flowgraph.blocks
-                if block.instance_name == "samp_rate"
+                if block.name == "samp_rate"
             ),
             "48000",
         )

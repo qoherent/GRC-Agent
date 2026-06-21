@@ -126,7 +126,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
         assert agent.session.flowgraph is not None
         found_samp_rate = False
         for block in agent.session.flowgraph.blocks:
-            if block.instance_name == "samp_rate":
+            if block.name == "samp_rate":
                 found_samp_rate = True
                 params = block.params.get("parameters", {})
                 val = params.get("value")

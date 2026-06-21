@@ -45,7 +45,7 @@ def _mark_agent_valid(agent: GrcAgent) -> None:
 def _block_param_value(session: FlowgraphSession, instance_name: str, param_key: str) -> object:
     assert session.flowgraph is not None
     for block in session.flowgraph.blocks:
-        if block.instance_name == instance_name:
+        if block.name == instance_name:
             return block.params["parameters"][param_key]
     raise AssertionError(f"Block not found: {instance_name}")
 
