@@ -19,14 +19,14 @@ import yaml
 from grc_agent._payload import ErrorCode, build_error_payload
 from grc_agent.catalog.loaders import describe_block, get_catalog_snapshot
 from grc_agent.catalog.schema import BlockDescription, NormalizedParameter, NormalizedPort
-from grc_agent.flowgraph_session import (
-    DEFAULT_CONTEXT_MAX_NODES,
-    DEFAULT_SUMMARY_BLOCK_LIMIT,
-    FlowgraphSession,
-)
+from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent._payload import Connection
 from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.session_ops import parse_connection_id
+
+# Formerly deprecated constants on FlowgraphSession; moved here (their only importer).
+DEFAULT_SUMMARY_BLOCK_LIMIT = 8
+DEFAULT_CONTEXT_MAX_NODES = 20
 
 logger = logging.getLogger(__name__)
 
