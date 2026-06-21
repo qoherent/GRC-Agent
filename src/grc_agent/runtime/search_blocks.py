@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
 from grc_agent._payload import ErrorCode
@@ -39,10 +38,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-_VECTOR_CACHE_MAX = 4
-_VECTOR_CACHE: "OrderedDict[tuple[str, int, str], dict[str, Any]]" = OrderedDict()
 
 
 def search_blocks(
@@ -79,34 +74,6 @@ def search_blocks(
         else int(k)
     )
     limit = max(1, min(limit_value, agent._retrieval_cfg.search_blocks_max_k))
-    cacheable = not debug
-
-    cache_key: tuple[str, int, str] | None = None
-    if cacheable:
-        cache_key = (q, limit, agent._search_blocks_version_token())
-        cached = _VECTOR_CACHE.get(cache_key)
-        if cached is not None:
-            _VECTOR_CACHE.move_to_end(cache_key)
-            payload = {
-                "ok": True,
-                "results": cached["results"],
-                "output_truncated": bool(cached.get("output_truncated", False)),
-            }
-            result = agent._payload_result(
-                "search_blocks", payload, include_active_session=False
-            )
-            return agent._attach_wrapper_dispatch_telemetry(
-                debug=debug,
-                wrapper_name="search_blocks",
-                wrapper_action="query",
-                internal_handlers=["search_blocks_cache(hit)"],
-                started=started,
-                before_revision=before_revision,
-                before_dirty=before_dirty,
-                result=result,
-                validation_run=False,
-                output_truncated=bool(cached.get("output_truncated", False)),
-            )
 
     handlers.append("catalog_vector_search")
     if not is_catalog_db_usable(CATALOG_DB_PATH):
@@ -209,7 +176,9 @@ def search_blocks(
             })
 
     limited = rows[:limit]
-    output_truncated = len(rows) > len(limited)
+    # The vector store returns limit+1 neighbours. If we got limit+1 back,
+    # there are more matches beyond what we showed.
+    output_truncated = len(neighbours) > limit
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -217,15 +186,6 @@ def search_blocks(
         "results": limited,
         "output_truncated": output_truncated,
     }
-
-    if cache_key is not None and cacheable:
-        _VECTOR_CACHE[cache_key] = {
-            "results": limited,
-            "output_truncated": output_truncated,
-        }
-        _VECTOR_CACHE.move_to_end(cache_key)
-        while len(_VECTOR_CACHE) > _VECTOR_CACHE_MAX:
-            _VECTOR_CACHE.popitem(last=False)
 
     result = agent._payload_result(
         "search_blocks", payload, include_active_session=False

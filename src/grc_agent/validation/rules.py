@@ -9,7 +9,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from grc_agent.catalog.loaders import _describe_block_with_root
+from grc_agent.catalog.loaders import (
+    BlockNotFoundError,
+    CatalogError,
+    _build_block_description,
+    find_block_source,
+)
 
 from .errors import ValidationIssue, format_catalog_lookup_message, make_issue
 
@@ -731,49 +736,54 @@ def _get_cached_block_rules(
     block_type: str,
     catalog_root_text: str | None,
 ) -> BlockRulesLookup:
-    payload = _describe_block_with_root(block_type, catalog_root=catalog_root_text)
-    if not payload.get("ok"):
+    try:
+        raw_block = find_block_source(block_type, catalog_root=catalog_root_text)
+        description = _build_block_description(raw_block)
+    except BlockNotFoundError:
         return BlockRulesLookup(
             rules=None,
-            error_type=str(payload.get("error_type") or "CatalogError"),
-            message=str(payload.get("message") or format_catalog_lookup_message(block_type)),
+            error_type="block_not_found",
+            message=format_catalog_lookup_message(block_type),
+        )
+    except CatalogError as exc:
+        return BlockRulesLookup(
+            rules=None,
+            error_type="catalog_load_error",
+            message=str(exc),
         )
 
     parameter_rules = {
-        parameter["id"]: ParameterRule(
-            parameter_id=parameter["id"],
-            dtype=_optional_text(parameter.get("dtype")),
-            default=parameter.get("default"),
-            options=tuple(str(option) for option in parameter.get("options", [])),
+        parameter.id: ParameterRule(
+            parameter_id=parameter.id,
+            dtype=_optional_text(parameter.dtype),
+            default=parameter.default,
+            options=tuple(str(option) for option in parameter.options),
             option_attributes={
                 str(key): tuple(values)
-                for key, values in parameter.get("option_attributes", {}).items()
+                for key, values in parameter.option_attributes.items()
             },
         )
-        for parameter in payload.get("parameters", [])
-        if isinstance(parameter, dict) and isinstance(parameter.get("id"), str)
+        for parameter in description.parameters
     }
     inputs = tuple(
         PortRule(
-            domain=_optional_text(port.get("domain")),
-            dtype=_optional_text(port.get("dtype")),
-            vlen=port.get("vlen"),
-            multiplicity=port.get("multiplicity"),
-            optional=port.get("optional"),
+            domain=_optional_text(port.domain),
+            dtype=_optional_text(port.dtype),
+            vlen=port.vlen,
+            multiplicity=port.multiplicity,
+            optional=port.optional,
         )
-        for port in payload.get("inputs", [])
-        if isinstance(port, dict)
+        for port in description.inputs
     )
     outputs = tuple(
         PortRule(
-            domain=_optional_text(port.get("domain")),
-            dtype=_optional_text(port.get("dtype")),
-            vlen=port.get("vlen"),
-            multiplicity=port.get("multiplicity"),
-            optional=port.get("optional"),
+            domain=_optional_text(port.domain),
+            dtype=_optional_text(port.dtype),
+            vlen=port.vlen,
+            multiplicity=port.multiplicity,
+            optional=port.optional,
         )
-        for port in payload.get("outputs", [])
-        if isinstance(port, dict)
+        for port in description.outputs
     )
     return BlockRulesLookup(
         rules=BlockRules(
@@ -781,7 +791,7 @@ def _get_cached_block_rules(
             parameters=parameter_rules,
             inputs=inputs,
             outputs=outputs,
-            asserts=tuple(str(item) for item in payload.get("asserts", [])),
+            asserts=tuple(str(item) for item in description.asserts),
         )
     )
 

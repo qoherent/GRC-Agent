@@ -1,6 +1,8 @@
 [llama]
 server_url = "http://localhost:11434"
 backend = "ollama"
+model = "gemma4:12b-it-qat"
+embedding_model = "embeddinggemma:latest"
 max_tokens = 4096
 max_tool_rounds = 8
 temperature = 0.0

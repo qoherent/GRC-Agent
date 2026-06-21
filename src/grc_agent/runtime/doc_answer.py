@@ -627,7 +627,9 @@ def build_catalog_assisted_candidate(
 ) -> _DocsEvidenceCandidate | None:
     subject = extract_block_definition_subject(question) or extract_docs_subject(question) or question
     try:
-        result = agent._search_blocks(subject, k=3, debug=False, enrich=True)
+        from grc_agent.runtime.search_blocks import search_blocks
+
+        result = search_blocks(agent, subject, k=3, debug=False)
     except Exception:
         return None
     if result.get("ok") is not True:
@@ -1080,7 +1082,7 @@ def build_fallback_answer(
 ) -> tuple[str, bool]:
     del evidence_strong
     answer_type = classify_docs_answer_type(question)
-    return agent._build_typed_docs_answer(
+    return build_typed_docs_answer(agent, 
         question=question,
         ranked_candidates=ranked_candidates,
         answer_type=answer_type,
@@ -1149,7 +1151,7 @@ def ask_grc_docs(
         if isinstance(focus, str) and focus.strip()
         else None
     )
-    answer_type = agent._classify_docs_answer_type(question_text)
+    answer_type = classify_docs_answer_type(question_text)
 
 
     degraded_retrieval = False
@@ -1158,80 +1160,30 @@ def ask_grc_docs(
     warnings: list[str] = []
     retrieval_mode = "keyword_docs"
     source_limit = min(limit, agent._docs_answer_cfg.max_sources)
-    final_cache_key = agent._ask_grc_docs_cache_key(
-        question=question_text,
-        k=source_limit,
-        focus=focus_text,
-        retrieval_mode=retrieval_mode,
-        sources=[],
-        cache_scope="final",
-    )
-    cached_final_answer = agent._ask_grc_docs_cache_get(final_cache_key)
-    if cached_final_answer is not None:
-        handlers.append("answer_cache(hit)")
-        result = agent._payload_result(
-            "ask_grc_docs",
-            _docs_answer_payload_from_cache(
-                question=question_text,
-                focus=focus_text,
-                retrieval_mode=retrieval_mode,
-                cached=cached_final_answer,
-            ),
-        )
-        agent._last_docs_advisor_meta.update(
-            {
-                "advisor_attempted": False,
-                "advisor_success": True,
-                "fallback_reason": "none",
-                "helper_latency_ms": 0,
-                "prompt_chars": 0,
-                "snippet_count": 0,
-                "schema_valid": True,
-                "cache_hit": True,
-                "helper_finish_reason": "answer_cache_hit",
-                "source_quality": dict(cached_final_answer.get("source_quality") or {}),
-                "helper_eligible": bool(cached_final_answer.get("helper_eligible", False)),
-                "helper_skipped_reason": str(
-                    cached_final_answer.get("helper_skipped_reason") or "answer_cache_hit"
-                ),
-            }
-        )
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="ask_grc_docs",
-            wrapper_action="query",
-            internal_handlers=handlers,
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=result,
-            validation_run=False,
-            output_truncated=False,
-        )
 
-    candidates = agent._collect_docs_candidates()
-    ranked_candidates = agent._rank_docs_candidates(
+    candidates = collect_docs_candidates(agent)
+    ranked_candidates = rank_docs_candidates(agent, 
         question=question_text,
         candidates=candidates,
     )
-    if agent._is_block_definition_query(question_text):
+    if is_block_definition_query(question_text):
         handlers.append("search_blocks(catalog_assisted_docs)")
-        assisted = agent._build_catalog_assisted_candidate(
+        assisted = build_catalog_assisted_candidate(agent, 
             question=question_text
         )
         if assisted is not None:
-            ranked_candidates = agent._rank_docs_candidates(
+            ranked_candidates = rank_docs_candidates(agent, 
                 question=question_text,
                 candidates=[*candidates, assisted],
             )
-    elif answer_type != "procedural_how_to" and agent._should_catalog_assist(
+    elif answer_type != "procedural_how_to" and should_catalog_assist(
         question_text,
         ranked_candidates,
     ):
         handlers.append("search_blocks(catalog_assisted_docs)")
-        assisted = agent._build_catalog_assisted_candidate(question=question_text)
+        assisted = build_catalog_assisted_candidate(agent, question=question_text)
         if assisted is not None:
-            ranked_candidates = agent._rank_docs_candidates(
+            ranked_candidates = rank_docs_candidates(agent, 
                 question=question_text,
                 candidates=[*candidates, assisted],
             )
@@ -1252,14 +1204,14 @@ def ask_grc_docs(
         requested_limit=limit,
         max_limit=agent._retrieval_cfg.ask_grc_docs_max_k,
     )
-    selected_candidates = agent._select_docs_candidates_for_answer_type(
+    selected_candidates = select_docs_candidates_for_answer_type(
         question=question_text,
         answer_type=answer_type,
         ranked_candidates=selected_pool,
         limit=answer_candidate_limit,
     )
     snippets = [candidate.snippet for candidate in selected_candidates]
-    source_quality = agent._build_docs_source_quality(
+    source_quality = build_docs_source_quality(agent, 
         question=question_text,
         answer_type=answer_type,
         selected_candidates=selected_candidates,
@@ -1280,34 +1232,9 @@ def ask_grc_docs(
         "source_quality": dict(source_quality),
     }
     evidence_strong = str(source_quality.get("quality")) == "strong"
-    cache_key = agent._ask_grc_docs_cache_key(
-        question=question_text,
-        k=source_limit,
-        retrieval_mode=retrieval_mode,
-        sources=sources[:source_limit],
-        focus=focus_text,
-        cache_scope="sources",
-    )
-    cached_docs_answer = agent._ask_grc_docs_cache_get(cache_key)
-    if cached_docs_answer is not None:
-        answer = str(cached_docs_answer.get("answer") or "")
-        sources = list(cached_docs_answer.get("sources") or [])
-        insufficient_evidence = bool(cached_docs_answer.get("insufficient_evidence"))
-        fallback_used = bool(cached_docs_answer.get("fallback_used"))
-        fallback_reason = str(cached_docs_answer.get("fallback_reason") or "cache_hit")
-        cached_quality = cached_docs_answer.get("source_quality")
-        if isinstance(cached_quality, dict):
-            source_quality = dict(cached_quality)
-        agent._last_docs_advisor_meta.update(
-            {
-                "snippet_count": len(snippets),
-                "source_quality": dict(source_quality),
-                "cache_hit": True,
-            }
-        )
-    elif snippets:
+    if snippets:
         if str(source_quality.get("quality")) != "weak":
-            answer, typed_insufficient = agent._build_typed_docs_answer(
+            answer, typed_insufficient = build_typed_docs_answer(agent,
                 question=question_text,
                 ranked_candidates=selected_candidates,
                 answer_type=answer_type,
@@ -1325,7 +1252,7 @@ def ask_grc_docs(
         agent._last_docs_advisor_meta["helper_finish_reason"] = "retrieval_empty"
 
     if not answer:
-        answer, insufficient_evidence = agent._build_fallback_answer(
+        answer, insufficient_evidence = build_fallback_answer(agent,
             question=question_text,
             ranked_candidates=ranked_candidates,
             evidence_strong=evidence_strong,
@@ -1333,27 +1260,13 @@ def ask_grc_docs(
     answer = " ".join(answer.split())
     if len(answer) > agent._docs_answer_cfg.answer_target_chars:
         answer = answer[: agent._docs_answer_cfg.answer_target_chars - 1].rstrip() + "…"
-    if cached_docs_answer is None and snippets:
+    if snippets:
         sources = _sources_from_candidates(
             selected_candidates,
             answer=answer,
             limit=source_limit,
             excerpt_chars=agent._docs_answer_cfg.excerpt_target_chars,
         )
-    if cached_docs_answer is None:
-        cache_payload = {
-            "answer": answer,
-            "sources": sources[:source_limit],
-            "insufficient_evidence": bool(insufficient_evidence),
-            "fallback_used": bool(fallback_used or degraded_retrieval),
-            "fallback_reason": fallback_reason,
-            "source_quality": dict(source_quality),
-        }
-        agent._ask_grc_docs_cache_put(
-            cache_key,
-            cache_payload,
-        )
-        agent._ask_grc_docs_cache_put(final_cache_key, cache_payload)
 
     result = agent._payload_result(
         "ask_grc_docs",
@@ -1600,11 +1513,11 @@ def rank_docs_candidates(
 ) -> list[_DocsEvidenceCandidate]:
     if not candidates:
         return []
-    keywords = agent._docs_topic_terms(question)
-    primary_terms = agent._docs_primary_terms(question)
+    keywords = docs_topic_terms(question)
+    primary_terms = docs_primary_terms(question)
     query_l = question.lower()
-    howto = agent._is_tutorial_or_howto_query(question)
-    block_definition_query = agent._is_block_definition_query(question)
+    howto = is_tutorial_or_howto_query(question)
+    block_definition_query = is_block_definition_query(question)
     preferred_markers = _preferred_docs_source_markers(question)
     ranked: list[_DocsEvidenceCandidate] = []
     for candidate in candidates:
@@ -1645,9 +1558,9 @@ def rank_docs_candidates(
         semantic_component = 0.0
         if isinstance(candidate.semantic_score, float):
             semantic_component = (candidate.semantic_score - 0.62) * 7.0
-        low_value_reasons = agent._docs_low_value_reasons(candidate=candidate)
+        low_value_reasons = docs_low_value_reasons(candidate=candidate)
         low_value_penalty = float(len(low_value_reasons)) * 1.6
-        procedural = agent._is_procedural_walkthrough_text(
+        procedural = is_procedural_walkthrough_text(
             candidate.snippet.excerpt
         )
         procedural_penalty = 2.5 if procedural and not howto else 0.0
@@ -1772,7 +1685,7 @@ def build_docs_source_quality(
     )
     required_min = agent._minimum_required_term_hits(required_terms)
     required_terms_covered = required_hits >= required_min
-    primary_terms = agent._docs_primary_terms(question) or agent._docs_topic_terms(question)
+    primary_terms = docs_primary_terms(question) or docs_topic_terms(question)
     top_text = " ".join([top.snippet.title, top.section, top.snippet.excerpt]).lower()
     topic_match = (
         True
@@ -1885,8 +1798,8 @@ def build_typed_docs_answer(
         return ("Local docs did not contain enough direct evidence for this question.", True)
     if not ranked_candidates:
         return ("Local docs did not contain enough direct evidence for this question.", True)
-    subject = agent._extract_docs_subject(question) or question
-    subject_terms = tuple(agent._docs_primary_terms(subject) or agent._docs_topic_terms(subject))
+    subject = extract_docs_subject(question) or question
+    subject_terms = tuple(docs_primary_terms(subject) or docs_topic_terms(subject))
     allow_procedural = answer_type == "procedural_how_to"
 
     if answer_type == "tool_command_concept":
@@ -1927,10 +1840,10 @@ def build_typed_docs_answer(
         left_terms = tuple(term for term in sides.left_terms if term not in shared_terms) or sides.left_terms
         right_terms = tuple(term for term in sides.right_terms if term not in shared_terms) or sides.right_terms
         left_anchor_terms = tuple(
-            agent._docs_primary_terms(sides.left_label) or agent._docs_topic_terms(sides.left_label)
+            docs_primary_terms(sides.left_label) or docs_topic_terms(sides.left_label)
         )
         right_anchor_terms = tuple(
-            agent._docs_primary_terms(sides.right_label) or agent._docs_topic_terms(sides.right_label)
+            docs_primary_terms(sides.right_label) or docs_topic_terms(sides.right_label)
         )
         if (
             ("tags" in left_terms and "metadata" in right_terms)
@@ -1940,7 +1853,7 @@ def build_typed_docs_answer(
                 "Local docs did not contain enough direct evidence to compare tags and metadata clearly.",
                 True,
             )
-        comparison_candidates = agent._select_docs_candidates_for_answer_type(
+        comparison_candidates = select_docs_candidates_for_answer_type(
             question=question,
             answer_type=answer_type,
             ranked_candidates=ranked_candidates,
@@ -2136,9 +2049,9 @@ def build_typed_docs_answer(
                     f"According to the local block catalog, {catalog.snippet.title} {summary}.",
                     False,
                 )
-        required_terms = subject_terms or tuple(agent._docs_primary_terms(question))
+        required_terms = subject_terms or tuple(docs_primary_terms(question))
         subject_phrase = (
-            (agent._extract_block_definition_subject(question) or "").strip().lower()
+            (extract_block_definition_subject(question) or "").strip().lower()
         )
         for candidate in ranked_candidates[:6]:
             sentence = agent._pick_typed_sentence(
@@ -2158,7 +2071,7 @@ def build_typed_docs_answer(
         return ("Local docs did not contain enough direct evidence for this question.", True)
 
     required_terms = subject_terms or tuple(
-        agent._docs_primary_terms(question) or agent._docs_topic_terms(question)
+        docs_primary_terms(question) or docs_topic_terms(question)
     )
     lower_question = question.lower()
     require_hier_source = "hierarchical block" in lower_question
@@ -2260,7 +2173,7 @@ def _pick_direct_docs_comparison_sentence(
                 prefix_text = " ".join(str(prefix or "").split()).strip()
                 if prefix_text and compact.lower().startswith(f"{prefix_text.lower()} "):
                     compact = compact[len(prefix_text) :].lstrip(" -:#")
-            compact = agent._clean_docs_excerpt(compact)
+            compact = clean_docs_excerpt(compact)
             lower = compact.lower()
             if len(compact) < 40 or len(compact) > 280:
                 continue

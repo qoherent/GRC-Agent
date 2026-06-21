@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-06-19-minimal-prompt`
+Prompt version: `2026-06-19-grounded-prompt`
 
 ## Model-Facing Surface
 
@@ -26,10 +26,11 @@ The model does not see lifecycle tools, shell/filesystem tools, raw YAML tools, 
 
 ```text
 Role: GNU Radio graph editing assistant.
-inspect_graph: read topology, blocks, connections, parameters, and validation status.
+inspect_graph: read topology, blocks, connections, field values, and validation status.
 query_knowledge: search catalog blocks or GNU Radio documentation.
-change_graph: add/remove blocks, update parameters, add/remove connections.
-Variables are blocks; use block_id "variable" to add one.
+change_graph: add/remove blocks, edit field values, add/remove connections.
+Variables are blocks; use block_id "variable" (not "parameter") to add one.
+Every GNU Radio fact must be grounded in query_knowledge, not memory.
 
 ```
 

@@ -2334,6 +2334,102 @@ def should_reuse_persisted_run(
     return status in {RUN_STATUS_PASS, RUN_STATUS_FAIL, RUN_STATUS_INFRA_FAIL}
 
 
+def render_markdown_report(report: dict[str, Any], store: dict[str, Any] | None = None) -> str:
+    """Render a chat-style markdown transcript.
+
+    Reads turn-by-turn tool call detail from the JSON ``store`` (which has
+    ``turn_results`` with full requested/executed payloads).  The ``report``
+    dict supplies the summary counts and model name.
+    """
+    from grc_agent.runtime.model_context import build_system_prompt
+    from grc_agent.runtime.tool_context import tool_history_content_as_text
+
+    lines: list[str] = []
+    model = report.get("model") or "?"
+    report_cases = report.get("cases") or []
+    p = sum(1 for c in report_cases if c.get("passed"))
+    f = sum(1 for c in report_cases if not c.get("passed"))
+    i = report.get("summary", {}).get("infra_failures", 0)
+    phase = report.get("phase") or "eval"
+
+    lines.append(f"# {phase}\n")
+    lines.append(f"Model: `{model}`  |  Cases: {len(report_cases)}  |  PASS/FAIL/INFRA: {p}/{f}/{i}\n")
+    lines.append("## System prompt\n")
+    lines.append("```text")
+    lines.append(build_system_prompt().rstrip())
+    lines.append("```\n")
+
+    # Prefer the store (rich turn_results); fall back to report cases.
+    store_runs = (store or {}).get("runs", [])
+    if store_runs:
+        _render_store_runs(store_runs, lines, tool_history_content_as_text)
+    else:
+        for case in report_cases:
+            case_name = case.get("case_name") or case.get("name") or "?"
+            status = "PASS" if case.get("passed") else "FAIL"
+            lines.append(f"## Case: `{case_name}` — {status}\n\n---\n")
+
+    return "\n".join(lines) + "\n"
+
+
+def _render_store_runs(runs: list[dict[str, Any]], lines: list[str], renderer_fn) -> None:
+    """Render runs from the JSON store format (has turn_results with full detail)."""
+    for run in runs:
+        case_name = run.get("case_name") or "?"
+        status = run.get("status") or "?"
+        lines.append(f"## Case: `{case_name}` — {status}\n")
+        chain = run.get("actual_chain") or []
+        if chain:
+            lines.append(f"Tool chain: {', '.join(chain)}\n")
+        lines.append("---\n")
+
+        for ti, tr in enumerate(run.get("turn_results", [])):
+            prompt = tr.get("prompt") or run.get("prompt") or ""
+            lines.append(f"### Turn {ti + 1}\n")
+            lines.append(f"> {prompt}\n")
+
+            reqs = tr.get("requested_tool_calls_raw") or tr.get("requested_tool_calls") or []
+            execs = tr.get("executed_tool_calls") or []
+
+            for n, req in enumerate(reqs):
+                name = req.get("name", "?") if isinstance(req, dict) else "?"
+                args = req.get("arguments", {}) if isinstance(req, dict) else {}
+                blob = json.dumps(args, default=str, indent=2)
+                lines.append(f"**Tool call {n + 1}: `{name}`**\n```json\n{blob}\n```\n")
+                ec = execs[n] if n < len(execs) else {}
+                ec_args = ec.get("arguments", {}) if isinstance(ec, dict) else {}
+                if ec_args:
+                    tool_truncated = ec_args.get("output_truncated") is True
+                    try:
+                        body = renderer_fn(
+                            ec_args, tool_name=name,
+                            semantic_search_result_preview=lambda r: [],
+                        )
+                    except Exception as e:
+                        body = f"(render error: {e})"
+                    flag = " _(more results exist beyond top-K)_" if tool_truncated else ""
+                    lines.append(f"**result (`{name}`):** ok={ec_args.get('ok')}{flag}\n\n```\n{body}\n```\n")
+
+            asst = tr.get("assistant_text") or ""
+            if asst:
+                lines.append(f"```\n{asst}\n```\n")
+
+            check_keys = ("routing_pass", "argument_pass", "tool_success_pass", "semantic_pass", "end_state_pass", "budget_pass")
+            failed = [k for k in check_keys if tr.get(k) is False]
+            if failed:
+                lines.append(f"**Failed checks:** {', '.join(failed)}\n")
+            lines.append("---\n")
+
+
+def write_markdown_report(report: dict[str, Any], results_path: str | Path) -> Path:
+    """Write the markdown transcript next to the JSON results store."""
+    md_path = Path(results_path).with_suffix(".md")
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    store = load_run_store(results_path)
+    md_path.write_text(render_markdown_report(report, store=store), encoding="utf-8")
+    return md_path
+
+
 def run_phase_eval(
     *,
     phase: int,
@@ -2527,7 +2623,7 @@ def run_phase_eval(
     summary = build_summary(results, len(cases))
     summary["stability"] = stability_summary(results, threshold=stability_threshold)
 
-    return {
+    report = {
         "phase": phase,
         "model": resolved_model,
         "temperature": temperature,
@@ -2544,6 +2640,14 @@ def run_phase_eval(
         "cases": results,
         "summary": summary,
     }
+
+    if results_path is not None:
+        md_path = write_markdown_report(report, results_path)
+        print(f"\nMarkdown transcript: {md_path}")
+        # MD is the user-facing artifact; remove the JSON store.
+        Path(results_path).unlink(missing_ok=True)
+
+    return report
 
 
 

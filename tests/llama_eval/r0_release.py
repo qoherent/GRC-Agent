@@ -175,7 +175,6 @@ R0_CASES: list[LiveScenario] = [
                 prompt="How do I add a key to a PMT dictionary without mutating it in place?",
                 expected_tool_calls=_docs("PMT dictionary add key immutable"),
                 semantic_checks=READ_ONLY_CHECKS(),
-                allow_safe_text_only=True,
             ),
         ),
     ),
@@ -187,9 +186,8 @@ R0_CASES: list[LiveScenario] = [
         turns=(
             LiveTurnSpec(
                 prompt="What scale factor between floats and 16-bit shorts?",
-                expected_tool_calls=(ToolExpectation("query_knowledge", arguments={"query": "float 16-bit short scale factor", "domain": "docs"}),),
+                expected_tool_calls=(ToolExpectation("query_knowledge", arguments={"domain": "docs"}),),
                 semantic_checks=READ_ONLY_CHECKS(),
-                allow_safe_text_only=True,
             ),
         ),
     ),

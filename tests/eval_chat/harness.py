@@ -314,8 +314,8 @@ def run_all_fixtures() -> list[EvalResult]:
 def write_measured_behavior_block(results: list[EvalResult]) -> str:
     """Produce a Markdown block that documents the baseline eval run.
 
-    Used to update BLUEPRINT's "Measured Behavior" section after a
-    baseline eval pass.
+    Emit after a baseline eval pass to record the measured behavior
+    (e.g. in ``docs/CHANGELOG.md`` or release notes).
     """
     total = len(results)
     passed = sum(1 for r in results if r.passed)

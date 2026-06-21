@@ -490,7 +490,6 @@ class ToolAgentsRunner:
         tool_names_requested: list[str] = []
         tool_rounds_used = 0
         assistant_turns = 0
-        seen_tool_calls: dict[tuple[str, str], dict[str, Any]] = {}
         tool_context_chars = 0
         truncated_tool_output = False
 
@@ -589,41 +588,8 @@ class ToolAgentsRunner:
                         str(tool_call.tool_call_arguments)[:120],
                     )
                     before_revision = agent.session.state_revision
-                    before_session_id = id(agent.session)
                     delegate = registry_builder.delegates.get(tool_name)
-                    dedup_key = (
-                        tool_name,
-                        _canonicalize_args(tool_call.tool_call_arguments),
-                    )
-                    if (
-                        delegate is not None
-                        and dedup_key in seen_tool_calls
-                    ):
-                        dedup_result = {
-                            "tool": tool_name,
-                            "ok": False,
-                            "deduplicated": True,
-                            "message": (
-                                "Duplicate tool call with identical arguments; "
-                                "not executed."
-                            ),
-                        }
-                        logger.info(
-                            "tool_call_dedup name=%s", tool_name
-                        )
-                        if on_tool_start:
-                            try:
-                                on_tool_start(tool_name, tool_call.tool_call_arguments)
-                            except Exception as e:
-                                logger.error(f"Error in on_tool_start callback: {e}")
-                        if on_tool_end:
-                            try:
-                                on_tool_end(tool_name, dedup_result)
-                            except Exception as e:
-                                logger.error(f"Error in on_tool_end callback: {e}")
-                        result = dedup_result
-                        executed = False
-                    elif delegate is None:
+                    if delegate is None:
                         result = {
                             "tool": tool_name,
                             "ok": False,
@@ -645,17 +611,6 @@ class ToolAgentsRunner:
                         truncated_tool_output = truncated_tool_output or bool(
                             result.get("output_truncated")
                         )
-                        if (
-                            isinstance(result, dict)
-                            and result.get("ok") is True
-                        ):
-                            seen_tool_calls[dedup_key] = result
-
-                        if (
-                            agent.session.state_revision != before_revision
-                            or id(agent.session) != before_session_id
-                        ):
-                            seen_tool_calls.clear()
                     tool_result_message = _tool_result_message(tool_call, result)
                     agent.chat_history.add_message(tool_result_message)
                     yield {
@@ -844,19 +799,6 @@ def _message_text(message: ChatMessage) -> str:
 
 def _chat_history_chars(chat_history: ChatHistory) -> int:
     return sum(len(m.get_as_text()) for m in chat_history.get_messages())
-
-
-def _canonicalize_args(arguments: Any) -> str:
-    """Return a stable string key for a tool call's argument bag.
-
-    Used to detect retry-storms: if the model issues the same
-    ``(tool_name, canonical_args)`` pair twice in a turn, we reuse
-    the prior result instead of re-executing.
-    """
-    try:
-        return json.dumps(arguments, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        return repr(arguments)
 
 
 def _model_messages_with_reminder(

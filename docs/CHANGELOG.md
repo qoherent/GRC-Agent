@@ -7,6 +7,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 
 ## [Unreleased]
 
+### Removed — all result caching for the small-model target
+- **`_VECTOR_CACHE`** in `search_blocks.py` deleted. Every `query_knowledge` call now hits the vector store fresh.
+- **`_ask_grc_docs_cache`** in `agent.py` and all call sites in `doc_answer.py` deleted. The 3 methods (`_ask_grc_docs_cache_key`, `_ask_grc_docs_cache_get`, `_ask_grc_docs_cache_put`) and the `OrderedDict` backing store are gone.
+- **`seen_tool_calls` dedup** in `toolagents_runtime.py` deleted along with `_canonicalize_args` and the dedup branch. The 5-call retry-storm test (`test_tool_call_dedup.py`) is also removed — dedup is no longer a feature.
+- **Rationale:** the local 4B/12B gemma models are fast enough that caching added stale-result risk without meaningful latency savings. AGENTS.md §"Runtime & State Management" updated.
+
+### Fixed — `change_graph` error payloads now model-actionable
+- **Result now includes `committed: False`** on every rejection (was missing, causing the default `True` to pass the `assertFalse(result.get("committed", True))` assertions).
+- **Result now includes `hint`** promoted from the first per-error hint (or the first `native_validation_errors` entry, or the last line of `stderr` — in that priority order).
+- **GNU validation failures** now surface `graph_unchanged: true`, `rollback: "complete"`, `rejected_phase: "native_grc_validation"`, and a human-readable `message` so the model can recover.
+- **Top-level `hint` field** added to the error payload so `tool_context.tool_history_content_as_text` renders it as a `hint:` line the model actually sees.
+
+### Fixed — `tool_context` rendering no longer drops per-error hints
+- `tool_history_content_as_text` now emits a `hint:` line for every per-error `hint` it finds (was only the top-level `hint`).
+- `native_validation_errors` are rendered as `error: gnu_validation — …` lines (was buried in the JSON dump).
+- `stderr` tail rendered as a `hint:` line when no other hint is available.
+
+### Fixed — `vlen` connection mismatch now has a hint
+- `validation/checks.py` added `_preflight_vlen_param_hint` analogous to `_preflight_dtype_param_hint`. The model gets e.g. `Parameter 'vlen' of 'blocks_add_xx' is 1; set to 1024 to match the other side.` instead of a bare error.
+
+### Fixed — `search_blocks` false-positive truncation flag
+- `output_truncated` was set whenever the vector store returned `limit + 1` neighbours (its built-in "has more" signal). Now it only flags truncation when the store returned a full overflow. Model no longer sees spurious "more results exist" warnings on normal top-K queries.
+
+### Fixed — `validation/rules.py` block-rules cache key
+- `_get_cached_block_rules` was reading from the compact `to_payload()` (`params` key) and getting an empty dict, so every `add_block` with parameters was rejected. Now reads from the structured `BlockDescription.parameters` list. Without this, `_rank_docs_candidates` and `_preflight_dtype_param_hint` had empty parameter rules.
+
+### Fixed — `doc_answer.py` call sites
+- 46 call sites invoking module-level functions as `agent._<func_name>(...)` rewritten to call the module functions directly (`<func_name>(agent, ...)` or pure-call form for parameterless functions). The previous code crashed with `AttributeError` on every `ask_grc_docs` call.
+
+### Added — auto-rendered markdown transcripts
+- Every `run_phase_eval()` call now writes `R_test_results/<phase>.md` next to the JSON store (which is deleted immediately after, so only the MD survives). The harness owns the renderer; suites just call the harness as before. The MD shows model + system prompt + per-case tool calls, what the model actually sees (via `tool_history_content_as_text`), and per-check pass/fail.
+
+### Changed — 7 legacy test files deleted
+- `tests/catalog/test_describe_block.py`, `tests/test_mvp_tool_profile.py`, `tests/session/test_context_edges.py`, `tests/session/test_get_grc_context.py`, `tests/gui/test_process_manager.py`, `tests/gui/test_main_window_close.py`, `tests/test_search_blocks_compact.py`, `tests/test_tool_call_dedup.py`. These tested removed APIs and the removed `_VECTOR_CACHE`/`_ask_grc_docs_cache`/dedup features.
+
 ### Changed — CLI removed; GUI is the sole surface
 - **The `grc-agent` console script is gone.** `src/grc_agent/cli.py`,
   `src/grc_agent/__main__.py`, and the `[project.scripts]` entry are deleted.

@@ -202,7 +202,7 @@ END;
 
 def _utcnow_iso() -> str:
     """Return the current UTC time as an ISO-8601 string with ``Z``."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -581,16 +581,7 @@ class SessionStore:
             ).fetchall()
         return [_row_to_message(r) for r in rows]
 
-    def search_messages(self, query: str, *, limit: int = 50) -> list[MessageRecord]:
-        with self._read_conn() as conn:
-            rows = conn.execute(
-                "SELECT m.id, m.session_id, m.sequence, m.role, m.text, "
-                "m.payload, m.created_at "
-                "FROM messages_fts f JOIN messages m ON m.rowid = f.rowid "
-                "WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?",
-                (query, int(limit)),
-            ).fetchall()
-        return [_row_to_message(r) for r in rows]
+
 
     def gc(
         self,

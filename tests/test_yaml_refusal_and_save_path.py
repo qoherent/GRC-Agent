@@ -12,27 +12,6 @@ FIXTURE = Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
 
 
 class RawYamlAndSavePathTests(unittest.TestCase):
-    def test_raw_yaml_edit_is_refused_without_exposing_internal_tools(self) -> None:
-        agent = GrcAgent(catalog_root="/usr/share/gnuradio/grc/blocks")
-
-        result = agent.check_unsupported_request("Edit the raw .grc YAML directly.")
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["model"], "guard")
-        self.assertEqual(result["tool_calls_executed"], 0)
-        self.assertIn("YAML editing is not supported", result["assistant_text"])
-        # Guard messages state facts only (AGENTS.md) — no internal tool names leaked.
-        self.assertNotIn("apply_edit", result["assistant_text"])
-        self.assertNotIn("propose_edit", result["assistant_text"])
-
-    def test_normal_graph_requests_are_not_refused_by_yaml_guard(self) -> None:
-        agent = GrcAgent(catalog_root="/usr/share/gnuradio/grc/blocks")
-
-        self.assertIsNone(agent.check_unsupported_request("Set samp_rate to 48000."))
-        self.assertIsNone(agent.check_unsupported_request("Summarize this graph."))
-
     def test_new_graph_save_requires_explicit_path(self) -> None:
         session = FlowgraphSession()
         agent = GrcAgent(session, catalog_root="/usr/share/gnuradio/grc/blocks")

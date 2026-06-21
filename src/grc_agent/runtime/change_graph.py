@@ -289,17 +289,35 @@ def dispatch_flat_change_graph_batch(
         agent.session._last_failed_ops_hash = None
     if isinstance(result, dict):
         if not ok:
+            error_items = [
+                {k: v for k, v in e.items() if k != "op_type"}
+                for e in (result.get("errors") or [])
+            ]
             # ── Minimal error payload — errors + what caused them ──
             payload = {
                 "ok": False,
-                "errors": [
-                    {k: v for k, v in e.items() if k != "op_type"}
-                    for e in (result.get("errors") or [])
-                ],
+                "committed": False,
+                "state_revision": agent.session.state_revision,
+                "errors": error_items,
+                "message": "change_graph rejected: changes not committed.",
             }
             if result.get("error_type"):
                 payload["error_type"] = result.get("error_type")
+            # Collect ALL per-error hints (not just the first) so the model
+            # sees every actionable recovery path, not just the first error's.
+            collected_hints: list[str] = []
+            for err in error_items:
+                if not isinstance(err, dict):
+                    continue
+                hint_text = err.get("hint")
+                if isinstance(hint_text, str) and hint_text.strip():
+                    collected_hints.append(hint_text.strip())
+            native_errors: list[str] = []
+            stderr_text: str | None = None
             if result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED:
+                payload["graph_unchanged"] = True
+                payload["rollback"] = "complete"
+                payload["rejected_phase"] = "native_grc_validation"
                 native_errors = (
                     _native_validation_error_text(validation_result)
                     if isinstance(validation_result, dict)
@@ -308,9 +326,45 @@ def dispatch_flat_change_graph_batch(
                 if native_errors:
                     payload["native_validation_errors"] = native_errors
                 if isinstance(validation_result, dict):
-                    stderr = validation_result.get("stderr")
-                    if isinstance(stderr, str) and stderr.strip():
-                        payload["stderr"] = stderr
+                    stderr_text = validation_result.get("stderr")
+                    if isinstance(stderr_text, str) and stderr_text.strip():
+                        payload["stderr"] = stderr_text
+            # When `errors=[]` (GNU native validation failed), synthesize an
+            # error entry from the first native error so the renderer
+            # surfaces it as a readable `error:` line.
+            if not error_items and native_errors:
+                synthesized_code = "gnu_validation_failed"
+                first_native = native_errors[0]
+                error_items = [
+                    {
+                        "code": synthesized_code,
+                        "field": "graph",
+                        "message": first_native,
+                    }
+                ]
+                payload["errors"] = error_items
+                if len(native_errors) > 1:
+                    payload["message"] = (
+                        "change_graph rejected: changes not committed. "
+                        f"{len(native_errors)} native validation errors."
+                    )
+            # Build the top-level hint from the first available source,
+            # preferring per-error hints and falling back to native errors.
+            if collected_hints:
+                payload["hint"] = collected_hints[0]
+                if len(collected_hints) > 1:
+                    payload["additional_hints"] = collected_hints[1:]
+            elif native_errors:
+                payload["hint"] = native_errors[0]
+                if len(native_errors) > 1:
+                    payload["additional_hints"] = native_errors[1:]
+            elif stderr_text and not collected_hints:
+                # Last line of stderr often names the real cause
+                # (e.g. "LookupError: source key pdu_out ...").
+                last_line = stderr_text.strip().splitlines()
+                tail = last_line[-1].strip() if last_line else ""
+                if tail:
+                    payload["hint"] = tail[:300]
 
             # ── Phase 3: State-aware repeat-payload escalator ──────────────
             current_ops_hash = json.dumps(normalized_operations, sort_keys=True)

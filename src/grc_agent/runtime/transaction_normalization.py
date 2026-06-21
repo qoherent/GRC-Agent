@@ -375,10 +375,21 @@ class TransactionNormalizer:
 
     @staticmethod
     def _tool_argument_candidates() -> tuple[str, ...]:
-        return (
-            "transaction", "node_id", "hops", "max_nodes", "block_id", "file_path",
-            "graph_id", "profile", "query", "scope", "k", "path", "max_blocks",
-        )
+        """Union of every tool-parameter name across the active schema set.
+
+        Previously a hand-curated tuple that drifted from the schemas
+        (e.g. ``scope`` was listed but no tool exposes it). Now derived
+        from :func:`build_tool_schemas` so any new tool parameter is
+        automatically included.
+        """
+        from grc_agent.runtime.tool_schemas import build_tool_schemas
+
+        names: list[str] = []
+        for schema in build_tool_schemas():
+            params = schema.get("function", {}).get("parameters", {}) or {}
+            names.extend(params.get("properties", {}).keys())
+        # Dedupe while preserving order.
+        return tuple(dict.fromkeys(names))
 
     @staticmethod
     def _dedupe_transaction_operations(operations: list[Any]) -> list[Any]:

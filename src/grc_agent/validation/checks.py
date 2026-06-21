@@ -1016,6 +1016,19 @@ def _apply_add_connection(
         and destination_port.vlen is not None
         and source_port.vlen != destination_port.vlen
     ):
+        vlen_hint = _preflight_vlen_param_hint(
+            src_block,
+            src_port,
+            source_port.vlen,
+            destination_port.vlen,
+            catalog_root=catalog_root,
+        ) or _preflight_vlen_param_hint(
+            dst_block,
+            dst_port,
+            destination_port.vlen,
+            source_port.vlen,
+            catalog_root=catalog_root,
+        )
         return [
             make_issue(
                 op_index=op_index,
@@ -1027,6 +1040,7 @@ def _apply_add_connection(
                     f"(vlen={source_port.vlen}) to {format_endpoint(dst_block_name, dst_port)} "
                     f"(vlen={destination_port.vlen})."
                 ),
+                hint=vlen_hint,
             )
         ], warnings
 
@@ -1859,3 +1873,42 @@ def _preflight_dtype_param_hint(
         return None
 
     return f"Parameter '{param_id}' of '{instance_name}' has matching type option '{suggested_val}'."
+
+
+def _preflight_vlen_param_hint(
+    block: Block,
+    port_id: Any,
+    block_vlen: Any,
+    target_vlen: Any,
+    *,
+    catalog_root: str | Path | None = None,
+) -> str | None:
+    """Build a hint when two connected stream ports have different ``vlen``.
+
+    The model gets a recovery path: it should set the block's ``vlen``
+    parameter (if it has one) to the value the OTHER side of the connection
+    expects, or to a variable that holds that value. Returns ``None`` if
+    the block has no configurable ``vlen`` parameter — in that case the
+    vlen is hard-coded by the block type and the only fix is to pick a
+    different block on the other side of the connection.
+    """
+    from .rules import get_block_rules
+
+    rules_lookup = get_block_rules(block.block_type, catalog_root=catalog_root)
+    if not rules_lookup.ok or rules_lookup.rules is None:
+        return None
+    rules = rules_lookup.rules
+
+    vlen_rule = rules.parameters.get("vlen")
+    if vlen_rule is None:
+        return None
+
+    if isinstance(target_vlen, int):
+        suggested = str(target_vlen)
+    else:
+        suggested = str(target_vlen)
+
+    return (
+        f"Parameter 'vlen' of '{block.instance_name}' is "
+        f"{block_vlen}; set to {suggested} to match the other side."
+    )

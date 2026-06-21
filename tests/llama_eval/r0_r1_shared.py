@@ -24,11 +24,11 @@ def _inspect(view: str) -> tuple[ToolExpectation, ...]:
 
 
 def _search(query: str) -> tuple[ToolExpectation, ...]:
-    return (ToolExpectation("query_knowledge", arguments={"query": query, "domain": "catalog"}),)
+    return (ToolExpectation("query_knowledge", arguments={"domain": "catalog"}),)
 
 
 def _docs(question: str) -> tuple[ToolExpectation, ...]:
-    return (ToolExpectation("query_knowledge", arguments={"query": question, "domain": "docs"}),)
+    return (ToolExpectation("query_knowledge", arguments={"domain": "docs"}),)
 
 
 def _set_param(instance_name: str, param: str, value: str) -> tuple[ToolExpectation, ...]:

@@ -46,7 +46,6 @@ def test_agent_worker_emits_start_signal(qtbot):
     mock_provider = MagicMock()
 
     # Mock the LLM execution behavior
-    mock_agent.check_unsupported_request.return_value = None
     mock_agent.history = []
 
     # We need to mock the ToolAgentsRunner inside workers

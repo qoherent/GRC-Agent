@@ -252,22 +252,7 @@ class RoundTripTests(_StoreTestCase):
         self.assertEqual(rec.message_count, 3)
         self.assertIsNotNone(rec.ended_at)
 
-    def test_fts5_finds_text(self) -> None:
-        sid = self._open_session()
-        self.store.append(sid, "user", "Please add a lowpass filter")
-        self.store.append(sid, "assistant", "Adding a kalman estimator instead")
-        self.store.flush(timeout=2.0)
-        # ``lowpass`` is a single token under the unicode61
-        # tokenizer (the hyphen is a separator, so ``low-pass``
-        # would tokenize to ``low`` and ``pass``). The point of
-        # this test is that FTS5 finds a hit, not which token
-        # strategy we use.
-        hits = self.store.search_messages("lowpass")
-        self.assertEqual(len(hits), 1)
-        self.assertIn("lowpass", hits[0].text)
-        hits2 = self.store.search_messages("kalman")
-        self.assertEqual(len(hits2), 1)
-        self.assertEqual(hits2[0].text, "Adding a kalman estimator instead")
+
 
     def test_cascade_delete_session_deletes_messages(self) -> None:
         sid = self._open_session()

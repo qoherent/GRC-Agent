@@ -16,10 +16,7 @@ from grc_agent.toolagents_runtime import (
     ToolAgentsRegistryBuilder,
     ToolAgentsToolDelegate,
     _function_tool_from_openai_tool,
-    _is_missing_graph_evidence_response,
-    _is_terminal_change_graph_failure,
     _tool_failure_text,
-    _tool_retry_reminder,
 )
 from ToolAgents import FunctionTool
 from ToolAgents.agents import ChatToolAgent
@@ -200,108 +197,6 @@ class ToolAgentsHistoryAdapterToolMessageTests(unittest.TestCase):
 
 
 class ToolAgentsRepairClassificationTests(unittest.TestCase):
-    def test_ambiguity_clarification_is_not_forced_into_mutation(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Disable the QT GUI time sink and validate the graph.",
-            assistant_text=(
-                "I found two instances: `qtgui_time_sink_x_0` and "
-                "`qtgui_time_sink_x_1`. Please specify which one to disable."
-            ),
-            tool_calls_requested=1,
-            tool_calls_executed=1,
-            tool_names_requested=["inspect_graph"],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=True,
-        )
-
-        self.assertIsNone(reminder)
-
-    def test_evidence_backed_clarification_is_not_forced_into_mutation(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Reconnect the time sink to the other random source.",
-            assistant_text=(
-                "Which random source should connect to which time sink input, "
-                "and should the existing connection be removed?"
-            ),
-            tool_calls_requested=1,
-            tool_calls_executed=1,
-            tool_names_requested=["inspect_graph"],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=False,
-        )
-
-        self.assertIsNone(reminder)
-
-    def test_pre_evidence_clarification_gets_inspection_reminder(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Reconnect the message strobe to another debug block.",
-            assistant_text=(
-                "Please provide the instance names and ports for the message "
-                "strobe and debug block."
-            ),
-            tool_calls_requested=0,
-            tool_calls_executed=0,
-            tool_names_requested=[],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=False,
-        )
-
-        self.assertIn("current tool evidence", (reminder or "").lower())
-
-    def test_ambiguous_stream_rewire_clarification_not_forced_into_mutation(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Reconnect time sink to other random source",
-            assistant_text="Which of the two random sources do you want to connect to, and on which port?",
-            tool_calls_requested=1,
-            tool_calls_executed=1,
-            tool_names_requested=["inspect_graph"],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=True,
-        )
-        self.assertIsNone(reminder)
-
-    def test_ambiguous_message_rewire_clarification_not_forced_into_mutation(self) -> None:
-        reminder = _tool_retry_reminder(
-            user_message="Reconnect message strobe to another debug block",
-            assistant_text="There are multiple strobe and debug blocks in this graph. Which one should I rewire?",
-            tool_calls_requested=1,
-            tool_calls_executed=1,
-            tool_names_requested=["inspect_graph"],
-            change_graph_schema_failure_pending=False,
-            change_graph_committed=False,
-            change_graph_control_response=False,
-            change_graph_wrong_insert_pending=False,
-            change_graph_missing_evidence_pending=False,
-            graph_ambiguity_pending=True,
-        )
-        self.assertIsNone(reminder)
-
-    def test_forced_invalid_commit_is_not_terminal_failure(self) -> None:
-        result = {
-            "ok": True,
-            "committed": True,
-            "forced_validation_failure": True,
-            "validation_result": {"status": "invalid"},
-        }
-
-        self.assertFalse(_is_terminal_change_graph_failure(result))
-
     def test_terminal_change_graph_failure_text_preserves_native_refusal_facts(self) -> None:
         text = _tool_failure_text(
             {
@@ -318,7 +213,6 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
         self.assertIn("did not commit", text)
         self.assertIn("The graph is unchanged.", text)
         self.assertIn("Source - out(0): Port is not connected.", text)
-        self.assertIn("Please choose", text)
 
     def test_terminal_change_graph_failure_text_handles_minimal_validation_result(
         self,
@@ -339,62 +233,6 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
         self.assertIn("did not commit", text)
         self.assertIn("No changes were committed.", text)
         self.assertIn("Source - out(0): Port is not connected.", text)
-        self.assertIn("force an invalid intermediate graph", text)
-
-    def test_unknown_param_preflight_is_repairable_evidence_failure(self) -> None:
-        result = {
-            "ok": False,
-            "error_type": "preflight_rejected",
-            "message": "Transaction failed preflight validation.",
-            "errors": [
-                {
-                    "code": "parameter_not_found",
-                    "message": "Unknown parameter for block type analog_sig_source_x: frequency",
-                    "hint": "Inspect the target block details and retry with an exact param_id.",
-                }
-            ],
-        }
-
-        self.assertTrue(_is_missing_graph_evidence_response(result))
-        self.assertFalse(_is_terminal_change_graph_failure(result))
-
-    def test_unknown_block_preflight_is_repairable_evidence_failure(self) -> None:
-        result = {
-            "ok": False,
-            "error_type": "preflight_rejected",
-            "message": "Transaction failed preflight validation.",
-            "errors": [
-                {
-                    "code": "unknown_block_id",
-                    "message": "Could not resolve block type: null_sink",
-                    "hint": "Run search_blocks for the block concept and retry.",
-                }
-            ],
-        }
-
-        self.assertTrue(_is_missing_graph_evidence_response(result))
-        self.assertFalse(_is_terminal_change_graph_failure(result))
-
-    def test_missing_added_connection_endpoint_is_repairable(self) -> None:
-        result = {
-            "ok": False,
-            "error_type": "preflight_rejected",
-            "message": "Transaction failed preflight validation.",
-            "errors": [
-                {
-                    "code": "block_not_found",
-                    "message": "Block not found: blocks_null_sink",
-                    "hint": (
-                        "The endpoint must be an existing graph instance_name. "
-                        "For a new sink/source, include add_blocks and add_connections in the same "
-                        "change_graph call, and connect to the new instance_name, not the catalog block_id."
-                    ),
-                }
-            ],
-        }
-
-        self.assertTrue(_is_missing_graph_evidence_response(result))
-        self.assertFalse(_is_terminal_change_graph_failure(result))
 
 
 class ToolAgentsProviderConfigTests(unittest.TestCase):

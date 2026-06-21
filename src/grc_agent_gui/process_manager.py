@@ -332,7 +332,7 @@ class ProcessManager(QObject):
             and self.compile_process.state() == QProcess.ProcessState.Running
         ):
             self._terminate_with_fallback(
-                self.compile_process, self._compile_kill_timer, "compilation"
+                self.compile_process, "compilation"
             )
 
         if (
@@ -340,7 +340,7 @@ class ProcessManager(QObject):
             and self.run_process.state() == QProcess.ProcessState.Running
         ):
             self._terminate_with_fallback(
-                self.run_process, self._run_kill_timer, "flowgraph execution"
+                self.run_process, "flowgraph execution"
             )
 
     def _terminate_with_fallback(

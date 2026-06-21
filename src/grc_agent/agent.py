@@ -7,7 +7,6 @@ import logging
 import re
 import time
 import uuid
-from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -250,9 +249,6 @@ class GrcAgent:
             "snippet_count": 0,
             "source_quality": {},
         }
-        self._ask_grc_docs_cache: OrderedDict[tuple[str, ...], dict[str, Any]] = (
-            OrderedDict()
-        )
         self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
@@ -1025,13 +1021,13 @@ class GrcAgent:
         include_active_session: bool | None = None,
     ) -> ToolResult:
         result = dict(payload)
-        # Don't add tool name or active_session for MVP model-facing tools
-        # — the model knows what it called, and active_session is noise.
+        # Drop active_session for MVP model-facing tools — it is noise
+        # the model does not act on. Keep the ``tool`` key for self-describing
+        # chat-history records and audit/eval consumers.
         _MVP_TOOLS = {"inspect_graph", "change_graph", "query_knowledge",
                        "search_blocks", "ask_grc_docs", "get_grc_context",
                        "describe_block"}
-        if tool_name not in _MVP_TOOLS:
-            result["tool"] = tool_name
+        result["tool"] = tool_name
         if default_message is not None and "message" not in result:
             result["message"] = default_message
         if include_active_session is None:
@@ -1125,51 +1121,6 @@ class GrcAgent:
     def _search_blocks_version_token(self) -> str:
         catalog_token = _catalog_version_token(self.catalog_root)
         return f"catalog={catalog_token}"
-
-    def _ask_grc_docs_cache_key(
-        self,
-        *,
-        question: str,
-        k: int,
-        retrieval_mode: str,
-        sources: list[dict[str, str]],
-        focus: str | None = None,
-        cache_scope: str = "sources",
-    ) -> tuple[str, ...]:
-        source_digest = hashlib.sha1()
-        for row in sources:
-            title = str(row.get("title", "")).strip()
-            source = str(row.get("source", "")).strip()
-            excerpt = str(row.get("excerpt", "")).strip()
-            source_digest.update(f"{title}|{source}|{excerpt}".encode())
-        return (
-            cache_scope,
-            question,
-            str(k),
-            str(focus or ""),
-            retrieval_mode,
-            source_digest.hexdigest(),
-        )
-
-    def _ask_grc_docs_cache_get(
-        self,
-        key: tuple[str, ...],
-    ) -> dict[str, Any] | None:
-        hit = self._ask_grc_docs_cache.get(key)
-        if hit is None:
-            return None
-        self._ask_grc_docs_cache.move_to_end(key)
-        return copy.deepcopy(hit)
-
-    def _ask_grc_docs_cache_put(
-        self,
-        key: tuple[str, ...],
-        payload: dict[str, Any],
-    ) -> None:
-        self._ask_grc_docs_cache[key] = copy.deepcopy(payload)
-        self._ask_grc_docs_cache.move_to_end(key)
-        while len(self._ask_grc_docs_cache) > self._docs_answer_cfg.answer_cache_size:
-            self._ask_grc_docs_cache.popitem(last=False)
 
     def _query_knowledge(
         self,
