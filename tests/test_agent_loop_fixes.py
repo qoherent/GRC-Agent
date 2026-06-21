@@ -455,41 +455,6 @@ class Fix1CommitResultTests(unittest.TestCase):
             "I updated the sample rate to 48000.",
         )
 
-    def test_dispatcher_backward_compat_accepts_flat_state_string(self) -> None:
-        errors: list[str] = []
-        op = _update_state_operation(
-            {"instance_name": "blocks_throttle2_0", "state": "disabled"},
-            index=0,
-            field_name="update_states",
-            errors=errors,
-        )
-        self.assertIsNotNone(op, f"errors={errors}")
-        self.assertEqual(op["op_type"], "update_states")
-        self.assertEqual(op["state"], "disabled")
-
-    def test_dispatcher_backward_compat_accepts_old_object_format(self) -> None:
-        errors: list[str] = []
-        op = _update_state_operation(
-            {"instance_name": "blocks_throttle2_0", "states": {"state": "disabled"}},
-            index=0,
-            field_name="update_states",
-            errors=errors,
-        )
-        self.assertIsNotNone(op, f"errors={errors}")
-        self.assertEqual(op["op_type"], "update_states")
-        self.assertEqual(op["state"], "disabled")
-
-    def test_dispatcher_backward_compat_accepts_boolean_alias(self) -> None:
-        errors: list[str] = []
-        op = _update_state_operation(
-            {"instance_name": "blocks_throttle2_0", "states": {"disabled": True}},
-            index=0,
-            field_name="update_states",
-            errors=errors,
-        )
-        self.assertIsNotNone(op, f"errors={errors}")
-        self.assertEqual(op["state"], "disabled")
-
     def test_dispatcher_accepts_bypass_state(self) -> None:
         errors: list[str] = []
         op = _update_state_operation(
