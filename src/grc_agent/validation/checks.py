@@ -1635,11 +1635,13 @@ def _validate_parameter_updates(
     block_type: str,
     params: dict[str, Any],
     parameter_rules: dict[str, Any],
-    allowed_parameter_ids: set[str] = set(),
+    allowed_parameter_ids: set[str] | None = None,
     op_index: int,
     op_type: str,
     field_prefix: str,
 ) -> list[ValidationIssue]:
+    if allowed_parameter_ids is None:
+        allowed_parameter_ids = set()
     issues: list[ValidationIssue] = []
     for parameter_id in sorted(params, key=str):
         rule = parameter_rules.get(parameter_id)

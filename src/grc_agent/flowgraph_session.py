@@ -1354,48 +1354,6 @@ class FlowgraphSession:
             ],
         }
 
-    @staticmethod
-    def _parameter_sample(parameter_map: dict[str, Any]) -> list[str]:
-        """Return a bounded key=value preview for one block's parameters."""
-        rendered = [
-            f"{key}={FlowgraphSession._compact_value(value)}"
-            for key, value in list(parameter_map.items())[:MAX_CONTEXT_PARAMETER_SAMPLE]
-        ]
-        remaining = len(parameter_map) - len(rendered)
-        if remaining > 0:
-            rendered.append(f"... +{remaining} more")
-        return rendered
-
-    @staticmethod
-    def _compact_value(value: Any) -> str:
-        """Collapse arbitrary values into a short single-line representation."""
-        if value is None:
-            return "null"
-        if isinstance(value, str):
-            return " ".join(value.split()) or '""'
-        if isinstance(value, (list, tuple)):
-            n = len(value)
-            if n > 4:
-                return (
-                    "["
-                    + ", ".join(FlowgraphSession._compact_value(item) for item in value[:4])
-                    + f", ... [TRUNCATED list: was {n} items, kept 4]"
-                    + "]"
-                )
-            return "[" + ", ".join(FlowgraphSession._compact_value(item) for item in value) + "]"
-        if isinstance(value, dict):
-            n = len(value)
-            if n > 4:
-                items = list(value.items())[:4]
-                body = ", ".join(
-                    f"{key}={FlowgraphSession._compact_value(item)}" for key, item in items
-                )
-                return "{" + body + f", ... [TRUNCATED dict: was {n} keys, kept 4]" + "}"
-            body = ", ".join(
-                f"{key}={FlowgraphSession._compact_value(item)}" for key, item in value.items()
-            )
-            return "{" + body + "}"
-        return str(value)
 
     # Parsing and serialization helpers
 

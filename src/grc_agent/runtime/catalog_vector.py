@@ -336,7 +336,6 @@ def is_catalog_db_usable(db_path: Path, *, sample_size: int = 16) -> bool:
         total = conn.execute("SELECT count(*) FROM catalog_chunks").fetchone()[0]
         if total == 0:
             return False
-        import random
         n = min(sample_size, total)
         rowids = [r[0] for r in conn.execute(
             f"SELECT rowid FROM catalog_chunks ORDER BY RANDOM() LIMIT {int(n)}"

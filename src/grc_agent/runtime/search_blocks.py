@@ -51,7 +51,6 @@ def search_blocks(
     Returns the same payload shape the model already sees: a list of
     ``{block_id, name, summary, distance, match_type, why}`` rows.
     """
-    import grc_agent.agent as agent_module
 
     started = time.monotonic()
     before_revision = agent.session.state_revision

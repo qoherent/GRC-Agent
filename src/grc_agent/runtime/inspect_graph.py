@@ -668,45 +668,6 @@ def _is_configured_or_prominent(
     return value != default
 
 
-def _variable_reference_map(
-    blocks: list[Block],
-    variable_values: dict[str, Any],
-) -> dict[str, list[dict[str, str]]]:
-    refs: dict[str, list[dict[str, str]]] = {}
-    for block in blocks:
-        params = block.params.get("parameters") if isinstance(block.params, dict) else None
-        if not isinstance(params, dict):
-            continue
-        for key, value in params.items():
-            if isinstance(value, str) and value in variable_values:
-                refs.setdefault(value, []).append(
-                    {"block": block.instance_name, "param": key}
-                )
-    return refs
-
-
-def _all_variable_references(
-    blocks: list[Block],
-    variable_values: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Lifted from the ``param_filter`` gate: every variable → its references.
-
-    The previous implementation only computed references for variables the
-    model explicitly requested via ``params=[...]``. Surfacing the full map on
-    every call means the model can answer "what uses variable X" without
-    first asking for a narrower view, and never needs to fall back to the
-    catalog to discover block/param names.
-    """
-    if not variable_values:
-        return {}
-    ref_map = _variable_reference_map(blocks, variable_values)
-    return {
-        name: {
-            "value": variable_values[name],
-            "referenced_by": ref_map.get(name, []),
-        }
-        for name in variable_values
-    }
 
 
 def _format_valid_block_names(names: list[str], *, limit: int = 20) -> str:
@@ -853,20 +814,15 @@ def _base_payload(
 ) -> dict[str, Any]:
     """Uniform model-visible payload for ``inspect_graph``.
 
-    Shape (every call has the same five fields; ``errors`` and ``targets`` are
+    Shape (every call has the same core fields; ``errors`` and ``targets`` are
     populated only when relevant):
 
-    - ``errors``: list of ``{code, message}`` — first-class, not nested in JSON.
-    - ``unmatched_params``: param strings the model asked for that didn't match.
-    - ``variable_references``: every variable → ``{value, referenced_by: [{block, param}]}``.
-      Lifted from the previous ``param_filter`` gate so the model can answer
-      "what uses X" without first requesting a narrower view.
-    - ``param_keys_by_block``: every block → sorted list of its param keys.
-      Surfaces ``GrcAgent._inspect_param_keys_by_block`` at the model boundary
-      so the model can see what valid ``targets`` / ``params`` look like.
+    - ``ok``: bool indicating success.
+    - ``params``: every block → sorted list of its param keys.
     - ``graph``: ``{graph_name, counts, blocks, connections}`` for overview,
       or just ``{graph_name, counts}`` for details.
     - ``targets`` (details only): block details rows.
+    - ``errors``: list of ``{code, message}`` — first-class, not nested in JSON.
     - ``omitted`` (optional): ``{blocks, connections, parameters}`` counts.
 
     The renderer in ``tool_context.py`` promotes every ``errors[i].message``
@@ -1080,9 +1036,6 @@ def _compact_value(value: Any) -> str:
     return str(value)
 
 
-def _graph_name(agent: GrcAgent) -> str | None:
-    path = agent.session.path
-    return path.name if path is not None else None
 
 
 # --- merged from get_grc_context_internal.py ---

@@ -6,7 +6,6 @@ import copy
 import datetime
 import json
 import logging
-import re
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -587,7 +586,6 @@ class ToolAgentsRunner:
                         tool_name,
                         str(tool_call.tool_call_arguments)[:120],
                     )
-                    before_revision = agent.session.state_revision
                     delegate = registry_builder.delegates.get(tool_name)
                     if delegate is None:
                         result = {

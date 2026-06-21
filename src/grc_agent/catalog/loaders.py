@@ -15,9 +15,7 @@ import yaml
 
 from grc_agent._payload import ErrorCode, build_error_payload
 from .schema import (
-    ADVANCED_PARAM_TAB,
     DEFAULT_PARAM_TAB,
-    EXCLUDED_PARAM_CATEGORIES,
     BlockDescription,
     CatalogFiles,
     CatalogSnapshot,

@@ -24,7 +24,7 @@ from grc_agent.flowgraph_session import (
     DEFAULT_SUMMARY_BLOCK_LIMIT,
     FlowgraphSession,
 )
-from grc_agent._payload import Block, Connection
+from grc_agent._payload import Connection
 from grc_agent.runtime.clarification import ClarificationOption, ClarificationRequest
 from grc_agent.session_ops import parse_connection_id
 
@@ -37,7 +37,6 @@ __all__ = [
     "suggest_insertions",
     "auto_insert_block",
     "validate_raw_flowgraph",
-    "validate_graph",
 ]
 
 
@@ -727,6 +726,7 @@ def _safe_rejection(attempted: list[dict[str, Any]], intent: dict[str, Any]) -> 
 
 
 def _build_clarification_payload(
+    session,
     validated: list[tuple[int, str, InsertionCandidate, dict[str, Any]]],
     attempted: list[dict[str, Any]],
     goal: str,
@@ -1043,4 +1043,4 @@ def auto_insert_block(
         full_attempted.append(entry_from_live)
         return _safe_rejection(full_attempted, intent)
 
-    return _build_clarification_payload(validated, attempted, goal, intent)
+    return _build_clarification_payload(session, validated, attempted, goal, intent)
