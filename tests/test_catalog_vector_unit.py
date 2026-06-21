@@ -1,21 +1,21 @@
 """Deterministic unit tests for the catalog embed-text helpers.
 
-No Ollama / no live embedding model required. The param filter delegates
-to GRC's native ``evaluated_param_hides`` (same call
-``inspect_graph._param_keys_by_block`` uses), so the live tests need a
-working GRC platform; the mock-based tests below don't.
+No Ollama / no live embedding model required. The param filter lives in
+:mod:`grc_agent.runtime.param_filter` (Stage A visibility via GRC's native
+``evaluated_param_hides`` + categories); the live tests need a working GRC
+platform, the mock-based tests below don't.
 """
 from __future__ import annotations
 
 from unittest import mock
 
 from grc_agent.runtime.catalog_vector import (
-    _visible_param_keys,
     compose_block_embed_text,
 )
+from grc_agent.runtime.param_filter import visible_param_keys
 
 
-# --- _visible_param_keys ---------------------------------------------------
+# --- visible_param_keys ---------------------------------------------------
 
 def test_visible_params_drops_hide_all_keys():
     """When GRC evaluates a param with hide='all', it is dropped."""
@@ -27,13 +27,17 @@ def test_visible_params_drops_hide_all_keys():
         "color1": "all",
     }
     with mock.patch(
-        "grc_agent.runtime.catalog_vector.evaluated_param_hides",
+        "grc_agent.runtime.param_filter.evaluated_param_hides",
         return_value=fake_eval,
     ):
-        result = _visible_param_keys(
-            "fake_block",
-            ["type", "name", "alpha1", "alpha2", "color1"],
-        )
+        with mock.patch(
+            "grc_agent.runtime.param_filter.categories",
+            return_value={},
+        ):
+            result = visible_param_keys(
+                "fake_block",
+                ["type", "name", "alpha1", "alpha2", "color1"],
+            )
     assert result == ["type", "name"]
 
 
@@ -44,13 +48,17 @@ def test_visible_params_keeps_hide_part_keys():
         "type": "none",
     }
     with mock.patch(
-        "grc_agent.runtime.catalog_vector.evaluated_param_hides",
+        "grc_agent.runtime.param_filter.evaluated_param_hides",
         return_value=fake_eval,
     ):
-        result = _visible_param_keys(
-            "fake_block",
-            ["ylabel", "type", "not_in_eval"],
-        )
+        with mock.patch(
+            "grc_agent.runtime.param_filter.categories",
+            return_value={},
+        ):
+            result = visible_param_keys(
+                "fake_block",
+                ["ylabel", "type", "not_in_eval"],
+            )
     # ylabel kept (part), type kept (none), not_in_eval kept (unknown)
     assert "ylabel" in result
     assert "type" in result
@@ -60,10 +68,10 @@ def test_visible_params_keeps_hide_part_keys():
 def test_visible_params_falls_back_when_grc_unavailable():
     """If GRC is unavailable, return the full list (no silent drop)."""
     with mock.patch(
-        "grc_agent.runtime.catalog_vector.evaluated_param_hides",
+        "grc_agent.runtime.param_filter.evaluated_param_hides",
         return_value={},
     ):
-        result = _visible_param_keys(
+        result = visible_param_keys(
             "fake_block",
             ["a", "b", "c"],
         )
@@ -75,7 +83,7 @@ def test_visible_params_falls_back_when_grc_unavailable():
 def test_compose_includes_passed_params_verbatim():
     """compose is a pure composer — it does NOT filter on its own.
 
-    Filtering is the caller's job (see ``_visible_param_keys``). The
+    Filtering is the caller's job (see ``visible_param_keys``). The
     compose function trusts the ``parameters`` argument.
     """
     text = compose_block_embed_text(
@@ -126,7 +134,7 @@ def test_visible_params_filters_real_qtgui_time_sink_x():
     reduced form) while extras beyond that are ``hide='all'``. The
     test asserts the high-N extras are filtered.
     """
-    visible = _visible_param_keys(
+    visible = visible_param_keys(
         "qtgui_time_sink_x",
         [
             "type", "name", "ylabel", "yunit", "size", "srate", "grid",

@@ -384,8 +384,8 @@ The `hide` field in block YAML can be:
 
 **Filtering rule:** `hide != 'all'` to keep visible params.
 
-**Used by:** `inspect_graph._param_keys_by_block` (line 750), the catalog
-embed filter, and `search_blocks._compact_catalog_details`.
+**Used by:** the unified filter `grc_agent.runtime.param_filter` (which
+consumes evaluated `hide`), the catalog embed text builder, and `inspect_graph`.
 
 ## 3.2 Tabs and Category Boundaries
 
@@ -435,15 +435,17 @@ GRC determines the visual prominence of parameters using these rules:
 - **Prominence ordering** — Sort by evaluated `hide` status: `'none'` (0,
   always prominent) first, then `'part'` (1, conditionally prominent), and
   finally `'all'` (2, hidden).
-- **Value-based filter (`_is_configured_or_prominent`)** — A parameter is
-  visible/essential if:
-  1. `hide != 'all'`, AND
-  2. `hide == 'none'` OR its current value differs from its default value OR
-     its value references a flowgraph variable (e.g., `samp_rate`).
+- **Value-based filter** — implemented in
+  `grc_agent.runtime.param_filter.keep_param` (the single authority). In
+  Overview/prominence mode a parameter is retained if `dtype == 'enum'`
+  (a structural selector such as `type`), OR its value differs from its
+  default, OR its value references a flowgraph variable. `hide == 'none'`
+  alone no longer retains a default-valued param. Details mode uses
+  visibility-only (dense: defaults shown).
 
-The value-based filter is the tightest — used by `inspect_graph` when no
-specific params are requested. It shows only params the user has actually
-changed, plus always-visible ones. Not suitable for catalog search (no
+The value-based filter is the tightest — used by `inspect_graph` Overview
+when no specific params are requested. It shows structural selectors plus
+params the user has actually changed. Not suitable for catalog search (no
 instance values), but useful for graph inspection where the goal is "what's
 configured" rather than "what exists".
 
@@ -457,34 +459,17 @@ GRC provides native boolean properties to classify blocks:
 - `Block.is_virtual_or_pad` — `True` if
   `block.key in ("virtual_source", "virtual_sink", "pad_source", "pad_sink")`.
 
-## 3.5 Combined Parameter Filtering Recipe (the agent's working code)
+## 3.5 Parameter Filtering (the agent's working code)
 
-```python
-from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB
-
-EXCLUDED_CATEGORIES = {ADVANCED_PARAM_TAB, "Config"}
-
-# 1. Evaluate hide with actual param defaults/current values
-hides = evaluated_param_hides(block_id, param_values)
-
-# 2. Get categories from the live GRC block
-param_cats = {name: getattr(p, "category", "General")
-              for name, p in block.params.items()}
-
-# 3. Filter: visible AND not Advanced AND not Config
-visible = [
-    p for p in raw_params
-    if hides.get(p["id"], "all") != "all"
-    and param_cats.get(p["id"], "General") not in EXCLUDED_CATEGORIES
-]
-
-# 4. Sort by prominence: hide='none' first, then 'part'
-visible.sort(key=lambda p: (
-    0 if hides.get(p["id"]) == "none"
-    else 1 if hides.get(p["id"]) == "part"
-    else 2
-))
-```
+The **single authority** is `grc_agent.runtime.param_filter.keep_param`.
+Every model-visible parameter payload — `inspect_graph` overview/details,
+catalog `describe_block`, and the catalog embed text — delegates its
+keep/drop decision to it. The pipeline: drop `hide == 'all'` → drop
+`category in {Advanced, Config}` → drop `dtype == 'gui_hint'` →
+(prominence only) keep `dtype == 'enum'` OR `value != default` OR
+value-references-a-variable. Do **not** re-implement this recipe inline;
+the duplicated inline copies were the source of the drift that forced the
+`param_filter` consolidation. See `src/grc_agent/runtime/param_filter.py`.
 
 ### Measured sizes (per block, no options)
 

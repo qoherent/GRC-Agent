@@ -8,11 +8,11 @@ The same uniform rules apply:
   * ``vec1`` provides cosine-distance nearest-neighbour over a flat packed
     index of 768-d float32 vectors.
 
-Param filtering for the embed text uses the same GRC-native
-``evaluated_param_hides`` that :func:`inspect_graph._param_keys_by_block`
-uses. GRC itself marks GUI-only parameters with ``hide='all'`` (color
-grids, alpha slots, per-channel device knobs); reading that attribute is
-the native answer to "which params should the embedding model see".
+Param filtering for the embed text is delegated to the single authority
+:mod:`grc_agent.runtime.param_filter` (Stage A visibility: drop ``hide='all'``,
+Advanced, Config). GRC itself marks GUI-only parameters with ``hide='all'``
+(color grids, alpha slots, per-channel device knobs); reading that attribute
+is the native answer to "which params should the embedding model see".
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from grc_agent.runtime.block_semantics import evaluated_param_hides
 from grc_agent.runtime.doc_answer import get_embedding
+from grc_agent.runtime.param_filter import visible_param_keys
 
 logger = logging.getLogger(__name__)
 
@@ -40,27 +40,6 @@ _DOCUMENT_PREFIX = "task: search result | document: "
 
 # --- Embed-text body cap (mirrors doc_answer.CHUNK_MAX_WORDS) ---------------
 _CATALOG_EMBED_MAX_WORDS = 256
-
-
-def _visible_param_keys(
-    block_id: str,
-    params: list[str] | tuple[str, ...],
-    param_values: dict[str, Any] | None = None,
-) -> list[str]:
-    """Return param keys that GRC's own ``hide`` evaluation marks as visible.
-
-    Delegates to :func:`evaluated_param_hides` (the same call
-    :func:`inspect_graph._param_keys_by_block` uses). Params with
-    ``hide='all'`` (color slots, alpha grids, per-channel knobs) are
-    excluded. ``hide='part'`` and ``hide='none'`` are kept. If the GRC
-    platform is unavailable, the function returns the full list
-    unchanged — never silently drops a parameter that might be useful.
-    """
-    evaluated = evaluated_param_hides(block_id, param_values or {})
-    if not evaluated:
-        return list(params)
-    visible = [key for key in params if evaluated.get(str(key)) != "all"]
-    return visible
 
 
 def _cap_embed_body(parts: list[str], max_words: int) -> str:
@@ -112,8 +91,8 @@ def compose_block_embed_text(
     so the embedding model sees a consistent shape.
 
     Param filtering is the caller's responsibility
-    (see :func:`_visible_param_keys`); this function trusts the
-    ``parameters`` argument as the already-filtered list. The resulting
+    (see :func:`grc_agent.runtime.param_filter.visible_param_keys`); this
+    function trusts the ``parameters`` argument as the already-filtered list. The resulting
     body is capped at 256 words; if the cap fires, a visible
     ``[TRUNCATED ...]`` flag is appended.
     """
@@ -227,7 +206,7 @@ class VectorCatalogStore:
                 raw_params = tuple(str(p) for p in (block.get("parameters") or ()))
                 param_values = block.get("param_values") or {}
                 visible_params = tuple(
-                    _visible_param_keys(block_id, raw_params, param_values)
+                    visible_param_keys(block_id, raw_params, param_values)
                 )
                 body = compose_block_embed_text(
                     block_id=block_id,

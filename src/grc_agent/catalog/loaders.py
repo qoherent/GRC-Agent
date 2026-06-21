@@ -15,7 +15,6 @@ import yaml
 
 from grc_agent._payload import ErrorCode, build_error_payload
 from .schema import (
-    DEFAULT_PARAM_TAB,
     BlockDescription,
     CatalogFiles,
     CatalogSnapshot,
@@ -345,38 +344,6 @@ def evaluated_param_hides_for_block(
     from grc_agent.runtime.block_semantics import evaluated_param_hides
 
     return evaluated_param_hides(block_id, param_values or {})
-
-
-def param_categories_for_block(block_id: str) -> dict[str, str]:
-    """Read GRC's native ``category`` attribute for each param.
-
-    Instantiates a throwaway flow graph block (same pattern as
-    :func:`evaluated_param_hides_for_block`) and reads ``param.category``
-    for each parameter. Falls back to an empty dict if the platform is
-    unavailable.
-    """
-    try:
-        from grc_agent.session import _ensure_platform
-
-        platform = _ensure_platform()
-    except Exception:
-        return {}
-    if platform is None:
-        return {}
-    try:
-        flow_graph = platform.make_flow_graph()
-        block = flow_graph.new_block(block_id)
-    except Exception:
-        return {}
-    if block is None:
-        return {}
-    try:
-        return {
-            str(name): str(getattr(param, "category", DEFAULT_PARAM_TAB))
-            for name, param in block.params.items()
-        }
-    except Exception:
-        return {}
 
 
 def _mapping_list_or_error(

@@ -19,6 +19,15 @@ from grc_agent.runtime.block_semantics import (
 )
 from grc_agent.runtime.block_semantics import _connection_summaries
 from grc_agent.runtime.enums import SearchDomain
+from grc_agent.runtime.param_filter import (
+    DEFAULT_PARAM_TAB,
+    PROMINENCE,
+    VISIBILITY,
+    categories as _param_categories,
+    filter_live_block_params,
+    keep_param,
+    prominence_rank,
+)
 from grc_agent.runtime.text_utils import compact_whitespace, tokenize_identifier
 from grc_agent.runtime.tool_context import is_meaningful, is_variable_block, truncate_list
 from grc_agent.session import summarize_graph
@@ -543,9 +552,10 @@ def _block_details_row(
     matched_params: set[str] = set()
     matched_requested_params: set[str] = set()
     selected_candidates: list[EditableParameterCandidate] = []
+    param_cats = _param_categories(block.block_type)
     for candidate in candidates:
         if not params:
-            if _is_configured_or_prominent(candidate, evaluated_hides, variable_values):
+            if _is_visible_param(candidate, evaluated_hides, param_cats):
                 selected_candidates.append(candidate)
                 matched_params.add(candidate.param_key)
         elif _params_request_all(params):
@@ -566,11 +576,7 @@ def _block_details_row(
 
     if selected_candidates and not specific_params:
         selected_candidates.sort(
-            key=lambda candidate: (
-                0 if evaluated_hides.get(candidate.param_key) == "none"
-                else 1 if evaluated_hides.get(candidate.param_key) == "part"
-                else 2
-            )
+            key=lambda candidate: prominence_rank(evaluated_hides.get(candidate.param_key, ""))
         )
 
     if not params:
@@ -648,24 +654,28 @@ def _parameter_payload(
     return {key: value for key, value in payload.items() if is_meaningful(value)}
 
 
-def _is_configured_or_prominent(
+def _is_visible_param(
     candidate: EditableParameterCandidate,
     evaluated_hides: dict[str, str],
-    variable_values: dict[str, Any],
+    categories: dict[str, str],
 ) -> bool:
-    if evaluated_hides.get(candidate.param_key) == "all":
-        return False
+    """Details-mode keep decision: dense (visibility-only) via the unified filter.
+
+    Drops only Stage-A invisibility (hide='all', Advanced/Config, gui_hint) and
+    empty values — defaults ARE shown so the model can read a targeted block's
+    full configuration. Delegates to :func:`grc_agent.runtime.param_filter.keep_param`.
+    """
     value = _compact_value(candidate.current_value)
     if not is_meaningful(value):
         return False
-    if evaluated_hides.get(candidate.param_key) == "none":
-        return True
-    if isinstance(variable_values, dict) and value in variable_values:
-        return True
-    default = _compact_value(candidate.param_default)
-    if not is_meaningful(default):
-        return False
-    return value != default
+    return keep_param(
+        hide=evaluated_hides.get(candidate.param_key, "all"),
+        category=categories.get(candidate.param_key, DEFAULT_PARAM_TAB),
+        dtype=candidate.param_dtype or "",
+        value=value,
+        default=_compact_value(candidate.param_default),
+        mode=VISIBILITY,
+    )
 
 
 
@@ -686,96 +696,28 @@ def _format_valid_block_names(names: list[str], *, limit: int = 20) -> str:
 
 
 def _param_keys_by_block(blocks: list[Block]) -> dict[str, dict[str, str]]:
-    """Essential params per block: only prominent or configured, with values.
+    """Essential params per block via the unified filter (param_filter.bible).
 
-    Applies four GRC-native filters (see ``docs/GNU_NATIVE_METHODS.md``):
-
-    1. ``hide != 'all'`` — drops hidden params.
-    2. ``category != ADVANCED_PARAM_TAB`` — drops auto-added metadata.
-    3. ``category != 'Config'`` — drops styling params.
-    4. **Prominence**: ``hide == 'none'`` (always visible) OR value differs
-       from catalog default (user has configured it). Params at default
-       values are omitted — they're not interesting.
-
-    Returns ``{block_name: {param_key: param_value}}`` — the actual
-    configured values, not just key lists. Falls back to all visible
-    keys (without values) if GRC evaluation is unavailable.
+    PROMINENCE mode (Overview semantics): keeps structural enums, user-changed
+    values, and variable references; drops defaults and cosmetic params.
+    Delegates entirely to :func:`grc_agent.runtime.param_filter.filter_live_block_params`.
     """
-    try:
-        from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB
-    except ImportError:
-        ADVANCED_PARAM_TAB = "Advanced"
-    _excluded = {ADVANCED_PARAM_TAB, "Config"}
-
+    variable_names = {
+        block.instance_name for block in blocks if is_variable_block(block.block_type)
+    }
     result: dict[str, dict[str, str]] = {}
     for block in blocks:
         params = block.params.get("parameters") if isinstance(block.params, dict) else None
-        if not isinstance(params, dict):
-            result[block.instance_name] = {}
-            continue
-        evaluated = evaluated_param_hides(block.block_type, params)
-        if not evaluated:
-            result[block.instance_name] = {str(k): str(v) for k, v in params.items()}
-            continue
-
-        param_cats = _platform_param_categories(block.block_type)
-        # Get catalog defaults to detect "configured" (value != default)
-        from grc_agent.catalog.loaders import describe_block
-        details = describe_block(block.block_type)
-        defaults = {}
-        if details.get("ok"):
-            for p in details.get("parameters", []):
-                pid = p.get("id")
-                if pid:
-                    defaults[str(pid)] = str(p.get("default", ""))
-
-        essential: dict[str, str] = {}
-        for key, value in params.items():
-            key_str = str(key)
-            hide = evaluated.get(key_str, "all")
-            cat = param_cats.get(key_str, "General")
-            # Filter 1-3: visibility + category
-            if hide == "all" or cat in _excluded:
-                continue
-            # Filter 4: prominence — hide='none' OR configured (value != default)
-            is_prominent = hide == "none"
-            default_val = defaults.get(key_str)
-            is_configured = (
-                default_val is not None
-                and str(value).strip() != ""
-                and str(value) != default_val
+        if isinstance(params, dict):
+            result[block.instance_name] = filter_live_block_params(
+                block.block_type,
+                params,
+                mode=PROMINENCE,
+                variable_names=variable_names,
             )
-            if is_prominent or is_configured:
-                val_str = str(value).strip()
-                if val_str:
-                    essential[key_str] = val_str
-        result[block.instance_name] = essential
+        else:
+            result[block.instance_name] = {}
     return result
-
-
-def _platform_param_categories(block_type: str) -> dict[str, str]:
-    """Read GRC's native ``category`` attribute for each param of a block type.
-
-    Instantiates a throwaway flow graph block (same pattern as
-    :func:`evaluated_param_hides`) and reads ``param.category`` for each
-    parameter. Falls back to an empty dict if the platform is unavailable.
-    """
-    try:
-        from grc_agent.session import _ensure_platform
-
-        platform = _ensure_platform()
-        if platform is None:
-            return {}
-        flow_graph = platform.make_flow_graph()
-        block = flow_graph.new_block(block_type)
-        if block is None:
-            return {}
-        return {
-            str(name): str(getattr(param, "category", "General"))
-            for name, param in block.params.items()
-        }
-    except Exception:
-        return {}
 
 
 def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:

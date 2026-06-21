@@ -11,19 +11,6 @@ from typing import Any
 from grc_agent._payload import join_non_empty
 
 
-# GRC-native param-category constants (see docs/GNU_NATIVE_METHODS.md)
-try:
-    from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB, DEFAULT_PARAM_TAB
-except ImportError:
-    ADVANCED_PARAM_TAB = "Advanced"
-    DEFAULT_PARAM_TAB = "General"
-
-# Categories that contain only non-essential params:
-#   ADVANCED_PARAM_TAB — GRC auto-added metadata (alias, affinity, comment, buffers)
-#   "Config"           — 100% styling (colors, alphas, markers, styles; verified across 564 blocks)
-EXCLUDED_PARAM_CATEGORIES: frozenset[str] = frozenset({ADVANCED_PARAM_TAB, "Config"})
-
-
 @dataclass(frozen=True)
 class CatalogFiles:
     """Resolved GNU catalog file sets under one catalog root."""
@@ -170,49 +157,46 @@ class BlockDescription:
     ) -> dict[str, Any]:
         """Build the discovery-shape payload (what the model sees).
 
-        Applies three native GRC filters (see ``docs/GNU_NATIVE_METHODS.md``):
-
-        1. ``hide != 'all'`` — drops params GRC itself hides at runtime.
-        2. ``category != ADVANCED_PARAM_TAB`` — drops auto-added metadata.
-        3. ``category != 'Config'`` — drops 100%-styling params.
-
-        Remaining params are sorted by GRC prominence (``hide='none'``
-        first, then ``hide='part'``) and returned with ``id``, ``label``,
+        Visibility filtering and prominence ordering are delegated to the
+        unified filter in :mod:`grc_agent.runtime.param_filter` (Stage A only:
+        drop ``hide='all'``, Advanced, Config, ``dtype='gui_hint'``). Surviving
+        params are sorted by GRC prominence and returned with ``id``,
         ``dtype``, ``default`` only — no ``options``/``option_labels``
         (editing context; ``inspect_graph`` provides them when needed).
         """
-        from grc_agent.catalog.loaders import (
-            evaluated_param_hides_for_block,
-            param_categories_for_block,
+        from grc_agent.catalog.loaders import evaluated_param_hides_for_block
+        from grc_agent.runtime.param_filter import (
+            DEFAULT_PARAM_TAB,
+            VISIBILITY,
+            categories as platform_categories,
+            keep_param,
+            prominence_rank,
         )
 
-        if param_categories is None:
-            param_categories = param_categories_for_block(self.block_id)
         if hides is None:
             hides = evaluated_param_hides_for_block(self.block_id)
-
         if not hides:
-            hides = {
-                parameter.id: parameter.hide or "none"
-                for parameter in self.parameters
-            }
+            hides = {parameter.id: parameter.hide or "none" for parameter in self.parameters}
+        if param_categories is None:
+            param_categories = platform_categories(self.block_id)
 
-        cat_by_id = param_categories
-        visible_params: list[NormalizedParameter] = []
-        for parameter in self.parameters:
-            if hides.get(parameter.id, "all") == "all":
-                continue
-            category = cat_by_id.get(parameter.id) or parameter.category or DEFAULT_PARAM_TAB
-            if category in EXCLUDED_PARAM_CATEGORIES:
-                continue
-            visible_params.append(parameter)
-
-        def prominence_key(p: NormalizedParameter) -> tuple[int, str]:
-            hid = hides.get(p.id, "all")
-            rank = 0 if hid == "none" else 1 if hid == "part" else 2
-            return (rank, p.id)
-
-        visible_params.sort(key=prominence_key)
+        visible_params = [
+            parameter
+            for parameter in self.parameters
+            if keep_param(
+                hide=hides.get(parameter.id, "all"),
+                category=param_categories.get(parameter.id)
+                or parameter.category
+                or DEFAULT_PARAM_TAB,
+                dtype=parameter.dtype or "",
+                value=parameter.default or "",
+                default=parameter.default or "",
+                mode=VISIBILITY,
+            )
+        ]
+        visible_params.sort(
+            key=lambda p: (prominence_rank(hides.get(p.id, "all")), p.id)
+        )
 
         payload: dict[str, Any] = {
             "ok": True,
