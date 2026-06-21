@@ -41,6 +41,12 @@ class FlowgraphSession:
         self.path = Path(path) if path is not None else None
         self.flowgraph: Any | None = None
         self.is_dirty = False
+        # Validation tracking (kept for agent.py save-gating compatibility).
+        self.last_validation_stdout: str | None = None
+        self.last_validation_stderr: str | None = None
+        self.last_validation_returncode: int | None = None
+        self.last_validation_ok: bool | None = None
+        self.last_validation_revision: int | None = None
         self._state_revision = 0
         self._persisted_file_sha256: str | None = None
         self._last_failed_ops_hash: str | None = None
@@ -59,6 +65,16 @@ class FlowgraphSession:
         return self._persisted_file_sha256
 
     # -- load / save ----------------------------------------------------------
+
+    @classmethod
+    def create(cls, path: str | Path | None = None) -> FlowgraphSession:
+        """Create a session with a blank native flowgraph."""
+        from grc_agent.grc_native_adapter import get_platform
+        session = cls(path)
+        fg = get_platform().make_flow_graph()
+        fg.rewrite()
+        session.flowgraph = fg
+        return session
 
     def load(self, path: str | Path) -> None:
         source_path = Path(path)
@@ -85,6 +101,40 @@ class FlowgraphSession:
             target
         )
         self.is_dirty = False
+
+    # -- snapshot / validation / identity (adapter-backed) --------------------
+
+    def active_session_snapshot(self) -> dict[str, Any] | None:
+        if self.flowgraph is None:
+            return None
+        from grc_agent.grc_native_adapter import render_flow_graph
+        return render_flow_graph(self.flowgraph).model_dump(exclude_none=True)
+
+    def summary_payload(self, *, block_limit: int = 8) -> dict[str, Any]:
+        if self.flowgraph is None:
+            return {"ok": False, "errors": [{"code": "no_flowgraph", "message": "No flowgraph loaded."}]}
+        from grc_agent.grc_native_adapter import render_flow_graph
+        snapshot = render_flow_graph(self.flowgraph)
+        return {
+            "ok": snapshot.ok,
+            "graph_name": snapshot.graph_name,
+            "blocks": [{"instance_name": b.instance_name, "block_type": b.block_type,
+                         "role": b.role.value if hasattr(b.role, "value") else str(b.role)}
+                        for b in snapshot.blocks[:block_limit]],
+            "validation": snapshot.validation.model_dump(exclude_none=True),
+        }
+
+    def validation_state(self) -> dict[str, Any]:
+        if self.flowgraph is None:
+            return {"status": "unknown", "errors": []}
+        from grc_agent.grc_native_adapter import validate
+        v = validate(self.flowgraph)
+        self.last_validation_ok = v.native_ok
+        self.last_validation_revision = self._state_revision
+        return {"status": v.status, "errors": v.errors, "state_revision": self._state_revision}
+
+    def graph_id(self) -> str | None:
+        return self._persisted_file_sha256
 
     # -- integrity ------------------------------------------------------------
 
