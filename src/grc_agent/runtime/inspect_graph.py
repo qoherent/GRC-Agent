@@ -1,42 +1,30 @@
-"""Read-only `inspect_graph` MVP wrapper."""
+"""Read-only ``inspect_graph`` + ``query_knowledge`` wrappers (Phase 6 cutover).
+
+inspect_graph delegates to :mod:`grc_agent.grc_native_adapter` — no dict-crawl.
+query_knowledge is unchanged (Phase 3 proved no native refactor needed).
+"""
 
 from __future__ import annotations
 
 import time
-from collections import Counter
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from grc_agent._payload import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent._payload import Block, Connection
-from grc_agent.runtime.block_semantics import (
-    EditableParameterCandidate,
-    build_block_semantics_by_type,
-    build_editable_parameter_candidates,
-    evaluated_param_hides,
-)
-from grc_agent.runtime.block_semantics import _connection_summaries
+from grc_agent.grc_native_adapter import render_flow_graph
 from grc_agent.runtime.enums import SearchDomain
-from grc_agent.runtime.param_filter import (
-    DEFAULT_PARAM_TAB,
-    PROMINENCE,
-    VISIBILITY,
-    categories as _param_categories,
-    filter_live_block_params,
-    keep_param,
-    prominence_rank,
-)
-from grc_agent.runtime.text_utils import compact_whitespace, tokenize_identifier
-from grc_agent.runtime.tool_context import is_meaningful, is_variable_block, truncate_list
-from grc_agent.session import summarize_graph
-from grc_agent.session_ops import connection_id as render_connection_id
+from grc_agent.runtime.param_filter import PROMINENCE, filter_live_block_params
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
 VALID_VIEWS = {"overview", "details"}
+
+
+# --------------------------------------------------------------------------- #
+# inspect_graph                                                                #
+# --------------------------------------------------------------------------- #
 
 
 def inspect_graph(
@@ -51,8 +39,6 @@ def inspect_graph(
     before_revision = agent.session.state_revision
     before_dirty = agent.session.is_dirty
     selected_view = str(view).strip().lower()
-    validation_run = False
-    output_truncated = False
 
     missing_session = agent._missing_session_result("inspect_graph")
     if missing_session is not None:
@@ -76,39 +62,26 @@ def inspect_graph(
     gc = agent._guardrails_cfg
     normalized_targets = _normalize_string_list(targets, limit=gc.max_inspect_targets)
     normalized_params = _normalize_string_list(params, limit=gc.max_inspect_params)
+
     if selected_view not in VALID_VIEWS:
-        result = _invalid_request(
-            agent,
-            view=selected_view,
-            code="invalid_view",
-            message="inspect_graph.view must be 'overview' or 'details'.",
-        )
+        result = _base_payload(agent, ok=False,
+                               errors=[{"code": "invalid_view",
+                                        "message": "inspect_graph.view must be 'overview' or 'details'."}])
     elif len(targets) > gc.max_inspect_targets:
-        result = _invalid_request(
-            agent,
-            view=selected_view,
-            code="target_limit_exceeded",
-            message=f"inspect_graph accepts at most {gc.max_inspect_targets} targets.",
-        )
+        result = _base_payload(agent, ok=False,
+                               errors=[{"code": "target_limit_exceeded",
+                                        "message": f"inspect_graph accepts at most {gc.max_inspect_targets} targets."}])
     elif len(params) > gc.max_inspect_params:
-        result = _invalid_request(
-            agent,
-            view=selected_view,
-            code="param_limit_exceeded",
-            message=f"inspect_graph accepts at most {gc.max_inspect_params} params.",
-        )
+        result = _base_payload(agent, ok=False,
+                               errors=[{"code": "param_limit_exceeded",
+                                        "message": f"inspect_graph accepts at most {gc.max_inspect_params} params."}])
     elif selected_view == "overview":
         result = _overview(agent, targets=normalized_targets, params=normalized_params)
-        output_truncated = bool(result.get("omitted"))
     else:
         result = _details(agent, targets=normalized_targets, params=normalized_params)
-        output_truncated = bool(result.get("omitted"))
 
-    tool_result = agent._payload_result(
-        "inspect_graph",
-        result,
-        include_active_session=False,
-    )
+    output_truncated = bool(result.get("omitted"))
+    tool_result = agent._payload_result("inspect_graph", result, include_active_session=False)
     return agent._attach_wrapper_dispatch_telemetry(
         debug=debug,
         wrapper_name="inspect_graph",
@@ -118,872 +91,101 @@ def inspect_graph(
         before_revision=before_revision,
         before_dirty=before_dirty,
         result=tool_result,
-        validation_run=validation_run,
+        validation_run=False,
         output_truncated=output_truncated,
     )
 
 
-def _overview(
-    agent: GrcAgent,
-    *,
-    targets: list[str],
-    params: list[str],
-) -> dict[str, Any]:
-    del targets
-    param_filter = (
-        None if (_params_request_all(params) or not params) else set(_specific_params(params))
-    )
-    summary = summarize_graph(
-        agent.session,
-        max_blocks=agent._guardrails_cfg.max_graph_summary_blocks,
-    )
-    if not summary.get("ok"):
-        return _base_payload(
-            agent,
-            ok=False,
-            errors=[
-                {
-                    "code": str(summary.get("error_type") or "inspect_failed"),
-                    "message": str(summary.get("message") or "Graph summary failed."),
-                }
-            ],
-        )
-
-    assert agent.session.flowgraph is not None
-    block_types = Counter(block.block_type for block in agent.session.flowgraph.blocks)
-    semantics_by_type = build_block_semantics_by_type(
-        block_types,
-        catalog_root=agent.catalog_root,
-    )
-    connections = [
-        render_connection_id(
-            connection.src_block,
-            connection.src_port,
-            connection.dst_block,
-            connection.dst_port,
-        )
-        for connection in agent.session.flowgraph.connections
-    ]
-    gc = agent._guardrails_cfg
-    shown_connections, omitted_connections_list = truncate_list(connections, gc.max_overview_connections)
-    omitted_connections = len(omitted_connections_list)
-    incoming, outgoing = _connection_summaries(agent.session.flowgraph.connections)
-    block_rows = _overview_block_rows(
-        agent.session.flowgraph.blocks,
-        semantics_by_type=semantics_by_type,
-        incoming=incoming,
-        outgoing=outgoing,
-        param_filter=param_filter,
-    )
-    limit = gc.max_graph_summary_blocks
-    if summary.get("blocks_truncated"):
-        block_rows = block_rows[:limit]
-    val_state = agent.session.validation_state()
-    graph = {
-        "blocks": block_rows,
-        "connections": shown_connections,
-        "validation": {
-            "status": val_state.get("status", "unknown"),
-        },
-    }
-    omitted_blocks = int(summary.get("blocks_truncated") or 0)
-    omitted_counts: dict[str, int] = {}
-    if omitted_blocks:
-        omitted_counts["blocks"] = omitted_blocks
-    if omitted_connections:
-        omitted_counts["connections"] = omitted_connections
-    return _base_payload(
-        agent,
-        ok=True,
-        graph=graph,
-        omitted=omitted_counts,
-    )
+def _overview(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict[str, Any]:
+    fg = agent.session.flowgraph
+    if fg is None:
+        return _base_payload(agent, ok=False,
+                             errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}])
+    snapshot = render_flow_graph(fg)
+    payload = snapshot.model_dump(exclude_none=True)
+    return _base_payload(agent, ok=True, graph=payload)
 
 
-def _details(
-    agent: GrcAgent,
-    *,
-    targets: list[str],
-    params: list[str],
-) -> dict[str, Any]:
-    if not targets:
-        return _base_payload(
-            agent,
-            ok=False,
-            errors=[
-                {
-                    "code": "target_required",
-                    "message": "details requires at least one graph-local target.",
-                }
-            ],
-        )
-    assert agent.session.flowgraph is not None
-    gc = agent._guardrails_cfg
-    candidates = build_editable_parameter_candidates(
-        agent.session,
-        catalog_root=agent.catalog_root,
-        include_connections=True,
-    )
-    variable_values = _graph_variable_values(agent.session.flowgraph.blocks)
-    by_block = _group_candidates_by_block(candidates)
-    connections = list(agent.session.flowgraph.connections)
-    incoming, outgoing = _connection_summaries(connections)
-    resolved_rows: list[dict[str, Any]] = []
-    matched_params: set[str] = set()
-    matched_requested_params: set[str] = set()
-    errors: list[dict[str, Any]] = []
-    truncated = False
-    omitted_counts: dict[str, int] = {}
-
-    for requested_target in targets:
-        match = _resolve_target(
-            requested_target,
-            agent.session.flowgraph.blocks,
-            candidates,
-            params=_specific_params(params),
-            connections=connections,
-        )
-        if match.status == "ambiguous":
-            matched_names = sorted(
-                str(c.get("instance_name") or "")
-                for c in match.candidates
-                if c.get("instance_name")
-            )
-            errors.append(
-                {
-                    "code": "ambiguous_target",
-                    "message": (
-                        f"Target {requested_target!r} matched multiple graph objects: "
-                        f"{', '.join(matched_names)}."
-                    ),
-                }
-            )
-            continue
-        if match.status == "not_found" or match.block is None:
-            valid_names = [
-                block.instance_name for block in agent.session.flowgraph.blocks
-            ]
-            if match.message:
-                message = match.message
-            else:
-                message = (
-                    f"Target {requested_target!r} not found. "
-                    f"Valid block names: {_format_valid_block_names(valid_names)}."
-                )
-            errors.append(
-                {
-                    "code": "target_not_found",
-                    "message": message,
-                }
-            )
-            continue
-
-        block_candidates = by_block.get(match.block.block_uid, [])
-        block_param_values = match.block.params.get("parameters") if isinstance(match.block.params, dict) else {}
-        block_param_values = block_param_values if isinstance(block_param_values, dict) else {}
-        evaluated_hides = evaluated_param_hides(match.block.block_type, block_param_values)
-        row, row_matched_params, row_matched_requested, row_truncated = _block_details_row(
-            match.block,
-            block_candidates,
-            requested=requested_target,
-            matched_by=match.matched_by,
-            params=params,
-            state_revision=agent.session.state_revision,
-            incoming_connections=incoming.get(match.block.instance_name, ()),
-            outgoing_connections=outgoing.get(match.block.instance_name, ()),
-            variable_values=variable_values,
-            evaluated_hides=evaluated_hides,
-            gc=gc,
-        )
-        resolved_rows.append(row)
-        matched_params.update(row_matched_params)
-        matched_requested_params.update(row_matched_requested)
-        if row_truncated:
-            truncated = True
-            omitted = row.get("omitted_param_count")
-            omitted_counts["parameters"] = omitted_counts.get("parameters", 0) + (
-                omitted if isinstance(omitted, int) and omitted > 0 else 1
-            )
-
-    if _params_request_all(params):
-        unmatched_params = []
-    else:
-        matched_requested_norm = {_normalize_text(item) for item in matched_requested_params}
-        unmatched_params = [
-            param
-            for param in params
-            if _normalize_text(param) not in matched_requested_norm
-        ]
-    return _base_payload(
-        agent,
-        ok=not errors,
-        graph={"validation": {"status": "valid"}},
-        targets=resolved_rows,
-        omitted=omitted_counts,
-        errors=errors,
-    )
-
-
-class _TargetMatch:
-    def __init__(
-        self,
-        *,
-        request: str,
-        status: str,
-        block: Block | None = None,
-        matched_by: str | None = None,
-        candidates: list[dict[str, Any]] | None = None,
-        message: str | None = None,
-    ) -> None:
-        self.request = request
-        self.status = status
-        self.block = block
-        self.matched_by = matched_by
-        self.candidates = candidates or []
-        self.message = message
-
-
-
-
-def _resolve_target(
-    target: str,
-    blocks: list[Block],
-    candidates: list[EditableParameterCandidate],
-    *,
-    params: list[str],
-    connections: list[Connection],
-) -> _TargetMatch:
-    request = str(target).strip()
-    if not request:
-        return _TargetMatch(request=request, status="not_found")
-
-    # Reject glob placeholders like "*block_name*" — these are
-    # documentation-style examples, not real identifiers. Without this
-    # guard, "*block_name*" can match real blocks via fuzzy scoring
-    # (the tokens "block" and "name" overlap with most block names),
-    # giving a misleading "success" that hides the model's mistake.
-    if request.startswith("*") and request.endswith("*") and len(request) > 2:
-        return _TargetMatch(
-            request=request,
-            status="not_found",
-            message=(
-                f"Target {request!r} looks like a documentation placeholder. "
-                "Use a real block instance_name, block_uid, or block_type."
-            ),
-        )
-
-    invalid_ref = _unknown_parameter_ref(request, blocks, candidates)
-    if invalid_ref is not None:
-        block, param_key = invalid_ref
-        return _TargetMatch(
-            request=request,
-            status="not_found",
-            candidates=[
-                {
-                    "name": block.instance_name,
-                    "kind": "block",
-                    "type": block.block_type,
-                    "uid": block.block_uid,
-                    "reason": f"unknown parameter key {param_key!r}",
-                }
-            ],
-            message=f"Target {request!r} uses unknown parameter key {param_key!r}.",
-        )
-
-    exact_blocks = [
-        block
-        for block in blocks
-        if request in {block.instance_name, block.block_uid, block.block_type}
-    ]
-    exact_blocks = _dedupe_blocks(exact_blocks)
-    if len(exact_blocks) == 1:
-        return _TargetMatch(
-            request=request,
-            status="resolved",
-            block=exact_blocks[0],
-            matched_by="exact_identifier",
-        )
-    if len(exact_blocks) > 1:
-        return _TargetMatch(
-            request=request,
-            status="ambiguous",
-            candidates=_candidate_payloads(exact_blocks),
-        )
-
-    request_tokens = _tokens(request)
-    requested_param_tokens = set().union(*(_tokens(param) for param in params)) if params else set()
-    scored: list[tuple[int, Block]] = []
-    for block in blocks:
-        block_candidates = [
-            candidate for candidate in candidates if candidate.block_uid == block.block_uid
-        ]
-        score = _target_score(
-            block,
-            block_candidates,
-            request=request,
-            request_tokens=request_tokens,
-            requested_param_tokens=requested_param_tokens,
-        )
-        if score > 0:
-            scored.append((score, block))
-    if not scored:
-        conn_blocks = _connection_target_blocks(request, connections, blocks)
-        if len(conn_blocks) == 1:
-            return _TargetMatch(
-                request=request,
-                status="resolved",
-                block=conn_blocks[0],
-                matched_by="connection_endpoint",
-            )
-        if len(conn_blocks) > 1:
-            return _TargetMatch(
-                request=request,
-                status="ambiguous",
-                candidates=_candidate_payloads(conn_blocks),
-            )
-        return _TargetMatch(request=request, status="not_found")
-
-    best_score = max(score for score, _block in scored)
-    best = _dedupe_blocks([block for score, block in scored if score == best_score])
-    if len(best) == 1:
-        return _TargetMatch(
-            request=request,
-            status="resolved",
-            block=best[0],
-            matched_by="graph_local_metadata",
-        )
-    return _TargetMatch(
-        request=request,
-        status="ambiguous",
-        candidates=_candidate_payloads(best),
-    )
-
-
-def _unknown_parameter_ref(
-    request: str,
-    blocks: list[Block],
-    candidates: list[EditableParameterCandidate],
-) -> tuple[Block, str] | None:
-    if "." not in request:
-        return None
-    by_block = _group_candidates_by_block(candidates)
-    for block in sorted(blocks, key=lambda item: len(item.instance_name), reverse=True):
-        prefix = f"{block.instance_name}."
-        if not request.startswith(prefix):
-            continue
-        param_key = request.removeprefix(prefix)
-        known_params = {candidate.param_key for candidate in by_block.get(block.block_uid, [])}
-        if param_key and param_key not in known_params:
-            return block, param_key
-    return None
-
-
-def _target_score(
-    block: Block,
-    candidates: list[EditableParameterCandidate],
-    *,
-    request: str,
-    request_tokens: set[str],
-    requested_param_tokens: set[str],
-) -> int:
-    score = 0
-    block_fields = [block.instance_name, block.block_type]
-    block_fields.extend(
-        candidate.block_label
-        for candidate in candidates
-        if isinstance(candidate.block_label, str)
-    )
-    if _any_field_matches(block_fields, request=request, tokens=request_tokens):
-        score += 3
-
-    for candidate in candidates:
-        if _any_field_matches(
-            [candidate.param_key, candidate.param_label],
-            request=request,
-            tokens=request_tokens | requested_param_tokens,
-        ):
-            score += 2
-        current_value = _compact_value(candidate.current_value)
-        if current_value and current_value.lower() in request.lower():
-            score += 2
-    return score
-
-
-def _connection_target_blocks(
-    target: str,
-    connections: list[Connection],
-    blocks: list[Block],
-) -> list[Block]:
-    by_name = {block.instance_name: block for block in blocks}
-    matches: list[Block] = []
-    target_lower = target.lower()
-    for connection in connections:
-        conn_id = render_connection_id(
-            connection.src_block,
-            connection.src_port,
-            connection.dst_block,
-            connection.dst_port,
-        )
-        if conn_id.lower() != target_lower:
-            continue
-        for name in (connection.src_block, connection.dst_block):
-            block = by_name.get(name)
-            if block is not None:
-                matches.append(block)
-    return _dedupe_blocks(matches)
-
-
-def _block_details_row(
-    block: Block,
-    candidates: list[EditableParameterCandidate],
-    *,
-    requested: str,
-    matched_by: str | None,
-    params: list[str],
-    state_revision: int,
-    incoming_connections: tuple[str, ...],
-    outgoing_connections: tuple[str, ...],
-    variable_values: dict[str, Any],
-    evaluated_hides: dict[str, str],
-    gc: Any,
-) -> tuple[dict[str, Any], set[str], set[str], bool]:
-    specific_params = _specific_params(params)
-    requested_param_tokens = [_tokens(param) for param in specific_params]
-    matched_params: set[str] = set()
-    matched_requested_params: set[str] = set()
-    selected_candidates: list[EditableParameterCandidate] = []
-    param_cats = _param_categories(block.block_type)
-    for candidate in candidates:
-        if not params:
-            if _is_visible_param(candidate, evaluated_hides, param_cats):
-                selected_candidates.append(candidate)
-                matched_params.add(candidate.param_key)
-        elif _params_request_all(params):
-            selected_candidates.append(candidate)
-            matched_params.add(candidate.param_key)
-        elif specific_params:
-            matched_requests = _matched_param_requests(
-                candidate,
-                specific_params,
-                requested_param_tokens,
-            )
-            if matched_requests:
-                selected_candidates.append(candidate)
-                matched_params.add(candidate.param_key)
-                matched_requested_params.update(matched_requests)
-    if _params_request_all(params) and not selected_candidates:
-        selected_candidates = candidates[:gc.max_detail_params_requested]
-
-    if selected_candidates and not specific_params:
-        selected_candidates.sort(
-            key=lambda candidate: prominence_rank(evaluated_hides.get(candidate.param_key, ""))
-        )
-
-    if not params:
-        param_limit = None
-    elif _params_request_all(params):
-        param_limit = gc.max_detail_params_all
-    else:
-        param_limit = gc.max_detail_params_requested
-    if param_limit is None:
-        returned_candidates = selected_candidates
-        params_truncated = False
-    else:
-        params_truncated = len(selected_candidates) > param_limit
-        returned_candidates = selected_candidates[:param_limit]
-    parameters = [
-        _parameter_payload(candidate, variable_values=variable_values)
-        for candidate in returned_candidates
-    ]
-    available_param_count = len(candidates)
-    returned_param_count = len(returned_candidates)
-    omitted_param_count = max(0, len(selected_candidates) - returned_param_count)
-    incoming = _connection_dicts(incoming_connections)
-    outgoing = _connection_dicts(outgoing_connections)
-    row: dict[str, Any] = {
-        "request": requested,
-        "matched_by": matched_by,
-        "instance_name": block.instance_name,
-        "block_type": block.block_type,
-        "name": block.instance_name,
-        "type": block.block_type,
-        "role": _block_role(
-            block,
-            semantics={},
-            incoming=incoming_connections,
-            outgoing=outgoing_connections,
-        ),
-        "catalog_label": _block_label(candidates),
-    }
-    if parameters:
-        row["parameters"] = parameters
-    if incoming or outgoing:
-        row["connections"] = {
-            "incoming": incoming,
-            "outgoing": outgoing,
-        }
-    if params_truncated:
-        row["params_truncated"] = True
-        row["omitted_param_count"] = omitted_param_count
-    if not params and available_param_count > returned_param_count:
-        row["available_param_count"] = available_param_count
-    return row, matched_params, matched_requested_params, params_truncated
-
-
-def _parameter_payload(
-    candidate: EditableParameterCandidate,
-    *,
-    variable_values: dict[str, Any],
-) -> dict[str, Any]:
-    value = _compact_value(candidate.current_value)
-    payload: dict[str, Any] = {
-        "name": candidate.param_key,
-        "label": candidate.param_label,
-        "dtype": candidate.param_dtype,
-        "value": value,
-    }
-    if isinstance(value, str) and value in variable_values:
-        payload["resolved_value"] = _compact_value(variable_values[value])
-    value_label = _option_label_for_current(candidate)
-    if value_label is not None:
-        payload["value_label"] = value_label
-    if candidate.param_options:
-        payload["options"] = list(candidate.param_options)
-    if candidate.param_option_labels:
-        payload["option_labels"] = list(candidate.param_option_labels)
-    return {key: value for key, value in payload.items() if is_meaningful(value)}
-
-
-def _is_visible_param(
-    candidate: EditableParameterCandidate,
-    evaluated_hides: dict[str, str],
-    categories: dict[str, str],
-) -> bool:
-    """Details-mode keep decision: dense (visibility-only) via the unified filter.
-
-    Drops only Stage-A invisibility (hide='all', Advanced/Config, gui_hint) and
-    empty values — defaults ARE shown so the model can read a targeted block's
-    full configuration. Delegates to :func:`grc_agent.runtime.param_filter.keep_param`.
-    """
-    value = _compact_value(candidate.current_value)
-    if not is_meaningful(value):
-        return False
-    return keep_param(
-        hide=evaluated_hides.get(candidate.param_key, "all"),
-        category=categories.get(candidate.param_key, DEFAULT_PARAM_TAB),
-        dtype=candidate.param_dtype or "",
-        value=value,
-        default=_compact_value(candidate.param_default),
-        mode=VISIBILITY,
-    )
-
-
-
-
-def _format_valid_block_names(names: list[str], *, limit: int = 20) -> str:
-    """Format a sorted, capped list of valid block names for an error message.
-
-    Sort: deterministic order. Cap: at most ``limit`` names plus a ``+N more`` suffix.
-    The cap is uniform across all `target_not_found` errors so a 50-block graph
-    does not produce a 900-char message.
-    """
-    deduped = sorted(set(n for n in names if n))
-    if len(deduped) <= limit:
-        return ", ".join(deduped)
-    shown = deduped[:limit]
-    remainder = len(deduped) - limit
-    return f"{', '.join(shown)}, +{remainder} more"
-
-
-def _param_keys_by_block(blocks: list[Block]) -> dict[str, dict[str, str]]:
-    """Essential params per block via the unified filter (param_filter.bible).
-
-    PROMINENCE mode (Overview semantics): keeps structural enums, user-changed
-    values, and variable references; drops defaults and cosmetic params.
-    Delegates entirely to :func:`grc_agent.runtime.param_filter.filter_live_block_params`.
-    """
-    variable_names = {
-        block.instance_name for block in blocks if is_variable_block(block.block_type)
-    }
-    result: dict[str, dict[str, str]] = {}
-    for block in blocks:
-        params = block.params.get("parameters") if isinstance(block.params, dict) else None
-        if isinstance(params, dict):
-            result[block.instance_name] = filter_live_block_params(
-                block.block_type,
-                params,
-                mode=PROMINENCE,
-                variable_names=variable_names,
-            )
+def _details(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict[str, Any]:
+    fg = agent.session.flowgraph
+    if fg is None:
+        return _base_payload(agent, ok=False,
+                             errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}])
+    snapshot = render_flow_graph(fg)
+    all_blocks = {b.instance_name: b for b in snapshot.blocks}
+    matched: list[str] = []
+    errors: list[dict[str, str]] = []
+    for target in targets:
+        if target in all_blocks:
+            matched.append(target)
         else:
-            result[block.instance_name] = {}
+            errors.append({"code": "target_not_found", "message": f"Block '{target}' not found."})
+    target_rows = []
+    for name in matched:
+        block = all_blocks[name]
+        row = {
+            "instance_name": block.instance_name,
+            "block_type": block.block_type,
+            "role": block.role.value if hasattr(block.role, "value") else str(block.role),
+            "state": block.state,
+            "parameters": [p.model_dump(exclude_none=True) for p in block.parameters],
+        }
+        target_rows.append(row)
+    payload = snapshot.model_dump(exclude_none=True)
+    result = _base_payload(agent, ok=len(errors) == 0, graph=payload)
+    if target_rows:
+        result["targets"] = target_rows
+    if errors:
+        result["errors"] = errors
     return result
 
 
-def _graph_variable_values(blocks: list[Block]) -> dict[str, Any]:
-    values: dict[str, Any] = {}
-    for block in blocks:
-        params = block.params.get("parameters") if isinstance(block.params, dict) else None
-        if not isinstance(params, dict) or "value" not in params:
-            continue
-        if is_variable_block(block.block_type):
-            values[block.instance_name] = params.get("value")
-    return values
-
-
-def _matched_param_requests(
-    candidate: EditableParameterCandidate,
-    params: list[str],
-    token_sets: list[set[str]],
-) -> set[str]:
-    fields = [candidate.param_key, candidate.param_label]
-    matched: set[str] = set()
-    for param, tokens in zip(params, token_sets, strict=False):
-        if _any_field_matches(fields, request=param, tokens=tokens):
-            matched.add(param)
-    return matched
-
-
-def _base_payload(
-    agent: GrcAgent,
-    *,
-    ok: bool,
-    graph: dict[str, Any] | None = None,
-    targets: list[dict[str, Any]] | None = None,
-    errors: list[dict[str, Any]] | None = None,
-    unmatched_params: list[str] | None = None,
-    omitted: dict[str, int] | None = None,
-) -> dict[str, Any]:
-    """Uniform model-visible payload for ``inspect_graph``.
-
-    Shape (every call has the same core fields; ``errors`` and ``targets`` are
-    populated only when relevant):
-
-    - ``ok``: bool indicating success.
-    - ``params``: every block → sorted list of its param keys.
-    - ``graph``: ``{graph_name, counts, blocks, connections}`` for overview,
-      or just ``{graph_name, counts}`` for details.
-    - ``targets`` (details only): block details rows.
-    - ``errors``: list of ``{code, message}`` — first-class, not nested in JSON.
-    - ``omitted`` (optional): ``{blocks, connections, parameters}`` counts.
-
-    The renderer in ``tool_context.py`` promotes every ``errors[i].message``
-    to a structural line so failure facts are never buried inside a JSON dump.
-    """
-    assert agent.session.flowgraph is not None
-    blocks = agent.session.flowgraph.blocks
+def _base_payload(agent: GrcAgent, *, ok: bool,
+                  graph: dict[str, Any] | None = None,
+                  errors: list[dict[str, str]] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ok": ok,
-        "params": _param_keys_by_block(blocks),
         "graph": graph if graph is not None else {},
     }
     if errors:
         payload["errors"] = list(errors)
-    if targets:
-        payload["targets"] = targets
-    if omitted:
-        payload["omitted"] = omitted
     return payload
 
 
-def _invalid_request(
-    agent: GrcAgent,
-    *,
-    view: str,
-    code: str,
-    message: str,
-) -> dict[str, Any]:
-    del view
-    return _base_payload(
-        agent,
-        ok=False,
-        errors=[{"code": code, "message": message}],
-    )
-
-
-def _group_candidates_by_block(
-    candidates: list[EditableParameterCandidate],
-) -> dict[str, list[EditableParameterCandidate]]:
-    grouped: dict[str, list[EditableParameterCandidate]] = {}
-    for candidate in candidates:
-        grouped.setdefault(candidate.block_uid, []).append(candidate)
-    return grouped
-
-
-def _candidate_payloads(blocks: list[Block], *, max_candidates: int = 12) -> list[dict[str, Any]]:
-    payloads = [
-        {
-            "instance_name": block.instance_name,
-            "block_type": block.block_type,
-            "name": block.instance_name,
-            "kind": "block",
-            "type": block.block_type,
-            "uid": block.block_uid,
-            "reason": "graph-local target candidate",
-        }
-        for block in blocks[:max_candidates]
-    ]
-    if len(blocks) > max_candidates:
-        payloads.append({"_truncated": f"was {len(blocks)}, kept {max_candidates}"})
-    return payloads
-
-
-def _dedupe_blocks(blocks: list[Block]) -> list[Block]:
-    deduped: dict[str, Block] = {}
+def _param_keys_by_block(blocks: list[Any]) -> dict[str, dict[str, str]]:
+    """Thin delegate to the unified filter — kept for agent.py compatibility."""
+    from grc_agent.runtime.tool_context import is_variable_block
+    variable_names = {b.name for b in blocks if is_variable_block(b.key)}
+    result: dict[str, dict[str, str]] = {}
     for block in blocks:
-        deduped.setdefault(block.block_uid, block)
-    return list(deduped.values())
+        params = {}
+        for k, p in block.params.items():
+            params[k] = str(p.value)
+        result[block.name or block.key] = filter_live_block_params(
+            block.key, params, mode=PROMINENCE, variable_names=variable_names,
+        )
+    return result
 
 
-def _connection_dicts(connection_ids: tuple[str, ...]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for conn_id in connection_ids:
-        rows.append({"connection_id": conn_id})
-    return rows
-
-
-def _overview_block_rows(
-    blocks: list[Block],
-    *,
-    semantics_by_type: dict[str, dict[str, Any]],
-    incoming: dict[str, tuple[str, ...]],
-    outgoing: dict[str, tuple[str, ...]],
-    param_filter: set[str] | None = None,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for block in blocks:
-        semantics = semantics_by_type.get(block.block_type, {})
-        row = {
-            "instance_name": block.instance_name,
-            "block_type": block.block_type,
-            "role": _block_role(
-                block,
-                semantics=semantics,
-                incoming=incoming.get(block.instance_name, ()),
-                outgoing=outgoing.get(block.instance_name, ()),
-            ),
-        }
-        if is_variable_block(block.block_type):
-            params = block.params.get("parameters", {})
-            if isinstance(params, dict) and "value" in params:
-                row["value"] = params["value"]
-            if param_filter:
-                meaningful = {k: v for k, v in params.items() if is_meaningful(v) and k != "value" and k in param_filter}
-                if meaningful:
-                    row["params"] = meaningful
-        elif param_filter:
-            block_params = block.params.get("parameters", {})
-            if isinstance(block_params, dict):
-                meaningful = {k: v for k, v in block_params.items() if is_meaningful(v) and k in param_filter}
-                if meaningful:
-                    row["params"] = meaningful
-        rows.append({key: value for key, value in row.items() if is_meaningful(value)})
-    return rows
-
-
-def _block_label(candidates: list[EditableParameterCandidate]) -> str | None:
-    for candidate in candidates:
-        if isinstance(candidate.block_label, str) and candidate.block_label.strip():
-            return candidate.block_label
-    return None
-
-
-def _option_label_for_current(candidate: EditableParameterCandidate) -> Any:
-    if not candidate.param_options or not candidate.param_option_labels:
-        return None
-    current = _compact_value(candidate.current_value)
-    for option, label in zip(
-        candidate.param_options,
-        candidate.param_option_labels,
-        strict=False,
-    ):
-        if _compact_value(option) == current:
-            return label
-    return None
-
-
-def _block_role(
-    block: Block,
-    *,
-    semantics: dict[str, Any],
-    incoming: tuple[str, ...],
-    outgoing: tuple[str, ...],
-) -> str:
-    role = semantics.get("role")
-    if isinstance(role, str) and role.strip():
-        return role.strip()
-    if outgoing and not incoming:
-        return "source"
-    if incoming and not outgoing:
-        return "sink"
-    if incoming and outgoing:
-        return "transform"
-    return "metadata"
-
-
-def _params_request_all(params: list[str]) -> bool:
-    return any(_normalize_text(param) == "all" for param in params)
-
-
-def _specific_params(params: list[str]) -> list[str]:
-    return [param for param in params if _normalize_text(param) != "all"]
-
-
-def _any_field_matches(
-    fields: list[str | None],
-    *,
-    request: str,
-    tokens: set[str],
-) -> bool:
-    request_lower = f" {request.lower()} "
-    for field in fields:
-        if not isinstance(field, str) or not field.strip():
-            continue
-        field_lower = field.strip().lower()
-        if f" {field_lower} " in request_lower:
-            return True
-        field_tokens = _tokens(field_lower)
-        meaningful = {token for token in field_tokens if len(token) > 1}
-        if meaningful and meaningful.issubset(tokens):
-            return True
-        if tokens and tokens.issubset(meaningful):
-            return True
-    return False
-
-
-def _tokens(text: str) -> set[str]:
-    return set(tokenize_identifier(text))
-
-
-def _normalize_text(text: Any) -> str:
-    return compact_whitespace(str(text).lower())
+# --------------------------------------------------------------------------- #
+# Helpers                                                                      #
+# --------------------------------------------------------------------------- #
 
 
 def _normalize_string_list(values: list[str], *, limit: int) -> list[str]:
-    normalized: list[str] = []
-    for value in values[:limit]:
-        if not isinstance(value, str):
-            continue
-        stripped = value.strip()
-        if stripped:
-            normalized.append(stripped)
-    return normalized
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        s = str(v).strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:limit]
 
 
-def _compact_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return " ".join(value.split())
-    return str(value)
-
-
-
-
-# --- merged from get_grc_context_internal.py ---
-
-ContextFn = Callable[..., dict[str, Any]]
-SymbolResolver = Callable[[str], str | None]
+# --------------------------------------------------------------------------- #
+# get_grc_context_internal (kept for agent.py compat; native block names)     #
+# --------------------------------------------------------------------------- #
 
 
 def get_grc_context_internal(
@@ -994,32 +196,27 @@ def get_grc_context_internal(
     session: FlowgraphSession,
     catalog_root: Path | None,
     default_max_nodes: int,
-    symbol_resolver: SymbolResolver,
-    context_fn: ContextFn,
+    symbol_resolver: Any,
+    context_fn: Any,
 ) -> dict[str, Any]:
     resolved_node_id = symbol_resolver(node_id) or node_id
     resolved_max_nodes = default_max_nodes if max_nodes is None else max_nodes
     payload = context_fn(
-        session,
-        resolved_node_id,
-        hops=hops,
-        max_nodes=resolved_max_nodes,
+        session, resolved_node_id, hops=hops, max_nodes=resolved_max_nodes,
     )
     if payload.get("ok") is False and payload.get("error_type") == ErrorCode.BLOCK_NOT_FOUND:
         if session.flowgraph is not None:
             fallback_candidates = [
-                b.instance_name for b in session.flowgraph.blocks[: min(5, max_nodes)]
+                b.name for b in session.flowgraph.blocks[: min(5, resolved_max_nodes)]
             ]
             if fallback_candidates:
                 payload["candidate_nodes"] = fallback_candidates
-                payload["hint"] = (
-                    "Specified block name was not found. "
-                    f"Available block names: {', '.join(fallback_candidates)}."
-                )
     return payload
 
 
-# --- merged from query_knowledge.py ---
+# --------------------------------------------------------------------------- #
+# query_knowledge (unchanged — Phase 3 proved no native refactor needed)      #
+# --------------------------------------------------------------------------- #
 
 
 def query_knowledge(
@@ -1048,5 +245,4 @@ def query_knowledge(
 
     if isinstance(result, dict):
         result.pop("active_session", None)
-    return result
     return result
