@@ -86,4 +86,5 @@ qt_api = "pyside6"
 markers = [
     "gui: tests that require a PySide6 QApplication",
     "live_rag: tests that touch the real vector DB / live ollama (only run under GRC_AGENT_LIVE_RAG=1)",
+    "grc_native: tests that require the GNU Radio native GRC platform (apt install gnuradio)",
 ]
