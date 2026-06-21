@@ -136,6 +136,66 @@ class FlowgraphSession:
     def graph_id(self) -> str | None:
         return self._persisted_file_sha256
 
+    # -- legacy compat (used by history.py + transaction.py) ------------------
+
+    @classmethod
+    def from_raw_data(cls, raw_data: dict[str, Any], path: str | Path | None = None) -> FlowgraphSession:
+        """Create a session from a raw data dict (GRC import_data format)."""
+        from grc_agent.grc_native_adapter import get_platform
+        session = cls(path)
+        fg = get_platform().make_flow_graph()
+        fg.import_data(raw_data)
+        fg.rewrite()
+        session.flowgraph = fg
+        return session
+
+    @staticmethod
+    def _serialize_raw_data(raw_data: Any) -> str:
+        """Serialize a raw data dict to GRC-native YAML."""
+        from grc_agent.grc_native_adapter import get_platform
+        get_platform()  # warm the platform (io.yaml circular-import guard)
+        from gnuradio.grc.core.io import yaml as _grc_yaml
+        return _grc_yaml.dump(raw_data)
+
+    def validate(self) -> bool:
+        """Validate the loaded flowgraph. Returns is_valid."""
+        if self.flowgraph is None:
+            return False
+        from grc_agent.grc_native_adapter import validate as _validate
+        result = _validate(self.flowgraph)
+        self.last_validation_ok = result.native_ok
+        self.last_validation_revision = self._state_revision
+        return bool(result.native_ok)
+
+    # -- mutation helpers (adapter-backed; used by transaction.apply_operations) --
+
+    def set_param(self, instance_name: str, key: str, value: Any, *, block_type: str | None = None) -> None:
+        from grc_agent.grc_native_adapter import _find_block, set_param as _set_param
+        _set_param(_find_block(self.flowgraph, instance_name), key, str(value))
+
+    def set_block_state(self, instance_name: str, state: str, *, block_type: str | None = None) -> None:
+        from grc_agent.grc_native_adapter import _find_block, set_block_state as _set_state
+        _set_block_state(_find_block(self.flowgraph, instance_name), state)
+
+    def connect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
+        from grc_agent.grc_native_adapter import connect as _connect
+        _connect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
+
+    def disconnect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
+        from grc_agent.grc_native_adapter import disconnect as _disconnect
+        _disconnect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
+
+    def remove_block(self, instance_name: str, *, block_type: str | None = None) -> None:
+        from grc_agent.grc_native_adapter import remove_block as _remove
+        _remove(self.flowgraph, instance_name)
+
+    def add_block(self, instance_name: str, block_type: str,
+                  parameters: dict[str, Any] | None = None,
+                  states: dict[str, Any] | None = None,
+                  *, _skip_grcc: bool = False) -> None:
+        from grc_agent.grc_native_adapter import add_block as _add
+        _add(self.flowgraph, block_type, instance_name, parameters or {})
+
     # -- integrity ------------------------------------------------------------
 
     def file_integrity_state(self) -> dict[str, Any]:

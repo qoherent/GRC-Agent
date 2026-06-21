@@ -167,20 +167,40 @@ def apply_operations(
 
 @dataclass(frozen=True)
 class SessionStateSnapshot:
-    state: dict[str, Any]
+    raw_data: dict[str, Any] | None
+    path: Any
+    is_dirty: bool
+    state_revision: int
+    persisted_file_sha256: str | None
 
 
 def capture_session_state(session: FlowgraphSession) -> SessionStateSnapshot:
-    return SessionStateSnapshot(state=copy.deepcopy(session.__dict__))
+    raw_data = session.flowgraph.export_data() if session.flowgraph is not None else None
+    return SessionStateSnapshot(
+        raw_data=dict(raw_data) if raw_data is not None else None,
+        path=session.path,
+        is_dirty=session.is_dirty,
+        state_revision=session.state_revision,
+        persisted_file_sha256=session._persisted_file_sha256,
+    )
 
 
 def restore_session_state(
     session: FlowgraphSession,
     snapshot: SessionStateSnapshot,
 ) -> FlowgraphSession:
-    new_state = copy.deepcopy(snapshot.state)
-    session.__dict__.clear()
-    session.__dict__.update(new_state)
+    session.path = snapshot.path
+    session.is_dirty = snapshot.is_dirty
+    session._state_revision = snapshot.state_revision
+    session._persisted_file_sha256 = snapshot.persisted_file_sha256
+    if snapshot.raw_data is not None:
+        from grc_agent.grc_native_adapter import get_platform
+        fg = get_platform().make_flow_graph()
+        fg.import_data(snapshot.raw_data)
+        fg.rewrite()
+        session.flowgraph = fg
+    else:
+        session.flowgraph = None
     return session
 
 
@@ -361,8 +381,9 @@ def apply_edit(
             if candidate.graph_id() == session.graph_id() and candidate.path == session.path:
                 candidate.is_dirty = session.is_dirty
 
+        from grc_agent.grc_native_adapter import validate as adapter_validate
         native_validation = (
-            validate_raw_flowgraph(candidate.flowgraph.raw_data)
+            {"ok": True, "valid": adapter_validate(candidate.flowgraph).native_ok, "errors": []}
             if candidate.flowgraph is not None
             else {"ok": False, "available": False, "valid": None, "errors": []}
         )

@@ -50,29 +50,31 @@ def snapshot_session(session: FlowgraphSession) -> GraphSnapshot:
     """Capture one loaded session in a JSON-serializable snapshot."""
     if session.flowgraph is None:
         raise ValueError("No flowgraph loaded.")
-    raw_data = copy.deepcopy(session.flowgraph.raw_data)
+    fg = session.flowgraph
+    raw_data = fg.export_data()
     serialized = FlowgraphSession._serialize_raw_data(raw_data)
     graph_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     blocks_by_uid: dict[str, dict[str, Any]] = {}
-    for block in session.flowgraph.blocks:
-        blocks_by_uid[block.block_uid] = {
-            "block_uid": block.block_uid,
-            "instance_name": block.instance_name,
-            "block_type": block.block_type,
-            "params": copy.deepcopy(block.params.get("parameters", {})),
-            "state": copy.deepcopy(block.params.get("states", {})),
+    for index, block in enumerate(fg.blocks):
+        uid = str(getattr(block, "name", "") or block.key)
+        blocks_by_uid[uid] = {
+            "block_uid": uid,
+            "instance_name": str(block.name or block.key),
+            "block_type": str(block.key),
+            "params": {k: str(p.value) for k, p in block.params.items()},
+            "state": dict(getattr(block, "states", {}) or {}),
         }
     connections = sorted(
         render_connection_id(
-            connection.src_block,
-            connection.src_port,
-            connection.dst_block,
-            connection.dst_port,
+            conn.source_block.name or conn.source_block.key,
+            conn.source_port.key,
+            conn.sink_block.name or conn.sink_block.key,
+            conn.sink_port.key,
         )
-        for connection in session.flowgraph.connections
+        for conn in fg.connections
     )
     return GraphSnapshot(
-        raw_data=raw_data,
+        raw_data=dict(raw_data),
         graph_hash=graph_hash,
         blocks_by_uid=blocks_by_uid,
         connections=connections,
@@ -435,7 +437,7 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
     if session.flowgraph is None:
         return "unloaded"
     path = str(session.path) if session.path is not None else "<memory>"
-    serialized = FlowgraphSession._serialize_raw_data(session.flowgraph.raw_data)
+    serialized = FlowgraphSession._serialize_raw_data(session.flowgraph.export_data())
     graph_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     digest = hashlib.sha256(f"{path}\n{graph_hash}".encode()).hexdigest()[:16]
     return f"lineage:{digest}"
