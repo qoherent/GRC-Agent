@@ -361,11 +361,9 @@ def suggest_insertions(
     block_types: dict[str, str] = {}
     block_params: dict[str, dict[str, str]] = {}
     for block in session.flowgraph.blocks:
-        block_types[block.instance_name] = block.block_type
-        if isinstance(block.params, dict):
-            params = block.params.get("parameters", {})
-            if isinstance(params, dict):
-                block_params[block.instance_name] = params
+        block_types[block.name] = block.key
+        if hasattr(block.params, "items"):
+            block_params[block.name] = {str(k): str(p.value) for k, p in block.params.items()}
 
     src_type = block_types.get(src_block)
     dst_type = block_types.get(dst_block)
@@ -413,7 +411,7 @@ def suggest_insertions(
         target_dtype=target_dtype,
         target_vlen=target_vlen,
         connection_id=connection_id_str,
-        existing_names={b.instance_name for b in session.flowgraph.blocks} if session.flowgraph else set(),
+        existing_names={b.name for b in session.flowgraph.blocks} if session.flowgraph else set(),
         k=max(k * 3, 500),
         resolved_dtype=target_dtype,
     )

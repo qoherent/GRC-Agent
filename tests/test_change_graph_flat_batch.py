@@ -31,9 +31,9 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         assert session.flowgraph is not None
         for block in session.flowgraph.blocks:
             if block.name == instance_name:
-                params = block.params.get("parameters")
-                if isinstance(params, dict) and key in params:
-                    return str(params[key])
+                param = block.params.get(key)
+                if param is not None:
+                    return str(param.value)
         return None
 
     @staticmethod
