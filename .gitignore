@@ -53,3 +53,6 @@ R_test_results/*_new.json
 R_test_results/*_v*.json
 R_test_results/rag/
 vec1.so
+
+# Experiment scratch output (output of run_experiment.py and similar)
+inspect_experiment
