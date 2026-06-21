@@ -57,7 +57,7 @@ class SessionSnapshot:
     def from_session(cls, session: FlowgraphSession) -> SessionSnapshot:
         if session.flowgraph is None:
             raise ValueError("No flowgraph loaded.")
-        raw_data = copy.deepcopy(session.flowgraph.raw_data)
+        raw_data = copy.deepcopy(session.flowgraph.export_data())
         snapshot = cls.from_raw_data(raw_data)
         snapshot.state_revision = session.state_revision
         return snapshot
