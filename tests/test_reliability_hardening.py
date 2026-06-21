@@ -128,7 +128,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
         for block in agent.session.flowgraph.blocks:
             if block.name == "samp_rate":
                 found_samp_rate = True
-                params = block.params.get("parameters", {})
+                params = {k: str(p.value) for k, p in block.params.items()}
                 val = params.get("value")
                 self.assertNotEqual(str(val), "99999",
                     "samp_rate must not be overwritten by rejected duplicate add")

@@ -234,13 +234,6 @@ class InspectorRunnable(QRunnable):
         try:
             from grc_agent.runtime.inspect_graph import inspect_graph
             overview_data = inspect_graph(self.agent, view="overview", targets=[], params=[])
-            if self.agent.session and self.agent.session.flowgraph:
-                params_map = {}
-                for b in self.agent.session.flowgraph.blocks:
-                    p = b.params.get("parameters", None)
-                    if p:
-                        params_map[b.instance_name] = p
-                overview_data["_block_params"] = params_map
             self.signals.finished.emit(overview_data)
         except Exception as e:
             self.signals.error.emit(str(e))
@@ -1006,7 +999,8 @@ class MainWindow(QMainWindow):
 
     def on_inspector_refreshed(self, overview_data: dict[str, Any]) -> None:
         self.inspector_widget.update_state(overview_data)
-        val_status = overview_data.get("validation_result", {}).get("status", "unknown")
+        graph = overview_data.get("graph", overview_data.get("summary", {})) or {}
+        val_status = graph.get("validation", {}).get("status", "unknown")
         if val_status == "valid":
             self.validation_label.setText("🟢 Valid")
             self.validation_label.setStyleSheet("color: #a6e3a1;")

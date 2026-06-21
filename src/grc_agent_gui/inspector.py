@@ -155,11 +155,10 @@ class InspectorWidget(QWidget):
         table_scroll = self.variables_table.verticalScrollBar().value()
         conn_scroll = self.connections_list.verticalScrollBar().value()
 
-        # 2. Extract sections from overview payload
-        summary = inspect_graph_data.get("summary", {}) or {}
-        blocks = summary.get("blocks", []) or []
-        connections = summary.get("connections", []) or []
-        block_params = inspect_graph_data.get("_block_params", {}) or {}
+        # 2. Extract sections from overview payload (flat shape, Phase 6+).
+        graph = inspect_graph_data.get("graph", inspect_graph_data.get("summary", {})) or {}
+        blocks = graph.get("blocks", []) or []
+        connections = graph.get("connections", []) or []
 
         # 3. Repopulate Variables Table
         variables = [
@@ -199,7 +198,7 @@ class InspectorWidget(QWidget):
         # (transform, message_or_event, metadata, unknown) fold into
         # ``other_blocks``.
         category_for_role = {
-            "variable_or_control": "variables",
+            "variable": "variables",
             "source": "sources",
             "sink": "sinks",
         }
@@ -223,8 +222,10 @@ class InspectorWidget(QWidget):
                 child.setText(0, name)
                 child.setText(1, str(block.get("block_type", "")))
 
-                params = block_params.get(name, {})
-                for pkey, pval in params.items():
+                # Inline parameters (no _block_params sidecar — Phase 6+).
+                for param in block.get("parameters", []) or []:
+                    pkey = str(param.get("name", ""))
+                    pval = param.get("evaluated_value", param.get("value", ""))
                     param_item = QTreeWidgetItem(child)
                     param_item.setText(0, pkey)
                     param_item.setText(1, str(pval))
