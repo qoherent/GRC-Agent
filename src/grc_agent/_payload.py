@@ -7,11 +7,30 @@ from typing import Any
 
 
 class ErrorCode:
-    BLOCK_NOT_FOUND = "block_not_found"
-    INVALID_REQUEST = "invalid_request"
-    RETRIEVAL_NOT_READY = "retrieval_not_ready"
+    MISSING_SESSION = "missing_session"
+    FILE_LOAD_ERROR = "file_load_error"
+    INVALID_GRC = "invalid_grc"
+    VALIDATION_ERROR = "validation_error"
+    VALIDATION_TIMEOUT = "validation_timeout"
+    PREFLIGHT_REJECTED = "preflight_rejected"
+    GNU_VALIDATION_FAILED = "gnu_validation_failed"
     TOOL_CALL_INVALID = "tool_call_invalid"
+    UNKNOWN_TOOL = "unknown_tool"
+    INVALID_REQUEST = "invalid_request"
+    STALE_REVISION = "stale_revision"
+    RETRIEVAL_NOT_READY = "retrieval_not_ready"
+    SAVE_REFUSED = "save_refused"
+    BLOCK_NOT_FOUND = "block_not_found"
+    UNSUPPORTED_OP = "unsupported_op"
     CATALOG_LOAD_ERROR = "catalog_load_error"
+    INTERNAL_ERROR = "internal_error"
+    SAFETY_CEILING = "safety_ceached_reached"
+    TOOL_NOT_ALLOWED_FOR_SURFACE = "tool_not_allowed_for_surface"
+    LLAMA_SERVER_MISSING = "llama_server_missing"
+    GRCC_MISSING = "grcc_missing"
+    MODEL_NOT_FOUND = "model_not_found"
+    INIT_FAILED = "init_failed"
+    BACKEND_UNREACHABLE = "backend_unreachable"
 
 
 def join_non_empty(*parts: Any, separator: str = " ") -> str:
