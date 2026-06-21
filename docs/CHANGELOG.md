@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 
 ## [Unreleased]
 
+### Documentation — single source of truth for GRC native API
+- **`docs/GRC_Core_API_Surface3.md` merged into `docs/GNU_NATIVE_METHODS.md`** to eliminate the split between the class-dictionary reference and the param-filtering recipe. The new `GNU_NATIVE_METHODS.md` is the single source of truth: class dictionary (§1), evaluation pipeline (§2), parameter filtering & visibility (§3), wildcard port resolution (§4), validation & error bubbling (§5), LLM headless orchestration blueprint (§6). All cross-references in the refactor plan and source code updated.
+- **`docs/comprehensive_native_refactoring_plan.md` deleted** — superseded by `docs/refactor_plan/` (the eight-phase plan).
+- **CHANGELOG "Deferred harder wins" section trimmed.** It referenced the removed `grc-agent` CLI subcommands (`grc-agent init`, `grc-agent paths`, `grc-agent clean`, etc.); the CLI surface was deleted in this branch.
+
+### Cleanup
+- `vec1.so` (stray build artifact at repo root, untracked) deleted.
+- `R_test_results/scenario12.md` (no longer produced by the current eval harness) deleted.
+
 ### Removed — all result caching for the small-model target
 - **`_VECTOR_CACHE`** in `search_blocks.py` deleted. Every `query_knowledge` call now hits the vector store fresh.
 - **`_ask_grc_docs_cache`** in `agent.py` and all call sites in `doc_answer.py` deleted. The 3 methods (`_ask_grc_docs_cache_key`, `_ask_grc_docs_cache_get`, `_ask_grc_docs_cache_put`) and the `OrderedDict` backing store are gone.
@@ -455,82 +464,3 @@ external use.
   license and attribution are documented in the directory.
 - `grc-agent init` writes a starter config to `~/.config/grc_agent/config.toml`.
 - `grc-agent paths` lists every on-disk location the package uses.
-
-## Deferred harder wins
-
-The 0.1.0 polish pass shipped a curated batch of "easy wins." The items
-below are deliberately deferred — each scoped to a single PR, with a
-rough effort estimate for a contributor already familiar with the
-codebase. See `README.md` for what's already implemented.
-
-**Multi-provider LLM support** (~1 week). `ProviderConfig` base class in
-`toolagents_runtime.py` with `LlamaCppProviderConfig`,
-`OpenAIProviderConfig`, `AnthropicProviderConfig`, `OllamaProviderConfig`
-subclasses. Move the OpenAI SDK call out of the runtime and into the
-provider subclasses. Add `anthropic` and `ollama` as optional extras.
-Select via a new `[llama].provider` key. Add provider-specific health
-checks to `grc-agent doctor`.
-
-**Settings / preferences dialog** (~3 days). GUI `QDialog` wrapping the
-keys exposed by `default_app_config()`. Validate as the user types; on
-Save, write through a thin wrapper around the loader. Re-entrant. Persist
-window geometry via `QSettings`.
-
-**First-run GUI onboarding wizard** (~1 week). `QWizard` with one page
-per `grc-agent init` question, followed by a "Verify" page that runs
-`grc-agent doctor`. Wire into the first launch of `grc-agent-gui`: if
-`user_config_path()` is missing, open the wizard instead of the main
-window. "Skip for now" acceptable.
-
-**Conversation history sidebar (with persistence)** — *shipped in
-[Unreleased] as System B Part 2*. The persistent `SidebarWidget`
-(left-edge panel, collapsible, resizable to max 20% width, session
-resumption with agent history restoration) replaces the modal
-`File > Recent Sessions...` dialog. The SQLite/FTS5 store at
-`~/.grc_agent/sessions.db` and the `grc-agent sessions` CLI
-subcommand that shipped in v0.1.0 System B remain the data layer.
-**Light / dark theme toggle (with system follow)** (~2-3 days). Move the
-hardcoded Catppuccin stylesheet out of `app.py` into two external `.qss`
-files. Add a `QSettings`-backed theme picker under **Help > Theme** (Dark
-/ Light / Follow system). For "Follow system", listen to
-`QStyleHints.colorScheme()`. Re-apply on the fly, no restart.
-
-**System tray icon / minimize to tray** (~2-3 days). `QSystemTrayIcon`
-with a context menu (Show, Stop, Quit). On `closeEvent`, hide the window
-instead of closing it when a flowgraph is running. Wire the existing
-two-phase termination into **Stop**.
-
-**Multi-window / multi-session support** (~1 week). Detach `GrcAgent` and
-`ChatWidget` into a per-session controller. The main window becomes a
-workspace holding many `SessionController` instances, each with its own
-tab. Cross-session features (shared history, parallel `grcc` jobs) are
-out of scope.
-
-**Test coverage tooling** (~half a day). Add `pytest-cov` to `[dev]`. Add
-`[tool.coverage.run]` and `[tool.coverage.report]` blocks targeting
-`grc_agent` and `grc_agent_gui`. Add a `coverage` job to CI and a badge to
-the README. Floor: 70% line coverage, gated.
-
-**PyPI publish workflow** (~half a day). Add a `release.yml` workflow
-that triggers on a `v*.*.*` tag push. Use PyPI Trusted Publishing (OIDC,
-no long-lived API token). Job runs `uv build`, uploads via
-`pypa/gh-action-pypi-publish`, creates a GitHub Release with the wheel
-and sdist attached.
-
-**Multi-OS CI matrix** (~1 day). Add `os: [ubuntu-latest, macos-latest,
-windows-latest]` to `.github/workflows/ci.yml`. On macOS, install GNU
-Radio through MacPorts; on Windows, document that `grcc` is not
-available and skip the GNU-Radio-dependent test step (but still run ruff,
-pytest, and the no-`grcc` subset of `unittest`).
-
-**GUI test runner unification** (~half a day). CI runs `unittest`; the
-GUI tests under `tests/gui/` use `pytest-qt` style fixtures (`qtbot`) and
-aren't picked up. Move GUI tests to a pytest-style discovery path that
-CI invokes with `uv run pytest tests/gui/`.
-
-**`grc-agent clean` / `grc-agent uninstall-purge`** (~half a day). Add
-`grc-agent clean` (deletes user-owned state directories, **not** model
-weights in `~/.cache/huggingface` — those are usually shared with other
-tools) and `grc-agent uninstall-purge` (calls `uv tool uninstall
-grc-agent` first, then `clean`). Both must require explicit `--yes` and
-print a summary of what they would delete before doing it.
