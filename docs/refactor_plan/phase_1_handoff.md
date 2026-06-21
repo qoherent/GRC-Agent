@@ -28,11 +28,33 @@ The native GRC API succeeded in:
 
 ## 3. Proposal Summary
 
-The formalized target JSON wire shape and filtering logic has been defined in [wire_shape_proposal.md](file:///home/mahmoud/Desktop/AI_Projects/qoherent/GRC_Agent/playground/inspect_experiment/wire_shape_proposal.md):
+The formalized target JSON wire shape and filtering logic has been defined in [wire_shape_proposal.md](file:///home/mahmoud/Desktop/AI_Projects/qoherent/GRC_Agent/playground/inspect_experiment/wire_shape_proposal.md). It models three target interaction modes:
 
-- **Inlining**: Parameters are inlined inside each block's definition under `"parameters"`.
-- **Filtering Rules**: Exclude parameters only if `p.hide == "all"` or `p.category in {"Advanced", "Config"}`.
-- **Role Resolution**: Resolved sequentially via native GRC block properties (`is_variable`, `is_import`, `is_snippet`, `is_virtual_or_pad`), specific keys (`key == "options"`), and input/output port counts.
+### 3.1 Overview Mode (`targets=[]`, `params=[]`)
+A hyper-minimal representation of the entire flowgraph with an average **60.42% character size reduction** (up to 68% on complex graphs). It applies the following rules:
+- **`options` block whitelist**: Strictly includes only `id`, `title`, `generate_options`, and `output_language`. All other parameters (author, cmake options, etc.) are dropped.
+- **Tab/Category Exclusion**: Parameters categorized under `Advanced` (GRC-appended boilerplate like `alias`, `affinity`, `minoutbuf`, etc.) or `Config` (Pure QT styling properties) are excluded.
+- **Visibility**: Excludes parameters where evaluated `p.hide == "all"`.
+- **Value-Based Prominence (Overview Mode Only)**: Includes a parameter only if it is always visible (`p.hide == "none"`), its value has been changed from default (`p.value != p.default`), or its value references a variable or another block's name in the graph.
+
+### 3.2 Details Mode (`targets=["block_name"]`)
+- **Targeted Blocks**: Return the full list of active parameters (filtering out only `Advanced`/`Config` tabs and evaluated `hide == "all"`).
+- **Non-Targeted Blocks**: Remain in the hyper-minimal Overview Mode.
+
+### 3.3 Param Filter Mode (`targets=["block_name"]`, `params=["param_key"]`)
+- **Targeted Blocks**: Only return parameters whose key is explicitly listed in `params`.
+- **Non-Targeted Blocks**: Remain in Overview Mode, returning only overview parameters that match keys in `params`.
+
+### 3.4 Role Resolution Rules
+Resolved sequentially via native GRC properties:
+1. `variable_or_control` if `block.is_variable`
+2. `import` if `block.is_import`
+3. `snippet` if `block.is_snippet`
+4. `virtual_or_pad` if `block.is_virtual_or_pad`
+5. `metadata` if `block.key == "options"`
+6. `source` if `len(sinks) == 0` and `len(sources) > 0`
+7. `sink` if `len(sources) == 0` and `len(sinks) > 0`
+8. `transform` if both sinks and sources are present.
 
 ---
 
