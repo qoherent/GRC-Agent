@@ -114,8 +114,11 @@ def parse_connections(connections_data: Any) -> list[Connection]:
         if not isinstance(entry, list) or len(entry) != 4:
             continue
         src_block, src_port_raw, dst_block, dst_port_raw = entry
-        connections.append(Connection(instance_name=f"{src_block}->{dst_block}",
-                                      block_type="connection"))
+        connections.append(Connection(
+            src_block=str(src_block), src_port=_normalize_port(src_port_raw),
+            dst_block=str(dst_block), dst_port=_normalize_port(dst_port_raw),
+            instance_name=f"{src_block}->{dst_block}", block_type="connection",
+        ))
     return connections
 
 

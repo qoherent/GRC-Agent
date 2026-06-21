@@ -56,6 +56,10 @@ class Block:
 
 @dataclass
 class Connection:
+    src_block: str = ""
+    src_port: Any = ""
+    dst_block: str = ""
+    dst_port: Any = ""
     instance_name: str = ""
     block_type: str = ""
     block_uid: str = ""
