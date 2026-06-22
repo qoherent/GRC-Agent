@@ -64,6 +64,29 @@ def dispatch_flat_change_graph_batch(
     if fg is None:
         return _tool_error(agent, started, "No flowgraph loaded.", before_revision, before_dirty)
 
+    integrity = agent.session.file_integrity_state()
+    if integrity.get("externally_modified"):
+        result: dict[str, Any] = {
+            "ok": False,
+            "committed": False,
+            "ops_applied": 0,
+            "tool": "change_graph",
+            "state_revision": before_revision,
+            "error_type": "stale_revision",
+            "file_integrity": integrity,
+            "errors": [
+                {"code": "stale_revision",
+                 "message": "file changed on disk; reload before editing"}
+            ],
+        }
+        return agent._attach_wrapper_dispatch_telemetry(
+            debug=debug, wrapper_name="change_graph",
+            wrapper_action="stale_revision",
+            internal_handlers=["none"], started=started,
+            before_revision=before_revision, before_dirty=before_dirty,
+            result=result, validation_run=False, output_truncated=False,
+        )
+
     errors: list[dict[str, str]] = []
     ops_applied = 0
 

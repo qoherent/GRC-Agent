@@ -65,6 +65,12 @@ def apply_operations(
     port/domain/dtype/occupancy combinations before apply time. It only applies
     the normalized operation list to the candidate `FlowgraphSession`.
     """
+    integrity = session.file_integrity_state()
+    if integrity.get("externally_modified"):
+        raise OSError(
+            f"Refusing to apply: file changed on disk at "
+            f"{integrity.get('path')}"
+        )
     affected_blocks: set[str] = set()
     affected_connections: set[tuple] = set()
 
