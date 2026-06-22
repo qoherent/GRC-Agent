@@ -327,27 +327,6 @@ def rewire_candidate_passes_preflight(fg: Any, **kwargs: Any) -> bool:
     return True
 
 
-def set_param_noop_check(fg: Any, instance_name: str, params: dict[str, Any]) -> bool:
-    """Return True if every param is already at target value (no mutation needed)."""
-    block = next((b for b in fg.blocks if b.name == instance_name), None)
-    if block is None:
-        return False
-    for k, v in (params or {}).items():
-        if k not in block.params:
-            return False
-        current = str(block.params[k].value)
-        if current != str(v):
-            return False
-    return True
-
-
-def set_block_state_noop_check(fg: Any, instance_name: str, state: str) -> bool:
-    block = next((b for b in fg.blocks if b.name == instance_name), None)
-    if block is None:
-        return False
-    return str(block.state) == str(state)
-
-
 _VALID_STATES = {"enabled", "disabled", "bypassed", "bypass"}
 
 
@@ -369,11 +348,6 @@ def _update_state_operation(entry: Any, *, index: Any = None,
         return None
     return {"instance_name": str(entry.get("instance_name", "")),
             "state": state}
-    """Normalize one update_states entry (kept for test compat)."""
-    if isinstance(entry, dict):
-        return {"instance_name": str(entry.get("instance_name", "")),
-                "state": str(entry.get("state", ""))}
-    return {"instance_name": "", "state": ""}
 
 
 # --------------------------------------------------------------------------- #

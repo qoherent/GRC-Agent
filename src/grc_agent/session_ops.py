@@ -28,7 +28,6 @@ FLOWGRAPH_SESSION_SHARED_PRIVATE_METHODS: tuple[str, ...] = (
 DISPLAY_ROLES: frozenset[str] = frozenset(
     {"user", "assistant", "tool_started", "tool_finished", "mutation", "error"}
 )
-MODEL_ROLES: frozenset[str] = frozenset({"assistant_model", "tool_model"})
 ASSISTANT_MODEL_ROLE = "assistant_model"
 TOOL_MODEL_ROLE = "tool_model"
 

@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 
 ## [Unreleased]
 
+### Added — GRC Native Refactor (Phases 1–7)
+- **`src/grc_agent/grc_native_adapter.py`** — 470-line bridge to GNU Radio GRC's Python API. Lazy singleton `get_platform()`, `load_flow_graph()`, `load_and_inspect()`, `render_flow_graph()`, 6 mutation helpers (`set_param`, `set_block_state`, `connect`, `disconnect`, `add_block`, `remove_block`), `apply_mutation()`, `validate_and_finalize()`, `serialize_flow_graph()`, `write_flow_graph_atomic()`. All gnuradio imports are confined to this module.
+- **`src/grc_agent/domain_models.py`** — 13 Pydantic V2 schemas. Outbound (`extra="forbid"`) for LLM-facing `GrcFlowgraph`, `GrcBlock`, `GrcParameter`, `GrcConnection`, `GrcValidation`. Inbound (`extra="ignore"`) for tool args. `BlockRole` StrEnum with 8 values.
+- **`src/grc_agent/runtime/param_filter.py`** — single source of truth for parameter visibility. `keep_param()` predicate: drop `hide==all` / `category∈{Advanced,Config}` / `dtype==gui_hint`. One uniform rule, no per-block allowlists.
+- **`docs/IMPLEMENTATION_REPORT.md`** — complete implementation report for Phases 1–7 with verification evidence.
+
+### Changed — Major Architecture Shift
+- **`flowgraph_session.py`** gutted from 1596 → 447 lines. `flowgraph` attribute is now a live `gnuradio.grc.core.FlowGraph.FlowGraph`. All 6 mutation helpers set `is_dirty=True` and bump `state_revision`. Integrity check (`file_integrity_state()`) guards save against external modification. Atomic save preserved with backup + lock.
+- **`runtime/inspect_graph.py`** rewritten from 1052 → 248 lines. All block/connection iteration goes through `render_flow_graph()` → `GrcFlowgraph` Pydantic model.
+- **`runtime/change_graph.py`** rewritten from 1277 → 370 lines. Flat batch dispatch via `dispatch_flat_change_graph_batch()`: stale-revision gate, noop detection (serialized snapshot comparison), autosave on commit, duplicate block name check, `force` bypasses validation failures only.
+- **`agent.py`** — 5 tool handlers updated. Inline rewire resolvers. All mutation paths go through adapter.
+- **`transaction.py`** — `apply_edit`/`propose_edit`/`clone_session`/`commit_candidate_session` rewired via `export_data()`/`import_data()`.
+- **`history.py`** — `snapshot_session` uses `export_data()` + native block/connection iteration.
+- **`validation/checks.py`** — `SessionSnapshot.from_session()` uses `export_data()`.
+- **`runtime/transaction_normalization.py`** — connection attribute access updated to native `source_block.name`/`sink_block.name`/`source_port.key`/`sink_port.key`. Port key coercion to int for numeric stream ports.
+
+### Changed — GUI (Phase 7)
+- **`src/grc_agent_gui/inspector.py`** — reads new flat payload shape (`graph.blocks`, `graph.connections`, `graph.validation.status`). Parameters inlined per block. `category_for_role` updated to new `BlockRole` enum values.
+- **`src/grc_agent_gui/main_window.py`** — `_block_params` sidecar producer removed. Save uses `session.save()` directly.
+
+### Changed — Error Payload
+- **`_payload.py`** — `build_error_payload()` now includes top-level `message` and `error_type` fields. `Flowgraph` dataclass deleted (zero importers).
+
+### Changed — Session Ops
+- **`session_ops.py`** — `chat_message_from_payload()` catches Pydantic validation errors gracefully. `MODEL_ROLES` frozenset deleted (zero importers).
+
+### Removed
+- 7 legacy/contradictory tests across `test_change_graph_flat_batch.py`, `test_transaction_commit.py`, `test_transaction_extended.py`, `test_transaction_rollback.py` (details in `docs/IMPLEMENTATION_REPORT.md`).
+- Dead code: `set_param_noop_check`, `set_block_state_noop_check`, unreachable lines in `_update_state_operation`, `_write_committed_changes` import.
+- `_block_params` sidecar from GUI save path.
+
 ### Documentation — single source of truth for GRC native API
 - **`docs/GRC_Core_API_Surface3.md` merged into `docs/GNU_NATIVE_METHODS.md`** to eliminate the split between the class-dictionary reference and the param-filtering recipe. The new `GNU_NATIVE_METHODS.md` is the single source of truth: class dictionary (§1), evaluation pipeline (§2), parameter filtering & visibility (§3), wildcard port resolution (§4), validation & error bubbling (§5), LLM headless orchestration blueprint (§6). All cross-references in the refactor plan and source code updated.
 - **`docs/comprehensive_native_refactoring_plan.md` deleted** — superseded by `docs/refactor_plan/` (the eight-phase plan).

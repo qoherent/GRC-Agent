@@ -9,6 +9,11 @@
 > **Audience:** agents implementing the native adapter, the model-visible tool
 > handlers, and the GUI inspector. **Not a GRC user manual** — it documents the
 > Python bindings the agent consumes, not the GRC UI.
+>
+> **Status:** Current for post-Phase-7 architecture. The native adapter at
+> `grc_native_adapter.py` implements the load/inspect/mutate/validate pipeline
+> described here. `param_filter.py` (§3.5) is the single filtering authority.
+> `domain_models.py` exposes the typed LLM-facing schemas.
 
 ---
 

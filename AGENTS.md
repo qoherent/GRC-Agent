@@ -7,58 +7,167 @@
 
 ---
 
+## Architecture (Post Phase-7 Refactor)
+
+### Core modules
+
+| Module | Lines | Role |
+|--------|-------|------|
+| `grc_native_adapter.py` | ~470 | **THE BRIDGE** — all GRC native API calls. Lazy singleton platform, load/inspect/mutate/validate/serialize. Never import `gnuradio` at module top-level. |
+| `domain_models.py` | ~182 | Pydantic V2 schemas. Outbound (`extra="forbid"`) for LLM-facing output. Inbound (`extra="ignore"`) for tool args. |
+| `flowgraph_session.py` | ~447 | Owns path, integrity, atomic save, revision, and 6 mutation helpers. `flowgraph` attribute is a live `gnuradio.grc.core.FlowGraph.FlowGraph`. |
+| `runtime/param_filter.py` | — | **THE BIBLE** — single source of truth for param visibility. `keep_param` predicate: drop `hide==all` / `category∈{Advanced,Config}` / `dtype==gui_hint`. One uniform rule. |
+| `runtime/inspect_graph.py` | ~248 | Adapter-backed. Returns `GrcFlowgraph` Pydantic model. |
+| `runtime/change_graph.py` | ~370 | Flat batch mutation dispatch. Stale-revision gate, noop detection, autosave, duplicate check. |
+| `_payload.py` | ~70 | ErrorCode constants (24 values), `build_error_payload()`, thin Block/Connection stubs. |
+| `session_ops.py` | ~185 | `connection_id()`, `parse_connection_id()`, validation pipeline helpers. |
+| `agent.py` | ~1964 | Tool registry, dispatch, lifecycle. Inline rewire resolvers. |
+| `transaction.py` | ~468 | Clone/commit via `export_data()`/`import_data()`. `apply_edit` / `propose_edit`. |
+
+### Data flow
+
+```
+GRC .grc file
+  → grc_native_adapter.load_flow_graph()     # Parse → import_data() → rewrite()
+  → FlowgraphSession.flowgraph                # Live native FlowGraph object
+  → render_flow_graph()                       # → GrcFlowgraph Pydantic model
+  → inspect_graph / change_graph dispatch      # Tool result
+  → Model receives flat typed payload
+```
+
+### Mutation path
+
+```
+change_graph tool call
+  → dispatch_flat_change_graph_batch()
+    → integrity check (stale revision guard)
+    → adapter.apply_mutation() per op
+    → validate_and_finalize() (native is_valid())
+    → rollback on failure / commit on success
+    → autosave if file changed (serialized snapshot comparison)
+```
+
+---
+
 ## Engineering Rules (for AI coding agents)
 
 ### General rules — never ad-hoc
-- **No hand-picked heuristics.** No per-field allowlists, per-scenario branches, regex routing, or prompt folklore ("tell the model to be careful about X"). If logic is needed, it is one uniform rule applied to every case.
-- **Prefer native methods.** Use the underlying system's own APIs before reimplementing logic. Example: block-parameter visibility comes from GNU Radio GRC's evaluated `hide` (`gnuradio.grc.core`), not a hand-rolled filter.
-- **Fix at the source.** Correctness lives in the tool/handler that produces data, not in a post-processor that carves it down. The tool's output is what the consumer sees.
-- **No silent transformation.** Any truncation, filtering, or omission in model-facing output must be explicitly flagged (what + how much). Never drop data without telling the consumer.
-- **Simplify by removal.** Prefer removing code over adding it. A one-line fix at the source beats a fifty-line wrapper.
+- **No hand-picked heuristics.** No per-field allowlists, per-scenario branches, regex routing, or prompt folklore. If logic is needed, it is one uniform rule applied to every case.
+- **Prefer native methods.** Use GNU Radio GRC's Python API (`gnuradio.grc.core`) — `param.hide`, `param.category`, `Block.is_variable`, `flow_graph.is_valid()`, etc.
+- **Fix at the source.** Correctness lives in the tool/handler that produces data, not in a post-processor.
+- **No silent transformation.** Any truncation, filtering, or omission in model-facing output must be explicitly flagged.
+- **Simplify by removal.** Prefer deleting code over adding it.
 
-### Verification standard — a pass is not "working"
-- **A green test is necessary, not sufficient.** After every change, inspect the actual data flow and the agent's observable behavior — not just the test result.
-- **Read real output.** Render what the model/user actually receives and examine it for completeness, noise, and regressions the assertions miss.
-- **Use an unbiased second look.** For non-trivial changes, dispatch a fresh reviewer (subagent) to inspect the rendered output and verdict it.
-- **Evidence before assertions.** Every claim of "fixed/done" cites a verified observation, never intent. If you did not watch it fail and then pass against real behavior, it is not done.
+### Verification standard
+- **A green test is necessary, not sufficient.** Inspect actual data flow.
+- **Evidence before assertions.** Every claim cites a verified observation, never intent.
 
 ---
 
 ## Prompt & Tool Surface Architecture
 
-### The system prompt is the sole behavioral authority
-The system prompt (`build_system_prompt` in `src/grc_agent/runtime/model_context.py`) is the **only** place that dictates model behavior.
-- Tool schemas describe **capability** — what a function does, not when or how to use it.
-- Tool results return **state** — what happened, metadata, errors.
-- Error strings return **facts** — what failed, never what to do about it.
+### Three model-facing tools
+| Tool | Direction | Backed by |
+|------|-----------|-----------|
+| `inspect_graph` | read | `grc_native_adapter.render_flow_graph()` → `GrcFlowgraph` |
+| `change_graph` | write | `grc_native_adapter.apply_mutation()` + `validate_and_finalize()` |
+| `query_knowledge` | read | `search_blocks` (catalog YAML) + `ask_grc_docs` (RAG) — no native API |
 
-### In-band control flow is prohibited
-No string the model sees may contain ALL-CAPS directives, behavioral commands (`Use this when`, `Call X now`, `Retry`, `You should`), or procedural recipes. This applies to tool schemas, wrapper outputs, validation errors, runtime directives, hint strings, recovery prompts, `next_step_notes` — **every model-visible string**.
-
-### Active MVP surface
-Three model-facing tools: `inspect_graph` (read), `query_knowledge` (catalog/docs search), `change_graph` (batch mutation).
-- No new model-facing tool, schema field, or system-prompt change without explicit maintainer authorization.
+- No new model-facing tool, schema field, or system-prompt change without maintainer authorization.
 - No speculative expansion without live eval-harness evidence.
-
-### Tool output is the model-visible output
-What a tool returns is what the model receives. No post-processing layer may silently rewrite, drop, or clip it. Legitimate size limits are uniform and flagged.
+- Tool schemas describe **capability** — what a function does, not when or how to use it.
+- No in-band control flow: no ALL-CAPS directives, behavioral commands, or procedural recipes in model-visible strings.
 
 ---
 
 ## Runtime & State Management
 
-- **Manual execution loop:** `ToolAgentsRunner._run_turn_events` with bounded `.step()`. Exists for GUI callbacks (`on_tool_start`/`on_tool_end`), sequential mutation tracking, factual (not behavioral) runtime reminders, and a `max_tool_rounds` ceiling.
-- **No result caching.** Every `query_knowledge` and `change_graph` call hits the live backend fresh. No dedup, no search-result cache, no docs-answer cache. The model must always see the current state of the graph and the current catalog.
-- **Repeat-payload escalator:** `_last_failed_ops_hash` flags when the model submits the exact same failing `change_graph` payload twice in a row, so the response can call it out. The escalator does not prevent re-execution — every call runs.
-- **Context compaction:** one-pass proportional slicing. Every truncation ends with `... [TRUNCATED by chat-history compactor: was N chars, kept M]`; N computed exactly once.
-- **Wire-format role safety:** runtime directives are injected as `user`-role only, wrapped `<runtime_directive>…</runtime_directive>`. Never leak custom roles over the wire.
+- **Manual execution loop:** `ToolAgentsRunner._run_turn_events` with bounded `.step()`.
+- **No result caching.** Every call hits the live backend fresh.
+- **Repeat-payload escalator:** `_last_failed_ops_hash` flags duplicate failing payloads.
+- **Context compaction:** one-pass proportional slicing with truncation flags.
+- **Wire-format role safety:** runtime directives injected as `user`-role only.
 
 ---
 
 ## Constraints (hard prohibitions)
 
-- **No daemon management:** never manage OS services/daemons or `subprocess.Popen` lifecycle for external servers (Ollama, etc.).
-- **No hardware polling:** no `psutil`, `nvidia-smi`, or telemetry. Handle backend unreachability by graceful degradation.
-- **Non-blocking flow:** no setup wizards, pre-launch modals, or mandatory config screens. Launch into degraded mode if the backend is unreachable; never `sys.exit()` on network failure.
-- **No backward compatibility:** no shims, dual-format persistence, or legacy synthesis layers. On legacy structures or missing payload fields, refuse the load.
+- **No daemon management.** Never manage OS services/daemons.
+- **No hardware polling.** No `psutil`, `nvidia-smi`, or telemetry.
+- **Non-blocking flow.** Launch into degraded mode if backend unreachable; never `sys.exit()`.
+- **No backward compatibility.** No shims, dual-format persistence, or legacy synthesis layers.
 - **No application-flow changes without permission.**
+- **No `gnuradio` imports outside `grc_native_adapter.py` and auxiliary files (doctor, dogfood, session catalog paths).**
+
+---
+
+## Key Conventions
+
+### Param visibility
+- Single source of truth: `runtime/param_filter.py` `keep_param()` predicate.
+- Drop: `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`.
+- Keep: `enum` OR `value != default` OR `references_variable`.
+
+### State values
+- Valid: `enabled`, `disabled`, `bypassed` (accept `bypass` as alias).
+- Enforced at `_update_state_operation()` in change_graph.py.
+
+### Disconnect precision
+- Native `flow_graph.disconnect(src, dst)` removes ALL edges from source port.
+- Adapter `disconnect()` finds exact `Connection` object and drops from set.
+
+### Graph identity
+- File-bytes SHA-256 (cross-session) + `state_revision` counter (in-session).
+- No deep-JSON hashing.
+
+### Atomic save
+- `_atomic_write_text()`: temp file → fsync → `os.replace()` → directory fsync.
+- Lock via `fcntl.flock` on `.grc_agent/<name>.lock`.
+- Backup saved before each save.
+
+---
+
+## File Map (Current State)
+
+| File | Lines | Status |
+|------|-------|--------|
+| `grc_native_adapter.py` | ~470 | Live — all GRC native API |
+| `domain_models.py` | ~182 | Live — Pydantic V2 schemas |
+| `flowgraph_session.py` | ~447 | Live — path, integrity, save, revision |
+| `_payload.py` | ~70 | Live — ErrorCode, error envelope, thin stubs |
+| `session_ops.py` | ~185 | Live — validation helpers, connection parsing |
+| `agent.py` | ~1964 | Live — tool registry + dispatch |
+| `runtime/param_filter.py` | — | Live — the Bible |
+| `runtime/inspect_graph.py` | ~248 | Live — adapter-backed |
+| `runtime/change_graph.py` | ~370 | Live — flat batch dispatch |
+
+---
+
+## Test Gate
+
+| Marker | Count | Command |
+|--------|-------|---------|
+| (default) | 390 passed, 10 skipped | `pytest` |
+| `grc_native` | 28 passed | `pytest -m grc_native` |
+| `gui` | 6 passed | `xvfb-run pytest -m gui` |
+| collection | 400 total | `pytest --collect-only` |
+
+### Default CI command
+```bash
+pytest -m "not grc_native and not gui and not llama_eval"
+```
+
+---
+
+## Definition of Done
+
+1. ✅ `pytest` passes (390/400)
+2. ✅ `pytest -m grc_native` passes (28/28)
+3. ✅ `pytest -m gui` passes (6/6)
+4. ✅ No `yaml.safe_load` / `grcc` subprocess in `src/grc_agent/`
+5. ✅ `gnuradio` imports only in adapter + auxiliary files
+6. ✅ `flowgraph_session.py` reduced 1596 → 447 (-1149 lines)
+7. ✅ No deep-JSON-hash function
+8. ✅ `param_filter.py` is single source of truth — no per-block allowlists
+9. ✅ Pydantic `extra="forbid"` outbound, `extra="ignore"` inbound
+10. ✅ GUI inspector reads new flat shape, no `_block_params` sidecar

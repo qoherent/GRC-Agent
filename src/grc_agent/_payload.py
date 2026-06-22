@@ -1,5 +1,6 @@
-"""Phase 6 — minimal payload utilities. Legacy Block/Connection/Flowgraph types
-replaced with thin stubs while the remaining callers are cut over to the adapter."""
+"""Phase 6 — minimal payload utilities. ErrorCode constants, error envelope
+builder, and thin stub dataclasses (Block, Connection) retained for callers
+that have not yet completed cutover to native domain_models."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
@@ -50,14 +51,14 @@ def build_error_payload(*, error_type: str, message: str,
     return payload
 
 
-# Thin stubs — the remaining consumers that still reference these types
-# (block_semantics, old inspect/change) are being cut over to the adapter.
+# Thin stubs retained for remaining consumers (block_semantics, validation/checks).
 @dataclass
 class Block:
     instance_name: str
     block_type: str
     block_uid: str = ""
     params: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class Connection:
@@ -68,10 +69,3 @@ class Connection:
     instance_name: str = ""
     block_type: str = ""
     block_uid: str = ""
-
-@dataclass
-class Flowgraph:
-    blocks: list[Block] = field(default_factory=list)
-    connections: list[Connection] = field(default_factory=list)
-    ok: bool = False
-    errors: list[dict[str, str]] = field(default_factory=list)

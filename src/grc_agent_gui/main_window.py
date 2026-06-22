@@ -1054,15 +1054,13 @@ class MainWindow(QMainWindow):
                 "No flowgraph is currently loaded. Open a `.grc` first.",
             )
             return
-        from grc_agent.runtime.change_graph import _write_committed_changes
-        success = _write_committed_changes(self.agent.session)
-        if success:
+        try:
+            self.agent.session.save()
             self.status_bar.showMessage("Graph saved.")
-        else:
+        except Exception as exc:
             self._show_error(
                 "Save failed",
-                "Saving the graph returned a failure result. "
-                "See the chat log for the underlying error.",
+                str(exc),
             )
 
     def on_inspector_error(self, err_msg: str) -> None:
