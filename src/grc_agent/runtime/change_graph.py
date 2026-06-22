@@ -106,6 +106,12 @@ def dispatch_flat_change_graph_batch(
             apply_mutation(fg, "add_block", block_type=block_id,
                            instance_name=instance_name, parameters=entry.get("params") or {})
             ops_applied += 1
+        except ValueError as exc:
+            msg = str(exc)
+            if msg.startswith("duplicate_block_name"):
+                _record_error("duplicate_block_name", msg)
+            else:
+                _record_error("add_block_failed", msg)
         except Exception as exc:
             _record_error("add_block_failed", str(exc))
 
@@ -328,12 +334,27 @@ def set_block_state_noop_check(fg: Any, instance_name: str, state: str) -> bool:
     return str(block.state) == str(state)
 
 
-def _update_state_operation(entry: Any) -> dict[str, Any]:
-    """Normalize one update_states entry (kept for test compat)."""
-    if isinstance(entry, dict):
-        return {"instance_name": str(entry.get("instance_name", "")),
-                "state": str(entry.get("state", ""))}
-    return {"instance_name": "", "state": ""}
+_VALID_STATES = {"enabled", "disabled", "bypassed", "bypass"}
+
+
+def _update_state_operation(entry: Any, *, index: Any = None,
+                           field_name: str = "update_states",
+                           errors: list[str] | None = None) -> dict[str, Any] | None:
+    """Normalize one update_states entry. Returns ``None`` when the state
+    value is invalid (recording the error if ``errors`` list is provided).
+    """
+    if not isinstance(entry, dict):
+        return None
+    state = str(entry.get("state", ""))
+    if state not in _VALID_STATES:
+        if errors is not None:
+            errors.append(
+                f"{field_name}[{index}]: state expected to be one of "
+                f"enabled/disabled/bypassed; got {state!r}"
+            )
+        return None
+    return {"instance_name": str(entry.get("instance_name", "")),
+            "state": state}
     """Normalize one update_states entry (kept for test compat)."""
     if isinstance(entry, dict):
         return {"instance_name": str(entry.get("instance_name", "")),

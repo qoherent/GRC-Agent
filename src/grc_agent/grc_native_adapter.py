@@ -337,6 +337,10 @@ def add_block(flow_graph: Any, block_type: str, instance_name: str,
               parameters: dict[str, Any]) -> Any:
     """Add a new block. Names it via ``params['id']`` (the empirically correct
     path — GRC's ``Block.name`` is a read-only property)."""
+    if any((b.name or b.key) == instance_name for b in flow_graph.blocks):
+        raise ValueError(
+            f"duplicate_block_name: a block named {instance_name!r} already exists"
+        )
     block = flow_graph.new_block(block_type)
     if block is None:
         raise KeyError(f"Block type {block_type!r} not found in catalog")
@@ -369,9 +373,11 @@ def set_param(block: Any, param_key: str, value: str) -> None:
 
 
 def set_block_state(block: Any, state: str) -> None:
-    if state not in {"enabled", "disabled", "bypassed"}:
+    aliases = {"bypass": "bypassed"}
+    canonical = aliases.get(state, state)
+    if canonical not in {"enabled", "disabled", "bypassed"}:
         raise ValueError(f"Invalid state {state!r}; must be enabled/disabled/bypassed")
-    block.state = state
+    block.state = canonical
 
 
 def connect(flow_graph: Any, src_block: str, src_port: str,
