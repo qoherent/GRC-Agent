@@ -1,7 +1,7 @@
-"""Phase 5 — complete native GRC adapter (load, mutate, validate, identity).
+"""Native GRC adapter — load, mutate, validate, identity.
 
-Per ``docs/refactor_plan/plan_context.md`` §5 (env facts) and §4 (no in-band
-control flow). The single source of truth for GNU Radio access in the agent.
+Per AGENTS.md (no in-band control flow; no gnuradio imports outside this
+module). The single source of truth for GNU Radio access in the agent.
 
 Public surface (consumed by Phase 6's cutover):
 

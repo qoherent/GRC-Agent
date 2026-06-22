@@ -11,7 +11,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 - **`src/grc_agent/grc_native_adapter.py`** — 470-line bridge to GNU Radio GRC's Python API. Lazy singleton `get_platform()`, `load_flow_graph()`, `load_and_inspect()`, `render_flow_graph()`, 6 mutation helpers (`set_param`, `set_block_state`, `connect`, `disconnect`, `add_block`, `remove_block`), `apply_mutation()`, `validate_and_finalize()`, `serialize_flow_graph()`, `write_flow_graph_atomic()`. All gnuradio imports are confined to this module.
 - **`src/grc_agent/domain_models.py`** — 13 Pydantic V2 schemas. Outbound (`extra="forbid"`) for LLM-facing `GrcFlowgraph`, `GrcBlock`, `GrcParameter`, `GrcConnection`, `GrcValidation`. Inbound (`extra="ignore"`) for tool args. `BlockRole` StrEnum with 8 values.
 - **`src/grc_agent/runtime/param_filter.py`** — single source of truth for parameter visibility. `keep_param()` predicate: drop `hide==all` / `category∈{Advanced,Config}` / `dtype==gui_hint`. One uniform rule, no per-block allowlists.
-- **`docs/IMPLEMENTATION_REPORT.md`** — complete implementation report for Phases 1–7 with verification evidence.
 
 ### Changed — Major Architecture Shift
 - **`flowgraph_session.py`** gutted from 1596 → 447 lines. `flowgraph` attribute is now a live `gnuradio.grc.core.FlowGraph.FlowGraph`. All 6 mutation helpers set `is_dirty=True` and bump `state_revision`. Integrity check (`file_integrity_state()`) guards save against external modification. Atomic save preserved with backup + lock.
@@ -34,13 +33,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
 - **`session_ops.py`** — `chat_message_from_payload()` catches Pydantic validation errors gracefully. `MODEL_ROLES` frozenset deleted (zero importers).
 
 ### Removed
-- 7 legacy/contradictory tests across `test_change_graph_flat_batch.py`, `test_transaction_commit.py`, `test_transaction_extended.py`, `test_transaction_rollback.py` (details in `docs/IMPLEMENTATION_REPORT.md`).
+- 7 legacy/contradictory tests across `test_change_graph_flat_batch.py`, `test_transaction_commit.py`, `test_transaction_extended.py`, `test_transaction_rollback.py`.
 - Dead code: `set_param_noop_check`, `set_block_state_noop_check`, unreachable lines in `_update_state_operation`, `_write_committed_changes` import.
 - `_block_params` sidecar from GUI save path.
 
 ### Documentation — single source of truth for GRC native API
 - **`docs/GRC_Core_API_Surface3.md` merged into `docs/GNU_NATIVE_METHODS.md`** to eliminate the split between the class-dictionary reference and the param-filtering recipe. The new `GNU_NATIVE_METHODS.md` is the single source of truth: class dictionary (§1), evaluation pipeline (§2), parameter filtering & visibility (§3), wildcard port resolution (§4), validation & error bubbling (§5), LLM headless orchestration blueprint (§6). All cross-references in the refactor plan and source code updated.
-- **`docs/comprehensive_native_refactoring_plan.md` deleted** — superseded by `docs/refactor_plan/` (the eight-phase plan).
+- **`docs/comprehensive_native_refactoring_plan.md` and `docs/refactor_plan/` deleted** — process docs from the completed refactor; the architectural rules are captured in `AGENTS.md`.
 - **CHANGELOG "Deferred harder wins" section trimmed.** It referenced the removed `grc-agent` CLI subcommands (`grc-agent init`, `grc-agent paths`, `grc-agent clean`, etc.); the CLI surface was deleted in this branch.
 
 ### Cleanup

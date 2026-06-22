@@ -1,9 +1,8 @@
 """Pydantic V2 domain models — the agent's inner wire-shape contract.
 
-Per ``docs/refactor_plan/plan_context.md`` §3 (MVP surface) and §4 (no in-band
-control flow): no field name or value here may carry an ALL-CAPS directive, a
-"Use this when …" phrase, or a procedural recipe. The model's system prompt is
-the only behavioral authority.
+Per AGENTS.md (no in-band control flow): no field name or value here may carry
+an ALL-CAPS directive, a "Use this when …" phrase, or a procedural recipe. The
+model's system prompt is the only behavioral authority.
 
 Two directions, two configs:
 
@@ -180,3 +179,59 @@ class QueryKnowledgeArgs(BaseModel):
     query: str
     domain: str = "catalog"
     debug: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# Error infrastructure (moved from the former ``_payload.py``).                #
+# Plain constants + builder — not Pydantic models.                            #
+# --------------------------------------------------------------------------- #
+
+
+class ErrorCode:
+    """Canonical error-type strings emitted in ``error_type`` fields."""
+
+    MISSING_SESSION = "missing_session"
+    FILE_LOAD_ERROR = "file_load_error"
+    INVALID_GRC = "invalid_grc"
+    VALIDATION_ERROR = "validation_error"
+    VALIDATION_TIMEOUT = "validation_timeout"
+    PREFLIGHT_REJECTED = "preflight_rejected"
+    GNU_VALIDATION_FAILED = "gnu_validation_failed"
+    TOOL_CALL_INVALID = "tool_call_invalid"
+    UNKNOWN_TOOL = "unknown_tool"
+    INVALID_REQUEST = "invalid_request"
+    STALE_REVISION = "stale_revision"
+    RETRIEVAL_NOT_READY = "retrieval_not_ready"
+    SAVE_REFUSED = "save_refused"
+    BLOCK_NOT_FOUND = "block_not_found"
+    UNSUPPORTED_OP = "unsupported_op"
+    CATALOG_LOAD_ERROR = "catalog_load_error"
+    INTERNAL_ERROR = "internal_error"
+    SAFETY_CEILING = "safety_ceiling_reached"
+    TOOL_NOT_ALLOWED_FOR_SURFACE = "tool_not_allowed_for_surface"
+    LLAMA_SERVER_MISSING = "llama_server_missing"
+    GRCC_MISSING = "grcc_missing"
+    MODEL_NOT_FOUND = "model_not_found"
+    INIT_FAILED = "init_failed"
+    BACKEND_UNREACHABLE = "backend_unreachable"
+
+
+def build_error_payload(
+    *,
+    error_type: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error_type": error_type,
+        "message": message,
+        "errors": [{"code": error_type, "message": message}],
+    }
+    if details:
+        payload["details"] = details
+    return payload
+
+
+def join_non_empty(*parts: Any, separator: str = " ") -> str:
+    return separator.join(str(p) for p in parts if p)
