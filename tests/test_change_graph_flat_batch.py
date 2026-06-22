@@ -409,7 +409,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                 "update_params": [
                     {
                         "instance_name": "samp_rate",
-                        "params": {"value": "32000"},
+                        "params": {"value": "48000"},
                     }
                 ]
             },
