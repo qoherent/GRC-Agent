@@ -90,6 +90,15 @@ def dispatch_flat_change_graph_batch(
     errors: list[dict[str, str]] = []
     ops_applied = 0
 
+    # Snapshot serialized form before any mutation to detect true no-ops.
+    from grc_agent.grc_native_adapter import serialize_flow_graph as _serialize_fg
+    before_serialized: str | None = None
+    if agent.session.path is not None:
+        try:
+            before_serialized = _serialize_fg(fg)
+        except Exception:
+            before_serialized = None
+
     def _record_error(code: str, message: str) -> None:
         errors.append({"code": code, "message": message})
 
@@ -208,7 +217,12 @@ def dispatch_flat_change_graph_batch(
     if committed and ops_applied:
         agent.session.is_dirty = True
         agent.session._bump_state_revision()
-        if agent.session.path is not None:
+        # Skip save if serialized form is unchanged (noop detection).
+        try:
+            after_serialized = _serialize_fg(fg)
+        except Exception:
+            after_serialized = None
+        if agent.session.path is not None and before_serialized != after_serialized:
             try:
                 agent.session.save()
             except Exception:
