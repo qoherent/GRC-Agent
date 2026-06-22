@@ -49,7 +49,7 @@ class GraphHistoryJournalTests(unittest.TestCase):
                     "transaction": {
                         "op_type": "update_params",
                         "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
+                        "params": {"value": "32000"},
                     }
                 },
             )
@@ -64,7 +64,7 @@ class GraphHistoryJournalTests(unittest.TestCase):
         self.assertEqual(edit_record["validation_result"]["status"], "valid")
         changed_blocks = edit_record["graph_delta"]["changed_blocks"]
         self.assertEqual(len(changed_blocks), 1)
-        self.assertEqual(changed_blocks[0]["param_changes"]["value"]["after"], "48000")
+        self.assertEqual(changed_blocks[0]["param_changes"]["value"]["after"], "32000")
 
     def test_checkpoint_after_successful_rewire_connection(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -179,7 +179,7 @@ class GraphHistoryJournalTests(unittest.TestCase):
                     "transaction": {
                         "op_type": "update_params",
                         "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
+                        "params": {"value": "32000"},
                     }
                 },
             )
@@ -201,7 +201,7 @@ class GraphHistoryJournalTests(unittest.TestCase):
                 for block in reloaded.flowgraph.blocks
                 if block.name == "samp_rate"
             ),
-            "48000",
+            "32000",
         )
 
     def test_restore_refuses_to_overwrite_existing_file(self) -> None:
@@ -237,7 +237,7 @@ class GraphHistoryJournalTests(unittest.TestCase):
                     "transaction": {
                         "op_type": "update_params",
                         "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
+                        "params": {"value": "32000"},
                     }
                 },
             )
