@@ -384,7 +384,9 @@ def apply_edit(
     try:
         affected_changes = apply_operations(candidate, normalized_operations)
         if candidate.flowgraph is not None and session.flowgraph is not None:
-            if candidate.graph_id() == session.graph_id() and candidate.path == session.path:
+            if (candidate.graph_id() == session.graph_id()
+                    and candidate.path == session.path
+                    and candidate.state_revision == session.state_revision):
                 candidate.is_dirty = session.is_dirty
 
         from grc_agent.grc_native_adapter import validate as adapter_validate

@@ -245,7 +245,7 @@ class FlowgraphSession:
 
     def set_block_state(self, instance_name: str, state: str, *, block_type: str | None = None) -> None:
         from grc_agent.grc_native_adapter import _find_block, set_block_state as _set_state
-        _set_block_state(_find_block(self.flowgraph, instance_name), state)
+        _set_state(_find_block(self.flowgraph, instance_name), state)
         self.is_dirty = True
         self._bump_state_revision()
 

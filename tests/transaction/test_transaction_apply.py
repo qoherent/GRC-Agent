@@ -96,7 +96,7 @@ class TransactionApplyTests(unittest.TestCase):
         self.assertEqual(payload["affected_blocks"], ["unused_var"])
         assert session.flowgraph is not None
         block = next(block for block in session.flowgraph.blocks if block.name == "unused_var")
-        self.assertEqual(block.params["states"]["state"], "disabled")
+        self.assertEqual(block.state, "disabled")
         self.assertTrue(session.last_validation_ok)
 
 
