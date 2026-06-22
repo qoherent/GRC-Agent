@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from grc_agent.grc_native_adapter import (
-    bump_revision,
     load_flow_graph,
 )
 
@@ -81,6 +80,7 @@ class FlowgraphSession:
     def create(cls, path: str | Path | None = None, **kwargs: Any) -> FlowgraphSession:
         """Create a session with a blank native flowgraph."""
         from grc_agent.grc_native_adapter import get_platform
+
         session = cls(path)
         fg = get_platform().make_flow_graph()
         fg.rewrite()
@@ -93,9 +93,7 @@ class FlowgraphSession:
         self.path = source_path
         self.is_dirty = False
         self._state_revision = 1
-        self._persisted_file_sha256 = FlowgraphSession._read_file_sha256_if_available(
-            source_path
-        )
+        self._persisted_file_sha256 = FlowgraphSession._read_file_sha256_if_available(source_path)
 
     def session_provenance(self) -> dict[str, Any]:
         """Return provenance info (path, loaded file) for tool results."""
@@ -113,20 +111,15 @@ class FlowgraphSession:
             raise RuntimeError("No flowgraph loaded.")
         integrity = self.file_integrity_state()
         if integrity.get("externally_modified"):
-            raise OSError(
-                f"Refusing to save: file changed on disk at {target}"
-            )
+            raise OSError(f"Refusing to save: file changed on disk at {target}")
         FlowgraphSession._refuse_ambiguous_save_target(target)
         FlowgraphSession._write_save_backup(target)
         with FlowgraphSession._save_file_lock(target):
             from grc_agent.grc_native_adapter import serialize_flow_graph
-            FlowgraphSession._atomic_write_text(
-                target, serialize_flow_graph(self.flowgraph)
-            )
+
+            FlowgraphSession._atomic_write_text(target, serialize_flow_graph(self.flowgraph))
         self.path = target
-        self._persisted_file_sha256 = FlowgraphSession._read_file_sha256_if_available(
-            target
-        )
+        self._persisted_file_sha256 = FlowgraphSession._read_file_sha256_if_available(target)
         self.is_dirty = False
 
     # -- snapshot / validation / identity (adapter-backed) --------------------
@@ -135,19 +128,27 @@ class FlowgraphSession:
         if self.flowgraph is None:
             return None
         from grc_agent.grc_native_adapter import render_flow_graph
+
         return render_flow_graph(self.flowgraph).model_dump(exclude_none=True)
 
-    def summary_payload(self, *, block_limit: int = 8, max_blocks: int | None = None) -> dict[str, Any]:
+    def summary_payload(
+        self, *, block_limit: int = 8, max_blocks: int | None = None
+    ) -> dict[str, Any]:
         if max_blocks is not None:
             block_limit = max_blocks
         if self.flowgraph is None:
-            return {"ok": False, "error_type": "invalid_request",
-                    "errors": [{"code": "no_flowgraph",
-                                "message": "No flowgraph loaded."}]}
+            return {
+                "ok": False,
+                "error_type": "invalid_request",
+                "errors": [{"code": "no_flowgraph", "message": "No flowgraph loaded."}],
+            }
         from grc_agent.grc_native_adapter import render_flow_graph
+
         snapshot = render_flow_graph(self.flowgraph)
-        if (self.last_validation_revision is not None
-                and self.last_validation_revision == self._state_revision):
+        if (
+            self.last_validation_revision is not None
+            and self.last_validation_revision == self._state_revision
+        ):
             validation_payload = {
                 "status": "valid" if self.last_validation_ok else "invalid",
                 "returncode": 0 if self.last_validation_ok else 1,
@@ -155,34 +156,39 @@ class FlowgraphSession:
             }
         else:
             validation_payload = {"status": "unknown", "errors": []}
-        user_blocks = [b for b in snapshot.blocks
-                       if (b.role.value if hasattr(b.role, "value") else str(b.role)) != "options"]
+        user_blocks = [
+            b
+            for b in snapshot.blocks
+            if (b.role.value if hasattr(b.role, "value") else str(b.role)) != "options"
+        ]
         all_blocks = [
-            {"instance_name": b.instance_name, "block_type": b.block_type,
-             "role": b.role.value if hasattr(b.role, "value") else str(b.role)}
+            {
+                "instance_name": b.instance_name,
+                "block_type": b.block_type,
+                "role": b.role.value if hasattr(b.role, "value") else str(b.role),
+            }
             for b in user_blocks
         ]
-        variable_count = sum(
-            1 for b in all_blocks if b["role"] == "variable"
-        )
+        variable_count = sum(1 for b in all_blocks if b["role"] == "variable")
         all_conns = sorted(
-            [{"connection_id": c.connection_id,
-              "src_block": c.src_block,
-              "src_port": _coerce_port(c.src_port),
-              "dst_block": c.dst_block,
-              "dst_port": _coerce_port(c.dst_port)}
-             for c in snapshot.connections],
+            [
+                {
+                    "connection_id": c.connection_id,
+                    "src_block": c.src_block,
+                    "src_port": _coerce_port(c.src_port),
+                    "dst_block": c.dst_block,
+                    "dst_port": _coerce_port(c.dst_port),
+                }
+                for c in snapshot.connections
+            ],
             key=lambda x: x["connection_id"],
         )
-        block_summaries = [
-            f"{b['instance_name']} ({b['block_type']})" for b in all_blocks[:3]
-        ]
+        block_summaries = [f"{b['instance_name']} ({b['block_type']})" for b in all_blocks[:3]]
         if len(all_blocks) > 3:
             block_summaries.append(f"... +{len(all_blocks) - 3} more")
         summary_text = (
             f"{Path(self.path).name if self.path else 'graph'}: "
-            f"{len(all_blocks)} blocks, {len(all_conns)} connections. "
-            + ", ".join(block_summaries)
+            f"{len(all_blocks)} blocks, {len(all_conns)} connections. " + ", ".join(block_summaries)
         )
         gid = self._persisted_file_sha256 or ""
         return {
@@ -204,6 +210,7 @@ class FlowgraphSession:
         if self.flowgraph is None:
             return {"status": "unknown", "errors": []}
         from grc_agent.grc_native_adapter import validate
+
         v = validate(self.flowgraph)
         self.last_validation_ok = v.native_ok
         self.last_validation_revision = self._state_revision
@@ -215,9 +222,12 @@ class FlowgraphSession:
     # -- legacy compat (used by history.py + transaction.py) ------------------
 
     @classmethod
-    def from_raw_data(cls, raw_data: dict[str, Any], path: str | Path | None = None) -> FlowgraphSession:
+    def from_raw_data(
+        cls, raw_data: dict[str, Any], path: str | Path | None = None
+    ) -> FlowgraphSession:
         """Create a session from a raw data dict (GRC import_data format)."""
         from grc_agent.grc_native_adapter import get_platform
+
         session = cls(path)
         fg = get_platform().make_flow_graph()
         fg.import_data(raw_data)
@@ -228,16 +238,16 @@ class FlowgraphSession:
     @staticmethod
     def _serialize_raw_data(raw_data: Any) -> str:
         """Serialize a raw data dict to GRC-native YAML."""
-        from grc_agent.grc_native_adapter import get_platform
-        get_platform()  # warm the platform (io.yaml circular-import guard)
-        from gnuradio.grc.core.io import yaml as _grc_yaml
-        return _grc_yaml.dump(raw_data)
+        from grc_agent.grc_native_adapter import serialize_raw_data
+
+        return serialize_raw_data(raw_data)
 
     def validate(self) -> bool:
         """Validate the loaded flowgraph. Returns is_valid."""
         if self.flowgraph is None:
             return False
         from grc_agent.grc_native_adapter import validate as _validate
+
         result = _validate(self.flowgraph)
         self.last_validation_ok = result.native_ok
         self.last_validation_revision = self._state_revision
@@ -245,41 +255,57 @@ class FlowgraphSession:
 
     # -- mutation helpers (adapter-backed; used by transaction.apply_operations) --
 
-    def set_param(self, instance_name: str, key: str, value: Any, *, block_type: str | None = None) -> None:
-        from grc_agent.grc_native_adapter import _find_block, set_param as _set_param
+    def set_param(
+        self, instance_name: str, key: str, value: Any, *, block_type: str | None = None
+    ) -> None:
+        from grc_agent.grc_native_adapter import _find_block
+        from grc_agent.grc_native_adapter import set_param as _set_param
+
         _set_param(_find_block(self.flowgraph, instance_name), key, str(value))
         self.is_dirty = True
         self._bump_state_revision()
 
-    def set_block_state(self, instance_name: str, state: str, *, block_type: str | None = None) -> None:
-        from grc_agent.grc_native_adapter import _find_block, set_block_state as _set_state
+    def set_block_state(
+        self, instance_name: str, state: str, *, block_type: str | None = None
+    ) -> None:
+        from grc_agent.grc_native_adapter import _find_block
+        from grc_agent.grc_native_adapter import set_block_state as _set_state
+
         _set_state(_find_block(self.flowgraph, instance_name), state)
         self.is_dirty = True
         self._bump_state_revision()
 
     def connect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
         from grc_agent.grc_native_adapter import connect as _connect
+
         _connect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
         self.is_dirty = True
         self._bump_state_revision()
 
     def disconnect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
         from grc_agent.grc_native_adapter import disconnect as _disconnect
+
         _disconnect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
         self.is_dirty = True
         self._bump_state_revision()
 
     def remove_block(self, instance_name: str, *, block_type: str | None = None) -> None:
         from grc_agent.grc_native_adapter import remove_block as _remove
+
         _remove(self.flowgraph, instance_name)
         self.is_dirty = True
         self._bump_state_revision()
 
-    def add_block(self, instance_name: str, block_type: str,
-                  parameters: dict[str, Any] | None = None,
-                  states: dict[str, Any] | None = None,
-                  *, _skip_grcc: bool = False) -> None:
+    def add_block(
+        self,
+        instance_name: str,
+        block_type: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        _skip_grcc: bool = False,
+    ) -> None:
         from grc_agent.grc_native_adapter import add_block as _add
+
         _add(self.flowgraph, block_type, instance_name, parameters or {})
         self.is_dirty = True
         self._bump_state_revision()
@@ -326,9 +352,7 @@ class FlowgraphSession:
         try:
             return hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
-            logging.getLogger("grc_agent").debug(
-                "hash_file_failed path=%s: %s", path, exc
-            )
+            logging.getLogger("grc_agent").debug("hash_file_failed path=%s: %s", path, exc)
             return None
 
     @staticmethod
@@ -338,9 +362,7 @@ class FlowgraphSession:
         try:
             control_dir.mkdir(mode=0o700, exist_ok=True)
         except OSError as exc:
-            raise OSError(
-                f"Could not create save lock directory for {target_path}: {exc}"
-            ) from exc
+            raise OSError(f"Could not create save lock directory for {target_path}: {exc}") from exc
         lock_path = control_dir / f"{target_path.name}.lock"
         try:
             with lock_path.open("a", encoding="utf-8") as lock_file:
@@ -371,9 +393,7 @@ class FlowgraphSession:
         except OSError as exc:
             raise OSError(f"Could not stat save target {target_path}: {exc}") from exc
         if stat_result.st_nlink > 1:
-            raise OSError(
-                f"Refusing to save hard-linked graph file: {target_path}"
-            )
+            raise OSError(f"Refusing to save hard-linked graph file: {target_path}")
 
     @staticmethod
     def _write_save_backup(target_path: Path) -> Path | None:
@@ -390,9 +410,7 @@ class FlowgraphSession:
                 f"Could not create save backup directory for {target_path}: {exc}"
             ) from exc
         timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        backup_path = (
-            backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
-        )
+        backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
         if backup_path.exists():
             backup_path = backup_dir / (
                 f"{timestamp}-{old_hash[:16]}-{time.time_ns()}{target_path.suffix}"
@@ -400,9 +418,7 @@ class FlowgraphSession:
         try:
             shutil.copy2(target_path, backup_path)
         except OSError as exc:
-            raise OSError(
-                f"Could not create save backup for {target_path}: {exc}"
-            ) from exc
+            raise OSError(f"Could not create save backup for {target_path}: {exc}") from exc
         return backup_path
 
     @staticmethod
@@ -434,12 +450,8 @@ class FlowgraphSession:
                 try:
                     temp_path.unlink()
                 except OSError:
-                    logger.warning(
-                        "atomic_save_temp_cleanup_failed path=%s", temp_path
-                    )
-            raise OSError(
-                f"Failed to save flowgraph to {target_path}: {exc}"
-            ) from exc
+                    logger.warning("atomic_save_temp_cleanup_failed path=%s", temp_path)
+            raise OSError(f"Failed to save flowgraph to {target_path}: {exc}") from exc
 
     @staticmethod
     def _fsync_directory(directory: Path) -> None:

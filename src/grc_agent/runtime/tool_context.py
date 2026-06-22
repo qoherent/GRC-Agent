@@ -116,8 +116,10 @@ def tool_history_content_as_text(
     # ``LookupError`` that the model can act on). Surface the last line
     # when there is no actionable hint already.
     stderr_text = compact.get("stderr")
-    if isinstance(stderr_text, str) and stderr_text.strip() and not any(
-        line.startswith("error:") for line in lines
+    if (
+        isinstance(stderr_text, str)
+        and stderr_text.strip()
+        and not any(line.startswith("error:") for line in lines)
     ):
         last_line = stderr_text.strip().splitlines()
         tail = last_line[-1].strip() if last_line else ""
@@ -176,9 +178,9 @@ def is_variable_block(block_type: str) -> bool:
     if not isinstance(block_type, str) or not block_type:
         return False
     try:
-        from grc_agent.session import _ensure_platform
+        from grc_agent.grc_native_adapter import get_platform_or_none
 
-        platform = _ensure_platform()
+        platform = get_platform_or_none()
     except Exception:
         platform = None
     if platform is not None:
@@ -199,29 +201,6 @@ def is_variable_block(block_type: str) -> bool:
         pass
     # Last resort: string-prefix heuristic (misses some edge cases).
     return block_type == "variable" or block_type.startswith("variable_")
-
-
-def truncate_list(items: list[_T], max_items: int) -> tuple[list[_T], list[_T]]:
-    if max_items < 0:
-        raise ValueError("max_items must be >= 0")
-    shown = items[:max_items]
-    omitted = items[max_items:]
-    return shown, omitted
-
-
-def truncate_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    overrun = int(max_chars * 0.2)
-    window = min(max_chars + overrun, len(text))
-    for boundary in (". ", "? ", "! "):
-        idx = text.rfind(boundary, max_chars, window)
-        if idx != -1:
-            return text[: idx + len(boundary)] + "…"
-    idx = text.rfind(" ", max_chars, window)
-    if idx != -1:
-        return text[:idx] + " …"
-    return text[:max_chars] + "…"
 
 
 # -- path safety (was path_safety.py) --
@@ -252,8 +231,7 @@ def unsafe_graph_root_for_path(
 # --- merged from chat_history.py ---
 
 _TRUNCATION_SENTINEL_TEMPLATE = (
-    "... [TRUNCATED by chat-history compactor: was {original} chars, "
-    "kept {kept}]"
+    "... [TRUNCATED by chat-history compactor: was {original} chars, kept {kept}]"
 )
 
 
@@ -268,9 +246,7 @@ def _shorten_tool_result(
         return content
     if original_length is None:
         original_length = len(original)
-    sentinel = _TRUNCATION_SENTINEL_TEMPLATE.format(
-        original=original_length, kept=max_chars - 1
-    )
+    sentinel = _TRUNCATION_SENTINEL_TEMPLATE.format(original=original_length, kept=max_chars - 1)
     budget = max(0, max_chars - len(sentinel) - 1)
     kept = original[:budget].rstrip()
     return ToolCallResultContent(
@@ -349,9 +325,7 @@ def compact_chat_history(
     def _shell_length(message: ChatMessage) -> int:
         full = len(message.get_as_text())
         payload_total = sum(
-            _payload_length(c)
-            for c in message.content
-            if isinstance(c, ToolCallResultContent)
+            _payload_length(c) for c in message.content if isinstance(c, ToolCallResultContent)
         )
         return full - payload_total
 
@@ -361,10 +335,7 @@ def compact_chat_history(
     for message in messages:
         shell_total += _shell_length(message)
         for content in message.content:
-            if (
-                isinstance(content, ToolCallResultContent)
-                and len(content.tool_call_result) > floor
-            ):
+            if isinstance(content, ToolCallResultContent) and len(content.tool_call_result) > floor:
                 length = _payload_length(content)
                 candidate_payloads.append((message, content, length))
                 candidate_total += length
@@ -376,9 +347,7 @@ def compact_chat_history(
     if total <= budget_chars:
         return False
 
-    mutable_budget = max(
-        0, budget_chars - shell_total
-    )
+    mutable_budget = max(0, budget_chars - shell_total)
     floor_total = floor * len(candidate_payloads)
     if mutable_budget < floor_total:
         mutable_budget = floor_total
@@ -415,5 +384,3 @@ def compact_chat_history(
             chat_history.messages[idx_in_history] = new_message
             changed = True
     return changed
-
-

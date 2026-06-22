@@ -1,8 +1,9 @@
 import json
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from grc_agent.config import (
     DEFAULT_OLLAMA_URL,
@@ -82,6 +83,7 @@ def _default_sessions_db() -> "Path":
 # Forward-slash only; the legacy backslash alternates were a per-command
 # special case and have been removed. Add new commands here, not inline.
 
+
 def _slash_command_name(prompt: str) -> str | None:
     """Return the canonical slash-command name (e.g. 'save') or None.
 
@@ -152,6 +154,7 @@ class ModelSwapRunnable(QRunnable):
             if self.backend == "ollama":
                 new_url = DEFAULT_OLLAMA_URL
                 from grc_agent.config import default_app_config
+
                 model_name = (
                     self.ollama_model_name
                     or getattr(self.llama_config, "model", "")
@@ -163,24 +166,27 @@ class ModelSwapRunnable(QRunnable):
                 # Check if model exists locally
                 try:
                     from grc_agent.model_manager import discover_ollama_models
+
                     local_models = discover_ollama_models(new_url)
                 except Exception:
                     local_models = []
 
                 model_exists = any(
-                    m == model_name or m == f"{model_name}:latest"
-                    for m in local_models
+                    m == model_name or m == f"{model_name}:latest" for m in local_models
                 )
 
                 if not model_exists:
                     self.signals.progress.emit(f"Pulling model '{model_name}'...")
                     try:
                         from grc_agent.model_manager import pull_ollama_model
+
                         pull_result = pull_ollama_model(model_name, server_url=new_url)
                         if not pull_result.get("ok"):
                             raise Exception(pull_result.get("error", "Unknown pull error"))
                     except Exception as exc:
-                        raise Exception(f"Failed to pull Ollama model '{model_name}': {exc}")
+                        raise Exception(
+                            f"Failed to pull Ollama model '{model_name}': {exc}"
+                        ) from exc
                     self.signals.progress.emit(f"Model '{model_name}' pulled successfully.")
 
                 new_model = model_name
@@ -188,6 +194,7 @@ class ModelSwapRunnable(QRunnable):
                 # Probe tool support
                 try:
                     from grc_agent.model_manager import check_ollama_tool_support
+
                     tool_ok = check_ollama_tool_support(new_url, new_model)
                     if tool_ok is False:
                         logger.warning(
@@ -233,6 +240,7 @@ class InspectorRunnable(QRunnable):
     def run(self) -> None:
         try:
             from grc_agent.runtime.inspect_graph import inspect_graph
+
             overview_data = inspect_graph(self.agent, view="overview", targets=[], params=[])
             self.signals.finished.emit(overview_data)
         except Exception as e:
@@ -270,14 +278,13 @@ class MainWindow(QMainWindow):
         # callbacks wired into the agent worker.
         self.backend_reachable: bool | None = None
         self._backend_unreachable_hint: str | None = None
-        if bootstrap_result is not None and getattr(
-            bootstrap_result, "launch_status", ""
-        ) in {"probe_failed", "failed"}:
+        if bootstrap_result is not None and getattr(bootstrap_result, "launch_status", "") in {
+            "probe_failed",
+            "failed",
+        }:
             self.backend_reachable = False
             errs = list(getattr(bootstrap_result, "errors", []) or [])
-            self._backend_unreachable_hint = (
-                errs[0] if errs else "Backend unreachable."
-            )
+            self._backend_unreachable_hint = errs[0] if errs else "Backend unreachable."
 
         self.setWindowTitle(f"{APP_DISPLAY_NAME} {_get_app_version()}")
         icon_path = Path(__file__).parent / "resources" / "icon.png"
@@ -406,7 +413,9 @@ class MainWindow(QMainWindow):
         v_splitter.setSizes([450, 150])
 
         # --- Inline model toolbar (replaces the setup wizard + Model dialog) ---
-        current_backend = getattr(self.llama_config, "backend", "ollama") if self.llama_config else "ollama"
+        current_backend = (
+            getattr(self.llama_config, "backend", "ollama") if self.llama_config else "ollama"
+        )
         current_model = getattr(self.llama_config, "model", "") if self.llama_config else ""
         if self.provider_config is not None:
             pm = getattr(self.provider_config, "model", "")
@@ -472,6 +481,7 @@ class MainWindow(QMainWindow):
 
         # Probe Ollama after the event loop starts (non-blocking).
         from PySide6.QtCore import QTimer
+
         QTimer.singleShot(0, self._probe_and_populate_models)
 
     def _resolve_model_status(self) -> str:
@@ -505,10 +515,7 @@ class MainWindow(QMainWindow):
 
     def update_ui_state(self) -> None:
         """Enable or disable chat and validation controls based on active session state."""
-        has_graph = (
-            self.agent.session is not None
-            and self.agent.session.flowgraph is not None
-        )
+        has_graph = self.agent.session is not None and self.agent.session.flowgraph is not None
         backend_ok = self.backend_reachable is not False
         self.chat_input.setEnabled(has_graph and backend_ok)
         self.validate_btn.setEnabled(has_graph and backend_ok)
@@ -523,19 +530,21 @@ class MainWindow(QMainWindow):
             self.validation_label.setStyleSheet("color: #f38ba8;")
             self._render_backend_unreachable_banner()
         elif has_graph:
-            self.chat_input.setPlaceholderText("Ask the assistant to modify or summarize the flowgraph...")
+            self.chat_input.setPlaceholderText(
+                "Ask the assistant to modify or summarize the flowgraph..."
+            )
             self.validation_label.setStyleSheet("color: #a6e3a1;")
         else:
-            self.chat_input.setPlaceholderText("Please load a .grc flowgraph (File -> Open) to start chatting...")
+            self.chat_input.setPlaceholderText(
+                "Please load a .grc flowgraph (File -> Open) to start chatting..."
+            )
             self.validation_label.setText("No Graph")
             self.validation_label.setStyleSheet("color: #a6adc8;")
 
     def _on_backend_unreachable(self, result: dict[str, Any]) -> None:
         """Worker callback: backend is unreachable, switch to degraded mode."""
         self.backend_reachable = False
-        self._backend_unreachable_hint = str(
-            result.get("assistant_text") or "Backend unreachable."
-        )
+        self._backend_unreachable_hint = str(result.get("assistant_text") or "Backend unreachable.")
         self.status_bar.showMessage(
             f"Backend unreachable at {self._server_url_display()} — chat disabled, "
             f"use the toolbar to retry or select a different model."
@@ -590,6 +599,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Connecting to {backend} ({model_name})...")
 
         from .model_dialog import ModelDialogSelection
+
         self._pending_swap_selection = ModelDialogSelection(
             backend=backend,
             ollama_model_name=model_name,
@@ -636,7 +646,10 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.chat_input and event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if (
+                event.key() == Qt.Key.Key_Return
+                and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+            ):
                 self.send_prompt()
                 return True
             if event.key() == Qt.Key.Key_Escape:
@@ -659,7 +672,9 @@ class MainWindow(QMainWindow):
                 if len(sizes) == 3:
                     # 1. Sidebar should be max 20% of total width. If it's larger or collapsed, set it to 18%.
                     max_sidebar_w = int(total_w * 0.20)
-                    if (sizes[0] > max_sidebar_w or sizes[0] < 50) and not self.sidebar_widget.isHidden():
+                    if (
+                        sizes[0] > max_sidebar_w or sizes[0] < 50
+                    ) and not self.sidebar_widget.isHidden():
                         sizes[0] = max(150, int(total_w * 0.18))
 
                     # 2. Ensure inspector (index 2) has a sensible size and was not collapsed by older 2-widget settings
@@ -690,11 +705,15 @@ class MainWindow(QMainWindow):
         graph_hash = ""
         if self.agent.session and self.agent.session.path:
             graph_path = str(self.agent.session.path)
-            if hasattr(self.agent.session, "persisted_file_sha256") and self.agent.session.persisted_file_sha256:
+            if (
+                hasattr(self.agent.session, "persisted_file_sha256")
+                and self.agent.session.persisted_file_sha256
+            ):
                 graph_hash = self.agent.session.persisted_file_sha256
             elif self.agent.session.path.exists():
                 try:
                     import hashlib
+
                     graph_hash = hashlib.sha256(self.agent.session.path.read_bytes()).hexdigest()
                 except Exception:
                     graph_hash = "unknown"
@@ -746,8 +765,6 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             logger.exception("Failed to save model message to DB: %s", exc)
-        except Exception as exc:
-            logger.exception("Failed to open new database session: %s", exc)
 
     def send_prompt(self) -> None:
         """Read the input box, format as a user message, and start worker generation."""
@@ -916,10 +933,7 @@ class MainWindow(QMainWindow):
 
         self.chat_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
-        if (
-            self.active_session_id is not None
-            and assistant_text.strip()
-        ):
+        if self.active_session_id is not None and assistant_text.strip():
             try:
                 self.sessions_store.append(
                     self.active_session_id,
@@ -942,10 +956,7 @@ class MainWindow(QMainWindow):
         try:
             if self.process_manager is None or self.process_manager.run_process is None:
                 return
-            if (
-                self.process_manager.run_process.state()
-                != QProcess.ProcessState.Running
-            ):
+            if self.process_manager.run_process.state() != QProcess.ProcessState.Running:
                 return
             session = getattr(self.agent, "session", None)
             if session is None:
@@ -1026,6 +1037,7 @@ class MainWindow(QMainWindow):
         rather than a tiny status-bar message.
         """
         from grc_agent.session import load_grc
+
         try:
             loaded = load_grc(file_path)
         except Exception as exc:
@@ -1084,14 +1096,13 @@ class MainWindow(QMainWindow):
         # bar always has a label to show, even if the swap was driven
         # by a code path that did not go through the dialog (tests,
         # programmatic recovery from a degraded state, etc.).
-        model_name = (
-            getattr(new_provider, "model", "")
-            or "unknown"
-        )
+        model_name = getattr(new_provider, "model", "") or "unknown"
         if getattr(self, "llama_config", None) is not None and selection is not None:
-            model_name = selection.ollama_model_name or getattr(
-                getattr(result, "provider_config", None), "model", ""
-            ) or "unknown"
+            model_name = (
+                selection.ollama_model_name
+                or getattr(getattr(result, "provider_config", None), "model", "")
+                or "unknown"
+            )
 
             if selection.backend == "ollama":
                 self.llama_config = dataclasses.replace(
@@ -1102,13 +1113,17 @@ class MainWindow(QMainWindow):
                 )
                 try:
                     from grc_agent.config import resolve_config_path, update_toml_config_file
+
                     config_path = resolve_config_path(None)
                     if config_path:
-                        update_toml_config_file(config_path, {
-                            "backend": "ollama",
-                            "server_url": DEFAULT_OLLAMA_URL,
-                            "model": selection.ollama_model_name,
-                        })
+                        update_toml_config_file(
+                            config_path,
+                            {
+                                "backend": "ollama",
+                                "server_url": DEFAULT_OLLAMA_URL,
+                                "model": selection.ollama_model_name,
+                            },
+                        )
                 except Exception as exc:
                     logger.warning("Failed to persist to grc_agent.toml: %s", exc)
 
@@ -1123,13 +1138,17 @@ class MainWindow(QMainWindow):
                 model_name = env_model
                 try:
                     from grc_agent.config import resolve_config_path, update_toml_config_file
+
                     config_path = resolve_config_path(None)
                     if config_path:
-                        update_toml_config_file(config_path, {
-                            "backend": "openrouter",
-                            "server_url": DEFAULT_OPENROUTER_URL,
-                            "model": env_model,
-                        })
+                        update_toml_config_file(
+                            config_path,
+                            {
+                                "backend": "openrouter",
+                                "server_url": DEFAULT_OPENROUTER_URL,
+                                "model": env_model,
+                            },
+                        )
                 except Exception as exc:
                     logger.warning("Failed to persist to grc_agent.toml: %s", exc)
 
@@ -1146,6 +1165,7 @@ class MainWindow(QMainWindow):
         # Persist to preferences.json so the selection survives restarts.
         try:
             from grc_agent.config import update_last_model, update_provider_chosen
+
             backend_str = getattr(self.llama_config, "backend", "ollama")
             update_last_model(model_name)
             update_provider_chosen(backend_str)
@@ -1155,9 +1175,7 @@ class MainWindow(QMainWindow):
         # different) backend is reachable. Drop the degraded mode and
         # re-enable the chat input.
         self._on_backend_recovered()
-        self.status_bar.showMessage(
-            f"Model switched to {model_name}", 5000
-        )
+        self.status_bar.showMessage(f"Model switched to {model_name}", 5000)
         self.chat_widget.append_message(
             "assistant",
             f"[model selector] Switched to `{model_name}`. "
@@ -1180,6 +1198,7 @@ class MainWindow(QMainWindow):
     def refresh_sidebar_sessions(self) -> None:
         """Fetch all sessions from the database and populate the sidebar list."""
         from grc_agent.sessions_store import list_sessions_sync
+
         try:
             sessions = list_sessions_sync(
                 _default_sessions_db(),
@@ -1224,7 +1243,7 @@ class MainWindow(QMainWindow):
         the agent's ``ChatHistory`` so the next model step has the
         same inspect/search/change evidence the user originally saw.
         """
-        from grc_agent.session_ops import (
+        from grc_agent.chat_roles import (
             DISPLAY_ROLES,
             chat_message_from_payload,
         )
@@ -1286,8 +1305,7 @@ class MainWindow(QMainWindow):
                 logger.exception("Failed to replay model row %s: %s", msg.id, exc)
 
         if model_replayed == 0 and any(
-            msg.role not in {"assistant_model", "tool_model"}
-            for msg in messages
+            msg.role not in {"assistant_model", "tool_model"} for msg in messages
         ):
             self.status_bar.showMessage(
                 f"Session {session_id} predates the typed-history "
@@ -1326,15 +1344,15 @@ class MainWindow(QMainWindow):
         """Lock or unlock the chat input / Validate button around a swap."""
         if not hasattr(self, "chat_input"):
             return
-        self.chat_input.setEnabled(not busy and (
-            self.agent.session is not None
-            and self.agent.session.flowgraph is not None
-        ))
+        self.chat_input.setEnabled(
+            not busy
+            and (self.agent.session is not None and self.agent.session.flowgraph is not None)
+        )
         if hasattr(self, "validate_btn"):
-            self.validate_btn.setEnabled(not busy and (
-                self.agent.session is not None
-                and self.agent.session.flowgraph is not None
-            ))
+            self.validate_btn.setEnabled(
+                not busy
+                and (self.agent.session is not None and self.agent.session.flowgraph is not None)
+            )
         if hasattr(self, "model_toolbar"):
             self.model_toolbar.setEnabled(not busy)
 
@@ -1377,8 +1395,6 @@ class MainWindow(QMainWindow):
         self.validate_btn.setEnabled(True)
         self.status_bar.showMessage(f"Ready (last execution exit code: {exit_code})")
 
-        session = self.agent.session
-
         self.refresh_inspector()
 
     def on_deferred_close(self, *args: Any) -> None:
@@ -1390,14 +1406,12 @@ class MainWindow(QMainWindow):
         if self.process_manager:
             if (
                 self.process_manager.compile_process
-                and self.process_manager.compile_process.state()
-                == QProcess.ProcessState.Running
+                and self.process_manager.compile_process.state() == QProcess.ProcessState.Running
             ):
                 is_running = True
             if (
                 self.process_manager.run_process
-                and self.process_manager.run_process.state()
-                == QProcess.ProcessState.Running
+                and self.process_manager.run_process.state() == QProcess.ProcessState.Running
             ):
                 is_running = True
 
@@ -1417,6 +1431,7 @@ class MainWindow(QMainWindow):
     def open_output_folder(self) -> None:
         """Open the directory where the package writes its state."""
         from grc_agent.config import collect_package_paths
+
         paths = collect_package_paths()
         # Prefer the launcher-logs dir (most useful for triage), fall back
         # to the user-state dir.
@@ -1457,9 +1472,7 @@ class MainWindow(QMainWindow):
                     encoding="utf-8",
                 )
             else:
-                target.write_text(
-                    self.chat_widget.export_markdown(), encoding="utf-8"
-                )
+                target.write_text(self.chat_widget.export_markdown(), encoding="utf-8")
         except OSError as exc:
             self._show_error("Export failed", f"Could not write {path_str}:\n{exc}")
             return
@@ -1488,6 +1501,7 @@ class MainWindow(QMainWindow):
         box.exec()
         if copy_button is not None and box.clickedButton() is copy_button:
             from PySide6.QtWidgets import QApplication as _QApp
+
             info = (
                 f"{APP_DISPLAY_NAME} {version}\n"
                 f"License: {APP_LICENSE_NAME}\n"

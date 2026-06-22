@@ -21,13 +21,13 @@ Public surface (consumed by Phase 6's cutover):
 ``connect``/``disconnect`` consume resolved ``Port`` objects; ``apply_mutation``
 and the test surface accept ``(block_name, port_key)`` and resolve internally.
 """
+
 from __future__ import annotations
 
 import hashlib
 import os
-import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,8 +42,6 @@ from grc_agent.domain_models import (
 from grc_agent.runtime.block_semantics import evaluated_param_hides
 from grc_agent.runtime.param_filter import (
     DEFAULT_PARAM_TAB,
-    EXCLUDED_PARAM_CATEGORIES,
-    categories,
     keep_param,
     prominence_rank,
 )
@@ -81,6 +79,21 @@ def get_platform() -> Any:
     )
     _PLATFORM.build_library()
     return _PLATFORM
+
+
+def get_platform_or_none() -> Any:
+    """Return the platform singleton or ``None`` if unavailable.
+
+    Graceful-degradation wrapper around :func:`get_platform` for callers that
+    must not raise when GNU Radio is absent (catalog inspection, param
+    metadata, semantic classification). This is the single authorized accessor
+    for graceful platform access — replaces the former shadow loaders
+    ``session._ensure_platform`` and ``validation.checks._cached_platform``.
+    """
+    try:
+        return get_platform()
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -141,7 +154,7 @@ def load_and_inspect(file_path: Path) -> GrcFlowgraph:
     on failure; never raises. ``ok=False`` + ``errors[0].code`` identifies the
     failure mode."""
     try:
-        raw_text = file_path.read_text(encoding="utf-8-sig")
+        file_path.read_text(encoding="utf-8-sig")
     except (IsADirectoryError, FileNotFoundError, PermissionError, UnicodeDecodeError) as exc:
         return _err_graph(file_path, "FILE_READ_ERROR", str(exc))
     try:
@@ -191,8 +204,9 @@ def _safe_evaluate(param: Any) -> Any | None:
         return None
 
 
-def render_parameter(block: Any, param_key: str, param: Any,
-                     evaluated_hides: dict[str, str] | None = None) -> GrcParameter | None:
+def render_parameter(
+    block: Any, param_key: str, param: Any, evaluated_hides: dict[str, str] | None = None
+) -> GrcParameter | None:
     """One uniform visibility filter — delegates to the bible (``keep_param``).
     Returns ``None`` if the param is hidden or in an excluded category.
     """
@@ -209,8 +223,9 @@ def render_parameter(block: Any, param_key: str, param: Any,
     dtype = str(getattr(param, "dtype", ""))
     value = str(param.value)
     default = str(getattr(param, "default", ""))
-    if not keep_param(hide=hide, category=category, dtype=dtype, value=value,
-                      default=default, mode="visibility"):
+    if not keep_param(
+        hide=hide, category=category, dtype=dtype, value=value, default=default, mode="visibility"
+    ):
         return None
     evaluated = _safe_evaluate(param)
     if evaluated is not None and not isinstance(evaluated, (str, int, float, bool, list, dict)):
@@ -333,8 +348,9 @@ def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) ->
     raise KeyError(f"{kind} port {port_key!r} not on block {block_name!r}")
 
 
-def add_block(flow_graph: Any, block_type: str, instance_name: str,
-              parameters: dict[str, Any]) -> Any:
+def add_block(
+    flow_graph: Any, block_type: str, instance_name: str, parameters: dict[str, Any]
+) -> Any:
     """Add a new block. Names it via ``params['id']`` (the empirically correct
     path — GRC's ``Block.name`` is a read-only property)."""
     block = flow_graph.new_block(block_type)
@@ -376,29 +392,29 @@ def set_block_state(block: Any, state: str) -> None:
     block.state = canonical
 
 
-def connect(flow_graph: Any, src_block: str, src_port: str,
-            dst_block: str, dst_port: str) -> Any:
+def connect(flow_graph: Any, src_block: str, src_port: str, dst_block: str, dst_port: str) -> Any:
     src = _find_port(flow_graph, src_block, src_port, kind="source")
     dst = _find_port(flow_graph, dst_block, dst_port, kind="sink")
     return flow_graph.connect(src, dst)
 
 
-def disconnect(flow_graph: Any, src_block: str, src_port: str,
-               dst_block: str, dst_port: str) -> None:
+def disconnect(
+    flow_graph: Any, src_block: str, src_port: str, dst_block: str, dst_port: str
+) -> None:
     """Remove a single connection. Native ``flow_graph.disconnect(src, dst)``
     removes every connection from the source port (not just the named edge),
     so we locate the exact ``Connection`` object and drop it from the set.
     """
     for connection in list(flow_graph.connections):
-        if (connection.source_block.name == src_block
-                and connection.source_port.key == src_port
-                and connection.sink_block.name == dst_block
-                and connection.sink_port.key == dst_port):
+        if (
+            connection.source_block.name == src_block
+            and connection.source_port.key == src_port
+            and connection.sink_block.name == dst_block
+            and connection.sink_port.key == dst_port
+        ):
             flow_graph.connections.remove(connection)
             return
-    raise KeyError(
-        f"connection not found: {src_block}:{src_port}->{dst_block}:{dst_port}"
-    )
+    raise KeyError(f"connection not found: {src_block}:{src_port}->{dst_block}:{dst_port}")
 
 
 def apply_mutation(flow_graph: Any, op_type: str, **kwargs: Any) -> None:
@@ -448,7 +464,21 @@ def serialize_flow_graph(flow_graph: Any) -> str:
     ``io.yaml`` triggers a circular import if loaded before the platform is
     warmed; ``get_platform()`` earlier in the call sequence has done that."""
     from gnuradio.grc.core.io import yaml as _grc_yaml
+
     return _grc_yaml.dump(flow_graph.export_data())
+
+
+def serialize_raw_data(raw_data: Any) -> str:
+    """Serialize a raw-data dict (GRC ``import_data`` format) to native YAML.
+
+    Consolidates the ``gnuradio.grc.core.io.yaml`` import behind the adapter
+    boundary (mirrors :func:`serialize_flow_graph` which operates on a live
+    FlowGraph). Warms the platform first to avoid io.yaml's circular import.
+    """
+    get_platform()  # warm the platform (io.yaml circular-import guard)
+    from gnuradio.grc.core.io import yaml as _grc_yaml
+
+    return _grc_yaml.dump(raw_data)
 
 
 def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:

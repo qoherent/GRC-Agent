@@ -11,11 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
-
-from grc_agent._payload import ErrorCode
+from grc_agent.domain_models import ErrorCode
 
 if TYPE_CHECKING:
-    pass
+    from grc_agent.agent import GrcAgent, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +62,10 @@ def initialize_vector_db_background() -> None:
 
 class VectorDocsStore:
     """Stub — catalog vector search uses VectorCatalogStore instead."""
+
     def __init__(self, db_path: Any, server_url: str = "") -> None:
         pass
+
     def ingest_if_needed(self) -> None:
         pass
 
@@ -259,11 +260,7 @@ def docs_topic_terms(query: str) -> list[str]:
 
 
 def docs_primary_terms(query: str) -> list[str]:
-    return [
-        token
-        for token in docs_topic_terms(query)
-        if token not in _DOCS_GENERIC_TOPIC_TERMS
-    ]
+    return [token for token in docs_topic_terms(query) if token not in _DOCS_GENERIC_TOPIC_TERMS]
 
 
 def normalize_docs_source_key(source: str) -> str:
@@ -623,7 +620,9 @@ def build_catalog_assisted_candidate(
     *,
     question: str,
 ) -> _DocsEvidenceCandidate | None:
-    subject = extract_block_definition_subject(question) or extract_docs_subject(question) or question
+    subject = (
+        extract_block_definition_subject(question) or extract_docs_subject(question) or question
+    )
     try:
         from grc_agent.runtime.search_blocks import search_blocks
 
@@ -737,9 +736,7 @@ def is_docs_evidence_strong(
     if any(reason in severe for reason in top.low_value_reasons):
         return False
     primary_terms = docs_primary_terms(question)
-    top_text = " ".join(
-        [top.snippet.title, top.section, top.snippet.excerpt]
-    ).lower()
+    top_text = " ".join([top.snippet.title, top.section, top.snippet.excerpt]).lower()
     primary_hits = sum(1 for term in primary_terms if term in top_text)
     if primary_terms and primary_hits == 0:
         return False
@@ -771,7 +768,9 @@ def classify_docs_answer_type(question: str) -> str:
         "block" in lower
         and "relate to" in lower
         and "pmt" in lower
-        and ("difference between" not in lower and "differ" not in lower and " versus " not in lower)
+        and (
+            "difference between" not in lower and "differ" not in lower and " versus " not in lower
+        )
     ):
         return "block_definition"
     if any(marker in lower for marker in ("difference between", "differ", "vs", "versus")):
@@ -839,11 +838,7 @@ def _expanded_docs_query(query: str, expansion: str) -> str:
     if not prefix:
         return expansion
     expansion_key = expansion.lower()
-    novel_terms = [
-        term
-        for term in prefix.split()
-        if term.lower() not in expansion_key
-    ]
+    novel_terms = [term for term in prefix.split() if term.lower() not in expansion_key]
     if not novel_terms:
         return expansion
     return f"{' '.join(novel_terms)} {expansion}"
@@ -925,8 +920,12 @@ def extract_comparison_sides(question: str) -> _DocsComparisonSides | None:
             continue
         left = " ".join(str(match.group("left") or "").split()).strip(" ?.,")
         right = " ".join(str(match.group("right") or "").split()).strip(" ?.,")
-        left = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", left).strip(" ?.,")
-        right = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", right).strip(" ?.,")
+        left = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", left).strip(
+            " ?.,"
+        )
+        right = re.sub(r"(?i)\b(keep it short|briefly|please cite source)\b.*$", "", right).strip(
+            " ?.,"
+        )
         if not left or not right:
             continue
         left_terms = tuple(docs_topic_terms(left))
@@ -1008,11 +1007,7 @@ def pick_typed_sentence(
             continue
         if not allow_procedural and is_procedural_walkthrough_text(lower):
             continue
-        term_hits = sum(
-            1
-            for term in required_terms
-            if text_matches_term_or_synonym(lower, term)
-        )
+        term_hits = sum(1 for term in required_terms if text_matches_term_or_synonym(lower, term))
         if required_terms and term_hits < max(1, min_term_hits):
             continue
         synonym_hits = 0
@@ -1021,17 +1016,22 @@ def pick_typed_sentence(
                 if synonym in lower:
                     synonym_hits += 1
         exact_term_hits = sum(1 for term in required_terms if term and term in lower)
-        score = (
-            float(term_hits)
-            + float(exact_term_hits)
-            + min(2.0, float(synonym_hits) * 0.5)
-        )
+        score = float(term_hits) + float(exact_term_hits) + min(2.0, float(synonym_hits) * 0.5)
         if re.search(
             r"\b(is|are|means|refers to|used for|allows|lets|converts|provides|carries|increases|decreases|reduces)\b",
             lower,
         ):
             score += 1.5
-        if any(marker in lower for marker in ("asynchronous", "between blocks", "control data", "time domain", "frequency domain")):
+        if any(
+            marker in lower
+            for marker in (
+                "asynchronous",
+                "between blocks",
+                "control data",
+                "time domain",
+                "frequency domain",
+            )
+        ):
             score += 1.6
         if "pmt symbol" in lower and "asynchronous" not in lower:
             score -= 0.8
@@ -1080,7 +1080,8 @@ def build_fallback_answer(
 ) -> tuple[str, bool]:
     del evidence_strong
     answer_type = classify_docs_answer_type(question)
-    return build_typed_docs_answer(agent, 
+    return build_typed_docs_answer(
+        agent,
         question=question,
         ranked_candidates=ranked_candidates,
         answer_type=answer_type,
@@ -1144,13 +1145,8 @@ def ask_grc_docs(
     if isinstance(k, int) and not isinstance(k, bool):
         limit = max(1, min(k, agent._retrieval_cfg.ask_grc_docs_max_k))
     question_text = " ".join(question.split())
-    focus_text = (
-        " ".join(focus.split())
-        if isinstance(focus, str) and focus.strip()
-        else None
-    )
+    focus_text = " ".join(focus.split()) if isinstance(focus, str) and focus.strip() else None
     answer_type = classify_docs_answer_type(question_text)
-
 
     degraded_retrieval = False
     fallback_used = False
@@ -1160,17 +1156,17 @@ def ask_grc_docs(
     source_limit = min(limit, agent._docs_answer_cfg.max_sources)
 
     candidates = collect_docs_candidates(agent)
-    ranked_candidates = rank_docs_candidates(agent, 
+    ranked_candidates = rank_docs_candidates(
+        agent,
         question=question_text,
         candidates=candidates,
     )
     if is_block_definition_query(question_text):
         handlers.append("search_blocks(catalog_assisted_docs)")
-        assisted = build_catalog_assisted_candidate(agent, 
-            question=question_text
-        )
+        assisted = build_catalog_assisted_candidate(agent, question=question_text)
         if assisted is not None:
-            ranked_candidates = rank_docs_candidates(agent, 
+            ranked_candidates = rank_docs_candidates(
+                agent,
                 question=question_text,
                 candidates=[*candidates, assisted],
             )
@@ -1181,7 +1177,8 @@ def ask_grc_docs(
         handlers.append("search_blocks(catalog_assisted_docs)")
         assisted = build_catalog_assisted_candidate(agent, question=question_text)
         if assisted is not None:
-            ranked_candidates = rank_docs_candidates(agent, 
+            ranked_candidates = rank_docs_candidates(
+                agent,
                 question=question_text,
                 candidates=[*candidates, assisted],
             )
@@ -1209,7 +1206,8 @@ def ask_grc_docs(
         limit=answer_candidate_limit,
     )
     snippets = [candidate.snippet for candidate in selected_candidates]
-    source_quality = build_docs_source_quality(agent, 
+    source_quality = build_docs_source_quality(
+        agent,
         question=question_text,
         answer_type=answer_type,
         selected_candidates=selected_candidates,
@@ -1232,7 +1230,8 @@ def ask_grc_docs(
     evidence_strong = str(source_quality.get("quality")) == "strong"
     if snippets:
         if str(source_quality.get("quality")) != "weak":
-            answer, typed_insufficient = build_typed_docs_answer(agent,
+            answer, typed_insufficient = build_typed_docs_answer(
+                agent,
                 question=question_text,
                 ranked_candidates=selected_candidates,
                 answer_type=answer_type,
@@ -1250,7 +1249,8 @@ def ask_grc_docs(
         agent._last_docs_advisor_meta["helper_finish_reason"] = "retrieval_empty"
 
     if not answer:
-        answer, insufficient_evidence = build_fallback_answer(agent,
+        answer, insufficient_evidence = build_fallback_answer(
+            agent,
             question=question_text,
             ranked_candidates=ranked_candidates,
             evidence_strong=evidence_strong,
@@ -1307,7 +1307,6 @@ def ask_grc_docs(
     )
 
 
-
 def _docs_answer_confidence(
     *,
     source_quality: dict[str, Any],
@@ -1353,8 +1352,6 @@ def _docs_answer_payload_from_cache(
     }
 
 
-
-
 def _sources_from_candidates(
     candidates: list[_DocsEvidenceCandidate],
     *,
@@ -1398,7 +1395,9 @@ def _sources_from_candidates(
     return sources
 
 
-def _answer_source_score(answer: str, candidate: _DocsEvidenceCandidate) -> tuple[float, float, float, float]:
+def _answer_source_score(
+    answer: str, candidate: _DocsEvidenceCandidate
+) -> tuple[float, float, float, float]:
     answer_text = _answer_evidence_text(answer)
     source_text = " ".join(
         [
@@ -1503,6 +1502,7 @@ def _answer_evidence_text(answer: str) -> str:
 def collect_docs_candidates(agent) -> list[_DocsEvidenceCandidate]:
     return []
 
+
 def rank_docs_candidates(
     agent,
     *,
@@ -1558,9 +1558,7 @@ def rank_docs_candidates(
             semantic_component = (candidate.semantic_score - 0.62) * 7.0
         low_value_reasons = docs_low_value_reasons(candidate=candidate)
         low_value_penalty = float(len(low_value_reasons)) * 1.6
-        procedural = is_procedural_walkthrough_text(
-            candidate.snippet.excerpt
-        )
+        procedural = is_procedural_walkthrough_text(candidate.snippet.excerpt)
         procedural_penalty = 2.5 if procedural and not howto else 0.0
         primary_hits = sum(1 for term in primary_terms if term in text)
         if primary_terms and primary_hits == 0:
@@ -1727,13 +1725,22 @@ def build_docs_source_quality(
             source_hint_match = supports_answer_type
     elif answer_type == "tool_command_concept":
         text = " ".join(
-            " ".join([candidate.snippet.title, candidate.section, candidate.snippet.source, candidate.snippet.excerpt]).lower()
+            " ".join(
+                [
+                    candidate.snippet.title,
+                    candidate.section,
+                    candidate.snippet.source,
+                    candidate.snippet.excerpt,
+                ]
+            ).lower()
             for candidate in selected_candidates
         )
         supports_answer_type = "grcc" in text and ("compile" in text or "validation" in text)
         source_hint_match = "grcc" in text
     elif answer_type == "block_definition":
-        catalog = [candidate for candidate in selected_candidates if candidate.source_type == "catalog"]
+        catalog = [
+            candidate for candidate in selected_candidates if candidate.source_type == "catalog"
+        ]
         if catalog:
             cleaned_summary = agent._clean_catalog_summary_for_answer(
                 catalog[0].snippet.title,
@@ -1785,6 +1792,7 @@ def build_docs_source_quality(
         "supports_answer_type": bool(supports_answer_type),
     }
 
+
 def build_typed_docs_answer(
     agent,
     *,
@@ -1835,17 +1843,21 @@ def build_typed_docs_answer(
         if sides is None:
             return ("Local docs did not contain enough direct evidence for this question.", True)
         shared_terms = set(sides.left_terms).intersection(sides.right_terms)
-        left_terms = tuple(term for term in sides.left_terms if term not in shared_terms) or sides.left_terms
-        right_terms = tuple(term for term in sides.right_terms if term not in shared_terms) or sides.right_terms
+        left_terms = (
+            tuple(term for term in sides.left_terms if term not in shared_terms) or sides.left_terms
+        )
+        right_terms = (
+            tuple(term for term in sides.right_terms if term not in shared_terms)
+            or sides.right_terms
+        )
         left_anchor_terms = tuple(
             docs_primary_terms(sides.left_label) or docs_topic_terms(sides.left_label)
         )
         right_anchor_terms = tuple(
             docs_primary_terms(sides.right_label) or docs_topic_terms(sides.right_label)
         )
-        if (
-            ("tags" in left_terms and "metadata" in right_terms)
-            or ("metadata" in left_terms and "tags" in right_terms)
+        if ("tags" in left_terms and "metadata" in right_terms) or (
+            "metadata" in left_terms and "tags" in right_terms
         ):
             return (
                 "Local docs did not contain enough direct evidence to compare tags and metadata clearly.",
@@ -1900,22 +1912,38 @@ def build_typed_docs_answer(
                 )
             if left_sentence and right_sentence:
                 break
-        if left_sentence and left_terms and not any(
-            agent._text_matches_term_or_synonym(left_sentence.lower(), term)
-            for term in left_terms
+        if (
+            left_sentence
+            and left_terms
+            and not any(
+                agent._text_matches_term_or_synonym(left_sentence.lower(), term)
+                for term in left_terms
+            )
         ):
             left_sentence = ""
-        if right_sentence and right_terms and not any(
-            agent._text_matches_term_or_synonym(right_sentence.lower(), term)
-            for term in right_terms
+        if (
+            right_sentence
+            and right_terms
+            and not any(
+                agent._text_matches_term_or_synonym(right_sentence.lower(), term)
+                for term in right_terms
+            )
         ):
             right_sentence = ""
-        if left_sentence and left_anchor_terms and not any(
-            term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+        if (
+            left_sentence
+            and left_anchor_terms
+            and not any(
+                term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+            )
         ):
             left_sentence = ""
-        if right_sentence and right_anchor_terms and not any(
-            term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+        if (
+            right_sentence
+            and right_anchor_terms
+            and not any(
+                term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+            )
         ):
             right_sentence = ""
         if not left_sentence or not right_sentence:
@@ -1956,12 +1984,20 @@ def build_typed_docs_answer(
                     )
                 if left_sentence and right_sentence:
                     break
-        if left_sentence and left_anchor_terms and not any(
-            term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+        if (
+            left_sentence
+            and left_anchor_terms
+            and not any(
+                term in left_sentence.lower() for term in left_anchor_terms if len(term) > 2
+            )
         ):
             left_sentence = ""
-        if right_sentence and right_anchor_terms and not any(
-            term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+        if (
+            right_sentence
+            and right_anchor_terms
+            and not any(
+                term in right_sentence.lower() for term in right_anchor_terms if len(term) > 2
+            )
         ):
             right_sentence = ""
         if not left_sentence or not right_sentence:
@@ -1985,13 +2021,9 @@ def build_typed_docs_answer(
             )
         if left_sentence.lower() == right_sentence.lower():
             shared = left_sentence.lower()
-            has_left = any(
-                agent._text_matches_term_or_synonym(shared, term)
-                for term in left_terms
-            )
+            has_left = any(agent._text_matches_term_or_synonym(shared, term) for term in left_terms)
             has_right = any(
-                agent._text_matches_term_or_synonym(shared, term)
-                for term in right_terms
+                agent._text_matches_term_or_synonym(shared, term) for term in right_terms
             )
             if not (has_left and has_right):
                 return (
@@ -2011,9 +2043,7 @@ def build_typed_docs_answer(
         if "hierarchical block" in question.lower():
             return ("Local docs did not contain enough direct evidence for this question.", True)
         catalog_candidates = [
-            candidate
-            for candidate in ranked_candidates
-            if candidate.source_type == "catalog"
+            candidate for candidate in ranked_candidates if candidate.source_type == "catalog"
         ]
         if catalog_candidates:
             catalog = catalog_candidates[0]
@@ -2042,15 +2072,16 @@ def build_typed_docs_answer(
                     and catalog.snippet.excerpt.rstrip().endswith("…")
                     and summary == cleaned_summary
                 ):
-                    return ("Local docs did not contain enough direct evidence for this question.", True)
+                    return (
+                        "Local docs did not contain enough direct evidence for this question.",
+                        True,
+                    )
                 return (
                     f"According to the local block catalog, {catalog.snippet.title} {summary}.",
                     False,
                 )
         required_terms = subject_terms or tuple(docs_primary_terms(question))
-        subject_phrase = (
-            (extract_block_definition_subject(question) or "").strip().lower()
-        )
+        subject_phrase = (extract_block_definition_subject(question) or "").strip().lower()
         for candidate in ranked_candidates[:6]:
             sentence = agent._pick_typed_sentence(
                 candidate=candidate,
@@ -2059,9 +2090,7 @@ def build_typed_docs_answer(
                 min_term_hits=agent._minimum_required_term_hits(required_terms),
             )
             if sentence and subject_phrase and " " in subject_phrase:
-                title_source = " ".join(
-                    [candidate.snippet.title, candidate.snippet.source]
-                ).lower()
+                title_source = " ".join([candidate.snippet.title, candidate.snippet.source]).lower()
                 if subject_phrase not in title_source:
                     continue
             if sentence:
@@ -2175,13 +2204,9 @@ def _pick_direct_docs_comparison_sentence(
             lower = compact.lower()
             if len(compact) < 40 or len(compact) > 280:
                 continue
-            has_left = any(
-                agent._text_matches_term_or_synonym(lower, term)
-                for term in left_terms
-            )
+            has_left = any(agent._text_matches_term_or_synonym(lower, term) for term in left_terms)
             has_right = any(
-                agent._text_matches_term_or_synonym(lower, term)
-                for term in right_terms
+                agent._text_matches_term_or_synonym(lower, term) for term in right_terms
             )
             has_contrast = any(marker in f" {lower} " for marker in contrast_markers)
             if has_left and has_right and has_contrast:

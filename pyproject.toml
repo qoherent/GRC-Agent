@@ -78,6 +78,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]  # asserts are fine in tests
+"src/**" = ["E402"]  # module-level imports after logger are intentional
+"tests/conftest.py" = ["E402"]  # env-var setup must precede imports
+"tests/llama_eval/**" = ["E402"]  # eval harness scripts have intentional import ordering
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

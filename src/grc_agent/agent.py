@@ -19,11 +19,10 @@ from ToolAgents.data_models.messages import (
     ToolCallResultContent,
 )
 
-from grc_agent._payload import ErrorCode
 from grc_agent.catalog.loaders import build_catalog_snapshot, describe_block
 from grc_agent.config import AgentConfig, default_app_config
+from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.integrity import compact_file_integrity
 from grc_agent.history import (
     GraphHistoryJournal,
     GraphSnapshot,
@@ -44,12 +43,6 @@ from grc_agent.runtime.change_graph import (
 )
 from grc_agent.runtime.change_graph import (
     loaded_block_has_port as loaded_block_has_port_wrapper,
-)
-from grc_agent.runtime.change_graph import (
-    resolve_old_rewire_connection_id as resolve_old_rewire_connection_id_wrapper,
-)
-from grc_agent.runtime.change_graph import (
-    resolve_rewire_new_endpoint_args as resolve_rewire_new_endpoint_args_wrapper,
 )
 from grc_agent.runtime.change_graph import (
     rewire_candidate_passes_preflight as rewire_candidate_passes_preflight_wrapper,
@@ -83,6 +76,7 @@ from grc_agent.runtime.inspect_graph import (
     get_grc_context_internal as get_grc_context_internal_wrapper,
 )
 from grc_agent.runtime.inspect_graph import inspect_graph as inspect_graph_wrapper
+from grc_agent.runtime.integrity import compact_file_integrity
 from grc_agent.runtime.model_context import (
     MODEL_TOOL_NAMES_ORDERED,
     MVP_MODEL_TOOL_NAMES,
@@ -110,6 +104,8 @@ logger = logging.getLogger(__name__)
 
 ToolResult = dict[str, Any]
 ToolCallable = Callable[..., ToolResult]
+
+
 def _user_text_of(message: ChatMessage) -> str:
     parts: list[str] = []
     for item in message.content:
@@ -134,6 +130,8 @@ _JOURNALED_MUTATION_TOOLS = {
     "auto_insert_block",
     "change_graph",
 }
+
+
 def _normalize_alias_key(value: str) -> str:
     """Canonical alias normalizer: whitespace + lowercase + alphanumeric-only."""
     from grc_agent.runtime.text_utils import compact_whitespace, tokenize_identifier
@@ -149,15 +147,15 @@ def _compact_block_summary(summary: Any) -> str:
     if original_len <= _SEARCH_BLOCK_SUMMARY_MAX_CHARS:
         return compact
     kept_len = _SEARCH_BLOCK_SUMMARY_MAX_CHARS - 1
-    return compact[:kept_len].rstrip() + f"... [TRUNCATED block-summary: was {original_len} chars, kept {kept_len}]"
+    return (
+        compact[:kept_len].rstrip()
+        + f"... [TRUNCATED block-summary: was {original_len} chars, kept {kept_len}]"
+    )
 
 
 def _compact_save_file_integrity(file_integrity: dict[str, Any]) -> dict[str, Any]:
     """Thin wrapper for the unified integrity compactor (legacy name)."""
     return compact_file_integrity(file_integrity)
-
-
-
 
 
 def _catalog_version_token(catalog_root: str | None) -> str:
@@ -181,8 +179,6 @@ def _catalog_version_token(catalog_root: str | None) -> str:
 
 class GrcAgent:
     """A thin integration layer between a language model and package-level owners."""
-
-
 
     def __init__(
         self,
@@ -260,7 +256,9 @@ class GrcAgent:
         ``grc_agent.runtime.doc_answer.get_embedding``.
         """
         import threading
+
         from grc_agent.runtime.doc_answer import DB_PATH, initialize_vector_db_background
+
         threading.Thread(
             target=initialize_vector_db_background,
             args=(DB_PATH, self._llama_server_url),
@@ -353,7 +351,11 @@ class GrcAgent:
             model_tool_call=model_tool_call,
         )
         if validation_result is not None:
-            logger.info("tool_call_rejected tool=%s error_type=%s", tool_name, validation_result.get("error_type"))
+            logger.info(
+                "tool_call_rejected tool=%s error_type=%s",
+                tool_name,
+                validation_result.get("error_type"),
+            )
             self._record_tool_journal(
                 tool_name=tool_name,
                 result=validation_result,
@@ -432,9 +434,7 @@ class GrcAgent:
         if "view" not in normalized:
             targets = normalized.get("targets")
             normalized["view"] = (
-                "details"
-                if isinstance(targets, list) and len(targets) > 0
-                else "overview"
+                "details" if isinstance(targets, list) and len(targets) > 0 else "overview"
             )
             view = normalized["view"]
         if isinstance(view, str) and view.strip().lower() == "overview":
@@ -496,13 +496,11 @@ class GrcAgent:
 
     def _inspect_param_keys_by_block(self) -> dict[str, set[str]]:
         from grc_agent.runtime.inspect_graph import _param_keys_by_block
+
         flowgraph = self.session.flowgraph
         if flowgraph is None:
             return {}
-        return {
-            name: set(keys)
-            for name, keys in _param_keys_by_block(flowgraph.blocks).items()
-        }
+        return {name: set(keys) for name, keys in _param_keys_by_block(flowgraph.blocks).items()}
 
     @staticmethod
     def _split_inspect_parameter_ref(
@@ -520,10 +518,6 @@ class GrcAgent:
             if param_key in param_keys_by_block[block_name]:
                 return block_name, param_key
         return None
-
-
-
-
 
     def _unsafe_graph_root_for_path(self, path_value: str | Path) -> str | None:
         return unsafe_graph_root_for_path(
@@ -559,10 +553,7 @@ class GrcAgent:
             )
         if not isinstance(kwargs, dict):
             kwargs = {}
-        validation_kwargs = {
-            k: v for k, v in kwargs.items()
-            if k != "view"
-        }
+        validation_kwargs = {k: v for k, v in kwargs.items() if k != "view"}
         validation_error = validate_runtime_tool_call(
             tool_name, validation_kwargs, self._tool_schema_map
         )
@@ -570,9 +561,7 @@ class GrcAgent:
             return None
         return self._tool_result(tool_name=tool_name, ok=False, **validation_error)
 
-    def should_stop_batch_after_result(
-        self, tool_name: str, result: dict[str, Any]
-    ) -> bool:
+    def should_stop_batch_after_result(self, tool_name: str, result: dict[str, Any]) -> bool:
         if not isinstance(result, dict) or result.get("ok") is not False:
             return False
         return tool_name in {
@@ -617,9 +606,7 @@ class GrcAgent:
             }
         if mode == "selected":
             opt = resolution["option"]
-            tool_call_id = self._record_clarification_option_call(
-                resolution["raw_reply"], opt
-            )
+            tool_call_id = self._record_clarification_option_call(resolution["raw_reply"], opt)
             result = self.execute_tool(
                 opt.tool_name,
                 opt.tool_args,
@@ -648,9 +635,7 @@ class GrcAgent:
     ) -> str:
         clarification_id = ""
         if self._pending_clarification is not None:
-            clarification_id = str(
-                self._pending_clarification.get("clarification_id") or "pending"
-            )
+            clarification_id = str(self._pending_clarification.get("clarification_id") or "pending")
         tool_call_id = f"clarification_{clarification_id}_{option.label}"
         self.chat_history.add_user_message(raw_reply)
         now = datetime.now()
@@ -712,8 +697,6 @@ class GrcAgent:
     def _clear_pending_clarification(self) -> None:
         self._pending_clarification = None
         self._pending_clarification_revision = None
-
-
 
     def validate_turn_route(
         self,
@@ -864,10 +847,7 @@ class GrcAgent:
         self._maybe_record_baseline_checkpoint(reason=reason)
 
     def _checkpoint_before(self, tool_name: str) -> GraphSnapshot | None:
-        if (
-            tool_name not in _JOURNALED_MUTATION_TOOLS
-            and tool_name != "save_graph"
-        ):
+        if tool_name not in _JOURNALED_MUTATION_TOOLS and tool_name != "save_graph":
             return None
         if self.session.flowgraph is None:
             return None
@@ -945,17 +925,10 @@ class GrcAgent:
                     if isinstance(result.get("validation"), dict)
                     else self.session.validation_state()
                 ),
-                save_path=(
-                    result.get("path")
-                    if tool_name == "save_graph"
-                    else None
-                ),
+                save_path=(result.get("path") if tool_name == "save_graph" else None),
             )
             checkpoint_id = checkpoint.get("id")
-            if (
-                isinstance(checkpoint_id, str)
-                and checkpoint_id
-            ):
+            if isinstance(checkpoint_id, str) and checkpoint_id:
                 # Store in telemetry (internal), NOT in the model-visible result.
                 telemetry = result.get("dispatch_telemetry")
                 if isinstance(telemetry, dict):
@@ -1021,9 +994,15 @@ class GrcAgent:
         # Drop active_session for MVP model-facing tools — it is noise
         # the model does not act on. Keep the ``tool`` key for self-describing
         # chat-history records and audit/eval consumers.
-        _MVP_TOOLS = {"inspect_graph", "change_graph", "query_knowledge",
-                       "search_blocks", "ask_grc_docs", "get_grc_context",
-                       "describe_block"}
+        _MVP_TOOLS = {
+            "inspect_graph",
+            "change_graph",
+            "query_knowledge",
+            "search_blocks",
+            "ask_grc_docs",
+            "get_grc_context",
+            "describe_block",
+        }
         result["tool"] = tool_name
         if default_message is not None and "message" not in result:
             result["message"] = default_message
@@ -1056,16 +1035,17 @@ class GrcAgent:
             if isinstance(value, list) and len(value) > max_list_items:
                 original_len = len(value)
                 compact[key] = value[:max_list_items]
-                compact[f"{key}_truncated"] = f"... [TRUNCATED: was {original_len} items, kept {max_list_items}]"
+                compact[f"{key}_truncated"] = (
+                    f"... [TRUNCATED: was {original_len} items, kept {max_list_items}]"
+                )
                 compact["output_truncated"] = True
         validation_errors = compact.get("validation_errors")
-        if (
-            isinstance(validation_errors, list)
-            and len(validation_errors) > max_validation_errors
-        ):
+        if isinstance(validation_errors, list) and len(validation_errors) > max_validation_errors:
             original_len = len(validation_errors)
             compact["validation_errors"] = validation_errors[:max_validation_errors]
-            compact["validation_errors_truncated"] = f"... [TRUNCATED: was {original_len} items, kept {max_validation_errors}]"
+            compact["validation_errors_truncated"] = (
+                f"... [TRUNCATED: was {original_len} items, kept {max_validation_errors}]"
+            )
             compact["output_truncated"] = True
         validation = compact.get("validation_result")
         if isinstance(validation, dict):
@@ -1073,7 +1053,10 @@ class GrcAgent:
             if isinstance(stderr, str) and len(stderr) > max_stderr_chars:
                 validation = dict(validation)
                 original_len = len(stderr)
-                validation["stderr"] = stderr[: max_stderr_chars - 1].rstrip() + f"… [TRUNCATED: was {original_len} chars, kept {max_stderr_chars}]"
+                validation["stderr"] = (
+                    stderr[: max_stderr_chars - 1].rstrip()
+                    + f"… [TRUNCATED: was {original_len} chars, kept {max_stderr_chars}]"
+                )
                 compact["validation_result"] = validation
                 compact["output_truncated"] = True
         compact["output_bytes"] = min(size, max_bytes)
@@ -1126,6 +1109,7 @@ class GrcAgent:
         debug: bool = False,
     ) -> ToolResult:
         from grc_agent.runtime.inspect_graph import query_knowledge as _qk
+
         return _qk(self, query=query, domain=domain, debug=debug)
 
     def _search_blocks(
@@ -1155,8 +1139,6 @@ class GrcAgent:
             focus=focus,
             debug=debug,
         )
-
-
 
     def _change_graph(
         self,
@@ -1200,18 +1182,20 @@ class GrcAgent:
             return result
         elapsed_ms = int((time.monotonic() - started) * 1000)
         graph_mutated = (
-            self.session.state_revision != before_revision
-            or self.session.is_dirty != before_dirty
+            self.session.state_revision != before_revision or self.session.is_dirty != before_dirty
         )
-        clarification_returned = bool(result.get("clarification_options")) or bool(
-            result.get("clarification_required")
-        ) or result.get("error_type") in {
-            "clarification_required",
-            "ambiguous_connection",
-            "ambiguous_rewire_old_connection",
-            "ambiguous_rewire_new_endpoint",
-            "ambiguous_target",
-        }
+        clarification_returned = (
+            bool(result.get("clarification_options"))
+            or bool(result.get("clarification_required"))
+            or result.get("error_type")
+            in {
+                "clarification_required",
+                "ambiguous_connection",
+                "ambiguous_rewire_old_connection",
+                "ambiguous_rewire_new_endpoint",
+                "ambiguous_target",
+            }
+        )
         # Check if checkpoint was created (stored in dispatch_telemetry by the
         # history journal, not in the model-visible result dict).
         dispatch_telem = result.get("dispatch_telemetry")
@@ -1268,11 +1252,7 @@ class GrcAgent:
                 "load_grc",
                 ok=False,
                 message="Refusing to activate loaded graph because validation failed.",
-                error_type=(
-                    ErrorCode.VALIDATION_TIMEOUT
-                    if loaded.last_validation_returncode == -2
-                    else ErrorCode.GNU_VALIDATION_FAILED
-                ),
+                error_type=ErrorCode.GNU_VALIDATION_FAILED,
                 validation=loaded.validation_state(),
             )
         self._replace_session(loaded, reason="load_grc")
@@ -1332,20 +1312,28 @@ class GrcAgent:
             payload["error_type"] = result.error_type
             payload["message"] = result.message
         else:
-            payload["source"] = {
-                "block": result.source.block,
-                "port": result.source.port,
-                "dtype": result.source.dtype,
-                "vlen": result.source.vlen,
-                "domain": result.source.domain,
-            } if result.source else None
-            payload["destination"] = {
-                "block": result.destination.block,
-                "port": result.destination.port,
-                "dtype": result.destination.dtype,
-                "vlen": result.destination.vlen,
-                "domain": result.destination.domain,
-            } if result.destination else None
+            payload["source"] = (
+                {
+                    "block": result.source.block,
+                    "port": result.source.port,
+                    "dtype": result.source.dtype,
+                    "vlen": result.source.vlen,
+                    "domain": result.source.domain,
+                }
+                if result.source
+                else None
+            )
+            payload["destination"] = (
+                {
+                    "block": result.destination.block,
+                    "port": result.destination.port,
+                    "dtype": result.destination.dtype,
+                    "vlen": result.destination.vlen,
+                    "domain": result.destination.domain,
+                }
+                if result.destination
+                else None
+            )
             payload["candidates"] = [
                 {
                     "block_type": c.block_type,
@@ -1428,9 +1416,7 @@ class GrcAgent:
             dst_port=dst_port,
         )
         if resolution.ambiguous_candidates is not None:
-            payload = self._connection_clarification_payload(
-                resolution.ambiguous_candidates
-            )
+            payload = self._connection_clarification_payload(resolution.ambiguous_candidates)
             self._store_pending_clarification(payload)
             return self._payload_result("remove_connection", payload)
         if not resolution.ok:
@@ -1658,14 +1644,21 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
     ) -> dict[str, Any]:
-        from grc_agent.session_ops import parse_connection_id
+        from grc_agent.runtime.connection_ids import parse_connection_id
+
         if not old_connection_id:
-            return {"ok": False, "error_type": "missing_old_connection_id",
-                    "message": "old_connection_id is required"}
+            return {
+                "ok": False,
+                "error_type": "missing_old_connection_id",
+                "message": "old_connection_id is required",
+            }
         parsed = parse_connection_id(old_connection_id)
         if parsed is None:
-            return {"ok": False, "error_type": "malformed_old_connection_id",
-                    "message": f"Cannot parse connection id: {old_connection_id}"}
+            return {
+                "ok": False,
+                "error_type": "malformed_old_connection_id",
+                "message": f"Cannot parse connection id: {old_connection_id}",
+            }
         return {
             "ok": True,
             "clarification_required": False,
@@ -1763,7 +1756,10 @@ class GrcAgent:
                 if autosave.get("skipped") and not result.get("dirty"):
                     msg = "already set to target values; graph unchanged."
                     hint = "The requested changes are already applied. Graph unchanged."
-                    if isinstance(result.get("normalized_operations"), list) and len(result["normalized_operations"]) == 1:
+                    if (
+                        isinstance(result.get("normalized_operations"), list)
+                        and len(result["normalized_operations"]) == 1
+                    ):
                         op = result["normalized_operations"][0]
                         if op.get("op_type") == "update_states":
                             state = op.get("state")
@@ -1778,13 +1774,9 @@ class GrcAgent:
                     result["message"] = msg
                     result["hint"] = hint
                 elif result.get("forced_validation_failure"):
-                    result["hint"] = (
-                        "Edit applied and autosaved — validation failed."
-                    )
+                    result["hint"] = "Edit applied and autosaved — validation failed."
                 else:
-                    result["hint"] = (
-                        "Edit applied, validated, and autosaved."
-                    )
+                    result["hint"] = "Edit applied, validated, and autosaved."
             else:
                 result["hint"] = (
                     "Edit applied and validated, but autosave did not write the graph: "
@@ -1799,16 +1791,6 @@ class GrcAgent:
         if missing_session is not None:
             return missing_session
         is_valid = self.session.validate()
-        if self.session.last_validation_returncode == -2:
-            self._last_validation_ok = False
-            self._last_validated_state_revision = None
-            return self._tool_result(
-                tool_name="validate_graph",
-                ok=False,
-                message="Graph validation timed out.",
-                error_type=ErrorCode.VALIDATION_TIMEOUT,
-                stderr=self.session.last_validation_stderr,
-            )
         if is_valid:
             self._record_successful_validation()
         else:
@@ -1858,9 +1840,7 @@ class GrcAgent:
                     error_type=ErrorCode.SAVE_REFUSED,
                 )
             current_path = (
-                self.session.path.resolve(strict=False)
-                if self.session.path is not None
-                else None
+                self.session.path.resolve(strict=False) if self.session.path is not None else None
             )
             if (
                 explicit_path
@@ -1893,12 +1873,9 @@ class GrcAgent:
                         path=str(resolved_target),
                         file_integrity=_compact_save_file_integrity(file_integrity),
                     )
-        if (
-            not allow_invalid
-            and (
+        if not allow_invalid and (
             not self._last_validation_ok
             or self._last_validated_state_revision != self.session.state_revision
-            )
         ):
             validation = self._validate_graph()
             if validation.get("ok") is not True or not bool(validation.get("valid")):

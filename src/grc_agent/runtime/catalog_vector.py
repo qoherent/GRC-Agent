@@ -131,7 +131,9 @@ def embed_block_text(
     return get_embedding(server_url, body, model=model)
 
 
-def embed_query(server_url: str, query: str, *, model: str = "embeddinggemma:latest") -> list[float]:
+def embed_query(
+    server_url: str, query: str, *, model: str = "embeddinggemma:latest"
+) -> list[float]:
     """Embed a search query with the uniform query prefix."""
     return get_embedding(server_url, _QUERY_PREFIX + query, model=model)
 
@@ -205,9 +207,7 @@ class VectorCatalogStore:
                     continue
                 raw_params = tuple(str(p) for p in (block.get("parameters") or ()))
                 param_values = block.get("param_values") or {}
-                visible_params = tuple(
-                    visible_param_keys(block_id, raw_params, param_values)
-                )
+                visible_params = tuple(visible_param_keys(block_id, raw_params, param_values))
                 body = compose_block_embed_text(
                     block_id=block_id,
                     label=str(block.get("label", "") or ""),
@@ -234,7 +234,7 @@ class VectorCatalogStore:
                 inserted += 1
             conn.execute(
                 "INSERT INTO catalog_idx(cmd, arg) "
-                "VALUES('rebuild', '{\"index\": \"flat\", \"distance\": \"cos\"}')"
+                'VALUES(\'rebuild\', \'{"index": "flat", "distance": "cos"}\')'
             )
             conn.commit()
             logger.info("Catalog vector index ingested %d blocks.", inserted)
@@ -264,12 +264,14 @@ class VectorCatalogStore:
                     (rowid,),
                 ).fetchone()
                 if chunk:
-                    matched.append({
-                        "rowid": rowid,
-                        "distance": distance,
-                        "block_id": chunk["block_id"],
-                        "payload": chunk["payload"],
-                    })
+                    matched.append(
+                        {
+                            "rowid": rowid,
+                            "distance": distance,
+                            "block_id": chunk["block_id"],
+                            "payload": chunk["payload"],
+                        }
+                    )
             return matched
         finally:
             conn.close()
@@ -316,9 +318,12 @@ def is_catalog_db_usable(db_path: Path, *, sample_size: int = 16) -> bool:
         if total == 0:
             return False
         n = min(sample_size, total)
-        rowids = [r[0] for r in conn.execute(
-            f"SELECT rowid FROM catalog_chunks ORDER BY RANDOM() LIMIT {int(n)}"
-        ).fetchall()]
+        rowids = [
+            r[0]
+            for r in conn.execute(
+                f"SELECT rowid FROM catalog_chunks ORDER BY RANDOM() LIMIT {int(n)}"
+            ).fetchall()
+        ]
         vectors: list[list[float]] = []
         for rid in rowids:
             raw = conn.execute(
@@ -333,7 +338,7 @@ def is_catalog_db_usable(db_path: Path, *, sample_size: int = 16) -> bool:
             return False
         first = vectors[0]
         for other in vectors[1:]:
-            if any(abs(a - b) > 1e-6 for a, b in zip(first, other)):
+            if any(abs(a - b) > 1e-6 for a, b in zip(first, other, strict=True)):
                 return True
         return False
     finally:

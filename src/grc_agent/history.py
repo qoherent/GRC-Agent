@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.session_ops import connection_id as render_connection_id
+from grc_agent.runtime.connection_ids import connection_id as render_connection_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,11 @@ def snapshot_session(session: FlowgraphSession) -> GraphSnapshot:
         raise ValueError("No flowgraph loaded.")
     fg = session.flowgraph
     raw_data = fg.export_data()
-    serialized = FlowgraphSession._serialize_raw_data(raw_data)
-    graph_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    # Non-recursive identity: persisted file SHA-256 + in-session revision.
+    # Replaces the former deep dict→YAML→SHA-256 hash (DoD #7).
+    graph_hash = f"{session.graph_id() or 'unknown'}:r{session.state_revision}"
     blocks_by_uid: dict[str, dict[str, Any]] = {}
-    for index, block in enumerate(fg.blocks):
+    for block in fg.blocks:
         uid = str(getattr(block, "name", "") or block.key)
         blocks_by_uid[uid] = {
             "block_uid": uid,
@@ -437,8 +438,8 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
     if session.flowgraph is None:
         return "unloaded"
     path = str(session.path) if session.path is not None else "<memory>"
-    serialized = FlowgraphSession._serialize_raw_data(session.flowgraph.export_data())
-    graph_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    # Non-recursive identity: persisted file SHA-256 + in-session revision.
+    graph_hash = f"{session.graph_id() or 'unknown'}:r{session.state_revision}"
     digest = hashlib.sha256(f"{path}\n{graph_hash}".encode()).hexdigest()[:16]
     return f"lineage:{digest}"
 

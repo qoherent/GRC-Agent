@@ -9,8 +9,7 @@ from functools import lru_cache
 from typing import Any
 
 from grc_agent.catalog.loaders import _describe_block_with_root
-from grc_agent._payload import Block, Connection
-from grc_agent.session_ops import connection_id as render_connection_id
+from grc_agent.runtime.connection_ids import connection_id as render_connection_id
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +46,7 @@ def build_block_semantics_by_type(
 ) -> dict[str, dict[str, Any]]:
     """Return compact semantic facts keyed by GNU Radio block type."""
     unique_types = tuple(sorted({item for item in block_types if isinstance(item, str)}))
-    return {
-        block_type: _block_semantics(block_type, catalog_root)
-        for block_type in unique_types
-    }
+    return {block_type: _block_semantics(block_type, catalog_root) for block_type in unique_types}
 
 
 @lru_cache(maxsize=2048)
@@ -64,8 +60,7 @@ def _block_semantics(
 
     platform = _gnu_platform_block_metadata(block_type)
     flags = sorted(
-        set(_string_list(catalog_payload.get("flags")))
-        | set(_string_list(platform.get("flags")))
+        set(_string_list(catalog_payload.get("flags"))) | set(_string_list(platform.get("flags")))
     )
     category_path = _string_list(
         platform.get("category_path") or catalog_payload.get("category_path")
@@ -75,11 +70,15 @@ def _block_semantics(
     input_domains = _domain_counts(inputs)
     output_domains = _domain_counts(outputs)
     native_role = platform.get("native_role")
-    role = native_role if native_role is not None else _semantic_role(
-        flags=flags,
-        category_path=category_path,
-        input_domains=input_domains,
-        output_domains=output_domains,
+    role = (
+        native_role
+        if native_role is not None
+        else _semantic_role(
+            flags=flags,
+            category_path=category_path,
+            input_domains=input_domains,
+            output_domains=output_domains,
+        )
     )
     evidence = {
         "source": "gnu_platform+catalog" if platform else "catalog",
@@ -99,9 +98,9 @@ def _block_semantics(
 
 def _gnu_platform_block_metadata(block_type: str) -> dict[str, Any]:
     try:
-        from grc_agent.session import _ensure_platform
+        from grc_agent.grc_native_adapter import get_platform_or_none
 
-        platform = _ensure_platform()
+        platform = get_platform_or_none()
     except Exception as exc:
         logger.debug("GNU Radio platform metadata unavailable: %s", exc)
         return {}
@@ -151,7 +150,12 @@ def evaluated_param_hides(block_type: str, param_values: dict[str, Any]) -> dict
     """GRC-core-evaluated 'hide' value ('none'|'part'|'all') per param key."""
     cache_key = (
         block_type,
-        tuple(sorted((str(key), "" if value is None else str(value)) for key, value in param_values.items())),
+        tuple(
+            sorted(
+                (str(key), "" if value is None else str(value))
+                for key, value in param_values.items()
+            )
+        ),
     )
     cached = _EVALUATED_HIDE_CACHE.get(cache_key)
     if cached is not None:
@@ -163,9 +167,9 @@ def evaluated_param_hides(block_type: str, param_values: dict[str, Any]) -> dict
 
 def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]) -> dict[str, str]:
     try:
-        from grc_agent.session import _ensure_platform
+        from grc_agent.grc_native_adapter import get_platform_or_none
 
-        platform = _ensure_platform()
+        platform = get_platform_or_none()
     except Exception:
         return {}
     if platform is None:
@@ -206,7 +210,6 @@ def _semantic_role(
     output_domains: dict[str, int],
 ) -> str:
     flag_set = {flag.lower() for flag in flags}
-    category_set = {item.lower() for item in category_path}
     has_stream_input = input_domains.get(PortDomain.STREAM, 0) > 0
     has_stream_output = output_domains.get(PortDomain.STREAM, 0) > 0
     has_any_input = any(count > 0 for count in input_domains.values())
@@ -428,7 +431,7 @@ def _metadata_list(value: Any) -> list[Any]:
 
 
 def _connection_summaries(
-    connections: list[Connection],
+    connections: list[Any],
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     incoming: dict[str, list[str]] = {}
     outgoing: dict[str, list[str]] = {}
@@ -444,7 +447,7 @@ def _connection_summaries(
     return incoming, outgoing
 
 
-def _parameter_map(block: Block) -> dict[str, Any]:
+def _parameter_map(block: Any) -> dict[str, Any]:
     parameters = block.params.get("parameters")
     if not isinstance(parameters, dict):
         return {}

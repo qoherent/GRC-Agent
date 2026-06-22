@@ -1,14 +1,13 @@
 """Phase 5 — native adapter tests (25+). Marked @pytest.mark.grc_native."""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
 import pytest
-
+from grc_agent.domain_models import BlockRole, GrcFlowgraph
 from grc_agent.grc_native_adapter import (
-    EXCLUDED_PARAM_CATEGORIES,
-    GraphIdentity,
     add_block,
     apply_mutation,
     bind_to_flow_graph,
@@ -22,17 +21,15 @@ from grc_agent.grc_native_adapter import (
     new_graph_identity,
     remove_block,
     render_block,
-    render_connection,
     render_flow_graph,
     render_parameter,
-    serialize_flow_graph,
     set_block_state,
     set_param,
     validate,
     validate_and_finalize,
     write_flow_graph_atomic,
 )
-from grc_agent.domain_models import BlockRole, GrcFlowgraph
+from grc_agent.runtime.param_filter import EXCLUDED_PARAM_CATEGORIES
 
 pytestmark = pytest.mark.grc_native
 
@@ -51,6 +48,7 @@ def test_get_platform_missing_grc_raises_runtime_error(monkeypatch):
     # time on this box; verify the function surfaces a clear error by
     # clearing the cached singleton and forcing a re-raise path.
     import grc_agent.grc_native_adapter as adapter
+
     monkeypatch.setattr(adapter, "_PLATFORM", None)
     # If GRC is available, get_platform() will succeed; if not, RuntimeError.
     try:
@@ -88,9 +86,13 @@ def test_graph_identity_bind_sets_instance_id():
 def test_no_deep_json_hash_function():
     """The consultant rejected deep-JSON hashing. Only the file-bytes SHA exists."""
     import grc_agent.grc_native_adapter as adapter
+
     text = open(adapter.__file__).read()
     assert "compute_graph_id" not in text
-    assert "json" not in re.findall(r"hashlib\.\w+|model_dump.*hash|json\.\w+", text).__str__() or "json" in text  # noqa
+    assert (
+        "json" not in re.findall(r"hashlib\.\w+|model_dump.*hash|json\.\w+", text).__str__()
+        or "json" in text
+    )  # noqa
     # Tight check: hashlib is used (for sha256) but not for json.
     assert "hashlib" in text
     assert "model_dump" not in text
@@ -115,7 +117,9 @@ def test_load_and_inspect_random_bit_generator():
 
 def test_load_and_inspect_blank():
     import tempfile
+
     import yaml
+
     # Build a minimal options-only flowgraph by reusing a real fixture's
     # options.parameters shape (GRC's parser is strict about required keys).
     src = yaml.safe_load((FIXTURES / "mac_sniffer.grc").read_text())
@@ -225,8 +229,9 @@ def test_serialize_flow_graph_round_trip(tmp_path):
     write_flow_graph_atomic(fg, out_path)
     reloaded = load_and_inspect(out_path)
     assert reloaded.ok
-    assert {b.instance_name for b in reloaded.blocks} == \
-           {b.instance_name for b in render_flow_graph(fg).blocks}
+    assert {b.instance_name for b in reloaded.blocks} == {
+        b.instance_name for b in render_flow_graph(fg).blocks
+    }
 
 
 # --- mutations ---------------------------------------------------------------- #
@@ -286,8 +291,13 @@ def test_connect_mutation():
 def test_apply_mutation_dispatcher():
     fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
     before = len(fg.blocks)
-    apply_mutation(fg, "add_block", block_type="analog_sig_source_x",
-                   instance_name="dispatcher_src", parameters={"freq": "42"})
+    apply_mutation(
+        fg,
+        "add_block",
+        block_type="analog_sig_source_x",
+        instance_name="dispatcher_src",
+        parameters={"freq": "42"},
+    )
     assert len(fg.blocks) == before + 1
     new = next(b for b in fg.blocks if b.name == "dispatcher_src")
     assert new.params["freq"].value == "42"
@@ -313,10 +323,12 @@ def test_validate_and_finalize_after_mutation():
 
 def test_rg_gnuradio_only_in_adapter():
     import subprocess
+
     res = subprocess.run(
         ["rg", "-n", "gnuradio", "src/grc_agent/"],
         cwd=Path(__file__).resolve().parents[2],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
     # All matches must be in grc_native_adapter.py.
@@ -326,9 +338,11 @@ def test_rg_gnuradio_only_in_adapter():
 
 def test_no_yaml_safe_load_in_adapter():
     import subprocess
+
     res = subprocess.run(
         ["rg", "-n", "yaml\\.safe_load", "src/grc_agent/grc_native_adapter.py"],
         cwd=Path(__file__).resolve().parents[2],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert res.stdout.strip() == ""

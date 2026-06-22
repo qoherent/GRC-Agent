@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from grc_agent._payload import ErrorCode
+from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.grc_native_adapter import render_flow_graph
 from grc_agent.runtime.enums import SearchDomain
@@ -64,17 +64,38 @@ def inspect_graph(
     normalized_params = _normalize_string_list(params, limit=gc.max_inspect_params)
 
     if selected_view not in VALID_VIEWS:
-        result = _base_payload(agent, ok=False,
-                               errors=[{"code": "invalid_view",
-                                        "message": "inspect_graph.view must be 'overview' or 'details'."}])
+        result = _base_payload(
+            agent,
+            ok=False,
+            errors=[
+                {
+                    "code": "invalid_view",
+                    "message": "inspect_graph.view must be 'overview' or 'details'.",
+                }
+            ],
+        )
     elif len(targets) > gc.max_inspect_targets:
-        result = _base_payload(agent, ok=False,
-                               errors=[{"code": "target_limit_exceeded",
-                                        "message": f"inspect_graph accepts at most {gc.max_inspect_targets} targets."}])
+        result = _base_payload(
+            agent,
+            ok=False,
+            errors=[
+                {
+                    "code": "target_limit_exceeded",
+                    "message": f"inspect_graph accepts at most {gc.max_inspect_targets} targets.",
+                }
+            ],
+        )
     elif len(params) > gc.max_inspect_params:
-        result = _base_payload(agent, ok=False,
-                               errors=[{"code": "param_limit_exceeded",
-                                        "message": f"inspect_graph accepts at most {gc.max_inspect_params} params."}])
+        result = _base_payload(
+            agent,
+            ok=False,
+            errors=[
+                {
+                    "code": "param_limit_exceeded",
+                    "message": f"inspect_graph accepts at most {gc.max_inspect_params} params.",
+                }
+            ],
+        )
     elif selected_view == "overview":
         result = _overview(agent, targets=normalized_targets, params=normalized_params)
     else:
@@ -99,8 +120,9 @@ def inspect_graph(
 def _overview(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict[str, Any]:
     fg = agent.session.flowgraph
     if fg is None:
-        return _base_payload(agent, ok=False,
-                             errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}])
+        return _base_payload(
+            agent, ok=False, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
+        )
     snapshot = render_flow_graph(fg)
     payload = snapshot.model_dump(exclude_none=True)
     return _base_payload(agent, ok=True, graph=payload)
@@ -109,8 +131,9 @@ def _overview(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict
 def _details(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict[str, Any]:
     fg = agent.session.flowgraph
     if fg is None:
-        return _base_payload(agent, ok=False,
-                             errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}])
+        return _base_payload(
+            agent, ok=False, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
+        )
     snapshot = render_flow_graph(fg)
     all_blocks = {b.instance_name: b for b in snapshot.blocks}
     matched: list[str] = []
@@ -140,9 +163,13 @@ def _details(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict[
     return result
 
 
-def _base_payload(agent: GrcAgent, *, ok: bool,
-                  graph: dict[str, Any] | None = None,
-                  errors: list[dict[str, str]] | None = None) -> dict[str, Any]:
+def _base_payload(
+    agent: GrcAgent,
+    *,
+    ok: bool,
+    graph: dict[str, Any] | None = None,
+    errors: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ok": ok,
         "graph": graph if graph is not None else {},
@@ -155,6 +182,7 @@ def _base_payload(agent: GrcAgent, *, ok: bool,
 def _param_keys_by_block(blocks: list[Any]) -> dict[str, dict[str, str]]:
     """Thin delegate to the unified filter — kept for agent.py compatibility."""
     from grc_agent.runtime.tool_context import is_variable_block
+
     variable_names = {b.name for b in blocks if is_variable_block(b.key)}
     result: dict[str, dict[str, str]] = {}
     for block in blocks:
@@ -162,7 +190,10 @@ def _param_keys_by_block(blocks: list[Any]) -> dict[str, dict[str, str]]:
         for k, p in block.params.items():
             params[k] = str(p.value)
         result[block.name or block.key] = filter_live_block_params(
-            block.key, params, mode=PROMINENCE, variable_names=variable_names,
+            block.key,
+            params,
+            mode=PROMINENCE,
+            variable_names=variable_names,
         )
     return result
 
@@ -202,7 +233,10 @@ def get_grc_context_internal(
     resolved_node_id = symbol_resolver(node_id) or node_id
     resolved_max_nodes = default_max_nodes if max_nodes is None else max_nodes
     payload = context_fn(
-        session, resolved_node_id, hops=hops, max_nodes=resolved_max_nodes,
+        session,
+        resolved_node_id,
+        hops=hops,
+        max_nodes=resolved_max_nodes,
     )
     if payload.get("ok") is False and payload.get("error_type") == ErrorCode.BLOCK_NOT_FOUND:
         if session.flowgraph is not None:
@@ -226,8 +260,6 @@ def query_knowledge(
     debug: bool = False,
 ) -> ToolResult:
     """Query GNU Radio knowledge — catalog (block IDs/params) or docs (concepts)."""
-    started = time.monotonic()
-
     if domain not in {SearchDomain.CATALOG, SearchDomain.DOCS}:
         return agent._tool_result(
             "query_knowledge",
@@ -238,9 +270,11 @@ def query_knowledge(
 
     if domain == SearchDomain.CATALOG:
         from grc_agent.runtime.search_blocks import search_blocks as _search
+
         result = _search(agent, query=query, debug=debug)
     else:
         from grc_agent.runtime.doc_answer import ask_grc_docs as _docs
+
         result = _docs(agent, question=query, debug=debug)
 
     if isinstance(result, dict):
