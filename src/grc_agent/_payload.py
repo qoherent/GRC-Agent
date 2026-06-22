@@ -42,6 +42,7 @@ def build_error_payload(*, error_type: str, message: str,
     payload: dict[str, Any] = {
         "ok": False,
         "error_type": error_type,
+        "message": message,
         "errors": [{"code": error_type, "message": message}],
     }
     if details:
