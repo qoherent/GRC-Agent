@@ -28,6 +28,18 @@ from grc_agent.grc_native_adapter import (
 logger = logging.getLogger(__name__)
 
 
+def _coerce_port(value: Any) -> Any:
+    """Return int if the port is a numeric string, otherwise the value as-is.
+    Matches the legacy representation: stream ports are ints, message ports strs.
+    """
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+
 class FlowgraphSession:
     """Own one ``.grc`` flowgraph, persisting through the native adapter.
 
@@ -80,7 +92,7 @@ class FlowgraphSession:
         self.flowgraph = load_flow_graph(source_path)
         self.path = source_path
         self.is_dirty = False
-        self._state_revision = 0
+        self._state_revision = 1
         self._persisted_file_sha256 = FlowgraphSession._read_file_sha256_if_available(
             source_path
         )
@@ -117,18 +129,67 @@ class FlowgraphSession:
         from grc_agent.grc_native_adapter import render_flow_graph
         return render_flow_graph(self.flowgraph).model_dump(exclude_none=True)
 
-    def summary_payload(self, *, block_limit: int = 8) -> dict[str, Any]:
+    def summary_payload(self, *, block_limit: int = 8, max_blocks: int | None = None) -> dict[str, Any]:
+        if max_blocks is not None:
+            block_limit = max_blocks
         if self.flowgraph is None:
-            return {"ok": False, "errors": [{"code": "no_flowgraph", "message": "No flowgraph loaded."}]}
+            return {"ok": False, "error_type": "invalid_request",
+                    "errors": [{"code": "no_flowgraph",
+                                "message": "No flowgraph loaded."}]}
         from grc_agent.grc_native_adapter import render_flow_graph
         snapshot = render_flow_graph(self.flowgraph)
+        if (self.last_validation_revision is not None
+                and self.last_validation_revision == self._state_revision):
+            validation_payload = {
+                "status": "valid" if self.last_validation_ok else "invalid",
+                "returncode": 0 if self.last_validation_ok else 1,
+                "errors": [],
+            }
+        else:
+            validation_payload = {"status": "unknown", "errors": []}
+        user_blocks = [b for b in snapshot.blocks
+                       if (b.role.value if hasattr(b.role, "value") else str(b.role)) != "options"]
+        all_blocks = [
+            {"instance_name": b.instance_name, "block_type": b.block_type,
+             "role": b.role.value if hasattr(b.role, "value") else str(b.role)}
+            for b in user_blocks
+        ]
+        variable_count = sum(
+            1 for b in all_blocks if b["role"] == "variable"
+        )
+        all_conns = sorted(
+            [{"connection_id": c.connection_id,
+              "src_block": c.src_block,
+              "src_port": _coerce_port(c.src_port),
+              "dst_block": c.dst_block,
+              "dst_port": _coerce_port(c.dst_port)}
+             for c in snapshot.connections],
+            key=lambda x: x["connection_id"],
+        )
+        block_summaries = [
+            f"{b['instance_name']} ({b['block_type']})" for b in all_blocks[:3]
+        ]
+        if len(all_blocks) > 3:
+            block_summaries.append(f"... +{len(all_blocks) - 3} more")
+        summary_text = (
+            f"{Path(self.path).name if self.path else 'graph'}: "
+            f"{len(all_blocks)} blocks, {len(all_conns)} connections. "
+            + ", ".join(block_summaries)
+        )
+        gid = self._persisted_file_sha256 or ""
         return {
             "ok": snapshot.ok,
+            "path": str(self.path) if self.path else None,
+            "graph_id": f"grc:{gid}" if gid else None,
             "graph_name": snapshot.graph_name,
-            "blocks": [{"instance_name": b.instance_name, "block_type": b.block_type,
-                         "role": b.role.value if hasattr(b.role, "value") else str(b.role)}
-                        for b in snapshot.blocks[:block_limit]],
-            "validation": snapshot.validation.model_dump(exclude_none=True),
+            "block_count": len(all_blocks),
+            "connection_count": len(all_conns),
+            "variable_count": variable_count,
+            "dirty": self.is_dirty,
+            "blocks": all_blocks[:block_limit],
+            "connections": all_conns,
+            "validation": validation_payload,
+            "summary": summary_text,
         }
 
     def validation_state(self) -> dict[str, Any]:

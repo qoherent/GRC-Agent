@@ -39,7 +39,11 @@ def join_non_empty(*parts: Any, separator: str = " ") -> str:
 
 def build_error_payload(*, error_type: str, message: str,
                         details: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"ok": False, "errors": [{"code": error_type, "message": message}]}
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error_type": error_type,
+        "errors": [{"code": error_type, "message": message}],
+    }
     if details:
         payload["details"] = details
     return payload
