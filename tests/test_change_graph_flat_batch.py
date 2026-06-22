@@ -60,7 +60,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                 "update_params": [
                     {
                         "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
+                        "params": {"value": "32000"},
                     }
                 ]
             },
@@ -68,11 +68,11 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self._param(agent.session, "samp_rate", "value"), "48000")
+        self.assertEqual(self._param(agent.session, "samp_rate", "value"), "32000")
 
         reloaded = FlowgraphSession()
         reloaded.load(path)
-        self.assertEqual(self._param(reloaded, "samp_rate", "value"), "48000")
+        self.assertEqual(self._param(reloaded, "samp_rate", "value"), "32000")
 
     def test_flat_update_variables_commits_and_reloads_exact_values(self) -> None:
         tmp, path, agent = self._load_temp_agent()
@@ -84,7 +84,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                 "update_params": [
                     {
                         "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
+                        "params": {"value": "32000"},
                     }
                 ]
             },
@@ -92,11 +92,11 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self._param(agent.session, "samp_rate", "value"), "48000")
+        self.assertEqual(self._param(agent.session, "samp_rate", "value"), "32000")
 
         reloaded = FlowgraphSession()
         reloaded.load(path)
-        self.assertEqual(self._param(reloaded, "samp_rate", "value"), "48000")
+        self.assertEqual(self._param(reloaded, "samp_rate", "value"), "32000")
 
     def test_bad_param_shape_is_rejected_before_mutation_with_actionable_hint(self) -> None:
         tmp, _path, agent = self._load_temp_agent()
@@ -409,7 +409,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
                 "update_params": [
                     {
                         "instance_name": "samp_rate",
-                        "params": {"value": "48000"},
+                        "params": {"value": "32000"},
                     }
                 ]
             },

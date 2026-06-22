@@ -121,7 +121,6 @@ def dispatch_flat_change_graph_batch(
             _record_error("remove_block_failed", str(exc))
 
     # update_params
-    all_noop = True
     for entry in _as_list(update_params, "update_params", errors):
         if not isinstance(entry, dict):
             continue
@@ -130,18 +129,13 @@ def dispatch_flat_change_graph_batch(
         if not name:
             _record_error("invalid_update", f"update_params entry needs instance_name: {entry}")
             continue
-        if set_param_noop_check(fg, name, params):
-            continue
-        all_noop = False
         try:
             apply_mutation(fg, "update_params", instance_name=name, params=params)
             ops_applied += 1
         except KeyError as exc:
             _record_error("parameter_not_found", str(exc))
-            all_noop = False
         except Exception as exc:
             _record_error("update_params_failed", str(exc))
-            all_noop = False
 
     # update_states
     for entry in _as_list(update_states, "update_states", errors):
@@ -152,15 +146,11 @@ def dispatch_flat_change_graph_batch(
         if not name or not state:
             _record_error("invalid_state", f"update_states entry needs instance_name and state: {entry}")
             continue
-        if set_block_state_noop_check(fg, name, state):
-            continue
-        all_noop = False
         try:
             apply_mutation(fg, "update_states", instance_name=name, state=state)
             ops_applied += 1
         except Exception as exc:
             _record_error("update_states_failed", str(exc))
-            all_noop = False
 
     # add_connections
     for entry in _as_list(add_connections, "add_connections", errors):
@@ -209,7 +199,7 @@ def dispatch_flat_change_graph_batch(
                 pass
     else:
         committed = True
-    if committed and ops_applied and not all_noop:
+    if committed and ops_applied:
         agent.session.is_dirty = True
         agent.session._bump_state_revision()
         if agent.session.path is not None:
