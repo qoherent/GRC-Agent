@@ -383,9 +383,20 @@ def connect(flow_graph: Any, src_block: str, src_port: str,
 
 def disconnect(flow_graph: Any, src_block: str, src_port: str,
                dst_block: str, dst_port: str) -> None:
-    src = _find_port(flow_graph, src_block, src_port, kind="source")
-    dst = _find_port(flow_graph, dst_block, dst_port, kind="sink")
-    flow_graph.disconnect(src, dst)
+    """Remove a single connection. Native ``flow_graph.disconnect(src, dst)``
+    removes every connection from the source port (not just the named edge),
+    so we locate the exact ``Connection`` object and drop it from the set.
+    """
+    for connection in list(flow_graph.connections):
+        if (connection.source_block.name == src_block
+                and connection.source_port.key == src_port
+                and connection.sink_block.name == dst_block
+                and connection.sink_port.key == dst_port):
+            flow_graph.connections.remove(connection)
+            return
+    raise KeyError(
+        f"connection not found: {src_block}:{src_port}->{dst_block}:{dst_port}"
+    )
 
 
 def apply_mutation(flow_graph: Any, op_type: str, **kwargs: Any) -> None:

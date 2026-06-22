@@ -85,7 +85,7 @@ class FlowgraphSession:
             source_path
         )
 
-    def save(self, path: str | Path | None = None) -> None:
+    def save(self, path: str | Path | None = None, **_unused: Any) -> None:
         target = Path(path) if path is not None else self.path
         if target is None:
             raise ValueError("No save path: pass path= or load a file first.")

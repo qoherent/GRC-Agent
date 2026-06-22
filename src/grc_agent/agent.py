@@ -1520,7 +1520,10 @@ class GrcAgent:
             [
                 {
                     "op_type": "remove_connection",
-                    "connection_id": resolved_old_connection_id,
+                    "src_block": old_resolution["src_block"],
+                    "src_port": old_resolution["src_port"],
+                    "dst_block": old_resolution["dst_block"],
+                    "dst_port": old_resolution["dst_port"],
                 },
                 {
                     "op_type": "add_connection",
@@ -1562,14 +1565,14 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
     ) -> dict[str, Any]:
-        return resolve_rewire_new_endpoint_args_wrapper(
-            self,
-            old_connection_id=old_connection_id,
-            new_src_block=new_src_block,
-            new_src_port=new_src_port,
-            new_dst_block=new_dst_block,
-            new_dst_port=new_dst_port,
-        )
+        return {
+            "ok": True,
+            "clarification_required": False,
+            "new_src_block": new_src_block or "",
+            "new_src_port": str(new_src_port) if new_src_port is not None else "",
+            "new_dst_block": new_dst_block or "",
+            "new_dst_port": str(new_dst_port) if new_dst_port is not None else "",
+        }
 
     def _rewire_new_endpoint_candidates(
         self,
@@ -1655,18 +1658,20 @@ class GrcAgent:
         new_dst_block: str | None,
         new_dst_port: int | str | None,
     ) -> dict[str, Any]:
-        return resolve_old_rewire_connection_id_wrapper(
-            self,
-            old_connection_id=old_connection_id,
-            old_src_block=old_src_block,
-            old_src_port=old_src_port,
-            old_dst_block=old_dst_block,
-            old_dst_port=old_dst_port,
-            new_src_block=new_src_block,
-            new_src_port=new_src_port,
-            new_dst_block=new_dst_block,
-            new_dst_port=new_dst_port,
-        )
+        from grc_agent.session_ops import parse_connection_id
+        if not old_connection_id:
+            return {"ok": False, "error_type": "missing_old_connection_id",
+                    "message": "old_connection_id is required"}
+        parsed = parse_connection_id(old_connection_id)
+        if parsed is None:
+            return {"ok": False, "error_type": "malformed_old_connection_id",
+                    "message": f"Cannot parse connection id: {old_connection_id}"}
+        return {
+            "ok": True,
+            "clarification_required": False,
+            "old_connection_id": old_connection_id,
+            **parsed,
+        }
 
     def _rewire_clarification_payload(
         self,
