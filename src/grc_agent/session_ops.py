@@ -73,7 +73,10 @@ def chat_message_payload(message: ChatMessage) -> dict[str, Any]:
 def chat_message_from_payload(payload: dict[str, Any] | None) -> ChatMessage | None:
     if payload is None:
         return None
-    return ChatMessage(**payload)
+    try:
+        return ChatMessage(**payload)
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- #

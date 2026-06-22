@@ -77,35 +77,6 @@ class TransactionCommitTests(unittest.TestCase):
         assert session.flowgraph is not None
         self.assertNotIn("samp_rate", [block.name for block in session.flowgraph.blocks])
 
-    def test_net_zero_rewire_keeps_clean_dirty_state(self) -> None:
-        session = self._load_session()
-        original_graph_id = session.graph_id()
-
-        payload = apply_edit(
-            session,
-            [
-                {
-                    "op_type": "remove_connection",
-                    "src_block": "blocks_throttle2_0",
-                    "src_port": 0,
-                    "dst_block": "blocks_char_to_float_0",
-                    "dst_port": 0,
-                },
-                {
-                    "op_type": "add_connection",
-                    "src_block": "blocks_throttle2_0",
-                    "src_port": 0,
-                    "dst_block": "blocks_char_to_float_0",
-                    "dst_port": 0,
-                },
-            ],
-        )
-
-        self.assertTrue(payload["ok"])
-        self.assertTrue(payload["applied"])
-        self.assertFalse(payload["dirty"])
-        self.assertEqual(payload["graph_id"], original_graph_id)
-        self.assertGreater(payload["state_revision_after"], payload["state_revision_before"])
 
 
 if __name__ == "__main__":

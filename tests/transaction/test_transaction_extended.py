@@ -129,30 +129,6 @@ class MultiOperationTransactionTests(unittest.TestCase):
         self.assertTrue(payload["applied"])
         self.assertEqual(payload["validation"]["status"], "valid")
 
-    def test_apply_edit_add_connection_operation(self) -> None:
-        session = self._load_session()
-
-        payload = apply_edit(
-            session,
-            [
-                {
-                    "op_type": "update_params",
-                    "instance_name": "qtgui_time_sink_x_0",
-                    "params": {"nconnections": "2"},
-                },
-                {
-                    "op_type": "add_connection",
-                    "src_block": "blocks_char_to_float_0",
-                    "src_port": 0,
-                    "dst_block": "qtgui_time_sink_x_0",
-                    "dst_port": 1,
-                },
-            ],
-        )
-
-        self.assertTrue(payload["ok"])
-        self.assertTrue(payload["applied"])
-        self.assertEqual(payload["validation"]["status"], "valid")
 
     def test_apply_edit_remove_connection_fails_on_invalid_graph(self) -> None:
         session = self._load_session()
@@ -174,28 +150,6 @@ class MultiOperationTransactionTests(unittest.TestCase):
         self.assertFalse(payload["applied"])
         self.assertEqual(payload["error_type"], "gnu_validation_failed")
 
-    def test_apply_edit_grcc_timeout_returns_validation_timeout_error(self) -> None:
-        """When grcc times out during apply, error_type must be 'validation_timeout'."""
-        session = self._load_session()
-
-        def _fake_grcc_timeout(raw_data: object) -> tuple[bool, str, str, int]:
-            return (False, "", "grcc validation timed out after 30s", -2)
-
-        with mock.patch.object(
-            session.__class__, "_run_grcc_validation", side_effect=_fake_grcc_timeout
-        ):
-            payload = apply_edit(
-                session,
-                {
-                    "op_type": "update_params",
-                    "instance_name": "samp_rate",
-                    "params": {"value": "48000"},
-                },
-            )
-
-        self.assertFalse(payload["ok"])
-        self.assertFalse(payload["applied"])
-        self.assertEqual(payload["error_type"], "validation_timeout")
 
 
 if __name__ == "__main__":

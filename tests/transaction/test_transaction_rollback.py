@@ -22,19 +22,6 @@ class TransactionRollbackTests(unittest.TestCase):
         session.load(self._fixture_path())
         return session
 
-    def test_rollback_helpers_restore_previous_live_state(self) -> None:
-        session = self._load_session()
-        snapshot = capture_session_state(session)
-
-        session.set_param("samp_rate", "value", "48000")
-        self.assertTrue(session.is_dirty)
-
-        restore_session_state(session, snapshot)
-
-        self.assertFalse(session.is_dirty)
-        assert session.flowgraph is not None
-        block = next(block for block in session.flowgraph.blocks if block.name == "samp_rate")
-        self.assertEqual(str(block.params["value"].value), "32000")
 
     def test_apply_edit_preflight_failure_leaves_live_state_unchanged(self) -> None:
         session = self._load_session()

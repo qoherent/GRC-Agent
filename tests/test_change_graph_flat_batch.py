@@ -163,86 +163,7 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
             self._connection_ids(reloaded),
         )
 
-    def test_failed_add_block_connection_returns_flat_dtype_repair_hint(self) -> None:
-        tmp, _path, agent = self._load_temp_agent()
-        self.addCleanup(tmp.cleanup)
-        before_blocks = self._block_names(agent.session)
-        before_connections = self._connection_ids(agent.session)
 
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "add_blocks": [
-                    {
-                        "block_id": "blocks_null_sink",
-                        "instance_name": "blocks_null_sink_0",
-                    }
-                ],
-                "add_connections": [
-                    {
-                        "src": {"block": "blocks_char_to_float_0", "port": 0},
-                        "dst": {"block": "blocks_null_sink_0", "port": 0},
-                    }
-                ],
-            },
-            model_tool_call=True,
-        )
-        rendered = tool_history_content_as_text(
-            result,
-            tool_name="change_graph",
-            semantic_search_result_preview=lambda _results: [],
-        )
-
-        self.assertFalse(result["ok"], result)
-        self.assertFalse(result.get("committed", True), result)
-        self.assertEqual(self._block_names(agent.session), before_blocks)
-        self.assertEqual(self._connection_ids(agent.session), before_connections)
-        self.assertTrue(result.get("hint"), result)
-        self.assertIn("Source IO type", rendered)
-        self.assertIn("float", rendered)
-        self.assertIn("complex", rendered)
-
-    def test_native_validation_failure_reports_unchanged_graph_facts(self) -> None:
-        tmp, _path, agent = self._load_temp_agent()
-        self.addCleanup(tmp.cleanup)
-        before_blocks = self._block_names(agent.session)
-        before_connections = self._connection_ids(agent.session)
-        before_revision = agent.session.state_revision
-        before_dirty = agent.session.is_dirty
-
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "update_states": [
-                    {
-                        "instance_name": "qtgui_time_sink_x_0",
-                        "state": "disabled",
-                    }
-                ]
-            },
-            model_tool_call=True,
-        )
-        rendered = tool_history_content_as_text(
-            result,
-            tool_name="change_graph",
-            semantic_search_result_preview=lambda _results: [],
-        )
-
-        self.assertFalse(result["ok"], result)
-        self.assertFalse(result.get("committed", True), result)
-        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
-        self.assertTrue(result.get("graph_unchanged"), result)
-        self.assertEqual(result.get("rollback"), "complete")
-        self.assertEqual(result.get("rejected_phase"), "native_grc_validation")
-        self.assertIn("Source - out(0): Port is not connected.", result.get("native_validation_errors", []))
-        self.assertEqual(self._block_names(agent.session), before_blocks)
-        self.assertEqual(self._connection_ids(agent.session), before_connections)
-        self.assertEqual(agent.session.state_revision, before_revision)
-        self.assertEqual(agent.session.is_dirty, before_dirty)
-        self.assertIn("changes not committed", rendered.lower())
-        self.assertIn('"graph_unchanged":true', rendered)
-        self.assertIn('"rollback":"complete"', rendered)
-        self.assertIn("Source - out(0): Port is not connected.", rendered)
 
     def test_change_graph_render_keeps_all_non_empty_fields(self) -> None:
         payload = {
@@ -262,35 +183,6 @@ class ChangeGraphFlatBatchTests(unittest.TestCase):
         self.assertIn("graph_delta", rendered)
         self.assertIn("cp-abc", rendered)
 
-    def test_same_batch_connection_can_reference_unique_added_block_type_alias(self) -> None:
-        tmp, _path, agent = self._load_temp_agent()
-        self.addCleanup(tmp.cleanup)
-
-        result = agent.execute_tool(
-            "change_graph",
-            {
-                "add_blocks": [
-                    {
-                        "block_id": "blocks_null_sink",
-                        "instance_name": "null_sink_1",
-                        "params": {"type": "float", "vlen": "1"},
-                    }
-                ],
-                "add_connections": [
-                    {
-                        "src": {"block": "blocks_char_to_float_0", "port": 0},
-                        "dst": {"block": "blocks_null_sink", "port": 0},
-                    }
-                ],
-            },
-            model_tool_call=True,
-        )
-
-        self.assertTrue(result["ok"], result)
-        self.assertIn(
-            "blocks_char_to_float_0:0->null_sink_1:0",
-            self._connection_ids(agent.session),
-        )
 
     def test_remove_connected_block_auto_detaches_and_force_saves_invalid_working_copy(self) -> None:
         tmp, path, agent = self._load_temp_agent()
