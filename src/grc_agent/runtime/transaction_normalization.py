@@ -287,14 +287,15 @@ class TransactionNormalizer:
         instance_name = normalized.get("src_block") or normalized.get("dst_block")
         if not isinstance(instance_name, str):
             return normalized
-        conns = [c for c in self._session.flowgraph.connections if c.src_block == instance_name or c.dst_block == instance_name]
+        conns = [c for c in self._session.flowgraph.connections
+                 if c.source_block.name == instance_name or c.sink_block.name == instance_name]
         if len(conns) == 1:
             c = conns[0]
             repaired = dict(normalized)
-            repaired.setdefault("src_block", c.src_block)
-            repaired.setdefault("src_port", c.src_port)
-            repaired.setdefault("dst_block", c.dst_block)
-            repaired.setdefault("dst_port", c.dst_port)
+            repaired.setdefault("src_block", c.source_block.name)
+            repaired.setdefault("src_port", _coerce_port_key(c.source_port.key))
+            repaired.setdefault("dst_block", c.sink_block.name)
+            repaired.setdefault("dst_port", _coerce_port_key(c.sink_port.key))
             return repaired
         return normalized
 
@@ -405,3 +406,11 @@ class TransactionNormalizer:
             seen_serialized.add(serialized)
             deduped.append(operation)
         return deduped
+
+
+def _coerce_port_key(value: str) -> str | int:
+    """Return int if port key is numeric, string otherwise."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return value

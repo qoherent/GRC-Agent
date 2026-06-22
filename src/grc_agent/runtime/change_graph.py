@@ -111,16 +111,16 @@ def dispatch_flat_change_graph_batch(
         if not block_id or not instance_name:
             _record_error("invalid_block", f"add_blocks entry needs block_id and instance_name: {entry}")
             continue
+        # Duplicate name detection (Phase 5): GRC allows duplicate names but they
+        # cause validation chaos. Reject here with a clear error.
+        if any((b.name or b.key) == instance_name for b in fg.blocks):
+            _record_error("duplicate_block_name",
+                          f"a block named {instance_name!r} already exists")
+            continue
         try:
             apply_mutation(fg, "add_block", block_type=block_id,
                            instance_name=instance_name, parameters=entry.get("params") or {})
             ops_applied += 1
-        except ValueError as exc:
-            msg = str(exc)
-            if msg.startswith("duplicate_block_name"):
-                _record_error("duplicate_block_name", msg)
-            else:
-                _record_error("add_block_failed", msg)
         except Exception as exc:
             _record_error("add_block_failed", str(exc))
 
