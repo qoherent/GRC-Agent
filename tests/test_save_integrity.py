@@ -61,7 +61,7 @@ class SaveIntegrityTests(unittest.TestCase):
             self.assertEqual(session.persisted_file_sha256, loaded_hash)
             self.assertEqual(session.file_integrity_state()["status"], "clean")
 
-            session.set_param("samp_rate", "value", "48000")
+            session.set_param("samp_rate", "value", "32000")
             _mark_session_valid(session)
             session.save()
 

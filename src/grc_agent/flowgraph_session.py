@@ -78,7 +78,7 @@ class FlowgraphSession:
     # -- load / save ----------------------------------------------------------
 
     @classmethod
-    def create(cls, path: str | Path | None = None) -> FlowgraphSession:
+    def create(cls, path: str | Path | None = None, **kwargs: Any) -> FlowgraphSession:
         """Create a session with a blank native flowgraph."""
         from grc_agent.grc_native_adapter import get_platform
         session = cls(path)
@@ -96,6 +96,14 @@ class FlowgraphSession:
         self._persisted_file_sha256 = FlowgraphSession._read_file_sha256_if_available(
             source_path
         )
+
+    def session_provenance(self) -> dict[str, Any]:
+        """Return provenance info (path, loaded file) for tool results."""
+        return {
+            "path": str(self.path) if self.path is not None else None,
+            "loaded_from": str(self.path) if self.path is not None else "new_graph",
+            "grc_version": None,
+        }
 
     def save(self, path: str | Path | None = None, **_unused: Any) -> None:
         target = Path(path) if path is not None else self.path
