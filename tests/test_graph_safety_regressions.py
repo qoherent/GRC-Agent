@@ -30,7 +30,8 @@ def _load_agent(path: Path) -> GrcAgent:
 def _connection_ids(session: FlowgraphSession) -> list[str]:
     assert session.flowgraph is not None
     return sorted(
-        connection_id(c.src_block, c.src_port, c.dst_block, c.dst_port)
+        connection_id(c.source_block.name, c.source_port.key,
+                      c.sink_block.name, c.sink_port.key)
         for c in session.flowgraph.connections
     )
 
@@ -52,10 +53,10 @@ class GraphSafetyRegressionTests(unittest.TestCase):
         self.assertIn("strobe_0:strobe->debug_0:print", before_ids)
         assert agent.session.flowgraph is not None
         target = next(
-            c for c in agent.session.flowgraph.connections if c.dst_block == "debug_0"
+            c for c in agent.session.flowgraph.connections if c.sink_block.name == "debug_0"
         )
-        self.assertIsInstance(target.src_port, str)
-        self.assertIsInstance(target.dst_port, str)
+        self.assertIsInstance(target.source_port.key, str)
+        self.assertIsInstance(target.sink_port.key, str)
 
         result = agent.execute_tool(
             "change_graph",

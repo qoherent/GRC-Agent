@@ -198,6 +198,11 @@ def dispatch_flat_change_graph_batch(
     if committed and ops_applied:
         agent.session.is_dirty = True
         agent.session._bump_state_revision()
+        if agent.session.path is not None:
+            try:
+                agent.session.save()
+            except Exception:
+                pass
 
     validation_status = "unknown"
     validation_errors: list[str] = []

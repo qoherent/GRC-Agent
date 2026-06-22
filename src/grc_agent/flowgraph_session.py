@@ -180,26 +180,31 @@ class FlowgraphSession:
         from grc_agent.grc_native_adapter import _find_block, set_param as _set_param
         _set_param(_find_block(self.flowgraph, instance_name), key, str(value))
         self.is_dirty = True
+        self._bump_state_revision()
 
     def set_block_state(self, instance_name: str, state: str, *, block_type: str | None = None) -> None:
         from grc_agent.grc_native_adapter import _find_block, set_block_state as _set_state
         _set_block_state(_find_block(self.flowgraph, instance_name), state)
         self.is_dirty = True
+        self._bump_state_revision()
 
     def connect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
         from grc_agent.grc_native_adapter import connect as _connect
         _connect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
         self.is_dirty = True
+        self._bump_state_revision()
 
     def disconnect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
         from grc_agent.grc_native_adapter import disconnect as _disconnect
         _disconnect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
         self.is_dirty = True
+        self._bump_state_revision()
 
     def remove_block(self, instance_name: str, *, block_type: str | None = None) -> None:
         from grc_agent.grc_native_adapter import remove_block as _remove
         _remove(self.flowgraph, instance_name)
         self.is_dirty = True
+        self._bump_state_revision()
 
     def add_block(self, instance_name: str, block_type: str,
                   parameters: dict[str, Any] | None = None,
@@ -208,6 +213,7 @@ class FlowgraphSession:
         from grc_agent.grc_native_adapter import add_block as _add
         _add(self.flowgraph, block_type, instance_name, parameters or {})
         self.is_dirty = True
+        self._bump_state_revision()
 
     # -- integrity ------------------------------------------------------------
 
