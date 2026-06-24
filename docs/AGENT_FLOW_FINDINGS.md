@@ -440,24 +440,106 @@ model-capability limit.
 
 ---
 
-## 14. Open Questions
+## 14. Experiment Results (Fix A + Fix B)
+
+### 14.1 Fix A: catalog enum values
+
+**Change:** `src/grc_agent/catalog/schema.py:196` — when a param is
+`dtype=enum` with non-empty options, include the allowed values in
+the model-facing payload:
+
+Before: `"type": "enum="`
+After: `"type": "enum=[complex,float,int,short,byte]="`
+
+**Risk:** minimal. Same `key=value` shorthand format. Pure capability data.
+
+### 14.2 Fix B: tool-side type hint
+
+**Change:** `src/grc_agent/runtime/change_graph.py` —
+`_connection_dtype_hint` now accepts a `new_block_names` set and, if
+either endpoint was newly added in the batch, looks at the new
+block's `type` enum param to find the value matching the neighbor's
+dtype. The hint reads e.g.:
+
+> `"Source IO type: float; Sink IO type: complex; Set type='float' on 'mid_throttle'"`
+
+`_type_hint_for_validation` extends this to `gnu_validation` errors
+that come from the final `validate()` call (not just `add_connection`
+failures), so the hint appears in every relevant error response.
+
+**Risk:** low. The hint is text in the documented `errors[].hint` field.
+The rule is uniform (every newly-added block with a matching enum
+option gets the same hint). No hand-picked heuristics.
+
+### 14.3 Results
+
+| Scenario | Status before A+B | Status after A+B |
+|----------|------------------|------------------|
+| 01 add_throttle | ✗ (no type=float) | **✓** (model picks float from enum options) |
+| 02 update_sample_rate | ✓ | ✓ |
+| 03 disable_and_enable | ✓ | ✓ |
+| 04 add_and_remove_variable | ✓ | ✓ |
+| 05 full_rewire | ✓ | ✗ (model still misroutes type, doesn't apply hint) |
+| 06 query_knowledge_multiply | ✗ (no params field) | ✗ (same — model emits no params at all) |
+| 07 force_disabled_connected_block | ✓ | ✓ |
+| 08 fm_rx_insert_throttle | ✗ | ✗ |
+
+**Aggregate:** 5/8 (unchanged). Scenario 01 went from ✗ to ✓. Scenario 05
+regressed from ✓ to ✗ (model non-determinism; the model did get the
+hint but placed `type` at the wrong level).
+
+### 14.4 The persistent failure pattern
+
+Scenarios 05, 06, 08 still fail because the model:
+- Reads the hint "Set type='float' on X"
+- Doesn't translate this into the correct JSON structure
+  (puts `type` at the wrong nesting level, or omits `params` entirely)
+
+This is a **model structure-output failure**, not a discovery or
+reasoning failure. The model knows WHAT to do but doesn't encode
+the JSON correctly.
+
+### 14.5 Remaining levers
+
+1. **Schema change: make `params` required when `block_id` ends in `_xx`.**
+   — AGENTS.md: hand-picked heuristic for block families. Forbidden.
+2. **Bigger model (replace 7.5B with 12B+).** — operational cost, not a
+   code change.
+3. **Accept 5/8 as the current ceiling for this model.** — realistic
+   given the persistent structure-output failures.
+
+---
+
+## 15. Final Status
+
+- **Syntactic success:** solved (0 schema rejections, max nesting 2)
+- **Output truncation:** solved (num_ctx=8192)
+- **Discovery gap:** closed (Fix A: enum values visible)
+- **Reasoning hint:** added (Fix B: type suggestion in errors)
+- **Structural output failure:** remaining — model doesn't encode
+  the correct JSON params structure despite seeing all signals
+
+**Recommended action:** ship Fix A + Fix B as wins for cases where the
+model CAN produce the right JSON structure (scenario 01 succeeds).
+Accept 5/8 as the current ceiling. Do not add per-scenario heuristics
+or schema changes targeting specific block families — these would
+violate AGENTS.md:32.
+
+---
+
+## 16. Open Questions
 
 1. Should the round cap be replaced with a repeat-call cap?
-   - Currently: 8-round cap never triggered (max turns used: 8 in scenario 03)
-   - With num_ctx fix, output truncation is no longer the issue
-   - The round cap is a vestigial safety net now
-2. Should the system prompt add the `*_xx` direction, or should it go in
-   user prompts?
-   - System prompt: tried — partial success (scenario 05 fixed)
-   - User prompts: ambiguous phrasing ("use X for Y") is a separate problem
-3. Are there other hidden ceilings besides `num_ctx` and the round cap?
-   - The model also produces `reasoning` content (separate field) that
-     was counted in completion_tokens but invisible. With num_ctx=8192,
-     the model has room to output both thinking and content.
-4. Does the 4B model (gemma4:e4b-it-qat, 7.5B actual params) have
-   reasoning limits that no amount of context/prompt fixing can solve?
-   - **Evidence suggests yes** for scenarios 01, 06, 08 (the model
-     reads multiple signals but doesn't act on them).
-   - The remaining option is to make the catalog emit valid enum values
-     for `type` (Fix F3) so the model can discover `type=float` without
-     relying on its own inference.
+   - Currently: 8-round cap never triggered
+   - With num_ctx=8192 and no other ceilings, the round cap is
+     vestigial — could be removed or replaced with repeat-call cap
+2. Is 5/8 the current ceiling for this model, or is there another
+   intervention worth trying?
+   - Prompts are exhausted (system + user both have type=float)
+   - Tool errors have explicit hints
+   - Catalog shows all enum values
+   - Remaining: structural-output failure on the model side
+3. Should we add a structural-output check in `change_graph` that
+   validates the params dict has the right keys for `_xx` blocks?
+   - This would be a schema-level per-family heuristic. AGENTS.md:32
+     forbids per-scenario branches. Skip.
