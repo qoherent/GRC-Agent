@@ -268,10 +268,14 @@ def dispatch_flat_change_graph_batch(
     # force=True, or rolled back). The model needs to know the graph is
     # invalid so it can decide whether to fix the issue or set force=true.
     if validation_errors and not validation_native_ok:
+        type_hint = _type_hint_for_validation(
+            fg, validation_errors, new_block_names
+        )
         for msg in validation_errors:
-            payload.setdefault("errors", []).append(
-                {"code": "gnu_validation", "message": msg}
-            )
+            entry: dict[str, Any] = {"code": "gnu_validation", "message": msg}
+            if type_hint:
+                entry["hint"] = type_hint
+            payload.setdefault("errors", []).append(entry)
         if not committed:
             payload["error_type"] = ErrorCode.GNU_VALIDATION_FAILED
 
@@ -291,6 +295,45 @@ def _as_list(value: Any, field_name: str, errors: list[dict[str, str]]) -> list[
         return value
     errors.append({"code": "invalid_field", "message": f"{field_name} must be a list."})
     return []
+
+
+def _type_hint_for_validation(
+    fg: Any,
+    validation_errors: list[str],
+    new_block_names: set[str],
+) -> str | None:
+    """If a validation error is an IO type/size mismatch and the batch
+    contains a newly-added block with a ``type`` enum param, return a
+    hint suggesting the matching enum value.
+    """
+    if not new_block_names:
+        return None
+    is_io_mismatch = any(
+        "IO type" in msg or "IO size" in msg for msg in validation_errors
+    )
+    if not is_io_mismatch:
+        return None
+    for name in new_block_names:
+        try:
+            block = fg.get_block(name)
+        except Exception:
+            continue
+        type_param = block.params.get("type")
+        if type_param is None:
+            continue
+        if type_param.dtype != "enum":
+            continue
+        opts = list(type_param.options or [])
+        for msg in validation_errors:
+            for dtype, value in [
+                ("float", "float"),
+                ("complex", "complex"),
+                ("int", "int"),
+                ("short", "short"),
+            ]:
+                if dtype in msg and value in opts:
+                    return f"Set type='{value}' on '{name}'"
+    return None
 
 
 def _connection_dtype_hint(
