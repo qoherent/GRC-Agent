@@ -174,19 +174,23 @@ def dispatch_flat_change_graph_batch(
     for entry in _as_list(remove_connections, "remove_connections", errors):
         conn_id = entry if isinstance(entry, str) else str(entry.get("connection_id", "")).strip()
         parsed = parse_connection_id(conn_id)
-        if parsed:
-            try:
-                apply_mutation(
-                    fg,
-                    "remove_connection",
-                    src_block=parsed["src_block"],
-                    src_port=str(parsed["src_port"]),
-                    dst_block=parsed["dst_block"],
-                    dst_port=str(parsed["dst_port"]),
-                )
-                ops_applied += 1
-            except KeyError:
-                pass
+        if not parsed:
+            _record_error("invalid_connection", f"unparseable connection_id: {conn_id!r}")
+            continue
+        try:
+            apply_mutation(
+                fg,
+                "remove_connection",
+                src_block=parsed["src_block"],
+                src_port=str(parsed["src_port"]),
+                dst_block=parsed["dst_block"],
+                dst_port=str(parsed["dst_port"]),
+            )
+            ops_applied += 1
+        except KeyError:
+            pass
+        except Exception as exc:
+            _record_error("remove_connection_failed", str(exc))
 
     # add_connections
     for entry in _as_list(add_connections, "add_connections", errors):
