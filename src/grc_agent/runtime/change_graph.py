@@ -121,10 +121,7 @@ def dispatch_flat_change_graph_batch(
 
     # remove_blocks
     for entry in _as_list(remove_blocks, "remove_blocks", errors):
-        if not isinstance(entry, dict):
-            _record_error("invalid_field", f"remove_blocks entry must be an object: {entry}")
-            continue
-        name = str(entry.get("instance_name", "")).strip()
+        name = str(entry).strip() if not isinstance(entry, dict) else str(entry.get("instance_name", "")).strip()
         if not name:
             continue
         try:
@@ -192,22 +189,31 @@ def dispatch_flat_change_graph_batch(
         except Exception as exc:
             _record_error("remove_connection_failed", str(exc))
 
-    # add_connections
+    # add_connections (flat strings: "src:port->dst:port")
     for entry in _as_list(add_connections, "add_connections", errors):
-        src, dst = _parse_connection_endpoints(entry, errors)
-        if src and dst:
-            try:
-                apply_mutation(fg, "add_connection", **src, **dst)
-                ops_applied += 1
-            except Exception as exc:
-                hint = _connection_dtype_hint(
-                    fg,
-                    src["src_block"],
-                    src["src_port"],
-                    dst["dst_block"],
-                    dst["dst_port"],
-                )
-                _record_error("add_connection_failed", str(exc), hint=hint)
+        parsed = parse_connection_id(str(entry))
+        if not parsed:
+            _record_error("invalid_connection", f"unparseable connection: {entry!r}")
+            continue
+        try:
+            apply_mutation(
+                fg,
+                "add_connection",
+                src_block=parsed["src_block"],
+                src_port=str(parsed["src_port"]),
+                dst_block=parsed["dst_block"],
+                dst_port=str(parsed["dst_port"]),
+            )
+            ops_applied += 1
+        except Exception as exc:
+            hint = _connection_dtype_hint(
+                fg,
+                parsed["src_block"],
+                str(parsed["src_port"]),
+                parsed["dst_block"],
+                str(parsed["dst_port"]),
+            )
+            _record_error("add_connection_failed", str(exc), hint=hint)
 
     # Validate the final state.
     validation = validate(fg) if ops_applied else None
@@ -286,31 +292,6 @@ def _as_list(value: Any, field_name: str, errors: list[dict[str, str]]) -> list[
         return value
     errors.append({"code": "invalid_field", "message": f"{field_name} must be a list."})
     return []
-
-
-def _parse_connection_endpoints(
-    entry: Any, errors: list[dict[str, str]]
-) -> tuple[dict, dict] | tuple[None, None]:
-    if not isinstance(entry, dict):
-        errors.append(
-            {"code": "invalid_connection", "message": f"connection entry must be a dict: {entry}"}
-        )
-        return None, None
-    src = entry.get("src") or {}
-    dst = entry.get("dst") or {}
-    if not isinstance(src, dict) or not isinstance(dst, dict):
-        errors.append(
-            {"code": "invalid_connection", "message": f"connection needs src/dst dicts: {entry}"}
-        )
-        return None, None
-    src_args = {"src_block": str(src.get("block", "")), "src_port": str(src.get("port", ""))}
-    dst_args = {"dst_block": str(dst.get("block", "")), "dst_port": str(dst.get("port", ""))}
-    if not src_args["src_block"] or not dst_args["dst_block"]:
-        errors.append(
-            {"code": "invalid_connection", "message": f"connection needs block+port: {entry}"}
-        )
-        return None, None
-    return src_args, dst_args
 
 
 def _connection_dtype_hint(

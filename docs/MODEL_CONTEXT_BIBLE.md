@@ -97,7 +97,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "change_graph",
-      "description": "Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction.",
+      "description": "Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction. At least one array must be provided.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -110,11 +110,11 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
               "properties": {
                 "block_id": {
                   "type": "string",
-                  "description": "Installed GNU Radio catalog block ID."
+                  "description": "Installed GNU Radio catalog block ID (e.g. 'analog_sig_source_x')."
                 },
                 "instance_name": {
                   "type": "string",
-                  "description": "New unique graph instance name."
+                  "description": "New unique graph instance name (e.g. 'my_source')."
                 },
                 "params": {
                   "type": "object",
@@ -127,7 +127,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
                     "disabled",
                     "bypass"
                   ],
-                  "description": "Optional initial block state."
+                  "description": "Initial block state; defaults to 'enabled'."
                 }
               },
               "required": [
@@ -138,15 +138,9 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
           },
           "remove_blocks": {
             "type": "array",
-            "description": "Remove/delete existing blocks from the graph.",
+            "description": "Remove existing blocks from the graph by instance name.",
             "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "instance_name": {
-                  "type": "string"
-                }
-              }
+              "type": "string"
             }
           },
           "update_params": {
@@ -158,7 +152,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
               "properties": {
                 "instance_name": {
                   "type": "string",
-                  "description": "Target block instance name."
+                  "description": "Target block instance name (e.g. 'my_source')."
                 },
                 "params": {
                   "type": "object",
@@ -180,7 +174,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
               "properties": {
                 "instance_name": {
                   "type": "string",
-                  "description": "Target block instance name."
+                  "description": "Target block instance name (e.g. 'my_source')."
                 },
                 "state": {
                   "type": "string",
@@ -200,66 +194,21 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
           },
           "add_connections": {
             "type": "array",
-            "description": "Add exact src/dst endpoints by instance_name and port.",
+            "description": "Connection strings to add, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
             "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "src": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "block": {
-                      "type": "string"
-                    },
-                    "port": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "block",
-                    "port"
-                  ]
-                },
-                "dst": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "block": {
-                      "type": "string"
-                    },
-                    "port": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "block",
-                    "port"
-                  ]
-                }
-              },
-              "required": [
-                "src",
-                "dst"
-              ]
+              "type": "string"
             }
           },
           "remove_connections": {
             "type": "array",
-            "description": "Exact connection_id strings to remove.",
+            "description": "Connection strings to remove, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
             "items": {
               "type": "string"
             }
           },
           "force": {
             "type": "boolean",
-            "description": "Bypass final validation compilation check to force apply intermediate graph state."
+            "description": "When true, edits are committed even if validation fails (e.g. 'Port is not connected'). Default false. Set to true after a failed attempt with a validation error."
           }
         },
         "required": [],

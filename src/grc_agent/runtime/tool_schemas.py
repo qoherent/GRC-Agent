@@ -72,7 +72,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
     ),
     _schema(
         "change_graph",
-        "Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction.",
+        "Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction. At least one array must be provided.",
         {
             "add_blocks": {
                 "type": "array",
@@ -83,11 +83,11 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                     "properties": {
                         "block_id": {
                             "type": "string",
-                            "description": "Installed GNU Radio catalog block ID.",
+                            "description": "Installed GNU Radio catalog block ID (e.g. 'analog_sig_source_x').",
                         },
                         "instance_name": {
                             "type": "string",
-                            "description": "New unique graph instance name.",
+                            "description": "New unique graph instance name (e.g. 'my_source').",
                         },
                         "params": {
                             "type": "object",
@@ -96,7 +96,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                         "state": {
                             "type": "string",
                             "enum": ["enabled", "disabled", "bypass"],
-                            "description": "Optional initial block state.",
+                            "description": "Initial block state; defaults to 'enabled'.",
                         },
                     },
                     "required": ["block_id", "instance_name"],
@@ -104,14 +104,8 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
             },
             "remove_blocks": {
                 "type": "array",
-                "description": "Remove/delete existing blocks from the graph.",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "instance_name": {"type": "string"},
-                    },
-                },
+                "description": "Remove existing blocks from the graph by instance name.",
+                "items": {"type": "string"},
             },
             "update_params": {
                 "type": "array",
@@ -122,7 +116,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                     "properties": {
                         "instance_name": {
                             "type": "string",
-                            "description": "Target block instance name.",
+                            "description": "Target block instance name (e.g. 'my_source').",
                         },
                         "params": {
                             "type": "object",
@@ -141,7 +135,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                     "properties": {
                         "instance_name": {
                             "type": "string",
-                            "description": "Target block instance name.",
+                            "description": "Target block instance name (e.g. 'my_source').",
                         },
                         "state": {
                             "type": "string",
@@ -154,41 +148,17 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
             },
             "add_connections": {
                 "type": "array",
-                "description": "Add exact src/dst endpoints by instance_name and port.",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "src": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "block": {"type": "string"},
-                                "port": {"type": ["integer", "string"]},
-                            },
-                            "required": ["block", "port"],
-                        },
-                        "dst": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "block": {"type": "string"},
-                                "port": {"type": ["integer", "string"]},
-                            },
-                            "required": ["block", "port"],
-                        },
-                    },
-                    "required": ["src", "dst"],
-                },
+                "description": "Connection strings to add, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
+                "items": {"type": "string"},
             },
             "remove_connections": {
                 "type": "array",
-                "description": "Exact connection_id strings to remove.",
+                "description": "Connection strings to remove, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
                 "items": {"type": "string"},
             },
             "force": {
                 "type": "boolean",
-                "description": "Bypass final validation compilation check to force apply intermediate graph state.",
+                "description": "When true, edits are committed even if validation fails (e.g. 'Port is not connected'). Default false. Set to true after a failed attempt with a validation error.",
             },
         },
         required=[],
