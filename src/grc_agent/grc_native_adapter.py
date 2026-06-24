@@ -298,8 +298,8 @@ def render_flow_graph(flow_graph: Any, mode: str = "details") -> GrcFlowgraph:
     valid = bool(flow_graph.is_valid())
     errors = []
     if not valid:
-        for _elem, message in flow_graph.iter_error_messages():
-            errors.append(str(message))
+        for elem, message in flow_graph.iter_error_messages():
+            errors.append(_format_error(elem, message))
     options = getattr(flow_graph, "options_block", None)
     return GrcFlowgraph(
         ok=valid,
@@ -317,6 +317,23 @@ def render_flow_graph(flow_graph: Any, mode: str = "details") -> GrcFlowgraph:
 # --------------------------------------------------------------------------- #
 # Mutation helpers                                                             #
 # --------------------------------------------------------------------------- #
+
+
+def _format_error(elem: Any, msg: Any) -> str:
+    """Format a GRC validation error with element identity.
+
+    GRC's ``iter_error_messages`` yields ``(element, message)`` tuples
+    where the element is the Block/Port/Connection that has the error.
+    The element's ``str()`` includes port direction and key (e.g.,
+    ``'Sink - in2(2)'``). Prefixing the message with the parent block
+    name makes the error actionable: the model can identify WHICH block
+    and WHICH port has the problem.
+    """
+    parent = getattr(elem, "parent_block", None)
+    if parent is not None and parent is not elem:
+        return f"{parent.name}: {elem}: {msg}"
+    loc = str(elem)
+    return f"{loc}: {msg}" if loc else str(msg)
 
 
 def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) -> Any:
@@ -426,7 +443,7 @@ def validate(flow_graph: Any) -> GrcValidation:
     valid = bool(flow_graph.is_valid())
     return GrcValidation(
         status="valid" if valid else "invalid",
-        errors=[str(m) for _e, m in flow_graph.iter_error_messages()],
+        errors=[_format_error(e, m) for e, m in flow_graph.iter_error_messages()],
         native_ok=valid,
     )
 
