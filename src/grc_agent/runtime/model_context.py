@@ -184,7 +184,7 @@ def render_model_messages(
 
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-06-24-expression-params"
+__version__ = "2026-06-24-expression-params-xx-default"
 
 
 def build_system_prompt(session_id: str | None = None) -> str:
@@ -196,6 +196,8 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "query_knowledge: search catalog blocks or GNU Radio documentation.\n"
         "change_graph: add/remove blocks, edit field values, add/remove connections.\n"
         "Parameter values are string expressions; a variable reference is the variable's name.\n"
+        "New blocks whose id contains _xx / _ff / _cc / _ii default to type=complex; "
+        "set type explicitly (e.g. type=float) when the connection requires it.\n"
         'Variables are blocks; use block_id "variable" (not "parameter") to add one.\n'
         "Every GNU Radio fact must be grounded in query_knowledge, not memory.\n"
     )

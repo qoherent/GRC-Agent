@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-06-24-expression-params`
+Prompt version: `2026-06-24-expression-params-xx-default`
 
 ## Model-Facing Surface
 
@@ -30,6 +30,7 @@ inspect_graph: read topology, blocks, connections, field values, and validation 
 query_knowledge: search catalog blocks or GNU Radio documentation.
 change_graph: add/remove blocks, edit field values, add/remove connections.
 Parameter values are string expressions; a variable reference is the variable's name.
+New blocks whose id contains _xx / _ff / _cc / _ii default to type=complex; set type explicitly (e.g. type=float) when the connection requires it.
 Variables are blocks; use block_id "variable" (not "parameter") to add one.
 Every GNU Radio fact must be grounded in query_knowledge, not memory.
 

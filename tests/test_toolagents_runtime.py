@@ -230,7 +230,7 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
 
 
 class ToolAgentsProviderConfigTests(unittest.TestCase):
-    def test_create_settings_omits_llama_extra_body(self) -> None:
+    def test_create_settings_includes_ollama_num_ctx(self) -> None:
         from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
 
         mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
@@ -240,10 +240,12 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
         cfg = ToolAgentsLlamaProviderConfig(
             base_url="http://127.0.0.1:11434",
             model="qwen-1.5b",
+            num_ctx=8192,
         )
         cfg.create_settings(mock_provider)
-        set_value_calls = [call[0] for call in mock_settings.set_value.call_args_list]
-        self.assertNotIn("extra_body", [c[0] for c in set_value_calls])
+        mock_settings.set_value.assert_any_call(
+            "extra_body", {"options": {"num_ctx": 8192}}
+        )
 
     def test_openrouter_settings_includes_provider_extra_body(self) -> None:
         from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
@@ -263,7 +265,8 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
             cfg.create_settings(mock_provider)
 
         mock_settings.set_value.assert_any_call(
-            "extra_body", {"provider": {"order": ["alibaba"], "allow_fallbacks": False}}
+            "extra_body",
+            {"options": {"num_ctx": 8192}, "provider": {"order": ["alibaba"], "allow_fallbacks": False}},
         )
 
 

@@ -145,6 +145,7 @@ class ToolAgentsLlamaProviderConfig:
     max_tokens: int = 4096
     temperature: float = 0.0
     enable_thinking: bool = False
+    num_ctx: int = 8192
 
     @property
     def openai_base_url(self) -> str:
@@ -182,14 +183,16 @@ class ToolAgentsLlamaProviderConfig:
         settings.set_value("response_format", response_format)
         settings.add_request_setting("max_tokens", max_tokens or self.max_tokens)
         settings.add_request_setting("parallel_tool_calls", True)
+        extra_body: dict[str, Any] = {}
+        if self.num_ctx:
+            extra_body.setdefault("options", {})["num_ctx"] = self.num_ctx
         if "openrouter" in (self.base_url or "").lower():
-            extra_body = {}
             import os
 
             provider_order = os.getenv("OPENROUTER_PROVIDER_ORDER")
             allow_fallbacks = os.getenv("OPENROUTER_ALLOW_FALLBACKS")
 
-            provider_dict = {}
+            provider_dict: dict[str, Any] = {}
             if provider_order:
                 provider_dict["order"] = [p.strip() for p in provider_order.split(",")]
             if allow_fallbacks is not None:
@@ -198,8 +201,8 @@ class ToolAgentsLlamaProviderConfig:
             if provider_dict:
                 extra_body["provider"] = provider_dict
 
-            if extra_body:
-                settings.set_value("extra_body", extra_body)
+        if extra_body:
+            settings.set_value("extra_body", extra_body)
         return settings
 
 
