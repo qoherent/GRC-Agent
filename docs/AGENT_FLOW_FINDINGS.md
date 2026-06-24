@@ -585,27 +585,74 @@ which is a different class of failure that auto-resolve doesn't address.
 
 ---
 
-## 16. Final Status
+## 17. Error Format Fix (block+port identity in validation errors)
 
-- **Syntactic success:** solved (0 schema rejections, max nesting 2)
-- **Output truncation:** solved (num_ctx=8192)
-- **Discovery gap:** closed (Fix A: enum values visible)
-- **Type mismatch:** closed (auto-resolve: adapter fills missing type)
-- **Scenario 03 (force):** regression — needs prompt fix (out of agent
-  scope)
-- **Scenario 06 (port connectivity):** topology issue, model reasoning
+### 17.1 The hidden bug
 
-**Recommended action:** ship Fix A + auto-resolve. Accept 6/8 as the
-current ceiling for this model. The remaining failure (scenario 06) is
-a graph-rewiring reasoning limit that no adapter-side fix can solve
-without hand-picked heuristics (AGENTS.md:32).
+GRC's `iter_error_messages()` yields `(element, message)` tuples where
+the element is the Block/Port/Connection that has the error. The
+adapter was silently discarding the element:
+
+```python
+# BEFORE (grc_native_adapter.py:429)
+errors=[str(m) for _e, m in flow_graph.iter_error_messages()]
+
+# AFTER
+errors=[_format_error(e, m) for e, m in flow_graph.iter_error_messages()]
+```
+
+Result:
+- Before: `"Port is not connected."`
+- After: `"blocks_add_xx: Sink - in2(2): Port is not connected."`
+
+This was a silent omission — AGENTS.md prohibits silent transformation.
+The information existed natively and was dropped before reaching the
+model. Both `validate()` and `render_flow_graph()` had the same bug.
+
+### 17.2 Impact
+
+| Scenario | Before fix | After fix |
+|----------|-----------|----------|
+| 03 disable_and_enable | ✗ (model can't identify port) | ✓ (model identifies port, re-enables) |
+| 06 query_knowledge_multiply | ✗ (same error) | ✗ (error now names `analog_noise_source_x_0: Source - out(0)` but model doesn't remove the orphaned block) |
+
+**Aggregate:** 6/8 → **7/8** semantic success.
+
+### 17.3 What this fix proves
+
+For scenario 03: the model WAS capable of reasoning about the topology.
+It just lacked the identity of the problematic block/port. With that
+identity, it understood the issue and took appropriate action.
+
+For scenario 06: the model's topology was CORRECT (multiplier wired
+perfectly). The only issue is an orphaned noise source output. The
+error now names it: `"analog_noise_source_x_0: Source - out(0): Port
+is not connected."` The model reads this but doesn't decide to remove
+the noise source block or use force. This is a genuine topology-
+reasoning limit.
+
+### 17.4 The chain of fixes (cumulative)
+
+| Fix | Scenarios fixed | Running total |
+|-----|----------------|--------------|
+| Schema flattening (depth 3→2) | 0 (structural) | 5/8 |
+| num_ctx 4096→8192 | +0 (eliminated truncation) | 5/8 |
+| Catalog enum values (Fix A) | +1 (01 on some runs) | 5-6/8 |
+| Auto-resolve type from neighbor | +2 (01, 05, 08) | 6/8 |
+| Error block+port identity | +1 (03) | **7/8** |
 
 ---
 
-## 17. Open Questions
+## 18. Final Status
 
-1. Is 6/8 acceptable, or should we pursue a different intervention for
-   scenario 06 (topology reasoning)?
-2. Should scenario 03's regression be fixed by updating its prompt to
-   mention `force` (out of agent scope — playground concern)?
-3. Should the round cap be removed entirely now that it's vestigial?
+- **Syntactic success:** solved (0 schema rejections, max nesting 2)
+- **Output truncation:** solved (num_ctx=8192)
+- **Discovery gap:** closed (catalog enum values visible)
+- **Type mismatch:** closed (auto-resolve from neighbor dtype)
+- **Error identity:** closed (block+port in every validation error)
+- **Scenario 06:** remaining — topology-reasoning limit (orphaned source)
+
+**7/8 semantic success.** The remaining failure (scenario 06) is a
+genuine model-reasoning limit about what to do with an orphaned source
+block. The error correctly identifies the block and port; the model
+doesn't take the implied action (remove the block or use force).
