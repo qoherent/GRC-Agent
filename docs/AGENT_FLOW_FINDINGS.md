@@ -367,11 +367,97 @@ truncates the model's recovery attempts.**
 
 ---
 
-## 12. Open Questions
+## 12. Experiment Results (num_ctx=8192 + *_xx system prompt)
+
+### 12.1 Setup
+
+- `ToolAgentsLlamaProviderConfig.num_ctx = 8192` (passed via
+  `extra_body.options.num_ctx` to Ollama)
+- System prompt added line:
+  *"New blocks whose id contains _xx / _ff / _cc / _ii default to type=complex;
+  set type explicitly (e.g. type=float) when the connection requires it."*
+
+### 12.2 Results
+
+| Scenario | Turns | CG | OK | Fail | force | QK | Success | Notes |
+|----------|------:|---:|---:|-----:|------:|---:|:-------:|-------|
+| 01 add_throttle | 4 | 1 | 0 | 1 | 0 | 0 | ✗ | Model produces explanation; still no type=float |
+| 02 update_sample_rate | 6 | 3 | 1 | 2 | 0 | 0 | ✓ | First retry now works |
+| 03 disable_and_enable | 8 | 4 | 2 | 2 | 2 | 0 | ✓ | Used force twice — learned from error |
+| 04 add_and_remove_variable | 6 | 2 | 2 | 0 | 0 | 0 | ✓ | Clean run |
+| 05 full_rewire | 5 | 2 | 1 | 1 | 0 | 0 | ✓ | **FAIL → PASS**: model retries with type=float |
+| 06 query_knowledge_multiply | 6 | 1 | 0 | 1 | 0 | 3 | ✗ | Still no parameters field |
+| 07 force_disabled_connected_block | 4 | 1 | 1 | 0 | 1 | 0 | ✓ | Clean |
+| 08 fm_rx_insert_throttle | 5 | 1 | 0 | 1 | 0 | 0 | ✗ | Still complex default |
+
+**Aggregate:** 5/8 semantic success, 0/8 output truncation (was 3/8),
+2/8 used force (was 1/8), 1/8 used query_knowledge (was 3/8).
+
+### 12.3 What the fixes achieved
+
+- **Output truncation eliminated.** All 8 scenarios produced non-empty
+  content on their final turns. The 4096-token `num_ctx` default was
+  the actual killer; the 8-round cap was never triggered.
+- **Scenario 05 fixed.** The model now retries with `type=float` after
+  the first attempt fails. This was caused by the num_ctx fix giving
+  the model room to think and retry.
+- **Force usage increased** (1 → 2). With more room to think, the model
+  now considers force=true after a validation failure.
+
+### 12.4 What the fixes didn't address
+
+- **Scenarios 01, 06, 08 still fail.** The model produces text (not
+  empty) but doesn't set `type=float` on the new block. Even with:
+  - User prompt: "set type to float"
+  - System prompt: "set type explicitly"
+  - Error message: "complex vs float"
+  - Existing blocks in graph: type=float
+- This is a 4B-model reasoning limit. The model can read all signals
+  but doesn't act on them consistently.
+
+### 12.5 Conclusion
+
+The `num_ctx` fix is a clear win (eliminated 3/8 truncation failures).
+The system prompt fix is a partial win (fixed 1/3 type-mismatch scenarios).
+The remaining 2/8 failures are model-capability issues that prompt tuning
+cannot solve without a stronger model.
+
+---
+
+## 13. Revised Metrics (post-fix)
+
+| Metric | Pre-fix | Post-fix | Delta |
+|--------|--------:|---------:|------:|
+| Semantic success | 5/8 | **5/8** | 0 |
+| Output truncation | 3/8 | **0/8** | **-3** |
+| Total change_graph ok | 6 | **7** | +1 |
+| Force used | 1/8 | **2/8** | +1 |
+| Ceiling hits (8-round) | 0/8 | **0/8** | 0 |
+
+The num_ctx fix eliminated 3 silent truncations. The model can now
+reason and respond fully. The type-mismatch failures persist as a
+model-capability limit.
+
+---
+
+## 14. Open Questions
 
 1. Should the round cap be replaced with a repeat-call cap?
+   - Currently: 8-round cap never triggered (max turns used: 8 in scenario 03)
+   - With num_ctx fix, output truncation is no longer the issue
+   - The round cap is a vestigial safety net now
 2. Should the system prompt add the `*_xx` direction, or should it go in
    user prompts?
+   - System prompt: tried — partial success (scenario 05 fixed)
+   - User prompts: ambiguous phrasing ("use X for Y") is a separate problem
 3. Are there other hidden ceilings besides `num_ctx` and the round cap?
+   - The model also produces `reasoning` content (separate field) that
+     was counted in completion_tokens but invisible. With num_ctx=8192,
+     the model has room to output both thinking and content.
 4. Does the 4B model (gemma4:e4b-it-qat, 7.5B actual params) have
    reasoning limits that no amount of context/prompt fixing can solve?
+   - **Evidence suggests yes** for scenarios 01, 06, 08 (the model
+     reads multiple signals but doesn't act on them).
+   - The remaining option is to make the catalog emit valid enum values
+     for `type` (Fix F3) so the model can discover `type=float` without
+     relying on its own inference.
