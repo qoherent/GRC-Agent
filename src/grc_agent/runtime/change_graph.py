@@ -85,7 +85,8 @@ def dispatch_flat_change_graph_batch(
             entry["hint"] = hint
         errors.append(entry)
 
-    # Collect instance names added in this batch (used by connection hint).
+    # Collect instance names added in this batch (used by connection hint
+    # and by auto-resolve).
     new_block_names: set[str] = set()
     for entry in _as_list(add_blocks, "add_blocks", errors):
         if isinstance(entry, dict):
@@ -93,8 +94,20 @@ def dispatch_flat_change_graph_batch(
             if name:
                 new_block_names.add(name)
 
-    # add_blocks
+    # Track which new blocks had `type` explicitly set by the model.
+    # Blocks not in this set are candidates for auto-resolve.
+    type_already_set: set[str] = set()
     for entry in _as_list(add_blocks, "add_blocks", errors):
+        if isinstance(entry, dict):
+            params = entry.get("params")
+            name = str(entry.get("instance_name", "")).strip()
+            if name and isinstance(params, dict) and "type" in params:
+                type_already_set.add(name)
+
+    # add_blocks
+    add_blocks_list = _as_list(add_blocks, "add_blocks", errors)
+    add_connections_list = _as_list(add_connections, "add_connections", errors)
+    for entry in add_blocks_list:
         if not isinstance(entry, dict):
             continue
         block_id = str(entry.get("block_id", "")).strip()
@@ -126,6 +139,32 @@ def dispatch_flat_change_graph_batch(
             _record_error("parameter_not_found", str(exc))
         except Exception as exc:
             _record_error("add_block_failed", str(exc))
+
+    # Auto-resolve missing `type` params on newly-added polymorphic blocks.
+    # Blocks like `*_xx` / `*_ff` default to `type=complex` when the model
+    # omits the `type` param, causing IO type/size mismatch with a typed
+    # neighbor. The uniform rule: if a newly-added block (a) was added in
+    # this batch, (b) did not have `type` in its params, and (c) is
+    # connected to a block whose port dtype resolves, set its `type`
+    # to that dtype so the connection will validate.
+    auto_resolved: dict[str, str] = {}
+    for name in new_block_names:
+        if name in type_already_set:
+            continue
+        try:
+            block = fg.get_block(name)
+        except KeyError:
+            continue
+        if "type" not in block.params:
+            continue
+        dtype = _neighbor_dtype_for(fg, name, add_connections_list)
+        if not dtype:
+            continue
+        try:
+            block.params["type"].set_value(dtype)
+            auto_resolved[name] = dtype
+        except Exception:
+            pass
 
     # remove_blocks
     for entry in _as_list(remove_blocks, "remove_blocks", errors):
@@ -264,6 +303,8 @@ def dispatch_flat_change_graph_batch(
         payload["error_type"] = ErrorCode.TOOL_CALL_INVALID
     if errors:
         payload["errors"] = errors
+    if auto_resolved:
+        payload["auto_resolved"] = auto_resolved
     # Surface validation errors when the graph is invalid (committed via
     # force=True, or rolled back). The model needs to know the graph is
     # invalid so it can decide whether to fix the issue or set force=true.
@@ -295,6 +336,53 @@ def _as_list(value: Any, field_name: str, errors: list[dict[str, str]]) -> list[
         return value
     errors.append({"code": "invalid_field", "message": f"{field_name} must be a list."})
     return []
+
+
+def _neighbor_dtype_for(
+    fg: Any,
+    instance_name: str,
+    add_connections: list[Any],
+) -> str | None:
+    """Return the port dtype of the first neighbor block connected to
+    ``instance_name`` in the batch's ``add_connections``.
+
+    The neighbor block may be either an existing block in the graph or
+    another newly-added block (in which case we look up its port
+    dtype the same way). Returns ``None`` if no typed neighbor is
+    found or the connection string is unparseable.
+    """
+    for conn_entry in add_connections:
+        parsed = parse_connection_id(str(conn_entry))
+        if not parsed:
+            continue
+        other: str | None = None
+        if parsed["src_block"] == instance_name:
+            other = parsed["dst_block"]
+        elif parsed["dst_block"] == instance_name:
+            other = parsed["src_block"]
+        if not other:
+            continue
+        try:
+            block = fg.get_block(other)
+        except KeyError:
+            continue
+        ports = (
+            block.active_sinks
+            if parsed["dst_block"] == other
+            else block.active_sources
+        )
+        port_key = (
+            str(parsed["dst_port"])
+            if parsed["dst_block"] == other
+            else str(parsed["src_port"])
+        )
+        for p in ports:
+            if p.key == port_key:
+                dtype = getattr(p, "dtype", None)
+                if dtype:
+                    return str(dtype)
+                break
+    return None
 
 
 def _type_hint_for_validation(
