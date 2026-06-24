@@ -199,7 +199,7 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
         text = _tool_failure_text(
             {
                 "tool": "change_graph",
-                "committed": False,
+                "ok": False,
                 "error_type": "gnu_validation_failed",
                 "errors": [
                     {"code": "gnu_validation", "message": "Source - out(0): Port is not connected."}
@@ -216,7 +216,7 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
     ) -> None:
         text = _tool_failure_text(
             {
-                "committed": False,
+                "ok": False,
                 "error_type": "gnu_validation_failed",
                 "errors": [
                     {"code": "gnu_validation", "message": "Source - out(0): Port is not connected."}

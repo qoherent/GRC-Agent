@@ -71,7 +71,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
                 ]
             },
         )
-        self.assertFalse(result.get("committed", True), "Duplicate add must not commit")
+        self.assertFalse(result.get("ok", True), "Duplicate add must not succeed")
         errors = result.get("errors", [])
         self.assertTrue(errors, "Must return errors for duplicate block name")
         codes = " ".join(e.get("code", "") for e in errors).lower()
@@ -100,7 +100,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
         # The batch may reject at the second add_block due to the first
         # having been staged in the snapshot
         self.assertFalse(
-            result.get("committed", True), "Batch with duplicate block name must not commit"
+            result.get("ok", True), "Batch with duplicate block name must not succeed"
         )
 
     def test_graph_is_unchanged_after_duplicate_block_rejection(self) -> None:
@@ -119,7 +119,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
                 ]
             },
         )
-        self.assertFalse(result.get("committed", True))
+        self.assertFalse(result.get("ok", True))
         # Revision must not change
         self.assertEqual(
             agent.session.state_revision,

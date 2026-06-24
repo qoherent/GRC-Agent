@@ -846,7 +846,7 @@ def _tool_failure_text(result: dict[str, Any]) -> str:
 
 def _is_native_validation_refusal(result: dict[str, Any]) -> bool:
     return bool(
-        result.get("committed") is False
+        result.get("ok") is False
         and result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED
     )
 

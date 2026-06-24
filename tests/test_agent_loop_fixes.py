@@ -411,20 +411,20 @@ class Fix1CommitResultTests(unittest.TestCase):
         self.assertGreaterEqual(
             len(tool_messages), 1, "change_graph result must be recorded as role:Tool"
         )
-        # The change_graph committed — verify the tool result carries ok=True.
-        committed_tool_payload = None
+        # The change_graph succeeded — verify the tool result carries ok=True.
+        ok_tool_payload = None
         for m in tool_messages:
             for item in m.content:
                 if isinstance(item, ToolCallResultContent):
                     payload = json.loads(item.tool_call_result)
                     if (
                         isinstance(payload, dict)
-                        and payload.get("committed") is True
+                        and payload.get("ok") is True
                     ):
-                        committed_tool_payload = payload
+                        ok_tool_payload = payload
         self.assertIsNotNone(
-            committed_tool_payload,
-            "expected a committed change_graph result recorded as role:Tool",
+            ok_tool_payload,
+            "expected an ok change_graph result recorded as role:Tool",
         )
         # The final assistant text is the model's real output, not a
         # synthesis fabricated by the loop.
@@ -453,9 +453,8 @@ class ChangeGraphForceAndRollbackTests(unittest.TestCase):
             "change_graph",
             {"remove_connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"]},
         )
-        self.assertFalse(result.get("committed"))
+        self.assertFalse(result.get("ok"))
         self.assertEqual(result.get("error_type"), "gnu_validation_failed")
-        self.assertNotIn("rollback_failed", result)
 
     def test_invalid_batch_committed_with_force(self) -> None:
         """Same invalid batch with force=True → committed despite validation failure."""
@@ -466,10 +465,9 @@ class ChangeGraphForceAndRollbackTests(unittest.TestCase):
                 "force": True,
             },
         )
-        self.assertTrue(result.get("committed"))
         self.assertTrue(result.get("ok"))
         # Validation errors surface via `errors` so the model knows the graph
-        # is invalid even though the batch was committed via force=True.
+        # is invalid even though the batch was applied via force=True.
         gnu_errors = [e for e in result.get("errors", []) if e.get("code") == "gnu_validation"]
         self.assertTrue(len(gnu_errors) > 0)
 

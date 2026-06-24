@@ -218,17 +218,14 @@ def dispatch_flat_change_graph_batch(
     # Validate the final state.
     validation = validate(fg) if ops_applied else None
     validation_ok = validation.native_ok if validation else True
-    native_validation_failure = False
-    rollback_status = "none"
     if not validation_ok and not force:
-        native_validation_failure = True
-        rollback_status = _restore_snapshot(agent, before_snapshot)
+        _restore_snapshot(agent, before_snapshot)
         committed = False
     elif errors:
         # Adapter errors (unknown param, missing block, etc.) cannot be bypassed
         # by force — force only suppresses native-validation failures.
+        _restore_snapshot(agent, before_snapshot)
         committed = False
-        rollback_status = _restore_snapshot(agent, before_snapshot)
     else:
         committed = True
     if committed and ops_applied:
@@ -253,19 +250,14 @@ def dispatch_flat_change_graph_batch(
 
     payload: dict[str, Any] = {
         "ok": committed and not errors,
-        "committed": committed,
     }
-    if not committed:
-        payload["ops_applied"] = 0
-        if errors and "error_type" not in payload:
-            payload["error_type"] = ErrorCode.TOOL_CALL_INVALID
+    if not committed and "error_type" not in payload:
+        payload["error_type"] = ErrorCode.TOOL_CALL_INVALID
     if errors:
         payload["errors"] = errors
-    # Surface validation errors whenever the graph is invalid (committed
-    # via force=True, or rolled back). The model must know the graph is
-    # invalid regardless of commit status — `committed: true` means the
-    # batch applied; `errors` with code gnu_validation means the result is
-    # not GRC-valid.
+    # Surface validation errors when the graph is invalid (committed via
+    # force=True, or rolled back). The model needs to know the graph is
+    # invalid so it can decide whether to fix the issue or set force=true.
     if validation_errors and not validation_native_ok:
         for msg in validation_errors:
             payload.setdefault("errors", []).append(
@@ -273,8 +265,6 @@ def dispatch_flat_change_graph_batch(
             )
         if not committed:
             payload["error_type"] = ErrorCode.GNU_VALIDATION_FAILED
-    if native_validation_failure and rollback_status == "failed":
-        payload["rollback_failed"] = True
 
     result = agent._payload_result("change_graph", payload, include_active_session=False)
     return result
