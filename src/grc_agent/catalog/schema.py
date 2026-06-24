@@ -193,7 +193,14 @@ class BlockDescription:
         payload: dict[str, Any] = {
             "ok": True,
             "block_id": self.block_id,
-            "params": {p.id: f"{p.dtype or '?'}={p.default or ''}" for p in visible_params},
+            "params": {
+                p.id: (
+                    f"enum=[{','.join(str(o) for o in p.options)}]={p.default or ''}"
+                    if p.dtype == "enum" and p.options
+                    else f"{p.dtype or '?'}={p.default or ''}"
+                )
+                for p in visible_params
+            },
             "inputs": [port.to_compact_dict() for port in self.inputs],
             "outputs": [port.to_compact_dict() for port in self.outputs],
         }
