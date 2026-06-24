@@ -85,6 +85,14 @@ def dispatch_flat_change_graph_batch(
             entry["hint"] = hint
         errors.append(entry)
 
+    # Collect instance names added in this batch (used by connection hint).
+    new_block_names: set[str] = set()
+    for entry in _as_list(add_blocks, "add_blocks", errors):
+        if isinstance(entry, dict):
+            name = str(entry.get("instance_name", "")).strip()
+            if name:
+                new_block_names.add(name)
+
     # add_blocks
     for entry in _as_list(add_blocks, "add_blocks", errors):
         if not isinstance(entry, dict):
@@ -212,6 +220,7 @@ def dispatch_flat_change_graph_batch(
                 str(parsed["src_port"]),
                 parsed["dst_block"],
                 str(parsed["dst_port"]),
+                new_block_names,
             )
             _record_error("add_connection_failed", str(exc), hint=hint)
 
@@ -290,11 +299,19 @@ def _connection_dtype_hint(
     src_port: str,
     dst_block: str,
     dst_port: str,
+    new_block_names: set[str] | None = None,
 ) -> str | None:
     """Extract source/sink dtype info for a failed connection attempt.
 
     Returns a human-readable hint so the model can repair its next call, or
     ``None`` if port resolution fails.
+
+    If ``new_block_names`` is provided and one of the endpoint blocks was
+    added in the same batch, inspect its ``type`` enum param (if any) and
+    append a hint suggesting which enum value would match the neighbor's
+    dtype. This is the uniform rule: every freshly-added block whose
+    connection failed on dtype is a candidate for a ``type`` adjustment,
+    and the matching option (if any) is found mechanically from the enum.
     """
     try:
         from grc_agent.grc_native_adapter import _find_port
@@ -303,13 +320,29 @@ def _connection_dtype_hint(
         dst_p = _find_port(fg, dst_block, dst_port, kind="sink")
         src_dtype = getattr(src_p, "dtype", None)
         dst_dtype = getattr(dst_p, "dtype", None)
-        if src_dtype or dst_dtype:
-            parts = []
-            if src_dtype:
-                parts.append(f"Source IO type: {src_dtype}")
-            if dst_dtype:
-                parts.append(f"Sink IO type: {dst_dtype}")
-            return "; ".join(parts)
+        parts: list[str] = []
+        if src_dtype:
+            parts.append(f"Source IO type: {src_dtype}")
+        if dst_dtype:
+            parts.append(f"Sink IO type: {dst_dtype}")
+
+        if new_block_names and (src_block in new_block_names or dst_block in new_block_names):
+            new_name = src_block if src_block in new_block_names else dst_block
+            neighbor_dtype = dst_dtype if src_block in new_block_names else src_dtype
+            if neighbor_dtype:
+                try:
+                    block = fg.get_block(new_name)
+                    type_param = block.params.get("type")
+                    if type_param is not None and type_param.dtype == "enum":
+                        opts = list(type_param.options or [])
+                        if neighbor_dtype in opts:
+                            parts.append(
+                                f"Set type='{neighbor_dtype}' on '{new_name}'"
+                            )
+                except Exception:
+                    pass
+
+        return "; ".join(parts) if parts else None
     except Exception:
         pass
     return None
