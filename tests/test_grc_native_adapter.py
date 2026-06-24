@@ -26,7 +26,6 @@ from grc_agent.grc_native_adapter import (
     set_block_state,
     set_param,
     validate,
-    validate_and_finalize,
     write_flow_graph_atomic,
 )
 from grc_agent.runtime.param_filter import EXCLUDED_PARAM_CATEGORIES
@@ -304,11 +303,11 @@ def test_apply_mutation_invalid_op_type():
         apply_mutation(fg, "bad_op_type")
 
 
-def test_validate_and_finalize_after_mutation():
+def test_validate_after_mutation():
     fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     var = next(b for b in fg.blocks if b.is_variable)
     apply_mutation(fg, "update_params", instance_name=var.name, params={"value": "48000"})
-    v = validate_and_finalize(fg)
+    v = validate(fg)
     assert v.status in {"valid", "invalid"}
     assert isinstance(v.native_ok, bool)
 

@@ -1,7 +1,7 @@
 """change_graph wrapper (Phase 6 cutover) — flat-batch mutations via the adapter.
 
 All mutations go through :func:`grc_agent.grc_native_adapter.apply_mutation`
-and :func:`validate_and_finalize`. No dict-crawl; no ``grcc`` subprocess.
+and :func:`validate`. No dict-crawl; no ``grcc`` subprocess.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from grc_agent.domain_models import ErrorCode
 from grc_agent.grc_native_adapter import (
     apply_mutation,
-    validate_and_finalize,
+    validate,
 )
 from grc_agent.runtime.connection_ids import parse_connection_id
 from grc_agent.transaction import capture_session_state, restore_session_state
@@ -167,6 +167,27 @@ def dispatch_flat_change_graph_batch(
         except Exception as exc:
             _record_error("update_states_failed", str(exc))
 
+    # remove_connections (MUST run before add_connections so inline-insert
+    # doesn't create a transient double-upstream that GRC rejects).
+    # Idempotent: if the edge is already gone (e.g. cascaded by a prior
+    # remove_block), skip silently — the desired state is already achieved.
+    for entry in _as_list(remove_connections, "remove_connections", errors):
+        conn_id = entry if isinstance(entry, str) else str(entry.get("connection_id", "")).strip()
+        parsed = parse_connection_id(conn_id)
+        if parsed:
+            try:
+                apply_mutation(
+                    fg,
+                    "remove_connection",
+                    src_block=parsed["src_block"],
+                    src_port=str(parsed["src_port"]),
+                    dst_block=parsed["dst_block"],
+                    dst_port=str(parsed["dst_port"]),
+                )
+                ops_applied += 1
+            except KeyError:
+                pass
+
     # add_connections
     for entry in _as_list(add_connections, "add_connections", errors):
         src, dst = _parse_connection_endpoints(entry, errors)
@@ -184,26 +205,8 @@ def dispatch_flat_change_graph_batch(
                 )
                 _record_error("add_connection_failed", str(exc), hint=hint)
 
-    # remove_connections
-    for entry in _as_list(remove_connections, "remove_connections", errors):
-        conn_id = entry if isinstance(entry, str) else str(entry.get("connection_id", "")).strip()
-        parsed = parse_connection_id(conn_id)
-        if parsed:
-            try:
-                apply_mutation(
-                    fg,
-                    "remove_connection",
-                    src_block=parsed["src_block"],
-                    src_port=str(parsed["src_port"]),
-                    dst_block=parsed["dst_block"],
-                    dst_port=str(parsed["dst_port"]),
-                )
-                ops_applied += 1
-            except Exception as exc:
-                _record_error("remove_connection_failed", str(exc))
-
     # Validate the final state.
-    validation = validate_and_finalize(fg) if ops_applied else None
+    validation = validate(fg) if ops_applied else None
     validation_ok = validation.native_ok if validation else True
     native_validation_failure = False
     rollback_status = "none"
@@ -242,8 +245,10 @@ def dispatch_flat_change_graph_batch(
         "ok": committed and not errors,
         "committed": committed,
     }
-    if not committed and ops_applied:
+    if not committed:
         payload["ops_applied"] = 0
+        if errors and "error_type" not in payload:
+            payload["error_type"] = ErrorCode.TOOL_CALL_INVALID
     if errors:
         payload["errors"] = errors
     # Surface validation errors whenever the graph is invalid (committed

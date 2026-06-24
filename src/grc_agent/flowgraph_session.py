@@ -197,7 +197,7 @@ class FlowgraphSession:
     def graph_id(self) -> str | None:
         return self._persisted_file_sha256
 
-    # -- legacy compat (used by history.py + transaction.py) ------------------
+    # -- raw-data construction (used by history.py) ---------------------------
 
     @classmethod
     def from_raw_data(

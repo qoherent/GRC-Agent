@@ -11,7 +11,7 @@ Public surface (consumed by Phase 6's cutover):
   Per the consultant's perf review, no deep-JSON hashing of the Pydantic model.
 - ``load_flow_graph``, ``load_and_inspect`` — loading + Pydantic snapshot.
 - ``add_block``, ``remove_block``, ``set_param``, ``set_block_state``,
-  ``connect``, ``disconnect``, ``apply_mutation``, ``validate_and_finalize`` —
+  ``connect``, ``disconnect``, ``apply_mutation``, ``validate`` —
   the six ``change_graph`` op_types, applied to a native ``FlowGraph``.
 - ``validate``, ``render_block``, ``render_connection``, ``render_parameter``,
   ``render_flow_graph``, ``classify_role`` — inspection helpers; filtering
@@ -429,12 +429,6 @@ def validate(flow_graph: Any) -> GrcValidation:
         errors=[str(m) for _e, m in flow_graph.iter_error_messages()],
         native_ok=valid,
     )
-
-
-def validate_and_finalize(flow_graph: Any) -> GrcValidation:
-    """One call to use after a batch of mutations. Runs ``rewrite()`` and
-    ``validate()`` and returns a :class:`GrcValidation`."""
-    return validate(flow_graph)
 
 
 # --------------------------------------------------------------------------- #

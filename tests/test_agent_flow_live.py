@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)
 
 OUT_DIR = Path(__file__).resolve().parent / "output" / "agent_flow"
+_FIXTURES = Path(__file__).resolve().parent / "data"
+_FM_RX_FIXTURE = str(_FIXTURES / "fm_rx.grc")
 
 _SCENARIOS: list[dict[str, str]] = [
     {
@@ -80,6 +82,45 @@ _SCENARIOS: list[dict[str, str]] = [
             " `dc_offset` with `const` set to `0.0`. Connect `dc_offset`"
             " port 0 to `blocks_add_xx` port 2 (replacing the noise path)."
             " Inspect the final result to confirm the changes."
+        ),
+    },
+    {
+        "name": "06_query_knowledge_multiply",
+        "title": "Discover an unknown block via query_knowledge (multiply)",
+        "prompt": (
+            "Inspect the current flowgraph. I want to multiply the two"
+            " sinusoid sources together instead of adding them. The exact"
+            " GNU Radio block_id for a signal multiplier is not something"
+            " to guess: use query_knowledge (domain catalog) to look it up"
+            " first, then add the block named `multiplier` with `type` set"
+            " to `float`. Connect the two existing `analog_sig_source_x`"
+            " outputs into the multiplier, remove the old `blocks_add_xx`,"
+            " and inspect the result to confirm."
+        ),
+    },
+    {
+        "name": "07_force_disabled_connected_block",
+        "title": "Disable a connected block and force-commit if invalid",
+        "prompt": (
+            "Inspect the current flowgraph. Disable the block"
+            " `analog_sig_source_x_0`, which is connected into the adder."
+            " If disabling a connected block makes the graph fail"
+            " validation, use force to commit the change anyway. Then"
+            " inspect the result to confirm the block is disabled."
+        ),
+    },
+    {
+        "name": "08_fm_rx_insert_throttle",
+        "title": "Insert a throttle on a larger FM receiver graph",
+        "fixture": _FM_RX_FIXTURE,
+        "prompt": (
+            "Inspect the current flowgraph (this is an FM receiver). Add a"
+            " `blocks_throttle` block named `audio_throttle` with `type` set"
+            " to `float` and `samples_per_second` set to `audio_rate`."
+            " Insert it inline on the connection from"
+            " `pfb_arb_resampler_xxx_0` to `audio_sink_0`: remove that"
+            " connection, then route the resampler output through the"
+            " throttle into the audio sink. Inspect the result to confirm."
         ),
     },
 ]
@@ -145,4 +186,16 @@ class AgentFlowLiveTests(unittest.TestCase):
 
     def test_05_full_rewire(self) -> None:
         rec = self._run_scenario(**_SCENARIOS[4])  # type: ignore[arg-type]
+        self._save_and_assert(rec)
+
+    def test_06_query_knowledge_multiply(self) -> None:
+        rec = self._run_scenario(**_SCENARIOS[5])  # type: ignore[arg-type]
+        self._save_and_assert(rec)
+
+    def test_07_force_disabled_connected_block(self) -> None:
+        rec = self._run_scenario(**_SCENARIOS[6])  # type: ignore[arg-type]
+        self._save_and_assert(rec)
+
+    def test_08_fm_rx_insert_throttle(self) -> None:
+        rec = self._run_scenario(**_SCENARIOS[7])  # type: ignore[arg-type]
         self._save_and_assert(rec)
