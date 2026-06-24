@@ -26,13 +26,13 @@ from ToolAgents.data_models.messages import (
 from ToolAgents.provider import OpenAIChatAPI
 from ToolAgents.provider.llm_provider import ProviderSettings
 
-from grc_agent._payload import ErrorCode
-from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
-from grc_agent.session_ops import (
+from grc_agent.chat_roles import (
     ASSISTANT_MODEL_ROLE,
     TOOL_MODEL_ROLE,
     chat_message_payload,
 )
+from grc_agent.domain_models import ErrorCode
+from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ class ToolAgentsLlamaProviderConfig:
 
     @property
     def openai_base_url(self) -> str:
-        base = self.base_url.rstrip('/')
+        base = self.base_url.rstrip("/")
         if base.endswith("/v1"):
             return base
         return f"{base}/v1"
@@ -185,6 +185,7 @@ class ToolAgentsLlamaProviderConfig:
         if "openrouter" in (self.base_url or "").lower():
             extra_body = {}
             import os
+
             provider_order = os.getenv("OPENROUTER_PROVIDER_ORDER")
             allow_fallbacks = os.getenv("OPENROUTER_ALLOW_FALLBACKS")
 
@@ -231,19 +232,16 @@ class ToolDelegateResult:
 
 
 class ToolAgentsToolDelegate:
-
     def __init__(
         self,
         agent: GrcAgent,
         tool_name: str,
         *,
-        wrapper_eval_telemetry: bool = False,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, Any], None] | None = None,
     ) -> None:
         self.agent = agent
         self.tool_name = tool_name
-        self.wrapper_eval_telemetry = wrapper_eval_telemetry
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
 
@@ -258,11 +256,6 @@ class ToolAgentsToolDelegate:
             self.tool_name,
             arguments,
             model_tool_call=True,
-        )
-        normalized = _maybe_enable_wrapper_eval_telemetry(
-            self.tool_name,
-            normalized,
-            enabled=self.wrapper_eval_telemetry,
         )
         route_result = self.agent.validate_turn_route(
             self.tool_name,
@@ -311,12 +304,10 @@ class ToolAgentsRegistryBuilder:
         self,
         agent: GrcAgent,
         *,
-        wrapper_eval_telemetry: bool = False,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, Any], None] | None = None,
     ) -> None:
         self.agent = agent
-        self.wrapper_eval_telemetry = wrapper_eval_telemetry
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
         self.delegates: dict[str, ToolAgentsToolDelegate] = {}
@@ -332,7 +323,6 @@ class ToolAgentsRegistryBuilder:
             delegate = ToolAgentsToolDelegate(
                 self.agent,
                 name,
-                wrapper_eval_telemetry=self.wrapper_eval_telemetry,
                 on_tool_start=self.on_tool_start,
                 on_tool_end=self.on_tool_end,
             )
@@ -363,7 +353,6 @@ class ToolAgentsRunner:
         *,
         model: str | None = None,
         mvp_tool_profile: bool = True,
-        wrapper_eval_telemetry: bool = False,
         max_tool_rounds: int | None = None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, Any], None] | None = None,
@@ -383,7 +372,6 @@ class ToolAgentsRunner:
             agent,
             user_message,
             model=model,
-            wrapper_eval_telemetry=wrapper_eval_telemetry,
             max_tool_rounds=max_tool_rounds,
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
@@ -403,7 +391,6 @@ class ToolAgentsRunner:
         *,
         model: str | None = None,
         mvp_tool_profile: bool = True,
-        wrapper_eval_telemetry: bool = False,
         max_tool_rounds: int | None = None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, Any], None] | None = None,
@@ -429,7 +416,6 @@ class ToolAgentsRunner:
             agent,
             user_message,
             model=model,
-            wrapper_eval_telemetry=wrapper_eval_telemetry,
             max_tool_rounds=max_tool_rounds,
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
@@ -441,7 +427,6 @@ class ToolAgentsRunner:
         user_message: str,
         *,
         model: str | None,
-        wrapper_eval_telemetry: bool,
         max_tool_rounds: int | None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None,
         on_tool_end: Callable[[str, Any], None] | None,
@@ -468,16 +453,17 @@ class ToolAgentsRunner:
             return
         if max_tool_rounds is None:
             max_tool_rounds = MVP_TOOL_SURFACE.default_max_tool_rounds
-        if hasattr(agent, 'config') and hasattr(agent.config, 'llama') and agent.config.llama.max_tool_rounds:
+        if (
+            hasattr(agent, "config")
+            and hasattr(agent.config, "llama")
+            and agent.config.llama.max_tool_rounds
+        ):
             max_tool_rounds = max(max_tool_rounds, agent.config.llama.max_tool_rounds)
 
         from grc_agent.runtime.model_context import _prune_completed_episodes
-        agent.chat_history.messages = _prune_completed_episodes(agent.chat_history.messages)
 
-        pre_compact_chars = _chat_history_chars(agent.chat_history)
+        agent.chat_history.messages = _prune_completed_episodes(agent.chat_history.messages)
         agent.compact_history()
-        post_compact_chars = _chat_history_chars(agent.chat_history)
-        history_truncated = post_compact_chars < pre_compact_chars
         if any(m.role == ChatMessageRole.User for m in agent.chat_history.get_messages()):
             agent._record_active_session_history(reason="turn_refresh")
         agent.chat_history.add_user_message(user_message)
@@ -502,14 +488,11 @@ class ToolAgentsRunner:
             )
             registry_builder = ToolAgentsRegistryBuilder(
                 agent,
-                wrapper_eval_telemetry=wrapper_eval_telemetry,
                 on_tool_start=on_tool_start,
                 on_tool_end=on_tool_end,
             )
             registry = registry_builder.build(active_allowed_tools)
-            messages = _model_messages_with_reminder(
-                agent, reminder=None
-            )
+            messages = _model_messages_with_reminder(agent, reminder=None)
             try:
                 assistant_message = self.chat_agent.step(
                     messages,
@@ -546,8 +529,7 @@ class ToolAgentsRunner:
 
             if tool_calls and tool_rounds_used >= max_tool_rounds:
                 ceiling_text = (
-                    f"Tool-round ceiling reached ({max_tool_rounds} rounds) "
-                    "without a final answer."
+                    f"Tool-round ceiling reached ({max_tool_rounds} rounds) without a final answer."
                 )
                 yield {"event": "chunk", "text": ceiling_text}
                 yield {
@@ -616,9 +598,6 @@ class ToolAgentsRunner:
                         "role": TOOL_MODEL_ROLE,
                         "payload": chat_message_payload(tool_result_message),
                     }
-                    if agent.should_stop_batch_after_result(tool_name, result):
-                        stopping_failure = result
-                        break
                 if stopping_failure is not None:
                     assistant_text = _tool_failure_text(stopping_failure)
                     agent.chat_history.add_assistant_message(assistant_text)
@@ -656,23 +635,15 @@ class ToolAgentsRunner:
             }
             yield {
                 "event": "final",
-                "result": _attach_context_budget_telemetry(
-                    {
-                        "ok": True,
-                        "model": resolved_model,
-                        "steps": assistant_turns,
-                        "tool_rounds_used": tool_rounds_used,
-                        "tool_calls_requested": tool_calls_requested,
-                        "tool_calls_executed": tool_calls_executed,
-                        "assistant_text": assistant_text,
-                    },
-                    enabled=wrapper_eval_telemetry,
-                    model_context_limit=None,
-                    history_chars=post_compact_chars,
-                    tool_context_chars=tool_context_chars,
-                    truncated_history=history_truncated,
-                    truncated_tool_output=truncated_tool_output,
-                ),
+                "result": {
+                    "ok": True,
+                    "model": resolved_model,
+                    "steps": assistant_turns,
+                    "tool_rounds_used": tool_rounds_used,
+                    "tool_calls_requested": tool_calls_requested,
+                    "tool_calls_executed": tool_calls_executed,
+                    "assistant_text": assistant_text,
+                },
             }
             return
 
@@ -701,6 +672,7 @@ class ToolAgentsJsonClient:
         self.timeout_seconds = self.provider_config.timeout_seconds
         self.provider = self.provider_config.create_provider()
         self.agent = ChatToolAgent(chat_api=self.provider)
+
 
 def run_bounded_toolagents_turn(
     agent: GrcAgent,
@@ -740,9 +712,7 @@ def _toolagents_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
     compatible = copy.deepcopy(schema)
     parameters = compatible.get("function", {}).get("parameters")
     if isinstance(parameters, dict):
-        parameters["properties"] = _compatible_properties(
-            parameters.get("properties", {})
-        )
+        parameters["properties"] = _compatible_properties(parameters.get("properties", {}))
     return compatible
 
 
@@ -784,8 +754,6 @@ def _is_primitive_item_schema(items: dict[str, Any]) -> bool:
     return "type" in items and "properties" not in items
 
 
-
-
 def _message_text(message: ChatMessage) -> str:
     parts = [
         content.content
@@ -795,24 +763,14 @@ def _message_text(message: ChatMessage) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _chat_history_chars(chat_history: ChatHistory) -> int:
-    return sum(len(m.get_as_text()) for m in chat_history.get_messages())
-
-
-def _model_messages_with_reminder(
-    agent: GrcAgent, *, reminder: str | None
-) -> list[ChatMessage]:
+def _model_messages_with_reminder(agent: GrcAgent, *, reminder: str | None) -> list[ChatMessage]:
     return agent.get_model_messages(reminder=reminder)
 
 
-def _tool_result_message(
-    tool_call: ToolCallContent, result: Any
-) -> ChatMessage:
+def _tool_result_message(tool_call: ToolCallContent, result: Any) -> ChatMessage:
     now = datetime.datetime.now()
     serialized = (
-        result
-        if isinstance(result, str)
-        else json.dumps(result, sort_keys=True, default=str)
+        result if isinstance(result, str) else json.dumps(result, sort_keys=True, default=str)
     )
     return ChatMessage(
         id=str(uuid.uuid4()),
@@ -835,9 +793,7 @@ def _replace_last_assistant_text(chat_history: ChatHistory, text: str) -> None:
     for index in range(len(messages) - 1, -1, -1):
         if messages[index].role == ChatMessageRole.Assistant:
             new_content = [
-                TextContent(content=text)
-                if isinstance(item, TextContent)
-                else item
+                TextContent(content=text) if isinstance(item, TextContent) else item
                 for item in messages[index].content
             ]
             if not any(isinstance(item, TextContent) for item in new_content):
@@ -854,34 +810,13 @@ def _replace_last_assistant_text(chat_history: ChatHistory, text: str) -> None:
             return
 
 
-def _maybe_enable_wrapper_eval_telemetry(
-    tool_name: str,
-    arguments: dict[str, Any],
-    *,
-    enabled: bool,
-) -> dict[str, Any]:
-    """Inject debug telemetry flag for MVP wrappers during eval-only runs."""
-    if not enabled:
-        return arguments
-    if tool_name not in MVP_TOOL_SURFACE.model_tool_names:
-        return arguments
-    if bool(arguments.get("debug")):
-        return arguments
-    injected = dict(arguments)
-    injected["debug"] = True
-    return injected
-
-
 def _tool_failure_text(result: dict[str, Any]) -> str:
     if _is_native_validation_refusal(result):
         lines = [
             "I attempted the requested edit, but did not commit it because "
             "native GRC validation rejected the candidate graph."
         ]
-        if result.get("graph_unchanged") is True:
-            lines.append("The graph is unchanged.")
-        else:
-            lines.append("No changes were committed.")
+        lines.append("No changes were committed.")
         native_errors = _native_validation_errors_from_result(result)
         if native_errors:
             lines.append("Native GRC validation reported:")
@@ -889,6 +824,7 @@ def _tool_failure_text(result: dict[str, Any]) -> str:
             shown = [e for e in native_errors[:_MAX_NATIVE_ERRORS] if str(e)]
             if len(native_errors) > _MAX_NATIVE_ERRORS:
                 from grc_agent.runtime.text_utils import format_truncation_flag
+
                 shown.append(
                     format_truncation_flag(
                         "native_validation_errors",
@@ -911,37 +847,18 @@ def _tool_failure_text(result: dict[str, Any]) -> str:
 def _is_native_validation_refusal(result: dict[str, Any]) -> bool:
     return bool(
         result.get("committed") is False
-        and (
-            result.get("rejected_phase") == "native_grc_validation"
-            or result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED
-        )
+        and result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED
     )
 
 
 def _native_validation_errors_from_result(result: dict[str, Any]) -> list[str]:
-    errors = _string_list(result.get("native_validation_errors"))
-    if errors:
-        return errors
-
-    for key in ("validation_result", "validation"):
-        validation = result.get(key)
-        if not isinstance(validation, dict):
+    # New minimal shape: validation errors surface as errors[].code == "gnu_validation".
+    for entry in result.get("errors") or []:
+        if not isinstance(entry, dict):
             continue
-        native = validation.get("native")
-        if isinstance(native, dict):
-            errors = _string_list(native.get("errors"))
-            if errors:
-                return errors
-        errors = _string_list(validation.get("errors"))
-        if errors:
-            return errors
+        if entry.get("code") == "gnu_validation" and entry.get("message"):
+            return [str(entry["message"])]
     return []
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _resolve_final_assistant_text(
@@ -960,38 +877,7 @@ def _resolve_final_assistant_text(
     return ""
 
 
-def _attach_context_budget_telemetry(
-    result: dict[str, Any],
-    *,
-    enabled: bool,
-    model_context_limit: int | None,
-    history_chars: int,
-    tool_context_chars: int,
-    truncated_history: bool,
-    truncated_tool_output: bool,
-) -> dict[str, Any]:
-    """Attach coarse budget telemetry in eval/debug flows only."""
-    if not enabled:
-        return result
-    telemetry = {
-        "model_context_limit": model_context_limit,
-        "history_tokens_estimated": _estimate_tokens(history_chars),
-        "tool_context_tokens_estimated": _estimate_tokens(tool_context_chars),
-        "prompt_tokens_estimated": _estimate_tokens(history_chars + tool_context_chars),
-        "truncated_history": bool(truncated_history),
-        "truncated_tool_output": bool(truncated_tool_output),
-    }
-    result["context_budget"] = telemetry
-    return result
-
-
-def _estimate_tokens(chars: int) -> int:
-    return max(1, int(chars / 4)) if chars > 0 else 0
-
-
-def model_name_matches(
-    name: str, available_ids: list[str]
-) -> bool:
+def model_name_matches(name: str, available_ids: list[str]) -> bool:
     """Check if a model name exists in available IDs with :latest suffix tolerance."""
     if name in available_ids:
         return True

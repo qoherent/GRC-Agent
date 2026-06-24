@@ -16,15 +16,10 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.change_graph import (
-    _update_state_operation,
-)
 from grc_agent.runtime.model_context import build_system_prompt, render_model_messages
-
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
@@ -63,9 +58,7 @@ def _assistant_message(text: str) -> ChatMessage:
     )
 
 
-def _assistant_with_tool_calls(
-    calls: list[tuple[str, str, dict]]
-) -> ChatMessage:
+def _assistant_with_tool_calls(calls: list[tuple[str, str, dict]]) -> ChatMessage:
     content: list = []
     for call_id, name, args in calls:
         content.append(
@@ -84,9 +77,7 @@ def _assistant_with_tool_calls(
     )
 
 
-def _tool_history_record(
-    name: str, content: dict, call_id: str = "fake-call-id"
-) -> ChatMessage:
+def _tool_history_record(name: str, content: dict, call_id: str = "fake-call-id") -> ChatMessage:
     return ChatMessage(
         id=f"t-{call_id}",
         role=ChatMessageRole.Tool,
@@ -144,9 +135,7 @@ class Fix2TransientReminderTests(unittest.TestCase):
             semantic_search_result_preview=lambda _r: [],
             reminder=None,
         )
-        has_reminder = any(
-            "Runtime reminder" in message.get_as_text() for message in messages
-        )
+        has_reminder = any("Runtime reminder" in message.get_as_text() for message in messages)
         self.assertFalse(has_reminder)
 
     def test_reminder_does_not_alter_agent_get_model_messages_history(self) -> None:
@@ -190,9 +179,7 @@ class Fix2RecencyBiasTests(unittest.TestCase):
         history = ChatHistory()
         history.add_message(_user_message("Add an AGC block."))
         history.add_message(
-            _assistant_with_tool_calls(
-                [("c1", "inspect_graph", {"view": "overview"})]
-            )
+            _assistant_with_tool_calls([("c1", "inspect_graph", {"view": "overview"})])
         )
         history.add_message(
             _tool_history_record(
@@ -201,11 +188,7 @@ class Fix2RecencyBiasTests(unittest.TestCase):
                 call_id="c1",
             )
         )
-        history.add_message(
-            _assistant_with_tool_calls(
-                [("c2", "search_blocks", {"query": "AGC"})]
-            )
-        )
+        history.add_message(_assistant_with_tool_calls([("c2", "search_blocks", {"query": "AGC"})]))
         history.add_message(
             _tool_history_record(
                 "search_blocks",
@@ -341,7 +324,6 @@ class Fix2TemplateSafetyTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-
 # Fix #1: No premature exit on commit — commit result is role:"tool"
 # ---------------------------------------------------------------------------
 
@@ -368,7 +350,7 @@ class Fix1CommitResultTests(unittest.TestCase):
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        src = _fixture_path("random_bit_generator.grc")
+        src = _fixture_path("dial_tone.grc")
         dst = Path(tmp.name) / "test.grc"
         shutil.copy2(src, dst)
         session = FlowgraphSession()
@@ -409,7 +391,6 @@ class Fix1CommitResultTests(unittest.TestCase):
                 agent,
                 "Set the sample rate to 48000.",
                 model=None,
-                wrapper_eval_telemetry=False,
                 max_tool_rounds=4,
                 on_tool_start=None,
                 on_tool_end=None,
@@ -425,9 +406,7 @@ class Fix1CommitResultTests(unittest.TestCase):
         # The commit result must flow as role:Tool, never as a fabricated
         # assistant synthesis message. Inspect the recorded chat history.
         messages = agent.chat_history.get_messages()
-        tool_messages = [
-            m for m in messages if m.role == ChatMessageRole.Tool
-        ]
+        tool_messages = [m for m in messages if m.role == ChatMessageRole.Tool]
         # At least one Tool-role message exists (the change_graph result).
         self.assertGreaterEqual(
             len(tool_messages), 1, "change_graph result must be recorded as role:Tool"
@@ -440,8 +419,7 @@ class Fix1CommitResultTests(unittest.TestCase):
                     payload = json.loads(item.tool_call_result)
                     if (
                         isinstance(payload, dict)
-                        and payload.get("tool") == "change_graph"
-                        and payload.get("ok") is True
+                        and payload.get("committed") is True
                     ):
                         committed_tool_payload = payload
         self.assertIsNotNone(
@@ -455,27 +433,55 @@ class Fix1CommitResultTests(unittest.TestCase):
             "I updated the sample rate to 48000.",
         )
 
-    def test_dispatcher_accepts_bypass_state(self) -> None:
-        errors: list[str] = []
-        op = _update_state_operation(
-            {"instance_name": "blocks_throttle2_0", "state": "bypass"},
-            index=0,
-            field_name="update_states",
-            errors=errors,
-        )
-        self.assertIsNotNone(op, f"errors={errors}")
-        self.assertEqual(op["state"], "bypass")
 
-    def test_dispatcher_rejects_invalid_state_value(self) -> None:
-        errors: list[str] = []
-        op = _update_state_operation(
-            {"instance_name": "blocks_throttle2_0", "state": "invisible"},
-            index=0,
-            field_name="update_states",
-            errors=errors,
+class ChangeGraphForceAndRollbackTests(unittest.TestCase):
+    """Tests for the force=True bypass and snapshot-based rollback."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        src = _fixture_path("dial_tone.grc")
+        dst = Path(self.tmp.name) / "test.grc"
+        shutil.copy2(src, dst)
+        self.session = FlowgraphSession()
+        self.session.load(dst)
+        self.agent = GrcAgent(self.session)
+
+    def test_invalid_batch_rejected_without_force(self) -> None:
+        """Remove a connection (dangling port) → native validation fails, rollback."""
+        result = self.agent.execute_tool(
+            "change_graph",
+            {"remove_connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"]},
         )
-        self.assertIsNone(op)
-        self.assertTrue(any("state expected to be" in e for e in errors), errors)
+        self.assertFalse(result.get("committed"))
+        self.assertEqual(result.get("error_type"), "gnu_validation_failed")
+        self.assertNotIn("rollback_failed", result)
+
+    def test_invalid_batch_committed_with_force(self) -> None:
+        """Same invalid batch with force=True → committed despite validation failure."""
+        result = self.agent.execute_tool(
+            "change_graph",
+            {
+                "remove_connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"],
+                "force": True,
+            },
+        )
+        self.assertTrue(result.get("committed"))
+        self.assertTrue(result.get("ok"))
+        # Validation errors surface via `errors` so the model knows the graph
+        # is invalid even though the batch was committed via force=True.
+        gnu_errors = [e for e in result.get("errors", []) if e.get("code") == "gnu_validation"]
+        self.assertTrue(len(gnu_errors) > 0)
+
+    def test_rollback_restores_pre_batch_state(self) -> None:
+        """After a rejected batch, the graph is byte-identical to before."""
+        before_blocks = [b.name for b in self.session.flowgraph.blocks]
+        self.agent.execute_tool(
+            "change_graph",
+            {"remove_connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"]},
+        )
+        after_blocks = [b.name for b in self.session.flowgraph.blocks]
+        self.assertEqual(before_blocks, after_blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +494,7 @@ class Fix3NoForcedToolsTests(unittest.TestCase):
 
     def test_forced_next_tool_name_not_in_module(self) -> None:
         import grc_agent.toolagents_runtime as mod
+
         self.assertFalse(
             hasattr(mod, "forced_next_tool_name"),
             "forced_next_tool_name should have been removed from the module",
@@ -495,6 +502,7 @@ class Fix3NoForcedToolsTests(unittest.TestCase):
 
     def test_forced_tool_for_retry_reminder_removed(self) -> None:
         import grc_agent.toolagents_runtime as mod
+
         self.assertFalse(
             hasattr(mod, "_forced_tool_for_retry_reminder"),
             "_forced_tool_for_retry_reminder should have been removed",
@@ -502,6 +510,7 @@ class Fix3NoForcedToolsTests(unittest.TestCase):
 
     def test_committed_change_text_removed(self) -> None:
         import grc_agent.toolagents_runtime as mod
+
         self.assertFalse(
             hasattr(mod, "_committed_change_text"),
             "_committed_change_text should have been removed",
@@ -509,6 +518,7 @@ class Fix3NoForcedToolsTests(unittest.TestCase):
 
     def test_forced_change_graph_reminder_removed(self) -> None:
         import grc_agent.toolagents_runtime as mod
+
         self.assertFalse(
             hasattr(mod, "_FORCED_CHANGE_GRAPH_REMINDER"),
             "_FORCED_CHANGE_GRAPH_REMINDER should have been removed",
@@ -526,7 +536,7 @@ class Fix4UpdateStatesEnumTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
-        src = _fixture_path("random_bit_generator.grc")
+        src = _fixture_path("dial_tone.grc")
         dst = Path(cls._tmp.name) / "test.grc"
         shutil.copy2(src, dst)
         cls._session = FlowgraphSession()
@@ -543,7 +553,7 @@ class Fix4UpdateStatesEnumTests(unittest.TestCase):
             {
                 "update_states": [
                     {
-                        "instance_name": "blocks_throttle2_0",
+                        "instance_name": "analog_sig_source_x_0",
                         "state": "disabled",
                     }
                 ],
@@ -594,10 +604,7 @@ class Fix4UpdateStatesEnumTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"], result)
         self.assertTrue(
-            any(
-                "state" in str(e.get("field", ""))
-                for e in result.get("validation_errors", [])
-            ),
+            any("state" in str(e.get("field", "")) for e in result.get("validation_errors", [])),
             str(result.get("validation_errors", "")),
         )
 

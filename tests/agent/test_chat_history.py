@@ -92,9 +92,7 @@ class CompactChatHistoryTests(unittest.TestCase):
         tool_calls = asst.get_tool_calls()
         self.assertEqual(len(tool_calls), 1)
         self.assertEqual(tool_calls[0].tool_call_name, "inspect_graph")
-        self.assertEqual(
-            tool_calls[0].tool_call_arguments, {"view": "overview"}
-        )
+        self.assertEqual(tool_calls[0].tool_call_arguments, {"view": "overview"})
         tool_msg = history.get_messages()[2]
         results = tool_msg.get_tool_call_results()
         self.assertEqual(len(results), 1)
@@ -106,9 +104,7 @@ class CompactChatHistoryTests(unittest.TestCase):
         compact_chat_history(history, budget_chars=300)
         assistant = history.get_messages()[3]
         self.assertEqual(assistant.role, ChatMessageRole.Assistant)
-        text = next(
-            c.content for c in assistant.content if isinstance(c, TextContent)
-        )
+        text = next(c.content for c in assistant.content if isinstance(c, TextContent))
         self.assertEqual(text, "There are 2 blocks.")
 
     def test_truncation_sentinel_reports_original_length(self) -> None:
@@ -167,7 +163,8 @@ class CompactChatHistoryTests(unittest.TestCase):
         # multi-pass loop would produce.
         new_count = len(after_ids - before_ids)
         self.assertEqual(
-            new_count, 1,
+            new_count,
+            1,
             f"Expected exactly 1 rewrite, got {new_count}",
         )
 
@@ -189,9 +186,7 @@ class CompactChatHistoryTests(unittest.TestCase):
         history = ChatHistory()
         history.add_user_message("Find me a sink.")
         for i in range(8):
-            history.add_message(_assistant_tool_call_message(
-                f"calling query_knowledge {i}"
-            ))
+            history.add_message(_assistant_tool_call_message(f"calling query_knowledge {i}"))
             history.add_message(_tool_result_message("Z" * 12_000, call_id=f"c{i}"))
         # 8 * 12K = 96K payload > 30K budget, so the compactor must
         # run and apply the per-payload cap to each candidate.
@@ -200,7 +195,8 @@ class CompactChatHistoryTests(unittest.TestCase):
             for content in message.content:
                 if isinstance(content, ToolCallResultContent):
                     self.assertLessEqual(
-                        len(content.tool_call_result), 4000,
+                        len(content.tool_call_result),
+                        4000,
                         f"Result #{i} exceeded the default 4000-char "
                         f"per-payload cap: {len(content.tool_call_result)} chars.",
                     )
@@ -216,15 +212,11 @@ class CompactChatHistoryTests(unittest.TestCase):
         history = ChatHistory()
         history.add_user_message("Find me a sink.")
         for i in range(8):
-            history.add_message(_assistant_tool_call_message(
-                f"calling query_knowledge {i}"
-            ))
+            history.add_message(_assistant_tool_call_message(f"calling query_knowledge {i}"))
             history.add_message(_tool_result_message("Z" * 12_000, call_id=f"c{i}"))
         # Caller asks for a 2000-char cap. The compactor must clamp
         # each candidate down to <= 2000.
-        compact_chat_history(
-            history, budget_chars=30_000, max_tool_result_chars=2000
-        )
+        compact_chat_history(history, budget_chars=30_000, max_tool_result_chars=2000)
         for message in history.get_messages():
             for content in message.content:
                 if isinstance(content, ToolCallResultContent):
@@ -262,7 +254,7 @@ class ResumeReplaysToolMessagesTests(unittest.TestCase):
     """
 
     def test_resume_replays_assistant_tool_calls_and_results(self) -> None:
-        from grc_agent.session_ops import (
+        from grc_agent.chat_roles import (
             ASSISTANT_MODEL_ROLE,
             TOOL_MODEL_ROLE,
             chat_message_from_payload,
@@ -301,14 +293,12 @@ class ResumeReplaysToolMessagesTests(unittest.TestCase):
             rebuilt.get_messages()[0].get_tool_calls()[0].tool_call_name,
             "inspect_graph",
         )
-        tool_result = (
-            rebuilt.get_messages()[1].get_tool_call_results()[0]
-        )
+        tool_result = rebuilt.get_messages()[1].get_tool_call_results()[0]
         self.assertEqual(tool_result.tool_call_id, "call-1")
         self.assertEqual(len(tool_result.tool_call_result), 4000)
 
     def test_resume_skips_corrupt_payload(self) -> None:
-        from grc_agent.session_ops import chat_message_from_payload
+        from grc_agent.chat_roles import chat_message_from_payload
 
         self.assertIsNone(chat_message_from_payload(None))
         self.assertIsNone(chat_message_from_payload({}))

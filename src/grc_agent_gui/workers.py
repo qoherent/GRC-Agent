@@ -17,7 +17,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from grc_agent.session_ops import (
+from grc_agent.chat_roles import (
     ASSISTANT_MODEL_ROLE,
     TOOL_MODEL_ROLE,
     chat_message_payload,
@@ -157,13 +157,9 @@ class AgentWorker(QObject):
                 client = getattr(runner.provider, "client", None)
                 if client:
                     client.close()
-                    logger.info(
-                        "Forcefully closed HTTP client socket for active worker."
-                    )
+                    logger.info("Forcefully closed HTTP client socket for active worker.")
             except Exception as exc:
-                logger.warning(
-                    f"Error during forceful close of HTTP client socket: {exc}"
-                )
+                logger.warning(f"Error during forceful close of HTTP client socket: {exc}")
 
 
 def _role_to_model_role(message: ChatMessage) -> str | None:

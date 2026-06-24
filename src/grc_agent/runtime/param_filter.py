@@ -1,18 +1,19 @@
 """Single source of truth for GRC-native parameter filtering.
 
 Every model-visible parameter payload in the agent (``inspect_graph``
-overview/details, catalog ``describe_block``, catalog vector search) derives
+overview, catalog ``describe_block``, catalog vector search) derives
 its keep/drop decision from :func:`keep_param` below. No other module may
-re-implement parameter visibility or prominence logic.
+re-implement parameter filtering logic.
 
 The rules (applied in order, one uniform rule per stage):
 
-  Stage A — visibility (every mode):
+  Stage A — applied in every mode:
     drop ``hide == 'all'``
     drop ``category in EXCLUDED_PARAM_CATEGORIES``  (Advanced, Config)
     drop ``dtype == 'gui_hint'``
-  Stage B — prominence (``PROMINENCE`` mode only):
-    keep if ``dtype == 'enum'``  (structural selectors: type, wintype, ...)
+  Stage B — applied only in overview mode:
+    keep if ``hide == 'none'``        (GRC marks the param always-shown)
+    keep if ``dtype == 'enum'``       (structural selector: type, wintype, ...)
     keep if ``value != default``
     keep if value references a flowgraph variable
 
@@ -25,17 +26,16 @@ static block-definition metadata.
 from __future__ import annotations
 
 import re
-from functools import lru_cache
+from functools import cache
 from typing import Any
 
 from grc_agent.runtime.block_semantics import evaluated_param_hides
 
-# GRC-native param-category constants.
-try:
-    from gnuradio.grc.core.Constants import ADVANCED_PARAM_TAB, DEFAULT_PARAM_TAB
-except ImportError:  # pragma: no cover - GRC absent
-    ADVANCED_PARAM_TAB = "Advanced"
-    DEFAULT_PARAM_TAB = "General"
+# GRC-native param-category constants (stable string values; importing them
+# from ``gnuradio.grc.core.Constants`` at module top-level would violate the
+# adapter boundary and break CI without GNU Radio).
+ADVANCED_PARAM_TAB = "Advanced"
+DEFAULT_PARAM_TAB = "General"
 
 # Categories that hold only non-essential params (verified across the 564-block
 # catalog): Advanced = GRC auto-added metadata (alias/affinity/comment/buffers);
@@ -46,8 +46,8 @@ EXCLUDED_PARAM_CATEGORIES: frozenset[str] = frozenset({ADVANCED_PARAM_TAB, "Conf
 # in its expression equals a variable block's name.
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
 
-VISIBILITY = "visibility"  # Stage A only (Details / describe_block / embed)
-PROMINENCE = "prominence"  # Stage A + Stage B (Overview)
+DETAILS = "details"    # Stage A only (catalog describe_block / embed)
+OVERVIEW = "overview"  # Stage A + Stage B (inspect_graph overview)
 
 
 def references_variable(value: Any, variable_names: set[str]) -> bool:
@@ -78,7 +78,9 @@ def keep_param(
         return False
     if dtype == "gui_hint":
         return False
-    if mode != PROMINENCE:
+    if mode != OVERVIEW:
+        return True
+    if hide == "none":
         return True
     if dtype == "enum":
         return True
@@ -89,12 +91,12 @@ def keep_param(
     return False
 
 
-def prominence_rank(hide: str) -> int:
+def overview_rank(hide: str) -> int:
     """Sort key: ``hide='none'`` first, then ``'part'``, then anything else."""
     return 0 if hide == "none" else 1 if hide == "part" else 2
 
 
-@lru_cache(maxsize=None)
+@cache
 def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
     """Static per-param metadata from the GRC block definition.
 
@@ -103,9 +105,9 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
     unavailable.
     """
     try:
-        from grc_agent.session import _ensure_platform
+        from grc_agent.grc_native_adapter import get_platform_or_none
 
-        platform = _ensure_platform()
+        platform = get_platform_or_none()
     except Exception:
         return {}
     if platform is None:
@@ -177,9 +179,9 @@ def visible_param_keys(
     keys: list[str] | tuple[str, ...],
     param_values: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Visibility-filtered param keys for catalog embed text.
+    """Details-mode param keys for catalog embed text.
 
-    Applies Stage A (hide + category) via :func:`keep_param` in VISIBILITY
+    Applies Stage A (hide + category) via :func:`keep_param` in details
     mode. Falls back to the full key list if GRC evaluation is unavailable.
     """
     hides = evaluated_param_hides(block_id, param_values or {})
@@ -191,13 +193,14 @@ def visible_param_keys(
     # Missing hide entries default to "none" (kept) — embed text is conservative
     # and never silently drops a param whose visibility is unknown.
     return [
-        key for key in keys
+        key
+        for key in keys
         if keep_param(
             hide=hides.get(str(key), "none"),
             category=cats.get(str(key), DEFAULT_PARAM_TAB),
             dtype="",
             value="",
             default="",
-            mode=VISIBILITY,
+            mode=DETAILS,
         )
     ]

@@ -9,13 +9,21 @@ The bridge: `grc_native_adapter.py` is the **only** module that imports `gnuradi
 | Module | Role |
 |--------|------|
 | `grc_native_adapter.py` | All GRC native API calls. Lazy singleton `get_platform()`. |
-| `domain_models.py` | Pydantic V2 schemas. Outbound `extra="forbid"`, inbound `extra="ignore"`. |
+| `domain_models.py` | Pydantic V2 schemas (`BlockRole` is a `StrEnum`). Outbound `extra="forbid"`, inbound `extra="ignore"`. |
 | `flowgraph_session.py` | Owns path, integrity, atomic save, revision. `flowgraph` is a live `gnuradio.grc.core.FlowGraph`. |
-| `runtime/param_filter.py` | **The Bible** — single source of truth for param visibility. |
-| `runtime/inspect_graph.py` | Adapter-backed read tool. |
-| `runtime/change_graph.py` | Flat batch mutation dispatch. Stale-revision gate, noop detection, autosave. |
-| `agent.py` | Tool registry, dispatch, lifecycle. |
-| `transaction.py` | Clone/commit via `export_data()`/`import_data()`. |
+| `session.py` | `load_grc` (file → session) + `summarize_graph` (session → dict). |
+| `runtime/param_filter.py` | **The Bible** — single source of truth for parameter filtering (Stage A + Stage B). |
+| `runtime/inspect_graph.py` | MVP `inspect_graph` + `query_knowledge` wrapper (routes to catalog/docs). |
+| `runtime/change_graph.py` | MVP `change_graph` engine — flat batch mutations via the native GRC adapter. |
+| `runtime/catalog_vector.py` | sqlite-vec + embeddinggemma index for the GNU Radio catalog. |
+| `runtime/doc_answer.py` | sqlite-vec + embeddinggemma RAG for GNU Radio docs wiki. |
+| `runtime/search_blocks.py` | Vector search over the catalog (`BlockDescription` payload, Stage A filtered). |
+| `runtime/model_context.py` | `render_model_messages` + MVP `ToolSurface` (3-tool profile). |
+| `runtime/tool_schemas.py` | MVP tool JSON schemas (3 tools). |
+| `runtime/clarification.py` | `normalize_pending_clarification` + `resolve_pending_clarification_state`. |
+| `runtime/connection_ids.py` | `connection_id` (build) + `parse_connection_id` (parse). |
+| `agent.py` | MVP `GrcAgent`: tool registry, dispatch, lifecycle, history journal. |
+| `transaction.py` | `capture_session_state` / `restore_session_state` for `change_graph` rollback. |
 
 Data flow: `.grc file` → `grc_native_adapter.load_flow_graph()` → `FlowgraphSession.flowgraph` → `render_flow_graph()` → `GrcFlowgraph` Pydantic model → tool result.
 
@@ -31,13 +39,15 @@ Data flow: `.grc file` → `grc_native_adapter.load_flow_graph()` → `Flowgraph
 
 ## Tool surface
 
-Three model-facing tools, all backed by the adapter:
+Three model-facing wrapper tools (the entire MVP model surface):
 
-| Tool | Direction | Backed by |
-|------|-----------|-----------|
-| `inspect_graph` | read | `grc_native_adapter.render_flow_graph()` → `GrcFlowgraph` |
-| `change_graph` | write | `grc_native_adapter.apply_mutation()` + `validate_and_finalize()` |
-| `query_knowledge` | read | `search_blocks` (catalog) + `ask_grc_docs` (RAG) — no native API |
+| Tool | Direction | Engine |
+|------|-----------|--------|
+| `inspect_graph` | read | `grc_native_adapter.render_flow_graph()` → `GrcFlowgraph` (Stage A + B filtered) |
+| `change_graph` | write | `runtime/change_graph.dispatch_flat_change_graph_batch()` + `grc_native_adapter.apply_mutation()` |
+| `query_knowledge` | read | `runtime/search_blocks.search_blocks()` (catalog: vector search + `BlockDescription` payload) **or** `runtime/doc_answer.ask_grc_docs()` (docs RAG: KNN → top-5 full md files → LLM-grounded answer) |
+
+`search_blocks` and `ask_grc_docs` are internal engines under `query_knowledge`, not separately surfaced to the model. Both go through the same `embeddinggemma:latest` + sqlite-vec pipeline.
 
 - No new model-facing tool, schema field, or system-prompt change without maintainer authorization.
 - Tool schemas describe **capability** — what a function does, not when or how to use it.
@@ -47,9 +57,9 @@ Three model-facing tools, all backed by the adapter:
 
 - **Manual execution loop:** `ToolAgentsRunner._run_turn_events` with bounded `.step()`.
 - **No result caching.** Every call hits the live backend fresh.
-- **Repeat-payload escalator:** `_last_failed_ops_hash` flags duplicate failing payloads.
 - **Context compaction:** one-pass proportional slicing with truncation flags.
 - **Wire-format role safety:** runtime directives injected as `user`-role only.
+- **`change_graph` output is minimal.** Success: `{"ok": true, "committed": true}`. Failure: `{"ok": false, "committed": false, "ops_applied": 0, "error_type": "...", "errors": [{"code": "...", "message": "..."}]}`. Validation errors (when the graph is GRC-invalid) surface as `errors[].code == "gnu_validation"`. The `force=True` flag bypasses validation but the batch is still committed; the model must read `committed` to know whether edits applied. No `state_revision`, `validation`, `hint`, `rejected_phase`, `graph_unchanged`, `native_validation_errors`, or `rollback` fields — these were triplicated or constant.
 
 ## Constraints (hard prohibitions)
 
@@ -62,18 +72,19 @@ Three model-facing tools, all backed by the adapter:
 
 ## Key conventions
 
-- **Param visibility** (one rule, in `param_filter.py`): drop `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`. Keep: `enum` OR `value != default` OR `references_variable`.
-- **State values:** `enabled`, `disabled`, `bypassed` (accept `bypass` as alias). Enforced at `_update_state_operation()` in `change_graph.py`.
-- **Disconnect precision:** native `flow_graph.disconnect(src, dst)` removes ALL edges from source port. Adapter `disconnect()` finds the exact `Connection` object and drops from set.
+- **Param filtering** (one rule, in `param_filter.py`): Stage A (every mode) drops `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`. Stage B (overview mode only) keeps `hide == "none"` OR `dtype == "enum"` OR `value != default` OR `references_variable`. Details mode = Stage A only; overview mode = Stage A + Stage B.
+- **State values:** `enabled`, `disabled`, `bypass` (accept `bypassed` as alias). Enforced by the `change_graph` JSON-schema enum (model-facing) and `grc_native_adapter.set_block_state` alias map (GRC-native boundary: `Block.STATE_LABELS`).
+- **Disconnect precision:** native `flow_graph.disconnect(src, dst)` removes ALL edges from source port. Adapter `disconnect()` finds the exact `Connection` and calls native `flow_graph.remove_element(connection)` for single-edge deletion.
 - **Graph identity:** file-bytes SHA-256 (cross-session) + `state_revision` counter (in-session). No deep-JSON hashing.
 - **Atomic save:** temp file → fsync → `os.replace()` → directory fsync. Lock via `fcntl.flock` on `.grc_agent/<name>.lock`. Backup saved before each save.
+- **Tool surface:** `agent.py` only registers the 3 MVP tools. No internal tools, no `PUBLIC_TOOL_NAMES`, no legacy tool registry.
 
 ## Test gate
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (361 passed, 10 skipped) |
-| `grc_native` | `pytest -m grc_native` (28 passed; requires GNU Radio) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (255 passed, 9 skipped) |
+| `grc_native` | `pytest -m grc_native` (26 passed, 1 skipped; requires GNU Radio) |
 | `gui` | `xvfb-run pytest -m gui` (6 passed) |
 
-**Total: 395 passing.** Default CI command: `pytest -m "not grc_native and not gui and not llama_eval"`.
+Default CI command: `pytest -m "not grc_native and not gui and not llama_eval"`. The `docs/MODEL_CONTEXT_BIBLE.md` staleness guard (`tests/test_model_context_bible.py`) runs in this default gate.

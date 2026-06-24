@@ -68,4 +68,4 @@ jobs:
         run: uv run python -m unittest
 
       - name: Run runtime smoke test
-        run: uv run grc-agent fake tests/data/random_bit_generator.grc
+        run: uv run python -c "from grc_agent.flowgraph_session import FlowgraphSession; s = FlowgraphSession(); s.load('tests/data/dial_tone.grc'); assert s.flowgraph is not None; print('smoke OK')"

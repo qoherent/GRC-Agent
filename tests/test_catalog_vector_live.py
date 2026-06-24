@@ -1,7 +1,7 @@
 """Regression tests for VectorCatalogStore using the real embeddinggemma model.
 
 These tests require:
-  * ``vec1.so`` at the repo root.
+  * the ``sqlite-vec`` package (pip-installed).
   * Ollama running at $GRC_AGENT_LLAMA_SERVER_URL (default http://localhost:11434).
   * The ``embeddinggemma:latest`` model pulled.
   * A populated catalog DB at ``.grc_agent/vectors/catalog_v1.db``.
@@ -15,6 +15,7 @@ These tests document the *real* ranking of queries against the catalog.
 They will FAIL if the embed text becomes bloated with GUI-styling params
 or other low-signal fields, because that pollutes the embedding.
 """
+
 from __future__ import annotations
 
 import os
@@ -22,9 +23,6 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-
-import pytest
-
 
 LIVE = os.environ.get("GRC_AGENT_LIVE_EMBED") == "1"
 # conftest.py sets GRC_AGENT_VECTORS_DIR to a tmpdir at session start so unit
@@ -79,7 +77,8 @@ class VectorCatalogLiveTests(unittest.TestCase):
         """
         top = self._top("time sink", k=5)
         self.assertEqual(
-            top[0][0], "qtgui_time_sink_x",
+            top[0][0],
+            "qtgui_time_sink_x",
             f"time sink must rank qtgui_time_sink_x first, got {top}",
         )
 
@@ -88,7 +87,8 @@ class VectorCatalogLiveTests(unittest.TestCase):
         top = self._top("time domain visualization", k=5)
         ids = [bid for bid, _ in top]
         self.assertIn(
-            "qtgui_time_sink_x", ids,
+            "qtgui_time_sink_x",
+            ids,
             f"time domain visualization should include time sink, got {top}",
         )
 

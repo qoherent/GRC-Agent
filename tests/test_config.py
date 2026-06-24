@@ -29,7 +29,7 @@ class RuntimeConfigTests(unittest.TestCase):
         # silently degrades every LLM call (chat completion, RAG synthesis)
         # to a backend 400. The GUI/CLI provider-picker can override at
         # runtime, but the parsed config must always carry a usable model.
-        self.assertEqual(config.llama.model, "gemma4:12b-it-qat")
+        self.assertEqual(config.llama.model, "gemma4:e4b-it-qat")
         self.assertEqual(config.llama.max_tokens, 4096)
         # The default per-payload truncation cap is 4000 chars —
         # large enough to fit a full GNU Radio catalog JSON object
@@ -42,8 +42,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
-        self.assertEqual(config.agent.docs_answer.answer_cache_size, 64)
-        self.assertEqual(config.agent.retrieval.search_blocks_default_k, 5)
+        self.assertEqual(config.agent.retrieval.search_blocks_default_k, 3)
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
         self.assertEqual(config.agent.guardrails.max_validation_stderr_chars, 1200)
         self.assertEqual(config.agent.guardrails.max_compact_list_items, 3)
@@ -75,10 +74,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "\n[agent]\n"
                     "history_compact_budget = 5000\n"
                     "max_tool_result_chars = 8000\n"
-                    "\n[agent.docs_answer]\n"
-                    "max_sources = 5\n"
-                    "answer_cache_size = 32\n"
-                    "answer_target_chars = 250\n"
                     "\n[agent.retrieval]\n"
                     "search_blocks_default_k = 7\n"
                     "\n[agent.history]\n"
@@ -95,9 +90,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(config.llama.enable_thinking)
         self.assertEqual(config.llama.max_tool_rounds, 42)
         self.assertEqual(config.agent.max_tool_result_chars, 8000)
-        self.assertEqual(config.agent.docs_answer.max_sources, 5)
-        self.assertEqual(config.agent.docs_answer.answer_cache_size, 32)
-        self.assertEqual(config.agent.docs_answer.answer_target_chars, 250)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 7)
         self.assertEqual(config.agent.history.checkpoint_retention, 140)
 
@@ -116,16 +108,15 @@ class RuntimeConfigTests(unittest.TestCase):
                     "request_timeout_seconds=1.0\n"
                     "\n[agent]\n"
                     "history_compact_budget=1000\n"
-                    "\n[agent.docs_answer]\n"
-                    "max_sources=10\n"
                     "\n[agent.retrieval]\n"
+                    "ask_grc_docs_default_k=10\n"
                     "ask_grc_docs_max_k=3\n"
                 ),
                 encoding="utf-8",
             )
 
             with self.assertRaisesRegex(
-                ConfigError, "max_sources must be <= .*ask_grc_docs_max_k"
+                ConfigError, "ask_grc_docs_default_k must be <= ask_grc_docs_max_k"
             ):
                 load_app_config(config_path)
 
@@ -165,9 +156,7 @@ class RuntimeConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch.dict(
-                "os.environ", {CONFIG_ENV_VAR: str(env_config)}, clear=False
-            ):
+            with mock.patch.dict("os.environ", {CONFIG_ENV_VAR: str(env_config)}, clear=False):
                 with mock.patch(
                     "grc_agent.config.default_config_path",
                     return_value=Path(tmpdir) / "missing-repo.toml",
@@ -226,7 +215,5 @@ class RuntimeConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(
-                ConfigError, "backend must be"
-            ):
+            with self.assertRaisesRegex(ConfigError, "backend must be"):
                 load_app_config(invalid_path)

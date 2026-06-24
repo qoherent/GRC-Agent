@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from grc_agent.domain_models import ErrorCode, build_error_payload
 
-from grc_agent._payload import ErrorCode, build_error_payload
 from .schema import (
     BlockDescription,
     CatalogFiles,
@@ -44,6 +44,7 @@ _BlockCallback = Callable[[tuple[str, ...], str], None]
 
 # -- errors --
 
+
 class CatalogError(RuntimeError):
     """Base class for catalog metadata and description failures."""
 
@@ -62,6 +63,7 @@ class BlockNotFoundError(CatalogError):
 
 
 # -- loaders --
+
 
 def discover_catalog_root(catalog_root: str | Path | None = None) -> Path:
     """Return the GNU catalog root used by retrieval and block description."""
@@ -223,7 +225,9 @@ def _build_catalog_snapshot_for_root(root: Path) -> CatalogSnapshot:
         walk_tree_entries(
             tree_payload,
             tree_path,
-            on_block=lambda category_path, block_id: block_category_paths[block_id].add(category_path),
+            on_block=lambda category_path, block_id: block_category_paths[block_id].add(
+                category_path
+            ),
         )
 
     blocks: dict[str, RawCatalogBlock] = {}
@@ -243,6 +247,7 @@ def _build_catalog_snapshot_for_root(root: Path) -> CatalogSnapshot:
 
 
 # -- describe --
+
 
 def describe_block(block_id: str) -> dict[str, Any]:
     """Return structured GNU catalog truth for one block id."""

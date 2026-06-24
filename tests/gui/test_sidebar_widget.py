@@ -56,27 +56,33 @@ def test_sidebar_signals_emitted(qtbot):
 
     # Test collapse requested signal
     collapse_emitted = False
+
     def on_collapse():
         nonlocal collapse_emitted
         collapse_emitted = True
+
     widget.collapse_requested.connect(on_collapse)
     widget.collapse_btn.click()
     assert collapse_emitted
 
     # Test new chat requested signal
     new_chat_emitted = False
+
     def on_new_chat():
         nonlocal new_chat_emitted
         new_chat_emitted = True
+
     widget.new_chat_requested.connect(on_new_chat)
     widget.new_chat_btn.click()
     assert new_chat_emitted
 
     # Test session selection double click
     selected_session_id = None
+
     def on_session_selected(sid):
         nonlocal selected_session_id
         selected_session_id = sid
+
     widget.session_selected.connect(on_session_selected)
     widget._on_item_double_clicked(widget.list_widget.item(0))
     assert selected_session_id == 42
@@ -85,6 +91,7 @@ def test_sidebar_signals_emitted(qtbot):
 def test_main_window_sidebar_integration(qtbot, tmp_path, monkeypatch):
     db_path = tmp_path / "sessions.db"
     import grc_agent_gui.main_window
+
     monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
 
     # Clean up any leftover singleton before starting
@@ -120,7 +127,9 @@ def test_main_window_sidebar_integration(qtbot, tmp_path, monkeypatch):
     window.sessions_store.flush(timeout=2.0)
 
     # Checking if the database has it
-    sessions = window.sessions_store._writer_conn.execute("SELECT id, title FROM sessions").fetchall()
+    sessions = window.sessions_store._writer_conn.execute(
+        "SELECT id, title FROM sessions"
+    ).fetchall()
     assert len(sessions) == 1
     assert sessions[0][1] == "Testing sidebar integration"
 
@@ -132,6 +141,7 @@ def test_main_window_sidebar_integration(qtbot, tmp_path, monkeypatch):
 def test_open_past_session_autoloads_graph(qtbot, tmp_path, monkeypatch):
     db_path = tmp_path / "sessions.db"
     import grc_agent_gui.main_window
+
     monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
 
     SessionStore._instance = None
@@ -182,6 +192,7 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
 
     db_path = tmp_path / "sessions.db"
     import grc_agent_gui.main_window
+
     monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
 
     SessionStore._instance = None
@@ -196,6 +207,7 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
         ToolCallContent,
         ToolCallResultContent,
     )
+
     mock_agent.chat_history = ChatHistory()
     mock_provider = MagicMock()
 
@@ -278,9 +290,7 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
     ]
     # The tool call survives round-trip.
     assert (
-        mock_agent.chat_history.get_messages()[1]
-        .get_tool_calls()[0]
-        .tool_call_name
+        mock_agent.chat_history.get_messages()[1].get_tool_calls()[0].tool_call_name
         == "inspect_graph"
     )
 
@@ -321,11 +331,13 @@ def test_open_legacy_session_refuses_to_resume(qtbot, tmp_path, monkeypatch):
     """
     db_path = tmp_path / "sessions.db"
     import grc_agent_gui.main_window
+
     monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
 
     SessionStore._instance = None
 
     from ToolAgents.data_models.chat_history import ChatHistory
+
     mock_agent = MagicMock()
     mock_agent.session = None
     mock_agent.chat_history = ChatHistory()

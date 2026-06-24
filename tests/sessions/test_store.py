@@ -93,18 +93,20 @@ class SchemaTests(_StoreTestCase):
         ):
             self.assertIn(required, names, f"missing table/view: {required}")
         for trigger in ("messages_ai", "messages_ad", "messages_au"):
-            row = sqlite3.connect(str(self.store._db_path)).execute(
-                "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",
-                (trigger,),
-            ).fetchone()
+            row = (
+                sqlite3.connect(str(self.store._db_path))
+                .execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",
+                    (trigger,),
+                )
+                .fetchone()
+            )
             self.assertIsNotNone(row, f"missing trigger: {trigger}")
 
     def test_schema_version_is_one(self) -> None:
         conn = sqlite3.connect(str(self.store._db_path))
         try:
-            row = conn.execute(
-                "SELECT version FROM schema_version LIMIT 1"
-            ).fetchone()
+            row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         finally:
             conn.close()
         self.assertEqual(row[0], SCHEMA_VERSION)
@@ -130,9 +132,7 @@ class SchemaTests(_StoreTestCase):
 
 class RoundTripTests(_StoreTestCase):
     def test_open_and_read_session_metadata(self) -> None:
-        sid = self._open_session(
-            graph_path="/tmp/a.grc", graph_hash="grc:111", title="first"
-        )
+        sid = self._open_session(graph_path="/tmp/a.grc", graph_hash="grc:111", title="first")
         self.store.flush(timeout=2.0)
         rec = self.store.get_session(sid)
         self.assertIsNotNone(rec)
@@ -168,7 +168,7 @@ class RoundTripTests(_StoreTestCase):
         """Rows with role ``assistant_model`` / ``tool_model`` carry the
         full ``ChatMessage`` payload and round-trip through the DB so
         the resume path can rebuild the agent's ``ChatHistory``."""
-        from grc_agent.session_ops import (
+        from grc_agent.chat_roles import (
             ASSISTANT_MODEL_ROLE,
             TOOL_MODEL_ROLE,
             chat_message_payload,
@@ -191,6 +191,7 @@ class RoundTripTests(_StoreTestCase):
         from datetime import datetime
 
         from ToolAgents.data_models.messages import ChatMessage
+
         now = datetime.now()
         asst_msg = ChatMessage(
             id="a1",
@@ -237,9 +238,7 @@ class RoundTripTests(_StoreTestCase):
         self.assertEqual(msgs[1].text, "")
         self.assertEqual(msgs[0].payload["role"], "assistant")
         self.assertEqual(msgs[1].payload["role"], "tool")
-        self.assertEqual(
-            msgs[0].payload["content"][0]["tool_call_name"], "inspect_graph"
-        )
+        self.assertEqual(msgs[0].payload["content"][0]["tool_call_name"], "inspect_graph")
 
     def test_close_session_updates_counts_and_ended_at(self) -> None:
         sid = self._open_session()
@@ -251,8 +250,6 @@ class RoundTripTests(_StoreTestCase):
         assert rec is not None
         self.assertEqual(rec.message_count, 3)
         self.assertIsNotNone(rec.ended_at)
-
-
 
     def test_cascade_delete_session_deletes_messages(self) -> None:
         sid = self._open_session()
@@ -314,9 +311,7 @@ class AsyncWriterTests(_StoreTestCase):
         small_q.put_nowait(_make_pending(sid, "user", "first"))
         self.store._q = small_q
         try:
-            with self.assertLogs(
-                "grc_agent.sessions_store", level="WARNING"
-            ) as log_ctx:
+            with self.assertLogs("grc_agent.sessions_store", level="WARNING") as log_ctx:
                 self.store.append(sid, "user", "second")
             joined = "\n".join(log_ctx.output)
             self.assertIn("sessions_queue_full", joined)
@@ -482,18 +477,14 @@ class SyncApiTests(unittest.TestCase):
                 model_alias="m",
                 title="t",
             )
-            mid = append_message_sync(
-                db, session_id=sid, role="user", text="hi"
-            )
+            mid = append_message_sync(db, session_id=sid, role="user", text="hi")
             self.assertEqual(len(mid), 36)  # UUIDv4
             msgs = list_messages_sync(db, sid)
             self.assertEqual(len(msgs), 1)
             self.assertEqual(msgs[0].text, "hi")
             self.assertEqual(msgs[0].sequence, 0)
             # Second message gets sequence 1.
-            append_message_sync(
-                db, session_id=sid, role="assistant", text="hello"
-            )
+            append_message_sync(db, session_id=sid, role="assistant", text="hello")
             msgs = list_messages_sync(db, sid)
             self.assertEqual([m.sequence for m in msgs], [0, 1])
 

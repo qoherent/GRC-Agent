@@ -68,15 +68,6 @@ def tool_history_content_as_text(
             "connection_preview": active_session.get("connection_preview"),
         }
 
-    if tool_name == "get_grc_context":
-        compact.pop("nodes", None)
-        target = compact.get("target")
-        if isinstance(target, dict):
-            compact["target"] = {
-                key: target.get(key)
-                for key in ("node_id", "label", "block_type", "incoming", "outgoing")
-                if key in target
-            }
     lines = [f"{tool_name} result"]
     ok = compact.get("ok")
     if isinstance(ok, bool):

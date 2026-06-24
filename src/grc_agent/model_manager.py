@@ -93,11 +93,7 @@ def _fetch_ollama_tags(
         )
         data = response.json()
         if isinstance(data, dict) and "models" in data:
-            return [
-                m["name"]
-                for m in data["models"]
-                if isinstance(m, dict) and "name" in m
-            ]
+            return [m["name"] for m in data["models"] if isinstance(m, dict) and "name" in m]
         return []
     except Exception as exc:
         logger.debug("Ollama tag probe failed on %s: %s", server_url, exc)
@@ -133,9 +129,7 @@ def probe_ollama_backend(
 
     server_url = (server_url or "").rstrip("/")
     model_alias = (model_alias or "").strip()
-    pull_command = (
-        f"ollama pull {model_alias}" if model_alias else "ollama pull <model_name>"
-    )
+    pull_command = f"ollama pull {model_alias}" if model_alias else "ollama pull <model_name>"
 
     tags = _fetch_ollama_tags(
         server_url,
@@ -224,7 +218,9 @@ def check_ollama_tool_support(
         logger.warning(
             "Ollama tool-support probe failed for model %r at %s: %s. "
             "The backend may be down; the GUI will render in degraded mode.",
-            model_name, url, exc,
+            model_name,
+            url,
+            exc,
         )
         return None
     finally:

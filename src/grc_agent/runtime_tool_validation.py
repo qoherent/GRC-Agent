@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from grc_agent._payload import ErrorCode
+from grc_agent.domain_models import ErrorCode
 
 ToolSchemaMap = dict[str, dict[str, Any]]
 
@@ -194,10 +194,7 @@ def _validate_value(
                 {
                     "code": "too_few_items",
                     "field": field_path,
-                    "message": (
-                        f"Argument '{field_path}' must contain at least "
-                        f"{min_items} item."
-                    ),
+                    "message": (f"Argument '{field_path}' must contain at least {min_items} item."),
                     "min_items": min_items,
                     "received_items": len(value),
                 }
@@ -208,10 +205,7 @@ def _validate_value(
                 {
                     "code": "too_many_items",
                     "field": field_path,
-                    "message": (
-                        f"Argument '{field_path}' must contain at most "
-                        f"{max_items} items."
-                    ),
+                    "message": (f"Argument '{field_path}' must contain at most {max_items} items."),
                     "max_items": max_items,
                     "received_items": len(value),
                 }

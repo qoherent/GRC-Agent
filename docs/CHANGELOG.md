@@ -1,496 +1,88 @@
 # Changelog
 
-All notable changes to GRC Agent are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
-adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once
-1.0 ships.
-
 ## [Unreleased]
 
-### Added — GRC Native Refactor (Phases 1–7)
-- **`src/grc_agent/grc_native_adapter.py`** — 470-line bridge to GNU Radio GRC's Python API. Lazy singleton `get_platform()`, `load_flow_graph()`, `load_and_inspect()`, `render_flow_graph()`, 6 mutation helpers (`set_param`, `set_block_state`, `connect`, `disconnect`, `add_block`, `remove_block`), `apply_mutation()`, `validate_and_finalize()`, `serialize_flow_graph()`, `write_flow_graph_atomic()`. All gnuradio imports are confined to this module.
-- **`src/grc_agent/domain_models.py`** — 13 Pydantic V2 schemas. Outbound (`extra="forbid"`) for LLM-facing `GrcFlowgraph`, `GrcBlock`, `GrcParameter`, `GrcConnection`, `GrcValidation`. Inbound (`extra="ignore"`) for tool args. `BlockRole` StrEnum with 8 values.
-- **`src/grc_agent/runtime/param_filter.py`** — single source of truth for parameter visibility. `keep_param()` predicate: drop `hide==all` / `category∈{Advanced,Config}` / `dtype==gui_hint`. One uniform rule, no per-block allowlists.
-
-### Changed — Major Architecture Shift
-- **`flowgraph_session.py`** gutted from 1596 → 447 lines. `flowgraph` attribute is now a live `gnuradio.grc.core.FlowGraph.FlowGraph`. All 6 mutation helpers set `is_dirty=True` and bump `state_revision`. Integrity check (`file_integrity_state()`) guards save against external modification. Atomic save preserved with backup + lock.
-- **`runtime/inspect_graph.py`** rewritten from 1052 → 248 lines. All block/connection iteration goes through `render_flow_graph()` → `GrcFlowgraph` Pydantic model.
-- **`runtime/change_graph.py`** rewritten from 1277 → 370 lines. Flat batch dispatch via `dispatch_flat_change_graph_batch()`: stale-revision gate, noop detection (serialized snapshot comparison), autosave on commit, duplicate block name check, `force` bypasses validation failures only.
-- **`agent.py`** — 5 tool handlers updated. Inline rewire resolvers. All mutation paths go through adapter.
-- **`transaction.py`** — `apply_edit`/`propose_edit`/`clone_session`/`commit_candidate_session` rewired via `export_data()`/`import_data()`.
-- **`history.py`** — `snapshot_session` uses `export_data()` + native block/connection iteration.
-- **`validation/checks.py`** — `SessionSnapshot.from_session()` uses `export_data()`.
-- **`runtime/transaction_normalization.py`** — connection attribute access updated to native `source_block.name`/`sink_block.name`/`source_port.key`/`sink_port.key`. Port key coercion to int for numeric stream ports.
-
-### Changed — GUI (Phase 7)
-- **`src/grc_agent_gui/inspector.py`** — reads new flat payload shape (`graph.blocks`, `graph.connections`, `graph.validation.status`). Parameters inlined per block. `category_for_role` updated to new `BlockRole` enum values.
-- **`src/grc_agent_gui/main_window.py`** — `_block_params` sidecar producer removed. Save uses `session.save()` directly.
-
-### Changed — Error Payload
-- **`_payload.py`** — `build_error_payload()` now includes top-level `message` and `error_type` fields. `Flowgraph` dataclass deleted (zero importers).
-
-### Changed — Session Ops
-- **`session_ops.py`** — `chat_message_from_payload()` catches Pydantic validation errors gracefully. `MODEL_ROLES` frozenset deleted (zero importers).
-
-### Removed
-- 7 legacy/contradictory tests across `test_change_graph_flat_batch.py`, `test_transaction_commit.py`, `test_transaction_extended.py`, `test_transaction_rollback.py`.
-- Dead code: `set_param_noop_check`, `set_block_state_noop_check`, unreachable lines in `_update_state_operation`, `_write_committed_changes` import.
-- `_block_params` sidecar from GUI save path.
-
-### Documentation — single source of truth for GRC native API
-- **`docs/GRC_Core_API_Surface3.md` merged into `docs/GNU_NATIVE_METHODS.md`** to eliminate the split between the class-dictionary reference and the param-filtering recipe. The new `GNU_NATIVE_METHODS.md` is the single source of truth: class dictionary (§1), evaluation pipeline (§2), parameter filtering & visibility (§3), wildcard port resolution (§4), validation & error bubbling (§5), LLM headless orchestration blueprint (§6). All cross-references in the refactor plan and source code updated.
-- **`docs/comprehensive_native_refactoring_plan.md` and `docs/refactor_plan/` deleted** — process docs from the completed refactor; the architectural rules are captured in `AGENTS.md`.
-- **CHANGELOG "Deferred harder wins" section trimmed.** It referenced the removed `grc-agent` CLI subcommands (`grc-agent init`, `grc-agent paths`, `grc-agent clean`, etc.); the CLI surface was deleted in this branch.
-
-### Cleanup
-- `vec1.so` (stray build artifact at repo root, untracked) deleted.
-- `R_test_results/scenario12.md` (no longer produced by the current eval harness) deleted.
-
-### Removed — all result caching for the small-model target
-- **`_VECTOR_CACHE`** in `search_blocks.py` deleted. Every `query_knowledge` call now hits the vector store fresh.
-- **`_ask_grc_docs_cache`** in `agent.py` and all call sites in `doc_answer.py` deleted. The 3 methods (`_ask_grc_docs_cache_key`, `_ask_grc_docs_cache_get`, `_ask_grc_docs_cache_put`) and the `OrderedDict` backing store are gone.
-- **`seen_tool_calls` dedup** in `toolagents_runtime.py` deleted along with `_canonicalize_args` and the dedup branch. The 5-call retry-storm test (`test_tool_call_dedup.py`) is also removed — dedup is no longer a feature.
-- **Rationale:** the local 4B/12B gemma models are fast enough that caching added stale-result risk without meaningful latency savings. AGENTS.md §"Runtime & State Management" updated.
-
-### Fixed — `change_graph` error payloads now model-actionable
-- **Result now includes `committed: False`** on every rejection (was missing, causing the default `True` to pass the `assertFalse(result.get("committed", True))` assertions).
-- **Result now includes `hint`** promoted from the first per-error hint (or the first `native_validation_errors` entry, or the last line of `stderr` — in that priority order).
-- **GNU validation failures** now surface `graph_unchanged: true`, `rollback: "complete"`, `rejected_phase: "native_grc_validation"`, and a human-readable `message` so the model can recover.
-- **Top-level `hint` field** added to the error payload so `tool_context.tool_history_content_as_text` renders it as a `hint:` line the model actually sees.
-
-### Fixed — `tool_context` rendering no longer drops per-error hints
-- `tool_history_content_as_text` now emits a `hint:` line for every per-error `hint` it finds (was only the top-level `hint`).
-- `native_validation_errors` are rendered as `error: gnu_validation — …` lines (was buried in the JSON dump).
-- `stderr` tail rendered as a `hint:` line when no other hint is available.
-
-### Fixed — `vlen` connection mismatch now has a hint
-- `validation/checks.py` added `_preflight_vlen_param_hint` analogous to `_preflight_dtype_param_hint`. The model gets e.g. `Parameter 'vlen' of 'blocks_add_xx' is 1; set to 1024 to match the other side.` instead of a bare error.
-
-### Fixed — `search_blocks` false-positive truncation flag
-- `output_truncated` was set whenever the vector store returned `limit + 1` neighbours (its built-in "has more" signal). Now it only flags truncation when the store returned a full overflow. Model no longer sees spurious "more results exist" warnings on normal top-K queries.
-
-### Fixed — `validation/rules.py` block-rules cache key
-- `_get_cached_block_rules` was reading from the compact `to_payload()` (`params` key) and getting an empty dict, so every `add_block` with parameters was rejected. Now reads from the structured `BlockDescription.parameters` list. Without this, `_rank_docs_candidates` and `_preflight_dtype_param_hint` had empty parameter rules.
-
-### Fixed — `doc_answer.py` call sites
-- 46 call sites invoking module-level functions as `agent._<func_name>(...)` rewritten to call the module functions directly (`<func_name>(agent, ...)` or pure-call form for parameterless functions). The previous code crashed with `AttributeError` on every `ask_grc_docs` call.
-
-### Added — auto-rendered markdown transcripts
-- Every `run_phase_eval()` call now writes `R_test_results/<phase>.md` next to the JSON store (which is deleted immediately after, so only the MD survives). The harness owns the renderer; suites just call the harness as before. The MD shows model + system prompt + per-case tool calls, what the model actually sees (via `tool_history_content_as_text`), and per-check pass/fail.
-
-### Changed — 7 legacy test files deleted
-- `tests/catalog/test_describe_block.py`, `tests/test_mvp_tool_profile.py`, `tests/session/test_context_edges.py`, `tests/session/test_get_grc_context.py`, `tests/gui/test_process_manager.py`, `tests/gui/test_main_window_close.py`, `tests/test_search_blocks_compact.py`, `tests/test_tool_call_dedup.py`. These tested removed APIs and the removed `_VECTOR_CACHE`/`_ask_grc_docs_cache`/dedup features.
-
-### Changed — CLI removed; GUI is the sole surface
-- **The `grc-agent` console script is gone.** `src/grc_agent/cli.py`,
-  `src/grc_agent/__main__.py`, and the `[project.scripts]` entry are deleted.
-  Only `grc-agent-gui` (`grc_agent_gui.app:main`) remains. The GUI already
-  had zero coupling to `grc_agent.cli` (verified by import audit).
-- **Library logic preserved.** `doctor.run_doctor`, `sessions_store.*`,
-  `history.GraphHistoryJournal`, `model_manager.*`, `config.collect_package_paths`,
-  and the rest of `src/grc_agent/` are unchanged and available to the GUI.
-- **Trapped CLI helpers deleted.** `_build_health_report`,
-  `_build_release_manifest`, and `_render_init_template` had no library caller;
-  they are removed with `cli.py`. `doctor.print_doctor_report` (CLI-only
-  printer) is also removed; the structured `run_doctor` dict remains.
-- **`dogfood.py` is dormant.** No production caller remains; the module is
-  retained as a standalone library for eval/test pipelines.
-- **Tests pruned.** CLI-only tests deleted; library-level tests rewritten to
-  call the underlying modules directly (`collect_package_paths`,
-  `GraphHistoryJournal.list_records/get_record/diff_records/restore_record`,
-  etc.).
-
-### Removed — dead GUI wizard/dialog code (~1200 LOC)
-- `setup_panel.py` (ProviderPickerWidget / OllamaSetupWidget /
-  OllamaStartHintWidget), `provider_picker_dialog.py`,
-  `recent_sessions_dialog.py`, and the `ModelDialog` class were orphaned when
-  the inline `ModelToolbar` replaced the setup wizard. Only
-  `ModelDialogSelection` is kept (still imported by `main_window`).
-
-### Fixed — GUI no longer `sys.exit`s on backend failure
-- `grc_agent_gui/app.py` previously called `sys.exit(1)` when the Ollama
-  probe failed. Per AGENTS.md "Non-blocking flow", the GUI now launches into
-  degraded mode (`MainWindow.backend_reachable = False`, status-bar message)
-  so the user can recover via the inline model toolbar.
-- `sys.exit(2)` on graph-load failure replaced with in-window error surfacing.
-- Dead `_register_server_cleanup` path removed (bootstrap never returns
-  `launch_status='started'`). Unused `atexit`/`signal` imports cleaned up.
-
-### Refactored — GUI block taxonomy, slash commands, error detection
-- `inspector.py:198-216` block classification: 5-arm substring cascade
-  replaced with dispatch table on native `BlockRole` StrEnum. Fabricated
-  `filters` category removed.
-- `main_window.py:732-744` slash-command routing: prefix ladder replaced
-  with dispatch table. Legacy `\\`-prefixed alternates dropped.
-- `main_window.py:851-856` `_result_is_error`: substring-scan of
-  re-serialized JSON replaced with `json.loads` + structured field read.
-- `main_window.py:673-674` MagicMock test leak removed (production was
-  special-casing `type(model_alias).__name__ in ("MagicMock","Mock")`).
-- Magic strings (OpenRouter URL, Ollama URL, default model) hoisted to
-  `config.py` as `DEFAULT_OLLAMA_URL` / `DEFAULT_OPENROUTER_URL` /
-  `default_openrouter_model()` — single source of truth for 12+ sites.
-
-### Refactored — system prompt (declarative contract)
-- `build_system_prompt` in `model_context.py:191` rewritten from imperative
-  prose ("First, echo the user's request...", "you must batch...",
-  "Use X only if...") into labeled "Routing contract" and "Structural
-  contract" bullet lists. Every routing/structural fact preserved;
-  no imperatives remain.
-
-### Removed — in-band behavioral directives from model-visible strings
-- All `toolagents_runtime.py` assistant/historical strings: `no_model_text`,
-  `ceiling_text`, `dedup_result.message`, `_backend_unreachable_hint`
-  stripped of "Please", "Reformulate", "Rephrase", "Ensure" commands.
-- All `clarification.py` + `session.py` clarification `question` and
-  `message` fields stripped of "Choose the one to remove",
-  "Which one should be inserted", "Choose one candidate" directives.
-  Now pure fact statements.
-
-### Refactored — centralized runtime helpers
-- New `runtime/text_utils.py` with `format_truncation_flag` (one uniform
-  truncation sentinel), `tokenize_identifier` (canonical casefold+
-  alphanumeric tokenizer replacing 6 near-duplicate normalizers), and
-  `compact_whitespace` (one whitespace compactor).
-- New `runtime/enums.py` with `BlockState`, `ValidationStatus`,
-  `SearchDomain`, `ValidationErrorCode` StrEnums replacing
-  hardcoded string tuples across change_graph/tool_schemas/inspect_graph.
-- New `runtime/integrity.py` with unified `compact_file_integrity` (full
-  SHA preserved). Both agent.py and change_graph.py had divergent
-  copies — one clipped silently to 12 chars.
-- High-impact silent truncations flagged: `transaction.py:207/210`
-  (stderr/stdout), `search_blocks.py:334` (evidence),
-  `toolagents_runtime.py:947` (native errors), `clarification.py:128`
-  (params preview).
-- `_tool_argument_candidates` now derived from `build_tool_schemas()`
-  (was a 13-element hardcoded tuple that drifted — contained `scope`
-  which no tool exposes).
-- Three tokenization helpers + dead `_ALIAS_TOKEN_PATTERN` removed.
-
-### Removed — regex/dtype heuristics, hardcoded allowlists
-- `_first_dtype_mismatch` / `_is_port_occupancy_error` regex heuristics
-  parsing GRC's free-text error strings removed per maintainer decision
-  (model relies on structured error codes from `errors_payload`).
-- `block:` prefix stripped from `stable_block_uid`; downstream consumer
-  workarounds (`agent.py:453` strip loop, `change_graph.py:761`
-  `startswith` check) deleted. `_normalize_change_graph_args` inlined.
-- `_is_core_block` / `_is_hardware_or_external` substring allowlists
-  replaced with exact path-component matching via named frozensets.
-- Port error-code tuple replaced with `ValidationErrorCode` StrEnum.
-- State decoding replaced with `BlockState` StrEnum.
-- Validation status check replaced with `ValidationStatus` StrEnum.
-- Domain check replaced with `SearchDomain` StrEnum.
-- `validation_error_summary` status check uses `ValidationStatus`.
-- `_NUMERIC_SHORTHAND_RE` dead regex removed.
-- `_compact_block_summary` truncation flag corrected from
-  "chat-history compactor" to "block-summary".
-
----
-
-### Fixed (RAG audit remediation — findings S1–S10)
-- **S1 — Vector DB no longer polluted by the test suite.** `GrcAgent.__init__`
-  used to spawn an unconditional background ingestion thread that wrote to
-  the real `.grc_agent/vectors/docs_v1.db`. When tests instantiated an agent
-  with `get_embedding` patched, the patched (constant-valued) vectors were
-  written into the production DB, permanently defeating retrieval. Ingestion
-  is now an explicit `GrcAgent.warmup_vector_index()` call wired only at the
-  CLI/GUI production entry points. A new `is_db_usable()` gate rejects any DB
-  whose stored embeddings have zero variance (the exact pollution signature).
-  `tests/conftest.py` redirects `GRC_AGENT_VECTORS_DIR` to a per-session tmp
-  dir at module load and asserts the real production path is never touched.
-- **S2 — `[llama].model` is now required.** A config file without a model
-  silently degraded every LLM call (chat completion, RAG synthesis) to a
-  backend 400. `config.py` now uses `_require_non_empty_string` for `model`
-  and the repo `grc_agent.toml` carries `model = "gemma4:12b-it-qat"`. The
-  GUI/CLI provider-picker can still override at runtime.
-- **S4 — Removed `sanitize_text` denylist.** The hand-rolled regex list
-  (`["ignore previous", "system prompt", …]`) violated the "no hand-picked
-  heuristics" and "no silent transformation" rules. Source excerpts now
-  roundtrip verbatim.
-- **S5 — Removed in-band control flow.** The docs-synthesis system prompt no
-  longer tells the model to "reply exactly with" a fixed phrase, and
-  `ask_grc_docs` no longer sniffs that phrase from the answer. Confidence is
-  now derived purely from the retrieval distance.
-- **S6 — Calibrated distance thresholds.** `DISTANCE_THRESHOLD_HIGH=0.35`,
-  `DISTANCE_THRESHOLD_MEDIUM=0.50`, `INSUFFICIENT_EVIDENCE_DISTANCE=0.65` —
-  sourced from `tests/retrieval_eval/calibrate_thresholds.py` against the live
-  wiki corpus (histogram in `docs/MODEL_CONTEXT_BIBLE.md`).
-- **S7 — Embedding model is configurable.** `[llama].embedding_model` (default
-  `embeddinggemma:latest`) threads through to `get_embedding`.
-- **S8 — gemma-3 task prefixes applied uniformly.** Every query and every
-  document chunk is prefixed (`task: search result | query: …` /
-  `… | document: …`) per Google's gemma-3-embedding spec.
-- **S9 — Resource safety and truthful flags.** `search()` and
-  `ingest_if_needed()` use `try/finally`; the CWD-relative `vec1.so` fallback
-  is gone (raises a clear error if not found); `output_truncated` is now
-  derived from a `K=limit+1` probe rather than `len(sources) >= limit`.
-- **S10 — Chunking overhaul.** Sections track the full heading hierarchy
-  (each chunk's embed text carries `title > heading_path > excerpt`); a
-  uniform markdown-noise stripper drops bare image/nav lines; chunks are
-  256 words with 100-word overlap (was 400 words, no overlap).
-
-### Changed — catalog search swapped from FTS5 to vector
-- **Backend: FTS5 → vector search (embeddinggemma 300M + vec1 cosine).**
-  `query_knowledge(domain="catalog")` now uses the same vec1+embeddinggemma
-  pipeline as `domain="docs"`, against a new per-catalog DB at
-  `.grc_agent/vectors/catalog_v1.db`. The old FTS5 lexical backend was
-  missing the plain `variable` block for queries like "block id for
-  constant value source" because BM25 under-ranks short doc strings.
-  Vector search is semantically robust.
-- **`retrieval_backend` reports `"vector"`** (was `"lexical_fts5"`).
-  `match_type` is now uniformly `"vector"`. The block metadata payload
-  shape is unchanged from the model's perspective.
-- **Lazy ingest.** The catalog vector DB is built on first `search_blocks`
-  call if it isn't already populated, sourced from
-  `grc_agent.retrieval.warmup_catalog_vector_index`. No setup wizard.
-- **Eval harness now warms both indexes.** `_warmup_knowledge_index` in
-  `tests/llama_eval/harness.py` builds `docs_v1.db` and `catalog_v1.db`
-  synchronously before the first scenario runs, mirroring the
-  `_warmup_docs_index` fix from earlier.
-- **`lexical_cache_size` renamed to `vector_cache_size`** in
-  `RetrievalConfig` (one field, one default, one parser site). Cache
-  semantics are unchanged (LRU, keyed on `(query, k, catalog_version)`).
-- **Test updates.** `tests/test_mvp_tool_profile.py` now asserts
-  `retrieval_mode == "vector"` and mocks `VectorCatalogStore.search`
-  instead of the FTS5 connection. The 33 mechanical updates preserve
-  the dispatch and payload-shape contracts.
-
-### Added
-- **RAG live-integration tests** (`tests/retrieval_eval/test_rag_integration.py`)
-  gated behind `GRC_AGENT_LIVE_RAG=1`. Verify real ingestion, real vec1
-  retrieval, and real LLM synthesis end-to-end. These would have caught S1
-  and S2 before they shipped. The mock-based tests in
-  `test_mvp_tool_profile.py` remain for fast unit coverage of wrapper logic.
-- **`GrcAgent.warmup_vector_index()`** — explicit production hook for
-  background vector-DB ingestion. Called from `cli.py` (main chat loop,
-  single-tool path) and `grc_agent_gui/app.py`. Tests must not call it.
-- **`is_db_usable(db_path)`** in `doc_answer.py` — uniform sanity gate that
-  rejects empty DBs and DBs whose stored embeddings have zero variance.
-- **`[llama].embedding_model`** config knob.
-
-### Multi-backend LLM support (pre-existing)
-- **Multi-backend LLM support.** `[llama].backend` selects the active backend
-  at startup; `config.py` accepts only `ollama` (default) or `openrouter`.
-  - **Ollama**: probed via `GET /v1/models` over the OpenAI-compatible path;
-    model discovery via `/api/tags`; tool-calling template support is checked
-    and the user is warned if the model's chat template lacks the `{{ .Tools }}`
-    section. The application never spawns or stops `ollama serve`.
-  - **OpenRouter**: `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are read from
-    the root `.env` and reached through the same OpenAI-compatible provider
-    (no separate HTTP client).
-  - `grc-agent model list [--backend {ollama,openrouter}]` lists models in the
-    active backend; `grc-agent model swap [--backend ...] [--model ...]`
-    switches backend/model and persists the choice.
-- **GUI inline model toolbar** (`src/grc_agent_gui/model_toolbar.py`): a
-  provider combo, model combo, status dot, and refresh button living
-  permanently above the chat pane. Replaces the pre-launch setup wizard and
-  the `Model > Select Model…` dialog; the live swap persists to both
-  `preferences.json` and `config.toml`.
-- **First-launch provider picker** (embedded, not a modal): Ollama (local) or
-  OpenRouter (cloud); persisted to `~/.config/grc_agent/preferences.json`.
-- **Degraded mode** when the backend probe fails at launch: the main window
-  still opens (no crash, no forced exit); chat input and Validate are
-  disabled; the model toolbar remains the recovery path. A cross-thread
-  `backend_unreachable` Qt signal keeps GUI mutations on the main thread.
-- **Backend-unreachable handling during turns**: `httpx.ConnectError`,
-  `ConnectTimeout`, and `ReadTimeout` in the turn loop produce a typed
-  `backend_unreachable` payload (`ErrorCode.BACKEND_UNREACHABLE`) with the
-  server URL, surfaced as a chat hint.
-- `UserPreferences.provider_chosen` field and `update_provider_chosen()`.
-- **User preferences (System A)**: `~/.config/grc_agent/preferences.json`
-  persists the last-loaded model, deliberately separate from the hand-edited
-  `grc_agent.toml` so UI writes never clobber user config. Listed under
-  `grc-agent paths`.
-- **Local chat-session history (System B)**: SQLite + FTS5 store at
-  `~/.grc_agent/sessions.db`. The async writer runs on a dedicated daemon
-  thread with a 1000-message bounded queue, drop-oldest backpressure, and
-  batched WAL commits, so the GUI main thread never blocks on SQLite I/O.
-  New `grc-agent sessions {list,show,export,gc}` subcommand and a
-  `File > Recent Sessions…` browser.
-- **Session-history sidebar** (System B part 2): persistent left-side
-  `SidebarWidget` (resizable, collapsible via `Ctrl+Shift+H`); double-clicking
-  a session autoloads the associated `.grc` and resumes that session.
+### Added — GRC Native Refactor
+- `grc_native_adapter.py`: 470-line bridge confining all `gnuradio` imports.
+- `domain_models.py`: 13 Pydantic V2 schemas (outbound `extra="forbid"`, inbound `extra="ignore"`).
+- `runtime/param_filter.py`: single uniform rule for param visibility.
 
 ### Changed
-- **Conversation model is now a typed `ChatHistory`** (`ToolAgents==0.3.0`).
-  The ad-hoc `list[dict]` history is gone; `GrcAgent.history` becomes
-  `GrcAgent.chat_history`; the runtime appends the typed `ChatMessage`
-  returned by `chat_agent.step` directly. The "session" pseudo-role is gone;
-  the graph snapshot is kept out-of-band on the agent. A reduced adapter and
-  `_resolve_final_assistant_text` are retained for the JSON-only helper path.
-- **Real-token streaming** via `ToolAgentsRunner.stream_turn`. The previous
-  post-hoc QTimer throttle of finished output is replaced by a generator that
-  yields `chunk` / `tool_start` / `tool_end` / `model_message` / `final`
-  events. `AgentWorker.run_turn_streaming` consumes it and falls back to the
-  bounded non-streaming `run_turn` when the provider cannot stream.
-- **Retry-storm guard** in the tool-call loop: a repeated
-  `(name, canonicalized-args)` call in one turn short-circuits to a
-  `deduplicated: True` result that reuses the prior output. Prevents small
-  local models from exhausting the history with identical calls.
-  `tests/test_tool_call_dedup.py` covers a 5-call storm → 1 execution.
-- **One-pass proportional compaction** in `compact_chat_history`. Truncated
-  payloads end with `... [TRUNCATED by chat-history compactor: was N chars,
-  kept M]` so the model can tell the JSON was cut off.
-- **Reminder** is wrapped in `<runtime_directive>` tags and emitted as a
-  `user`-role message, keeping the control plane's voice distinct from the
-  human user's while avoiding non-standard wire roles.
-- **Empty assistant bubble dropped** when a turn ends with only tool calls
-  (`ChatWidget.drop_last_assistant()`); the persistence layer also skips the
-  empty flat `assistant` display row.
-- **GUI sidebar width halved** (18% → 9%).
-- **Eval harness** (`tests/eval_chat/`): JSON-fixture scenarios driving the
-  real `ToolAgentsRunner._run_turn_events` loop with a stubbed
-  `chat_agent.step` (no real llama.cpp). `write_measured_behavior_block()`
-  emits the baseline summary for this changelog.
-
-### Removed
-- `src/grc_agent/llama_launcher.py` and `src/grc_agent/llama_probe.py`
-  (obsoleted by the ToolAgents-backed runtime). The app no longer manages a
-  `llama-server`/daemon lifecycle.
-- `llama_cpp` as a backend option (`[llama].backend` is now `ollama` or
-  `openrouter` only), along with the `hf_repo` / `hf_model` / `model_path`
-  config fields and the HF-cache GGUF discovery path that supported it.
+- `flowgraph_session.py` gutted 1596→447 lines; `flowgraph` is now a live `gnuradio.grc.core.FlowGraph`.
+- `inspect_graph.py` rewritten 1052→248 lines; `change_graph.py` rewritten 1277→370 lines (flat batch dispatch, stale-revision gate, noop detection, autosave).
+- All mutation paths go through adapter; `export_data()`/`import_data()` used for transaction snapshots.
+- CLI removed; GUI is sole surface. Dead wizard/dialog code (~1200 LOC) deleted.
+- `tool_context` rendering now emits per-error `hint:` lines and structured `error:` lines.
+- System prompt rewritten from imperative prose to declarative contract bullet lists.
+- All in-band behavioral directives removed from model-visible strings.
+- Centralized runtime helpers: `text_utils.py`, `enums.py`, `integrity.py`.
+- 7 legacy test files, regex/dtype heuristics, hardcoded allowlists removed.
+- Mutation methods consolidated to native GRC APIs: `flow_graph.get_block()` replaces adhoc `_find_block`; `flow_graph.remove_element()` replaces manual list/set manipulation; `Block.STATE_LABELS` replaces hardcoded set.
+- Dead code deleted: `validation/` package (3,415 lines), `transaction.py` apply path (~430 lines), `flowgraph_session.py` mutation wrappers (6 methods), 15 dead tests.
+- Dead `name or key` fallbacks removed from `render_connection` and `history.py` (5 sites).
+- System prompt: added "Parameter values are string expressions; a variable reference is the variable's name."
 
 ### Fixed
-- **`'LlamaConfig' object has no attribute 'llama'` on OpenRouter/Ollama
-  swap**: `ModelSwapRunnable` was passing a bare `LlamaConfig` to
-  `bootstrap_runtime`, which expects an `AppConfig`. Fixed by wrapping the
-  mutated `LlamaConfig` in a fresh `AppConfig`.
-- **GUI layout — sidebar over-wide / inspector collapsed on relaunch**:
-  splitter state is now restored in `showEvent` (after window geometry is
-  realized) instead of `__init__`, with `setStretchFactor` keeping the
-  sidebar and inspector at fixed widths on resize.
-- **Session resumption created a new session instead of continuing**:
-  `_open_past_session` now preserves `active_session_id` instead of clearing
-  it.
-- **Resume dropped tool evidence**: the old path rebuilt the model history
-  from only `user`/`assistant` rows, dropping every tool result and every
-  `tool_calls`-bearing assistant row, so a resumed session had no
-  `inspect_graph` / `search_blocks` evidence in context. The new path
-  persists typed `ChatMessage` payloads in the `payload` column
-  (`assistant_model` / `tool_model` roles) and replays them via
-  `ChatMessage.from_dict` on resume. See
-  `docs/superpowers/specs/2026-06-09-chat-history-refactor-design.md`.
-- **Legacy resume fallback removed.** Per AGENTS.md (no backward-compat
-  shims), `_open_past_session` refuses to resume a pre-typed-history session
-  (no model rows → `active_session_id = None` with a status-bar hint to start
-  a new chat). Enforced by `test_open_legacy_session_refuses_to_resume`.
+- `change_graph` error payloads are minimal: `{ok, committed, ops_applied, errors, error_type}`. Validation errors surface as `errors[].code == "gnu_validation"`. Removed triplicated `state_revision`, `validation`, `native_validation_errors`, `rejected_phase`, `graph_unchanged`, `hint`, `rollback` fields.
+- `vlen` connection mismatch now has explicit hint.
+- `search_blocks` false-positive `output_truncated` flag corrected.
+- `validation/rules.py` block-rules cache key reads `BlockDescription.parameters` (not `to_payload()`).
+- `doc_answer.py` call sites rewritten to avoid `AttributeError`.
+- GUI no longer `sys.exit`s on backend failure — launches in degraded mode.
+- CLI helpers/tests pruned; library logic preserved.
+
+### Refactored — GUI
+- Block taxonomy uses native `BlockRole` StrEnum dispatch table (no substring cascade).
+- Slash-command routing uses dispatch table; `\`-prefixed alternates dropped.
+- Magic strings hoisted to `config.py`.
+- MagicMock test leak removed.
+
+### Fixed — RAG audit (findings S1–S10)
+- Background ingestion no longer pollutes production vector DB (`warmup_vector_index()` is explicit).
+- `[llama].model` is now required (config without it silently degraded every LLM call).
+- `sanitize_text` denylist removed (violated no-hand-picked-heuristics rule).
+- In-band control flow in docs-synthesis prompt removed.
+- Distance thresholds calibrated (`0.35`/`0.50`/`0.65`) from live wiki corpus.
+- Embedding model configurable via `[llama].embedding_model`.
+- gemma-3 task prefixes applied uniformly to queries and chunks.
+- Resource safety: `try/finally` guards; `vec1.so` fallback raises clear error.
+- Chunk size reduced to 256 words / 100-word overlap with full heading hierarchy.
+
+### Changed — Catalog search: FTS5 → vector
+- `query_knowledge(domain="catalog")` uses vec1+embeddinggemma pipeline (`.grc_agent/vectors/catalog_v1.db`).
+- `retrieval_backend` reports `"vector"`; `match_type` is uniformly `"vector"`.
+
+### Added
+- RAG live-integration tests (`GRC_AGENT_LIVE_RAG=1`).
+- `GrcAgent.warmup_vector_index()`, `is_db_usable()`, `[llama].embedding_model`.
+
+### Multi-backend LLM support
+- Ollama (probed via `/v1/models`) and OpenRouter (`OPENROUTER_API_KEY` from `.env`).
+- GUI inline model toolbar replaces setup wizard; first-launch provider picker.
+- Degraded mode on backend failure (chat input disabled, toolbar is recovery path).
+- `ChatHistory` typed model; real-token streaming via `ToolAgentsRunner.stream_turn`.
+- Retry-storm guard (identical calls in one turn short-circuited).
+- One-pass proportional compaction with truncation flags.
+- Session-history sidebar (SQLite + FTS5, async writer, `File > Recent Sessions…`).
 
 ### `inspect_graph` data-layer refactor
-- **Uniform 5-field `_base_payload` shape** (`runtime/inspect_graph.py`):
-  `ok`, `errors`, `unmatched_params`, `variable_references`,
-  `param_keys_by_block`, `graph`. Same fields for every view, every
-  call path, success and failure.
-- **`variable_references` lifted from the `param_filter` gate.** The
-  reverse map (variable → `{value, referenced_by}`) is now always present,
-  so a model answering "what uses variable X" needs no second call. The
-  prior behavior required `params=['X']` to surface the map.
-- **`param_keys_by_block` filtered to GRC-evaluated `hide != 'all'`.**
-  Uses the native `evaluated_param_hides` (lru_cached, calls GRC's
-  `platform.make_flow_graph().new_block(...).rewrite()`). 87-key blocks
-  collapse to 3 visible params; `-42%` model-visible payload for overview.
-- **`role` added to details rows** (mirrors the overview row's `role`).
-- **Renderer (`tool_context.py`)** promotes every `errors[i].message` to
-  a structural `error: {code} — {message}` line (was: first only). Uses
-  the same `f"{label}: {value}"` pattern as the existing `message`/`hint`
-  promotion. Applies uniformly to all tools.
-- **`ambiguous_target` error** now lists the matched candidate names
-  (sorted, native from `_resolve_target(...).candidates`). No more second
-  `inspect_graph(view='overview')` to recover.
-- **`target_not_found` error** lists valid block names via the native
-  `flowgraph.blocks` iterator, sorted, capped at 20 with `+N more`
-  suffix — no magic number in the call site, no hand-tuned limit.
-- **`is_variable_block` bridged to native GRC `Block.is_variable`** via
-  the platform registry. Catches 6 variable types the string-prefix
-  heuristic missed (`json_config`, `yaml_config`, `qtgui_dialgauge`,
-  `qtgui_levelgauge`, `qtgui_msgdigitalnumbercontrol`, `uhd_rfnoc_graph`).
-  String-prefix fallback retained for platform-unavailable paths.
-- **Schema documentation**: `targets` description now lists `['all']` /
-  `['*']` as the documented way to request overview. `query_knowledge`
-  description is dual-purpose (catalog + docs).
-- **System prompt**: catalog soft-escape-hatch clause removed (Variant A
-  experiment verified safe via 3 R0 runs). Model now routes variable-
-  reference questions to `inspect_graph` because the data layer makes the
-  right tool obvious.
-- **Dead code removed**: `_validation_status` (30 lines), `_params_filter`
-  (20 lines), `block_semantics._compact_value` (one of 3 copies,
-  zero callers), 3 dead `GuardrailsConfig` fields
-  (`max_detail_params_default`, `max_connections_per_block`,
-  `min_detail_params_before_truncation`).
-- **`_connection_summaries` consolidated**: removed duplicate from
-  `inspect_graph.py`, imported from `block_semantics.py`.
-- **`output_truncated` telemetry bug fixed**: was reading
-  `result.get("truncation", {})` (renamed to `omitted` in the refactor),
-  always returning `False`. Now reads `omitted` correctly.
-- **5 `GuardrailsConfig` fields wired into TOML loader**
-  (`max_overview_connections`, `max_detail_params_all`,
-  `max_detail_params_requested`, `max_inspect_targets`,
-  `max_inspect_params`): previously defined with defaults but silently
-  ignored by the TOML loader.
-- **FTS5 wiki index**: in-memory SQLite FTS5 over the bundled
-  `grc_agent/wiki_gnuradio_org` corpus. `tokenize='porter unicode61
-  remove_diacritics 2'` for English-prose recall (verified 36× more
-  results on "filtering" vs. plain unicode61). Section truncation
-  removed (was 600-char cap dropping 49% of text; bm25 was distorted
-  by length normalization). BM25F column weights `bm25(wiki_fts, 8.0,
-  4.0, 1.0)` replace hand-tuned `title_hits * 2.0` /
-  `heading_hits * 1.5` multipliers. Three accidental cargo-cult items
-  removed (`PRAGMA temp_store`, `PRAGMA cache_size`, `prefix='2 3'`,
-  `optimize`): 0 ms benefit on `:memory:` DBs, +2 MB index size, +70%
-  build time.
-- **Ranking constants cleaned**: 3 class-C hand-picked heuristics
-  dropped from `rank_docs_candidates` (`off_topic_curated_penalty`
-  per-doc `6.0` for "Variables in Flowgraphs", `preferred_source_bonus`
-  per-query allowlist `3.5` + its `_preferred_docs_source_markers`
-  function, `weak_absence_penalty` `< 0.74` threshold). The 6-way
-  `source_pref` if/elif collapsed to a module-level
-  `_SOURCE_PREF_WEIGHTS: dict[tuple[bool, bool, str], float]`.
-- **Live R0 (`gemma4:e4b-it-qat`)**: 3 consecutive runs at 14/14
-  after each fix batch. Unit tests: 404 passing, 0 fail.
-- **Ground-truth set**: 97 wiki-title-based queries + 5 verified
-  queries, used for I6 ranking experiments.
-
-### Known surface items needing maintainer sign-off
-- **`get_grc_context` is a 4th model-facing tool** with in-band control
-  flow (`hint: "If the user also asked for a real change after
-  inspecting, call \`apply_edit\` next."` at
-  `runtime/inspect_graph.py:1051`). AGENTS.md §"Active MVP surface"
-  states 3 tools; this is a 4th. Flag for maintainer decision (unify
-  or accept).
-- **`(semantic_score - 0.62) * 7.0`** in `rank_docs_candidates:1764` is
-  the last remaining magic pair. It's calibrated to the
-  `1/(1+rank)` semantic-score scale and cannot be changed without
-  re-calibrating the whole composite. Flag for maintainer: replace
-  with normalized bm25 magnitude (subagent's `M1 = -bm25 /
-  (1+abs(bm25))`), which would also drop the `0.62`/`7.0` pair.
+- Uniform 5-field `_base_payload` shape for all views.
+- `variable_references` always present (lifted from `param_filter` gate).
+- `param_keys_by_block` filtered to GRC-evaluated `hide != 'all'` (87-key blocks → ~3).
+- `role` added to details rows; renderer promotes all `errors[i].message` lines.
+- `ambiguous_target` lists matched candidates; `target_not_found` lists valid blocks.
+- `is_variable_block` bridged to native `Block.is_variable`.
+- Dead code removed (~50 lines); `GuardrailsConfig` fields wired into TOML loader.
+- FTS5 wiki index: `porter unicode61` tokenizer, BM25F weights, 3 cargo-cult items removed.
+- 3 class-C heuristics dropped from `rank_docs_candidates`.
 
 ## [0.1.0] - 2026-06-05
 
-First open-source release. Functional-complete internal tool released for
-external use.
+First open-source release.
 
-### Added
-- **Startup cache cleanup hardening**: Added automatic reaping of orphan `llama-server` backend processes on startup, log file pruning/retention in the launcher log directory, and cleanup of stale GUI temp compile directories left behind by abnormal exits.
-- **CLI** (`grc-agent`): REPL chat, one-shot `--message` runs, scripted
-  `tool` invocation, vector index build/search/gc, history journal with
-  list/show/diff/restore, dogfood intake, `doctor`/`health`/`debug-bundle`
-  diagnostics, `release-manifest` evidence dumper, and a `fake` deterministic
-  smoke harness.
-- **GUI** (`grc-agent-gui`): PySide6 desktop sidekick with real-time streamed
-  chat (Pygments-highlighted), live flowgraph inspector, two-phase
-  `grcc`+run process manager, cancel/stop, and persistent window state.
-- **MVP model-facing tool surface** (3 wrappers): `inspect_graph`,
-  `query_knowledge` (dispatches to `search_blocks` / `ask_grc_docs` by
-  intent), and `change_graph`. Larger internal surface (17 tools) is not
-  model-facing.
-- **Local retrieval** over the bundled GNU Radio manual/tutorial corpus
-  (Qdrant + FastEmbed, `thenlper/gte-base`).
-- **Shared startup bootstrap** for CLI and GUI; lazy llama.cpp auto-launch
-  with PID-liveness checks.
-- **Open-source hygiene**: MIT license, `uv` install path, CONTRIBUTING,
-  CODE_OF_CONDUCT, SECURITY, customer docs consolidated into the README.
-
-### Notes
-- The bundled `docs/wiki_gnuradio_org/` corpus is shipped for retrieval;
-  license and attribution are documented in the directory.
-- `grc-agent init` writes a starter config to `~/.config/grc_agent/config.toml`.
-- `grc-agent paths` lists every on-disk location the package uses.
+- CLI (`grc-agent`): REPL chat, one-shot, scripted tool invocation, vector index mgmt, history journal, dogfood, diagnostics.
+- GUI (`grc-agent-gui`): PySide6 desktop with streamed chat, live flowgraph inspector, process manager.
+- 3 model-facing tools (`inspect_graph`, `query_knowledge`, `change_graph`).
+- Local retrieval over bundled GNU Radio corpus (Qdrant + FastEmbed).
+- Shared CLI/GUI bootstrap with lazy llama.cpp auto-launch.
+- MIT license, `uv` install path, CONTRIBUTING/CODE_OF_CONDUCT/SECURITY.

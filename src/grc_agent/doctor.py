@@ -46,11 +46,8 @@ def _build_check(name: str, ok: bool, detail: str, **extra: Any) -> dict[str, An
 
 def _check_python() -> dict[str, Any]:
     version = sys.version_info
-    ok = (version.major == 3 and version.minor >= 12)
-    detail = (
-        f"{version.major}.{version.minor}.{version.micro} "
-        f"(expected >= 3.12)"
-    )
+    ok = version.major == 3 and version.minor >= 12
+    detail = f"{version.major}.{version.minor}.{version.micro} (expected >= 3.12)"
     return _build_check("Python version", ok, detail)
 
 
@@ -81,7 +78,7 @@ def _check_config(config_path: str | None = None) -> dict[str, Any]:
         return _build_check(
             "App config",
             False,
-            f"{exc}. Run: uv run grc-agent doctor --skip-retrieval",
+            f"{exc}. Check the AppConfig defaults in grc_agent.config.",
         )
 
     resolved_path = resolve_config_path(config_path)
@@ -251,9 +248,7 @@ def _is_git_ignored(repo_root: Path, relative_path: str) -> bool | None:
             stderr=subprocess.DEVNULL,
         )
     except Exception:
-        logger.debug(
-            "git check-ignore %s failed", relative_path, exc_info=True
-        )
+        logger.debug("git check-ignore %s failed", relative_path, exc_info=True)
         return None
     return completed.returncode == 0
 
@@ -267,9 +262,7 @@ def _is_git_tracked(repo_root: Path, relative_path: str) -> bool | None:
             stderr=subprocess.DEVNULL,
         )
     except Exception:
-        logger.debug(
-            "git ls-files --error-unmatch %s failed", relative_path, exc_info=True
-        )
+        logger.debug("git ls-files --error-unmatch %s failed", relative_path, exc_info=True)
         return None
     return completed.returncode == 0
 
@@ -349,9 +342,7 @@ def detect_environment_mode() -> dict[str, Any]:
 
     in_virtualenv = sys.prefix != sys.base_prefix
     pyvenv_cfg = _read_pyvenv_cfg()
-    include_system_site = (
-        pyvenv_cfg.get("include-system-site-packages", "").lower() == "true"
-    )
+    include_system_site = pyvenv_cfg.get("include-system-site-packages", "").lower() == "true"
     if in_virtualenv and include_system_site:
         mode = "system-site-venv"
     elif in_virtualenv:

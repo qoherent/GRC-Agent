@@ -12,8 +12,8 @@ from typing import Any
 
 import httpx
 
-from grc_agent._payload import ErrorCode
 from grc_agent.config import AppConfig
+from grc_agent.domain_models import ErrorCode
 from grc_agent.retrieval import initialize_retrieval
 from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig, model_name_matches
 
@@ -120,7 +120,9 @@ def _probe_generic(
         try:
             parsed = response.json()
             if isinstance(parsed, dict) and "data" in parsed:
-                model_ids = [m.get("id") for m in parsed["data"] if isinstance(m, dict) and m.get("id")]
+                model_ids = [
+                    m.get("id") for m in parsed["data"] if isinstance(m, dict) and m.get("id")
+                ]
                 if not model_name_matches(effective_model, model_ids):
                     logger.warning(
                         f"Model '{effective_model}' not found in /v1/models of {backend}. Available models: {model_ids}"
@@ -144,6 +146,7 @@ def _probe_generic(
         if backend == "ollama":
             try:
                 from grc_agent.model_manager import check_ollama_tool_support
+
                 tool_ok = check_ollama_tool_support(effective_server_url, effective_model)
                 if tool_ok is False:
                     logger.warning(

@@ -14,7 +14,7 @@ Public surface (consumed by Phase 6's cutover):
   ``connect``, ``disconnect``, ``apply_mutation``, ``validate_and_finalize`` —
   the six ``change_graph`` op_types, applied to a native ``FlowGraph``.
 - ``validate``, ``render_block``, ``render_connection``, ``render_parameter``,
-  ``render_flow_graph``, ``classify_role`` — inspection helpers; visibility
+  ``render_flow_graph``, ``classify_role`` — inspection helpers; filtering
   delegates to the single authority :mod:`grc_agent.runtime.param_filter`.
 - ``serialize_flow_graph``, ``write_flow_graph_atomic`` — persistence.
 
@@ -34,16 +34,15 @@ from typing import Any
 from grc_agent.domain_models import (
     BlockRole,
     GrcBlock,
-    GrcConnection,
     GrcFlowgraph,
-    GrcParameter,
     GrcValidation,
 )
 from grc_agent.runtime.block_semantics import evaluated_param_hides
+from grc_agent.runtime.connection_ids import connection_id
 from grc_agent.runtime.param_filter import (
     DEFAULT_PARAM_TAB,
     keep_param,
-    prominence_rank,
+    overview_rank,
 )
 
 # --------------------------------------------------------------------------- #
@@ -86,9 +85,7 @@ def get_platform_or_none() -> Any:
 
     Graceful-degradation wrapper around :func:`get_platform` for callers that
     must not raise when GNU Radio is absent (catalog inspection, param
-    metadata, semantic classification). This is the single authorized accessor
-    for graceful platform access — replaces the former shadow loaders
-    ``session._ensure_platform`` and ``validation.checks._cached_platform``.
+    metadata, semantic classification).
     """
     try:
         return get_platform()
@@ -205,9 +202,14 @@ def _safe_evaluate(param: Any) -> Any | None:
 
 
 def render_parameter(
-    block: Any, param_key: str, param: Any, evaluated_hides: dict[str, str] | None = None
-) -> GrcParameter | None:
-    """One uniform visibility filter — delegates to the bible (``keep_param``).
+    block: Any,
+    param_key: str,
+    param: Any,
+    evaluated_hides: dict[str, str] | None = None,
+    mode: str = "details",
+    variable_names: set[str] | None = None,
+) -> str | None:
+    """One uniform parameter filter — delegates to the bible (``keep_param``).
     Returns ``None`` if the param is hidden or in an excluded category.
     """
     hide_map = evaluated_hides
@@ -224,23 +226,24 @@ def render_parameter(
     value = str(param.value)
     default = str(getattr(param, "default", ""))
     if not keep_param(
-        hide=hide, category=category, dtype=dtype, value=value, default=default, mode="visibility"
-    ):
-        return None
-    evaluated = _safe_evaluate(param)
-    if evaluated is not None and not isinstance(evaluated, (str, int, float, bool, list, dict)):
-        evaluated = str(evaluated)
-    return GrcParameter(
-        name=param_key,
+        hide=hide,
+        category=category,
         dtype=dtype,
         value=value,
-        evaluated_value=evaluated,
-        category=category,
-        hide=hide,
-    )
+        default=default,
+        mode=mode,
+        variable_names=variable_names,
+    ):
+        return None
+    return value
 
 
-def render_block(block: Any, flow_graph: Any | None = None) -> GrcBlock:
+def render_block(
+    block: Any,
+    flow_graph: Any | None = None,
+    mode: str = "details",
+    variable_names: set[str] | None = None,
+) -> GrcBlock:
     evaluated_hides: dict[str, str] | None = None
     if flow_graph is not None:
         try:
@@ -249,74 +252,58 @@ def render_block(block: Any, flow_graph: Any | None = None) -> GrcBlock:
         except Exception:
             evaluated_hides = None
 
-    parameters = []
+    unsorted_params = []
     for k, p in block.params.items():
-        rendered = render_parameter(block, k, p, evaluated_hides=evaluated_hides)
+        rendered = render_parameter(
+            block,
+            k,
+            p,
+            evaluated_hides=evaluated_hides,
+            mode=mode,
+            variable_names=variable_names,
+        )
         if rendered is not None:
-            parameters.append(rendered)
-    if evaluated_hides:
-        parameters.sort(key=lambda p: (prominence_rank(evaluated_hides.get(p.name, "all")), p.name))
+            unsorted_params.append((k, rendered))
 
-    coordinate = None
+    if evaluated_hides:
+        unsorted_params.sort(key=lambda item: (overview_rank(evaluated_hides.get(item[0], "all")), item[0]))
+
+    parameters = {k: v for k, v in unsorted_params}
+
     states = getattr(block, "states", {}) or {}
-    coord = states.get("coordinate")
-    if isinstance(coord, (list, tuple)) and len(coord) >= 2:
-        try:
-            coordinate = (float(coord[0]), float(coord[1]))
-        except (TypeError, ValueError):
-            coordinate = None
     return GrcBlock(
-        instance_name=block.name or block.key,
+        instance_name=block.name,
         block_type=block.key,
-        block_uid=str(getattr(block, "id", "") or ""),
         role=classify_role(block),
         state=str(states.get("state", "enabled")),
         parameters=parameters,
-        coordinate=coordinate,
     )
 
 
-def render_connection(conn: Any) -> GrcConnection:
+def render_connection(conn: Any) -> str:
     src = conn.source_block
-    dst = conn.sink_block
     sp = conn.source_port
+    dst = conn.sink_block
     dp = conn.sink_port
-    return GrcConnection(
-        connection_id=f"{src.name}:{sp.key}->{dst.name}:{dp.key}",
-        src_block=src.name or src.key,
-        src_port=sp.key,
-        dst_block=dst.name or dst.key,
-        dst_port=dp.key,
-        dtype=getattr(sp, "dtype", None),
-    )
+    return connection_id(src.name, sp.key, dst.name, dp.key)
 
 
-def render_flow_graph(flow_graph: Any) -> GrcFlowgraph:
-    blocks = [render_block(b, flow_graph) for b in flow_graph.blocks]
+def render_flow_graph(flow_graph: Any, mode: str = "details") -> GrcFlowgraph:
+    variable_names = {b.name for b in flow_graph.blocks if getattr(b, "is_variable", False)}
+    blocks = [
+        render_block(b, flow_graph, mode=mode, variable_names=variable_names)
+        for b in flow_graph.blocks
+    ]
     connections = [render_connection(c) for c in flow_graph.connections]
     valid = bool(flow_graph.is_valid())
     errors = []
     if not valid:
         for _elem, message in flow_graph.iter_error_messages():
             errors.append(str(message))
-    file_format = None
-    grc_version = None
     options = getattr(flow_graph, "options_block", None)
-    if options is not None:
-        ff = options.params.get("file_format")
-        if ff is not None:
-            try:
-                file_format = int(str(ff.value))
-            except (TypeError, ValueError):
-                file_format = None
-        gv = options.params.get("grc_version")
-        if gv is not None:
-            grc_version = str(gv.value) or None
     return GrcFlowgraph(
         ok=valid,
         graph_name=options.name if options is not None else "",
-        file_format=file_format,
-        grc_version=grc_version,
         blocks=blocks,
         connections=connections,
         validation=GrcValidation(
@@ -332,15 +319,8 @@ def render_flow_graph(flow_graph: Any) -> GrcFlowgraph:
 # --------------------------------------------------------------------------- #
 
 
-def _find_block(flow_graph: Any, instance_name: str) -> Any:
-    for b in flow_graph.blocks:
-        if (b.name or b.key) == instance_name:
-            return b
-    raise KeyError(f"Block {instance_name!r} not found")
-
-
 def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) -> Any:
-    block = _find_block(flow_graph, block_name)
+    block = flow_graph.get_block(block_name)
     ports = block.active_sinks if kind == "sink" else block.active_sources
     for p in ports:
         if p.key == port_key:
@@ -349,33 +329,31 @@ def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) ->
 
 
 def add_block(
-    flow_graph: Any, block_type: str, instance_name: str, parameters: dict[str, Any]
+    flow_graph: Any,
+    block_type: str,
+    instance_name: str,
+    parameters: dict[str, Any] | None = None,
+    state: str | None = None,
 ) -> Any:
     """Add a new block. Names it via ``params['id']`` (the empirically correct
-    path — GRC's ``Block.name`` is a read-only property)."""
+    path — GRC's ``Block.name`` is a read-only property). Unknown params raise
+    ``KeyError`` (uniform with :func:`set_param`/:func:`apply_mutation`
+    ``update_params``)."""
     block = flow_graph.new_block(block_type)
     if block is None:
         raise KeyError(f"Block type {block_type!r} not found in catalog")
     block.params["id"].set_value(str(instance_name))
     flow_graph.rewrite()
     for k, v in (parameters or {}).items():
-        if k in block.params:
-            block.params[k].set_value(str(v))
+        set_param(block, k, v)
+    if state is not None and state != "enabled":
+        set_block_state(block, state)
     return block
 
 
 def remove_block(flow_graph: Any, instance_name: str) -> None:
-    # GRC has no public remove_block; mutate the internal list after disconnecting
-    # any connections that touch the victim (Phase 2 experiment's answer).
-    target = _find_block(flow_graph, instance_name)
-    for conn in list(flow_graph.connections):
-        if conn.source_block is target or conn.sink_block is target:
-            flow_graph.disconnect(conn.source_port, conn.sink_port)
-    for i, b in enumerate(flow_graph.blocks):
-        if b is target:
-            del flow_graph.blocks[i]
-            return
-    raise KeyError(f"Block {instance_name!r} disappeared during removal")
+    target = flow_graph.get_block(instance_name)
+    flow_graph.remove_element(target)
 
 
 def set_param(block: Any, param_key: str, value: str) -> None:
@@ -387,8 +365,10 @@ def set_param(block: Any, param_key: str, value: str) -> None:
 def set_block_state(block: Any, state: str) -> None:
     aliases = {"bypass": "bypassed"}
     canonical = aliases.get(state, state)
-    if canonical not in {"enabled", "disabled", "bypassed"}:
-        raise ValueError(f"Invalid state {state!r}; must be enabled/disabled/bypassed")
+    if canonical not in block.STATE_LABELS:
+        raise ValueError(
+            f"Invalid state {state!r}; must be one of {block.STATE_LABELS}"
+        )
     block.state = canonical
 
 
@@ -401,9 +381,12 @@ def connect(flow_graph: Any, src_block: str, src_port: str, dst_block: str, dst_
 def disconnect(
     flow_graph: Any, src_block: str, src_port: str, dst_block: str, dst_port: str
 ) -> None:
-    """Remove a single connection. Native ``flow_graph.disconnect(src, dst)``
-    removes every connection from the source port (not just the named edge),
-    so we locate the exact ``Connection`` object and drop it from the set.
+    """Remove a single connection edge.
+
+    Native ``flow_graph.disconnect(*ports)`` removes every connection touching
+    any of the named ports, not a single edge, so we locate the exact
+    ``Connection`` object and use ``remove_element`` (the same native API the
+    GRC GUI calls for single-edge deletion).
     """
     for connection in list(flow_graph.connections):
         if (
@@ -412,7 +395,7 @@ def disconnect(
             and connection.sink_block.name == dst_block
             and connection.sink_port.key == dst_port
         ):
-            flow_graph.connections.remove(connection)
+            flow_graph.remove_element(connection)
             return
     raise KeyError(f"connection not found: {src_block}:{src_port}->{dst_block}:{dst_port}")
 
@@ -423,11 +406,11 @@ def apply_mutation(flow_graph: Any, op_type: str, **kwargs: Any) -> None:
     elif op_type == "remove_block":
         remove_block(flow_graph, **kwargs)
     elif op_type == "update_params":
-        block = _find_block(flow_graph, kwargs.pop("instance_name"))
+        block = flow_graph.get_block(kwargs.pop("instance_name"))
         for k, v in (kwargs.pop("params") or {}).items():
             set_param(block, k, v)
     elif op_type == "update_states":
-        block = _find_block(flow_graph, kwargs.pop("instance_name"))
+        block = flow_graph.get_block(kwargs.pop("instance_name"))
         set_block_state(block, kwargs.pop("state"))
     elif op_type == "add_connection":
         connect(flow_graph, **kwargs)

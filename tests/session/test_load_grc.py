@@ -11,7 +11,7 @@ class LoadGrcTests(unittest.TestCase):
     """Check that the read-only session package reuses FlowgraphSession cleanly."""
 
     def _fixture_path(self) -> Path:
-        return Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc"
+        return Path(__file__).resolve().parents[1] / "data" / "dial_tone.grc"
 
     def test_load_grc_returns_loaded_session(self) -> None:
         fixture_path = self._fixture_path()

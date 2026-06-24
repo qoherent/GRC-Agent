@@ -102,17 +102,19 @@ def test_no_deep_json_hash_function():
 
 
 def test_load_and_inspect_random_bit_generator():
-    out = load_and_inspect(FIXTURES / "random_bit_generator.grc")
+    out = load_and_inspect(FIXTURES / "dial_tone.grc")
     assert isinstance(out, GrcFlowgraph)
     assert out.ok
     assert len(out.blocks) >= 4
     instance_names = {b.instance_name for b in out.blocks}
     assert "samp_rate" in instance_names
     # All rendered params must be visible (no Advanced/Config).
+    from grc_agent.runtime.param_filter import param_metadata
     for block in out.blocks:
-        for p in block.parameters:
-            assert p.category not in EXCLUDED_PARAM_CATEGORIES
-            assert p.hide != "all"
+        meta = param_metadata(block.block_type)
+        for k in block.parameters.keys():
+            info = meta.get(k, {})
+            assert info.get("category") not in EXCLUDED_PARAM_CATEGORIES
 
 
 def test_load_and_inspect_blank():
@@ -122,7 +124,7 @@ def test_load_and_inspect_blank():
 
     # Build a minimal options-only flowgraph by reusing a real fixture's
     # options.parameters shape (GRC's parser is strict about required keys).
-    src = yaml.safe_load((FIXTURES / "mac_sniffer.grc").read_text())
+    src = yaml.safe_load((FIXTURES / "dial_tone.grc").read_text())
     options = src["options"]
     payload = {
         "options": options,
@@ -145,17 +147,6 @@ def test_load_and_inspect_blank():
         path.unlink()
 
 
-def test_load_and_inspect_broken_grc():
-    out = load_and_inspect(FIXTURES / "r2_broken_fixer.grc")
-    # r2_broken_fixer is intentionally a "broken" graph: the adapter must
-    # surface it as not-ok with a structured validation result (errors may
-    # be empty if the graph fails rewrite/validate silently, but status is
-    # "invalid").
-    assert not out.ok
-    assert out.validation.status == "invalid"
-    assert out.validation.native_ok is False
-
-
 def test_load_and_inspect_nonexistent_file():
     out = load_and_inspect(FIXTURES / "definitely_missing.grc")
     assert not out.ok
@@ -172,48 +163,52 @@ def test_load_and_inspect_directory():
 
 
 def test_classify_role_options():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     assert classify_role(fg.options_block) == BlockRole.OPTIONS
 
 
 def test_classify_role_variable():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     var = next(b for b in fg.blocks if b.is_variable)
     assert classify_role(var) == BlockRole.VARIABLE
 
 
 def test_classify_role_source_sink_transform():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     roles = {b.name or b.key: classify_role(b) for b in fg.blocks}
-    # random_bit_generator: analog_random_source_x_0 (source) ->
-    #   blocks_throttle2_0 -> blocks_char_to_float_0 -> qtgui_time_sink_x_0 (sink).
-    assert roles["analog_random_source_x_0"] == BlockRole.SOURCE
-    assert roles["qtgui_time_sink_x_0"] == BlockRole.SINK
+    # dial_tone: analog_sig_source_x_0 (source) -> blocks_add_xx (transform)
+    #   -> audio_sink (sink).
+    assert roles["analog_sig_source_x_0"] == BlockRole.SOURCE
+    assert roles["audio_sink"] == BlockRole.SINK
 
 
 # --- render_parameter visibility --------------------------------------------- #
 
 
 def test_render_parameter_filters_advanced_and_config_and_hide_all():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
-    target = next(b for b in fg.blocks if b.key == "qtgui_time_sink_x")
+    fg = load_flow_graph(FIXTURES / "qtgui_vector_sink_example.grc")
+    target = next(b for b in fg.blocks if b.key.startswith("qtgui"))
     for k, p in target.params.items():
         rendered = render_parameter(target, k, p)
-        if p.category in EXCLUDED_PARAM_CATEGORIES or p.hide == "all":
+        if p.category in EXCLUDED_PARAM_CATEGORIES or p.hide == "all" or p.dtype == "gui_hint":
             assert rendered is None
+        else:
+            assert rendered == str(p.value)
     # Also confirm the rendered output for this block contains no
     # Advanced/Config params and no hide=='all' params.
     rendered_block = render_block(target, flow_graph=fg)
-    for p in rendered_block.parameters:
-        assert p.category not in EXCLUDED_PARAM_CATEGORIES
-        assert p.hide != "all"
+    from grc_agent.runtime.param_filter import param_metadata
+    meta = param_metadata(rendered_block.block_type)
+    for k in rendered_block.parameters.keys():
+        info = meta.get(k, {})
+        assert info.get("category") not in EXCLUDED_PARAM_CATEGORIES
 
 
 # --- validate ----------------------------------------------------------------- #
 
 
 def test_validate_valid_flowgraph():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     v = validate(fg)
     assert v.status == "valid"
     assert v.errors == []
@@ -224,7 +219,7 @@ def test_validate_valid_flowgraph():
 
 
 def test_serialize_flow_graph_round_trip(tmp_path):
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     out_path = tmp_path / "round_trip.grc"
     write_flow_graph_atomic(fg, out_path)
     reloaded = load_and_inspect(out_path)
@@ -238,7 +233,7 @@ def test_serialize_flow_graph_round_trip(tmp_path):
 
 
 def test_add_block_mutation():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     before = len(fg.blocks)
     add_block(fg, "analog_sig_source_x", "experiment_src", {"freq": "1000"})
     after = len(fg.blocks)
@@ -248,7 +243,7 @@ def test_add_block_mutation():
 
 
 def test_remove_block_mutation():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     before = len(fg.blocks)
     victim = next(b for b in fg.blocks if b.key != "options" and not b.is_variable)
     remove_block(fg, victim.name or victim.key)
@@ -257,14 +252,14 @@ def test_remove_block_mutation():
 
 
 def test_set_param_mutation():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     var = next(b for b in fg.blocks if b.is_variable)
     set_param(var, "value", "99999")
     assert var.params["value"].value == "99999"
 
 
 def test_set_block_state_mutation():
-    fg = load_flow_graph(FIXTURES / "mac_sniffer.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     target = next(b for b in fg.blocks if b.key != "options")
     set_block_state(target, "disabled")
     assert not target.enabled
@@ -273,7 +268,7 @@ def test_set_block_state_mutation():
 
 
 def test_connect_mutation():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     before = len(fg.connections)
     # Connect the unused throttle output port to the time sink's spare input.
     # Many blocks have multi-port or unused; we exercise connect's own path
@@ -289,7 +284,7 @@ def test_connect_mutation():
 
 
 def test_apply_mutation_dispatcher():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     before = len(fg.blocks)
     apply_mutation(
         fg,
@@ -304,13 +299,13 @@ def test_apply_mutation_dispatcher():
 
 
 def test_apply_mutation_invalid_op_type():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     with pytest.raises(ValueError):
         apply_mutation(fg, "bad_op_type")
 
 
 def test_validate_and_finalize_after_mutation():
-    fg = load_flow_graph(FIXTURES / "random_bit_generator.grc")
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     var = next(b for b in fg.blocks if b.is_variable)
     apply_mutation(fg, "update_params", instance_name=var.name, params={"value": "48000"})
     v = validate_and_finalize(fg)

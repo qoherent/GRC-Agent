@@ -24,6 +24,7 @@ def test_chat_widget_uses_qtextbrowser(qtbot):
     assert hasattr(widget, "chat_input"), "ChatWidget must have chat_input"
 
     from PySide6.QtWidgets import QLineEdit, QTextBrowser
+
     assert isinstance(widget.chat_display, QTextBrowser)
     assert isinstance(widget.chat_input, QLineEdit)
 
@@ -47,7 +48,9 @@ def test_html_safety_handling(qtbot):
     widget = ChatWidget()
     qtbot.addWidget(widget)
 
-    unsafe_markdown = "Hello <script>alert('hack');</script> <iframe src='http://evil.com'></iframe> World"
+    unsafe_markdown = (
+        "Hello <script>alert('hack');</script> <iframe src='http://evil.com'></iframe> World"
+    )
     widget.append_message("assistant", unsafe_markdown)
 
     html = widget.chat_display.toHtml()
@@ -180,6 +183,7 @@ def test_stream_chunk_invalidates_memo(qtbot):
 def test_sanitizer_strips_event_handlers(qtbot):
     """2.3: the hardened sanitizer must strip on*-event attributes."""
     from grc_agent_gui.chat_widget import sanitize_html
+
     unsafe = '<a href="x" onclick="alert(1)" onerror="bad()">link</a>'
     safe = sanitize_html(unsafe).lower()
     assert "onclick" not in safe
@@ -189,6 +193,7 @@ def test_sanitizer_strips_event_handlers(qtbot):
 def test_sanitizer_strips_dangerous_tags(qtbot):
     """2.3: the hardened sanitizer must strip <svg>, <object>, <style>, etc."""
     from grc_agent_gui.chat_widget import sanitize_html
+
     unsafe = "<p>hi</p><svg><script>bad()</script></svg><object data='x'></object>"
     safe = sanitize_html(unsafe).lower()
     assert "<svg" not in safe
@@ -200,11 +205,11 @@ def test_sanitizer_strips_dangerous_tags(qtbot):
 def test_sanitizer_strips_javascript_uri(qtbot):
     """2.3: the hardened sanitizer must strip javascript:/vbscript: URIs."""
     from grc_agent_gui.chat_widget import sanitize_html
+
     unsafe = '<a href="javascript:alert(1)">x</a><a href="vbscript:msgbox(1)">y</a>'
     safe = sanitize_html(unsafe).lower()
     assert "javascript:" not in safe
     assert "vbscript:" not in safe
-
 
 
 def test_get_history_returns_independent_copy(qtbot):
@@ -329,4 +334,3 @@ def test_finalize_stream_keeps_final_text_when_present(qtbot):
 
     plain = widget.chat_display.toPlainText()
     assert "final answer" in plain
-

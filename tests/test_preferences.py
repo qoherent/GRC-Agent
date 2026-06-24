@@ -15,11 +15,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from grc_agent.config import LlamaConfig
 from grc_agent.config import (
     PREFERENCES_SCHEMA_VERSION,
     PREFS_FILE_NAME,
     LastModel,
+    LlamaConfig,
     UserPreferences,
     apply_user_preferences_to_llama_config,
     default_user_preferences,
@@ -59,15 +59,11 @@ class PathTests(unittest.TestCase):
         # The path is in the same directory as ``user_config_path``.
         from grc_agent.config import user_config_path
 
-        self.assertEqual(
-            user_preferences_path().parent, user_config_path().parent
-        )
+        self.assertEqual(user_preferences_path().parent, user_config_path().parent)
         self.assertEqual(user_preferences_path().name, PREFS_FILE_NAME)
 
     def test_user_preferences_path_respects_xdg(self) -> None:
-        with mock.patch.dict(
-            os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg_test_xyz"}, clear=False
-        ):
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg_test_xyz"}, clear=False):
             path = user_preferences_path()
         self.assertEqual(path, Path("/tmp/xdg_test_xyz") / "grc_agent" / PREFS_FILE_NAME)
 
@@ -126,15 +122,11 @@ class LoadTests(unittest.TestCase):
             # The malformed file must be left in place, not deleted.
             self.assertTrue(target.exists())
         self.assertEqual(prefs, default_user_preferences())
-        self.assertTrue(
-            self._has_log_containing("not valid JSON", min_level=logging.WARNING)
-        )
+        self.assertTrue(self._has_log_containing("not valid JSON", min_level=logging.WARNING))
 
     def test_load_wrong_types_returns_defaults_and_warns(self) -> None:
         with tempfile_Target() as target:
-            target.write_text(
-                json.dumps({"last_model": "not-a-dict"}), encoding="utf-8"
-            )
+            target.write_text(json.dumps({"last_model": "not-a-dict"}), encoding="utf-8")
             prefs = load_user_preferences(path=target)
         self.assertEqual(prefs.last_model, LastModel())
         self.assertTrue(self._has_log_containing("non-dict last_model"))
@@ -152,9 +144,7 @@ class LoadTests(unittest.TestCase):
             )
             prefs = load_user_preferences(path=target)
         self.assertEqual(prefs, default_user_preferences())
-        self.assertTrue(
-            self._has_log_containing("schema_version=999", min_level=logging.WARNING)
-        )
+        self.assertTrue(self._has_log_containing("schema_version=999", min_level=logging.WARNING))
 
     def test_load_ignores_unknown_keys(self) -> None:
         with tempfile_Target() as target:
@@ -180,9 +170,7 @@ class SaveTests(unittest.TestCase):
             parent = marker.parent / "freshly_created_dir" / "prefs.json"
             self.assertFalse(parent.parent.exists())
             save_user_preferences(
-                UserPreferences(
-                    last_model=LastModel(model="llama3.2")
-                ),
+                UserPreferences(last_model=LastModel(model="llama3.2")),
                 path=parent,
             )
             self.assertTrue(parent.exists())
@@ -191,22 +179,16 @@ class SaveTests(unittest.TestCase):
     def test_save_is_atomic(self) -> None:
         with tempfile_Target(suffix="prefs.json") as target:
             save_user_preferences(
-                UserPreferences(
-                    last_model=LastModel(model="llama3.2")
-                ),
+                UserPreferences(last_model=LastModel(model="llama3.2")),
                 path=target,
             )
             original_text = target.read_text(encoding="utf-8")
             # Inject an os.replace failure; the target file must
             # remain unchanged and the temp file must be cleaned up.
-            with mock.patch(
-                "os.replace", side_effect=OSError("disk full")
-            ) as replace_mock:
+            with mock.patch("os.replace", side_effect=OSError("disk full")) as replace_mock:
                 with self.assertRaises(OSError):
                     save_user_preferences(
-                        UserPreferences(
-                            last_model=LastModel(model="qwen2.5")
-                        ),
+                        UserPreferences(last_model=LastModel(model="qwen2.5")),
                         path=target,
                     )
             replace_mock.assert_called_once()
@@ -224,27 +206,21 @@ class SaveTests(unittest.TestCase):
             text = target.read_text(encoding="utf-8")
             # json.dumps with sort_keys=True yields a stable,
             # diff-friendly file. Just assert sorted fields.
-            self.assertLess(text.index('"last_model"'),
-                            text.index('"schema_version"'))
-            self.assertLess(text.index('"model"'),
-                            text.index('"saved_at"'))
+            self.assertLess(text.index('"last_model"'), text.index('"schema_version"'))
+            self.assertLess(text.index('"model"'), text.index('"saved_at"'))
 
 
 class ApplyToLlamaConfigTests(unittest.TestCase):
     def test_empty_prefs_is_noop(self) -> None:
         cfg = _make_llama_config()
-        out = apply_user_preferences_to_llama_config(
-            cfg, default_user_preferences()
-        )
+        out = apply_user_preferences_to_llama_config(cfg, default_user_preferences())
         self.assertEqual(out, cfg)
 
     def test_populated_prefs_override_model(self) -> None:
         cfg = _make_llama_config(model="old-model")
         out = apply_user_preferences_to_llama_config(
             cfg,
-            UserPreferences(
-                last_model=LastModel(model="new-model")
-            ),
+            UserPreferences(last_model=LastModel(model="new-model")),
         )
         self.assertEqual(out.model, "new-model")
 
@@ -255,9 +231,7 @@ class ApplyToLlamaConfigTests(unittest.TestCase):
         )
         out = apply_user_preferences_to_llama_config(
             cfg,
-            UserPreferences(
-                last_model=LastModel(model="new-model")
-            ),
+            UserPreferences(last_model=LastModel(model="new-model")),
         )
         self.assertEqual(out.backend, "ollama")
         self.assertEqual(out.max_tokens, 2048)
@@ -274,12 +248,10 @@ class UpdateLastModelTests(unittest.TestCase):
             loaded = load_user_preferences(path=target)
         self.assertEqual(loaded.last_model.model, "llama3.2")
         # saved_at is a recent ISO-8601 UTC timestamp.
-        parsed = datetime.strptime(
-            loaded.last_model.saved_at, "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=UTC)
-        self.assertLess(
-            (datetime.now(UTC) - parsed).total_seconds(), 60
+        parsed = datetime.strptime(loaded.last_model.saved_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=UTC
         )
+        self.assertLess((datetime.now(UTC) - parsed).total_seconds(), 60)
 
 
 def tempfile_Target(suffix: str = "preferences.json"):

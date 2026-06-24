@@ -61,13 +61,13 @@ def _make_fake_llama_config() -> Any:
 
 @pytest.mark.usefixtures("tmp_home")
 class GuiLaunchOnProbeFailureTests(unittest.TestCase):
-
     qapp: Any
 
     @classmethod
     def setUpClass(cls) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
+
         cls.qapp = QApplication.instance() or QApplication([])
 
     def _build_window(self) -> Any:

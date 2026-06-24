@@ -1,40 +1,45 @@
-"""Tests for the catalog vector store (vec1 + embeddinggemma)."""
+"""Tests for the catalog vector store (sqlite-vec + embeddinggemma)."""
+
 from __future__ import annotations
 
-import os
-import struct
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import sqlite_vec
 from grc_agent.runtime.catalog_vector import (
-    VectorCatalogStore,
     compose_block_embed_text,
     embed_block_text,
-    is_catalog_db_populated,
     is_catalog_db_usable,
 )
 
 
-def _write_fake_vec1_db(db_path: Path, vectors: list[list[float]]) -> None:
-    """Write a sqlite DB that loads vec1 and inserts `vectors` rows."""
-    import sqlite3
-    # We can't load vec1 in CI without the .so; skip if missing.
-    if not (Path(__file__).resolve().parents[1] / "vec1.so").exists():
-        raise unittest.SkipTest("vec1.so not available")
+def _write_test_db(db_path: Path, vectors: list[list[float]]) -> None:
+    """Create a real sqlite-vec DB and insert ``vectors`` rows."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.enable_load_extension(True)
-    conn.load_extension(str((Path(__file__).resolve().parents[1] / "vec1.so").resolve()))
-    conn.execute("CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT)")
-    conn.execute("CREATE VIRTUAL TABLE catalog_idx USING vec1(embedding)")
-    for i, vec in enumerate(vectors, start=1):
-        conn.execute("INSERT INTO catalog_chunks VALUES(?, ?, ?)", (i, f"b{i}", "{}"))
-        conn.execute("INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
-                     (i, struct.pack(f"{len(vec)}f", *vec)))
-    conn.execute("INSERT INTO catalog_idx(cmd, arg) VALUES('rebuild', '{\"index\": \"flat\", \"distance\": \"cos\"}')")
-    conn.commit()
-    conn.close()
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute(
+            "CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT)"
+        )
+        conn.execute(
+            "CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[768])"
+        )
+        for i, vec in enumerate(vectors, start=1):
+            conn.execute("INSERT INTO catalog_chunks VALUES(?, ?, ?)", (i, f"b{i}", "{}"))
+            conn.execute(
+                "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
+                (i, sqlite_vec.serialize_float32(vec)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class CatalogVectorEmbedTextTests(unittest.TestCase):
@@ -70,7 +75,7 @@ class CatalogVectorReadinessTests(unittest.TestCase):
     def test_is_catalog_db_usable_true_on_populated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "catalog_v1.db"
-            _write_fake_vec1_db(db, [[0.1] * 768, [0.2] * 768])
+            _write_test_db(db, [[0.1] * 768, [0.2] * 768])
             self.assertTrue(is_catalog_db_usable(db))
 
 

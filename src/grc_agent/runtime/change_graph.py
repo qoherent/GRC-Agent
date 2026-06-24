@@ -6,32 +6,21 @@ and :func:`validate_and_finalize`. No dict-crawl; no ``grcc`` subprocess.
 
 from __future__ import annotations
 
-import time
+import logging
 from typing import TYPE_CHECKING, Any
 
-from grc_agent._payload import ErrorCode
+from grc_agent.domain_models import ErrorCode
 from grc_agent.grc_native_adapter import (
     apply_mutation,
     validate_and_finalize,
 )
-from grc_agent.session_ops import connection_id as render_connection_id
-from grc_agent.session_ops import parse_connection_id
+from grc_agent.runtime.connection_ids import parse_connection_id
+from grc_agent.transaction import capture_session_state, restore_session_state
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from grc_agent.agent import GrcAgent, ToolResult
-
-_FLAT_BATCH_FIELDS = {
-    "add_blocks",
-    "remove_blocks",
-    "update_params",
-    "update_states",
-    "add_connections",
-    "remove_connections",
-}
-
-
-def has_flat_change_graph_batch(kwargs: dict[str, Any]) -> bool:
-    return any(key in kwargs for key in _FLAT_BATCH_FIELDS)
+    from grc_agent.agent import ToolResult
 
 
 def dispatch_flat_change_graph_batch(
@@ -44,47 +33,32 @@ def dispatch_flat_change_graph_batch(
     add_connections: Any = None,
     remove_connections: Any = None,
     force: bool = False,
-    debug: bool = False,
 ) -> ToolResult:
     """Execute the flat model-facing batch edit surface via the native adapter."""
-    started = time.monotonic()
-    before_revision = agent.session.state_revision
-    before_dirty = agent.session.is_dirty
 
     missing_session = agent._missing_session_result("change_graph")
     if missing_session is not None:
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug, wrapper_name="change_graph", wrapper_action="missing_session",
-            internal_handlers=["none"], started=started,
-            before_revision=before_revision, before_dirty=before_dirty,
-            result=missing_session, validation_run=False, output_truncated=False,
-        )
+        return missing_session
 
     fg = agent.session.flowgraph
     if fg is None:
-        return _tool_error(agent, started, "No flowgraph loaded.", before_revision, before_dirty)
+        return _tool_error(agent, "No flowgraph loaded.")
 
     integrity = agent.session.file_integrity_state()
     if integrity.get("externally_modified"):
-        result: dict[str, Any] = {
-            "ok": False,
-            "committed": False,
-            "ops_applied": 0,
-            "tool": "change_graph",
-            "state_revision": before_revision,
-            "error_type": "stale_revision",
-            "file_integrity": integrity,
-            "errors": [
-                {"code": "stale_revision",
-                 "message": "file changed on disk; reload before editing"}
-            ],
-        }
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug, wrapper_name="change_graph",
-            wrapper_action="stale_revision",
-            internal_handlers=["none"], started=started,
-            before_revision=before_revision, before_dirty=before_dirty,
-            result=result, validation_run=False, output_truncated=False,
+        return agent._payload_result(
+            "change_graph",
+            {
+                "ok": False,
+                "committed": False,
+                "ops_applied": 0,
+                "error_type": "stale_revision",
+                "file_integrity": integrity,
+                "errors": [
+                    {"code": "stale_revision", "message": "file changed on disk; reload before editing"}
+                ],
+            },
+            include_active_session=False,
         )
 
     errors: list[dict[str, str]] = []
@@ -92,6 +66,7 @@ def dispatch_flat_change_graph_batch(
 
     # Snapshot serialized form before any mutation to detect true no-ops.
     from grc_agent.grc_native_adapter import serialize_flow_graph as _serialize_fg
+
     before_serialized: str | None = None
     if agent.session.path is not None:
         try:
@@ -99,8 +74,16 @@ def dispatch_flat_change_graph_batch(
         except Exception:
             before_serialized = None
 
-    def _record_error(code: str, message: str) -> None:
-        errors.append({"code": code, "message": message})
+    # Capture a pre-batch snapshot for rollback. Uses GRC-native
+    # export_data/import_data (not file reload) so unsaved dirty edits
+    # are preserved on rollback.
+    before_snapshot = capture_session_state(agent.session)
+
+    def _record_error(code: str, message: str, *, hint: str | None = None) -> None:
+        entry: dict[str, str] = {"code": code, "message": message}
+        if hint:
+            entry["hint"] = hint
+        errors.append(entry)
 
     # add_blocks
     for entry in _as_list(add_blocks, "add_blocks", errors):
@@ -109,24 +92,39 @@ def dispatch_flat_change_graph_batch(
         block_id = str(entry.get("block_id", "")).strip()
         instance_name = str(entry.get("instance_name", "")).strip()
         if not block_id or not instance_name:
-            _record_error("invalid_block", f"add_blocks entry needs block_id and instance_name: {entry}")
+            _record_error(
+                "invalid_block", f"add_blocks entry needs block_id and instance_name: {entry}"
+            )
             continue
-        # Duplicate name detection (Phase 5): GRC allows duplicate names but they
+        # Duplicate name detection: GRC allows duplicate names but they
         # cause validation chaos. Reject here with a clear error.
-        if any((b.name or b.key) == instance_name for b in fg.blocks):
-            _record_error("duplicate_block_name",
-                          f"a block named {instance_name!r} already exists")
-            continue
         try:
-            apply_mutation(fg, "add_block", block_type=block_id,
-                           instance_name=instance_name, parameters=entry.get("params") or {})
+            fg.get_block(instance_name)
+            _record_error("duplicate_block_name", f"a block named {instance_name!r} already exists")
+            continue
+        except KeyError:
+            pass
+        try:
+            apply_mutation(
+                fg,
+                "add_block",
+                block_type=block_id,
+                instance_name=instance_name,
+                parameters=entry.get("params") or {},
+                state=entry.get("state"),
+            )
             ops_applied += 1
+        except KeyError as exc:
+            _record_error("parameter_not_found", str(exc))
         except Exception as exc:
             _record_error("add_block_failed", str(exc))
 
     # remove_blocks
     for entry in _as_list(remove_blocks, "remove_blocks", errors):
-        name = entry if isinstance(entry, str) else str(entry.get("instance_name", "")).strip()
+        if not isinstance(entry, dict):
+            _record_error("invalid_field", f"remove_blocks entry must be an object: {entry}")
+            continue
+        name = str(entry.get("instance_name", "")).strip()
         if not name:
             continue
         try:
@@ -159,7 +157,9 @@ def dispatch_flat_change_graph_batch(
         name = str(entry.get("instance_name", "")).strip()
         state = str(entry.get("state", "")).strip()
         if not name or not state:
-            _record_error("invalid_state", f"update_states entry needs instance_name and state: {entry}")
+            _record_error(
+                "invalid_state", f"update_states entry needs instance_name and state: {entry}"
+            )
             continue
         try:
             apply_mutation(fg, "update_states", instance_name=name, state=state)
@@ -175,7 +175,14 @@ def dispatch_flat_change_graph_batch(
                 apply_mutation(fg, "add_connection", **src, **dst)
                 ops_applied += 1
             except Exception as exc:
-                _record_error("add_connection_failed", str(exc))
+                hint = _connection_dtype_hint(
+                    fg,
+                    src["src_block"],
+                    src["src_port"],
+                    dst["dst_block"],
+                    dst["dst_port"],
+                )
+                _record_error("add_connection_failed", str(exc), hint=hint)
 
     # remove_connections
     for entry in _as_list(remove_connections, "remove_connections", errors):
@@ -183,9 +190,14 @@ def dispatch_flat_change_graph_batch(
         parsed = parse_connection_id(conn_id)
         if parsed:
             try:
-                apply_mutation(fg, "remove_connection",
-                               src_block=parsed["src_block"], src_port=str(parsed["src_port"]),
-                               dst_block=parsed["dst_block"], dst_port=str(parsed["dst_port"]))
+                apply_mutation(
+                    fg,
+                    "remove_connection",
+                    src_block=parsed["src_block"],
+                    src_port=str(parsed["src_port"]),
+                    dst_block=parsed["dst_block"],
+                    dst_port=str(parsed["dst_port"]),
+                )
                 ops_applied += 1
             except Exception as exc:
                 _record_error("remove_connection_failed", str(exc))
@@ -193,25 +205,17 @@ def dispatch_flat_change_graph_batch(
     # Validate the final state.
     validation = validate_and_finalize(fg) if ops_applied else None
     validation_ok = validation.native_ok if validation else True
+    native_validation_failure = False
+    rollback_status = "none"
     if not validation_ok and not force:
-        # Rollback: reload from the file to undo in-memory mutations.
-        if agent.session.path:
-            try:
-                from grc_agent.grc_native_adapter import load_flow_graph
-                agent.session.flowgraph = load_flow_graph(agent.session.path)
-            except Exception:
-                pass
+        native_validation_failure = True
+        rollback_status = _restore_snapshot(agent, before_snapshot)
         committed = False
     elif errors:
         # Adapter errors (unknown param, missing block, etc.) cannot be bypassed
         # by force — force only suppresses native-validation failures.
         committed = False
-        if agent.session.path:
-            try:
-                from grc_agent.grc_native_adapter import load_flow_graph
-                agent.session.flowgraph = load_flow_graph(agent.session.path)
-            except Exception:
-                pass
+        rollback_status = _restore_snapshot(agent, before_snapshot)
     else:
         committed = True
     if committed and ops_applied:
@@ -228,126 +232,37 @@ def dispatch_flat_change_graph_batch(
             except Exception:
                 pass
 
-    validation_status = "unknown"
     validation_errors: list[str] = []
+    validation_native_ok = True
     if validation is not None:
-        validation_status = validation.status
         validation_errors = validation.errors
+        validation_native_ok = bool(validation.native_ok)
 
     payload: dict[str, Any] = {
-        "ok": committed and len(errors) == 0,
+        "ok": committed and not errors,
         "committed": committed,
-        "ops_applied": ops_applied,
-        "validation": {"status": validation_status, "errors": validation_errors},
     }
+    if not committed and ops_applied:
+        payload["ops_applied"] = 0
     if errors:
         payload["errors"] = errors
+    # Surface validation errors whenever the graph is invalid (committed
+    # via force=True, or rolled back). The model must know the graph is
+    # invalid regardless of commit status — `committed: true` means the
+    # batch applied; `errors` with code gnu_validation means the result is
+    # not GRC-valid.
+    if validation_errors and not validation_native_ok:
+        for msg in validation_errors:
+            payload.setdefault("errors", []).append(
+                {"code": "gnu_validation", "message": msg}
+            )
+        if not committed:
+            payload["error_type"] = ErrorCode.GNU_VALIDATION_FAILED
+    if native_validation_failure and rollback_status == "failed":
+        payload["rollback_failed"] = True
 
     result = agent._payload_result("change_graph", payload, include_active_session=False)
-    return agent._attach_wrapper_dispatch_telemetry(
-        debug=debug, wrapper_name="change_graph", wrapper_action="flat_batch",
-        internal_handlers=["change_graph"], started=started,
-        before_revision=before_revision, before_dirty=before_dirty,
-        result=result, validation_run=bool(validation), output_truncated=False,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Utility functions (agent.py imports these; work on native FlowGraph)        #
-# --------------------------------------------------------------------------- #
-
-
-def loaded_block_by_name(fg: Any, name: str) -> Any | None:
-    for b in fg.blocks:
-        if (b.name or b.key) == name:
-            return b
-    return None
-
-
-def loaded_block_has_port(fg: Any, block_name: str, port: str, *, kind: str = "any") -> bool:
-    block = loaded_block_by_name(fg, block_name)
-    if block is None:
-        return False
-    ports = list(block.sources) + list(block.sinks) if kind == "any" else \
-            (list(block.sources) if kind == "source" else list(block.sinks))
-    return any(str(p.key) == str(port) for p in ports)
-
-
-def connection_endpoint_candidates(fg: Any, block_name: str, port: str) -> list[dict[str, str]]:
-    """Find connections that match (block, port) on either endpoint."""
-    out: list[dict[str, str]] = []
-    for conn in fg.connections:
-        src_name = conn.source_block.name or conn.source_block.key
-        dst_name = conn.sink_block.name or conn.sink_block.key
-        if (src_name == block_name and str(conn.source_port.key) == str(port)):
-            out.append({"connection_id": render_connection_id(
-                src_name, conn.source_port.key, dst_name, conn.sink_port.key)})
-        if (dst_name == block_name and str(conn.sink_port.key) == str(port)):
-            out.append({"connection_id": render_connection_id(
-                src_name, conn.source_port.key, dst_name, conn.sink_port.key)})
-    return out
-
-
-def has_endpoint_value(entry: Any, key: str) -> bool:
-    if isinstance(entry, dict):
-        return key in entry and entry[key]
-    return False
-
-
-def resolve_disconnect_connection_id(fg: Any, *, connection_id: str | None = None,
-                                     **kwargs: Any) -> dict[str, Any] | None:
-    if connection_id:
-        return parse_connection_id(connection_id)
-    return None
-
-
-def resolve_old_rewire_connection_id(fg: Any, *, connection_id: str | None = None,
-                                     **kwargs: Any) -> dict[str, Any] | None:
-    return resolve_disconnect_connection_id(fg, connection_id=connection_id)
-
-
-def resolve_rewire_new_endpoint_args(fg: Any, **kwargs: Any) -> dict[str, Any] | None:
-    src = kwargs.get("src") or {}
-    dst = kwargs.get("dst") or {}
-    if isinstance(src, dict) and isinstance(dst, dict):
-        return {"src_block": src.get("block", ""), "src_port": str(src.get("port", "")),
-                "dst_block": dst.get("block", ""), "dst_port": str(dst.get("port", ""))}
-    return None
-
-
-def rewire_new_endpoint_candidates(fg: Any, block_name: str, port: str) -> list[str]:
-    return [c["connection_id"] for c in connection_endpoint_candidates(fg, block_name, port)]
-
-
-def rewire_new_endpoint_is_exact(fg: Any, block_name: str, port: str) -> bool:
-    return bool(rewire_new_endpoint_candidates(fg, block_name, port))
-
-
-def rewire_candidate_passes_preflight(fg: Any, **kwargs: Any) -> bool:
-    return True
-
-
-_VALID_STATES = {"enabled", "disabled", "bypassed", "bypass"}
-
-
-def _update_state_operation(entry: Any, *, index: Any = None,
-                           field_name: str = "update_states",
-                           errors: list[str] | None = None) -> dict[str, Any] | None:
-    """Normalize one update_states entry. Returns ``None`` when the state
-    value is invalid (recording the error if ``errors`` list is provided).
-    """
-    if not isinstance(entry, dict):
-        return None
-    state = str(entry.get("state", ""))
-    if state not in _VALID_STATES:
-        if errors is not None:
-            errors.append(
-                f"{field_name}[{index}]: state expected to be one of "
-                f"enabled/disabled/bypassed; got {state!r}"
-            )
-        return None
-    return {"instance_name": str(entry.get("instance_name", "")),
-            "state": state}
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -364,30 +279,76 @@ def _as_list(value: Any, field_name: str, errors: list[dict[str, str]]) -> list[
     return []
 
 
-def _parse_connection_endpoints(entry: Any, errors: list[dict[str, str]]) -> tuple[dict, dict] | tuple[None, None]:
+def _parse_connection_endpoints(
+    entry: Any, errors: list[dict[str, str]]
+) -> tuple[dict, dict] | tuple[None, None]:
     if not isinstance(entry, dict):
-        errors.append({"code": "invalid_connection", "message": f"connection entry must be a dict: {entry}"})
+        errors.append(
+            {"code": "invalid_connection", "message": f"connection entry must be a dict: {entry}"}
+        )
         return None, None
     src = entry.get("src") or {}
     dst = entry.get("dst") or {}
     if not isinstance(src, dict) or not isinstance(dst, dict):
-        errors.append({"code": "invalid_connection", "message": f"connection needs src/dst dicts: {entry}"})
+        errors.append(
+            {"code": "invalid_connection", "message": f"connection needs src/dst dicts: {entry}"}
+        )
         return None, None
     src_args = {"src_block": str(src.get("block", "")), "src_port": str(src.get("port", ""))}
     dst_args = {"dst_block": str(dst.get("block", "")), "dst_port": str(dst.get("port", ""))}
     if not src_args["src_block"] or not dst_args["dst_block"]:
-        errors.append({"code": "invalid_connection", "message": f"connection needs block+port: {entry}"})
+        errors.append(
+            {"code": "invalid_connection", "message": f"connection needs block+port: {entry}"}
+        )
         return None, None
     return src_args, dst_args
 
 
-def _tool_error(agent: Any, started: float, message: str,
-                before_revision: int, before_dirty: bool) -> ToolResult:
+def _connection_dtype_hint(
+    fg: Any,
+    src_block: str,
+    src_port: str,
+    dst_block: str,
+    dst_port: str,
+) -> str | None:
+    """Extract source/sink dtype info for a failed connection attempt.
+
+    Returns a human-readable hint so the model can repair its next call, or
+    ``None`` if port resolution fails.
+    """
+    try:
+        from grc_agent.grc_native_adapter import _find_port
+
+        src_p = _find_port(fg, src_block, src_port, kind="source")
+        dst_p = _find_port(fg, dst_block, dst_port, kind="sink")
+        src_dtype = getattr(src_p, "dtype", None)
+        dst_dtype = getattr(dst_p, "dtype", None)
+        if src_dtype or dst_dtype:
+            parts = []
+            if src_dtype:
+                parts.append(f"Source IO type: {src_dtype}")
+            if dst_dtype:
+                parts.append(f"Sink IO type: {dst_dtype}")
+            return "; ".join(parts)
+    except Exception:
+        pass
+    return None
+
+
+def _tool_error(agent: Any, message: str) -> ToolResult:
     payload = {"ok": False, "errors": [{"code": "no_flowgraph", "message": message}]}
-    result = agent._payload_result("change_graph", payload, include_active_session=False)
-    return agent._attach_wrapper_dispatch_telemetry(
-        debug=False, wrapper_name="change_graph", wrapper_action="error",
-        internal_handlers=["none"], started=started,
-        before_revision=before_revision, before_dirty=before_dirty,
-        result=result, validation_run=False, output_truncated=False,
-    )
+    return agent._payload_result("change_graph", payload, include_active_session=False)
+
+
+def _restore_snapshot(agent: Any, snapshot: Any) -> str:
+    """Restore session from a pre-batch snapshot via GRC-native import_data.
+
+    Returns ``"complete"`` on success or ``"failed"`` if the restore itself
+    raised. Never silently swallows the failure.
+    """
+    try:
+        restore_session_state(agent.session, snapshot)
+        return "complete"
+    except Exception as exc:
+        logger.error("change_graph rollback failed: %s", exc)
+        return "failed"

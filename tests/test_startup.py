@@ -7,7 +7,6 @@ from unittest import mock
 
 import httpx
 from grc_agent.config import (
-    DEFAULT_DOCS_ANSWER_CONFIG,
     DEFAULT_GUARDRAILS_CONFIG,
     DEFAULT_HISTORY_CONFIG,
     DEFAULT_RETRIEVAL_CONFIG,
@@ -33,7 +32,6 @@ class StartupTests(unittest.TestCase):
             ),
             agent=AgentConfig(
                 history_compact_budget=100000,
-                docs_answer=DEFAULT_DOCS_ANSWER_CONFIG,
                 retrieval=DEFAULT_RETRIEVAL_CONFIG,
                 history=DEFAULT_HISTORY_CONFIG,
                 guardrails=DEFAULT_GUARDRAILS_CONFIG,
@@ -43,12 +41,11 @@ class StartupTests(unittest.TestCase):
     def test_bootstrap_runtime_ollama_backend_success(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"data": [{"id": "test-model"}]})
+
         test_client = httpx.Client(transport=httpx.MockTransport(handler))
 
         config = self._app_config("ollama", 11434)
-        with mock.patch(
-            "grc_agent.model_manager.httpx.Client", return_value=test_client
-        ):
+        with mock.patch("grc_agent.model_manager.httpx.Client", return_value=test_client):
             with mock.patch("grc_agent.startup.initialize_retrieval") as mock_init_retrieval:
                 mock_init_retrieval.return_value = {
                     "ok": True,
@@ -67,12 +64,11 @@ class StartupTests(unittest.TestCase):
     def test_bootstrap_runtime_openrouter_backend_failure(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("Connection refused")
+
         test_client = httpx.Client(transport=httpx.MockTransport(handler))
 
         config = self._app_config("openrouter", 8080)
-        with mock.patch(
-            "grc_agent.model_manager.httpx.Client", return_value=test_client
-        ):
+        with mock.patch("grc_agent.model_manager.httpx.Client", return_value=test_client):
             with mock.patch("grc_agent.startup.initialize_retrieval") as mock_init_retrieval:
                 mock_init_retrieval.return_value = {
                     "ok": True,
@@ -92,14 +88,13 @@ class StartupTests(unittest.TestCase):
 
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("Connection refused")
+
         test_client = httpx.Client(transport=httpx.MockTransport(handler))
 
-        from grc_agent._payload import ErrorCode
+        from grc_agent.domain_models import ErrorCode
 
         config = self._app_config("ollama", 11434)
-        with mock.patch(
-            "grc_agent.model_manager.httpx.Client", return_value=test_client
-        ):
+        with mock.patch("grc_agent.model_manager.httpx.Client", return_value=test_client):
             with mock.patch("grc_agent.startup.initialize_retrieval") as mock_init_retrieval:
                 mock_init_retrieval.return_value = {
                     "ok": True,

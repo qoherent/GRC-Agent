@@ -11,7 +11,7 @@ class GraphIdRoundTripTests(unittest.TestCase):
     """Verify that load/serialize/load preserves the graph identifier."""
 
     def _fixture_path(self) -> Path:
-        return Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc"
+        return Path(__file__).resolve().parents[1] / "data" / "test_udp_sink.grc"
 
     def test_round_trip_serialization_preserves_graph_id(self) -> None:
         session = FlowgraphSession()

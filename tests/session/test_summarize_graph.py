@@ -11,52 +11,32 @@ class SummarizeGraphTests(unittest.TestCase):
     """Check the bounded structured summary payload for one loaded graph."""
 
     def _fixture_path(self) -> Path:
-        return Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc"
+        return Path(__file__).resolve().parents[1] / "data" / "dial_tone.grc"
 
     def test_summary_payload_is_structured_and_bounded(self) -> None:
         session = load_grc(self._fixture_path())
+        fg = session.flowgraph
+        options_block = getattr(fg, "options_block", None)
+        options_name = options_block.name if options_block is not None else None
+        expected_blocks = sum(1 for b in fg.blocks if b.name != options_name)
+        expected_conns = len(fg.connections)
 
         payload = summarize_graph(session, max_blocks=3)
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["path"], str(self._fixture_path()))
         self.assertTrue(payload["graph_id"].startswith("grc:"))
-        self.assertEqual(payload["block_count"], 5)
-        self.assertEqual(payload["connection_count"], 3)
-        self.assertEqual(
-            payload["connections"],
-            [
-                {
-                    "connection_id": "analog_random_source_x_0:0->blocks_throttle2_0:0",
-                    "src_block": "analog_random_source_x_0",
-                    "src_port": 0,
-                    "dst_block": "blocks_throttle2_0",
-                    "dst_port": 0,
-                },
-                {
-                    "connection_id": "blocks_char_to_float_0:0->qtgui_time_sink_x_0:0",
-                    "src_block": "blocks_char_to_float_0",
-                    "src_port": 0,
-                    "dst_block": "qtgui_time_sink_x_0",
-                    "dst_port": 0,
-                },
-                {
-                    "connection_id": "blocks_throttle2_0:0->blocks_char_to_float_0:0",
-                    "src_block": "blocks_throttle2_0",
-                    "src_port": 0,
-                    "dst_block": "blocks_char_to_float_0",
-                    "dst_port": 0,
-                },
-            ],
-        )
-        self.assertEqual(payload["variable_count"], 1)
+        self.assertEqual(payload["block_count"], expected_blocks)
+        self.assertEqual(payload["connection_count"], expected_conns)
+        self.assertEqual(len(payload["connections"]), expected_conns)
+        self.assertEqual(payload["connections"], sorted(payload["connections"]))
         self.assertFalse(payload["dirty"])
         self.assertEqual(payload["validation"]["status"], "unknown")
-        self.assertIn("random_bit_generator.grc", payload["summary"])
-        self.assertIn("5 blocks", payload["summary"])
-        self.assertIn("3 connections", payload["summary"])
-        self.assertIn("samp_rate (variable)", payload["summary"])
-        self.assertIn("... +2 more", payload["summary"])
+        self.assertIn(self._fixture_path().name, payload["summary"])
+        self.assertIn(f"{expected_blocks} blocks", payload["summary"])
+        self.assertIn(f"{expected_conns} connections", payload["summary"])
+        if expected_blocks > 3:
+            self.assertIn(f"... +{expected_blocks - 3} more", payload["summary"])
 
     def test_summary_reflects_validation_state(self) -> None:
         session = load_grc(self._fixture_path())

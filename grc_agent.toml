@@ -1,7 +1,7 @@
 [llama]
 server_url = "http://localhost:11434"
 backend = "ollama"
-model = "gemma4:12b-it-qat"
+model = "gemma4:e4b-it-qat"
 embedding_model = "embeddinggemma:latest"
 max_tokens = 4096
 max_tool_rounds = 8
@@ -13,15 +13,9 @@ request_timeout_seconds = 120.0
 history_compact_budget = 100000
 max_tool_result_chars = 4000
 
-[agent.docs_answer]
-max_sources = 3
-answer_target_chars = 320
-excerpt_target_chars = 180
-answer_cache_size = 64
-
 [agent.retrieval]
-search_blocks_default_k = 5
-search_blocks_max_k = 10
+search_blocks_default_k = 3
+search_blocks_max_k = 12
 ask_grc_docs_default_k = 3
 ask_grc_docs_max_k = 6
 
@@ -33,5 +27,4 @@ max_tool_output_bytes = 32768
 max_validation_errors = 8
 max_validation_stderr_chars = 1200
 max_compact_list_items = 3
-max_graph_summary_blocks = 50
 max_context_nodes = 20

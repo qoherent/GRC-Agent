@@ -50,6 +50,7 @@ def test_agent_worker_emits_start_signal(qtbot):
 
     # We need to mock the ToolAgentsRunner inside workers
     from unittest.mock import patch
+
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
         mock_runner.run_turn.return_value = {"ok": True, "assistant_text": "Done"}
@@ -407,4 +408,3 @@ def test_no_double_emit_turn_finished(qtbot):
         # It may have fired before cancel arrived; the test only
         # forbids multiple emissions of the same final payload.
         assert len(emitted_payloads) <= 1
-

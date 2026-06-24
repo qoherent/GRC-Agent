@@ -5,10 +5,8 @@ Owns:
   model-facing string. AGENTS.md mandates explicit (what, was, kept) flags
   on every model-visible truncation. This is the single place that emits them.
 - tokenize_identifier: the canonical identifier tokenizer. casefold, split on
-  non-alphanumeric, drop empties. Replaces 6+ ad-hoc normalizers that
-  drifted across agent / search_blocks / inspect_graph / session.
-- compact_whitespace: the canonical whitespace compactor. Replaces
-  3+ duplicates that did '" ".join(value.split())' each.
+  non-alphanumeric, drop empties.
+- compact_whitespace: the canonical whitespace compactor.
 
 No model-visible string ever truncates or tokenizes without going through
 this module.

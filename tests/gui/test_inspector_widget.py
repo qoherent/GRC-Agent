@@ -27,11 +27,25 @@ def test_variables_table_mapping(qtbot):
         "state_revision": 1,
         "summary": {
             "blocks": [
-                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable", "value": "32000"},
-                {"instance_name": "freq", "block_type": "variable", "role": "variable", "value": "1000"},
-                {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"}
+                {
+                    "instance_name": "samp_rate",
+                    "block_type": "variable",
+                    "role": "variable",
+                    "value": "32000",
+                },
+                {
+                    "instance_name": "freq",
+                    "block_type": "variable",
+                    "role": "variable",
+                    "value": "1000",
+                },
+                {
+                    "instance_name": "analog_sig_source_x_0",
+                    "block_type": "analog_sig_source_x",
+                    "role": "source",
+                },
             ]
-        }
+        },
     }
 
     widget.update_state(mock_payload)
@@ -62,11 +76,24 @@ def test_blocks_tree_mapping(qtbot):
         "state_revision": 1,
         "summary": {
             "blocks": [
-                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable", "value": "32000"},
-                {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"},
-                {"instance_name": "blocks_throttle_0", "block_type": "blocks_throttle", "role": "transform"}
+                {
+                    "instance_name": "samp_rate",
+                    "block_type": "variable",
+                    "role": "variable",
+                    "value": "32000",
+                },
+                {
+                    "instance_name": "analog_sig_source_x_0",
+                    "block_type": "analog_sig_source_x",
+                    "role": "source",
+                },
+                {
+                    "instance_name": "blocks_throttle_0",
+                    "block_type": "blocks_throttle",
+                    "role": "transform",
+                },
             ]
-        }
+        },
     }
 
     widget.update_state(mock_payload)
@@ -92,10 +119,19 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
         "state_revision": 1,
         "summary": {
             "blocks": [
-                {"instance_name": "samp_rate", "block_type": "variable", "role": "variable", "value": "32000"},
-                {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"}
+                {
+                    "instance_name": "samp_rate",
+                    "block_type": "variable",
+                    "role": "variable",
+                    "value": "32000",
+                },
+                {
+                    "instance_name": "analog_sig_source_x_0",
+                    "block_type": "analog_sig_source_x",
+                    "role": "source",
+                },
             ]
-        }
+        },
     }
 
     # Initial load
@@ -184,6 +220,7 @@ def test_start_detached_failure_disables_button(qtbot):
 def test_expansion_state_uses_user_role(qtbot):
     """5.2: category expansion state is keyed on Qt.UserRole, not display text."""
     from PySide6.QtCore import Qt
+
     widget = InspectorWidget()
     qtbot.addWidget(widget)
 
@@ -193,7 +230,11 @@ def test_expansion_state_uses_user_role(qtbot):
         "state_revision": 1,
         "summary": {
             "blocks": [
-                {"instance_name": "analog_sig_source_x_0", "block_type": "analog_sig_source_x", "role": "source"}
+                {
+                    "instance_name": "analog_sig_source_x_0",
+                    "block_type": "analog_sig_source_x",
+                    "role": "source",
+                }
             ]
         },
     }

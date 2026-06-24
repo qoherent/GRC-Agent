@@ -18,13 +18,13 @@ No native GRC imports here. These are pure data schemas; the native adapter
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class BlockRole(str, Enum):
+class BlockRole(StrEnum):
     """Role of a GRC block. Lowercase string values — no ALL-CAPS directives."""
 
     VARIABLE = "variable"
@@ -43,41 +43,15 @@ class BlockRole(str, Enum):
 # --------------------------------------------------------------------------- #
 
 
-class GrcParameter(BaseModel):
-    """A single GRC block parameter as seen by the model."""
-
-    model_config = ConfigDict(extra="forbid")
-    name: str
-    dtype: str
-    value: Any
-    evaluated_value: Any | None = None
-    category: str = "General"
-    hide: str = "none"
-
-
-class GrcConnection(BaseModel):
-    """A single GRC connection as seen by the model."""
-
-    model_config = ConfigDict(extra="forbid")
-    connection_id: str
-    src_block: str
-    src_port: str
-    dst_block: str
-    dst_port: str
-    dtype: str | None = None
-
-
 class GrcBlock(BaseModel):
     """A single GRC block as seen by the model."""
 
     model_config = ConfigDict(extra="forbid")
     instance_name: str
     block_type: str
-    block_uid: str
     role: BlockRole
     state: str
-    parameters: list[GrcParameter] = Field(default_factory=list)
-    coordinate: tuple[float, float] | None = None
+    parameters: dict[str, str] = Field(default_factory=dict)
 
 
 class GrcValidation(BaseModel):
@@ -95,90 +69,10 @@ class GrcFlowgraph(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ok: bool
     graph_name: str
-    file_format: int | None = None
-    grc_version: str | None = None
     blocks: list[GrcBlock] = Field(default_factory=list)
-    connections: list[GrcConnection] = Field(default_factory=list)
+    connections: list[str] = Field(default_factory=list)
     validation: GrcValidation = Field(default_factory=GrcValidation)
     errors: list[dict[str, str]] = Field(default_factory=list)
-    state_revision: int = 0
-
-
-# --------------------------------------------------------------------------- #
-# Inbound models (LLM tool-call arguments). extra="ignore" drops unknowns.    #
-# --------------------------------------------------------------------------- #
-
-
-class InspectGraphArgs(BaseModel):
-    """Arguments to the inspect_graph tool. Extra fields are ignored."""
-
-    model_config = ConfigDict(extra="ignore")
-    view: str = "overview"
-    targets: list[str] = Field(default_factory=list)
-    params: list[str] = Field(default_factory=list)
-    debug: bool = False
-
-
-class ChangeGraphAddBlock(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    block_id: str
-    instance_name: str
-    params: dict[str, Any] = Field(default_factory=dict)
-    state: str | None = None
-
-
-class ChangeGraphRemoveBlock(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    instance_name: str
-    block_type: str | None = None
-
-
-class ChangeGraphUpdateParams(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    instance_name: str
-    params: dict[str, Any]
-    block_type: str | None = None
-
-
-class ChangeGraphUpdateStates(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    instance_name: str
-    state: str
-    block_type: str | None = None
-
-
-class ChangeGraphAddConnection(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    src: dict[str, str]
-    dst: dict[str, str]
-
-
-class ChangeGraphRemoveConnection(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    connection_id: str
-
-
-class ChangeGraphArgs(BaseModel):
-    """Arguments to the change_graph tool. Extra fields are ignored."""
-
-    model_config = ConfigDict(extra="ignore")
-    add_blocks: list[ChangeGraphAddBlock] = Field(default_factory=list)
-    remove_blocks: list[ChangeGraphRemoveBlock] = Field(default_factory=list)
-    update_params: list[ChangeGraphUpdateParams] = Field(default_factory=list)
-    update_states: list[ChangeGraphUpdateStates] = Field(default_factory=list)
-    add_connections: list[ChangeGraphAddConnection] = Field(default_factory=list)
-    remove_connections: list[ChangeGraphRemoveConnection] = Field(default_factory=list)
-    force: bool = False
-    debug: bool = False
-
-
-class QueryKnowledgeArgs(BaseModel):
-    """Arguments to the query_knowledge tool. Extra fields are ignored."""
-
-    model_config = ConfigDict(extra="ignore")
-    query: str
-    domain: str = "catalog"
-    debug: bool = False
 
 
 # --------------------------------------------------------------------------- #

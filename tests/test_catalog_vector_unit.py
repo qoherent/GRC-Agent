@@ -5,6 +5,7 @@ No Ollama / no live embedding model required. The param filter lives in
 ``evaluated_param_hides`` + categories); the live tests need a working GRC
 platform, the mock-based tests below don't.
 """
+
 from __future__ import annotations
 
 from unittest import mock
@@ -14,8 +15,8 @@ from grc_agent.runtime.catalog_vector import (
 )
 from grc_agent.runtime.param_filter import visible_param_keys
 
-
 # --- visible_param_keys ---------------------------------------------------
+
 
 def test_visible_params_drops_hide_all_keys():
     """When GRC evaluates a param with hide='all', it is dropped."""
@@ -80,6 +81,7 @@ def test_visible_params_falls_back_when_grc_unavailable():
 
 # --- compose_block_embed_text ---------------------------------------------
 
+
 def test_compose_includes_passed_params_verbatim():
     """compose is a pure composer — it does NOT filter on its own.
 
@@ -121,6 +123,7 @@ def test_compose_caps_at_256_words():
 
 # --- integration with the real GRC platform -------------------------------
 
+
 def test_visible_params_filters_real_qtgui_time_sink_x():
     """The native GRC filter removes the GUI-styling alpha/color/label
     grids from the time-sink block.
@@ -137,16 +140,47 @@ def test_visible_params_filters_real_qtgui_time_sink_x():
     visible = visible_param_keys(
         "qtgui_time_sink_x",
         [
-            "type", "name", "ylabel", "yunit", "size", "srate", "grid",
-            "alpha1", "alpha2", "alpha3", "alpha4", "alpha5",
-            "alpha6", "alpha7", "alpha8", "alpha9", "alpha10",
-            "color1", "color2", "color3", "color4", "color5",
-            "label1", "label2", "label3", "label4", "label5",
+            "type",
+            "name",
+            "ylabel",
+            "yunit",
+            "size",
+            "srate",
+            "grid",
+            "alpha1",
+            "alpha2",
+            "alpha3",
+            "alpha4",
+            "alpha5",
+            "alpha6",
+            "alpha7",
+            "alpha8",
+            "alpha9",
+            "alpha10",
+            "color1",
+            "color2",
+            "color3",
+            "color4",
+            "color5",
+            "label1",
+            "label2",
+            "label3",
+            "label4",
+            "label5",
         ],
     )
     # GUI-styling params with hide='all' (the high-N extras) must be gone.
-    for gui in ("alpha6", "alpha7", "alpha8", "alpha9", "alpha10",
-                "color4", "color5", "label4", "label5"):
+    for gui in (
+        "alpha6",
+        "alpha7",
+        "alpha8",
+        "alpha9",
+        "alpha10",
+        "color4",
+        "color5",
+        "label4",
+        "label5",
+    ):
         assert gui not in visible, f"{gui} should be filtered (hide=all)"
     # Semantically meaningful params must be kept.
     for kept in ("type", "name", "srate"):

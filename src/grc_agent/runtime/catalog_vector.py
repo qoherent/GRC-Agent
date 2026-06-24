@@ -1,15 +1,15 @@
-"""Catalog vector-search pipeline (vec1 + embeddinggemma).
+"""Catalog vector-search pipeline (sqlite-vec + embeddinggemma).
 
 Parallel to :mod:`grc_agent.runtime.doc_answer` for GNU Radio catalog blocks.
 The same uniform rules apply:
   * ``embeddinggemma:latest`` (gemma-3-embedding, 300M) produces the vectors.
   * Google gemma-3-embedding spec: prefix every query and every document
     with the same task descriptor. We use the same prefix as docs.
-  * ``vec1`` provides cosine-distance nearest-neighbour over a flat packed
-    index of 768-d float32 vectors.
+  * ``sqlite-vec`` provides L2 KNN over packed float32 vectors in a
+    ``vec0`` virtual table.
 
 Param filtering for the embed text is delegated to the single authority
-:mod:`grc_agent.runtime.param_filter` (Stage A visibility: drop ``hide='all'``,
+:mod:`grc_agent.runtime.param_filter` (Stage A details: drop ``hide='all'``,
 Advanced, Config). GRC itself marks GUI-only parameters with ``hide='all'``
 (color grids, alpha slots, per-channel device knobs); reading that attribute
 is the native answer to "which params should the embedding model see".
@@ -24,6 +24,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+import sqlite_vec
 from grc_agent.runtime.doc_answer import get_embedding
 from grc_agent.runtime.param_filter import visible_param_keys
 
@@ -40,6 +41,7 @@ _DOCUMENT_PREFIX = "task: search result | document: "
 
 # --- Embed-text body cap (mirrors doc_answer.CHUNK_MAX_WORDS) ---------------
 _CATALOG_EMBED_MAX_WORDS = 256
+_EMBED_DIM = 768  # embeddinggemma float32
 
 
 def _cap_embed_body(parts: list[str], max_words: int) -> str:
@@ -139,31 +141,16 @@ def embed_query(
 
 
 class VectorCatalogStore:
-    """vec1-backed KNN store for GNU Radio catalog blocks."""
+    """sqlite-vec backed KNN store for GNU Radio catalog blocks."""
 
     def __init__(self, db_path: Path, server_url: str):
         self.db_path = db_path
         self.server_url = server_url
 
     def _get_connection(self) -> sqlite3.Connection:
-        resolved: Path | None = None
-        for parent in Path(__file__).resolve().parents:
-            cand = parent / "vec1.so"
-            if cand.exists():
-                resolved = cand
-                break
-        if resolved is None:
-            raise RuntimeError(
-                "vec1.so not found alongside grc_agent package. "
-                "Place vec1.so in src/grc_agent/ (or a parent) and retry."
-            )
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        try:
-            conn.enable_load_extension(True)
-            conn.load_extension(str(resolved))
-        except Exception:
-            conn.close()
-            raise
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
         return conn
 
     def init_db(self, conn: sqlite3.Connection) -> None:
@@ -173,7 +160,10 @@ class VectorCatalogStore:
             "block_id TEXT, "
             "payload TEXT)"
         )
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS catalog_idx USING vec1(embedding)")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS catalog_idx USING vec0("
+            f"embedding float[{_EMBED_DIM}])"
+        )
 
     def ingest_if_needed(
         self,
@@ -229,31 +219,22 @@ class VectorCatalogStore:
                 rowid = cursor.lastrowid
                 conn.execute(
                     "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
-                    (rowid, struct.pack(f"{len(embedding)}f", *embedding)),
+                    (rowid, sqlite_vec.serialize_float32(embedding)),
                 )
                 inserted += 1
-            conn.execute(
-                "INSERT INTO catalog_idx(cmd, arg) "
-                'VALUES(\'rebuild\', \'{"index": "flat", "distance": "cos"}\')'
-            )
             conn.commit()
             logger.info("Catalog vector index ingested %d blocks.", inserted)
         finally:
             conn.close()
 
     def search(self, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
-        """Return up to ``limit + 1`` nearest neighbours.
-
-        Same "carry overflow to the caller" rule as :meth:`VectorDocsStore.search`:
-        we do not slice here.
-        """
+        """Return up to ``limit`` nearest neighbours via sqlite-vec KNN."""
         conn = self._get_connection()
         try:
             conn.row_factory = sqlite3.Row
-            packed_vec = struct.pack(f"{len(query_vector)}f", *query_vector)
             cursor = conn.execute(
-                "SELECT rowid, distance FROM catalog_idx(?, ?)",
-                (packed_vec, f'{{"K": {limit + 1}}}'),
+                "SELECT rowid, distance FROM catalog_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vector), limit),
             )
             matched: list[dict[str, Any]] = []
             for row in cursor.fetchall():

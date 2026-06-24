@@ -11,7 +11,7 @@ class NoCheatsTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         prod_root = repo_root / "src" / "grc_agent"
         forbidden_fragments = {
-            "random_bit_generator.grc",
+            "dial_tone.grc",
             "required_next_tools",
             "internal_compile_check_passed",
             "_canonical_samp_rate_repair_operations",
@@ -36,9 +36,7 @@ class NoCheatsTests(unittest.TestCase):
     def test_manual_retrieval_is_not_imported_by_mutation_paths(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mutation_paths = [
-            repo_root / "src" / "grc_agent" / "transaction",
-            repo_root / "src" / "grc_agent" / "validation",
-            repo_root / "src" / "grc_agent" / "session" / "insertion.py",
+            repo_root / "src" / "grc_agent" / "transaction.py",
         ]
 
         offenders: list[str] = []

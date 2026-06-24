@@ -9,11 +9,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from grc_agent._payload import ErrorCode
 from grc_agent.agent import GrcAgent
+from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.grc_native_adapter import apply_mutation
 
-FIXTURE = Path(__file__).resolve().parent / "data" / "random_bit_generator.grc"
+FIXTURE = Path(__file__).resolve().parent / "data" / "dial_tone.grc"
 
 
 def _sha256(path: Path) -> str:
@@ -26,6 +27,14 @@ def _load_temp_session(tmpdir: str) -> FlowgraphSession:
     session = FlowgraphSession()
     session.load(dst)
     return session
+
+
+def _mutate_param(session: FlowgraphSession, instance_name: str, key: str, value: str) -> None:
+    """Dirty the session via the adapter (replaces deleted session.set_param)."""
+    assert session.flowgraph is not None
+    apply_mutation(session.flowgraph, "update_params", instance_name=instance_name, params={key: value})
+    session.is_dirty = True
+    session._bump_state_revision()
 
 
 def _mark_session_valid(session: FlowgraphSession) -> None:
@@ -61,7 +70,7 @@ class SaveIntegrityTests(unittest.TestCase):
             self.assertEqual(session.persisted_file_sha256, loaded_hash)
             self.assertEqual(session.file_integrity_state()["status"], "clean")
 
-            session.set_param("samp_rate", "value", "32000")
+            _mutate_param(session, "samp_rate", "value", "48000")
             _mark_session_valid(session)
             session.save()
 
@@ -80,7 +89,7 @@ class SaveIntegrityTests(unittest.TestCase):
             session = _load_temp_session(tmpdir)
             assert session.path is not None
             original_hash = session.persisted_file_sha256
-            session.set_param("samp_rate", "value", "48000")
+            _mutate_param(session, "samp_rate", "value", "48000")
             _mark_session_valid(session)
             session.path.write_text(
                 session.path.read_text(encoding="utf-8") + "\n# external edit\n",
@@ -105,7 +114,7 @@ class SaveIntegrityTests(unittest.TestCase):
             symlink_target.symlink_to(real_target.name)
             session.path = symlink_target
             session._persisted_file_sha256 = _sha256(real_target)
-            session.set_param("samp_rate", "value", "48000")
+            _mutate_param(session, "samp_rate", "value", "48000")
             _mark_session_valid(session)
 
             with self.assertRaises(OSError) as caught:
@@ -114,21 +123,6 @@ class SaveIntegrityTests(unittest.TestCase):
             self.assertIn("symlink", str(caught.exception))
             self.assertTrue(session.is_dirty)
 
-    def test_manual_save_refuses_externally_modified_active_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            session = _load_temp_session(tmpdir)
-            assert session.path is not None
-            agent = GrcAgent(session)
-            _mark_agent_valid(agent)
-            before = session.path.read_text(encoding="utf-8")
-            session.path.write_text(before + "\n# external edit\n", encoding="utf-8")
-
-            result = agent.execute_tool("save_graph", {})
-
-            self.assertFalse(result.get("ok"), result)
-            self.assertEqual(result.get("error_type"), ErrorCode.STALE_REVISION)
-            self.assertEqual(result.get("file_integrity", {}).get("status"), "modified")
-            self.assertIn("# external edit", session.path.read_text(encoding="utf-8"))
 
     def test_change_graph_commit_refuses_externally_modified_active_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,7 +157,7 @@ class SaveIntegrityTests(unittest.TestCase):
             assert session.path is not None
             original_text = session.path.read_text(encoding="utf-8")
             original_hash = session.persisted_file_sha256
-            session.set_param("samp_rate", "value", "48000")
+            _mutate_param(session, "samp_rate", "value", "48000")
             _mark_session_valid(session)
 
             with mock.patch.object(

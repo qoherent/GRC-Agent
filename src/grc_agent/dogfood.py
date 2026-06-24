@@ -10,49 +10,55 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from grc_agent._payload import build_error_payload
+from grc_agent.domain_models import build_error_payload
 
 DOGFOOD_SCHEMA_VERSION = "2026-04-29-dogfood-v1"
 
-VALID_DOGFOOD_SOURCES = frozenset({
-    "installed_example",
-    "user_graph",
-    "real_user",
-    "eval",
-    "manual_review",
-})
-VALID_TASK_TYPES = frozenset({
-    "inspect",
-    "validate",
-    "param_edit",
-    "add_variable",
-    "state_edit",
-    "disable_enable",
-    "disconnect",
-    "rewire",
-    "save_copy",
-    "preview",
-    "retrieval",
-    "clarification",
-    "negative",
-    "block_uid_mutation",
-    "duplicate_safety",
-    "other",
-})
-VALID_FAILURE_CATEGORIES = frozenset({
-    "no_failure",
-    "routing_failure",
-    "argument_copying_failure",
-    "safe_preflight_rejection",
-    "preflight_false_reject",
-    "unsafe_mutation_risk",
-    "grcc_failure",
-    "save_reload_mismatch",
-    "confusing_clarification",
-    "retrieval_miss",
-    "tool_error",
-    "other",
-})
+VALID_DOGFOOD_SOURCES = frozenset(
+    {
+        "installed_example",
+        "user_graph",
+        "real_user",
+        "eval",
+        "manual_review",
+    }
+)
+VALID_TASK_TYPES = frozenset(
+    {
+        "inspect",
+        "validate",
+        "param_edit",
+        "add_variable",
+        "state_edit",
+        "disable_enable",
+        "disconnect",
+        "rewire",
+        "save_copy",
+        "preview",
+        "retrieval",
+        "clarification",
+        "negative",
+        "block_uid_mutation",
+        "duplicate_safety",
+        "other",
+    }
+)
+VALID_FAILURE_CATEGORIES = frozenset(
+    {
+        "no_failure",
+        "routing_failure",
+        "argument_copying_failure",
+        "safe_preflight_rejection",
+        "preflight_false_reject",
+        "unsafe_mutation_risk",
+        "grcc_failure",
+        "save_reload_mismatch",
+        "confusing_clarification",
+        "retrieval_miss",
+        "tool_error",
+        "other",
+    }
+)
 VALID_SEVERITIES = frozenset({"info", "low", "medium", "high", "stop_the_line"})
 
 _PATH_RE = re.compile(r"(?:~|/|\b[A-Za-z]:[\\/])(?:[^\s\"'<>|:]+[\\/])*[^\s\"'<>|:]+")
@@ -144,9 +150,7 @@ def record_dogfood_case(
     }
 
 
-def summarize_dogfood_cases(
-    *, intake_path: str | Path | None = None
-) -> dict[str, Any]:
+def summarize_dogfood_cases(*, intake_path: str | Path | None = None) -> dict[str, Any]:
     """Summarize structured dogfooding records into conservative clusters."""
     path = resolve_dogfood_intake_path(intake_path)
     if not path.exists():
@@ -165,8 +169,7 @@ def summarize_dogfood_cases(
     for record in records:
         clusters.setdefault(_cluster_key(record), []).append(record)
     summaries = [
-        _summarize_cluster(cluster_id, items)
-        for cluster_id, items in sorted(clusters.items())
+        _summarize_cluster(cluster_id, items) for cluster_id, items in sorted(clusters.items())
     ]
     summaries.sort(key=lambda item: (-item["count"], item["cluster_id"]))
     return {
@@ -221,8 +224,12 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
 
 def _normalize_record(payload: dict[str, Any]) -> dict[str, Any]:
     prompt = _bounded_text(_sanitize_text(payload.get("prompt", "")), limit=1000)
-    source = payload.get("source") if payload.get("source") in VALID_DOGFOOD_SOURCES else "manual_review"
-    task_type = payload.get("task_type") if payload.get("task_type") in VALID_TASK_TYPES else "other"
+    source = (
+        payload.get("source") if payload.get("source") in VALID_DOGFOOD_SOURCES else "manual_review"
+    )
+    task_type = (
+        payload.get("task_type") if payload.get("task_type") in VALID_TASK_TYPES else "other"
+    )
     failure_category = (
         payload.get("failure_category")
         if payload.get("failure_category") in VALID_FAILURE_CATEGORIES
@@ -243,7 +250,9 @@ def _normalize_record(payload: dict[str, Any]) -> dict[str, Any]:
         "actual": _bounded_text(_sanitize_text(payload.get("actual", "")), limit=1000),
         "actual_tools": _clean_tools(payload.get("actual_tools") or ()),
         "graph_delta": _bounded_text(_sanitize_text(payload.get("graph_delta", "")), limit=1000),
-        "validation_state": _bounded_text(_sanitize_text(payload.get("validation_state", "")), limit=200),
+        "validation_state": _bounded_text(
+            _sanitize_text(payload.get("validation_state", "")), limit=200
+        ),
         "save_state": _bounded_text(_sanitize_text(payload.get("save_state", "")), limit=200),
         "reproducible": bool(payload.get("reproducible")),
         "notes": _bounded_text(_sanitize_text(payload.get("notes", "")), limit=1000),
@@ -285,8 +294,12 @@ def _summarize_cluster(cluster_id: str, records: list[dict[str, Any]]) -> dict[s
         "actual_preview": actual[:3],
         "notes_count": sum(1 for record in records if record["notes"]),
         "notes_preview": notes[:3],
-        "graph_refs": sorted({record["graph_ref"] for record in records if record["graph_ref"]})[:5],
-        "actual_tools": sorted({tool for record in records for tool in record["actual_tools"]})[:10],
+        "graph_refs": sorted({record["graph_ref"] for record in records if record["graph_ref"]})[
+            :5
+        ],
+        "actual_tools": sorted({tool for record in records for tool in record["actual_tools"]})[
+            :10
+        ],
         "recommendation": _cluster_recommendation(records),
     }
 
@@ -303,11 +316,13 @@ def _cluster_recommendation(records: list[dict[str, Any]]) -> str:
 
 
 def _cluster_key(record: dict[str, Any]) -> str:
-    return "|".join((
-        record["failure_category"],
-        record["task_type"],
-        _topic_key(record["prompt_key"]),
-    ))
+    return "|".join(
+        (
+            record["failure_category"],
+            record["task_type"],
+            _topic_key(record["prompt_key"]),
+        )
+    )
 
 
 def _topic_key(prompt_key: str) -> str:
@@ -379,12 +394,14 @@ def _empty_counts() -> dict[str, dict[str, int]]:
 
 def stable_record_id(record: dict[str, Any]) -> str:
     """Return a stable identifier for report references."""
-    key = "|".join((
-        str(record.get("timestamp", "")),
-        str(record.get("source", "")),
-        str(record.get("task_type", "")),
-        str(record.get("prompt_key", "")),
-    ))
+    key = "|".join(
+        (
+            str(record.get("timestamp", "")),
+            str(record.get("source", "")),
+            str(record.get("task_type", "")),
+            str(record.get("prompt_key", "")),
+        )
+    )
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 

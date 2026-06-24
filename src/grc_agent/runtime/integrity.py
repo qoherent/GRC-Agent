@@ -1,12 +1,10 @@
 """Unified file-integrity compactor.
 
-The two pre-existing copies of this helper (agent.py:_compact_save_file_integrity
-and change_graph.py:_compact_file_integrity) had divergent behavior: one
-returned the full hash, the other silently clipped to 12 chars with no
-flag. Per AGENTS.md 'no silent transformation', the unified implementation
-always returns the full hash. If a future limit is imposed, it MUST go
-through :func:`format_truncation_flag` so the consumer can see what was
-dropped.
+Single source of truth for the model-visible file-integrity payload.
+Per AGENTS.md 'no silent transformation', the full hash is always returned.
+If a future limit is imposed, it MUST go through
+:func:`grc_agent.runtime.text_utils.format_truncation_flag` so the
+consumer can see what was dropped.
 """
 
 from __future__ import annotations

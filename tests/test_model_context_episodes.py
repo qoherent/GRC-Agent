@@ -2,6 +2,7 @@ import datetime
 import unittest
 import uuid
 
+from grc_agent.runtime.model_context import _prune_completed_episodes
 from ToolAgents.data_models.messages import (
     ChatMessage,
     ChatMessageRole,
@@ -9,8 +10,6 @@ from ToolAgents.data_models.messages import (
     ToolCallContent,
     ToolCallResultContent,
 )
-
-from grc_agent.runtime.model_context import _prune_completed_episodes
 
 
 def _msg(role: ChatMessageRole, content: list) -> ChatMessage:
@@ -61,7 +60,10 @@ class EpisodePruneTests(unittest.TestCase):
 
     def test_old_runtime_directives_still_dropped(self) -> None:
         messages = [
-            _msg(ChatMessageRole.User, [TextContent(content="<runtime_directive>old nudge</runtime_directive>")]),
+            _msg(
+                ChatMessageRole.User,
+                [TextContent(content="<runtime_directive>old nudge</runtime_directive>")],
+            ),
             _msg(ChatMessageRole.User, [TextContent(content="real question")]),
         ]
 

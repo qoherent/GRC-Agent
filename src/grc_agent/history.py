@@ -57,19 +57,19 @@ def snapshot_session(session: FlowgraphSession) -> GraphSnapshot:
     graph_hash = f"{session.graph_id() or 'unknown'}:r{session.state_revision}"
     blocks_by_uid: dict[str, dict[str, Any]] = {}
     for block in fg.blocks:
-        uid = str(getattr(block, "name", "") or block.key)
+        uid = block.name
         blocks_by_uid[uid] = {
             "block_uid": uid,
-            "instance_name": str(block.name or block.key),
+            "instance_name": block.name,
             "block_type": str(block.key),
             "params": {k: str(p.value) for k, p in block.params.items()},
             "state": dict(getattr(block, "states", {}) or {}),
         }
     connections = sorted(
         render_connection_id(
-            conn.source_block.name or conn.source_block.key,
+            conn.source_block.name,
             conn.source_port.key,
-            conn.sink_block.name or conn.sink_block.key,
+            conn.sink_block.name,
             conn.sink_port.key,
         )
         for conn in fg.connections
@@ -445,17 +445,6 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
 
 
 def operation_type_from_result(tool_name: str, result: dict[str, Any]) -> str:
-    if tool_name == "save_graph":
-        return "save_graph"
-    operations = result.get("normalized_operations")
-    if isinstance(operations, list) and operations:
-        op_types = [
-            str(operation.get("op_type"))
-            for operation in operations
-            if isinstance(operation, dict) and operation.get("op_type") is not None
-        ]
-        if op_types:
-            return "+".join(op_types)
     return tool_name
 
 

@@ -185,7 +185,9 @@ class ChatWidget(QWidget):
 
     def append_status(self, name: str, args: str) -> None:
         """Insert a styled tool-call status block with arguments."""
-        self._history.append({"role": "tool_started", "text": f"Tool: {name}\nArgs: {args}", "_rendered": None})
+        self._history.append(
+            {"role": "tool_started", "text": f"Tool: {name}\nArgs: {args}", "_rendered": None}
+        )
         self._render_chat()
 
     def append_mutation(self, result: str) -> None:
@@ -224,7 +226,7 @@ class ChatWidget(QWidget):
                 cursor.insertHtml(
                     '<div style="margin-top: 12px; margin-bottom: 4px;">'
                     '<b style="color: #a6e3a1;">Agent:</b>'
-                    '</div>'
+                    "</div>"
                 )
 
                 # Move to the end of the header and start the indented block for streaming
@@ -312,18 +314,18 @@ class ChatWidget(QWidget):
                 cached = f'<div style="margin-bottom: 12px;"><b style="color: #a6e3a1;">Agent:</b><div style="margin-top: 4px; padding-left: 8px;">{body}</div></div>'
             elif role == "tool_started":
                 lines = text.split("\n", 1)
-                name = lines[0][6:].strip() if len(lines) > 0 else ""
-                args = lines[1][5:].strip() if len(lines) > 1 else ""
+                name = lines[0].removeprefix("Tool: ").strip() if len(lines) > 0 else ""
+                args = lines[1].removeprefix("Args: ").strip() if len(lines) > 1 else ""
                 safe_name = html.escape(name)
                 safe_args = html.escape(args)
                 cached = (
                     f'<div style="margin: 4px 0; padding: 4px 8px; '
-                    f'border-left: 2px solid #89b4fa; '
-                    f'background-color: #1e1e2e; '
+                    f"border-left: 2px solid #89b4fa; "
+                    f"background-color: #1e1e2e; "
                     f'font-family: monospace; font-size: 12px; border-radius: 4px; line-height: 1.4;">'
                     f'<span style="color: #89b4fa;">⚡ {safe_name}</span>'
                     f'<br/>&nbsp;&nbsp;<span style="color: #a6adc8;">{safe_args}</span>'
-                    f'</div>'
+                    f"</div>"
                 )
             elif role == "mutation":
                 cached = (
@@ -355,6 +357,4 @@ class ChatWidget(QWidget):
         else:
             # Explicit clamp to be safe even though QScrollBar.setValue
             # is internally clamped.
-            scroll_bar.setValue(
-                max(scroll_bar.minimum(), min(old_val, scroll_bar.maximum()))
-            )
+            scroll_bar.setValue(max(scroll_bar.minimum(), min(old_val, scroll_bar.maximum())))

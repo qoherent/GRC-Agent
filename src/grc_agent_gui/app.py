@@ -306,9 +306,7 @@ def main() -> None:
         prefs = load_user_preferences()
         if prefs.last_model.model:
             config = AppConfig(
-                llama=apply_user_preferences_to_llama_config(
-                    config.llama, prefs
-                ),
+                llama=apply_user_preferences_to_llama_config(config.llama, prefs),
                 agent=config.agent,
             )
     except Exception as exc:  # noqa: BLE001 - defensive
@@ -326,9 +324,7 @@ def main() -> None:
         else:
             loaded = load_grc(grc_path)
             if isinstance(loaded, dict):
-                graph_load_error = (
-                    f"Failed to load graph: {loaded.get('message', 'unknown error')}"
-                )
+                graph_load_error = f"Failed to load graph: {loaded.get('message', 'unknown error')}"
             else:
                 if not loaded.validate():
                     print(

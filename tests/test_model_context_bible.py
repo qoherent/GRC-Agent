@@ -9,8 +9,10 @@ from pathlib import Path
 
 from grc_agent.runtime.model_context import (
     MVP_MODEL_TOOL_NAMES,
-    __version__ as PROMPT_VERSION,
     build_system_prompt,
+)
+from grc_agent.runtime.model_context import (
+    __version__ as PROMPT_VERSION,
 )
 from grc_agent.runtime.tool_schemas import build_tool_schemas
 
@@ -22,10 +24,7 @@ UPDATE_ENV = "UPDATE_MODEL_CONTEXT_BIBLE"
 def render_model_context_bible() -> str:
     """Render the generated model-context documentation from runtime sources."""
     schemas = build_tool_schemas(MVP_MODEL_TOOL_NAMES)
-    tool_names = [
-        str(schema.get("function", {}).get("name", ""))
-        for schema in schemas
-    ]
+    tool_names = [str(schema.get("function", {}).get("name", "")) for schema in schemas]
     tool_bullets = "\n".join(f"- `{name}`" for name in tool_names)
     schema_json = json.dumps(schemas, indent=2)
     prompt = build_system_prompt()

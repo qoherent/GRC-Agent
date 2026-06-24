@@ -48,9 +48,7 @@ class ToolAgentsImportTests(unittest.TestCase):
 class ToolAgentsRegistryTests(unittest.TestCase):
     def test_registry_builder_exposes_exactly_mvp_wrappers(self) -> None:
         agent = GrcAgent()
-        registry = ToolAgentsRegistryBuilder(agent).build(
-            set(MVP_TOOL_SURFACE.model_tool_names)
-        )
+        registry = ToolAgentsRegistryBuilder(agent).build(set(MVP_TOOL_SURFACE.model_tool_names))
 
         tools = registry.get_openai_tools()
         names = [tool["function"]["name"] for tool in tools]
@@ -112,7 +110,7 @@ class ToolAgentsDelegateTests(unittest.TestCase):
 
     def test_delegate_rejects_internal_tool_without_execution(self) -> None:
         agent = GrcAgent()
-        delegate = ToolAgentsToolDelegate(agent, "apply_edit")
+        delegate = ToolAgentsToolDelegate(agent, "legacy_internal_tool")
 
         with mock.patch.object(agent, "execute_tool") as execute_tool:
             result = delegate.invoke(
@@ -202,16 +200,15 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
             {
                 "tool": "change_graph",
                 "committed": False,
-                "rejected_phase": "native_grc_validation",
-                "graph_unchanged": True,
-                "native_validation_errors": [
-                    "Source - out(0): Port is not connected.",
+                "error_type": "gnu_validation_failed",
+                "errors": [
+                    {"code": "gnu_validation", "message": "Source - out(0): Port is not connected."}
                 ],
             }
         )
 
         self.assertIn("did not commit", text)
-        self.assertIn("The graph is unchanged.", text)
+        self.assertIn("No changes were committed.", text)
         self.assertIn("Source - out(0): Port is not connected.", text)
 
     def test_terminal_change_graph_failure_text_handles_minimal_validation_result(
@@ -221,12 +218,9 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
             {
                 "committed": False,
                 "error_type": "gnu_validation_failed",
-                "message": "Candidate graph rejected by native GRC validation.",
-                "validation_result": {
-                    "native": {
-                        "errors": ["Source - out(0): Port is not connected."]
-                    }
-                },
+                "errors": [
+                    {"code": "gnu_validation", "message": "Source - out(0): Port is not connected."}
+                ],
             }
         )
 
@@ -238,6 +232,7 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
 class ToolAgentsProviderConfigTests(unittest.TestCase):
     def test_create_settings_omits_llama_extra_body(self) -> None:
         from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
+
         mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
         mock_settings = mock.MagicMock()
         mock_provider.get_default_settings.return_value = mock_settings
@@ -252,26 +247,24 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
 
     def test_openrouter_settings_includes_provider_extra_body(self) -> None:
         from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
+
         mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
         mock_settings = mock.MagicMock()
         mock_provider.get_default_settings.return_value = mock_settings
 
-        with mock.patch.dict("os.environ", {
-            "OPENROUTER_PROVIDER_ORDER": "alibaba",
-            "OPENROUTER_ALLOW_FALLBACKS": "false"
-        }):
+        with mock.patch.dict(
+            "os.environ",
+            {"OPENROUTER_PROVIDER_ORDER": "alibaba", "OPENROUTER_ALLOW_FALLBACKS": "false"},
+        ):
             cfg = ToolAgentsLlamaProviderConfig(
                 base_url="https://openrouter.ai/api",
                 model="qwen-1.5b",
             )
             cfg.create_settings(mock_provider)
 
-        mock_settings.set_value.assert_any_call("extra_body", {
-            "provider": {
-                "order": ["alibaba"],
-                "allow_fallbacks": False
-            }
-        })
+        mock_settings.set_value.assert_any_call(
+            "extra_body", {"provider": {"order": ["alibaba"], "allow_fallbacks": False}}
+        )
 
 
 class OpenRouterDelegatesToSDKTests(unittest.TestCase):
@@ -349,9 +342,8 @@ class ToolAgentsRunnerBackendUnreachableTests(unittest.TestCase):
 
         def _raise_connection_error(*args, **kwargs):
             import openai
-            raise openai.APIConnectionError(
-                request=mock.MagicMock()
-            )
+
+            raise openai.APIConnectionError(request=mock.MagicMock())
 
         chat_agent.step = _raise_connection_error  # type: ignore[method-assign]
         return ToolAgentsRunner(cfg, chat_agent=chat_agent)

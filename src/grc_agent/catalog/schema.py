@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from grc_agent._payload import join_non_empty
+from grc_agent.domain_models import join_non_empty
 
 
 @dataclass(frozen=True)
@@ -74,11 +74,7 @@ class NormalizedParameter:
             "option_attributes": dict(self.option_attributes),
             "base_key": self.base_key,
         }
-        return {
-            key: value
-            for key, value in payload.items()
-            if value not in (None, [], {})
-        }
+        return {key: value for key, value in payload.items() if value not in (None, [], {})}
 
     def to_compact_dict(self) -> dict[str, Any]:
         """Discovery shape: id/dtype/default only — no options, no label."""
@@ -116,11 +112,7 @@ class NormalizedPort:
             "hide": self.hide,
             "color": self.color,
         }
-        return {
-            key: value
-            for key, value in payload.items()
-            if value is not None
-        }
+        return {key: value for key, value in payload.items() if value is not None}
 
     def to_compact_dict(self) -> dict[str, Any]:
         """Discovery shape: id/domain/dtype only — no multiplicity/optional."""
@@ -157,20 +149,22 @@ class BlockDescription:
     ) -> dict[str, Any]:
         """Build the discovery-shape payload (what the model sees).
 
-        Visibility filtering and prominence ordering are delegated to the
-        unified filter in :mod:`grc_agent.runtime.param_filter` (Stage A only:
-        drop ``hide='all'``, Advanced, Config, ``dtype='gui_hint'``). Surviving
-        params are sorted by GRC prominence and returned with ``id``,
+        Parameter filtering and ordering are delegated to the unified filter
+        in :mod:`grc_agent.runtime.param_filter` (Stage A only: drop
+        ``hide='all'``, Advanced, Config, ``dtype='gui_hint'``). Surviving
+        params are sorted by GRC overview rank and returned with ``id``,
         ``dtype``, ``default`` only — no ``options``/``option_labels``
         (editing context; ``inspect_graph`` provides them when needed).
         """
         from grc_agent.catalog.loaders import evaluated_param_hides_for_block
         from grc_agent.runtime.param_filter import (
             DEFAULT_PARAM_TAB,
-            VISIBILITY,
-            categories as platform_categories,
+            DETAILS,
             keep_param,
-            prominence_rank,
+            overview_rank,
+        )
+        from grc_agent.runtime.param_filter import (
+            categories as platform_categories,
         )
 
         if hides is None:
@@ -191,12 +185,10 @@ class BlockDescription:
                 dtype=parameter.dtype or "",
                 value=parameter.default or "",
                 default=parameter.default or "",
-                mode=VISIBILITY,
+                mode=DETAILS,
             )
         ]
-        visible_params.sort(
-            key=lambda p: (prominence_rank(hides.get(p.id, "all")), p.id)
-        )
+        visible_params.sort(key=lambda p: (overview_rank(hides.get(p.id, "all")), p.id))
 
         payload: dict[str, Any] = {
             "ok": True,
@@ -215,9 +207,7 @@ def compact_text(value: Any) -> str:
     if isinstance(value, str):
         return " ".join(value.split())
     if isinstance(value, dict):
-        parts = [
-            join_non_empty(str(key), compact_text(item)) for key, item in value.items()
-        ]
+        parts = [join_non_empty(str(key), compact_text(item)) for key, item in value.items()]
         return "; ".join(part for part in parts if part)
     if isinstance(value, (list, tuple, set)):
         parts = [compact_text(item) for item in value]
@@ -279,17 +269,13 @@ def preserved_string_values(value: Any) -> list[str]:
     return [text] if text else []
 
 
-def normalize_parameter(
-    payload: dict[str, Any], *, source_path: Path
-) -> NormalizedParameter:
+def normalize_parameter(payload: dict[str, Any], *, source_path: Path) -> NormalizedParameter:
     """Normalize one GNU parameter payload into the public structured shape."""
     from .loaders import CatalogLoadError
 
     parameter_id = optional_string(payload.get("id"))
     if parameter_id is None:
-        raise CatalogLoadError(
-            f"{source_path} has a parameter missing a non-empty 'id' field."
-        )
+        raise CatalogLoadError(f"{source_path} has a parameter missing a non-empty 'id' field.")
 
     option_attributes: dict[str, list[Any]] = {}
     raw_option_attributes = payload.get("option_attributes")
@@ -313,9 +299,7 @@ def normalize_parameter(
         category=optional_string(payload.get("category")),
         hide=optional_string(payload.get("hide")),
         options=list(raw_options) if isinstance(raw_options, list) else [],
-        option_labels=list(raw_option_labels)
-        if isinstance(raw_option_labels, list)
-        else [],
+        option_labels=list(raw_option_labels) if isinstance(raw_option_labels, list) else [],
         option_attributes=option_attributes,
         base_key=optional_string(payload.get("base_key")),
     )
@@ -450,19 +434,13 @@ def build_signature(
     return f"{block_id}({', '.join(rendered)})"
 
 
-def _looks_hierarchical(
-    block_id: str, label: str | None, make_text: str | None
-) -> bool:
-    haystack = " ".join(
-        part for part in (block_id, label or "", make_text or "") if part
-    ).lower()
+def _looks_hierarchical(block_id: str, label: str | None, make_text: str | None) -> bool:
+    haystack = " ".join(part for part in (block_id, label or "", make_text or "") if part).lower()
     return "_hier" in haystack or "hierarchical" in haystack or "hier_block" in haystack
 
 
 @lru_cache(maxsize=128)
-def _resolves_to_hierarchical_class(
-    imports_text: str | None, make_text: str | None
-) -> bool:
+def _resolves_to_hierarchical_class(imports_text: str | None, make_text: str | None) -> bool:
     """Resolve the make() target through the imports and check MRO for hier_block2.
 
     Note: ``platform.block_classes[id]`` returns GRC's metadata Block class,

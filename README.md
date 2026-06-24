@@ -54,34 +54,12 @@ recover via the inline model toolbar.
 
 ---
 
-## Running the R-suite eval (live model evals)
+## Exploratory experiments
 
-Each R-suite (`R0` read-only, `R1` mutations, `R2` chaos monkey, the DSP
-fuzzing gauntlet, and the R4 scenarios) can be run individually with the
-modules under `tests/llama_eval/`. The combined runner captures every
-suite's results into a per-suite JSON store plus a human-readable Markdown
-report:
-
-```bash
-# Make sure Ollama is up and the model is pulled:
-ollama pull gemma4:e4b-it-qat
-
-# Run every R-suite, write R_test_results/ at the repo root:
-GRC_AGENT_LIVE_LLAMA_MODEL=gemma4:e4b-it-qat \
-  bash tests/llama_eval/run_all_r_scenarios.sh
-```
-
-Override defaults via env: `GRC_AGENT_LIVE_LLAMA_MODEL`, `GRC_AGENT_LIVE_LLAMA_URL`,
-`GRC_AGENT_R_RUNS`. Output is one `<phase>.json` plus one `<phase>.md` per
-suite (e.g. `r0_release.json` / `r0_release.md`). The Markdown reports show
-per-scenario pass/fail, every turn's prompt, model reply, requested and
-executed tool calls, and per-dimension pass flags.
-
-Re-render existing JSON stores without re-running the evals:
-
-```bash
-uv run python -m tests.llama_eval.render_results R_test_results
-```
+One-off experiments live in `playground/` (search, query, inspect, change-graph).
+Each subfolder has a `run_*.py` that produces Markdown results under
+`results/`. The experiment scripts are read-only consumers of the agent —
+they are useful for smoke-testing the tool surface, not for CI.
 
 ---
 

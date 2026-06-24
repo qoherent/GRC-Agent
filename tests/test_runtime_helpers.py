@@ -2,13 +2,13 @@
 
 import unittest
 
+from grc_agent.runtime.enums import SearchDomain
+from grc_agent.runtime.integrity import compact_file_integrity
 from grc_agent.runtime.text_utils import (
     compact_whitespace,
     format_truncation_flag,
     tokenize_identifier,
 )
-from grc_agent.runtime.enums import BlockState, ValidationStatus, SearchDomain
-from grc_agent.runtime.integrity import compact_file_integrity
 
 
 class FormatTruncationFlagTests(unittest.TestCase):
@@ -64,28 +64,6 @@ class CompactWhitespaceTests(unittest.TestCase):
 
     def test_empty_passthrough(self) -> None:
         self.assertEqual(compact_whitespace(""), "")
-
-
-class BlockStateEnumTests(unittest.TestCase):
-    def test_string_values(self) -> None:
-        self.assertEqual(BlockState.ENABLED.value, "enabled")
-        self.assertEqual(BlockState.DISABLED.value, "disabled")
-        self.assertEqual(BlockState.BYPASS.value, "bypass")
-
-    def test_str_comparison_works(self) -> None:
-        # A producer that emits a raw "enabled" string compares equal to
-        # the enum member, so legacy payload fields can be checked with
-        # ``state in {BlockState.ENABLED, "enabled"}`` uniformly.
-        self.assertEqual(BlockState.ENABLED, "enabled")
-        self.assertIn(BlockState.BYPASS, {"bypass", "enabled"})
-
-
-class ValidationStatusEnumTests(unittest.TestCase):
-    def test_string_values(self) -> None:
-        self.assertEqual(ValidationStatus.VALID.value, "valid")
-        self.assertEqual(ValidationStatus.INVALID.value, "invalid")
-        self.assertEqual(ValidationStatus.FAILED.value, "failed")
-        self.assertEqual(ValidationStatus.SKIPPED.value, "skipped")
 
 
 class SearchDomainEnumTests(unittest.TestCase):

@@ -70,7 +70,9 @@ class SidebarWidget(QWidget):
 
         # Section Label
         label = QLabel("Recent Chats", self)
-        label.setStyleSheet("color: #bac2de; font-size: 11px; font-weight: bold; margin-top: 6px; padding-left: 2px;")
+        label.setStyleSheet(
+            "color: #bac2de; font-size: 11px; font-weight: bold; margin-top: 6px; padding-left: 2px;"
+        )
         layout.addWidget(label)
 
         # List of sessions
@@ -93,9 +95,7 @@ class SidebarWidget(QWidget):
             item = QListWidgetItem(f"💬 {title}\n  {display_date} · msgs={s.message_count}")
             item.setData(Qt.ItemDataRole.UserRole, s.id)
             item.setToolTip(
-                f"Session #{s.id}\n"
-                f"Model: {s.model_alias or 'N/A'}\n"
-                f"Graph: {s.graph_path or 'N/A'}"
+                f"Session #{s.id}\nModel: {s.model_alias or 'N/A'}\nGraph: {s.graph_path or 'N/A'}"
             )
             self.list_widget.addItem(item)
 

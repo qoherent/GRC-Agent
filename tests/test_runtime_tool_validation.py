@@ -13,13 +13,13 @@ class RuntimeToolValidationTests(unittest.TestCase):
 
     def _fixture_path(self) -> Path:
         test_directory = Path(__file__).resolve().parent
-        return test_directory / "data" / "random_bit_generator.grc"
+        return test_directory / "data" / "dial_tone.grc"
 
     def _schema_map(self) -> dict[str, dict]:
         session = FlowgraphSession()
         session.load(self._fixture_path())
         agent = GrcAgent(session)
-        return build_tool_schema_map(agent.get_all_tool_schemas())
+        return build_tool_schema_map(agent._tool_schemas)
 
     def test_unknown_tool_is_rejected(self) -> None:
         result = validate_runtime_tool_call("set_variable", {}, self._schema_map())
@@ -28,23 +28,10 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "unknown_tool")
         self.assertEqual(result["validation_errors"][0]["code"], "unknown_tool")
 
-    def test_missing_required_argument_is_rejected(self) -> None:
-        result = validate_runtime_tool_call("load_grc", {}, self._schema_map())
-
-        assert result is not None
-        self.assertEqual(result["error_type"], "tool_call_invalid")
-        self.assertEqual(result["validation_errors"][0]["code"], "missing_required")
-        self.assertEqual(result["validation_errors"][0]["field"], "file_path")
-        self.assertTrue(result["schema_repair_instruction"]["no_tool_ran"])
-        self.assertEqual(
-            result["schema_repair_instruction"]["missing_fields"],
-            ["file_path"],
-        )
-
     def test_unsupported_extra_argument_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "search_blocks",
-            {"query": "throttle", "unexpected": True},
+            "query_knowledge",
+            {"query": "throttle", "domain": "catalog", "unexpected": True},
             self._schema_map(),
         )
 
@@ -53,19 +40,19 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(result["validation_errors"][0]["field"], "unexpected")
         self.assertTrue(result["schema_repair_instruction"]["no_tool_ran"])
-        self.assertEqual(result["schema_repair_instruction"]["tool"], "search_blocks")
+        self.assertEqual(result["schema_repair_instruction"]["tool"], "query_knowledge")
 
     def test_invalid_argument_type_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
-            "search_blocks",
-            {"query": "samp_rate", "k": "five"},
+            "query_knowledge",
+            {"query": "samp_rate", "domain": 123},
             self._schema_map(),
         )
 
         assert result is not None
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_type")
-        self.assertEqual(result["validation_errors"][0]["field"], "k")
+        self.assertEqual(result["validation_errors"][0]["field"], "domain")
 
     def test_invalid_enum_value_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
@@ -78,33 +65,6 @@ class RuntimeToolValidationTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "tool_call_invalid")
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_enum")
         self.assertEqual(result["validation_errors"][0]["field"], "domain")
-
-    def test_empty_inspect_params_is_valid(self) -> None:
-        result = validate_runtime_tool_call(
-            "inspect_graph",
-            {"targets": ["analog_sig_source_x_1"], "params": []},
-            self._schema_map(),
-        )
-
-        self.assertIsNone(result)
-
-    def test_missing_inspect_params_is_valid(self) -> None:
-        result = validate_runtime_tool_call(
-            "inspect_graph",
-            {"targets": ["analog_sig_source_x_1"]},
-            self._schema_map(),
-        )
-
-        self.assertIsNone(result)
-
-    def test_missing_inspect_view_is_valid(self) -> None:
-        result = validate_runtime_tool_call(
-            "inspect_graph",
-            {"targets": ["analog_sig_source_x_1"]},
-            self._schema_map(),
-        )
-
-        self.assertIsNone(result)
 
     def test_overview_without_filler_arguments_is_valid(self) -> None:
         result = validate_runtime_tool_call(

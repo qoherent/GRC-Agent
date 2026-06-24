@@ -249,9 +249,7 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
         )
         conn.row_factory = sqlite3.Row
     except sqlite3.DatabaseError as exc:
-        raise SessionStoreCorrupt(
-            f"sessions DB at {db_path} could not be opened: {exc}"
-        ) from exc
+        raise SessionStoreCorrupt(f"sessions DB at {db_path} could not be opened: {exc}") from exc
     try:
         _apply_pragmas(conn)
     except sqlite3.DatabaseError as exc:
@@ -265,9 +263,7 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
     ).fetchone()
     if row is not None:
-        v = conn.execute(
-            "SELECT version FROM schema_version LIMIT 1"
-        ).fetchone()
+        v = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         file_version = int(v[0]) if v is not None else 0
         if file_version > SCHEMA_VERSION:
             conn.close()
@@ -283,9 +279,7 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
     integrity = conn.execute("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":
         conn.close()
-        raise SessionStoreCorrupt(
-            f"sessions DB at {db_path} failed integrity_check: {integrity!r}"
-        )
+        raise SessionStoreCorrupt(f"sessions DB at {db_path} failed integrity_check: {integrity!r}")
     return conn
 
 
@@ -366,9 +360,7 @@ class SessionStore:
         self._writer_conn = _open_db(self._db_path)
         # The writer's run() loop body.
         self._stop = threading.Event()
-        self._writer = threading.Thread(
-            target=self._run, name="grc-sessions-writer", daemon=True
-        )
+        self._writer = threading.Thread(target=self._run, name="grc-sessions-writer", daemon=True)
         self._writer.start()
 
     # --- public, non-blocking ---
@@ -581,8 +573,6 @@ class SessionStore:
             ).fetchall()
         return [_row_to_message(r) for r in rows]
 
-
-
     def gc(
         self,
         *,
@@ -599,9 +589,7 @@ class SessionStore:
             for s in sessions:
                 if not Path(s.graph_path).exists():
                     with self._read_conn() as conn:
-                        conn.execute(
-                            "DELETE FROM sessions WHERE id = ?", (s.id,)
-                        )
+                        conn.execute("DELETE FROM sessions WHERE id = ?", (s.id,))
                         conn.execute("COMMIT")
                     deleted += 1
             return deleted
@@ -816,8 +804,7 @@ def append_message_sync(
     try:
         msg_id = str(uuid.uuid4())
         seq_row = conn.execute(
-            "SELECT COALESCE(MAX(sequence), -1) + 1 AS next "
-            "FROM messages WHERE session_id = ?",
+            "SELECT COALESCE(MAX(sequence), -1) + 1 AS next FROM messages WHERE session_id = ?",
             (int(session_id),),
         ).fetchone()
         seq = int(seq_row["next"]) if seq_row else 0

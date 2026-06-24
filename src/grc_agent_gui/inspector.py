@@ -57,9 +57,7 @@ class InspectorWidget(QWidget):
         self.open_grc_btn = QPushButton("Open in GRC", self)
         self.open_grc_btn.setEnabled(False)
         self.open_grc_btn.clicked.connect(self.open_in_grc)
-        self.open_grc_btn.setToolTip(
-            "Open the active flowgraph in the GNU Radio Companion editor."
-        )
+        self.open_grc_btn.setToolTip("Open the active flowgraph in the GNU Radio Companion editor.")
         header_layout.addWidget(self.open_grc_btn)
 
         layout.addLayout(header_layout)
@@ -69,9 +67,7 @@ class InspectorWidget(QWidget):
         self.variables_table = QTableWidget(self)
         self.variables_table.setColumnCount(2)
         self.variables_table.setHorizontalHeaderLabels(["Name", "Value"])
-        self.variables_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
+        self.variables_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.variables_table)
 
         # Section 2: Blocks Tree
@@ -119,9 +115,7 @@ class InspectorWidget(QWidget):
             )
             return
 
-        logger.info(
-            f"Launching gnuradio-companion detached for file: {self.grc_file_path}"
-        )
+        logger.info(f"Launching gnuradio-companion detached for file: {self.grc_file_path}")
         result = QProcess.startDetached("gnuradio-companion", [self.grc_file_path])
         # PySide6 returns a tuple (ok: bool, pid: int) on success, or
         # False on failure depending on the binding version. Handle both.
@@ -162,23 +156,24 @@ class InspectorWidget(QWidget):
 
         # 3. Repopulate Variables Table
         variables = [
-            b
-            for b in blocks
-            if b.get("block_type") == "variable" or b.get("role") == "variable"
+            b for b in blocks if b.get("block_type") == "variable" or b.get("role") == "variable"
         ]
         self.variables_table.setRowCount(0)
         self.variables_table.setRowCount(len(variables))
         for row_idx, var in enumerate(variables):
             name_item = QTableWidgetItem(str(var.get("instance_name", "")))
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            val_item = QTableWidgetItem(str(var.get("value", "")))
+            # Retrieve value from parameters dictionary if available, falling back to direct value key for mock compatibility
+            params_dict = var.get("parameters", {}) or {}
+            val_str = str(params_dict.get("value", var.get("value", "")))
+            val_item = QTableWidgetItem(val_str)
             val_item.setFlags(val_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.variables_table.setItem(row_idx, 0, name_item)
             self.variables_table.setItem(row_idx, 1, val_item)
 
         # 4. Repopulate Blocks Tree (grouped categorisation)
         # Categories are derived solely from the native block ``role`` emitted
-        # by ``runtime/block_semantics.py`` (BlockRole StrEnum). There is no
+        # by ``domain_models.BlockRole`` (StrEnum). There is no
         # substring matching on block_type/role — one uniform rule.
         self.blocks_tree.clear()
 
@@ -223,11 +218,10 @@ class InspectorWidget(QWidget):
                 child.setText(1, str(block.get("block_type", "")))
 
                 # Inline parameters (no _block_params sidecar — Phase 6+).
-                for param in block.get("parameters", []) or []:
-                    pkey = str(param.get("name", ""))
-                    pval = param.get("evaluated_value", param.get("value", ""))
+                params_dict = block.get("parameters", {}) or {}
+                for pkey, pval in params_dict.items():
                     param_item = QTreeWidgetItem(child)
-                    param_item.setText(0, pkey)
+                    param_item.setText(0, str(pkey))
                     param_item.setText(1, str(pval))
 
         # 5. Repopulate Connections Wires

@@ -17,7 +17,6 @@ CACHE_DIRS = {
     ".cache",
     ".eggs",
     ".tox",
-    ".mypy_cache",
     "node_modules",
 }
 

@@ -7,6 +7,7 @@ These fixtures are auto-discovered by pytest but are also importable from
 from __future__ import annotations
 
 import os
+
 os.environ["GRC_AGENT_TESTING"] = "true"
 
 # Redirect the vector DB to a per-session tmp dir BEFORE any test module
@@ -20,6 +21,7 @@ os.environ["GRC_AGENT_TESTING"] = "true"
 _SESSION_VECTORS_DIR = os.environ.get("GRC_AGENT_TEST_VECTORS_DIR")
 if not _SESSION_VECTORS_DIR:
     import tempfile as _tf
+
     _SESSION_VECTORS_DIR = _tf.mkdtemp(prefix="grc_agent_test_vectors_")
 os.environ.setdefault("GRC_AGENT_VECTORS_DIR", _SESSION_VECTORS_DIR)
 
@@ -53,8 +55,7 @@ def no_real_prefs_writes() -> Any:
     if real_path.exists():
         if not existed_before:
             raise AssertionError(
-                f"Test created {real_path}. Redirect "
-                "XDG_CONFIG_HOME in your test setUp."
+                f"Test created {real_path}. Redirect XDG_CONFIG_HOME in your test setUp."
             )
         if real_path.stat().st_mtime != mtime_before:
             raise AssertionError(

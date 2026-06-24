@@ -1,25 +1,23 @@
-"""Read-only ``inspect_graph`` + ``query_knowledge`` wrappers (Phase 6 cutover).
+"""Read-only ``inspect_graph`` + ``query_knowledge`` wrappers.
 
 inspect_graph delegates to :mod:`grc_agent.grc_native_adapter` — no dict-crawl.
-query_knowledge is unchanged (Phase 3 proved no native refactor needed).
+query_knowledge routes to :mod:`grc_agent.runtime.search_blocks` (catalog)
+or :mod:`grc_agent.runtime.doc_answer` (docs RAG).
 """
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from grc_agent.domain_models import ErrorCode
-from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.grc_native_adapter import render_flow_graph
+from grc_agent.runtime.connection_ids import parse_connection_id
 from grc_agent.runtime.enums import SearchDomain
-from grc_agent.runtime.param_filter import PROMINENCE, filter_live_block_params
+from grc_agent.runtime.param_filter import OVERVIEW
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
 
-VALID_VIEWS = {"overview", "details"}
+VALID_VIEWS = {"overview"}
 
 
 # --------------------------------------------------------------------------- #
@@ -32,52 +30,30 @@ def inspect_graph(
     *,
     view: str,
     targets: list[str],
-    params: list[str],
-    debug: bool = False,
 ) -> ToolResult:
-    started = time.monotonic()
-    before_revision = agent.session.state_revision
-    before_dirty = agent.session.is_dirty
     selected_view = str(view).strip().lower()
 
     missing_session = agent._missing_session_result("inspect_graph")
     if missing_session is not None:
-        return agent._attach_wrapper_dispatch_telemetry(
-            debug=debug,
-            wrapper_name="inspect_graph",
-            wrapper_action=selected_view or "invalid",
-            internal_handlers=["none"],
-            started=started,
-            before_revision=before_revision,
-            before_dirty=before_dirty,
-            result=missing_session,
-            validation_run=False,
-            output_truncated=False,
-        )
-
-    if targets and any(t.strip().lower() in ("*", "all") for t in targets):
-        targets = []
-        selected_view = "overview"
+        return missing_session
 
     gc = agent._guardrails_cfg
     normalized_targets = _normalize_string_list(targets, limit=gc.max_inspect_targets)
-    normalized_params = _normalize_string_list(params, limit=gc.max_inspect_params)
+    whole_graph = not normalized_targets or any(t in ("all", "*") for t in normalized_targets)
 
     if selected_view not in VALID_VIEWS:
         result = _base_payload(
             agent,
-            ok=False,
             errors=[
                 {
                     "code": "invalid_view",
-                    "message": "inspect_graph.view must be 'overview' or 'details'.",
+                    "message": "inspect_graph.view must be 'overview'.",
                 }
             ],
         )
     elif len(targets) > gc.max_inspect_targets:
         result = _base_payload(
             agent,
-            ok=False,
             errors=[
                 {
                     "code": "target_limit_exceeded",
@@ -85,90 +61,79 @@ def inspect_graph(
                 }
             ],
         )
-    elif len(params) > gc.max_inspect_params:
-        result = _base_payload(
+    elif whole_graph:
+        result = _overview(agent)
+    else:
+        result = _specific(agent, targets=normalized_targets)
+
+    return agent._payload_result("inspect_graph", result, include_active_session=False)
+
+
+def _overview(agent: GrcAgent) -> dict[str, Any]:
+    fg = agent.session.flowgraph
+    if fg is None:
+        return _base_payload(
+            agent, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
+        )
+    snapshot = render_flow_graph(fg, mode=OVERVIEW)
+    payload = snapshot.model_dump(exclude_none=True)
+    return _base_payload(agent, graph=payload)
+
+
+def _specific(agent: GrcAgent, *, targets: list[str]) -> dict[str, Any]:
+    """Overview-filtered snapshot scoped to the requested block instance_names.
+
+    Same Stage A+B filter and the same per-block shape as :func:`_overview`;
+    only the scope differs — returned ``blocks`` are the requested ones and
+    ``connections`` are those touching any requested block (so the agent can
+    reason about rewires). Unknown names yield a ``block_not_found`` error
+    listing every valid block name.
+    """
+    fg = agent.session.flowgraph
+    if fg is None:
+        return _base_payload(
+            agent, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
+        )
+    snapshot = render_flow_graph(fg, mode=OVERVIEW)
+    payload = snapshot.model_dump(exclude_none=True)
+
+    blocks = payload.get("blocks", [])
+    connections = payload.get("connections", [])
+    valid_names = [b["instance_name"] for b in blocks]
+    valid_set = set(valid_names)
+    missing = [t for t in targets if t not in valid_set]
+    if missing:
+        return _base_payload(
             agent,
-            ok=False,
             errors=[
                 {
-                    "code": "param_limit_exceeded",
-                    "message": f"inspect_graph accepts at most {gc.max_inspect_params} params.",
+                    "code": "block_not_found",
+                    "message": f"Unknown block name(s): {', '.join(missing)}",
+                    "valid_block_names": sorted(valid_set),
                 }
             ],
         )
-    elif selected_view == "overview":
-        result = _overview(agent, targets=normalized_targets, params=normalized_params)
-    else:
-        result = _details(agent, targets=normalized_targets, params=normalized_params)
 
-    output_truncated = bool(result.get("omitted"))
-    tool_result = agent._payload_result("inspect_graph", result, include_active_session=False)
-    return agent._attach_wrapper_dispatch_telemetry(
-        debug=debug,
-        wrapper_name="inspect_graph",
-        wrapper_action=selected_view or "invalid",
-        internal_handlers=["inspect_graph_view"],
-        started=started,
-        before_revision=before_revision,
-        before_dirty=before_dirty,
-        result=tool_result,
-        validation_run=False,
-        output_truncated=output_truncated,
-    )
-
-
-def _overview(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict[str, Any]:
-    fg = agent.session.flowgraph
-    if fg is None:
-        return _base_payload(
-            agent, ok=False, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
-        )
-    snapshot = render_flow_graph(fg)
-    payload = snapshot.model_dump(exclude_none=True)
+    requested = set(targets)
+    payload["blocks"] = [b for b in blocks if b["instance_name"] in requested]
+    payload["connections"] = [
+        c for c in connections if _connection_touches(c, requested)
+    ]
     return _base_payload(agent, ok=True, graph=payload)
 
 
-def _details(agent: GrcAgent, *, targets: list[str], params: list[str]) -> dict[str, Any]:
-    fg = agent.session.flowgraph
-    if fg is None:
-        return _base_payload(
-            agent, ok=False, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
-        )
-    snapshot = render_flow_graph(fg)
-    all_blocks = {b.instance_name: b for b in snapshot.blocks}
-    matched: list[str] = []
-    errors: list[dict[str, str]] = []
-    for target in targets:
-        if target in all_blocks:
-            matched.append(target)
-        else:
-            errors.append({"code": "target_not_found", "message": f"Block '{target}' not found."})
-    target_rows = []
-    for name in matched:
-        block = all_blocks[name]
-        row = {
-            "instance_name": block.instance_name,
-            "block_type": block.block_type,
-            "role": block.role.value if hasattr(block.role, "value") else str(block.role),
-            "state": block.state,
-            "parameters": [p.model_dump(exclude_none=True) for p in block.parameters],
-        }
-        target_rows.append(row)
-    payload = snapshot.model_dump(exclude_none=True)
-    result = _base_payload(agent, ok=len(errors) == 0, graph=payload)
-    if target_rows:
-        result["targets"] = target_rows
-    if errors:
-        result["errors"] = errors
-    return result
+def _connection_touches(conn_id: str, requested: set[str]) -> bool:
+    """True if the connection's source or destination block is requested."""
+    parsed = parse_connection_id(conn_id)
+    return bool(parsed) and (parsed["src_block"] in requested or parsed["dst_block"] in requested)
 
 
 def _base_payload(
     agent: GrcAgent,
     *,
-    ok: bool,
     graph: dict[str, Any] | None = None,
     errors: list[dict[str, str]] | None = None,
+    ok: bool = True,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ok": ok,
@@ -177,25 +142,6 @@ def _base_payload(
     if errors:
         payload["errors"] = list(errors)
     return payload
-
-
-def _param_keys_by_block(blocks: list[Any]) -> dict[str, dict[str, str]]:
-    """Thin delegate to the unified filter — kept for agent.py compatibility."""
-    from grc_agent.runtime.tool_context import is_variable_block
-
-    variable_names = {b.name for b in blocks if is_variable_block(b.key)}
-    result: dict[str, dict[str, str]] = {}
-    for block in blocks:
-        params = {}
-        for k, p in block.params.items():
-            params[k] = str(p.value)
-        result[block.name or block.key] = filter_live_block_params(
-            block.key,
-            params,
-            mode=PROMINENCE,
-            variable_names=variable_names,
-        )
-    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -214,38 +160,6 @@ def _normalize_string_list(values: list[str], *, limit: int) -> list[str]:
     return out[:limit]
 
 
-# --------------------------------------------------------------------------- #
-# get_grc_context_internal (kept for agent.py compat; native block names)     #
-# --------------------------------------------------------------------------- #
-
-
-def get_grc_context_internal(
-    node_id: str,
-    *,
-    hops: int,
-    max_nodes: int | None,
-    session: FlowgraphSession,
-    catalog_root: Path | None,
-    default_max_nodes: int,
-    symbol_resolver: Any,
-    context_fn: Any,
-) -> dict[str, Any]:
-    resolved_node_id = symbol_resolver(node_id) or node_id
-    resolved_max_nodes = default_max_nodes if max_nodes is None else max_nodes
-    payload = context_fn(
-        session,
-        resolved_node_id,
-        hops=hops,
-        max_nodes=resolved_max_nodes,
-    )
-    if payload.get("ok") is False and payload.get("error_type") == ErrorCode.BLOCK_NOT_FOUND:
-        if session.flowgraph is not None:
-            fallback_candidates = [
-                b.name for b in session.flowgraph.blocks[: min(5, resolved_max_nodes)]
-            ]
-            if fallback_candidates:
-                payload["candidate_nodes"] = fallback_candidates
-    return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -257,7 +171,6 @@ def query_knowledge(
     agent: GrcAgent,
     query: str,
     domain: str,
-    debug: bool = False,
 ) -> ToolResult:
     """Query GNU Radio knowledge — catalog (block IDs/params) or docs (concepts)."""
     if domain not in {SearchDomain.CATALOG, SearchDomain.DOCS}:
@@ -271,11 +184,11 @@ def query_knowledge(
     if domain == SearchDomain.CATALOG:
         from grc_agent.runtime.search_blocks import search_blocks as _search
 
-        result = _search(agent, query=query, debug=debug)
+        result = _search(agent, query=query)
     else:
         from grc_agent.runtime.doc_answer import ask_grc_docs as _docs
 
-        result = _docs(agent, question=query, debug=debug)
+        result = _docs(agent, question=query)
 
     if isinstance(result, dict):
         result.pop("active_session", None)

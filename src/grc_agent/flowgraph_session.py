@@ -27,16 +27,6 @@ from grc_agent.grc_native_adapter import (
 logger = logging.getLogger(__name__)
 
 
-def _coerce_port(value: Any) -> Any:
-    """Return int if the port is a numeric string, otherwise the value as-is.
-    Matches the legacy representation: stream ports are ints, message ports strs.
-    """
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return value
-    return value
 
 
 class FlowgraphSession:
@@ -170,19 +160,7 @@ class FlowgraphSession:
             for b in user_blocks
         ]
         variable_count = sum(1 for b in all_blocks if b["role"] == "variable")
-        all_conns = sorted(
-            [
-                {
-                    "connection_id": c.connection_id,
-                    "src_block": c.src_block,
-                    "src_port": _coerce_port(c.src_port),
-                    "dst_block": c.dst_block,
-                    "dst_port": _coerce_port(c.dst_port),
-                }
-                for c in snapshot.connections
-            ],
-            key=lambda x: x["connection_id"],
-        )
+        all_conns = sorted(snapshot.connections)
         block_summaries = [f"{b['instance_name']} ({b['block_type']})" for b in all_blocks[:3]]
         if len(all_blocks) > 3:
             block_summaries.append(f"... +{len(all_blocks) - 3} more")
@@ -252,63 +230,6 @@ class FlowgraphSession:
         self.last_validation_ok = result.native_ok
         self.last_validation_revision = self._state_revision
         return bool(result.native_ok)
-
-    # -- mutation helpers (adapter-backed; used by transaction.apply_operations) --
-
-    def set_param(
-        self, instance_name: str, key: str, value: Any, *, block_type: str | None = None
-    ) -> None:
-        from grc_agent.grc_native_adapter import _find_block
-        from grc_agent.grc_native_adapter import set_param as _set_param
-
-        _set_param(_find_block(self.flowgraph, instance_name), key, str(value))
-        self.is_dirty = True
-        self._bump_state_revision()
-
-    def set_block_state(
-        self, instance_name: str, state: str, *, block_type: str | None = None
-    ) -> None:
-        from grc_agent.grc_native_adapter import _find_block
-        from grc_agent.grc_native_adapter import set_block_state as _set_state
-
-        _set_state(_find_block(self.flowgraph, instance_name), state)
-        self.is_dirty = True
-        self._bump_state_revision()
-
-    def connect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
-        from grc_agent.grc_native_adapter import connect as _connect
-
-        _connect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
-        self.is_dirty = True
-        self._bump_state_revision()
-
-    def disconnect(self, src_block: str, src_port: Any, dst_block: str, dst_port: Any) -> None:
-        from grc_agent.grc_native_adapter import disconnect as _disconnect
-
-        _disconnect(self.flowgraph, src_block, str(src_port), dst_block, str(dst_port))
-        self.is_dirty = True
-        self._bump_state_revision()
-
-    def remove_block(self, instance_name: str, *, block_type: str | None = None) -> None:
-        from grc_agent.grc_native_adapter import remove_block as _remove
-
-        _remove(self.flowgraph, instance_name)
-        self.is_dirty = True
-        self._bump_state_revision()
-
-    def add_block(
-        self,
-        instance_name: str,
-        block_type: str,
-        parameters: dict[str, Any] | None = None,
-        *,
-        _skip_grcc: bool = False,
-    ) -> None:
-        from grc_agent.grc_native_adapter import add_block as _add
-
-        _add(self.flowgraph, block_type, instance_name, parameters or {})
-        self.is_dirty = True
-        self._bump_state_revision()
 
     # -- integrity ------------------------------------------------------------
 

@@ -40,9 +40,7 @@ from ToolAgents.data_models.messages import (
 PreviewCallback = Callable[..., list[dict[str, str]]]
 
 
-def _format_tool_result(
-    content: ToolCallResultContent, *, preview: PreviewCallback
-) -> str:
+def _format_tool_result(content: ToolCallResultContent, *, preview: PreviewCallback) -> str:
     payload = content.tool_call_result
     parsed: Any = payload
     if isinstance(payload, str):
@@ -141,7 +139,11 @@ def _prune_completed_episodes(messages: list[ChatMessage]) -> list[ChatMessage]:
             for item in prev.content:
                 merged_content.append(item)
             for item in msg.content:
-                if isinstance(item, TextContent) and merged_content and isinstance(merged_content[-1], TextContent):
+                if (
+                    isinstance(item, TextContent)
+                    and merged_content
+                    and isinstance(merged_content[-1], TextContent)
+                ):
                     merged_content[-1] = TextContent(
                         content=merged_content[-1].content + "\n\n" + item.content
                     )
@@ -175,19 +177,15 @@ def render_model_messages(
     for message in pruned:
         messages.append(_ensure_serializable(message, preview=semantic_search_result_preview))
     if reminder:
-        wrapped = (
-            "<runtime_directive>\n"
-            f"{reminder}\n"
-            "</runtime_directive>"
-        )
+        wrapped = f"<runtime_directive>\n{reminder}\n</runtime_directive>"
         messages.append(ChatMessage.create_user_message(wrapped))
     return messages
 
 
-
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-06-19-grounded-prompt"
+__version__ = "2026-06-24-expression-params"
+
 
 def build_system_prompt(session_id: str | None = None) -> str:
     """Return the system prompt shipped to the model."""
@@ -197,59 +195,42 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "inspect_graph: read topology, blocks, connections, field values, and validation status.\n"
         "query_knowledge: search catalog blocks or GNU Radio documentation.\n"
         "change_graph: add/remove blocks, edit field values, add/remove connections.\n"
-        "Variables are blocks; use block_id \"variable\" (not \"parameter\") to add one.\n"
+        "Parameter values are string expressions; a variable reference is the variable's name.\n"
+        'Variables are blocks; use block_id "variable" (not "parameter") to add one.\n'
         "Every GNU Radio fact must be grounded in query_knowledge, not memory.\n"
     )
 
+
 # -- tool surface (was tool_surface.py) --
 
-PUBLIC_TOOL_NAMES: tuple[str, ...] = (
-    "new_grc",
-    "load_grc",
-    "summarize_graph",
-    "get_grc_context",
-    "describe_block",
-    "suggest_compatible_insertions",
-    "insert_block_on_connection",
-    "auto_insert_block",
-    "remove_connection",
-    "rewire_connection",
-    "apply_edit",
-    "propose_edit",
-    "validate_graph",
-    "save_graph",
-    "search_blocks",
-    "ask_grc_docs",
-)
 MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
     "inspect_graph",
     "query_knowledge",
     "change_graph",
 )
-MODEL_TOOL_NAMES_ORDERED: tuple[str, ...] = (
-    *PUBLIC_TOOL_NAMES,
-    *MVP_MODEL_TOOL_NAMES,
-)
+
+
 @dataclass(frozen=True)
 class ToolSurface:
     """Runtime policy for one model-facing tool profile."""
+
     name: str
     model_tool_names: tuple[str, ...]
-    internal_tool_names: tuple[str, ...]
     assistant_text_fallback_enabled: bool
     default_max_tool_rounds: int
+
     @property
     def model_tool_count(self) -> int:
         return len(self.model_tool_names)
-    @property
-    def internal_tool_count(self) -> int:
-        return len(self.internal_tool_names)
+
+
 MVP_TOOL_SURFACE = ToolSurface(
     name="mvp",
     model_tool_names=MVP_MODEL_TOOL_NAMES,
-    internal_tool_names=PUBLIC_TOOL_NAMES,
     assistant_text_fallback_enabled=False,
     default_max_tool_rounds=8,
 )
 
 __all__ = ["render_model_messages"]
+
+

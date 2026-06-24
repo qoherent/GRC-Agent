@@ -241,7 +241,7 @@ class InspectorRunnable(QRunnable):
         try:
             from grc_agent.runtime.inspect_graph import inspect_graph
 
-            overview_data = inspect_graph(self.agent, view="overview", targets=[], params=[])
+            overview_data = inspect_graph(self.agent, view="overview", targets=[])
             self.signals.finished.emit(overview_data)
         except Exception as e:
             self.signals.error.emit(str(e))

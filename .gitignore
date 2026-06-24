@@ -31,6 +31,7 @@ Thumbs.db
 *.swo
 *~
 .pytest_cache/
+tests/output/
 /*.py
 __pycache__/
 *.py[oc]
@@ -47,12 +48,4 @@ tmp/
 # Virtual environments
 wheels/
 
-# R-suite live eval output (auto-generated MD transcripts stay under R_test_results/)
-R_test_results/*.json
-R_test_results/*_new.json
-R_test_results/*_v*.json
-R_test_results/rag/
 vec1.so
-
-# Experiment scratch output (output of run_experiment.py and similar)
-inspect_experiment

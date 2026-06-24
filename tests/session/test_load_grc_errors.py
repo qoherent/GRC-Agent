@@ -36,9 +36,7 @@ class LoadGrcErrorTests(unittest.TestCase):
             Path(malformed_path).unlink(missing_ok=True)
 
     def test_load_valid_fixture_still_works(self) -> None:
-        fixture_path = (
-            Path(__file__).resolve().parents[1] / "data" / "random_bit_generator.grc"
-        )
+        fixture_path = Path(__file__).resolve().parents[1] / "data" / "dial_tone.grc"
 
         session = load_grc(fixture_path)
 

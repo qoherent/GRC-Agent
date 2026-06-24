@@ -8,14 +8,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from grc_agent._payload import ErrorCode, build_error_payload
-from grc_agent.catalog.loaders import CatalogLoadError
 from grc_agent.catalog.loaders import (
     DEFAULT_GRC_CATALOG_ROOTS,
+    CatalogLoadError,
     collect_catalog_files,
     discover_catalog_root,
     validate_catalog_files,
 )
+from grc_agent.domain_models import ErrorCode, build_error_payload
 from grc_agent.runtime.catalog_vector import (
     CATALOG_DB_PATH,
     VectorCatalogStore,
@@ -52,20 +52,23 @@ def warmup_catalog_vector_index(
         # and ``hide='all'`` GUI-styling params leak into the embed.
         param_values = {
             str(p.get("id")): "" if p.get("default") is None else str(p.get("default"))
-            for p in raw_params if p.get("id")
+            for p in raw_params
+            if p.get("id")
         }
-        blocks_payload.append({
-            "block_id": bid,
-            "label": (b.payload.get("label") or bid),
-            "categories": list(getattr(b, "category_paths", ())),
-            "parameters": param_ids,
-            "param_values": param_values,
-            "ports": (
-                [p.get("id") for p in (b.payload.get("inputs") or []) if p.get("id")] +
-                [p.get("id") for p in (b.payload.get("outputs") or []) if p.get("id")]
-            ),
-            "documentation": b.payload.get("documentation") or "",
-        })
+        blocks_payload.append(
+            {
+                "block_id": bid,
+                "label": (b.payload.get("label") or bid),
+                "categories": list(getattr(b, "category_paths", ())),
+                "parameters": param_ids,
+                "param_values": param_values,
+                "ports": (
+                    [p.get("id") for p in (b.payload.get("inputs") or []) if p.get("id")]
+                    + [p.get("id") for p in (b.payload.get("outputs") or []) if p.get("id")]
+                ),
+                "documentation": b.payload.get("documentation") or "",
+            }
+        )
     store = VectorCatalogStore(CATALOG_DB_PATH, server_url)
     store.ingest_if_needed(blocks=blocks_payload, server_url=server_url)
     return {
