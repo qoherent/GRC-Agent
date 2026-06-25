@@ -55,3 +55,40 @@ This is a model-reasoning limit on multi-step topology cleanup, not an informati
 | Auto-resolve type from neighbor | `change_graph.py` | Adapter fills missing `type` deterministically |
 | Error block+port identity | `grc_native_adapter.py` | `"blocks_add_xx: Sink - in2(2): Port is not connected."` |
 | System prompt direction | `model_context.py` | `*_xx` defaults + expression params |
+
+---
+
+## Runtime behavior reference
+
+These are GRC/GNU-specific runtime behaviors (not coding-agent rules —
+see `AGENTS.md` for those). Documented here for reference.
+
+### Disconnect precision
+
+Native `flow_graph.disconnect(src, dst)` removes ALL edges from a port.
+The adapter's `disconnect()` finds the exact `Connection` object and calls
+native `flow_graph.remove_element(connection)` for single-edge deletion.
+Idempotent: if the edge is already gone (e.g. cascaded by `remove_block`),
+the KeyError is caught and the operation is a silent no-op.
+
+### Type auto-resolve
+
+When a newly-added block omits the `type` param and the batch connects it
+to a typed neighbor, the adapter sets `type` from the neighbor's port
+dtype. The decision is reported in the `auto_resolved` field of the
+`change_graph` response: `{"auto_resolved": {"mid_throttle": "float"}}`.
+Only fills MISSING values — never overrides model-specified params.
+
+### Error locality
+
+GRC's `iter_error_messages()` yields `(element, message)` tuples where the
+element is the Block/Port/Connection with the error. The adapter formats
+every error as `"block_name: Port - dir(key): message"` (e.g.,
+`"blocks_add_xx: Sink - in2(2): Port is not connected."`). The element
+identity is never silently dropped.
+
+### Connection ordering
+
+`remove_connections` runs BEFORE `add_connections` in the batch dispatcher.
+This prevents transient double-upstream errors when doing inline-insert
+(remove 1 edge → add 2 edges).
