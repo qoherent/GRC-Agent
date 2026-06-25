@@ -74,7 +74,9 @@ Three model-facing wrapper tools (the entire MVP model surface):
 
 - **Param filtering** (one rule, in `param_filter.py`): Stage A (every mode) drops `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`. Stage B (overview mode only) keeps `hide == "none"` OR `dtype == "enum"` OR `value != default` OR `references_variable`. Details mode = Stage A only; overview mode = Stage A + Stage B.
 - **State values:** `enabled`, `disabled`, `bypass` (accept `bypassed` as alias). Enforced by the `change_graph` JSON-schema enum (model-facing) and `grc_native_adapter.set_block_state` alias map (GRC-native boundary: `Block.STATE_LABELS`).
-- **Disconnect precision:** native `flow_graph.disconnect(src, dst)` removes ALL edges from source port. Adapter `disconnect()` finds the exact `Connection` and calls native `flow_graph.remove_element(connection)` for single-edge deletion.
+- **Disconnect precision:** native `flow_graph.disconnect(src, dst)` removes ALL edges from source port. Adapter `disconnect()` finds the exact `Connection` and calls native `flow_graph.remove_element(connection)` for single-edge deletion. Idempotent: if the edge is already gone (e.g. cascaded by `remove_block`), skip silently.
+- **Type auto-resolve:** when a newly-added block omits the `type` param and the batch connects it to a typed neighbor, the adapter sets `type` from the neighbor's port dtype. Reported in the `auto_resolved` field.
+- **Error locality:** GRC validation errors include block+port identity (`"blocks_add_xx: Sink - in2(2): Port is not connected."`), not bare messages.
 - **Graph identity:** file-bytes SHA-256 (cross-session) + `state_revision` counter (in-session). No deep-JSON hashing.
 - **Atomic save:** temp file → fsync → `os.replace()` → directory fsync. Lock via `fcntl.flock` on `.grc_agent/<name>.lock`. Backup saved before each save.
 - **Tool surface:** `agent.py` only registers the 3 MVP tools. No internal tools, no `PUBLIC_TOOL_NAMES`, no legacy tool registry.
@@ -83,7 +85,7 @@ Three model-facing wrapper tools (the entire MVP model surface):
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (255 passed, 9 skipped) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (255 passed, 12 skipped) |
 | `grc_native` | `pytest -m grc_native` (26 passed, 1 skipped; requires GNU Radio) |
 | `gui` | `xvfb-run pytest -m gui` (6 passed) |
 

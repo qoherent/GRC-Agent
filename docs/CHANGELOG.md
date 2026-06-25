@@ -2,9 +2,35 @@
 
 ## [Unreleased]
 
+### Agent flow optimization (5/8 → 7/8 semantic success)
+
+- **Schema flattening:** `add_connections` and `remove_blocks` now use flat strings (depth 3→2). Read/write symmetric with `inspect_graph` output.
+- **Payload simplification:** `change_graph` returns `{"ok": true/false, "errors": [...]}` — no internal plumbing (`committed`, `ops_applied`, `rollback_failed`).
+- **num_ctx=120000:** Was using Ollama default 4096 (model native is 131072). Eliminated output truncation.
+- **Auto-resolve type:** Adapter infers missing `type` param on newly-added polymorphic blocks from the connected neighbor's port dtype. Reports via `auto_resolved` field.
+- **Error locality:** Validation errors now include block+port identity (`"blocks_add_xx: Sink - in2(2): Port is not connected."`). Was bare `"Port is not connected."`.
+- **Catalog enum values:** `query_knowledge` returns `"enum=[complex,float,int,short]=complex"` instead of `"enum="` with empty options.
+- **Connection ordering:** `remove_connections` runs before `add_connections` (prevents transient double-upstream on inline-insert).
+- **Idempotent remove_connection:** Skip silently if edge already gone via cascade.
+- **System prompt:** Added `*_xx` default-complex direction + expression params direction.
+
+### Dead code deleted (~4,200 lines)
+
+- `validation/` package (checks.py, rules.py, errors.py, raw_parse.py — 3,415 lines)
+- `transaction.py` apply path (~430 lines — apply_edit, propose_edit, apply_operations, clone_session, commit_candidate_session, build_apply_*_payload)
+- `flowgraph_session.py` mutation wrappers (6 methods)
+- 15 dead tests (transaction/, validation/)
+
+### Native API consolidation
+
+- `FlowGraph.get_block()` replaces adhoc `_find_block` (was verbatim reimplementation)
+- `FlowGraph.remove_element()` replaces manual list/set manipulation for block + connection removal
+- `Block.STATE_LABELS` replaces hardcoded state set
+- Dead `name or key` fallbacks removed (5 sites)
+
 ### Added — GRC Native Refactor
-- `grc_native_adapter.py`: 470-line bridge confining all `gnuradio` imports.
-- `domain_models.py`: 13 Pydantic V2 schemas (outbound `extra="forbid"`, inbound `extra="ignore"`).
+- `grc_native_adapter.py`: bridge confining all `gnuradio` imports.
+- `domain_models.py`: Pydantic V2 schemas (outbound `extra="forbid"`, inbound `extra="ignore"`).
 - `runtime/param_filter.py`: single uniform rule for param visibility.
 
 ### Changed
