@@ -266,7 +266,7 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
 
         mock_settings.set_value.assert_any_call(
             "extra_body",
-            {"options": {"num_ctx": 8192}, "provider": {"order": ["alibaba"], "allow_fallbacks": False}},
+            {"options": {"num_ctx": 120000}, "provider": {"order": ["alibaba"], "allow_fallbacks": False}},
         )
 
 
