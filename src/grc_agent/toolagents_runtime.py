@@ -145,7 +145,7 @@ class ToolAgentsLlamaProviderConfig:
     max_tokens: int = 4096
     temperature: float = 0.0
     enable_thinking: bool = False
-    num_ctx: int = 8192
+    num_ctx: int = 120000
 
     @property
     def openai_base_url(self) -> str:
