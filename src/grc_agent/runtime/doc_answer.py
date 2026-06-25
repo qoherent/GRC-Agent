@@ -265,11 +265,15 @@ def _generate_grounded_answer(
         context = " ".join(words[:_MAX_CONTEXT_WORDS])
 
     prompt = (
-        "Answer the following GNU Radio question using ONLY the documentation "
-        "below. Be concise and direct. Cite the source file name when relevant. "
-        "If the documentation does not contain the answer, say exactly: "
-        '"The provided documentation does not cover this." '
-        "Do not make up information.\n\n"
+        "You are answering a GNU Radio question. Use ONLY the documentation "
+        "below. Ground every claim in the docs and cite the source file name. "
+        "The sources below were retrieved as relevant to this question.\n\n"
+        "Answer concisely and directly. If a specific sub-question is not "
+        "addressed by the sources, say which part is not covered, but still "
+        "answer what IS covered.\n\n"
+        "Do not make up information. If NONE of the sources are related to "
+        'the question, say exactly: "The provided documentation does not '
+        'cover this."\n\n'
         f"Question: {question}\n\n"
         f"Documentation:\n{context}"
     )
