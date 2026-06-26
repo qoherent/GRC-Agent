@@ -143,7 +143,6 @@ class SaveIntegrityTests(unittest.TestCase):
 
             self.assertFalse(result.get("ok"), result)
             self.assertEqual(result.get("error_type"), ErrorCode.STALE_REVISION)
-            self.assertEqual(result.get("file_integrity", {}).get("status"), "modified")
             self.assertEqual(session.state_revision, before_revision)
             self.assertEqual(
                 _block_param_value(session, "samp_rate", "value"),

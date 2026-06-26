@@ -47,7 +47,6 @@ OLLAMA_URL = "http://localhost:11434"
 # docs/AGENT_FLOW_FINDINGS.md). ornith-9b is a thinking model; the provider
 # sends think:false (enable_thinking=False) so it answers in `content`.
 MODEL = "maxwell1500/ornith-9b:q4_K_M-120k"
-MAX_TOOL_ROUNDS = 5
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)
@@ -387,7 +386,7 @@ def _fresh_agent(fixture: str | Path | None = None) -> tuple[GrcAgent, Path]:
     shutil.copy2(src, tmp_fixture)
     session = FlowgraphSession()
     session.load(str(tmp_fixture))
-    return GrcAgent(session=session), tmp_fixture
+    return GrcAgent(session=session, llama_model=MODEL), tmp_fixture
 
 
 def _graph_state(fixture_path: Path) -> dict[str, Any]:

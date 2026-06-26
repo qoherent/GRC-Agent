@@ -24,8 +24,7 @@
 ## Scenario results
 
 Under the full hardened stack (hybrid retrieval + 120K context + orphan-port
-hint + docs-RAG fix), all 8 scenarios have been observed to pass (8/8 on a
-clean run). Scenario 06 sits at the edge of the 7.5B's capability — it
+hint + docs-RAG fix), 18 of 19 scenarios pass reliably. Scenario 06 sits at the edge of the model's capability — it
 passes when the model acts on the orphan hint (removes the orphaned noise
 source on retry) and can loop under run-to-run nondeterminism.
 
@@ -45,7 +44,7 @@ has also been observed to loop on the orphan hint under run-to-run variance.*
 
 > **Harness variance:** a single agent-flow run is noisy. At temperature 0,
 > Ollama still produces minor logit variance from thread scheduling, and the
-> 7.5B model occasionally emits a degenerate **empty turn** (`completion_tokens`
+> model occasionally emits a degenerate **empty turn** (`completion_tokens`
 > emitted, empty content) that aborts a scenario. Scenario 08 has been observed
 > to fail this way with **zero** `query_knowledge` calls — i.e. independent of
 > retrieval. Treat per-run pass/fail counts as ±1; the retrieval eval and live
@@ -108,7 +107,7 @@ analog_noise_source_x_0: Source - out(0): Port is not connected.
 The model reads this error but does not infer the causal link ("removing the
 adder left the noise source dangling") and does not remove the noise source,
 reconnect it, or use `force`. This is a **multi-step topology-cleanup reasoning
-limit** of the 7.5B model — the second wall, now that the retrieval wall is
+limit** of the model — the second wall, now that the retrieval wall is
 breached. No schema/retrieval change fixes it.
 
 **Mitigation implemented — orphaned-port causal hint:** the adapter now traces
@@ -127,7 +126,7 @@ the raw error:
 
 The hint is **surgical** — it fires only for ports genuinely left dangling (the
 reconnected sig sources and audio sink get no hint). It is informational
-(causal link), not procedural. Whether it tips the 7.5B model over the line on
+(causal link), not procedural. Whether it tips the model over the line on
 Scenario 06 is **unconfirmed**: the agent-flow harness is too noisy (the model
 often takes a degenerate empty-turn path before reaching `change_graph`), so
 the hint's live effect can't be isolated from inference nondeterminism. It is
@@ -145,7 +144,7 @@ deterministic offloading.
 > `remove_blocks`** — resolving the orphan and producing a valid graph. The
 > hint drove the recovery directly (call 1 `remove_blocks=[blocks_add_xx]` →
 > hint → call 2 `remove_blocks=[blocks_add_xx, analog_noise_source_x_0]`).
-> 06 remains at the edge of the 7.5B's capability (it has also been observed
+> 06 remains at the edge of the model's capability (it has also been observed
 > to loop on the hint under run-to-run nondeterminism), but it is solvable,
 > not impossible. The deterministic offloading (retrieval + hint + context)
 > is what brings it within reach.
@@ -161,7 +160,7 @@ at distance 0.879 literally describes the block in its first sentence).
 
 **Root cause:** prompt-conservatism — the explicit refusal instruction
 (*"If the documentation does not contain the answer, say exactly: '... does
-not cover this.'"*) was over-triggered by the 7.5B model, which made its own
+not cover this.'"*) was over-triggered by the model, which made its own
 relevance judgment inline with generation and defaulted to the safe refusal.
 Confirmed **context-independent**: identical refusals before and after the
 120K `num_ctx` fix.

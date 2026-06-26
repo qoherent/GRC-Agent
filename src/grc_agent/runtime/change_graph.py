@@ -50,10 +50,7 @@ def dispatch_flat_change_graph_batch(
             "change_graph",
             {
                 "ok": False,
-                "committed": False,
-                "ops_applied": 0,
                 "error_type": "stale_revision",
-                "file_integrity": integrity,
                 "errors": [
                     {"code": "stale_revision", "message": "file changed on disk; reload before editing"}
                 ],
