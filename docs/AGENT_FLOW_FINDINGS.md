@@ -22,8 +22,11 @@
 
 ## Scenario results
 
-Scenarios 01–05, 07, 08 pass. Scenario 06 fails at the **topology** layer
-(it used to fail earlier, at **retrieval** — see below).
+Under the full hardened stack (hybrid retrieval + 120K context + orphan-port
+hint + docs-RAG fix), all 8 scenarios have been observed to pass (8/8 on a
+clean run). Scenario 06 sits at the edge of the 7.5B's capability — it
+passes when the model acts on the orphan hint (removes the orphaned noise
+source on retry) and can loop under run-to-run nondeterminism.
 
 | # | Scenario | Status | Key enabler |
 |---|----------|:------:|-------------|
@@ -32,9 +35,12 @@ Scenarios 01–05, 07, 08 pass. Scenario 06 fails at the **topology** layer
 | 03 | disable + re-enable | ✓ | error identity → model identifies port |
 | 04 | add + use variable | ✓ | expression params (system prompt) |
 | 05 | full rewire | ✓ | auto-resolve + flat connections |
-| 06 | multiply via query_knowledge | ✗ | topology limit: orphaned noise source |
+| 06 | multiply via query_knowledge | ✓* | retrieval fix + orphan hint → model removes orphaned source on retry |
 | 07 | force-disable connected block | ✓ | force description + error identity |
 | 08 | fm_rx inline throttle | ✓ | auto-resolve + flat connections |
+
+*\*Scenario 06 passes under the full stack but sits at the model's edge — it
+has also been observed to loop on the orphan hint under run-to-run variance.*
 
 > **Harness variance:** a single agent-flow run is noisy. At temperature 0,
 > Ollama still produces minor logit variance from thread scheduling, and the
@@ -128,6 +134,20 @@ verified correct at the unit + `grc_native` integration level.
 
 **Fix path:** upgrade the model (8B+), or build on the hint with further
 deterministic offloading.
+
+> **Update (post-hardening):** the topology ceiling is **not** a hard limit.
+> Under the full hardened stack (hybrid retrieval + 120K context + the
+> orphan-port hint), Scenario 06 has been observed to **pass**: the model
+> finds `blocks_multiply_xx` via retrieval, attempts the swap, hits the orphan
+> hint on the first `change_graph` (`"output was connected to removed block
+> 'blocks_add_xx'"`), and on the retry **adds `analog_noise_source_x_0` to
+> `remove_blocks`** — resolving the orphan and producing a valid graph. The
+> hint drove the recovery directly (call 1 `remove_blocks=[blocks_add_xx]` →
+> hint → call 2 `remove_blocks=[blocks_add_xx, analog_noise_source_x_0]`).
+> 06 remains at the edge of the 7.5B's capability (it has also been observed
+> to loop on the hint under run-to-run nondeterminism), but it is solvable,
+> not impossible. The deterministic offloading (retrieval + hint + context)
+> is what brings it within reach.
 
 ---
 
