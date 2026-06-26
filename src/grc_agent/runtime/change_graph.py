@@ -14,7 +14,7 @@ from grc_agent.grc_native_adapter import (
     apply_mutation,
     validate,
 )
-from grc_agent.runtime.connection_ids import parse_connection_id
+from grc_agent.runtime.connection_ids import connection_id, parse_connection_id
 from grc_agent.transaction import capture_session_state, restore_session_state
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,22 @@ def dispatch_flat_change_graph_batch(
             name = str(entry.get("instance_name", "")).strip()
             if name:
                 new_block_names.add(name)
+
+    # Capture the pre-batch edge set and the blocks being removed, so that a
+    # removal which orphans another block's port can be traced causally and
+    # surfaced as a validation hint (deterministic topology offloading).
+    pre_edges: set[str] = {
+        connection_id(c.source_block.name, c.source_port.key,
+                      c.sink_block.name, c.sink_port.key)
+        for c in fg.connections
+    }
+    removed_names: set[str] = set()
+    for entry in _as_list(remove_blocks, "remove_blocks", errors):
+        name = str(entry).strip() if not isinstance(entry, dict) else str(
+            entry.get("instance_name", "")
+        ).strip()
+        if name:
+            removed_names.add(name)
 
     # Track which new blocks had `type` explicitly set by the model.
     # Blocks not in this set are candidates for auto-resolve.
@@ -312,10 +328,10 @@ def dispatch_flat_change_graph_batch(
         type_hint = _type_hint_for_validation(
             fg, validation_errors, new_block_names
         )
-        for msg in validation_errors:
-            entry: dict[str, Any] = {"code": "gnu_validation", "message": msg}
-            if type_hint:
-                entry["hint"] = type_hint
+        orphaned_hints = (
+            _orphaned_port_hints(pre_edges, removed_names) if removed_names else {}
+        )
+        for entry in _validation_error_entries(validation_errors, type_hint, orphaned_hints):
             payload.setdefault("errors", []).append(entry)
         if not committed:
             payload["error_type"] = ErrorCode.GNU_VALIDATION_FAILED
@@ -477,6 +493,60 @@ def _connection_dtype_hint(
     except Exception:
         pass
     return None
+
+
+def _orphaned_port_hints(
+    pre_edges: set[str], removed_names: set[str]
+) -> dict[str, str]:
+    """Map orphaned block name -> causal hint.
+
+    For each pre-batch edge that touched a removed block, the OTHER endpoint's
+    port is now dangling (the removed block took its connection with it via
+    GRC's native cascade). The hint names the ORPHANED block first (the subject
+    of the validation error) and states the current defect + the cause, so the
+    model connects "Port is not connected" to the right block. Informational
+    only — never prescribes an action (no "remove"/"force"). One uniform rule;
+    direction is reflected in the wording (source output vs. sink input).
+    """
+    hints: dict[str, str] = {}
+    for edge in pre_edges:
+        parsed = parse_connection_id(edge)
+        if not parsed:
+            continue
+        src, dst = parsed["src_block"], parsed["dst_block"]
+        if src in removed_names and dst not in removed_names:
+            hints.setdefault(
+                dst,
+                f"'{dst}' input port is unconnected because it was fed by removed block '{src}'",
+            )
+        if dst in removed_names and src not in removed_names:
+            hints.setdefault(
+                src,
+                f"'{src}' output port is unconnected because it fed removed block '{dst}'",
+            )
+    return hints
+
+
+def _validation_error_entries(
+    validation_errors: list[str],
+    type_hint: str | None,
+    orphaned_hints: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Build model-facing gnu_validation entries with the most specific hint.
+
+    Prefers the orphaned-port causal hint (specific to the block in the error)
+    over the generic IO-type hint. Errors matching neither get no hint.
+    """
+    entries: list[dict[str, Any]] = []
+    for msg in validation_errors:
+        entry: dict[str, Any] = {"code": "gnu_validation", "message": msg}
+        block_name = msg.split(": ", 1)[0] if ": " in msg else ""
+        if block_name and block_name in orphaned_hints:
+            entry["hint"] = orphaned_hints[block_name]
+        elif type_hint:
+            entry["hint"] = type_hint
+        entries.append(entry)
+    return entries
 
 
 def _tool_error(agent: Any, message: str) -> ToolResult:
