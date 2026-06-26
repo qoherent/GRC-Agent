@@ -273,10 +273,10 @@ def render_block(
     states = getattr(block, "states", {}) or {}
     return GrcBlock(
         instance_name=block.name,
-        block_type=block.key,
+        block_id=block.key,
         role=classify_role(block),
         state=str(states.get("state", "enabled")),
-        parameters=parameters,
+        params=parameters,
     )
 
 
@@ -426,6 +426,12 @@ def apply_mutation(flow_graph: Any, op_type: str, **kwargs: Any) -> None:
         block = flow_graph.get_block(kwargs.pop("instance_name"))
         for k, v in (kwargs.pop("params") or {}).items():
             set_param(block, k, v)
+        # Regenerate derived IO: params like ``num_inputs`` / ``type`` /
+        # ``vlen`` determine port count and dtype via GRC's templates, and
+        # those ports are only (re)created on rewrite(). Without this, a batch
+        # that bumps ``num_inputs`` then connects to the new port fails because
+        # the port doesn't exist at connect-time. Mirrors add_block's rewrite.
+        flow_graph.rewrite()
     elif op_type == "update_states":
         block = flow_graph.get_block(kwargs.pop("instance_name"))
         set_block_state(block, kwargs.pop("state"))

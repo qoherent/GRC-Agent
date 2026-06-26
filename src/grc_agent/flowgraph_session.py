@@ -154,14 +154,14 @@ class FlowgraphSession:
         all_blocks = [
             {
                 "instance_name": b.instance_name,
-                "block_type": b.block_type,
+                "block_id": b.block_id,
                 "role": b.role.value if hasattr(b.role, "value") else str(b.role),
             }
             for b in user_blocks
         ]
         variable_count = sum(1 for b in all_blocks if b["role"] == "variable")
         all_conns = sorted(snapshot.connections)
-        block_summaries = [f"{b['instance_name']} ({b['block_type']})" for b in all_blocks[:3]]
+        block_summaries = [f"{b['instance_name']} ({b['block_id']})" for b in all_blocks[:3]]
         if len(all_blocks) > 3:
             block_summaries.append(f"... +{len(all_blocks) - 3} more")
         summary_text = (

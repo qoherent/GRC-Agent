@@ -35,7 +35,7 @@ class InspectorWidget(QWidget):
 
     The widget currently consumes the ``inspect_graph`` **overview** payload
     only (audit 5.4). The variables table reads ``value`` for blocks whose
-    ``block_type == "variable"``; ``variable_*`` variants and non-variable
+    ``block_id == "variable"``; ``variable_*`` variants and non-variable
     blocks do not have a ``value`` field in the overview and will show
     an empty cell. Per-block parameter details require the ``details``
     view, which is intentionally out of scope for this sidebar widget.
@@ -156,15 +156,15 @@ class InspectorWidget(QWidget):
 
         # 3. Repopulate Variables Table
         variables = [
-            b for b in blocks if b.get("block_type") == "variable" or b.get("role") == "variable"
+            b for b in blocks if b.get("block_id") == "variable" or b.get("role") == "variable"
         ]
         self.variables_table.setRowCount(0)
         self.variables_table.setRowCount(len(variables))
         for row_idx, var in enumerate(variables):
             name_item = QTableWidgetItem(str(var.get("instance_name", "")))
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            # Retrieve value from parameters dictionary if available, falling back to direct value key for mock compatibility
-            params_dict = var.get("parameters", {}) or {}
+            # Retrieve value from params dictionary if available, falling back to direct value key for mock compatibility
+            params_dict = var.get("params", {}) or {}
             val_str = str(params_dict.get("value", var.get("value", "")))
             val_item = QTableWidgetItem(val_str)
             val_item.setFlags(val_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -174,7 +174,7 @@ class InspectorWidget(QWidget):
         # 4. Repopulate Blocks Tree (grouped categorisation)
         # Categories are derived solely from the native block ``role`` emitted
         # by ``domain_models.BlockRole`` (StrEnum). There is no
-        # substring matching on block_type/role — one uniform rule.
+        # substring matching on block_id/role — one uniform rule.
         self.blocks_tree.clear()
 
         categories: dict[str, list[dict[str, Any]]] = {
@@ -215,10 +215,10 @@ class InspectorWidget(QWidget):
                 name = str(block.get("instance_name", ""))
                 child = QTreeWidgetItem(cat_node)
                 child.setText(0, name)
-                child.setText(1, str(block.get("block_type", "")))
+                child.setText(1, str(block.get("block_id", "")))
 
                 # Inline parameters (no _block_params sidecar — Phase 6+).
-                params_dict = block.get("parameters", {}) or {}
+                params_dict = block.get("params", {}) or {}
                 for pkey, pval in params_dict.items():
                     param_item = QTreeWidgetItem(child)
                     param_item.setText(0, str(pkey))

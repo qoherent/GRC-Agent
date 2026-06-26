@@ -8,9 +8,8 @@ verification — a force-commit that leaves the graph wrong is a failure, not a
 pass. Success is NEVER read from a tool's ``ok`` flag.
 
 The scenarios + ``expect`` predicates live in
-``playground/agent_flow_experiment/run_agent_flow.py`` (single source of
-truth); this test imports them so the live gate and the playground harness
-cannot drift apart.
+``tests/agent_flow/run_agent_flow.py`` (single source of truth); this test
+imports them so the live gate and the standalone harness cannot drift apart.
 
 These tests require:
   * Ollama running at ``GRC_AGENT_LLAMA_SERVER_URL`` (default localhost:11434).
@@ -58,9 +57,9 @@ class AgentFlowLiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        # Lazy import: playground/ is gitignored, so a fresh checkout without
-        # it must still collect (skip) this module cleanly.
-        from playground.agent_flow_experiment.run_agent_flow import (
+        # The harness is a tracked module under tests/agent_flow/; the lazy
+        # import keeps this module collectable even if its deps are unavailable.
+        from tests.agent_flow.run_agent_flow import (
             SCENARIOS,
             _extract_metrics,
             _fresh_agent,  # noqa: F401  (re-exported for external callers)

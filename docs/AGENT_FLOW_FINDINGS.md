@@ -4,9 +4,10 @@
 > topology-reasoning ceiling. Agent-flow raw counts swing ~±1 from Ollama
 > temp-0 nondeterminism, so they are not a reliable gate — the controlled
 > retrieval eval and live catalog tests are the trustworthy signal.
-> Model: `gemma4:e4b-it-qat-120k` (7.5B Q4_0, native ctx 131K). Custom Modelfile
-> model with `PARAMETER num_ctx 120000` — Ollama's `/v1` endpoint ignores
-> per-request `num_ctx`, so the 120K window is baked into the model.
+> Model: `maxwell1500/ornith-9b:q4_K_M-120k` (9B Q4_K_M, native ctx 262K, run
+> at num_ctx=120000). Custom Modelfile model with `PARAMETER num_ctx 120000`
+> (Ollama's `/v1` endpoint ignores per-request num_ctx). ornith-9b is a thinking
+> model; the provider sends `think:false` by default so it answers in `content`.
 
 ---
 
@@ -76,9 +77,9 @@ queries; the block was present (rowid 107 of 564). The two real causes were
 | Fusion | **Weighted RRF, `w_vec=2`** | Vector 2x lexical → lexical is a *boost-only* signal. Plain unweighted RRF dilutes strong vector matches (`sine wave source` regression); `w_vec=2` dominates it on a 30-query eval. |
 | Result window | `k` 3 → **10** | Controlled eval: rec@10 87%→97%. |
 
-**Evidence:** `playground/search_blocks_experiment/eval_retrieval.py` is a
-controlled 30-query battery (terse/verbose/synonym/morphology) measuring
-recall@k + MRR across candidate retrievers. Selected result:
+**Evidence:** a controlled 30-query battery (terse/verbose/synonym/morphology)
+measuring recall@k + MRR across candidate retrievers (the experiment script
+has been retired; the selected result is recorded below). Selected result:
 
 | Approach | rec@3 | rec@5 | rec@10 |
 |----------|------:|------:|-------:|

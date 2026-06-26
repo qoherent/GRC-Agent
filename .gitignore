@@ -22,7 +22,6 @@ dist/
 node_modules/
 # Node/Remotion generated artifacts
 .opencode/
-playground/
 scratch/
 # Playground / generated artifacts (not tracked)
 .DS_Store

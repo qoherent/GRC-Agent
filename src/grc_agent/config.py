@@ -7,7 +7,7 @@ import logging
 import os
 import tempfile
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -67,7 +67,7 @@ class LlamaConfig:
     """
 
     server_url: str = DEFAULT_OLLAMA_URL
-    model: str = "gemma4:e4b-it-qat"
+    model: str = "maxwell1500/ornith-9b:q4_K_M-120k"
     embedding_model: str = "embeddinggemma:latest"
     backend: str = "ollama"
     max_tokens: int = 4096
@@ -107,7 +107,7 @@ class GuardrailsConfig:
 
 
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
-    search_blocks_default_k=3,
+    search_blocks_default_k=10,
     search_blocks_max_k=12,
     ask_grc_docs_default_k=3,
     ask_grc_docs_max_k=8,
@@ -576,6 +576,18 @@ PREFS_FILE_NAME = "preferences.json"
 PREFERENCES_SCHEMA_VERSION = 1
 
 
+# Deterministic remap of stale persisted model names. When a model is
+# upgraded via a new Modelfile variant (e.g. a different context window),
+# GUI users whose `last_model.model` predates the upgrade must be migrated
+# automatically — otherwise they keep running the old model despite the
+# config default update. One uniform rule per entry (no per-field branching):
+# if the persisted value is a key here, replace it with the mapped value on
+# load and persist the result so the migration is a one-time event.
+_MODEL_REMAP: dict[str, str] = {
+    "gemma4:e4b-it-qat": "gemma4:e4b-it-qat-120k",
+}
+
+
 @dataclass(frozen=True)
 class LastModel:
     """The model the user most recently loaded through the GUI/CLI."""
@@ -675,6 +687,37 @@ def load_user_preferences(path: Path | None = None) -> UserPreferences:
         )
         return default_user_preferences()
     prefs = _parse_preferences(raw)
+    # Apply deterministic stale-model remap (e.g. gemma4:e4b-it-qat ->
+    # gemma4:e4b-it-qat-120k) so users whose GUI previously pinned the old
+    # model variant pick up the upgrade. The migration is persisted so it
+    # runs once per file, not on every load. Save failures are logged but
+    # never raised — startup must not block on a migration write.
+    if prefs.last_model.model and prefs.last_model.model in _MODEL_REMAP:
+        stale_model = prefs.last_model.model
+        remapped_name = _MODEL_REMAP[stale_model]
+        prefs = replace(
+            prefs,
+            last_model=replace(
+                prefs.last_model,
+                model=remapped_name,
+                saved_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+        try:
+            save_user_preferences(prefs, path=target)
+            logger.info(
+                "preferences: remapped last_model.model %r -> %r and persisted.",
+                stale_model,
+                remapped_name,
+            )
+        except OSError as exc:
+            logger.warning(
+                "preferences: remapped %r -> %r in memory but failed to "
+                "persist (%s). The remap will be retried on next load.",
+                stale_model,
+                remapped_name,
+                exc,
+            )
     if prefs.schema_version > PREFERENCES_SCHEMA_VERSION:
         logger.warning(
             "preferences: %s has schema_version=%d, this build supports up "

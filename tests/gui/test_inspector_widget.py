@@ -29,19 +29,19 @@ def test_variables_table_mapping(qtbot):
             "blocks": [
                 {
                     "instance_name": "samp_rate",
-                    "block_type": "variable",
+                    "block_id": "variable",
                     "role": "variable",
                     "value": "32000",
                 },
                 {
                     "instance_name": "freq",
-                    "block_type": "variable",
+                    "block_id": "variable",
                     "role": "variable",
                     "value": "1000",
                 },
                 {
                     "instance_name": "analog_sig_source_x_0",
-                    "block_type": "analog_sig_source_x",
+                    "block_id": "analog_sig_source_x",
                     "role": "source",
                 },
             ]
@@ -78,18 +78,18 @@ def test_blocks_tree_mapping(qtbot):
             "blocks": [
                 {
                     "instance_name": "samp_rate",
-                    "block_type": "variable",
+                    "block_id": "variable",
                     "role": "variable",
                     "value": "32000",
                 },
                 {
                     "instance_name": "analog_sig_source_x_0",
-                    "block_type": "analog_sig_source_x",
+                    "block_id": "analog_sig_source_x",
                     "role": "source",
                 },
                 {
                     "instance_name": "blocks_throttle_0",
-                    "block_type": "blocks_throttle",
+                    "block_id": "blocks_throttle",
                     "role": "transform",
                 },
             ]
@@ -121,13 +121,13 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
             "blocks": [
                 {
                     "instance_name": "samp_rate",
-                    "block_type": "variable",
+                    "block_id": "variable",
                     "role": "variable",
                     "value": "32000",
                 },
                 {
                     "instance_name": "analog_sig_source_x_0",
-                    "block_type": "analog_sig_source_x",
+                    "block_id": "analog_sig_source_x",
                     "role": "source",
                 },
             ]
@@ -232,7 +232,7 @@ def test_expansion_state_uses_user_role(qtbot):
             "blocks": [
                 {
                     "instance_name": "analog_sig_source_x_0",
-                    "block_type": "analog_sig_source_x",
+                    "block_id": "analog_sig_source_x",
                     "role": "source",
                 }
             ]
@@ -266,7 +266,7 @@ def test_scroll_clamp_on_smaller_range(qtbot):
 
     # First load with many blocks so the range is large.
     many_blocks = [
-        {"instance_name": f"src_{i}", "block_type": "analog_sig_source_x", "role": "source"}
+        {"instance_name": f"src_{i}", "block_id": "analog_sig_source_x", "role": "source"}
         for i in range(50)
     ]
     payload = {

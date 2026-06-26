@@ -201,6 +201,10 @@ class BlockDescription:
                 )
                 for p in visible_params
             },
+            "default_params": {
+                p.id: "" if p.default is None else str(p.default)
+                for p in visible_params
+            },
             "inputs": [port.to_compact_dict() for port in self.inputs],
             "outputs": [port.to_compact_dict() for port in self.outputs],
         }

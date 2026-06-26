@@ -230,23 +230,6 @@ class ToolAgentsRepairClassificationTests(unittest.TestCase):
 
 
 class ToolAgentsProviderConfigTests(unittest.TestCase):
-    def test_create_settings_includes_ollama_num_ctx(self) -> None:
-        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
-
-        mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
-        mock_settings = mock.MagicMock()
-        mock_provider.get_default_settings.return_value = mock_settings
-
-        cfg = ToolAgentsLlamaProviderConfig(
-            base_url="http://127.0.0.1:11434",
-            model="qwen-1.5b",
-            num_ctx=8192,
-        )
-        cfg.create_settings(mock_provider)
-        mock_settings.set_value.assert_any_call(
-            "extra_body", {"options": {"num_ctx": 8192}}
-        )
-
     def test_openrouter_settings_includes_provider_extra_body(self) -> None:
         from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
 
@@ -266,8 +249,54 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
 
         mock_settings.set_value.assert_any_call(
             "extra_body",
-            {"options": {"num_ctx": 120000}, "provider": {"order": ["alibaba"], "allow_fallbacks": False}},
+            {"provider": {"order": ["alibaba"], "allow_fallbacks": False}},
         )
+
+    def test_ollama_disables_thinking_by_default(self) -> None:
+        """Thinking models (e.g. ornith-9b) emit EMPTY content until reasoning
+        finishes, breaking the agent loop. ``enable_thinking=False`` (the
+        default) must send ``think:false`` via extra_body on the Ollama path.
+        """
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
+
+        mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
+        mock_settings = mock.MagicMock()
+        mock_provider.get_default_settings.return_value = mock_settings
+
+        cfg = ToolAgentsLlamaProviderConfig(base_url="http://127.0.0.1:11434", model="x")
+        cfg.create_settings(mock_provider)
+        mock_settings.set_value.assert_any_call("extra_body", {"think": False})
+
+    def test_ollama_provider_settings_has_no_per_request_num_ctx(self) -> None:
+        """Ollama's /v1 endpoint silently ignores per-request num_ctx — the
+        provider must NOT pass it. Context sizing lives on the model
+        (Modelfile PARAMETER num_ctx), not in the request payload.
+        Regression guard against re-introducing the dead `extra_body.options.num_ctx`.
+        """
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
+
+        mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
+        mock_settings = mock.MagicMock()
+        mock_provider.get_default_settings.return_value = mock_settings
+
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="gemma4:e4b-it-qat-120k",
+        )
+        cfg.create_settings(mock_provider)
+
+        # The only way `options.num_ctx` could reappear is via set_value on
+        # an extra_body containing {"options": {"num_ctx": ...}}. Assert
+        # no such call was made.
+        for call in mock_settings.set_value.call_args_list:
+            args, _ = call
+            if not args:
+                continue
+            value = args[-1]
+            if isinstance(value, dict) and "extra_body" in args[0]:
+                assert "options" not in value.get("extra_body", {}), (
+                    f"extra_body must not contain 'options' (num_ctx is dead on /v1): {value}"
+                )
 
 
 class OpenRouterDelegatesToSDKTests(unittest.TestCase):

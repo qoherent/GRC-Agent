@@ -131,7 +131,7 @@ def search_blocks(
     try:
         store = VectorCatalogStore(CATALOG_DB_PATH, agent._llama_server_url)
         # Pull one extra neighbour so we can detect truncation.
-        neighbours = store.search(query_vec, limit + 1)
+        neighbours = store.search(q, query_vec, limit + 1)
     except Exception as exc:
         return _tool_error(
             agent,

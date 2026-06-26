@@ -110,8 +110,8 @@ def test_load_and_inspect_random_bit_generator():
     # All rendered params must be visible (no Advanced/Config).
     from grc_agent.runtime.param_filter import param_metadata
     for block in out.blocks:
-        meta = param_metadata(block.block_type)
-        for k in block.parameters.keys():
+        meta = param_metadata(block.block_id)
+        for k in block.params.keys():
             info = meta.get(k, {})
             assert info.get("category") not in EXCLUDED_PARAM_CATEGORIES
 
@@ -140,7 +140,7 @@ def test_load_and_inspect_blank():
         # GRC renders the options block as a block, so an options-only
         # flowgraph has one block (the options/metadata block).
         assert len(out.blocks) == 1
-        assert out.blocks[0].block_type == "options"
+        assert out.blocks[0].block_id == "options"
         assert out.connections == []
     finally:
         path.unlink()
@@ -197,8 +197,8 @@ def test_render_parameter_filters_advanced_and_config_and_hide_all():
     # Advanced/Config params and no hide=='all' params.
     rendered_block = render_block(target, flow_graph=fg)
     from grc_agent.runtime.param_filter import param_metadata
-    meta = param_metadata(rendered_block.block_type)
-    for k in rendered_block.parameters.keys():
+    meta = param_metadata(rendered_block.block_id)
+    for k in rendered_block.params.keys():
         info = meta.get(k, {})
         assert info.get("category") not in EXCLUDED_PARAM_CATEGORIES
 
@@ -309,7 +309,22 @@ def test_validate_after_mutation():
     apply_mutation(fg, "update_params", instance_name=var.name, params={"value": "48000"})
     v = validate(fg)
     assert v.status in {"valid", "invalid"}
-    assert isinstance(v.native_ok, bool)
+
+
+def test_update_params_regenerates_derived_ports():
+    """update_params must regenerate derived IO (e.g. sink ports from
+    ``num_inputs``) via native rewrite() — otherwise a correct batch that bumps
+    ``num_inputs`` then connects to the new port fails because the port doesn't
+    exist at connect-time (the scenario-16 trap). Mirrors add_block's rewrite.
+    """
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
+    adder = fg.get_block("blocks_add_xx")
+    assert [p.key for p in adder.active_sinks] == ["0", "1", "2"]
+    apply_mutation(fg, "update_params", instance_name="blocks_add_xx", params={"num_inputs": "4"})
+    adder = fg.get_block("blocks_add_xx")
+    # The 4th sink port (key "3") must exist immediately after update_params,
+    # without a separate manual rewrite.
+    assert [p.key for p in adder.active_sinks] == ["0", "1", "2", "3"]
 
 
 # --- gate hygiene ------------------------------------------------------------- #
@@ -340,3 +355,67 @@ def test_no_yaml_safe_load_in_adapter():
         text=True,
     )
     assert res.stdout.strip() == ""
+
+
+# --- inspect/change schema symmetry ------------------------------------------ #
+
+
+def test_describe_block_payload_has_symmetry_keys():
+    """Catalog description (query_knowledge output) must emit the same keys
+    that ``add_blocks``/``update_params`` accept: ``block_id`` and ``params``,
+    plus a clean ``default_params`` dict whose values are copy-pasteable into
+    ``add_blocks.params``. Guards the consultant-approved symmetry contract."""
+    from grc_agent.catalog.loaders import describe_block
+
+    payload = describe_block("analog_sig_source_x")
+    assert payload.get("ok") is True
+    assert payload["block_id"] == "analog_sig_source_x"
+    # Encoded overview strings (dtype=default).
+    assert isinstance(payload["params"], dict) and payload["params"]
+    # Clean default map — values are plain strings, no encoding.
+    defaults = payload["default_params"]
+    assert isinstance(defaults, dict) and defaults
+    assert all(isinstance(v, str) for v in defaults.values())
+    # Every visible param has a matching default entry (same key set).
+    assert set(defaults.keys()) == set(payload["params"].keys())
+
+
+def test_inspect_block_uses_symmetry_field_names():
+    """``inspect_graph`` block objects must expose ``block_id`` and ``params``
+    (not ``block_type``/``parameters``) so the model can mirror the shape into
+    ``change_graph`` without key translation."""
+    out = load_and_inspect(FIXTURES / "dial_tone.grc")
+    block = out.blocks[0]
+    dumped = block.model_dump()
+    assert "block_id" in dumped and "block_type" not in dumped
+    assert "params" in dumped and "parameters" not in dumped
+
+
+# --- orphaned-port causal hint (topology offloading) ------------------------ #
+
+
+def test_change_graph_orphaned_port_hint_names_the_removed_block():
+    """Removing a block that other blocks feed must surface WHY their ports are
+    now dangling. Reproduces the Scenario 06 topology failure: removing
+    ``blocks_add_xx`` orphans ``analog_noise_source_x_0``'s output. The
+    adapter must trace the causality and name the removed block in the hint.
+    """
+    from grc_agent.agent import GrcAgent
+    from grc_agent.flowgraph_session import FlowgraphSession
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    session = FlowgraphSession()
+    session.load(str(FIXTURES / "dial_tone.grc"))
+    agent = GrcAgent(session=session)
+
+    result = dispatch_flat_change_graph_batch(agent, remove_blocks=["blocks_add_xx"])
+
+    # Removing the adder makes the graph invalid (orphaned sources/sink).
+    assert result["ok"] is False
+    noise_error = next(
+        e for e in result["errors"]
+        if "analog_noise_source_x_0" in e.get("message", "")
+    )
+    # The hint must name the removed block that caused the orphan, so the
+    # model can infer it must also remove/reconnect the noise source or force.
+    assert "blocks_add_xx" in noise_error.get("hint", "")

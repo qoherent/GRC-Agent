@@ -29,7 +29,7 @@ class RuntimeConfigTests(unittest.TestCase):
         # silently degrades every LLM call (chat completion, RAG synthesis)
         # to a backend 400. The GUI/CLI provider-picker can override at
         # runtime, but the parsed config must always carry a usable model.
-        self.assertEqual(config.llama.model, "gemma4:e4b-it-qat")
+        self.assertEqual(config.llama.model, "maxwell1500/ornith-9b:q4_K_M-120k")
         self.assertEqual(config.llama.max_tokens, 4096)
         # The default per-payload truncation cap is 4000 chars —
         # large enough to fit a full GNU Radio catalog JSON object
@@ -42,7 +42,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
-        self.assertEqual(config.agent.retrieval.search_blocks_default_k, 3)
+        self.assertEqual(config.agent.retrieval.search_blocks_default_k, 10)
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
         self.assertEqual(config.agent.guardrails.max_validation_stderr_chars, 1200)
         self.assertEqual(config.agent.guardrails.max_compact_list_items, 3)

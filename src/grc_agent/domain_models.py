@@ -48,10 +48,10 @@ class GrcBlock(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     instance_name: str
-    block_type: str
+    block_id: str
     role: BlockRole
     state: str
-    parameters: dict[str, str] = Field(default_factory=dict)
+    params: dict[str, str] = Field(default_factory=dict)
 
 
 class GrcValidation(BaseModel):

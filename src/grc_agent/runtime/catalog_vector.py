@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import struct
 from pathlib import Path
@@ -42,6 +43,56 @@ _DOCUMENT_PREFIX = "task: search result | document: "
 # --- Embed-text body cap (mirrors doc_answer.CHUNK_MAX_WORDS) ---------------
 _CATALOG_EMBED_MAX_WORDS = 256
 _EMBED_DIM = 768  # embeddinggemma float32
+
+# --- Hybrid retrieval (consultant-approved: FTS5-porter + vector, weighted RRF)
+RRF_K = 60  # standard Reciprocal Rank Fusion constant
+FUSION_POOL = 30  # candidates pulled from each backend before fusion
+VEC_WEIGHT = 2.0  # vector rank weighted 2x lexical — lexical is a boost-only signal
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def fuse_ranks(
+    vec_ranks: list[Any],
+    lex_ranks: list[Any],
+    *,
+    w_vec: float = VEC_WEIGHT,
+    k: int = RRF_K,
+) -> list[Any]:
+    """Weighted Reciprocal Rank Fusion of two ranked id lists.
+
+    Vector rank is weighted ``w_vec`` (default 2x) so lexical matches act as a
+    boost-only signal: a lexical-only hit cannot demote a strong vector match,
+    but a block that BOTH backends like is promoted. Ties break by id for
+    deterministic ordering.
+    """
+    scores: dict[Any, float] = {}
+    for pos, rid in enumerate(vec_ranks):
+        scores[rid] = scores.get(rid, 0.0) + w_vec / (k + pos + 1)
+    for pos, rid in enumerate(lex_ranks):
+        scores[rid] = scores.get(rid, 0.0) + 1.0 / (k + pos + 1)
+    return [rid for rid, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def fts_match(conn: sqlite3.Connection, query: str, limit: int) -> list[int]:
+    """Porter-stemmed lexical match over ``catalog_fts``.
+
+    Query terms are OR-joined (recall-friendly) and stemmed by the FTS5 porter
+    tokenizer, closing morphology gaps like ``multiplier`` <-> ``multiply``.
+    Returns ``[]`` if the FTS5 table is absent (graceful degradation to vector).
+    """
+    terms = _TOKEN_RE.findall((query or "").lower())
+    if not terms:
+        return []
+    fts_query = " OR ".join(terms)
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM catalog_fts WHERE catalog_fts MATCH ? "
+            "ORDER BY bm25(catalog_fts) LIMIT ?",
+            (fts_query, limit),
+        ).fetchall()
+        return [r[0] for r in rows]
+    except sqlite3.OperationalError:
+        return []
 
 
 def _cap_embed_body(parts: list[str], max_words: int) -> str:
@@ -164,6 +215,35 @@ class VectorCatalogStore:
             f"CREATE VIRTUAL TABLE IF NOT EXISTS catalog_idx USING vec0("
             f"embedding float[{_EMBED_DIM}])"
         )
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts "
+            "USING fts5(content, tokenize='porter')"
+        )
+
+    def _ensure_fts5(self, conn: sqlite3.Connection) -> None:
+        """Ensure the FTS5 porter table exists and is populated.
+
+        Fresh DBs build it during :meth:`ingest_if_needed`; this self-heals
+        older vec-only DBs from the already-stored chunk payloads (no
+        re-embedding). No-op once the table holds rows.
+        """
+        try:
+            n = conn.execute("SELECT count(*) FROM catalog_fts").fetchone()[0]
+        except sqlite3.OperationalError:
+            conn.execute(
+                "CREATE VIRTUAL TABLE catalog_fts USING fts5(content, tokenize='porter')"
+            )
+            n = 0
+        if n > 0:
+            return
+        for rid, payload in conn.execute(
+            "SELECT rowid, payload FROM catalog_chunks"
+        ).fetchall():
+            conn.execute(
+                "INSERT INTO catalog_fts(rowid, content) VALUES (?, ?)",
+                (rid, payload or ""),
+            )
+        conn.commit()
 
     def ingest_if_needed(
         self,
@@ -221,25 +301,45 @@ class VectorCatalogStore:
                     "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
                     (rowid, sqlite_vec.serialize_float32(embedding)),
                 )
+                conn.execute(
+                    "INSERT INTO catalog_fts(rowid, content) VALUES(?, ?)",
+                    (rowid, body),
+                )
                 inserted += 1
             conn.commit()
             logger.info("Catalog vector index ingested %d blocks.", inserted)
         finally:
             conn.close()
 
-    def search(self, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
-        """Return up to ``limit`` nearest neighbours via sqlite-vec KNN."""
+    def search(
+        self, query: str, query_vector: list[float], limit: int
+    ) -> list[dict[str, Any]]:
+        """Hybrid retrieval: weighted-RRF fusion of vector KNN + FTS5-porter.
+
+        Pulls a ``FUSION_POOL``-wide candidate set from each backend, fuses via
+        :func:`fuse_ranks` (vector weighted 2x lexical), and returns the top
+        ``limit`` with their vector L2 distance (sentinel for lexical-only
+        hits). Degrades gracefully to pure-vector when the FTS5 table is absent.
+        """
         conn = self._get_connection()
         try:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT rowid, distance FROM catalog_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (sqlite_vec.serialize_float32(query_vector), limit),
-            )
+            self._ensure_fts5(conn)
+
+            vec_rows = conn.execute(
+                "SELECT rowid, distance FROM catalog_idx "
+                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vector), FUSION_POOL),
+            ).fetchall()
+            vec_ranks = [r["rowid"] for r in vec_rows]
+            vec_dist = {r["rowid"]: r["distance"] for r in vec_rows}
+            worst_vec = max(vec_dist.values()) if vec_dist else 0.0
+
+            lex_ranks = fts_match(conn, query, FUSION_POOL)
+
+            fused = fuse_ranks(vec_ranks, lex_ranks, w_vec=VEC_WEIGHT)[:limit]
             matched: list[dict[str, Any]] = []
-            for row in cursor.fetchall():
-                rowid = row["rowid"]
-                distance = row["distance"]
+            for rowid in fused:
                 chunk = conn.execute(
                     "SELECT block_id, payload FROM catalog_chunks WHERE rowid = ?",
                     (rowid,),
@@ -248,7 +348,9 @@ class VectorCatalogStore:
                     matched.append(
                         {
                             "rowid": rowid,
-                            "distance": distance,
+                            # Lexical-only hits carry no vector distance; mark
+                            # them clearly farther than any real neighbour.
+                            "distance": vec_dist.get(rowid, worst_vec + 1.0),
                             "block_id": chunk["block_id"],
                             "payload": chunk["payload"],
                         }

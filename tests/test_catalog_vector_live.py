@@ -66,7 +66,7 @@ class VectorCatalogLiveTests(unittest.TestCase):
 
     def _top(self, query: str, k: int = 5) -> list[tuple[str, float]]:
         qv = type(self).embed_query("http://localhost:11434", query)
-        results = self.store.search(qv, k)
+        results = self.store.search(query, qv, k)
         return [(r["block_id"], r["distance"]) for r in results]
 
     def test_time_sink_ranks_qtgui_time_sink_x_first(self) -> None:

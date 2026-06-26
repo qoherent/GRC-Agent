@@ -24,10 +24,10 @@ def test_grc_flowgraph_round_trip():
         blocks=[
             GrcBlock(
                 instance_name="src",
-                block_type="analog_sig_source_x",
+                block_id="analog_sig_source_x",
                 role=BlockRole.SOURCE,
                 state="enabled",
-                parameters={"freq": "350"},
+                params={"freq": "350"},
             ),
         ],
         connections=[
@@ -51,7 +51,7 @@ def test_grc_block_extra_forbid():
     with pytest.raises(ValidationError):
         GrcBlock(
             instance_name="x",
-            block_type="t",
+            block_id="t",
             role=BlockRole.OTHER,
             state="enabled",
             foobar=42,

@@ -277,5 +277,71 @@ def tempfile_Target(suffix: str = "preferences.json"):
     return _TargetCM()
 
 
+class ModelMigrationTests(unittest.TestCase):
+    """The GUI persists the model the user last picked in `last_model.model`.
+    When the default model is upgraded (e.g. a new Modelfile variant with
+    a different context window), stale persisted values must be remapped
+    automatically — otherwise users keep running the old model despite the
+    config default update.
+    """
+
+    def test_load_remaps_stale_gemma4_to_120k_variant(self) -> None:
+        with tempfile_Target(suffix="prefs.json") as target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"last_model": {"model": "gemma4:e4b-it-qat"}}),
+                encoding="utf-8",
+            )
+            prefs = load_user_preferences(path=target)
+            self.assertEqual(prefs.last_model.model, "gemma4:e4b-it-qat-120k")
+
+    def test_load_persists_remapped_value_to_disk(self) -> None:
+        with tempfile_Target(suffix="prefs.json") as target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"last_model": {"model": "gemma4:e4b-it-qat"}}),
+                encoding="utf-8",
+            )
+            load_user_preferences(path=target)
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["last_model"]["model"], "gemma4:e4b-it-qat-120k")
+
+    def test_load_leaves_unrelated_models_unchanged(self) -> None:
+        with tempfile_Target(suffix="prefs.json") as target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"last_model": {"model": "llama3.2"}}),
+                encoding="utf-8",
+            )
+            prefs = load_user_preferences(path=target)
+            self.assertEqual(prefs.last_model.model, "llama3.2")
+            # And the on-disk file is untouched (no spurious rewrite).
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["last_model"]["model"], "llama3.2")
+
+    def test_load_with_no_last_model_does_not_create_file(self) -> None:
+        with tempfile_Target(suffix="prefs.json") as target:
+            # File does not exist — load returns defaults and must NOT
+            # create the file just to persist defaults.
+            self.assertFalse(target.exists())
+            prefs = load_user_preferences(path=target)
+            self.assertEqual(prefs.last_model.model, "")
+            self.assertFalse(target.exists())
+
+    def test_apply_overlay_uses_remapped_model(self) -> None:
+        """End-to-end: after the remap, the LlamaConfig overlay must see
+        the new model — otherwise the GUI would still pin the old value."""
+        with tempfile_Target(suffix="prefs.json") as target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"last_model": {"model": "gemma4:e4b-it-qat"}}),
+                encoding="utf-8",
+            )
+            prefs = load_user_preferences(path=target)
+            base = LlamaConfig()
+            overlaid = apply_user_preferences_to_llama_config(base, prefs)
+            self.assertEqual(overlaid.model, "gemma4:e4b-it-qat-120k")
+
+
 if __name__ == "__main__":
     unittest.main()

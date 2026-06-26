@@ -145,7 +145,6 @@ class ToolAgentsLlamaProviderConfig:
     max_tokens: int = 4096
     temperature: float = 0.0
     enable_thinking: bool = False
-    num_ctx: int = 120000
 
     @property
     def openai_base_url(self) -> str:
@@ -175,18 +174,28 @@ class ToolAgentsLlamaProviderConfig:
     ) -> ProviderSettings:
         """Return request settings."""
         settings = provider.get_default_settings()
-        settings.set_value(
-            "temperature",
-            self.temperature if temperature is None else float(temperature),
-        )
+        settings.set_value("temperature", self.temperature if temperature is None else float(temperature))
         settings.set_value("tool_choice", tool_choice)
         settings.set_value("response_format", response_format)
         settings.add_request_setting("max_tokens", max_tokens or self.max_tokens)
         settings.add_request_setting("parallel_tool_calls", True)
+        think = self.enable_thinking if enable_thinking is None else bool(enable_thinking)
         extra_body: dict[str, Any] = {}
-        if self.num_ctx:
-            extra_body.setdefault("options", {})["num_ctx"] = self.num_ctx
-        if "openrouter" in (self.base_url or "").lower():
+        is_openrouter = "openrouter" in (self.base_url or "").lower()
+        # Thinking models (e.g. ornith-9b, qwq, deepseek-r1) put their reasoning
+        # in a separate ``thinking`` field and emit EMPTY ``content`` until
+        # reasoning finishes — which breaks a tool-calling agent loop that reads
+        # ``content``. For the local Ollama /v1 path, ``enable_thinking=False``
+        # (the default) sends ``think:false`` so the model answers directly in
+        # ``content``. Ignored by non-thinking models; not sent to OpenRouter.
+        # Context-window sizing is NOT a per-request concern: Ollama's
+        # OpenAI-compatible /v1 endpoint silently ignores per-request num_ctx
+        # (the native /api endpoint honors it). Configure num_ctx on the
+        # model via a Modelfile (PARAMETER num_ctx ...) instead — see
+        # docs/AGENT_FLOW_FINDINGS.md.
+        if not is_openrouter and not think:
+            extra_body["think"] = False
+        if is_openrouter:
             import os
 
             provider_order = os.getenv("OPENROUTER_PROVIDER_ORDER")

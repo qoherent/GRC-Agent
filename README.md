@@ -56,10 +56,13 @@ recover via the inline model toolbar.
 
 ## Exploratory experiments
 
-One-off experiments live in `playground/` (search, query, inspect, change-graph).
-Each subfolder has a `run_*.py` that produces Markdown results under
-`results/`. The experiment scripts are read-only consumers of the agent —
-they are useful for smoke-testing the tool surface, not for CI.
+The autonomous agent-flow experiment harness lives at
+`tests/agent_flow/run_agent_flow.py` (tracked). It runs the full scenario
+suite against a live model and writes Markdown transcripts + a metrics summary
+to the gitignored `tests/output/agent_flow/` (regenerated each run). The
+gated live test `tests/test_agent_flow_live.py` asserts the per-scenario
+expect verdicts. These are read-only consumers of the agent — useful for
+smoke-testing the tool surface, not part of the default CI gate.
 
 ---
 

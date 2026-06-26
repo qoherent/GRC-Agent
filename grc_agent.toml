@@ -1,7 +1,12 @@
 [llama]
 server_url = "http://localhost:11434"
 backend = "ollama"
-model = "gemma4:e4b-it-qat"
+# Custom Modelfile model: maxwell1500/ornith-9b:q4_K_M with PARAMETER num_ctx
+# 120000. Ollama's OpenAI-compatible /v1 endpoint does NOT honor per-request
+# num_ctx, so the 120K window is baked into the model (see
+# docs/AGENT_FLOW_FINDINGS.md). ornith-9b is a thinking model; the provider
+# sends think:false by default (enable_thinking=False) so it answers in content.
+model = "maxwell1500/ornith-9b:q4_K_M-120k"
 embedding_model = "embeddinggemma:latest"
 max_tokens = 4096
 max_tool_rounds = 8
@@ -14,7 +19,7 @@ history_compact_budget = 100000
 max_tool_result_chars = 4000
 
 [agent.retrieval]
-search_blocks_default_k = 3
+search_blocks_default_k = 10
 search_blocks_max_k = 12
 ask_grc_docs_default_k = 3
 ask_grc_docs_max_k = 6
