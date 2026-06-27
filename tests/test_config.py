@@ -42,7 +42,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
-        self.assertEqual(config.agent.retrieval.search_blocks_default_k, 10)
+        self.assertEqual(config.agent.retrieval.search_blocks_default_k, 5)
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
         self.assertEqual(config.agent.guardrails.max_validation_stderr_chars, 1200)
         self.assertEqual(config.agent.guardrails.max_compact_list_items, 3)

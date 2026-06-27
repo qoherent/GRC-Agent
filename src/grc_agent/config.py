@@ -107,7 +107,7 @@ class GuardrailsConfig:
 
 
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
-    search_blocks_default_k=10,
+    search_blocks_default_k=5,
     search_blocks_max_k=12,
     ask_grc_docs_default_k=3,
     ask_grc_docs_max_k=8,
