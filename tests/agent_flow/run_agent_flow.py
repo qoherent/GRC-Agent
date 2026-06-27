@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -50,6 +51,71 @@ MODEL = "gemma4:e4b-it-qat-120k"
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)
+
+
+def _load_dotenv() -> None:
+    """Read .env at the workspace root into os.environ (no override).
+
+    Sets only keys not already present in the environment, so explicit
+    shell exports win. Used by the ``openrouter`` provider factory.
+    """
+    env_path = WORKSPACE / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip())
+
+
+def _default_ollama_provider() -> ToolAgentsLlamaProviderConfig:
+    """The original local-Ollama provider (unchanged harness behavior)."""
+    return ToolAgentsLlamaProviderConfig(
+        base_url=OLLAMA_URL,
+        model=MODEL,
+        timeout_seconds=180.0,
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+
+def _make_provider(provider: str) -> ToolAgentsLlamaProviderConfig:
+    """Return the provider config for the given provider name.
+
+    - ``ollama`` (default): local Ollama — the original harness behavior, so
+      the gated live test (which calls ``_run_scenario`` with no provider) is
+      unaffected.
+    - ``openrouter``: loads .env, targets OpenRouter
+      (``base_url=https://openrouter.ai/api``) with the model named by
+      ``OPENROUTER_MODEL``. ``create_settings`` already detects the
+      ``openrouter`` host and forwards ``OPENROUTER_PROVIDER_ORDER`` /
+      ``OPENROUTER_ALLOW_FALLBACKS`` via ``extra_body.provider``.
+
+    Never overrides ``OPENROUTER_MODEL`` — whatever .env says is authoritative.
+    """
+    if provider == "ollama":
+        return _default_ollama_provider()
+    if provider == "openrouter":
+        _load_dotenv()
+        model = os.environ.get("OPENROUTER_MODEL")
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not model or not api_key:
+            raise RuntimeError(
+                "OPENROUTER_MODEL / OPENROUTER_API_KEY missing — check .env"
+            )
+        return ToolAgentsLlamaProviderConfig(
+            base_url="https://openrouter.ai/api",
+            model=model,
+            api_key=api_key,
+            timeout_seconds=300.0,  # cloud can be slower than local
+            max_tokens=2048,
+            temperature=0.0,
+        )
+    raise ValueError(
+        f"unknown provider: {provider!r} (expected 'ollama' or 'openrouter')"
+    )
 
 SCENARIOS: list[dict[str, Any]] = [
     {
@@ -374,7 +440,10 @@ SCENARIOS: list[dict[str, Any]] = [
 ]
 
 
-def _fresh_agent(fixture: str | Path | None = None) -> tuple[GrcAgent, Path]:
+def _fresh_agent(
+    fixture: str | Path | None = None,
+    model: str = MODEL,
+) -> tuple[GrcAgent, Path]:
     """Create a fresh agent from a temp copy of the fixture.
 
     Returns the agent and the path to the temp fixture file (for reading
@@ -386,7 +455,7 @@ def _fresh_agent(fixture: str | Path | None = None) -> tuple[GrcAgent, Path]:
     shutil.copy2(src, tmp_fixture)
     session = FlowgraphSession()
     session.load(str(tmp_fixture))
-    return GrcAgent(session=session, llama_model=MODEL), tmp_fixture
+    return GrcAgent(session=session, llama_model=model), tmp_fixture
 
 
 def _graph_state(fixture_path: Path) -> dict[str, Any]:
@@ -417,19 +486,19 @@ def _run_scenario(
     prompt: str,
     fixture: str | Path | None = None,
     expect: dict[str, Any] | None = None,
+    provider_config: ToolAgentsLlamaProviderConfig | None = None,
 ) -> dict[str, Any]:
-    agent, fixture_path = _fresh_agent(fixture)
+    # Default provider = the original local-Ollama config, so the gated live
+    # test (which calls _run_scenario(**sc) with no provider) is unchanged.
+    if provider_config is None:
+        provider_config = _default_ollama_provider()
+    active_model = provider_config.model or MODEL
+
+    agent, fixture_path = _fresh_agent(fixture, model=active_model)
     system_prompt = build_system_prompt(agent.chat_session_id)
     grc_before = fixture_path.read_text(encoding="utf-8")
 
-    provider = ToolAgentsLlamaProviderConfig(
-        base_url=OLLAMA_URL,
-        model=MODEL,
-        timeout_seconds=180.0,
-        max_tokens=2048,
-        temperature=0.0,
-    )
-    runner = ToolAgentsRunner(provider_config=provider)
+    runner = ToolAgentsRunner(provider_config=provider_config)
 
     events: list[dict[str, Any]] = []
     pending_tool: dict[str, Any] = {}
@@ -462,7 +531,7 @@ def _run_scenario(
         "title": title,
         "prompt": prompt,
         "system_prompt": system_prompt,
-        "model": MODEL,
+        "model": active_model,
         "fixture_name": fixture_path.name,
         "expect": expect or {},
         "grc_before": grc_before,
@@ -769,8 +838,10 @@ def _render_summary(all_metrics: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def main(runs: int = 1) -> None:
-    print(f"Model: {MODEL}")
+def main(runs: int = 1, provider: str = "ollama") -> None:
+    provider_config = _make_provider(provider)
+    active_model = provider_config.model or MODEL
+    print(f"Provider: {provider} | Model: {active_model}")
     print(f"Fixture: {FIXTURE.name}")
     print(f"Scenarios: {len(SCENARIOS)} | runs per scenario: {runs}")
     print("Max tool rounds: system default (8)")
@@ -790,7 +861,7 @@ def main(runs: int = 1) -> None:
                 flush=True,
             )
             try:
-                rec = _run_scenario(**sc)
+                rec = _run_scenario(**sc, provider_config=provider_config)
                 if attempt == 0:  # keep the first run's transcript on disk
                     md = _render_md(rec)
                     (RESULTS / f"{sc['name']}.md").write_text(md, encoding="utf-8")
@@ -846,5 +917,11 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=1, help="runs per scenario (pass-rate mode)")
+    ap.add_argument(
+        "--provider",
+        choices=("ollama", "openrouter"),
+        default="ollama",
+        help="model provider (default ollama; openrouter loads .env)",
+    )
     args = ap.parse_args()
-    main(runs=args.runs)
+    main(runs=args.runs, provider=args.provider)
