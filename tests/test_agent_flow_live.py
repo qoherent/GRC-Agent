@@ -13,7 +13,7 @@ imports them so the live gate and the standalone harness cannot drift apart.
 
 These tests require:
   * Ollama running at ``GRC_AGENT_LLAMA_SERVER_URL`` (default localhost:11434).
-  * The model ``GRC_AGENT_LIVE_MODEL`` pulled (defaults to ``maxwell1500/ornith-9b:q4_K_M-120k``).
+  * The model ``GRC_AGENT_LIVE_MODEL`` pulled (defaults to ``gemma4:e4b-it-qat-120k``).
 
 This module is **opt-in** (``GRC_AGENT_LIVE_MODEL=1``) and is NOT part of the
 default CI gate — it never alters the test-gate table. Run with::

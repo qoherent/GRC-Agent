@@ -1,12 +1,10 @@
 [llama]
 server_url = "http://localhost:11434"
 backend = "ollama"
-# Custom Modelfile model: maxwell1500/ornith-9b:q4_K_M with PARAMETER num_ctx
-# 120000. Ollama's OpenAI-compatible /v1 endpoint does NOT honor per-request
-# num_ctx, so the 120K window is baked into the model (see
-# docs/AGENT_FLOW_FINDINGS.md). ornith-9b is a thinking model; the provider
-# sends think:false by default (enable_thinking=False) so it answers in content.
-model = "maxwell1500/ornith-9b:q4_K_M-120k"
+# Custom Modelfile model: gemma4:e4b-it-qat with PARAMETER num_ctx 120000.
+# Ollama's /v1 endpoint ignores per-request num_ctx, so the 120K window is
+# baked into the model (see docs/AGENT_FLOW_FINDINGS.md).
+model = "gemma4:e4b-it-qat-120k"
 embedding_model = "embeddinggemma:latest"
 max_tokens = 4096
 max_tool_rounds = 8

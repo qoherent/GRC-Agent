@@ -4,10 +4,9 @@
 > topology-reasoning ceiling. Agent-flow raw counts swing ~±1 from Ollama
 > temp-0 nondeterminism, so they are not a reliable gate — the controlled
 > retrieval eval and live catalog tests are the trustworthy signal.
-> Model: `maxwell1500/ornith-9b:q4_K_M-120k` (9B Q4_K_M, native ctx 262K, run
-> at num_ctx=120000). Custom Modelfile model with `PARAMETER num_ctx 120000`
-> (Ollama's `/v1` endpoint ignores per-request num_ctx). ornith-9b is a thinking
-> model; the provider sends `think:false` by default so it answers in `content`.
+> Model: `gemma4:e4b-it-qat-120k` (7.5B Q4_0, native ctx 131K, run at
+> num_ctx=120000). Custom Modelfile model with `PARAMETER num_ctx 120000`
+> (Ollama's `/v1` endpoint ignores per-request num_ctx).
 
 ---
 

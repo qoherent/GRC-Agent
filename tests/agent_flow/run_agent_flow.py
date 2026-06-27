@@ -46,7 +46,7 @@ OLLAMA_URL = "http://localhost:11434"
 # 120000 baked in (Ollama's /v1 endpoint ignores per-request num_ctx — see
 # docs/AGENT_FLOW_FINDINGS.md). ornith-9b is a thinking model; the provider
 # sends think:false (enable_thinking=False) so it answers in `content`.
-MODEL = "maxwell1500/ornith-9b:q4_K_M-120k"
+MODEL = "gemma4:e4b-it-qat-120k"
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)

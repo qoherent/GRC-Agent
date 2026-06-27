@@ -67,7 +67,7 @@ class LlamaConfig:
     """
 
     server_url: str = DEFAULT_OLLAMA_URL
-    model: str = "maxwell1500/ornith-9b:q4_K_M-120k"
+    model: str = "gemma4:e4b-it-qat-120k"
     embedding_model: str = "embeddinggemma:latest"
     backend: str = "ollama"
     max_tokens: int = 4096
