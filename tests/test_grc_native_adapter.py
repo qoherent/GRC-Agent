@@ -362,9 +362,10 @@ def test_no_yaml_safe_load_in_adapter():
 
 def test_describe_block_payload_has_symmetry_keys():
     """Catalog description (query_knowledge output) must emit the same keys
-    that ``add_blocks``/``update_params`` accept: ``block_id`` and ``params``,
-    plus a clean ``default_params`` dict whose values are copy-pasteable into
-    ``add_blocks.params``. Guards the consultant-approved symmetry contract."""
+    that ``add_blocks``/``update_params`` accept: ``block_id`` and ``params``
+(encoded ``dtype=default`` strings). Guards the consultant-approved symmetry
+    contract. ``default_params`` was dropped (redundant — the default is
+    already the substring after ``=`` in each ``params`` value)."""
     from grc_agent.catalog.loaders import describe_block
 
     payload = describe_block("analog_sig_source_x")
@@ -372,12 +373,8 @@ def test_describe_block_payload_has_symmetry_keys():
     assert payload["block_id"] == "analog_sig_source_x"
     # Encoded overview strings (dtype=default).
     assert isinstance(payload["params"], dict) and payload["params"]
-    # Clean default map — values are plain strings, no encoding.
-    defaults = payload["default_params"]
-    assert isinstance(defaults, dict) and defaults
-    assert all(isinstance(v, str) for v in defaults.values())
-    # Every visible param has a matching default entry (same key set).
-    assert set(defaults.keys()) == set(payload["params"].keys())
+    # default_params was removed (simplify by removal — strictly redundant).
+    assert "default_params" not in payload
 
 
 def test_inspect_block_uses_symmetry_field_names():

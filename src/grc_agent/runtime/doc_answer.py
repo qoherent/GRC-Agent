@@ -46,7 +46,6 @@ _QUERY_PREFIX = "task: search result | query: "
 _DOCUMENT_PREFIX = "task: search result | document: "
 _EMBED_MODEL = "embeddinggemma:latest"
 _EMBED_MAX_WORDS = 256
-_NUM_SOURCE_FILES = 5
 _MAX_CONTEXT_WORDS = 6000
 
 
@@ -256,13 +255,14 @@ def _generate_grounded_answer(
     the provided documentation.
     """
     context_parts = [
-        f"# Source: {s['path']}\n{s['content']}" for s in sources
+        f"# Source: {s['path']} — {s.get('heading', '')}\n{s['content']}"
+        for s in sources
     ]
     context = "\n\n---\n\n".join(context_parts)
-    # Safety valve: cap total context to fit the model's context window.
-    words = context.split()
-    if len(words) > _MAX_CONTEXT_WORDS:
-        context = " ".join(words[:_MAX_CONTEXT_WORDS])
+    # Cap total context to fit the model's context window. Use _cap_words
+    # (explicitly flagged) — never a raw slice, per AGENTS.md "no silent
+    # transformation."
+    context = _cap_words(context, _MAX_CONTEXT_WORDS)
 
     prompt = (
         "You are answering a GNU Radio question. Use ONLY the documentation "
@@ -300,12 +300,14 @@ def ask_grc_docs(
 ) -> ToolResult:
     """Ground one GNU Radio docs question in the wiki corpus.
 
-    Flow: embed question → sqlite-vec KNN → deduplicate to the top-N source
-    **files** (by best chunk distance) → load the **full** markdown of each →
-    single LLM call produces a concise, grounded answer.
+    Flow: embed question → sqlite-vec KNN → take the top-k **chunks**
+    directly (each ≤256 words, already the most relevant sections) → single
+    LLM call produces a concise, grounded answer.
 
-    ``k`` controls the number of source files (default 5). ``focus`` is
-    reserved for future use.
+    ``k`` controls the number of chunks (default from
+    ``agent._retrieval_cfg.ask_grc_docs_default_k``). Sending chunks instead
+    of full files eliminates the old 75% silent-truncation and cuts the
+    grounding call's input tokens ~10×.
     """
     if not isinstance(question, str) or not question.strip():
         return agent._tool_result(
@@ -315,13 +317,18 @@ def ask_grc_docs(
             error_type=ErrorCode.INVALID_REQUEST,
         )
 
-    num_files = k if isinstance(k, int) and k > 0 else _NUM_SOURCE_FILES
+    num_chunks = (
+        k
+        if isinstance(k, int) and k > 0
+        else agent._retrieval_cfg.ask_grc_docs_default_k
+    )
 
     try:
         store = VectorDocsStore(DB_PATH, agent._llama_server_url)
         query_vec = embed_query(agent._llama_server_url, question.strip())
-        # Over-fetch chunks so we can deduplicate down to num_files unique files.
-        chunk_hits = store.search(query_vec, num_files * 6)
+        # Retrieve the top-k chunks directly — the KNN already ranks by
+        # relevance; no file-level dedup or full-file reload needed.
+        chunk_hits = store.search(query_vec, num_chunks)
     except Exception as exc:
         return agent._tool_result(
             "ask_grc_docs",
@@ -330,15 +337,7 @@ def ask_grc_docs(
             error_type=ErrorCode.RETRIEVAL_NOT_READY,
         )
 
-    # Deduplicate by file path; keep the best (lowest) distance per file.
-    best_per_file: dict[str, float] = {}
-    for hit in chunk_hits:
-        p = hit["path"]
-        if p not in best_per_file or hit["distance"] < best_per_file[p]:
-            best_per_file[p] = hit["distance"]
-    top_files = sorted(best_per_file.items(), key=lambda x: x[1])[:num_files]
-
-    if not top_files:
+    if not chunk_hits:
         return agent._tool_result(
             "ask_grc_docs",
             ok=False,
@@ -346,19 +345,22 @@ def ask_grc_docs(
             error_type=ErrorCode.RETRIEVAL_NOT_READY,
         )
 
-    # Load the full markdown content for each source file.
-    sources: list[dict[str, Any]] = []
-    for path, distance in top_files:
-        full_path = DOCS_DIR / path
-        content = full_path.read_text(encoding="utf-8", errors="replace") if full_path.exists() else ""
-        sources.append({"path": path, "distance": distance, "content": content})
+    # Each chunk hit carries the raw chunk text (heading + body, ≤256 words)
+    # in its "text" field — no full-file reload from disk.
+    sources: list[dict[str, Any]] = [
+        {
+            "path": h["path"],
+            "heading": h.get("heading", ""),
+            "distance": h["distance"],
+            "content": h["text"],
+        }
+        for h in chunk_hits
+    ]
 
-    # Single LLM call: question + full source files → concise grounded answer.
+    # Single LLM call: question + relevant chunks → concise grounded answer.
     try:
         answer = _generate_grounded_answer(agent, question.strip(), sources)
     except Exception as exc:
-        # If the LLM call fails, return the raw sources so the caller still
-        # has the retrieved material.
         return agent._tool_result(
             "ask_grc_docs",
             ok=False,
@@ -370,6 +372,8 @@ def ask_grc_docs(
         "ok": True,
         "question": question.strip(),
         "answer": answer,
-        "sources": [{"path": s["path"], "distance": s["distance"]} for s in sources],
+        "sources": [
+            {"path": s["path"], "distance": s["distance"]} for s in sources
+        ],
     }
     return agent._payload_result("ask_grc_docs", payload, include_active_session=False)
