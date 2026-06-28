@@ -85,8 +85,8 @@ Three model-facing wrapper tools (the entire MVP model surface):
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (255 passed, 12 skipped) |
-| `grc_native` | `pytest -m grc_native` (26 passed, 1 skipped; requires GNU Radio) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (273 passed, 5 skipped) |
+| `grc_native` | `pytest -m grc_native` (30 passed, 1 skipped; requires GNU Radio) |
 | `gui` | `xvfb-run pytest -m gui` (6 passed) |
 
 Default CI command: `pytest -m "not grc_native and not gui and not llama_eval"`. The `docs/MODEL_CONTEXT_BIBLE.md` staleness guard (`tests/test_model_context_bible.py`) runs in this default gate.
