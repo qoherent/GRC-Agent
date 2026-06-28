@@ -657,9 +657,9 @@ class GrcAgent:
             return
         if self.session.flowgraph is None:
             return
-        if result.get("committed") is True:
+        if result.get("ok") is True:
             self._record_accepted_checkpoint(tool_name, result, before)
-        elif not result.get("ok"):
+        elif result.get("ok") is False:
             self._record_failure_journal(tool_name, result, before)
 
     def _record_accepted_checkpoint(

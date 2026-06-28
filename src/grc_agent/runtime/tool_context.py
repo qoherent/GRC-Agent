@@ -75,10 +75,7 @@ def tool_history_content_as_text(
     message = compact.get("message")
     if isinstance(message, str) and message:
         lines.append(f"message: {message}")
-    hint = compact.get("hint")
-    if isinstance(hint, str) and hint:
-        lines.append(f"hint: {hint}")
-    # Surface every per-error hint (not just the first promoted to top-level).
+    # Surface every per-error hint.
     errors_list = compact.get("errors")
     if isinstance(errors_list, list) and errors_list:
         for error_entry in errors_list:
@@ -89,33 +86,8 @@ def tool_history_content_as_text(
             if isinstance(message, str) and message:
                 lines.append(f"error: {code} — {message}")
             entry_hint = error_entry.get("hint")
-            if (
-                isinstance(entry_hint, str)
-                and entry_hint.strip()
-                and entry_hint.strip() != (hint or "").strip()
-            ):
+            if isinstance(entry_hint, str) and entry_hint.strip():
                 lines.append(f"hint: {entry_hint}")
-    # Native GRC validation errors are stored as a sibling payload field
-    # (not under ``errors``). Render them as ``error:`` lines so the model
-    # sees the real reason instead of a JSON dump.
-    native_errors = compact.get("native_validation_errors")
-    if isinstance(native_errors, list) and native_errors:
-        for native_msg in native_errors:
-            if isinstance(native_msg, str) and native_msg.strip():
-                lines.append(f"error: gnu_validation — {native_msg}")
-    # Stderr tail often names the underlying exception (e.g. a
-    # ``LookupError`` that the model can act on). Surface the last line
-    # when there is no actionable hint already.
-    stderr_text = compact.get("stderr")
-    if (
-        isinstance(stderr_text, str)
-        and stderr_text.strip()
-        and not any(line.startswith("error:") for line in lines)
-    ):
-        last_line = stderr_text.strip().splitlines()
-        tail = last_line[-1].strip() if last_line else ""
-        if tail and len(tail) < 400:
-            lines.append(f"hint: {tail}")
     if tool_name in {"search_blocks", "ask_grc_docs"}:
         return json.dumps(compact, separators=(",", ":"), sort_keys=True)
     lines.append(json.dumps(compact, separators=(",", ":"), sort_keys=True))

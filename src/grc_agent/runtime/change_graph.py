@@ -433,7 +433,7 @@ def _type_hint_for_validation(
                 ("short", "short"),
             ]:
                 if dtype in msg and value in opts:
-                    return f"Set type='{value}' on '{name}'"
+                    return f"'{name}' type enum includes '{value}' (neighbor dtype is {dtype})"
     return None
 
 
@@ -481,7 +481,7 @@ def _connection_dtype_hint(
                         opts = list(type_param.options or [])
                         if neighbor_dtype in opts:
                             parts.append(
-                                f"Set type='{neighbor_dtype}' on '{new_name}'"
+                                f"'{new_name}' type enum includes '{neighbor_dtype}' (neighbor dtype is {neighbor_dtype})"
                             )
                 except Exception:
                     pass

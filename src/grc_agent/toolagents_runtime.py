@@ -572,7 +572,6 @@ class ToolAgentsRunner:
 
             if tool_calls:
                 tool_rounds_used += 1
-                stopping_failure: dict[str, Any] | None = None
                 for tool_call in tool_calls:
                     tool_name = tool_call.tool_call_name
                     logger.info(
@@ -610,24 +609,6 @@ class ToolAgentsRunner:
                         "role": TOOL_MODEL_ROLE,
                         "payload": chat_message_payload(tool_result_message),
                     }
-                if stopping_failure is not None:
-                    assistant_text = _tool_failure_text(stopping_failure)
-                    agent.chat_history.add_assistant_message(assistant_text)
-                    yield {
-                        "event": "final",
-                        "result": {
-                            "ok": False,
-                            "model": resolved_model,
-                            "steps": assistant_turns,
-                            "tool_rounds_used": tool_rounds_used,
-                            "tool_calls_requested": tool_calls_requested,
-                            "tool_calls_executed": tool_calls_executed,
-                            "assistant_text": assistant_text,
-                            "error_type": stopping_failure.get("error_type"),
-                            "message": assistant_text,
-                        },
-                    }
-                    return
                 continue
 
             assistant_text = _resolve_final_assistant_text(
@@ -820,57 +801,6 @@ def _replace_last_assistant_text(chat_history: ChatHistory, text: str) -> None:
                 additional_information=messages[index].additional_information,
             )
             return
-
-
-def _tool_failure_text(result: dict[str, Any]) -> str:
-    if _is_native_validation_refusal(result):
-        lines = [
-            "I attempted the requested edit, but did not commit it because "
-            "native GRC validation rejected the candidate graph."
-        ]
-        lines.append("No changes were committed.")
-        native_errors = _native_validation_errors_from_result(result)
-        if native_errors:
-            lines.append("Native GRC validation reported:")
-            _MAX_NATIVE_ERRORS = 3
-            shown = [e for e in native_errors[:_MAX_NATIVE_ERRORS] if str(e)]
-            if len(native_errors) > _MAX_NATIVE_ERRORS:
-                from grc_agent.runtime.text_utils import format_truncation_flag
-
-                shown.append(
-                    format_truncation_flag(
-                        "native_validation_errors",
-                        len(native_errors),
-                        _MAX_NATIVE_ERRORS,
-                        unit="items",
-                    )
-                )
-            lines.extend(f"- {error}" for error in shown)
-        return "\n".join(lines)
-    message = result.get("message")
-    if isinstance(message, str) and message.strip():
-        return message
-    error_type = result.get("error_type")
-    if isinstance(error_type, str) and error_type.strip():
-        return f"Tool call failed: {error_type}."
-    return "I could not complete that request with the available tools."
-
-
-def _is_native_validation_refusal(result: dict[str, Any]) -> bool:
-    return bool(
-        result.get("ok") is False
-        and result.get("error_type") == ErrorCode.GNU_VALIDATION_FAILED
-    )
-
-
-def _native_validation_errors_from_result(result: dict[str, Any]) -> list[str]:
-    # New minimal shape: validation errors surface as errors[].code == "gnu_validation".
-    for entry in result.get("errors") or []:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("code") == "gnu_validation" and entry.get("message"):
-            return [str(entry["message"])]
-    return []
 
 
 def _resolve_final_assistant_text(

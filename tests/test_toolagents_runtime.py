@@ -16,7 +16,6 @@ from grc_agent.toolagents_runtime import (
     ToolAgentsRegistryBuilder,
     ToolAgentsToolDelegate,
     _function_tool_from_openai_tool,
-    _tool_failure_text,
 )
 from ToolAgents import FunctionTool
 from ToolAgents.agents import ChatToolAgent
@@ -192,41 +191,6 @@ class ToolAgentsHistoryAdapterToolMessageTests(unittest.TestCase):
         last = agent.chat_history.get_messages()[-1]
         self.assertEqual(last.role, ChatMessageRole.Assistant)
         self.assertEqual(last.get_as_text(), "hello back")
-
-
-class ToolAgentsRepairClassificationTests(unittest.TestCase):
-    def test_terminal_change_graph_failure_text_preserves_native_refusal_facts(self) -> None:
-        text = _tool_failure_text(
-            {
-                "tool": "change_graph",
-                "ok": False,
-                "error_type": "gnu_validation_failed",
-                "errors": [
-                    {"code": "gnu_validation", "message": "Source - out(0): Port is not connected."}
-                ],
-            }
-        )
-
-        self.assertIn("did not commit", text)
-        self.assertIn("No changes were committed.", text)
-        self.assertIn("Source - out(0): Port is not connected.", text)
-
-    def test_terminal_change_graph_failure_text_handles_minimal_validation_result(
-        self,
-    ) -> None:
-        text = _tool_failure_text(
-            {
-                "ok": False,
-                "error_type": "gnu_validation_failed",
-                "errors": [
-                    {"code": "gnu_validation", "message": "Source - out(0): Port is not connected."}
-                ],
-            }
-        )
-
-        self.assertIn("did not commit", text)
-        self.assertIn("No changes were committed.", text)
-        self.assertIn("Source - out(0): Port is not connected.", text)
 
 
 class ToolAgentsProviderConfigTests(unittest.TestCase):

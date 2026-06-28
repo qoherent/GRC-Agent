@@ -40,9 +40,6 @@ def _mutate_param(session: FlowgraphSession, instance_name: str, key: str, value
 def _mark_session_valid(session: FlowgraphSession) -> None:
     session.last_validation_ok = True
     session.last_validation_revision = session.state_revision
-    session.last_validation_returncode = 0
-    session.last_validation_stdout = ""
-    session.last_validation_stderr = ""
 
 
 def _mark_agent_valid(agent: GrcAgent) -> None:

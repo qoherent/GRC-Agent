@@ -158,7 +158,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
             },
             "force": {
                 "type": "boolean",
-                "description": "When true, edits are committed even if validation fails (e.g. 'Port is not connected'). Default false. Set to true after a failed attempt with a validation error.",
+                "description": "When true, edits are committed even if validation fails (e.g. 'Port is not connected'). Default false.",
             },
         },
         required=[],

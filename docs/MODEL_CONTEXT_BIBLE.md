@@ -209,7 +209,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
           },
           "force": {
             "type": "boolean",
-            "description": "When true, edits are committed even if validation fails (e.g. 'Port is not connected'). Default false. Set to true after a failed attempt with a validation error."
+            "description": "When true, edits are committed even if validation fails (e.g. 'Port is not connected'). Default false."
           }
         },
         "required": [],

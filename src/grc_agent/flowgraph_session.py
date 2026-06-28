@@ -42,9 +42,6 @@ class FlowgraphSession:
         self.flowgraph: Any | None = None
         self.is_dirty = False
         # Validation tracking (kept for agent.py save-gating compatibility).
-        self.last_validation_stdout: str | None = None
-        self.last_validation_stderr: str | None = None
-        self.last_validation_returncode: int | None = None
         self.last_validation_ok: bool | None = None
         self.last_validation_revision: int | None = None
         self._state_revision = 0
