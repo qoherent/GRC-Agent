@@ -4,16 +4,9 @@ Per AGENTS.md (no in-band control flow): no field name or value here may carry
 an ALL-CAPS directive, a "Use this when …" phrase, or a procedural recipe. The
 model's system prompt is the only behavioral authority.
 
-Two directions, two configs:
-
-- **Outbound** (state serialized to the model): ``extra="forbid"``. The wire
-  shape is locked so the model's input is predictable across turns and models.
-- **Inbound** (LLM tool-call arguments to the agent): ``extra="ignore"``. Extra
-  hallucinated fields are silently dropped; the agent never hard-crashes on a
-  harmless extra parameter. Type errors are still ``ValidationError``.
-
-No native GRC imports here. These are pure data schemas; the native adapter
-(``grc_native_adapter.py``, Phase 5) fills the outbound models.
+All models are outbound (``extra="forbid"``) — the wire shape the model
+sees is locked. Inbound JSON-schema validation lives in
+:mod:`grc_agent.runtime_tool_validation` (hand-rolled), not in Pydantic.
 """
 
 from __future__ import annotations
@@ -36,6 +29,14 @@ class BlockRole(StrEnum):
     SNIPPET = "snippet"
     OPTIONS = "options"
     OTHER = "other"
+
+
+class BlockState(StrEnum):
+    """Wire-format block state values (mirrors GRC ``Block.STATE_LABELS``)."""
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    BYPASS = "bypass"
 
 
 # --------------------------------------------------------------------------- #
@@ -103,9 +104,29 @@ class ErrorCode:
     INTERNAL_ERROR = "internal_error"
     SAFETY_CEILING = "safety_ceiling_reached"
     TOOL_NOT_ALLOWED_FOR_SURFACE = "tool_not_allowed_for_surface"
+    DUPLICATE_BLOCK_NAME = "duplicate_block_name"
     MODEL_NOT_FOUND = "model_not_found"
     BACKEND_UNREACHABLE = "backend_unreachable"
     EMPTY_MODEL_RESPONSE = "empty_model_response"
+
+
+class ToolValidationCode:
+    """Canonical inner ``validation_errors[].code`` values.
+
+    The outer ``error_type`` field uses :class:`ErrorCode`; the inner
+    per-issue ``code`` field uses these constants. One uniform source of
+    truth so a rename stays in lockstep across producers and tests.
+    """
+
+    UNKNOWN_TOOL = "unknown_tool"
+    MISSING_REQUIRED = "missing_required"
+    UNEXPECTED_ARGUMENT = "unexpected_argument"
+    INVALID_ARGUMENTS = "invalid_arguments"
+    INVALID_TYPE = "invalid_type"
+    INVALID_ENUM = "invalid_enum"
+    TOO_FEW_ITEMS = "too_few_items"
+    TOO_MANY_ITEMS = "too_many_items"
+    NO_TOOL_RAN = "no_tool_ran"
 
 
 def build_error_payload(

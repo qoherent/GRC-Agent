@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from grc_agent.domain_models import ErrorCode
 from grc_agent.grc_native_adapter import render_flow_graph
 from grc_agent.runtime.connection_ids import parse_connection_id
 from grc_agent.runtime.enums import SearchDomain
@@ -193,7 +194,7 @@ def query_knowledge(
             "query_knowledge",
             ok=False,
             message=f"Invalid domain '{domain}'.",
-            error_type="invalid_request",
+            error_type=ErrorCode.INVALID_REQUEST,
         )
 
     if domain == SearchDomain.CATALOG:

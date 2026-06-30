@@ -1,9 +1,9 @@
 import html
 import json
-import logging
 import re
 from typing import Any
 
+from grc_agent.chat_roles import DISPLAY_ROLES
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
@@ -11,9 +11,6 @@ from pygments.lexers.special import TextLexer
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices, QTextBlockFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import QLineEdit, QTextBrowser, QVBoxLayout, QWidget
-
-logger = logging.getLogger(__name__)
-
 
 # Layered defense against XSS / event-handler injection. QTextBrowser does
 # not execute JavaScript or load remote resources, but we still strip
@@ -203,6 +200,10 @@ class ChatWidget(QWidget):
 
     def append_message(self, role: str, text: str, payload: dict | None = None) -> None:
         """Append a standard completed message, parsing it as markdown/HTML."""
+        if role not in DISPLAY_ROLES:
+            raise ValueError(
+                f"unknown display role: {role!r}; expected one of {sorted(DISPLAY_ROLES)}"
+            )
         entry = {"role": role, "text": text, "_rendered": None}
         if payload:
             entry.update(payload)
@@ -225,7 +226,7 @@ class ChatWidget(QWidget):
     def append_status(self, name: str, args: str) -> None:
         """Insert a styled tool-call status block with arguments."""
         self._history.append(
-            {"role": "tool_started", "text": f"Tool: {name}\nArgs: {args}", "_rendered": None}
+            {"role": "tool_started", "tool_name": name, "args": args, "_rendered": None}
         )
         self._render_chat()
 
@@ -350,7 +351,7 @@ class ChatWidget(QWidget):
         html_contents: list[str] = []
         for idx, msg in enumerate(self._history):
             role = msg["role"]
-            text = msg["text"]
+            text = msg.get("text", "")
             cached = msg.get("_rendered")
             if cached is not None:
                 if cached:
@@ -406,9 +407,8 @@ class ChatWidget(QWidget):
                     f"</div>"
                 )
             elif role == "tool_started":
-                lines = text.split("\n", 1)
-                name = lines[0].removeprefix("Tool: ").strip() if len(lines) > 0 else ""
-                args = lines[1].removeprefix("Args: ").strip() if len(lines) > 1 else ""
+                name = str(msg.get("tool_name", ""))
+                args = str(msg.get("args", ""))
                 safe_name = html.escape(name)
                 safe_args = html.escape(args)
                 cached = (
@@ -430,7 +430,7 @@ class ChatWidget(QWidget):
                     f'padding-left: 8px; margin: 6px 0; font-size: 13px;">&#10007; {html.escape(text[:200])}</div>'
                 )
             elif role == "tool_finished":
-                tool_name = msg.get("tool_name") or msg.get("name") or "Tool"
+                tool_name = msg.get("tool_name") or "Tool"
                 is_expanded = msg.get("expanded", False)
                 raw_output = text
                 try:

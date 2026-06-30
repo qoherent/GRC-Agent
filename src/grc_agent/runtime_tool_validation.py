@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from grc_agent.domain_models import ErrorCode
+from grc_agent.domain_models import ErrorCode, ToolValidationCode
 
 ToolSchemaMap = dict[str, dict[str, Any]]
 
@@ -38,7 +38,7 @@ def validate_runtime_tool_call(
             "message": f"Unknown tool: {tool_name}",
             "validation_errors": [
                 {
-                    "code": "unknown_tool",
+                    "code": ToolValidationCode.UNKNOWN_TOOL,
                     "field": None,
                     "message": f"Unknown tool: {tool_name}",
                     "supported_tools": sorted(schema_map),
@@ -52,7 +52,7 @@ def validate_runtime_tool_call(
             "message": f"Rejected invalid tool call for {tool_name}: arguments must be a JSON object.",
             "validation_errors": [
                 {
-                    "code": "invalid_arguments",
+                    "code": ToolValidationCode.INVALID_ARGUMENTS,
                     "field": None,
                     "message": "Tool arguments must be a JSON object.",
                     "received_type": _describe_value_type(arguments),
@@ -80,16 +80,16 @@ def _schema_repair_instruction(
     missing = [
         issue.get("field")
         for issue in issues
-        if issue.get("code") == "missing_required" and isinstance(issue.get("field"), str)
+        if issue.get("code") == ToolValidationCode.MISSING_REQUIRED and isinstance(issue.get("field"), str)
     ]
     invalid = [
         issue.get("field")
         for issue in issues
-        if issue.get("code") != "missing_required" and isinstance(issue.get("field"), str)
+        if issue.get("code") != ToolValidationCode.MISSING_REQUIRED and isinstance(issue.get("field"), str)
     ]
     return {
         "tool": tool_name,
-        "no_tool_ran": True,
+        ToolValidationCode.NO_TOOL_RAN: True,
         "missing_fields": missing,
         "invalid_fields": invalid,
     }
@@ -111,7 +111,7 @@ def _validate_object(
         if required_field not in value:
             issues.append(
                 {
-                    "code": "missing_required",
+                    "code": ToolValidationCode.MISSING_REQUIRED,
                     "field": _compose_field_path(field_path, str(required_field)),
                     "message": f"Missing required argument '{required_field}'.",
                     "required_fields": sorted(str(item) for item in required_fields),
@@ -123,7 +123,7 @@ def _validate_object(
         for unexpected_field in sorted(key for key in value if key not in defined_properties):
             issues.append(
                 {
-                    "code": "unexpected_argument",
+                    "code": ToolValidationCode.UNEXPECTED_ARGUMENT,
                     "field": _compose_field_path(field_path, unexpected_field),
                     "message": f"Unsupported argument '{unexpected_field}'.",
                     "allowed_fields": sorted(defined_properties),
@@ -159,7 +159,7 @@ def _validate_value(
         if matched_type is None:
             issues.append(
                 {
-                    "code": "invalid_type",
+                    "code": ToolValidationCode.INVALID_TYPE,
                     "field": field_path,
                     "message": (
                         f"Argument '{field_path}' must be "
@@ -175,7 +175,7 @@ def _validate_value(
     if isinstance(enum_values, list) and value not in enum_values:
         issues.append(
             {
-                "code": "invalid_enum",
+                "code": ToolValidationCode.INVALID_ENUM,
                 "field": field_path,
                 "message": f"Argument '{field_path}' must be one of {enum_values}.",
                 "allowed_values": enum_values,
@@ -192,7 +192,7 @@ def _validate_value(
         if isinstance(min_items, int) and len(value) < min_items:
             issues.append(
                 {
-                    "code": "too_few_items",
+                    "code": ToolValidationCode.TOO_FEW_ITEMS,
                     "field": field_path,
                     "message": (f"Argument '{field_path}' must contain at least {min_items} item."),
                     "min_items": min_items,
@@ -203,7 +203,7 @@ def _validate_value(
         if isinstance(max_items, int) and len(value) > max_items:
             issues.append(
                 {
-                    "code": "too_many_items",
+                    "code": ToolValidationCode.TOO_MANY_ITEMS,
                     "field": field_path,
                     "message": (f"Argument '{field_path}' must contain at most {max_items} items."),
                     "max_items": max_items,

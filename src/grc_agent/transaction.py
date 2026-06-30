@@ -40,7 +40,7 @@ def capture_session_state(session: FlowgraphSession) -> SessionStateSnapshot:
         path=session.path,
         is_dirty=session.is_dirty,
         state_revision=session.state_revision,
-        persisted_file_sha256=session._persisted_file_sha256,
+        persisted_file_sha256=session.persisted_file_sha256,
     )
 
 
@@ -50,8 +50,8 @@ def restore_session_state(
 ) -> FlowgraphSession:
     session.path = snapshot.path
     session.is_dirty = snapshot.is_dirty
-    session._state_revision = snapshot.state_revision
-    session._persisted_file_sha256 = snapshot.persisted_file_sha256
+    session.set_state_revision(snapshot.state_revision)
+    session.set_persisted_sha256(snapshot.persisted_file_sha256)
     if snapshot.raw_data is not None:
         from grc_agent.grc_native_adapter import get_platform
 

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from grc_agent.agent import GrcAgent
+from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.model_context import build_system_prompt
 from grc_agent.toolagents_runtime import (
@@ -36,13 +37,11 @@ WORKSPACE = Path(__file__).resolve().parents[2]
 # Results land in the gitignored tests/output/agent_flow/ dir (regenerated on
 # each run, never committed) — shared with the gated live test.
 RESULTS = WORKSPACE / "tests" / "output" / "agent_flow"
-RESULTS.mkdir(parents=True, exist_ok=True)
 
 FIXTURE = WORKSPACE / "tests" / "data" / "dial_tone.grc"
 FM_RX_FIXTURE = WORKSPACE / "tests" / "data" / "fm_rx.grc"
 EMPTY_FIXTURE = WORKSPACE / "tests" / "data" / "empty.grc"
 BROKEN_SINK_FIXTURE = WORKSPACE / "tests" / "data" / "broken_unconnected_sink.grc"
-OLLAMA_URL = "http://localhost:11434"
 # Custom Modelfile model: gemma4:e4b-it-qat-120k with PARAMETER num_ctx
 # 120000 baked in (Ollama's /v1 endpoint ignores per-request num_ctx — see
 # docs/AGENT_FLOW_FINDINGS.md).
@@ -51,29 +50,21 @@ MODEL = "gemma4:e4b-it-qat-120k"
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)
 
+from dotenv import load_dotenv  # noqa: E402  (after logging.basicConfig)
+
 
 def _load_dotenv() -> None:
-    """Read .env at the workspace root into os.environ (no override).
-
-    Sets only keys not already present in the environment, so explicit
-    shell exports win. Used by the ``openrouter`` provider factory.
-    """
-    env_path = WORKSPACE / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+    """Load .env at the workspace root into os.environ (no override)."""
+    load_dotenv(WORKSPACE / ".env", override=False)
 
 
 def _default_ollama_provider() -> ToolAgentsLlamaProviderConfig:
     """The original local-Ollama provider (unchanged harness behavior)."""
+    from grc_agent.config import default_app_config
+
     model = os.environ.get("OLLAMA_MODEL", MODEL)
     return ToolAgentsLlamaProviderConfig(
-        base_url=OLLAMA_URL,
+        base_url=default_app_config().llama.server_url,
         model=model,
         timeout_seconds=180.0,
         max_tokens=2048,
@@ -532,7 +523,7 @@ def _graph_state(fixture_path: Path) -> dict[str, Any]:
 
     fg = load_flow_graph(fixture_path)
     valid = bool(validate(fg).native_ok)  # fresh: rewrite + validate + is_valid
-    snap = render_flow_graph(fg, mode="details")
+    snap = render_flow_graph(fg, mode="overview")  # match the engine-core helper
     return {
         "valid": valid,
         "instance_names": sorted(b.instance_name for b in snap.blocks),
@@ -705,7 +696,7 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
         (e.get("result", {}) for e in events if e.get("event") == "final"), {}
     )
     final_text = (final.get("assistant_text") or "").strip()
-    hit_ceiling = final.get("error_type") == "safety_ceiling_reached"
+    hit_ceiling = final.get("error_type") == ErrorCode.SAFETY_CEILING
 
     n_assistant = sum(1 for e in events if e.get("role") == "assistant_model")
     n_tool_model = sum(1 for e in events if e.get("role") == "tool_model")
@@ -762,7 +753,7 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
                 if is_inline:
                     n_inline_insert_committed += 1
                 has_gnu_val = any(
-                    e.get("code") == "gnu_validation"
+                    e.get("code") == ErrorCode.GNU_VALIDATION_FAILED
                     for e in (result_obj.get("errors") or [])
                 )
                 if has_gnu_val:
@@ -927,6 +918,7 @@ def write_metrics_outputs(
 
 
 def main(runs: int = 1, provider: str = "ollama") -> None:
+    RESULTS.mkdir(parents=True, exist_ok=True)
     provider_config = _make_provider(provider)
     active_model = provider_config.model or MODEL
     print(f"Provider: {provider} | Model: {active_model}")

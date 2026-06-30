@@ -3,6 +3,7 @@
 import unittest
 from pathlib import Path
 
+from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session import load_grc, summarize_graph
 
@@ -53,4 +54,4 @@ class SummarizeGraphTests(unittest.TestCase):
         payload = summarize_graph(session)
 
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error_type"], "invalid_request")
+        self.assertEqual(payload["error_type"], ErrorCode.INVALID_REQUEST)

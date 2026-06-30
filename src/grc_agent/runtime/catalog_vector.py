@@ -42,13 +42,14 @@ CATALOG_DB_PATH = DB_DIR / "catalog_v1.db"
 
 
 
-# --- gemma-3 task prefixes (uniform across query and document) --------------
-_QUERY_PREFIX = "task: search result | query: "
-_DOCUMENT_PREFIX = "task: search result | document: "
-
-# --- Embed-text body cap (mirrors doc_answer.CHUNK_MAX_WORDS) ---------------
-_CATALOG_EMBED_MAX_WORDS = 256
-_EMBED_DIM = 768  # embeddinggemma float32
+# --- Embedding constants: single source of truth in doc_answer ---------------
+from grc_agent.runtime.doc_answer import (
+    _DOCUMENT_PREFIX,
+    _EMBED_DIM,
+    _EMBED_MAX_WORDS,
+    _EMBED_MODEL,
+    _QUERY_PREFIX,
+)  # noqa: F401  (re-exported for catalog-vector callers)
 
 # --- Hybrid retrieval (consultant-approved: FTS5-porter + vector, weighted RRF)
 RRF_K = 60  # standard Reciprocal Rank Fusion constant
@@ -107,7 +108,7 @@ def _cap_embed_body(parts: list[str], max_words: int) -> str:
     If the body would exceed ``max_words``, the body is truncated to
     ``max_words`` words and a visible flag is appended:
     ``[TRUNCATED by catalog embed: was N words, kept M]``. This mirrors
-    the docs pipeline's ``CHUNK_MAX_WORDS = 256`` cap and the
+    the docs pipeline's ``_EMBED_MAX_WORDS = 256`` cap and the
     ``[TRUNCATED ...]`` convention from ``text_utils``.
     """
     body = "\n".join(parts)
@@ -168,7 +169,7 @@ def compose_block_embed_text(
         parts.extend(f"port: {p}" for p in ports)
     if documentation:
         parts.append(documentation.strip())
-    body = _cap_embed_body(parts, _CATALOG_EMBED_MAX_WORDS)
+    body = _cap_embed_body(parts, _EMBED_MAX_WORDS)
     return _DOCUMENT_PREFIX + body
 
 
@@ -176,7 +177,7 @@ def embed_block_text(
     server_url: str,
     body: str,
     *,
-    model: str = "embeddinggemma:latest",
+    model: str = _EMBED_MODEL,
 ) -> list[float]:
     """Embed a block text with the uniform document prefix.
 
@@ -191,7 +192,7 @@ def embed_block_text(
 
 
 def embed_query(
-    server_url: str, query: str, *, model: str = "embeddinggemma:latest"
+    server_url: str, query: str, *, model: str = _EMBED_MODEL
 ) -> list[float]:
     """Embed a search query with the uniform query prefix."""
     return get_embedding(server_url, _QUERY_PREFIX + query, model=model)

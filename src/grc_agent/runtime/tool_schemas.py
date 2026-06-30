@@ -12,6 +12,12 @@ to the model. They are called only by ``query_knowledge`` itself.
 
 from typing import Any
 
+from grc_agent.domain_models import BlockState
+from grc_agent.runtime.enums import SearchDomain
+
+VALID_INSPECT_VIEWS: frozenset[str] = frozenset({"overview"})
+WHOLE_GRAPH_WILDCARDS: frozenset[str] = frozenset({"all", "*"})
+
 
 def _schema(
     name: str,
@@ -46,7 +52,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
         {
             "view": {
                 "type": "string",
-                "enum": ["overview"],
+                "enum": sorted(VALID_INSPECT_VIEWS),
                 "description": "The view mode. Defaults to 'overview'.",
             },
             "targets": {
@@ -68,7 +74,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
             },
             "domain": {
                 "type": "string",
-                "enum": ["catalog", "docs"],
+                "enum": [d.value for d in SearchDomain],
                 "description": "'catalog' for block types/params; 'docs' for concepts.",
             },
         },
@@ -100,7 +106,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                         },
                         "state": {
                             "type": "string",
-                            "enum": ["enabled", "disabled", "bypass"],
+                            "enum": [s.value for s in BlockState],
                             "description": "Initial block state; defaults to 'enabled'.",
                         },
                     },
@@ -144,7 +150,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                         },
                         "state": {
                             "type": "string",
-                            "enum": ["enabled", "disabled", "bypass"],
+                            "enum": [s.value for s in BlockState],
                             "description": "New block state.",
                         },
                     },

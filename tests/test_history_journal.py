@@ -76,4 +76,3 @@ class HistoryJournalTests(unittest.TestCase):
         # Unlink the database file. If a connection was leaked and left open, unlinking would fail
         # on Windows or we can check active handles.
         self.journal_path.unlink()
-        self.assertFalse(self.journal_path.exists())

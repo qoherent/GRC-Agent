@@ -28,7 +28,7 @@ from grc_agent.grc_native_adapter import (
     validate,
     write_flow_graph_atomic,
 )
-from grc_agent.runtime.param_filter import DETAILS, EXCLUDED_PARAM_CATEGORIES, OVERVIEW
+from grc_agent.runtime.param_filter import DETAILS, EXCLUDED_PARAM_CATEGORIES, OVERVIEW, keep_param
 
 pytestmark = pytest.mark.grc_native
 
@@ -195,44 +195,38 @@ def test_classify_role_source_sink_transform():
 # --- render_parameter visibility --------------------------------------------- #
 
 
-def test_render_parameter_filters_advanced_and_config_and_hide_all():
+def test_render_parameter_matches_keep_param_for_every_param():
+    """``render_parameter`` must agree with the bible ``keep_param`` for every
+    param in every mode. Driving the assertion through the production rule
+    (not a hand-written subset) prevents the "test that copies production"
+    anti-pattern: a future bugfix in ``keep_param`` is caught here, and a
+    future divergence between ``render_parameter`` and ``keep_param`` is
+    caught too.
+    """
     fg = load_flow_graph(FIXTURES / "qtgui_vector_sink_example.grc")
     target = next(b for b in fg.blocks if b.key.startswith("qtgui"))
 
-    # 1. Details mode: only drops category ∈ {Advanced, Config}, hide == 'all', dtype == 'gui_hint'.
-    for k, p in target.params.items():
-        rendered = render_parameter(target, k, p, mode=DETAILS)
-        if (
-            p.category in EXCLUDED_PARAM_CATEGORIES
-            or p.hide == "all"
-            or p.dtype == "gui_hint"
-            or k == "showports"
-            or k.startswith("bus_structure_")
-        ):
-            assert rendered is None
-        else:
-            assert rendered == str(p.value)
+    for mode in (DETAILS, OVERVIEW):
+        for k, p in target.params.items():
+            expected = keep_param(
+                hide=p.hide,
+                category=p.category,
+                dtype=p.dtype,
+                value=p.value,
+                default=p.default,
+                mode=mode,
+                param_key=k,
+            )
+            rendered = render_parameter(target, k, p, mode=mode)
+            assert (rendered is None) == (not expected), (
+                f"mode={mode} key={k!r}: keep_param={expected} but "
+                f"render_parameter returned {'None' if rendered is None else 'value'}"
+            )
 
-    # 2. Overview mode: additionally drops any parameter at its default value
-    #    (unless structural 'type' or 'generate_options').
-    for k, p in target.params.items():
-        rendered = render_parameter(target, k, p, mode=OVERVIEW)
-        if (
-            p.category in EXCLUDED_PARAM_CATEGORIES
-            or p.hide == "all"
-            or p.dtype == "gui_hint"
-            or k == "showports"
-            or k.startswith("bus_structure_")
-            or (str(p.value) == str(p.default) and k not in {"type", "generate_options"})
-        ):
-            assert rendered is None
-        else:
-            assert rendered == str(p.value)
-
-    # Also confirm the rendered output for this block contains no
-    # Advanced/Config params and no hide=='all' params.
+    # Spot-check: no Advanced/Config params leak into the rendered block.
     rendered_block = render_block(target, flow_graph=fg)
     from grc_agent.runtime.param_filter import param_metadata
+
     meta = param_metadata(rendered_block.block_id)
     for k in rendered_block.params.keys():
         info = meta.get(k, {})
@@ -531,19 +525,23 @@ def test_options_block_renders_params_with_id_dropped():
 
 
 def test_qtgui_cosmetic_params_filtered_from_overview():
-    """qtgui styling grids (alpha/color/label/marker/style/width + numeric
-    suffix) are category='Config' and must be dropped by Stage A — they must
-    never flood the overview."""
+    """qtgui Config-category params (cosmetic styling) must be dropped by
+    Stage A — test the rule (category == "Config") rather than a string-prefix
+    heuristic so a regression in either direction is caught.
+    """
     fg = load_flow_graph(FIXTURES / "fm_rx.grc")
     snap = render_flow_graph(fg, mode=OVERVIEW)
     d = snap.model_dump(exclude_none=True)
-    cosmetic = ("alpha", "color", "label", "marker", "style", "width")
     for b in d["blocks"]:
-        if "qtgui" in b["block_id"]:
-            for key in b["params"]:
-                assert not (
-                    any(key.startswith(p) for p in cosmetic) and key[-1].isdigit()
-                ), f"cosmetic param {key!r} leaked into overview"
+        if "qtgui" not in b["block_id"]:
+            continue
+        for key in b["params"]:
+            from grc_agent.runtime.param_filter import categories
+
+            assert categories(b["block_id"]).get(key) != "Config", (
+                f"Config-category param {key!r} leaked into overview for "
+                f"{b['block_id']!r}"
+            )
 
 
 def test_catalog_stream_ports_carry_positional_keys():

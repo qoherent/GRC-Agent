@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Any
 
+from grc_agent.domain_models import BlockRole
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -35,7 +36,7 @@ class InspectorWidget(QWidget):
 
     The widget currently consumes the ``inspect_graph`` **overview** payload
     only (audit 5.4). The variables table reads ``value`` for blocks whose
-    ``block_id == "variable"``; ``variable_*`` variants and non-variable
+    ``role == "variable"``; ``variable_*`` variants and non-variable
     blocks do not have a ``value`` field in the overview and will show
     an empty cell. Per-block parameter details require the ``details``
     view, which is intentionally out of scope for this sidebar widget.
@@ -191,13 +192,13 @@ class InspectorWidget(QWidget):
         # (transform, message_or_event, metadata, unknown) fold into
         # ``other_blocks``.
         category_for_role = {
-            "variable": "variables",
-            "source": "sources",
-            "sink": "sinks",
+            BlockRole.VARIABLE: "variables",
+            BlockRole.SOURCE: "sources",
+            BlockRole.SINK: "sinks",
         }
 
         for block in blocks:
-            role = str(block.get("role", "")).lower()
+            role = BlockRole(str(block.get("role", "")).lower())
             categories[category_for_role.get(role, "other_blocks")].append(block)
 
         for cat_key, cat_blocks in categories.items():

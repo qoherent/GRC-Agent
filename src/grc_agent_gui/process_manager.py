@@ -40,14 +40,8 @@ class ProcessManager(QObject):
         self._should_run_after_compile = False
 
     def resolve_flowgraph_id(self, session) -> str:
-        """Resolve the options block id parameter from the session flowgraph metadata."""
-        try:
-            return session.flowgraph.metadata["options"]["parameters"]["id"]
-        except (KeyError, TypeError, AttributeError) as e:
-            logger.warning(
-                f"Could not resolve flowgraph ID from metadata: {e}. Defaulting to 'top_block'."
-            )
-            return "top_block"
+        """Resolve the top-block class name (single source of truth: ``FlowgraphSession.get_top_block_class_name``)."""
+        return session.get_top_block_class_name()
 
     def _disconnect_and_reap(self, proc: QProcess, label: str) -> None:
         failed = 0
@@ -206,14 +200,11 @@ class ProcessManager(QObject):
             self.compile_process = None
             proc.deleteLater()
 
-        # Robust comparison to handle patched QProcess in test environments
-        is_normal_exit = False
-        if exit_status == 0:
-            is_normal_exit = True
-        elif getattr(exit_status, "name", "") == "NormalExit":
-            is_normal_exit = True
-        elif "NormalExit" in str(exit_status):
-            is_normal_exit = True
+        # Robust comparison to handle patched QProcess in test environments.
+        # Keeps the integer branch (covers int test mocks) and the .name branch
+        # (covers Qt's IntEnum). The substring branch was removed — it accepted
+        # any string containing "NormalExit", including the class name itself.
+        is_normal_exit = exit_status == 0 or getattr(exit_status, "name", "") == "NormalExit"
 
         if exit_code == 0 and is_normal_exit:
             self.status_message.emit("Validation passed.")

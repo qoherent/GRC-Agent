@@ -34,7 +34,8 @@ class FlowgraphSession:
         self.path = Path(path) if path is not None else None
         self.flowgraph: Any | None = None
         self.is_dirty = False
-        # Validation tracking (kept for agent.py save-gating compatibility).
+        # Validation snapshot (consumed by ``summary_payload`` to report
+        # status without re-running ``validate()`` on every call).
         self.last_validation_ok: bool | None = None
         self.last_validation_revision: int | None = None
         self._state_revision = 0
@@ -46,8 +47,17 @@ class FlowgraphSession:
     def state_revision(self) -> int:
         return self._state_revision
 
-    def _bump_state_revision(self) -> None:
+    def bump_revision(self) -> None:
+        """Increment the state revision (public API for the change_graph engine)."""
         self._state_revision += 1
+
+    def set_state_revision(self, value: int) -> None:
+        """Restore the state revision (used by ``transaction.restore_session``)."""
+        self._state_revision = int(value)
+
+    def set_persisted_sha256(self, value: str | None) -> None:
+        """Restore the persisted-file SHA-256 (used by ``transaction.restore_session``)."""
+        self._persisted_file_sha256 = value
 
     @property
     def persisted_file_sha256(self) -> str | None:
@@ -241,3 +251,17 @@ class FlowgraphSession:
                 "hash_file_failed path=%s: %s", path, exc
             )
             return None
+
+    def get_top_block_class_name(self) -> str:
+        """Return the top-block class name (defaults to ``"top_block"``).
+
+        Single source of truth for the top-block identity; replaces
+        callers that reached into ``session.flowgraph.metadata["options"]
+        ["parameters"]["id"]`` directly.
+        """
+        if self.flowgraph is None:
+            return "top_block"
+        options = getattr(self.flowgraph, "options_block", None)
+        if options is None:
+            return "top_block"
+        return str(getattr(options, "name", "top_block") or "top_block")

@@ -50,10 +50,11 @@ def dispatch_flat_change_graph_batch(
             "change_graph",
             {
                 "ok": False,
-                "error_type": "stale_revision",
-                "errors": [
-                    {"code": "stale_revision", "message": "file changed on disk; reload before editing"}
-                ],
+                "error_type": ErrorCode.STALE_REVISION,
+                "errors": [{
+                    "code": ErrorCode.STALE_REVISION,
+                    "message": "file changed on disk; reload before editing",
+                }],
             },
         )
 
@@ -308,7 +309,7 @@ def dispatch_flat_change_graph_batch(
         committed = True
     if committed and ops_applied:
         agent.session.is_dirty = True
-        agent.session._bump_state_revision()
+        agent.session.bump_revision()
         # Skip save if serialized form is unchanged (noop detection).
         try:
             after_serialized = _serialize_fg(fg)

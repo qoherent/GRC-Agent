@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from grc_agent.agent import GrcAgent
+from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime_tool_validation import build_tool_schema_map, validate_runtime_tool_call
 
@@ -25,8 +26,8 @@ class RuntimeToolValidationTests(unittest.TestCase):
         result = validate_runtime_tool_call("set_variable", {}, self._schema_map())
 
         assert result is not None
-        self.assertEqual(result["error_type"], "unknown_tool")
-        self.assertEqual(result["validation_errors"][0]["code"], "unknown_tool")
+        self.assertEqual(result["error_type"], ErrorCode.UNKNOWN_TOOL)
+        self.assertEqual(result["validation_errors"][0]["code"], ErrorCode.UNKNOWN_TOOL)
 
     def test_unsupported_extra_argument_is_rejected(self) -> None:
         result = validate_runtime_tool_call(
@@ -36,7 +37,7 @@ class RuntimeToolValidationTests(unittest.TestCase):
         )
 
         assert result is not None
-        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertEqual(result["error_type"], ErrorCode.TOOL_CALL_INVALID)
         self.assertEqual(result["validation_errors"][0]["code"], "unexpected_argument")
         self.assertEqual(result["validation_errors"][0]["field"], "unexpected")
         self.assertTrue(result["schema_repair_instruction"]["no_tool_ran"])
@@ -50,7 +51,7 @@ class RuntimeToolValidationTests(unittest.TestCase):
         )
 
         assert result is not None
-        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertEqual(result["error_type"], ErrorCode.TOOL_CALL_INVALID)
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_type")
         self.assertEqual(result["validation_errors"][0]["field"], "domain")
 
@@ -62,7 +63,7 @@ class RuntimeToolValidationTests(unittest.TestCase):
         )
 
         assert result is not None
-        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertEqual(result["error_type"], ErrorCode.TOOL_CALL_INVALID)
         self.assertEqual(result["validation_errors"][0]["code"], "invalid_enum")
         self.assertEqual(result["validation_errors"][0]["field"], "domain")
 

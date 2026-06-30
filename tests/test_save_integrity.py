@@ -34,7 +34,7 @@ def _mutate_param(session: FlowgraphSession, instance_name: str, key: str, value
     assert session.flowgraph is not None
     apply_mutation(session.flowgraph, "update_params", instance_name=instance_name, params={key: value})
     session.is_dirty = True
-    session._bump_state_revision()
+    session.bump_revision()
 
 
 def _mark_session_valid(session: FlowgraphSession) -> None:

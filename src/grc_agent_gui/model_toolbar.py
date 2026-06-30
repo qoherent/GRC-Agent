@@ -9,8 +9,7 @@ are orchestrated by :class:`MainWindow` via signals.
 
 from __future__ import annotations
 
-import logging
-
+from grc_agent.config import ALLOWED_BACKENDS
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -21,10 +20,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-logger = logging.getLogger(__name__)
-
 _BACKEND_OLLAMA = "ollama"
 _BACKEND_OPENROUTER = "openrouter"
+# Single source of truth: ``config.ALLOWED_BACKENDS``. Fail loud on drift.
+assert {_BACKEND_OLLAMA, _BACKEND_OPENROUTER} == ALLOWED_BACKENDS, (
+    f"GUI backends out of sync with config.ALLOWED_BACKENDS={ALLOWED_BACKENDS}"
+)
 _PLACEHOLDER_MODEL = "(select model)"
 
 _STYLE = """

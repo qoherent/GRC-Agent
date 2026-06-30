@@ -3,6 +3,7 @@
 import unittest
 from pathlib import Path
 
+from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.session import load_grc
 
@@ -31,7 +32,10 @@ class LoadGrcErrorTests(unittest.TestCase):
             self.assertNotIsInstance(result, FlowgraphSession)
             self.assertIsInstance(result, dict)
             self.assertFalse(result["ok"])
-            self.assertIn(result["error_type"], ("invalid_grc", "file_load_error"))
+            self.assertIn(
+                result["error_type"],
+                (ErrorCode.INVALID_GRC, ErrorCode.FILE_LOAD_ERROR),
+            )
         finally:
             Path(malformed_path).unlink(missing_ok=True)
 

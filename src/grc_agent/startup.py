@@ -200,6 +200,10 @@ def _classify_launcher_error(exc: BaseException, server_url: str) -> str:
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)):
         logger.warning("Backend unreachable at %s: %s", server_url, exc)
         return ErrorCode.BACKEND_UNREACHABLE
+    # Last-resort fallback: backend did not surface a structured error code.
+    # Substring match is the only signal left for ``model_not_found``-shaped
+    # errors. If the backend SDK grows a typed exception hierarchy, prefer
+    # that over this text probe.
     lowered = str(exc).lower()
     if "alias" in lowered and "mismatch" in lowered:
         return ErrorCode.MODEL_NOT_FOUND

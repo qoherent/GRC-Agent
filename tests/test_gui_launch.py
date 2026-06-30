@@ -18,6 +18,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+from grc_agent.domain_models import ErrorCode
 
 pytestmark = pytest.mark.gui
 
@@ -39,7 +40,7 @@ def _make_fake_bootstrap_result() -> Any:
     result = RuntimeBootstrapResult()
     result.provider_config = provider
     result.launch_status = "probe_failed"
-    result.error_type = "backend_unreachable"
+    result.error_type = ErrorCode.BACKEND_UNREACHABLE
     result.server_url = "http://127.0.0.1:11434"
     result.model_alias = "qwen3.5:9b-q4_K_M"
     result.errors = [
