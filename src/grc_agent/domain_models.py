@@ -103,10 +103,7 @@ class ErrorCode:
     INTERNAL_ERROR = "internal_error"
     SAFETY_CEILING = "safety_ceiling_reached"
     TOOL_NOT_ALLOWED_FOR_SURFACE = "tool_not_allowed_for_surface"
-    LLAMA_SERVER_MISSING = "llama_server_missing"
-    GRCC_MISSING = "grcc_missing"
     MODEL_NOT_FOUND = "model_not_found"
-    INIT_FAILED = "init_failed"
     BACKEND_UNREACHABLE = "backend_unreachable"
     EMPTY_MODEL_RESPONSE = "empty_model_response"
 

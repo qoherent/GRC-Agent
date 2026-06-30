@@ -380,74 +380,40 @@ def _neighbor_dtype_for(
     another newly-added block. We prioritize existing blocks first to
     correctly bootstrap type resolution in new block chains.
     """
-    # Pass 1: Try neighbors that are NOT newly-added blocks (existing blocks).
+    # Single pass: record the first hit from an existing block and the first
+    # hit from a newly-added block; return the existing-block hit if any,
+    # otherwise fall back to the new-block hit.
+    from grc_agent.grc_native_adapter import port_object
+
+    existing_dtype: str | None = None
+    new_dtype: str | None = None
     for conn_entry in add_connections:
         parsed = parse_connection_id(str(conn_entry))
         if not parsed:
             continue
         other: str | None = None
+        port_key: str | None = None
         if parsed["src_block"] == instance_name:
             other = parsed["dst_block"]
+            port_key = str(parsed["dst_port"])
         elif parsed["dst_block"] == instance_name:
             other = parsed["src_block"]
-        if not other:
+            port_key = str(parsed["src_port"])
+        if not other or not port_key:
+            continue
+        kind = "sink" if parsed["src_block"] == instance_name else "source"
+        port = port_object(fg, other, port_key, kind=kind)
+        if port is None:
+            continue
+        dtype = getattr(port, "dtype", None)
+        if not dtype:
             continue
         if new_block_names and other in new_block_names:
-            continue
-        try:
-            block = fg.get_block(other)
-        except KeyError:
-            continue
-        ports = (
-            block.active_sinks
-            if parsed["dst_block"] == other
-            else block.active_sources
-        )
-        port_key = (
-            str(parsed["dst_port"])
-            if parsed["dst_block"] == other
-            else str(parsed["src_port"])
-        )
-        for p in ports:
-            if p.key == port_key:
-                dtype = getattr(p, "dtype", None)
-                if dtype:
-                    return str(dtype)
-                break
-
-    # Pass 2: Fall back to any neighbor (including newly-added blocks).
-    for conn_entry in add_connections:
-        parsed = parse_connection_id(str(conn_entry))
-        if not parsed:
-            continue
-        other = None
-        if parsed["src_block"] == instance_name:
-            other = parsed["dst_block"]
-        elif parsed["dst_block"] == instance_name:
-            other = parsed["src_block"]
-        if not other:
-            continue
-        try:
-            block = fg.get_block(other)
-        except KeyError:
-            continue
-        ports = (
-            block.active_sinks
-            if parsed["dst_block"] == other
-            else block.active_sources
-        )
-        port_key = (
-            str(parsed["dst_port"])
-            if parsed["dst_block"] == other
-            else str(parsed["src_port"])
-        )
-        for p in ports:
-            if p.key == port_key:
-                dtype = getattr(p, "dtype", None)
-                if dtype:
-                    return str(dtype)
-                break
-    return None
+            if new_dtype is None:
+                new_dtype = str(dtype)
+        else:
+            return str(dtype)
+    return existing_dtype or new_dtype
 
 
 def _neighbor_port_dtype(fg: Any, block_name: str) -> str | None:
@@ -533,10 +499,14 @@ def _connection_dtype_hint(
     and the matching option (if any) is found mechanically from the enum.
     """
     try:
-        from grc_agent.grc_native_adapter import _find_port
+        from grc_agent.grc_native_adapter import port_object
 
-        src_p = _find_port(fg, src_block, src_port, kind="source")
-        dst_p = _find_port(fg, dst_block, dst_port, kind="sink")
+        src_p = port_object(fg, src_block, src_port, kind="source")
+        dst_p = port_object(fg, dst_block, dst_port, kind="sink")
+        if src_p is None:
+            raise KeyError(f"source port {src_port!r} not on block {src_block!r}")
+        if dst_p is None:
+            raise KeyError(f"sink port {dst_port!r} not on block {dst_block!r}")
         src_dtype = getattr(src_p, "dtype", None)
         dst_dtype = getattr(dst_p, "dtype", None)
         parts: list[str] = []

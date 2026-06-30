@@ -341,7 +341,7 @@ class GraphHistoryJournal:
             }
         snapshot = _snapshot_from_record(record)
         session = FlowgraphSession.from_raw_data(snapshot.raw_data, path=target)
-        session.save(target, validate=False)
+        session.save(target)
         valid = session.validate()
         validation = session.validation_state()
         return {
@@ -451,9 +451,6 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
     digest = hashlib.sha256(f"{path}\n{graph_hash}".encode()).hexdigest()[:16]
     return f"lineage:{digest}"
 
-
-def operation_type_from_result(tool_name: str, result: dict[str, Any]) -> str:
-    return tool_name
 
 
 def _result_validation(result: dict[str, Any]) -> dict[str, Any] | None:

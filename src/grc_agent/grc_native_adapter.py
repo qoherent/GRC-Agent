@@ -25,9 +25,14 @@ and the test surface accept ``(block_name, port_key)`` and resolve internally.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
+import shutil
 import tempfile
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -174,26 +179,78 @@ def load_and_inspect(file_path: Path) -> GrcFlowgraph:
 # --------------------------------------------------------------------------- #
 
 
-def classify_role(block: Any) -> BlockRole:
-    if getattr(block, "is_variable", False):
+def _classify_role_core(
+    *,
+    key: str,
+    is_variable: bool,
+    is_import: bool,
+    is_snippet: bool,
+    is_virtual_or_pad: bool,
+    has_sources: bool,
+    has_sinks: bool,
+) -> BlockRole:
+    """Single source of truth for block role classification.
+
+    Mirrors the logic that used to live inline in ``catalog/schema.py``.
+    Restores ``VIRTUAL_OR_PAD`` (previously dropped by the catalog inline
+    ladder) so every catalog payload classifies to the same role a live
+    GRC block would.
+    """
+    if is_variable:
         return BlockRole.VARIABLE
-    if getattr(block, "is_import", False):
+    if is_import:
         return BlockRole.IMPORT
-    if getattr(block, "is_snippet", False):
+    if is_snippet:
         return BlockRole.SNIPPET
-    if getattr(block, "is_virtual_or_pad", False):
+    if is_virtual_or_pad:
         return BlockRole.VIRTUAL_OR_PAD
-    if block.key == "options":
+    if key == "options":
         return BlockRole.OPTIONS
-    has_out = len(block.active_sources) > 0
-    has_in = len(block.active_sinks) > 0
-    if has_out and not has_in:
+    if has_sources and not has_sinks:
         return BlockRole.SOURCE
-    if has_in and not has_out:
+    if has_sinks and not has_sources:
         return BlockRole.SINK
-    if has_in and has_out:
+    if has_sources and has_sinks:
         return BlockRole.TRANSFORM
     return BlockRole.OTHER
+
+
+def classify_role(block: Any) -> BlockRole:
+    """Classify a live GRC block (uses native ``Block`` discriminators)."""
+    return _classify_role_core(
+        key=getattr(block, "key", ""),
+        is_variable=bool(getattr(block, "is_variable", False)),
+        is_import=bool(getattr(block, "is_import", False)),
+        is_snippet=bool(getattr(block, "is_snippet", False)),
+        is_virtual_or_pad=bool(getattr(block, "is_virtual_or_pad", False)),
+        has_sources=len(getattr(block, "active_sources", ()) or ()) > 0,
+        has_sinks=len(getattr(block, "active_sinks", ()) or ()) > 0,
+    )
+
+
+def classify_role_from_catalog(
+    key: str,
+    flags: list[str] | tuple[str, ...],
+    *,
+    has_sources: bool,
+    has_sinks: bool,
+) -> BlockRole:
+    """Classify a catalog payload to the same role a live block would get.
+
+    Single source of truth with :func:`classify_role` via
+    :func:`_classify_role_core`. Derives native discriminators from
+    catalog metadata (``flags`` and ``key``).
+    """
+    flags_tuple = tuple(flags or ())
+    return _classify_role_core(
+        key=key,
+        is_variable="variable" in flags_tuple or key.startswith("variable"),
+        is_import=key == "import",
+        is_snippet=key == "snippet",
+        is_virtual_or_pad=key.startswith(("virtual_", "pad_")),
+        has_sources=has_sources,
+        has_sinks=has_sinks,
+    )
 
 
 def render_parameter(
@@ -340,13 +397,33 @@ def _format_error(elem: Any, msg: Any) -> str:
     return f"{loc}: {msg}" if loc else str(msg)
 
 
-def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) -> Any:
-    block = flow_graph.get_block(block_name)
+def port_object(
+    flow_graph: Any, block_name: str, port_key: str, *, kind: str
+) -> Any:
+    """Return the live port object on ``block_name`` matching ``port_key``.
+
+    Returns ``None`` when the block has no port with that key under
+    ``kind`` (``"source"`` or ``"sink"``). Single source of truth for
+    port resolution; replaces the inline ``active_sinks``/``active_sources``
+    scans that previously lived in runtime modules.
+    """
+    try:
+        block = flow_graph.get_block(block_name)
+    except KeyError:
+        return None
     ports = block.active_sinks if kind == "sink" else block.active_sources
     for p in ports:
         if p.key == port_key:
             return p
-    raise KeyError(f"{kind} port {port_key!r} not on block {block_name!r}")
+    return None
+
+
+def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) -> Any:
+    """Internal raise-on-miss wrapper preserved for callers that want an error."""
+    port = port_object(flow_graph, block_name, port_key, kind=kind)
+    if port is None:
+        raise KeyError(f"{kind} port {port_key!r} not on block {block_name!r}")
+    return port
 
 
 def add_block(
@@ -548,4 +625,95 @@ def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
     except Exception:
         if os.path.exists(tmp):
             os.unlink(tmp)
+        raise
+
+
+# --------------------------------------------------------------------------- #
+# Save primitives (single source of truth for the save lifecycle)              #
+# --------------------------------------------------------------------------- #
+
+_logger = logging.getLogger(__name__)
+
+
+def refuse_ambiguous_save_target(target_path: Path) -> None:
+    """Refuse to save through a symlink or a hard-linked file.
+
+    Saving through a symlink could write to a location the user did not
+    intend. Hard-linked files share an inode, so an atomic-replace on one
+    would silently clobber the other. Both cases are configuration
+    mistakes and the safe behavior is to fail loud.
+    """
+    if not target_path.exists():
+        return
+    if target_path.is_symlink():
+        raise OSError(f"Refusing to save through symlink: {target_path}")
+    try:
+        stat_result = target_path.stat()
+    except OSError as exc:
+        raise OSError(f"Could not stat save target {target_path}: {exc}") from exc
+    if stat_result.st_nlink > 1:
+        raise OSError(f"Refusing to save hard-linked graph file: {target_path}")
+
+
+def write_save_backup(target_path: Path) -> Path | None:
+    """Snapshot the existing file to ``.grc_agent/backups/<ts>-<hash><ext>``.
+
+    Returns the backup path, or ``None`` when the target does not exist
+    (first save).
+    """
+    if not target_path.exists():
+        return None
+    backup_dir = target_path.parent / ".grc_agent" / "backups"
+    try:
+        backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OSError(
+            f"Could not create save backup directory for {target_path}: {exc}"
+        ) from exc
+    with open(target_path, "rb") as f:
+        old_hash = hashlib.sha256(f.read()).hexdigest()
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
+    if backup_path.exists():
+        backup_path = backup_dir / (
+            f"{timestamp}-{old_hash[:16]}-{time.time_ns()}{target_path.suffix}"
+        )
+    try:
+        shutil.copy2(target_path, backup_path)
+    except OSError as exc:
+        raise OSError(f"Could not create save backup for {target_path}: {exc}") from exc
+    return backup_path
+
+
+@contextmanager
+def exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+    """Acquire an exclusive ``fcntl.flock`` on ``lock_path``.
+
+    Creates the parent directory (mode 0o700) if needed. The lock is
+    released when the context exits, even on exception.
+    """
+    try:
+        lock_path.parent.mkdir(mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise OSError(f"Could not create lock directory for {lock_path}: {exc}") from exc
+    try:
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            try:
+                import fcntl as _fcntl
+
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            except OSError as exc:
+                raise OSError(
+                    f"Could not acquire exclusive lock on {lock_path}: {exc}"
+                ) from exc
+            try:
+                yield
+            finally:
+                try:
+                    import fcntl as _fcntl
+
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+                except OSError:
+                    _logger.warning("file_lock_release_failed path=%s", lock_path)
+    except OSError:
         raise

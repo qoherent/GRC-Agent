@@ -1,4 +1,4 @@
-"""GRC-core-evaluated parameter visibility + port domain enum.
+"""GRC-core-evaluated parameter visibility.
 
 The single source of truth for the per-param ``hide`` value GRC computes
 at runtime (``'none' | 'part' | 'all'``) given a block type and its
@@ -9,16 +9,7 @@ visible tool.
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Any
-
-
-class PortDomain(StrEnum):
-    """Domain classification for a block port."""
-
-    STREAM = "stream"
-    MESSAGE = "message"
-
 
 _EVALUATED_HIDE_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, str]] = {}
 

@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Iterable
-from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from ToolAgents.data_models.chat_history import ChatHistory
@@ -18,13 +17,14 @@ from ToolAgents.data_models.messages import (
 )
 
 PreviewCallback = Callable[..., list[dict[str, Any]]]
-_MODEL_WRAPPER_NAMES = {
+# Model-facing tool names (the 3 MVP tools). Kept in sync with
+# MVP_MODEL_TOOL_NAMES in runtime/model_context.py; derived at runtime
+# in P2 to break the import cycle between tool_context <-> model_context.
+_MODEL_WRAPPER_NAMES: frozenset[str] = frozenset({
     "inspect_graph",
-    "search_blocks",
-    "ask_grc_docs",
-    "change_graph",
     "query_knowledge",
-}
+    "change_graph",
+})
 
 
 def tool_history_content_as_text(
@@ -106,8 +106,6 @@ def tool_history_content_as_text(
             entry_hint = error_entry.get("hint")
             if isinstance(entry_hint, str) and entry_hint.strip():
                 lines.append(f"hint: {entry_hint}")
-    if tool_name in {"search_blocks", "ask_grc_docs"}:
-        return json.dumps(compact, separators=(",", ":"), sort_keys=True)
     lines.append(json.dumps(compact, separators=(",", ":"), sort_keys=True))
     return "\n".join(lines)
 
@@ -143,69 +141,6 @@ def _drop_empty_recursive(value: Any) -> Any:
             if is_meaningful(dropped)
         ]
     return value
-
-
-def is_variable_block(block_type: str) -> bool:
-    """Whether a block type is a GRC variable/control block.
-
-    Uses the native GRC ``Block.is_variable`` discriminator (``bool(cls.value)``)
-    via the platform's block-class registry when available. Falls back to
-    GRC's ``not_dsp`` flag from the catalog descriptor when the class
-    registry is unavailable but the catalog is.
-
-    The native path catches variable types that don't start with ``variable_``
-    (e.g. ``json_config``, ``yaml_config``, ``qtgui_dialgauge``).
-    """
-    if not isinstance(block_type, str) or not block_type:
-        return False
-    try:
-        from grc_agent.grc_native_adapter import get_platform_or_none
-
-        platform = get_platform_or_none()
-    except Exception:
-        platform = None
-    if platform is not None:
-        cls = getattr(platform, "block_classes", {}).get(block_type)
-        if cls is not None:
-            return bool(getattr(cls, "value", None))
-    # Secondary: check catalog flags for ``not_dsp`` (GRC's native signal
-    # for control/variable blocks — set by the block author in YAML).
-    try:
-        from grc_agent.catalog.loaders import describe_block
-
-        details = describe_block(block_type)
-        if details.get("ok"):
-            flags = details.get("flags") or []
-            if "not_dsp" in flags:
-                return True
-    except Exception:
-        pass
-    return False
-
-
-# -- path safety (was path_safety.py) --
-
-
-def resolved_path(path_value: str | Path) -> Path:
-    return Path(path_value).expanduser().resolve(strict=False)
-
-
-def unsafe_graph_root_for_path(
-    path_value: str | Path,
-    *,
-    installed_graph_roots: Iterable[Path],
-    canonical_fixture_root: Path,
-) -> str | None:
-    candidate = resolved_path(path_value)
-    roots = (*installed_graph_roots, canonical_fixture_root)
-    for root in roots:
-        resolved_root = root.expanduser().resolve(strict=False)
-        try:
-            candidate.relative_to(resolved_root)
-        except ValueError:
-            continue
-        return str(resolved_root)
-    return None
 
 
 # --- merged from chat_history.py ---

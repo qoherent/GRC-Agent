@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections import Counter
@@ -392,19 +391,6 @@ def _empty_counts() -> dict[str, dict[str, int]]:
     }
 
 
-def stable_record_id(record: dict[str, Any]) -> str:
-    """Return a stable identifier for report references."""
-    key = "|".join(
-        (
-            str(record.get("timestamp", "")),
-            str(record.get("source", "")),
-            str(record.get("task_type", "")),
-            str(record.get("prompt_key", "")),
-        )
-    )
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
-
-
 __all__ = [
     "DOGFOOD_SCHEMA_VERSION",
     "VALID_DOGFOOD_SOURCES",
@@ -414,6 +400,5 @@ __all__ = [
     "DogfoodIntakeError",
     "record_dogfood_case",
     "resolve_dogfood_intake_path",
-    "stable_record_id",
     "summarize_dogfood_cases",
 ]

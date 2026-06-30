@@ -2,9 +2,6 @@
 
 Single source of truth for the model-visible file-integrity payload.
 Per AGENTS.md 'no silent transformation', the full hash is always returned.
-If a future limit is imposed, it MUST go through
-:func:`grc_agent.runtime.text_utils.format_truncation_flag` so the
-consumer can see what was dropped.
 """
 
 from __future__ import annotations

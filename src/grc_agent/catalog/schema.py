@@ -203,28 +203,21 @@ class BlockDescription:
         ]
         visible_params.sort(key=lambda p: (overview_rank(hides.get(p.id, "all")), p.id))
 
-        # Determine block role consistently with GrcBlock.role classification
-        if self.block_id == "options":
-            role_str = "options"
-        elif "variable" in (self.flags or []) or self.block_id.startswith("variable"):
-            role_str = "variable"
-        elif self.block_id == "import":
-            role_str = "import"
-        elif self.block_id == "snippet":
-            role_str = "snippet"
-        elif not self.inputs and self.outputs:
-            role_str = "source"
-        elif self.inputs and not self.outputs:
-            role_str = "sink"
-        elif self.inputs and self.outputs:
-            role_str = "transform"
-        else:
-            role_str = "other"
+        # Determine block role consistently with live ``classify_role``.
+        # Single source of truth: ``grc_native_adapter._classify_role_core``.
+        from grc_agent.grc_native_adapter import classify_role_from_catalog
+
+        role = classify_role_from_catalog(
+            self.block_id,
+            self.flags or (),
+            has_sources=bool(self.outputs),
+            has_sinks=bool(self.inputs),
+        )
 
         payload: dict[str, Any] = {
             "ok": True,
             "block_id": self.block_id,
-            "role": role_str,
+            "role": role.value,
             "params": {
                 p.id: (
                     f"bool={clean_template_string(p.default)}"

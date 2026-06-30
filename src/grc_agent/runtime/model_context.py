@@ -239,18 +239,12 @@ class ToolSurface:
 
     name: str
     model_tool_names: tuple[str, ...]
-    assistant_text_fallback_enabled: bool
     default_max_tool_rounds: int
-
-    @property
-    def model_tool_count(self) -> int:
-        return len(self.model_tool_names)
 
 
 MVP_TOOL_SURFACE = ToolSurface(
     name="mvp",
     model_tool_names=MVP_MODEL_TOOL_NAMES,
-    assistant_text_fallback_enabled=False,
     default_max_tool_rounds=8,
 )
 

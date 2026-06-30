@@ -569,15 +569,12 @@ def _run_scenario(
         pending_tool["name"] = tool_name
         pending_tool["args"] = dict(args)
 
-    def _on_tool_end(tool_name: str, result: Any) -> None:
-        pass
-
     for event in runner.stream_turn(
         agent,
         prompt,
         max_tool_rounds=max_tool_rounds,
         on_tool_start=_on_tool_start,
-        on_tool_end=_on_tool_end,
+        on_tool_end=None,
     ):
         ev_copy = dict(event)
         if event.get("event") == "model_message" and event.get("role") == "tool_model" and pending_tool:
@@ -585,7 +582,6 @@ def _run_scenario(
             pending_tool.clear()
         events.append(ev_copy)
 
-    grc_after = fixture_path.read_text(encoding="utf-8")
     graph_state = _graph_state(fixture_path)
 
     return {
@@ -597,7 +593,6 @@ def _run_scenario(
         "fixture_name": fixture_path.name,
         "expect": expect or {},
         "grc_before": grc_before,
-        "grc_after": grc_after,
         "graph_state": graph_state,
         "events": events,
     }

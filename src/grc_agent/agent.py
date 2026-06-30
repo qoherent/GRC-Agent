@@ -23,7 +23,6 @@ from grc_agent.history import (
     GraphHistoryJournal,
     GraphSnapshot,
     lineage_key_for_session,
-    operation_type_from_result,
     snapshot_session,
 )
 from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
@@ -453,7 +452,7 @@ class GrcAgent:
                 before=before,
                 request_text=self._turn_user_message,
                 tool_name=tool_name,
-                operation_type=operation_type_from_result(tool_name, result),
+                operation_type=tool_name,
                 validation_result=self.session.validation_state(),
             )
         except Exception:
@@ -472,7 +471,7 @@ class GrcAgent:
                 before=before,
                 request_text=self._turn_user_message,
                 tool_name=tool_name,
-                operation_type=operation_type_from_result(tool_name, result),
+                operation_type=tool_name,
                 result=result,
             )
         except Exception:
