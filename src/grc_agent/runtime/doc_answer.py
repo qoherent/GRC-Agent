@@ -38,9 +38,15 @@ logger = logging.getLogger(__name__)
 
 # --- Filesystem / model coordinates ------------------------------------------
 
-DB_DIR = Path(os.environ.get("GRC_AGENT_VECTORS_DIR", ".grc_agent/vectors"))
+DB_DIR = Path(
+    os.environ.get(
+        "GRC_AGENT_VECTORS_DIR",
+        str(Path(__file__).resolve().parents[1] / "vectors"),
+    )
+)
 DB_PATH = DB_DIR / "docs_v1.db"
 DOCS_DIR = Path(__file__).resolve().parents[3] / "docs" / "wiki_gnuradio_org"
+
 
 _QUERY_PREFIX = "task: search result | query: "
 _DOCUMENT_PREFIX = "task: search result | document: "
@@ -277,26 +283,41 @@ def _generate_grounded_answer(
         f"Question: {question}\n\n"
         f"Documentation:\n{context}"
     )
-    response = httpx.post(
-        f"{agent._llama_server_url.rstrip('/')}/api/chat",
-        json={
-            "model": agent._llama_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "think": False,
-            "options": {"num_ctx": 32768, "num_predict": 2048},
-        },
+    import os
+
+    from openai import OpenAI
+
+    base_url = agent._llama_server_url.rstrip("/")
+    if "openrouter.ai" in base_url and not base_url.endswith("/v1"):
+        openai_base_url = f"{base_url}/v1"
+    elif "11434" in base_url and not base_url.endswith("/v1"):
+        openai_base_url = f"{base_url}/v1"
+    else:
+        openai_base_url = base_url
+
+    api_key = os.environ.get("OPENROUTER_API_KEY") or "not-needed"
+    client = OpenAI(
+        base_url=openai_base_url,
+        api_key=api_key,
         timeout=agent._llama_request_timeout_seconds,
     )
-    response.raise_for_status()
-    return response.json()["message"]["content"].strip()
+
+    extra_body = {}
+    if "openrouter.ai" not in openai_base_url:
+        extra_body["think"] = False
+
+    completion = client.chat.completions.create(
+        model=agent._llama_model,
+        messages=[{"role": "user", "content": prompt}],
+        extra_body=extra_body,
+    )
+    return completion.choices[0].message.content.strip()
 
 
 def ask_grc_docs(
     agent: GrcAgent,
     question: str,
     k: int | None = None,
-    focus: str | None = None,
 ) -> ToolResult:
     """Ground one GNU Radio docs question in the wiki corpus.
 
@@ -376,4 +397,4 @@ def ask_grc_docs(
             {"path": s["path"], "distance": s["distance"]} for s in sources
         ],
     }
-    return agent._payload_result("ask_grc_docs", payload, include_active_session=False)
+    return agent._payload_result("ask_grc_docs", payload)

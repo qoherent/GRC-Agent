@@ -7,7 +7,7 @@ import logging
 import os
 import tempfile
 import tomllib
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,7 +20,13 @@ USER_CONFIG_FILE_NAME = "config.toml"
 USER_CONFIG_DIR_NAME = "grc_agent"
 
 
-def _load_dotenv() -> None:
+_DOTENV_LOADED = False
+
+
+def _ensure_dotenv_loaded() -> None:
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
     import dotenv
 
     candidates = [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"]
@@ -31,9 +37,7 @@ def _load_dotenv() -> None:
                 break
             except Exception:
                 pass
-
-
-_load_dotenv()
+    _DOTENV_LOADED = True
 
 
 # ---------------------------------------------------------------------------
@@ -43,12 +47,12 @@ _load_dotenv()
 # ---------------------------------------------------------------------------
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api"
+ALLOWED_BACKENDS = {"ollama", "openrouter"}
 
 
 def default_openrouter_model() -> str:
     """Resolve the OpenRouter model from the environment, with one literal fallback."""
-    import os
-
+    _ensure_dotenv_loaded()
     return os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
 
 
@@ -72,7 +76,6 @@ class LlamaConfig:
     backend: str = "ollama"
     max_tokens: int = 4096
     max_tool_rounds: int = 8
-    temperature: float = 0.0
     enable_thinking: bool = False
     request_timeout_seconds: float = 120.0
 
@@ -102,7 +105,6 @@ class GuardrailsConfig:
     max_validation_errors: int
     max_validation_stderr_chars: int
     max_compact_list_items: int
-    max_context_nodes: int
     max_inspect_targets: int = 8
 
 
@@ -120,7 +122,6 @@ DEFAULT_GUARDRAILS_CONFIG = GuardrailsConfig(
     max_validation_errors=8,
     max_validation_stderr_chars=1200,
     max_compact_list_items=5,
-    max_context_nodes=20,
 )
 
 
@@ -155,6 +156,7 @@ def user_config_path() -> Path:
 
 def default_app_config() -> AppConfig:
     """Return the built-in runtime defaults used when no config file exists."""
+    _ensure_dotenv_loaded()
     config = AppConfig(
         llama=LlamaConfig(),
         agent=AgentConfig(
@@ -187,6 +189,7 @@ def resolve_config_path(config_path: str | Path | None = None) -> Path | None:
 
 def load_app_config(config_path: str | Path | None = None) -> AppConfig:
     """Read the resolved config file or return built-in defaults."""
+    _ensure_dotenv_loaded()
     resolved_path = resolve_config_path(config_path)
     if resolved_path is None:
         return default_app_config()
@@ -261,12 +264,7 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 default=defaults.llama.max_tool_rounds,
                 context="[llama]",
             ),
-            temperature=_optional_non_negative_float(
-                llama_table,
-                "temperature",
-                default=defaults.llama.temperature,
-                context="[llama]",
-            ),
+
             enable_thinking=_optional_bool(
                 llama_table,
                 "enable_thinking",
@@ -466,12 +464,6 @@ def _guardrails_config(
             default=defaults.max_compact_list_items,
             context="[agent.guardrails]",
         ),
-        max_context_nodes=_optional_positive_int(
-            table,
-            "max_context_nodes",
-            default=defaults.max_context_nodes,
-            context="[agent.guardrails]",
-        ),
         max_inspect_targets=_optional_positive_int(
             table,
             "max_inspect_targets",
@@ -483,11 +475,10 @@ def _guardrails_config(
 
 def _validate_cross_field_constraints(config: AppConfig) -> None:
     retrieval = config.agent.retrieval
-    guardrails = config.agent.guardrails
 
-    if config.llama.backend not in ("ollama", "openrouter"):
+    if config.llama.backend not in ALLOWED_BACKENDS:
         raise ConfigError(
-            f"[llama].backend must be 'ollama' or 'openrouter'; found '{config.llama.backend}'."
+            f"[llama].backend must be one of {sorted(ALLOWED_BACKENDS)}; found '{config.llama.backend}'."
         )
 
     if retrieval.search_blocks_default_k > retrieval.search_blocks_max_k:
@@ -496,8 +487,6 @@ def _validate_cross_field_constraints(config: AppConfig) -> None:
         )
     if retrieval.ask_grc_docs_default_k > retrieval.ask_grc_docs_max_k:
         raise ConfigError("[agent.retrieval].ask_grc_docs_default_k must be <= ask_grc_docs_max_k.")
-    if guardrails.max_compact_list_items < 1:
-        raise ConfigError("[agent.guardrails].max_compact_list_items must be >= 1.")
 
 
 def update_toml_config_file(config_path: Path, updates: dict[str, Any]) -> None:
@@ -576,18 +565,6 @@ PREFS_FILE_NAME = "preferences.json"
 PREFERENCES_SCHEMA_VERSION = 1
 
 
-# Deterministic remap of stale persisted model names. When a model is
-# upgraded via a new Modelfile variant (e.g. a different context window),
-# GUI users whose `last_model.model` predates the upgrade must be migrated
-# automatically — otherwise they keep running the old model despite the
-# config default update. One uniform rule per entry (no per-field branching):
-# if the persisted value is a key here, replace it with the mapped value on
-# load and persist the result so the migration is a one-time event.
-_MODEL_REMAP: dict[str, str] = {
-    "gemma4:e4b-it-qat": "gemma4:e4b-it-qat-120k",
-}
-
-
 @dataclass(frozen=True)
 class LastModel:
     """The model the user most recently loaded through the GUI/CLI."""
@@ -641,7 +618,7 @@ def _parse_preferences(raw: object) -> UserPreferences:
     provider_chosen = ""
     if "provider_chosen" in raw:
         value = raw["provider_chosen"]
-        if isinstance(value, str) and value in {"", "ollama", "openrouter"}:
+        if isinstance(value, str) and (value == "" or value in ALLOWED_BACKENDS):
             provider_chosen = value
         else:
             logger.info("preferences: dropping unknown provider_chosen=%r", value)
@@ -687,37 +664,6 @@ def load_user_preferences(path: Path | None = None) -> UserPreferences:
         )
         return default_user_preferences()
     prefs = _parse_preferences(raw)
-    # Apply deterministic stale-model remap (e.g. gemma4:e4b-it-qat ->
-    # gemma4:e4b-it-qat-120k) so users whose GUI previously pinned the old
-    # model variant pick up the upgrade. The migration is persisted so it
-    # runs once per file, not on every load. Save failures are logged but
-    # never raised — startup must not block on a migration write.
-    if prefs.last_model.model and prefs.last_model.model in _MODEL_REMAP:
-        stale_model = prefs.last_model.model
-        remapped_name = _MODEL_REMAP[stale_model]
-        prefs = replace(
-            prefs,
-            last_model=replace(
-                prefs.last_model,
-                model=remapped_name,
-                saved_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            ),
-        )
-        try:
-            save_user_preferences(prefs, path=target)
-            logger.info(
-                "preferences: remapped last_model.model %r -> %r and persisted.",
-                stale_model,
-                remapped_name,
-            )
-        except OSError as exc:
-            logger.warning(
-                "preferences: remapped %r -> %r in memory but failed to "
-                "persist (%s). The remap will be retried on next load.",
-                stale_model,
-                remapped_name,
-                exc,
-            )
     if prefs.schema_version > PREFERENCES_SCHEMA_VERSION:
         logger.warning(
             "preferences: %s has schema_version=%d, this build supports up "
@@ -765,7 +711,7 @@ def apply_user_preferences_to_llama_config(llama_config: Any, prefs: UserPrefere
     updated = llama_config
     if prefs.last_model.model:
         updated = dataclasses.replace(updated, model=prefs.last_model.model)
-    if prefs.provider_chosen in {"ollama", "openrouter"}:
+    if prefs.provider_chosen in ALLOWED_BACKENDS:
         updated = dataclasses.replace(updated, backend=prefs.provider_chosen)
     return updated
 
@@ -796,8 +742,8 @@ def update_provider_chosen(
     path: Path | None = None,
 ) -> None:
     """Persist the user's provider-picker choice."""
-    if provider not in {"ollama", "openrouter"}:
-        raise ValueError(f"provider must be 'ollama' or 'openrouter'; got {provider!r}")
+    if provider not in ALLOWED_BACKENDS:
+        raise ValueError(f"provider must be one of {sorted(ALLOWED_BACKENDS)}; got {provider!r}")
     current = load_user_preferences(path=path)
     updated = UserPreferences(
         last_model=current.last_model,

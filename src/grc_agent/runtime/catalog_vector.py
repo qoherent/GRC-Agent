@@ -32,8 +32,14 @@ from grc_agent.runtime.param_filter import visible_param_keys
 logger = logging.getLogger(__name__)
 
 
-DB_DIR = Path(os.environ.get("GRC_AGENT_VECTORS_DIR", ".grc_agent/vectors"))
+DB_DIR = Path(
+    os.environ.get(
+        "GRC_AGENT_VECTORS_DIR",
+        str(Path(__file__).resolve().parents[1] / "vectors"),
+    )
+)
 CATALOG_DB_PATH = DB_DIR / "catalog_v1.db"
+
 
 
 # --- gemma-3 task prefixes (uniform across query and document) --------------

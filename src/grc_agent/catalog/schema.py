@@ -11,6 +11,18 @@ from typing import Any
 from grc_agent.domain_models import join_non_empty
 
 
+def clean_template_string(val: Any) -> str:
+    if val is None:
+        return ""
+    val_str = str(val)
+    import re
+    # 1. ${expression}=fallback -> fallback
+    val_str = re.sub(r'\$\{[^}]*\}=' , "", val_str)
+    # 2. ${expression} -> expression
+    val_str = re.sub(r'\$\{\s*([^}]+?)\s*\}', r'\1', val_str)
+    return val_str.strip()
+
+
 @dataclass(frozen=True)
 class CatalogFiles:
     """Resolved GNU catalog file sets under one catalog root."""
@@ -118,8 +130,8 @@ class NormalizedPort:
         """Discovery shape: id/domain/dtype only — no multiplicity/optional."""
         payload = {
             "id": self.id,
-            "domain": self.domain,
-            "dtype": self.dtype,
+            "domain": self.domain if self.domain != "stream" else None,
+            "dtype": clean_template_string(self.dtype),
         }
         return {k: v for k, v in payload.items() if v is not None}
 
@@ -146,6 +158,7 @@ class BlockDescription:
         *,
         hides: dict[str, str] | None = None,
         param_categories: dict[str, str] | None = None,
+        mode: str = "details",
     ) -> dict[str, Any]:
         """Build the discovery-shape payload (what the model sees).
 
@@ -159,7 +172,6 @@ class BlockDescription:
         from grc_agent.catalog.loaders import evaluated_param_hides_for_block
         from grc_agent.runtime.param_filter import (
             DEFAULT_PARAM_TAB,
-            DETAILS,
             keep_param,
             overview_rank,
         )
@@ -185,19 +197,41 @@ class BlockDescription:
                 dtype=parameter.dtype or "",
                 value=parameter.default or "",
                 default=parameter.default or "",
-                mode=DETAILS,
+                mode=mode,
+                param_key=parameter.id,
             )
         ]
         visible_params.sort(key=lambda p: (overview_rank(hides.get(p.id, "all")), p.id))
 
+        # Determine block role consistently with GrcBlock.role classification
+        if self.block_id == "options":
+            role_str = "options"
+        elif "variable" in (self.flags or []) or self.block_id.startswith("variable"):
+            role_str = "variable"
+        elif self.block_id == "import":
+            role_str = "import"
+        elif self.block_id == "snippet":
+            role_str = "snippet"
+        elif not self.inputs and self.outputs:
+            role_str = "source"
+        elif self.inputs and not self.outputs:
+            role_str = "sink"
+        elif self.inputs and self.outputs:
+            role_str = "transform"
+        else:
+            role_str = "other"
+
         payload: dict[str, Any] = {
             "ok": True,
             "block_id": self.block_id,
+            "role": role_str,
             "params": {
                 p.id: (
-                    f"enum=[{','.join(str(o) for o in p.options)}]={p.default or ''}"
+                    f"bool={clean_template_string(p.default)}"
+                    if p.dtype == "enum" and p.options and set(str(o) for o in p.options) == {"True", "False"}
+                    else f"enum=[{','.join(str(o) for o in p.options)}]={clean_template_string(p.default)}"
                     if p.dtype == "enum" and p.options
-                    else f"{p.dtype or '?'}={p.default or ''}"
+                    else f"{clean_template_string(p.dtype) or '?'}={clean_template_string(p.default)}"
                 )
                 for p in visible_params
             },

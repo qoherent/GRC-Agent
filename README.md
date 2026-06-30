@@ -1,5 +1,5 @@
 # GRC Agent
-
+uv run python scripts/clean_cache.py
 Local companion for GNU Radio Companion (`.grc`) flowgraphs. GRC Agent helps you inspect, document, and edit your graphs using local LLMs.
 
 Runs as a sidekick window alongside GRC (GUI).
@@ -59,10 +59,23 @@ recover via the inline model toolbar.
 The autonomous agent-flow experiment harness lives at
 `tests/agent_flow/run_agent_flow.py` (tracked). It runs the full scenario
 suite against a live model and writes Markdown transcripts + a metrics summary
-to the gitignored `tests/output/agent_flow/` (regenerated each run). The
-gated live test `tests/test_agent_flow_live.py` asserts the per-scenario
-expect verdicts. These are read-only consumers of the agent — useful for
-smoke-testing the tool surface, not part of the default CI gate.
+(`metrics.json`, `METRICS.md`) to the gitignored `tests/output/agent_flow/`
+(regenerated each run). The gated live test `tests/test_agent_flow_live.py`
+asserts the per-scenario expect verdicts and refreshes the same metrics files.
+These are read-only consumers of the agent — useful for smoke-testing the tool
+surface, not part of the default CI gate.
+
+Because the live eval is model-dependent and nondeterministic, engine
+correctness is anchored deterministically by
+`tests/test_agent_flow_engine_core.py` (`grc_native` marker): it applies each
+scenario's intended `change_graph` batch directly (no model) and asserts the
+`expect` predicate via a fresh native `validate()`. Run the live smoke with
+`GRC_AGENT_LIVE_MODEL=1` (Ollama) and the retrieval tests with
+`GRC_AGENT_LIVE_EMBED=1`.
+
+See `docs/AGENT_RUNTIME.md` for the runtime architecture (execution loop,
+loop-detection, context/compaction, session/integrity/rollback, tool dispatch,
+retrieval).
 
 ---
 

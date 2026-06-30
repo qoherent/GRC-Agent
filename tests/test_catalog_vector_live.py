@@ -30,7 +30,7 @@ LIVE = os.environ.get("GRC_AGENT_LIVE_EMBED") == "1"
 # import of grc_agent.runtime.catalog_vector, because CATALOG_DB_PATH is
 # captured at module load. Tests in this module run only when LIVE is set,
 # so the env override is safe.
-_REAL_VECTORS_DIR = Path(".grc_agent/vectors").resolve()
+_REAL_VECTORS_DIR = Path("src/grc_agent/vectors").resolve()
 if LIVE and Path(_REAL_VECTORS_DIR / "catalog_v1.db").exists():
     os.environ["GRC_AGENT_VECTORS_DIR"] = str(_REAL_VECTORS_DIR)
 
@@ -101,6 +101,50 @@ class VectorCatalogLiveTests(unittest.TestCase):
         """Sanity: variable should rank first for natural phrasing."""
         top = self._top("variable holding a value", k=3)
         self.assertEqual(top[0][0], "variable", f"got {top}")
+
+    def test_search_blocks_output_to_results(self) -> None:
+        """Run search_blocks tool function for multiple queries and save outputs to .md files."""
+        import json
+        import re
+        from unittest import mock
+
+        from grc_agent.agent import GrcAgent
+        from grc_agent.config import load_app_config
+        from grc_agent.runtime.search_blocks import search_blocks
+
+        config = load_app_config()
+        agent = GrcAgent(config=config.agent)
+        agent._llama_server_url = "http://localhost:11434"
+
+        queries = [
+            "float stream to complex stream",
+            "low pass filter",
+            "frequency sink",
+            "variable slider",
+            "signal source",
+            "throttle",
+            "add constant",
+            "rational resampler",
+            "complex conjugate",
+            "null sink",
+        ]
+
+        out_dir = Path("tests/output/search_queries")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        for q in queries:
+            with mock.patch("grc_agent.runtime.search_blocks.CATALOG_DB_PATH", str(type(self).test_db)):
+                result = search_blocks(agent, q, k=3)
+
+            self.assertTrue(result.get("ok"))
+
+            # Slugify query name for filename
+            slug = re.sub(r"[^a-z0-9]+", "_", q.lower()).strip("_")
+            out_file = out_dir / f"{slug}.md"
+
+            md_content = f"# Search Query: {q}\n\n```json\n{json.dumps(result, indent=2)}\n```\n"
+            out_file.write_text(md_content, encoding="utf-8")
+            self.assertTrue(out_file.exists())
 
 
 if __name__ == "__main__":

@@ -44,6 +44,11 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
         "inspect_graph",
         "Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.",
         {
+            "view": {
+                "type": "string",
+                "enum": ["overview"],
+                "description": "The view mode. Defaults to 'overview'.",
+            },
             "targets": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -120,7 +125,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                         },
                         "params": {
                             "type": "object",
-                            "description": "Param updates keyed by exact GNU param_id.",
+                            "description": "Param updates keyed by exact GNU param_id. Changing the 'id' parameter to rename a block is not allowed and will be ignored.",
                         },
                     },
                     "required": ["instance_name", "params"],
@@ -148,12 +153,12 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
             },
             "add_connections": {
                 "type": "array",
-                "description": "Connection strings to add, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
+                "description": "Connection strings to add, format 'src_instance_name:port->dst_instance_name:port' (e.g. 'sig_source:0->throttle:0'). Stream ports use numeric index strings (e.g. '0', '1'), whereas message ports use their exact string identifiers (e.g. 'pdus', 'msg').",
                 "items": {"type": "string"},
             },
             "remove_connections": {
                 "type": "array",
-                "description": "Connection strings to remove, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
+                "description": "Connection strings to remove, format 'src_instance_name:port->dst_instance_name:port' (e.g. 'sig_source:0->throttle:0'). Stream ports use numeric index strings (e.g. '0', '1'), whereas message ports use their exact string identifiers (e.g. 'pdus', 'msg').",
                 "items": {"type": "string"},
             },
             "force": {

@@ -71,7 +71,7 @@ def _ensure_catalog_index(agent: GrcAgent) -> bool:
 def _render_hit(raw_block: Any, distance: float) -> dict[str, Any] | None:
     """One vector-store hit rendered as a model-facing block summary.
 
-    Uses :meth:`BlockDescription.to_payload` (Stage A filter) for the params,
+    Uses :meth:`BlockDescription.to_payload` (Stage B filter) for the params,
     so the model sees the same per-block shape as :func:`describe_block`.
     The per-block ``ok`` flag is dropped — the outer payload owns that.
     """
@@ -80,14 +80,22 @@ def _render_hit(raw_block: Any, distance: float) -> dict[str, Any] | None:
     except Exception as exc:
         logger.debug("Skipping unrenderable catalog hit %s: %s", raw_block.block_id, exc)
         return None
-    rendered = description.to_payload()
+    from grc_agent.runtime.param_filter import DETAILS
+
+    rendered = description.to_payload(mode=DETAILS)
     rendered.pop("ok", None)
-    rendered["distance"] = round(float(distance), 6)
-    if description.label:
-        rendered["label"] = description.label
+    rendered["distance"] = round(float(distance), 3)
     category = description.category_path
     if category:
-        rendered["category"] = " > ".join(category)
+        cat_str = " > ".join(category)
+        if cat_str.startswith("Core > "):
+            cat_str = cat_str[7:]
+        rendered["category"] = cat_str
+
+    if "inputs" in rendered and not rendered["inputs"]:
+        rendered.pop("inputs")
+    if "outputs" in rendered and not rendered["outputs"]:
+        rendered.pop("outputs")
     return rendered
 
 
@@ -169,7 +177,6 @@ def search_blocks(
             "results": rows,
             "output_truncated": len(neighbours) > limit,
         },
-        include_active_session=False,
     )
 
 
@@ -184,10 +191,8 @@ def _tool_error(
         "ok": False,
         "query": "",
         "results": [],
-        "degraded_retrieval": degraded,
-        "retrieval_mode": "vector",
         "output_truncated": False,
         "message": message,
         "error_type": error_type,
     }
-    return agent._payload_result("search_blocks", payload, include_active_session=False)
+    return agent._payload_result("search_blocks", payload)

@@ -5,6 +5,7 @@ Consolidated from loaders.py + errors.py + describe.py.
 
 from __future__ import annotations
 
+import dataclasses
 from collections import defaultdict
 from collections.abc import Callable
 from functools import lru_cache
@@ -18,6 +19,7 @@ from .schema import (
     BlockDescription,
     CatalogFiles,
     CatalogSnapshot,
+    NormalizedPort,
     RawCatalogBlock,
     build_signature,
     hierarchy_warnings,
@@ -293,6 +295,25 @@ def _normalize_block_id(block_id: Any) -> str | None:
     return normalized or None
 
 
+def _normalize_ports(port_payloads: list[dict[str, Any]]) -> list[NormalizedPort]:
+    """Normalize port payloads, synthesizing a numeric key for stream ports
+    that lack an explicit ``id``.
+
+    GRC assigns stream port keys ``"0","1",...`` by position when a block's
+    YAML omits them; the static catalog payload carries no id for such ports,
+    which left the model unable to discover the port key needed to form a
+    connection (scenario 15 root cause). Message/rfnoc ports keep their
+    explicit id; only stream ports without an id get the positional key.
+    """
+    ports: list[NormalizedPort] = []
+    for index, port_payload in enumerate(port_payloads):
+        port = normalize_port(port_payload)
+        if port.id is None and (port.domain or "stream") == "stream":
+            port = dataclasses.replace(port, id=str(index))
+        ports.append(port)
+    return ports
+
+
 def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
     payload = raw_block.payload
     label = optional_string(payload.get("label"))
@@ -310,8 +331,8 @@ def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
         normalize_parameter(parameter_payload, source_path=raw_block.path)
         for parameter_payload in parameter_payloads
     ]
-    inputs = [normalize_port(port_payload) for port_payload in input_payloads]
-    outputs = [normalize_port(port_payload) for port_payload in output_payloads]
+    inputs = _normalize_ports(input_payloads)
+    outputs = _normalize_ports(output_payloads)
 
     flags = preserved_string_values(payload.get("flags"))
     asserts = preserved_string_values(payload.get("asserts"))

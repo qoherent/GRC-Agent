@@ -66,12 +66,19 @@ def keep_param(
     default: Any,
     mode: str,
     variable_names: set[str] | None = None,
+    param_key: str = "",
 ) -> bool:
     """THE parameter keep/drop rule. Single authority for every tool.
 
     Returns True if the param survives the pipeline for the given ``mode``.
     Pure function — no I/O, no side effects.
     """
+    # The 'id' param is the block's instance name — always redundant with
+    # ``instance_name`` (already carried by every model-visible block payload)
+    # and the system prompt forbids editing it. One uniform rule for every
+    # block, every mode, every tool.
+    if param_key == "id" or param_key == "showports" or param_key.startswith("bus_structure_"):
+        return False
     if hide == "all":
         return False
     if category in EXCLUDED_PARAM_CATEGORIES:
@@ -80,10 +87,18 @@ def keep_param(
         return False
     if mode != OVERVIEW:
         return True
-    if hide == "none":
-        return True
+
+    # Pure GRC property rule: drop 'hide: part' parameters in overview mode if they match default and don't reference a variable
+    if hide == "part" and param_key not in {"type", "generate_options"}:
+        is_custom = str(value) != str(default)
+        is_var_ref = variable_names and references_variable(value, variable_names)
+        if not (is_custom or is_var_ref):
+            return False
+
     if dtype == "enum":
-        return True
+        if str(value) != str(default) or param_key in {"type", "generate_options"}:
+            return True
+        return False
     if str(value) != str(default):
         return True
     if variable_names and references_variable(value, variable_names):
@@ -167,6 +182,7 @@ def filter_live_block_params(
             default=info.get("default", ""),
             mode=mode,
             variable_names=variable_names,
+            param_key=ks,
         ):
             vs = str(value).strip()
             if vs:
@@ -202,5 +218,6 @@ def visible_param_keys(
             value="",
             default="",
             mode=DETAILS,
+            param_key=str(key),
         )
     ]

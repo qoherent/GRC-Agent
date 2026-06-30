@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,7 @@ from grc_agent.runtime.block_semantics import evaluated_param_hides
 from grc_agent.runtime.connection_ids import connection_id
 from grc_agent.runtime.param_filter import (
     DEFAULT_PARAM_TAB,
+    OVERVIEW,
     keep_param,
     overview_rank,
 )
@@ -194,19 +196,12 @@ def classify_role(block: Any) -> BlockRole:
     return BlockRole.OTHER
 
 
-def _safe_evaluate(param: Any) -> Any | None:
-    try:
-        return param.get_evaluated()
-    except Exception:
-        return None
-
-
 def render_parameter(
     block: Any,
     param_key: str,
     param: Any,
     evaluated_hides: dict[str, str] | None = None,
-    mode: str = "details",
+    mode: str = OVERVIEW,
     variable_names: set[str] | None = None,
 ) -> str | None:
     """One uniform parameter filter — delegates to the bible (``keep_param``).
@@ -233,7 +228,14 @@ def render_parameter(
         default=default,
         mode=mode,
         variable_names=variable_names,
+        param_key=param_key,
     ):
+        return None
+    # Empty values carry no information; the bible's live path
+    # (filter_live_block_params) already strips them, so mirror that here so an
+    # empty enum such as realtime_scheduling="" never leaks into the inspect
+    # payload. Consistency fix, not a new omission.
+    if not value.strip():
         return None
     return value
 
@@ -241,7 +243,7 @@ def render_parameter(
 def render_block(
     block: Any,
     flow_graph: Any | None = None,
-    mode: str = "details",
+    mode: str = OVERVIEW,
     variable_names: set[str] | None = None,
 ) -> GrcBlock:
     evaluated_hides: dict[str, str] | None = None
@@ -271,11 +273,13 @@ def render_block(
     parameters = {k: v for k, v in unsorted_params}
 
     states = getattr(block, "states", {}) or {}
+    raw_state = str(states.get("state", "enabled"))
+    canonical_state = "bypass" if raw_state == "bypassed" else raw_state
     return GrcBlock(
         instance_name=block.name,
         block_id=block.key,
         role=classify_role(block),
-        state=str(states.get("state", "enabled")),
+        state=canonical_state,
         params=parameters,
     )
 
@@ -288,7 +292,7 @@ def render_connection(conn: Any) -> str:
     return connection_id(src.name, sp.key, dst.name, dp.key)
 
 
-def render_flow_graph(flow_graph: Any, mode: str = "details") -> GrcFlowgraph:
+def render_flow_graph(flow_graph: Any, mode: str = OVERVIEW) -> GrcFlowgraph:
     variable_names = {b.name for b in flow_graph.blocks if getattr(b, "is_variable", False)}
     blocks = [
         render_block(b, flow_graph, mode=mode, variable_names=variable_names)
@@ -373,10 +377,50 @@ def remove_block(flow_graph: Any, instance_name: str) -> None:
     flow_graph.remove_element(target)
 
 
+# A value of the form ``${variable:NAME}`` is a templating literal some models
+# emit instead of the bare variable name GRC expressions require. Uniform rule:
+# detect it once for every param and surface a clear error (never silently
+# strip — AGENTS.md "no silent transformation").
+_VARIABLE_TEMPLATE_RE = re.compile(r"^\$\{variable:\s*([A-Za-z_]\w*)\s*\}$")
+
+
 def set_param(block: Any, param_key: str, value: str) -> None:
     if param_key not in block.params:
         raise KeyError(f"Param {param_key!r} not in block {block.name!r}")
-    block.params[param_key].set_value(str(value))
+    if param_key == "id":
+        # The 'id' param is the instance name; renaming via set_param is
+        # intentionally ignored (rename = remove + add). Short-circuit before
+        # the enum/template checks — id is never an enum or a template value.
+        if str(value) != str(block.params["id"].value):
+            value = str(block.params["id"].value)
+        block.params[param_key].set_value(str(value))
+        return
+    raw_value = str(value)
+    template = _VARIABLE_TEMPLATE_RE.match(raw_value)
+    if template:
+        bare = template.group(1)
+        raise ValueError(
+            f"Invalid value for param {param_key!r} on block {block.name!r}: "
+            f"{raw_value!r} is a template literal. Use the bare variable name "
+            f"{bare!r} (e.g. {param_key}={bare})."
+        )
+    param = block.params[param_key]
+    # Validate enum inputs against the authoritative option set BEFORE setting.
+    # Native set_value accepts ANY string on an enum and ``rewrite()`` then
+    # silently resets an invalid token to the default (observed in the wild:
+    # 'float_const/float' -> 'complex' with no error). Reject here so the model
+    # learns the token is wrong — one uniform rule for every enum param.
+    if str(getattr(param, "dtype", "") or "") == "enum":
+        options = [str(o) for o in (getattr(param, "options", None) or [])]
+        labels = [str(o) for o in (getattr(param, "option_labels", None) or [])]
+        accepted = set(options) | set(labels)
+        if accepted and raw_value not in accepted:
+            raise ValueError(
+                f"Invalid enum value for param {param_key!r} on block "
+                f"{block.name!r}: {raw_value!r} is not one of the valid "
+                f"options {options}. Use one of those exact tokens."
+            )
+    param.set_value(raw_value)
 
 
 def set_block_state(block: Any, state: str) -> None:

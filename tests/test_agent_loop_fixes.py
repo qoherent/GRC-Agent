@@ -607,28 +607,5 @@ class Fix4UpdateStatesEnumTests(unittest.TestCase):
         )
 
 
-# ---------------------------------------------------------------------------
-# Cache invalidation: _catalog_version_token must reflect on-disk changes
-# ---------------------------------------------------------------------------
-
-
-class CatalogCacheInvalidationTests(unittest.TestCase):
-    """The search-blocks cache key embeds ``_catalog_version_token`` to
-    detect catalog file changes. If that function is ``lru_cache``d, the
-    mtime freezes and the cache never invalidates — search returns stale
-    results for the entire process lifetime.
-    """
-
-    def test_catalog_version_token_is_not_lru_cached(self) -> None:
-        from grc_agent.agent import _catalog_version_token
-
-        # lru_cache-decorated functions expose cache_info/cache_clear.
-        self.assertFalse(
-            hasattr(_catalog_version_token, "cache_info"),
-            "_catalog_version_token must not be lru_cached — freezing the mtime "
-            "defeats the cache invalidation it exists to provide.",
-        )
-
-
 if __name__ == "__main__":
     unittest.main()

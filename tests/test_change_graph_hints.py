@@ -55,3 +55,58 @@ class TestValidationErrorEntries:
     def test_no_hint_when_neither_applies(self):
         entries = _validation_error_entries(["blk: some error"], type_hint=None, orphaned_hints={})
         assert "hint" not in entries[0]
+
+
+class TestSchemaFormattingHints:
+    def test_remove_blocks_connection_id_hint(self):
+        from unittest import mock
+
+        from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+        mock_agent = mock.Mock()
+        mock_agent._missing_session_result.return_value = None
+        mock_agent.session.file_integrity_state.return_value = {"externally_modified": False}
+        mock_agent.session.path = None
+
+        mock_fg = mock.Mock()
+        mock_fg.blocks = []
+        mock_fg.connections = []
+        mock_agent.session.flowgraph = mock_fg
+
+        # Make payload_result return the payload directly for inspection
+        mock_agent._payload_result.side_effect = lambda tool_name, payload: payload
+
+        result = dispatch_flat_change_graph_batch(
+            mock_agent,
+            remove_blocks=["src:0->dst:0"],
+        )
+        assert result["ok"] is False
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["code"] == "remove_block_failed"
+        assert "This looks like a connection ID" in result["errors"][0]["message"]
+
+    def test_remove_connections_block_name_hint(self):
+        from unittest import mock
+
+        from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+        mock_agent = mock.Mock()
+        mock_agent._missing_session_result.return_value = None
+        mock_agent.session.file_integrity_state.return_value = {"externally_modified": False}
+        mock_agent.session.path = None
+
+        mock_fg = mock.Mock()
+        mock_fg.blocks = []
+        mock_fg.connections = []
+        mock_agent.session.flowgraph = mock_fg
+
+        mock_agent._payload_result.side_effect = lambda tool_name, payload: payload
+
+        result = dispatch_flat_change_graph_batch(
+            mock_agent,
+            remove_connections=["my_block_instance_name"],
+        )
+        assert result["ok"] is False
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["code"] == "invalid_connection"
+        assert "Did you mean to pass" in result["errors"][0]["message"]

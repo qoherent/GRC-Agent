@@ -65,14 +65,17 @@ class AgentFlowLiveTests(unittest.TestCase):
             _fresh_agent,  # noqa: F401  (re-exported for external callers)
             _render_md,
             _run_scenario,
+            write_metrics_outputs,
         )
 
         cls.SCENARIOS = SCENARIOS
         cls._run_scenario = staticmethod(_run_scenario)  # type: ignore[assignment]
         cls._render_md = staticmethod(_render_md)  # type: ignore[assignment]
         cls._extract_metrics = staticmethod(_extract_metrics)  # type: ignore[assignment]
+        cls._write_metrics_outputs = staticmethod(write_metrics_outputs)  # type: ignore[assignment]
+        cls._collected_metrics: list[dict] = []
 
-    def _save_and_assert(self, rec: dict) -> None:
+    def _save_and_assert(self, rec: dict) -> dict:
         md = type(self)._render_md(rec)
         out = OUT_DIR / f"{rec['name']}.md"
         out.write_text(md, encoding="utf-8")
@@ -81,12 +84,18 @@ class AgentFlowLiveTests(unittest.TestCase):
         n_tools = sum(1 for e in events if e.get("role") == "tool_model")
         n_assistant = sum(1 for e in events if e.get("role") == "assistant_model")
 
+        # Collect metrics BEFORE asserting. An assertion raise (a FAILED
+        # scenario) must not silently drop the scenario from METRICS.md —
+        # failures are the whole point of the report, so they are captured
+        # first and always written by tearDownClass.
+        metrics = type(self)._extract_metrics(rec)
+        type(self)._collected_metrics.append(metrics)
+
         # Crash guard: the loop must have actually run.
         self.assertGreater(n_tools, 0, f"no tool calls: {rec['name']}")
         self.assertGreater(n_assistant, 0, f"no assistant turns: {rec['name']}")
 
         # The real assertion: the expect-based verdict on the resulting graph.
-        metrics = type(self)._extract_metrics(rec)
         self.assertTrue(
             metrics["semantic_success"],
             f"{rec['name']} FAILED expect: {metrics['expect_reason']} "
@@ -99,6 +108,7 @@ class AgentFlowLiveTests(unittest.TestCase):
             n_tools,
             metrics["graph_valid"],
         )
+        return metrics
 
     def test_all_scenarios(self) -> None:
         """Run every scenario in the shared SCENARIOS list and assert each."""
@@ -106,6 +116,13 @@ class AgentFlowLiveTests(unittest.TestCase):
             with self.subTest(scenario=sc["name"]):
                 rec = type(self)._run_scenario(**sc)
                 self._save_and_assert(rec)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        """Write METRICS.md + metrics.json so a pytest live run leaves fresh
+        artifacts (parity with the standalone harness — same shared writer)."""
+        if cls._collected_metrics:
+            cls._write_metrics_outputs(cls._collected_metrics, OUT_DIR)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import json
 import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
@@ -17,14 +17,13 @@ from ToolAgents.data_models.messages import (
     ToolCallResultContent,
 )
 
-_T = TypeVar("_T")
-
 PreviewCallback = Callable[..., list[dict[str, Any]]]
 _MODEL_WRAPPER_NAMES = {
     "inspect_graph",
     "search_blocks",
     "ask_grc_docs",
     "change_graph",
+    "query_knowledge",
 }
 
 
@@ -41,25 +40,42 @@ def tool_history_content_as_text(
 
     validation = compact.get("validation")
     if isinstance(validation, dict):
+        omitted = [k for k in validation if k not in {"status", "returncode"}]
         compact["validation"] = {
             "status": validation.get("status"),
             "returncode": validation.get("returncode"),
         }
+        if omitted:
+            compact["validation"]["omitted"] = omitted
 
     active_session = compact.get("active_session")
     if isinstance(active_session, dict):
         active_validation = active_session.get("validation")
+        keep_session_keys = {
+            "path", "graph_id", "state_revision", "dirty", "validation",
+            "block_count", "connection_count", "variable_count",
+            "variable_preview", "block_preview", "connection_preview"
+        }
+        omitted = [k for k in active_session if k not in keep_session_keys]
+
+        session_val_dict = None
+        if isinstance(active_validation, dict):
+            val_omitted = [k for k in active_validation if k not in {"status", "returncode"}]
+            session_val_dict = {
+                "status": active_validation.get("status"),
+                "returncode": active_validation.get("returncode"),
+            }
+            if val_omitted:
+                session_val_dict["omitted"] = val_omitted
+        else:
+            session_val_dict = active_validation
+
         compact["active_session"] = {
             "path": active_session.get("path"),
             "graph_id": active_session.get("graph_id"),
             "state_revision": active_session.get("state_revision"),
             "dirty": active_session.get("dirty"),
-            "validation": {
-                "status": active_validation.get("status"),
-                "returncode": active_validation.get("returncode"),
-            }
-            if isinstance(active_validation, dict)
-            else active_validation,
+            "validation": session_val_dict,
             "block_count": active_session.get("block_count"),
             "connection_count": active_session.get("connection_count"),
             "variable_count": active_session.get("variable_count"),
@@ -67,6 +83,8 @@ def tool_history_content_as_text(
             "block_preview": active_session.get("block_preview"),
             "connection_preview": active_session.get("connection_preview"),
         }
+        if omitted:
+            compact["active_session"]["omitted"] = omitted
 
     lines = [f"{tool_name} result"]
     ok = compact.get("ok")
@@ -162,8 +180,7 @@ def is_variable_block(block_type: str) -> bool:
                 return True
     except Exception:
         pass
-    # Last resort: string-prefix heuristic (misses some edge cases).
-    return block_type == "variable" or block_type.startswith("variable_")
+    return False
 
 
 # -- path safety (was path_safety.py) --

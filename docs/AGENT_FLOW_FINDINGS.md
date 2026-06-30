@@ -221,9 +221,9 @@ the KeyError is caught and the operation is a silent no-op.
 
 When a newly-added block omits the `type` param and the batch connects it
 to a typed neighbor, the adapter sets `type` from the neighbor's port
-dtype. The decision is reported in the `auto_resolved` field of the
-`change_graph` response: `{"auto_resolved": {"mid_throttle": "float"}}`.
-Only fills MISSING values — never overrides model-specified params.
+dtype. This is done deterministically to prevent connection validation
+failures on omitted types. Only fills MISSING values — never overrides
+model-specified params.
 
 ### Error locality
 

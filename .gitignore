@@ -48,3 +48,8 @@ tmp/
 wheels/
 
 vec1.so
+
+# Generated vector indexes (rebuilt at boot via GrcAgent.warmup_vector_index
+# or manually via scripts/regenerate_vectors.py)
+src/grc_agent/vectors/
+src/grc_agent/runtime/*.db

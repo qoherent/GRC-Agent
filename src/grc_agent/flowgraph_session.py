@@ -46,7 +46,6 @@ class FlowgraphSession:
         self.last_validation_revision: int | None = None
         self._state_revision = 0
         self._persisted_file_sha256: str | None = None
-        self._last_failed_ops_hash: str | None = None
 
     # -- identity / revision --------------------------------------------------
 
@@ -143,10 +142,13 @@ class FlowgraphSession:
             }
         else:
             validation_payload = {"status": "unknown", "errors": []}
+        from grc_agent.domain_models import BlockRole
+        SUMMARY_PREVIEW_LIMIT = 3
+
         user_blocks = [
             b
             for b in snapshot.blocks
-            if (b.role.value if hasattr(b.role, "value") else str(b.role)) != "options"
+            if b.role != BlockRole.OPTIONS
         ]
         all_blocks = [
             {
@@ -158,9 +160,9 @@ class FlowgraphSession:
         ]
         variable_count = sum(1 for b in all_blocks if b["role"] == "variable")
         all_conns = sorted(snapshot.connections)
-        block_summaries = [f"{b['instance_name']} ({b['block_id']})" for b in all_blocks[:3]]
-        if len(all_blocks) > 3:
-            block_summaries.append(f"... +{len(all_blocks) - 3} more")
+        block_summaries = [f"{b['instance_name']} ({b['block_id']})" for b in all_blocks[:SUMMARY_PREVIEW_LIMIT]]
+        if len(all_blocks) > SUMMARY_PREVIEW_LIMIT:
+            block_summaries.append(f"... +{len(all_blocks) - SUMMARY_PREVIEW_LIMIT} more")
         summary_text = (
             f"{Path(self.path).name if self.path else 'graph'}: "
             f"{len(all_blocks)} blocks, {len(all_conns)} connections. " + ", ".join(block_summaries)

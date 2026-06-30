@@ -19,14 +19,10 @@ from grc_agent.sessions_store import (
     SessionStore,
     SessionStoreCorrupt,
     SessionStoreTooNew,
-    append_message_sync,
     default_sessions_db_path,
-    export_markdown_sync,
     get_session_sync,
-    list_messages_sync,
     list_sessions_sync,
     open_session_store,
-    open_session_sync,
     session_store_cm,
 )
 
@@ -464,71 +460,41 @@ class SingletonTests(unittest.TestCase):
             b.close()
 
 
-class SyncApiTests(unittest.TestCase):
-    """The CLI uses the *sync* helpers, bypassing the writer thread."""
-
-    def test_open_and_append_via_sync(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = _make_db_path(Path(tmp))
-            sid = open_session_sync(
-                db,
-                graph_path="/x.grc",
-                graph_hash="grc:42",
-                model_alias="m",
-                title="t",
-            )
-            mid = append_message_sync(db, session_id=sid, role="user", text="hi")
-            self.assertEqual(len(mid), 36)  # UUIDv4
-            msgs = list_messages_sync(db, sid)
-            self.assertEqual(len(msgs), 1)
-            self.assertEqual(msgs[0].text, "hi")
-            self.assertEqual(msgs[0].sequence, 0)
-            # Second message gets sequence 1.
-            append_message_sync(db, session_id=sid, role="assistant", text="hello")
-            msgs = list_messages_sync(db, sid)
-            self.assertEqual([m.sequence for m in msgs], [0, 1])
+class SyncApiTests(_StoreTestCase):
+    """The sync read helpers (``list_sessions_sync``, ``get_session_sync``,
+    ``list_messages_sync``) read via short-lived connections on the GUI thread."""
 
     def test_list_sessions_sync_filters(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = _make_db_path(Path(tmp))
-            open_session_sync(db, graph_path="/a.grc", graph_hash="g:1", title="A")
-            open_session_sync(db, graph_path="/b.grc", graph_hash="g:2", title="B")
-            all_sessions = list_sessions_sync(db)
-            self.assertEqual(len(all_sessions), 2)
-            a_sessions = list_sessions_sync(db, graph_path="/a.grc")
-            self.assertEqual(len(a_sessions), 1)
-            self.assertEqual(a_sessions[0].graph_path, "/a.grc")
-            sub = list_sessions_sync(db, graph_path_substring=".grc")
-            self.assertEqual(len(sub), 2)
-
-    def test_export_markdown_sync(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = _make_db_path(Path(tmp))
-            sid = open_session_sync(
-                db,
-                graph_path="/x.grc",
-                graph_hash="g:1",
-                model_alias="m",
-                title="Demo",
-            )
-            append_message_sync(db, session_id=sid, role="user", text="hi")
-            append_message_sync(
-                db,
-                session_id=sid,
-                role="tool_finished",
-                text="applied",
-                payload={"kind": "tool_finished_ok", "ok": True},
-            )
-            md = export_markdown_sync(db, sid)
-            self.assertIn("# Demo", md)
-            self.assertIn("## You", md)
-            self.assertIn("## Tool (finished)", md)
-            self.assertIn('"kind": "tool_finished_ok"', md)
+        self._open_session(graph_path="/a.grc", graph_hash="g:1", title="A")
+        self._open_session(graph_path="/b.grc", graph_hash="g:2", title="B")
+        self.store.flush(timeout=2.0)
+        db = self.store._db_path
+        all_sessions = list_sessions_sync(db)
+        self.assertEqual(len(all_sessions), 2)
+        a_sessions = list_sessions_sync(db, graph_path="/a.grc")
+        self.assertEqual(len(a_sessions), 1)
+        self.assertEqual(a_sessions[0].graph_path, "/a.grc")
+        sub = list_sessions_sync(db, graph_path_substring=".grc")
+        self.assertEqual(len(sub), 2)
 
     def test_get_session_sync_missing_returns_none(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = _make_db_path(Path(tmp))
-            self.assertIsNone(get_session_sync(db, 99999))
+        self.assertIsNone(get_session_sync(self.store._db_path, 99999))
+
+
+class GCTests(_StoreTestCase):
+    def test_gc_older_than_days(self) -> None:
+        _sid = self._open_session()
+        self.store.flush()
+        # This will trigger the commit bug
+        deleted = self.store.gc(older_than_days=180)
+        self.assertEqual(deleted, 0)
+
+    def test_gc_orphans(self) -> None:
+        _sid = self._open_session(graph_path="/nonexistent/path/to/some/file.grc")
+        self.store.flush()
+        # This will trigger the commit bug
+        deleted = self.store.gc(only_orphans=True)
+        self.assertEqual(deleted, 1)
 
 
 class DefaultPathTests(unittest.TestCase):
@@ -544,3 +510,4 @@ class DefaultPathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

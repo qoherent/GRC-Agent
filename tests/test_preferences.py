@@ -38,7 +38,6 @@ def _make_llama_config(**overrides: object) -> LlamaConfig:
         backend="ollama",
         max_tokens=4096,
         max_tool_rounds=8,
-        temperature=0.0,
         enable_thinking=False,
         request_timeout_seconds=120.0,
     )
@@ -277,34 +276,10 @@ def tempfile_Target(suffix: str = "preferences.json"):
     return _TargetCM()
 
 
-class ModelMigrationTests(unittest.TestCase):
-    """The GUI persists the model the user last picked in `last_model.model`.
-    When the default model is upgraded (e.g. a new Modelfile variant with
-    a different context window), stale persisted values must be remapped
-    automatically — otherwise users keep running the old model despite the
-    config default update.
+class PreferencesLoadPassthroughTests(unittest.TestCase):
+    """``load_user_preferences`` passes the persisted model through unchanged
+    and never creates a preferences file when one does not exist.
     """
-
-    def test_load_remaps_stale_gemma4_to_120k_variant(self) -> None:
-        with tempfile_Target(suffix="prefs.json") as target:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"last_model": {"model": "gemma4:e4b-it-qat"}}),
-                encoding="utf-8",
-            )
-            prefs = load_user_preferences(path=target)
-            self.assertEqual(prefs.last_model.model, "gemma4:e4b-it-qat-120k")
-
-    def test_load_persists_remapped_value_to_disk(self) -> None:
-        with tempfile_Target(suffix="prefs.json") as target:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"last_model": {"model": "gemma4:e4b-it-qat"}}),
-                encoding="utf-8",
-            )
-            load_user_preferences(path=target)
-            raw = json.loads(target.read_text(encoding="utf-8"))
-            self.assertEqual(raw["last_model"]["model"], "gemma4:e4b-it-qat-120k")
 
     def test_load_leaves_unrelated_models_unchanged(self) -> None:
         with tempfile_Target(suffix="prefs.json") as target:
@@ -327,20 +302,6 @@ class ModelMigrationTests(unittest.TestCase):
             prefs = load_user_preferences(path=target)
             self.assertEqual(prefs.last_model.model, "")
             self.assertFalse(target.exists())
-
-    def test_apply_overlay_uses_remapped_model(self) -> None:
-        """End-to-end: after the remap, the LlamaConfig overlay must see
-        the new model — otherwise the GUI would still pin the old value."""
-        with tempfile_Target(suffix="prefs.json") as target:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"last_model": {"model": "gemma4:e4b-it-qat"}}),
-                encoding="utf-8",
-            )
-            prefs = load_user_preferences(path=target)
-            base = LlamaConfig()
-            overlaid = apply_user_preferences_to_llama_config(base, prefs)
-            self.assertEqual(overlaid.model, "gemma4:e4b-it-qat-120k")
 
 
 if __name__ == "__main__":

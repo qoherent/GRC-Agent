@@ -122,7 +122,6 @@ def grc_agent_toml(tmp_home: Path) -> Any:
         body += 'backend = "ollama"\n'
         body += "max_tokens = 1024\n"
         body += "max_tool_rounds = 4\n"
-        body += "temperature = 0.0\n"
         body += "enable_thinking = false\n"
         body += "request_timeout_seconds = 30.0\n"
         for key, value in overrides.items():

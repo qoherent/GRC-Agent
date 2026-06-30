@@ -34,7 +34,6 @@ Design constraints:
 - Single-writer rule: one writer thread per process. Multiple
   *processes* (two GUI windows) share the DB; SQLite WAL
   serializes them transparently.
-- Forward-only schema migrations via :data:`MIGRATIONS`.
 """
 
 from __future__ import annotations
@@ -222,23 +221,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
-def _open_db(db_path: Path) -> sqlite3.Connection:
-    """Open the DB, run PRAGMAs, run migrations, run integrity_check.
+def _open_db(db_path: Path, validate_integrity: bool = False) -> sqlite3.Connection:
+    """Open the DB, run PRAGMAs, run migrations, and optionally run integrity_check.
 
     Raises :class:`SessionStoreTooNew` for forward-incompatible
     schemas and :class:`SessionStoreCorrupt` for integrity
     failures. The caller owns the connection.
 
-    Connections are opened with ``check_same_thread=False`` and a
-    per-connection ``WRITER`` lock so a single connection can be
-    used from both the writer thread and the main thread's read
-    helpers. SQLite serializes writes at the file level under
-    WAL; the lock is what makes the contract explicit. This is
-    necessary because the writer thread holds a long-lived
-    connection (open for the lifetime of the store) and the
-    read-side helpers cannot reasonably open a new connection
-    for every read without losing the small in-process
-    connection-pool wins.
+    Connections are opened with ``check_same_thread=False``. The
+    writer thread holds one long-lived connection for writes;
+    read-side helpers open a fresh short-lived connection per read.
+    SQLite serializes writers at the file level under WAL.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -275,12 +268,54 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
     _init_schema(conn)
     # integrity_check is a fast scan on a small DB; failure here is
     # unrecoverable from inside the writer, so we surface it
-    # immediately.
-    integrity = conn.execute("PRAGMA integrity_check").fetchone()
-    if integrity is None or integrity[0] != "ok":
-        conn.close()
-        raise SessionStoreCorrupt(f"sessions DB at {db_path} failed integrity_check: {integrity!r}")
+    # immediately. We only run it on DB initialization/construction
+    # to avoid huge query-level overhead.
+    if validate_integrity:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            conn.close()
+            raise SessionStoreCorrupt(f"sessions DB at {db_path} failed integrity_check: {integrity!r}")
     return conn
+
+
+# Shared read-SQL. The bound ``SessionStore`` read methods and the
+# ``*_sync`` module-level helpers read through these so the column lists and
+# filter builders live in one place (AGENTS.md "Simplify by removal").
+_SESSION_COLUMNS = (
+    "id, graph_path, graph_hash, started_at, ended_at, "
+    "model_alias, backend, title, message_count, graph_exists"
+)
+_MESSAGES_COLUMNS = "id, session_id, sequence, role, text, payload, created_at"
+
+
+def _select_sessions_sql(
+    *,
+    graph_path: str | None,
+    graph_path_substring: str | None,
+    limit: int,
+) -> tuple[str, list[Any]]:
+    sql = f"SELECT {_SESSION_COLUMNS} FROM sessions "
+    params: list[Any] = []
+    clauses: list[str] = []
+    if graph_path is not None:
+        clauses.append("graph_path = ?")
+        params.append(graph_path)
+    if graph_path_substring is not None:
+        clauses.append("graph_path LIKE ?")
+        params.append(f"%{graph_path_substring}%")
+    if clauses:
+        sql += "WHERE " + " AND ".join(clauses) + " "
+    sql += "ORDER BY started_at DESC LIMIT ?"
+    params.append(int(limit))
+    return sql, params
+
+
+def _select_session_by_id_sql() -> str:
+    return f"SELECT {_SESSION_COLUMNS} FROM sessions WHERE id = ?"
+
+
+def _select_messages_sql() -> str:
+    return f"SELECT {_MESSAGES_COLUMNS} FROM messages WHERE session_id = ? ORDER BY sequence ASC"
 
 
 def _row_to_session(row: sqlite3.Row) -> SessionRecord:
@@ -343,7 +378,7 @@ class SessionStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = (db_path or default_sessions_db_path()).expanduser()
         self._q: queue.Queue[_PendingMessage] = queue.Queue(maxsize=_QUEUE_MAX)
-        self._closed_sessions: queue.Queue[int] = queue.Queue()
+        self._closed_sessions: queue.Queue[int] = queue.Queue(maxsize=_QUEUE_MAX)
         # ``_drained`` is cleared on every enqueue and set by the
         # writer when it has nothing to do. ``flush()`` blocks on
         # it.
@@ -357,7 +392,8 @@ class SessionStore:
         # ``ProgrammingError`` Python's sqlite3 raises when a
         # connection is touched by a thread other than the one
         # that created it.
-        self._writer_conn = _open_db(self._db_path)
+        self._writer_conn = _open_db(self._db_path, validate_integrity=True)
+
         # The writer's run() loop body.
         self._stop = threading.Event()
         self._writer = threading.Thread(target=self._run, name="grc-sessions-writer", daemon=True)
@@ -487,8 +523,8 @@ class SessionStore:
         # each iteration; setting it is sufficient to wake the
         # thread out of its blocking ``_q.get`` (which has a
         # 50ms timeout anyway) and let it exit cleanly. We do
-        # NOT push a sentinel — pushing ``None`` would feed it
-        # into ``asdict`` and crash the writer.
+        # NOT push a sentinel — the queue is typed as
+        # ``_PendingMessage``; a ``None`` is not a valid item.
         self._writer.join(timeout=_SHUTDOWN_TIMEOUT_S)
         if self._writer.is_alive():
             logger.warning(
@@ -507,7 +543,7 @@ class SessionStore:
         if SessionStore._instance is self:
             SessionStore._instance = None
 
-    # --- read-side helpers (synchronous; use the writer's connection) ---
+    # --- read-side helpers (fresh short-lived connection per read) ---
 
     @contextmanager
     def _read_conn(self) -> Iterator[sqlite3.Connection]:
@@ -533,23 +569,11 @@ class SessionStore:
     ) -> list[SessionRecord]:
         """Return sessions ordered by started_at DESC, optionally
         filtered by exact graph_path or a substring match."""
-        sql = (
-            "SELECT id, graph_path, graph_hash, started_at, ended_at, "
-            "model_alias, backend, title, message_count, graph_exists "
-            "FROM sessions "
+        sql, params = _select_sessions_sql(
+            graph_path=graph_path,
+            graph_path_substring=graph_path_substring,
+            limit=limit,
         )
-        params: list[Any] = []
-        clauses: list[str] = []
-        if graph_path is not None:
-            clauses.append("graph_path = ?")
-            params.append(graph_path)
-        if graph_path_substring is not None:
-            clauses.append("graph_path LIKE ?")
-            params.append(f"%{graph_path_substring}%")
-        if clauses:
-            sql += "WHERE " + " AND ".join(clauses) + " "
-        sql += "ORDER BY started_at DESC LIMIT ?"
-        params.append(int(limit))
         with self._read_conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_session(r) for r in rows]
@@ -557,9 +581,7 @@ class SessionStore:
     def get_session(self, session_id: int) -> SessionRecord | None:
         with self._read_conn() as conn:
             row = conn.execute(
-                "SELECT id, graph_path, graph_hash, started_at, ended_at, "
-                "model_alias, backend, title, message_count, graph_exists "
-                "FROM sessions WHERE id = ?",
+                _select_session_by_id_sql(),
                 (int(session_id),),
             ).fetchone()
         return _row_to_session(row) if row is not None else None
@@ -567,8 +589,7 @@ class SessionStore:
     def list_messages(self, session_id: int) -> list[MessageRecord]:
         with self._read_conn() as conn:
             rows = conn.execute(
-                "SELECT id, session_id, sequence, role, text, payload, created_at "
-                "FROM messages WHERE session_id = ? ORDER BY sequence ASC",
+                _select_messages_sql(),
                 (int(session_id),),
             ).fetchall()
         return [_row_to_message(r) for r in rows]
@@ -589,20 +610,31 @@ class SessionStore:
             for s in sessions:
                 if not Path(s.graph_path).exists():
                     with self._read_conn() as conn:
-                        conn.execute("DELETE FROM sessions WHERE id = ?", (s.id,))
-                        conn.execute("COMMIT")
+                        conn.execute("BEGIN")
+                        try:
+                            conn.execute("DELETE FROM sessions WHERE id = ?", (s.id,))
+                            conn.execute("COMMIT")
+                        except Exception:
+                            conn.execute("ROLLBACK")
+                            raise
                     deleted += 1
             return deleted
         # ``datetime('now', ??)`` is the SQLite way to compute
         # ``now - N days``. We pass the days as a negative
         # modifier.
         with self._read_conn() as conn:
-            cur = conn.execute(
-                "DELETE FROM sessions WHERE started_at < datetime('now', ?)",
-                (f"-{int(older_than_days)} days",),
-            )
-            conn.execute("COMMIT")
+            conn.execute("BEGIN")
+            try:
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE started_at < datetime('now', ?)",
+                    (f"-{int(older_than_days)} days",),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
         return int(cur.rowcount or 0)
+
 
     # --- internal: writer thread ---
 
@@ -756,76 +788,8 @@ def session_store_cm(db_path: Path | None = None) -> Iterator[SessionStore]:
 
 
 # ---------------------------------------------------------------------------
-# Synchronous helpers (used by the CLI; bypass the writer thread)
+# Synchronous read helpers (short-lived connection per read; GUI read paths)
 # ---------------------------------------------------------------------------
-
-
-def open_session_sync(
-    db_path: Path,
-    *,
-    graph_path: str,
-    graph_hash: str,
-    model_alias: str | None = None,
-    backend: str | None = None,
-    title: str = "",
-) -> int:
-    """Open a session in a short-lived connection, commit, return id."""
-    conn = _open_db(db_path)
-    try:
-        cur = conn.execute(
-            "INSERT INTO sessions "
-            "(graph_path, graph_hash, started_at, model_alias, backend, title) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                graph_path,
-                graph_hash,
-                _utcnow_iso(),
-                model_alias,
-                backend,
-                title,
-            ),
-        )
-        conn.commit()
-        return int(cur.lastrowid)
-    finally:
-        conn.close()
-
-
-def append_message_sync(
-    db_path: Path,
-    *,
-    session_id: int,
-    role: str,
-    text: str,
-    payload: dict | None = None,
-) -> str:
-    """Append one message in a short-lived connection."""
-    conn = _open_db(db_path)
-    try:
-        msg_id = str(uuid.uuid4())
-        seq_row = conn.execute(
-            "SELECT COALESCE(MAX(sequence), -1) + 1 AS next FROM messages WHERE session_id = ?",
-            (int(session_id),),
-        ).fetchone()
-        seq = int(seq_row["next"]) if seq_row else 0
-        conn.execute(
-            "INSERT INTO messages "
-            "(id, session_id, sequence, role, text, payload, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                msg_id,
-                int(session_id),
-                seq,
-                role,
-                text,
-                json.dumps(payload) if payload is not None else None,
-                _utcnow_iso(),
-            ),
-        )
-        conn.commit()
-        return msg_id
-    finally:
-        conn.close()
 
 
 def list_sessions_sync(
@@ -835,26 +799,14 @@ def list_sessions_sync(
     graph_path_substring: str | None = None,
     limit: int = 50,
 ) -> list[SessionRecord]:
-    """Read-only list helper used by the CLI."""
+    """Read-only list helper used by the GUI read path."""
+    sql, params = _select_sessions_sql(
+        graph_path=graph_path,
+        graph_path_substring=graph_path_substring,
+        limit=limit,
+    )
     conn = _open_db(db_path)
     try:
-        sql = (
-            "SELECT id, graph_path, graph_hash, started_at, ended_at, "
-            "model_alias, backend, title, message_count, graph_exists "
-            "FROM sessions "
-        )
-        params: list[Any] = []
-        clauses: list[str] = []
-        if graph_path is not None:
-            clauses.append("graph_path = ?")
-            params.append(graph_path)
-        if graph_path_substring is not None:
-            clauses.append("graph_path LIKE ?")
-            params.append(f"%{graph_path_substring}%")
-        if clauses:
-            sql += "WHERE " + " AND ".join(clauses) + " "
-        sql += "ORDER BY started_at DESC LIMIT ?"
-        params.append(int(limit))
         rows = conn.execute(sql, params).fetchall()
         return [_row_to_session(r) for r in rows]
     finally:
@@ -864,12 +816,7 @@ def list_sessions_sync(
 def get_session_sync(db_path: Path, session_id: int) -> SessionRecord | None:
     conn = _open_db(db_path)
     try:
-        row = conn.execute(
-            "SELECT id, graph_path, graph_hash, started_at, ended_at, "
-            "model_alias, backend, title, message_count, graph_exists "
-            "FROM sessions WHERE id = ?",
-            (int(session_id),),
-        ).fetchone()
+        row = conn.execute(_select_session_by_id_sql(), (int(session_id),)).fetchone()
         return _row_to_session(row) if row is not None else None
     finally:
         conn.close()
@@ -878,59 +825,10 @@ def get_session_sync(db_path: Path, session_id: int) -> SessionRecord | None:
 def list_messages_sync(db_path: Path, session_id: int) -> list[MessageRecord]:
     conn = _open_db(db_path)
     try:
-        rows = conn.execute(
-            "SELECT id, session_id, sequence, role, text, payload, created_at "
-            "FROM messages WHERE session_id = ? ORDER BY sequence ASC",
-            (int(session_id),),
-        ).fetchall()
+        rows = conn.execute(_select_messages_sql(), (int(session_id),)).fetchall()
         return [_row_to_message(r) for r in rows]
     finally:
         conn.close()
-
-
-def export_markdown_sync(db_path: Path, session_id: int) -> str:
-    """Render a session as a Markdown transcript."""
-    session = get_session_sync(db_path, session_id)
-    if session is None:
-        return f"# Session {session_id} (missing)\n"
-    messages = list_messages_sync(db_path, session_id)
-    title = session.title or "(untitled session)"
-    lines: list[str] = [
-        f"# {title}",
-        "",
-        f"- Started: {session.started_at}",
-        f"- Ended: {session.ended_at or '(open)'}",
-        f"- Graph: `{session.graph_path}`",
-        f"- Graph hash: `{session.graph_hash}`",
-        f"- Model: `{session.model_alias or '(unknown)'}`",
-        f"- Backend: `{session.backend or '(unknown)'}`",
-        f"- Messages: {len(messages)}",
-        "",
-        "---",
-        "",
-    ]
-    role_heading = {
-        "user": "## You",
-        "assistant": "## Agent",
-        "tool_started": "## Tool (started)",
-        "tool_finished": "## Tool (finished)",
-        "mutation": "## Tool (mutation)",
-        "error": "## Error",
-        "system": "## System",
-    }
-    for msg in messages:
-        heading = role_heading.get(msg.role, f"## {msg.role}")
-        lines.append(heading)
-        lines.append("")
-        if msg.text:
-            lines.append(msg.text)
-            lines.append("")
-        if msg.payload:
-            lines.append("```json")
-            lines.append(json.dumps(msg.payload, indent=2, sort_keys=True))
-            lines.append("```")
-            lines.append("")
-    return "\n".join(lines)
 
 
 __all__ = [
@@ -942,13 +840,10 @@ __all__ = [
     "SessionStoreCorrupt",
     "SessionStoreError",
     "SessionStoreTooNew",
-    "append_message_sync",
     "default_sessions_db_path",
-    "export_markdown_sync",
     "get_session_sync",
     "list_messages_sync",
     "list_sessions_sync",
     "open_session_store",
-    "open_session_sync",
     "session_store_cm",
 ]

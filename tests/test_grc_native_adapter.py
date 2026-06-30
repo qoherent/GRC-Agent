@@ -28,11 +28,22 @@ from grc_agent.grc_native_adapter import (
     validate,
     write_flow_graph_atomic,
 )
-from grc_agent.runtime.param_filter import EXCLUDED_PARAM_CATEGORIES
+from grc_agent.runtime.param_filter import DETAILS, EXCLUDED_PARAM_CATEGORIES, OVERVIEW
 
 pytestmark = pytest.mark.grc_native
 
 FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "data"
+
+
+def _temp_fixture(name: str) -> Path:
+    """Copy a fixture to a temp file so a successful change_graph batch (which
+    calls ``session.save()``) cannot write back to the committed fixture."""
+    import shutil
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="grc_test_")) / Path(name).name
+    shutil.copy2(FIXTURES / name, tmp)
+    return tmp
 
 
 # --- platform / identity ------------------------------------------------------ #
@@ -187,12 +198,37 @@ def test_classify_role_source_sink_transform():
 def test_render_parameter_filters_advanced_and_config_and_hide_all():
     fg = load_flow_graph(FIXTURES / "qtgui_vector_sink_example.grc")
     target = next(b for b in fg.blocks if b.key.startswith("qtgui"))
+
+    # 1. Details mode: only drops category ∈ {Advanced, Config}, hide == 'all', dtype == 'gui_hint'.
     for k, p in target.params.items():
-        rendered = render_parameter(target, k, p)
-        if p.category in EXCLUDED_PARAM_CATEGORIES or p.hide == "all" or p.dtype == "gui_hint":
+        rendered = render_parameter(target, k, p, mode=DETAILS)
+        if (
+            p.category in EXCLUDED_PARAM_CATEGORIES
+            or p.hide == "all"
+            or p.dtype == "gui_hint"
+            or k == "showports"
+            or k.startswith("bus_structure_")
+        ):
             assert rendered is None
         else:
             assert rendered == str(p.value)
+
+    # 2. Overview mode: additionally drops any parameter at its default value
+    #    (unless structural 'type' or 'generate_options').
+    for k, p in target.params.items():
+        rendered = render_parameter(target, k, p, mode=OVERVIEW)
+        if (
+            p.category in EXCLUDED_PARAM_CATEGORIES
+            or p.hide == "all"
+            or p.dtype == "gui_hint"
+            or k == "showports"
+            or k.startswith("bus_structure_")
+            or (str(p.value) == str(p.default) and k not in {"type", "generate_options"})
+        ):
+            assert rendered is None
+        else:
+            assert rendered == str(p.value)
+
     # Also confirm the rendered output for this block contains no
     # Advanced/Config params and no hide=='all' params.
     rendered_block = render_block(target, flow_graph=fg)
@@ -416,3 +452,189 @@ def test_change_graph_orphaned_port_hint_names_the_removed_block():
     # The hint must name the removed block that caused the orphan, so the
     # model can infer it must also remove/reconnect the noise source or force.
     assert "blocks_add_xx" in noise_error.get("hint", "")
+
+
+# --- Phase 0: disabled vs bypass native semantics (regression anchor) -------- #
+
+
+def test_disabled_connected_source_is_invalid_native():
+    """Native GRC itself flags a disabled connected source's downstream port as
+    'not connected'. Our validate() is native-faithful — this anchors that the
+    disabled/bypass asymmetry is NOT an agent bug, so the validator must not be
+    'fixed' (that would diverge from native GRC)."""
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
+    src = next(b for b in fg.blocks if b.key == "analog_sig_source_x")
+    set_block_state(src, "disabled")
+    result = validate(fg)
+    assert result.native_ok is False
+    assert any("not connected" in e for e in result.errors)
+
+
+def test_bypassed_connected_source_is_valid_native():
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
+    src = next(b for b in fg.blocks if b.key == "analog_sig_source_x")
+    set_block_state(src, "bypass")
+    assert validate(fg).native_ok is True
+
+
+# --- Phase 1: enum rejection, template detection, empty-value strip ---------- #
+
+
+def test_set_param_rejects_invalid_enum_value():
+    """Native set_value silently keeps the current value for an invalid enum
+    option; set_param must surface it as a hard error (no silent fallback)."""
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
+    block = next(b for b in fg.blocks if b.key == "analog_sig_source_x")
+    type_param = block.params["type"]
+    assert "float" in [str(o) for o in type_param.options]  # sanity
+    set_param(block, "type", "float")  # valid option accepted
+    assert str(block.params["type"].value) == "float"
+    with pytest.raises(ValueError):  # invalid option rejected
+        set_param(block, "type", "float_const/float")
+    # the invalid value was not applied
+    assert str(block.params["type"].value) != "float_const/float"
+
+
+def test_set_param_rejects_variable_template_literal():
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
+    block = next(b for b in fg.blocks if b.key == "analog_sig_source_x")
+    with pytest.raises(ValueError):
+        set_param(block, "samp_rate", "${variable:samp_rate}")
+
+
+def test_render_block_strips_empty_enum_value():
+    """An empty-valued enum (e.g. options.realtime_scheduling='') must not leak
+    into the inspect payload (consistency with filter_live_block_params)."""
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
+    options_block = next(b for b in fg.blocks if b.key == "options")
+    rendered = render_block(options_block, fg, mode=OVERVIEW, variable_names=set())
+    assert "realtime_scheduling" not in rendered.params
+
+
+# --- Phase 4: options collapse, qtgui cosmetics, catalog port keys ------------ #
+
+
+def test_options_block_renders_params_with_id_dropped():
+    """The options block is rendered with its real params (author/title/...);
+    only the redundant 'id' param (== instance_name) is dropped and empty
+    values (e.g. realtime_scheduling='') are stripped. The block is NOT
+    collapsed — project policy preserves information in tool outputs."""
+    fg = load_flow_graph(FIXTURES / "dial_tone.grc")
+    snap = render_flow_graph(fg, mode=OVERVIEW)
+    options_blocks = [b for b in snap.blocks if b.block_id == "options"]
+    assert options_blocks, "fixture should have an options block"
+    ob = options_blocks[0]
+    assert "id" not in ob.params, "id is redundant with instance_name"
+    assert "realtime_scheduling" not in ob.params, "empty value stripped"
+    assert "author" in ob.params, "real param preserved (no collapse)"
+    assert "title" in ob.params
+
+
+def test_qtgui_cosmetic_params_filtered_from_overview():
+    """qtgui styling grids (alpha/color/label/marker/style/width + numeric
+    suffix) are category='Config' and must be dropped by Stage A — they must
+    never flood the overview."""
+    fg = load_flow_graph(FIXTURES / "fm_rx.grc")
+    snap = render_flow_graph(fg, mode=OVERVIEW)
+    d = snap.model_dump(exclude_none=True)
+    cosmetic = ("alpha", "color", "label", "marker", "style", "width")
+    for b in d["blocks"]:
+        if "qtgui" in b["block_id"]:
+            for key in b["params"]:
+                assert not (
+                    any(key.startswith(p) for p in cosmetic) and key[-1].isdigit()
+                ), f"cosmetic param {key!r} leaked into overview"
+
+
+def test_catalog_stream_ports_carry_positional_keys():
+    """Catalog stream ports without an explicit id must expose their positional
+    key so the model can form connections (scenario 15 root cause)."""
+    from grc_agent.catalog.loaders import (
+        _build_block_description,
+        get_catalog_snapshot,
+    )
+
+    snap = get_catalog_snapshot(None)
+    audio = snap.blocks.get("audio_sink")
+    if audio is None:
+        pytest.skip("audio_sink not in catalog")
+    desc = _build_block_description(audio)
+    compact = [p.to_compact_dict() for p in desc.inputs]
+    assert compact, "audio_sink should have inputs"
+    assert "id" in compact[0], "stream port must expose positional key"
+    assert compact[0]["id"] == "0"
+
+
+def test_type_hint_names_neighbor_dtype_not_source_type():
+    """IO type/size mismatch hint must name the dtype the new block should
+    ADOPT (the neighbor/sink dtype), not the source's own wrong current type.
+
+    Regression for scenario 16: the adder is ``float`` but a newly-added
+    ``analog_sig_source_x`` was left at the default ``complex``; the old hint
+    said "'third_tone' type enum includes 'complex'" (the source's wrong type,
+    which appears first in the error message) instead of 'float'."""
+    from grc_agent.agent import GrcAgent
+    from grc_agent.flowgraph_session import FlowgraphSession
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    session = FlowgraphSession()
+    session.load(str(_temp_fixture("dial_tone.grc")))
+    agent = GrcAgent(session=session)
+    result = dispatch_flat_change_graph_batch(
+        agent,
+        add_blocks=[
+            {
+                "block_id": "analog_sig_source_x",
+                "instance_name": "third_tone",
+                "params": {
+                    "type": "complex",  # intentionally wrong (adder is float)
+                    "freq": "350",
+                    "samp_rate": "samp_rate",
+                    "amp": "ampl",
+                },
+            }
+        ],
+        update_params=[{"instance_name": "blocks_add_xx", "params": {"num_inputs": "4"}}],
+        add_connections=["third_tone:0->blocks_add_xx:3"],
+    )
+    assert result["ok"] is False
+    hints = [
+        e.get("hint", "")
+        for e in result.get("errors", [])
+        if e.get("code") == "gnu_validation"
+    ]
+    # The hint must point at 'float' (the dtype to adopt), NOT 'complex'.
+    assert any("'third_tone' type enum includes 'float'" in h for h in hints), hints
+    assert not any("includes 'complex'" in h for h in hints), hints
+
+
+def test_auto_resolve_sees_port_created_by_same_batch_num_inputs_bump():
+    """Auto-resolve must run AFTER update_params so a port created by a
+    same-batch `num_inputs` bump exists when the neighbor dtype is read.
+
+    Regression for scenario 16: a newly-added ``third_tone`` (no explicit
+    type) connected to a freshly-exposed adder port 3 must auto-resolve to the
+    adder's dtype (float) — not stay at the complex default that caused the
+    IO mismatch."""
+    from grc_agent.agent import GrcAgent
+    from grc_agent.flowgraph_session import FlowgraphSession
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    session = FlowgraphSession()
+    session.load(str(_temp_fixture("dial_tone.grc")))
+    agent = GrcAgent(session=session)
+    result = dispatch_flat_change_graph_batch(
+        agent,
+        add_blocks=[
+            {
+                "block_id": "analog_sig_source_x",
+                "instance_name": "third_tone",
+                "params": {"freq": "350", "samp_rate": "samp_rate", "amp": "ampl"},
+            }
+        ],
+        update_params=[{"instance_name": "blocks_add_xx", "params": {"num_inputs": "4"}}],
+        add_connections=["third_tone:0->blocks_add_xx:3"],
+    )
+    assert result["ok"] is True, result
+    third = next(b for b in agent.session.flowgraph.blocks if b.name == "third_tone")
+    assert str(third.params["type"].value) == "float"

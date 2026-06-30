@@ -10,19 +10,12 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ToolAgents.data_models.chat_history import ChatHistory
-from ToolAgents.data_models.messages import (
-    ChatMessage,
-    ChatMessageRole,
-    ToolCallContent,
-    ToolCallResultContent,
-)
+from ToolAgents.data_models.messages import ChatMessage
 
-from grc_agent.catalog.loaders import build_catalog_snapshot
 from grc_agent.config import AgentConfig, default_app_config
 from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
@@ -34,10 +27,6 @@ from grc_agent.history import (
     snapshot_session,
 )
 from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
-from grc_agent.runtime.clarification import (
-    normalize_pending_clarification,
-    resolve_pending_clarification_state,
-)
 from grc_agent.runtime.inspect_graph import inspect_graph as inspect_graph_wrapper
 from grc_agent.runtime.model_context import (
     MVP_MODEL_TOOL_NAMES,
@@ -45,10 +34,7 @@ from grc_agent.runtime.model_context import (
     build_system_prompt,
     render_model_messages,
 )
-from grc_agent.runtime.tool_context import (
-    compact_chat_history,
-    unsafe_graph_root_for_path,
-)
+from grc_agent.runtime.tool_context import compact_chat_history
 from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime_tool_validation import (
     build_tool_schema_map,
@@ -61,34 +47,9 @@ ToolResult = dict[str, Any]
 ToolCallable = Callable[..., ToolResult]
 
 
-_INSTALLED_GRAPH_ROOTS = (
-    Path("/usr/share/gnuradio/examples"),
-    Path("/usr/local/share/gnuradio/examples"),
-)
-_CANONICAL_FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "tests" / "data"
-
-
-def _catalog_version_token(catalog_root: str | None) -> str:
-    """Compute a freshness token for the search cache key.
-
-    The expensive catalog parse (``build_catalog_snapshot``) is already
-    ``lru_cache``d in ``catalog.loaders``. This function only does cheap
-    ``stat()`` calls over the cached file list to detect on-disk changes,
-    so it is NOT cached here — caching it would freeze the mtime and
-    defeat the invalidation it exists to provide.
-    """
-    snapshot = build_catalog_snapshot(catalog_root)
-    newest_mtime = 0
-    for path in [*snapshot.files.block, *snapshot.files.tree, *snapshot.files.domain]:
-        try:
-            newest_mtime = max(newest_mtime, path.stat().st_mtime_ns)
-        except OSError:
-            continue
-    return f"{snapshot.root}|blocks={len(snapshot.blocks)}|mtime_ns={newest_mtime}"
-
-
 class GrcAgent:
     """A thin integration layer between a language model and package-level owners."""
+    _MUTATING_TOOLS = {"change_graph"}
 
     def __init__(
         self,
@@ -131,50 +92,49 @@ class GrcAgent:
         )
         self._history_lineage_key: str | None = None
         self.chat_history: ChatHistory = ChatHistory()
-        self._session_snapshot: dict[str, Any] | None = None
         self.chat_session_id = str(uuid.uuid4())
-        self._last_validated_state_revision: int | None = None
-        self._last_validation_ok: bool | None = None
-        self._reset_validation_tracking()
         self._mvp_tools = self._build_mvp_tool_registry()
         self._active_tool_surface = MVP_TOOL_SURFACE
         self._tool_schemas = build_tool_schemas(self._active_tool_surface.model_tool_names)
         self._tool_schema_map = build_tool_schema_map(self._tool_schemas)
-        self._record_active_session_history(reason="initial_session")
         self._turn_user_message = ""
-        self._pending_clarification: dict[str, Any] | None = None
-        self._pending_clarification_revision: int | None = None
-        self._last_docs_advisor_meta: dict[str, Any] = {
-            "snippet_count": 0,
-            "source_quality": {},
-        }
         self._maybe_record_baseline_checkpoint(reason="initial_session")
 
     def get_system_prompt(self) -> str:
         return build_system_prompt(self.chat_session_id)
 
     def warmup_vector_index(self) -> None:
-        """Kick off background vector-DB ingestion for ask_grc_docs.
+        """Kick off background ingestion for both vector indexes (docs + catalog).
 
         Production entry points (CLI, GUI) call this once after constructing
-        the agent. Tests MUST NOT call it: the ingestion thread writes to the
-        real DB_PATH and would be affected by test-time mocks of
-        ``grc_agent.runtime.doc_answer.get_embedding``.
+        the agent so the indexes auto-create on first boot if missing. Both
+        stores are idempotent (no-op once populated), so this is safe to call
+        every boot. Tests MUST NOT call it: ingestion writes to the real DB
+        paths and would be affected by test-time mocks of the embedding
+        function.
         """
         import threading
 
+        from grc_agent.retrieval import warmup_catalog_vector_index
         from grc_agent.runtime.doc_answer import DB_PATH, initialize_vector_db_background
 
-        threading.Thread(
-            target=initialize_vector_db_background,
-            args=(DB_PATH, self._llama_server_url),
-            daemon=True,
-        ).start()
+        server_url = self._llama_server_url
+
+        def _warm() -> None:
+            try:
+                initialize_vector_db_background(DB_PATH, server_url)
+            except Exception:
+                logger.exception("docs vector index warmup failed")
+            try:
+                warmup_catalog_vector_index(server_url=server_url)
+            except Exception:
+                logger.exception("catalog vector index warmup failed")
+
+        threading.Thread(target=_warm, daemon=True).start()
 
     def reset_chat_session(self) -> None:
         """Reset the chat session history and generate a new session ID to clear KV cache matching."""
         self.chat_history.clear()
-        self._session_snapshot = None
         self.chat_session_id = str(uuid.uuid4())
 
     def get_tool_schemas_for_turn(
@@ -194,6 +154,30 @@ class GrcAgent:
         schemas_by_name = {schema["function"]["name"]: schema for schema in self._tool_schemas}
         return [schemas_by_name[name] for name in allowed_order if name in schemas_by_name]
 
+    def _reject_outside_surface(
+        self,
+        tool_name: str,
+        allowed: set[str] | tuple[str, ...],
+    ) -> ToolResult | None:
+        """Canonical surface gate: reject a tool call outside ``allowed``.
+
+        One uniform rule for both execution paths (``execute_tool`` and the
+        ToolAgents delegate). Returns ``None`` when the tool is allowed.
+        """
+        if tool_name in allowed:
+            return None
+        return self._tool_result(
+            tool_name=tool_name,
+            ok=False,
+            message=(
+                f"Tool '{tool_name}' is not available through the model-facing "
+                "surface for this graph session."
+            ),
+            error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
+            active_tool_surface=self._active_tool_surface.name,
+            allowed_tools=sorted(allowed),
+        )
+
     def _surface_tool_gate_result(
         self,
         *,
@@ -203,15 +187,8 @@ class GrcAgent:
         """Reject disallowed model-driven tools for the active surface profile."""
         if not model_tool_call:
             return None
-        if tool_name in self._active_tool_surface.model_tool_names:
-            return None
-        return self._tool_result(
-            tool_name=tool_name,
-            ok=False,
-            message=f"Tool '{tool_name}' is not allowed for MVP model-facing execution.",
-            error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
-            active_tool_surface=self._active_tool_surface.name,
-            allowed_model_tools=list(self._active_tool_surface.model_tool_names),
+        return self._reject_outside_surface(
+            tool_name, self._active_tool_surface.model_tool_names
         )
 
     def execute_tool(
@@ -311,25 +288,9 @@ class GrcAgent:
             return {}
 
         normalized = dict(kwargs)
-        if tool_name == "inspect_graph":
-            normalized = self._normalize_inspect_graph_args(normalized)
         if tool_name == "change_graph":
             normalized = copy.deepcopy(normalized)
         return normalized
-
-    def _normalize_inspect_graph_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Default inspect_graph view to 'overview'; let targets through."""
-        normalized = dict(kwargs)
-        normalized.setdefault("view", "overview")
-        normalized.setdefault("targets", [])
-        return normalized
-
-    def _unsafe_graph_root_for_path(self, path_value: str | Path) -> str | None:
-        return unsafe_graph_root_for_path(
-            path_value,
-            installed_graph_roots=_INSTALLED_GRAPH_ROOTS,
-            canonical_fixture_root=_CANONICAL_FIXTURE_ROOT,
-        )
 
     def validate_tool_call(
         self,
@@ -356,140 +317,12 @@ class GrcAgent:
                 message="Debug telemetry is not available through the model-facing tool surface.",
                 error_type=ErrorCode.INVALID_REQUEST,
             )
-        validation_kwargs = {
-            k: v for k, v in kwargs.items() if k not in {"view", "targets"}
-        }
         validation_error = validate_runtime_tool_call(
-            tool_name, validation_kwargs, self._tool_schema_map
+            tool_name, kwargs, self._tool_schema_map
         )
         if validation_error is None:
             return None
         return self._tool_result(tool_name=tool_name, ok=False, **validation_error)
-
-    def resolve_pending_clarification(
-        self,
-        user_message: str,
-        *,
-        model_tool_call: bool = False,
-    ) -> dict[str, Any]:
-        """Resolve a pending clarification from a human user reply.
-
-        Returns a dict with one of:
-            mode="none"              — no pending clarification, proceed normally
-            mode="executed"          — option executed, result in "tool_result"
-            mode="expired"           — session changed since clarification, cleared
-            mode="reminder"          — unrelated text while pending, compact reminder
-            mode="custom"            — D / free text, cleared, proceed normally
-        """
-        if self._pending_clarification is None:
-            return {"mode": "none"}
-
-        resolution = resolve_pending_clarification_state(
-            pending_clarification=self._pending_clarification,
-            pending_revision=self._pending_clarification_revision,
-            current_state_revision=self.session.state_revision,
-            user_message=user_message,
-        )
-        mode = resolution.get("mode")
-        if mode == "expired":
-            self._clear_pending_clarification()
-            return {
-                "mode": "expired",
-                "text": resolution["text"],
-            }
-        if mode == "selected":
-            opt = resolution["option"]
-            tool_call_id = self._record_clarification_option_call(resolution["raw_reply"], opt)
-            result = self.execute_tool(
-                opt.tool_name,
-                opt.tool_args,
-                model_tool_call=model_tool_call,
-            )
-            self._record_clarification_option_result(
-                tool_call_id,
-                opt.tool_name,
-                result,
-            )
-            self._clear_pending_clarification()
-            return {"mode": "executed", "tool_result": result}
-        if mode == "custom":
-            self._clear_pending_clarification()
-            return {
-                "mode": "custom",
-                "text": resolution["text"],
-                "custom_hint": resolution["custom_hint"],
-            }
-        return resolution
-
-    def _record_clarification_option_call(
-        self,
-        raw_reply: str,
-        option: Any,
-    ) -> str:
-        clarification_id = ""
-        if self._pending_clarification is not None:
-            clarification_id = str(self._pending_clarification.get("clarification_id") or "pending")
-        tool_call_id = f"clarification_{clarification_id}_{option.label}"
-        self.chat_history.add_user_message(raw_reply)
-        now = datetime.now()
-        clarification_message = ChatMessage(
-            id=str(uuid.uuid4()),
-            role=ChatMessageRole.Assistant,
-            content=[
-                ToolCallContent(
-                    tool_call_id=tool_call_id,
-                    tool_call_name=option.tool_name,
-                    tool_call_arguments=option.tool_args,
-                )
-            ],
-            created_at=now,
-            updated_at=now,
-            additional_fields={
-                "clarification_selection": {
-                    "label": option.label,
-                    "clarification_id": clarification_id,
-                }
-            },
-        )
-        self.chat_history.add_message(clarification_message)
-        return tool_call_id
-
-    def _record_clarification_option_result(
-        self,
-        tool_call_id: str,
-        tool_name: str,
-        result: dict[str, Any],
-    ) -> None:
-        now = datetime.now()
-        self.chat_history.add_message(
-            ChatMessage(
-                id=str(uuid.uuid4()),
-                role=ChatMessageRole.Tool,
-                content=[
-                    ToolCallResultContent(
-                        tool_call_result_id=str(uuid.uuid4()),
-                        tool_call_id=tool_call_id,
-                        tool_call_name=tool_name,
-                        tool_call_result=json.dumps(result, sort_keys=True),
-                    )
-                ],
-                created_at=now,
-                updated_at=now,
-            )
-        )
-
-    def _store_pending_clarification(self, payload: dict[str, Any]) -> None:
-        """Store a clarification produced by a tool for user resolution."""
-        stored, revision = normalize_pending_clarification(
-            payload,
-            current_state_revision=self.session.state_revision,
-        )
-        self._pending_clarification = stored
-        self._pending_clarification_revision = revision
-
-    def _clear_pending_clarification(self) -> None:
-        self._pending_clarification = None
-        self._pending_clarification_revision = None
 
     def validate_turn_route(
         self,
@@ -505,55 +338,20 @@ class GrcAgent:
             if allowed_tool_names is None
             else set(allowed_tool_names)
         )
-        if tool_name in effective_allowed:
-            return None
-        return self._tool_result(
-            tool_name=tool_name,
-            ok=False,
-            message=(
-                f"Tool `{tool_name}` is not available through the model-facing "
-                "surface for this graph session."
-            ),
-            error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
-            allowed_tools=sorted(effective_allowed),
-        )
+        return self._reject_outside_surface(tool_name, effective_allowed)
 
-    def health_check(self) -> dict[str, Any]:
-        """Return a structured health payload describing agent readiness."""
-        has_session = self.session.flowgraph is not None
-        has_retrieval = self.catalog_root is not None
-        surface = self._active_tool_surface
-        model_tool_count = len(surface.model_tool_names)
-        agent_core_ready = model_tool_count > 0
-        status = "ok" if agent_core_ready and has_retrieval else "not_ready"
-        return {
-            "status": status,
-            "agent_core_ready": agent_core_ready,
-            "session_loaded": has_session,
-            "retrieval_ready": has_retrieval,
-            "history_length": self.chat_history.get_message_count(),
-            "active_tool_surface": surface.name,
-            "model_facing_tools": list(surface.model_tool_names),
-            "model_tool_count": model_tool_count,
-            "tool_count": model_tool_count,
-            "assistant_text_fallback_enabled": surface.assistant_text_fallback_enabled,
-        }
-
-    def active_session_snapshot(self) -> dict[str, Any] | None:
-        """Return the compact active-session payload exposed in runtime history and CLI output."""
-        if self.session.flowgraph is None:
-            return None
-        try:
-            return self.session.active_session_snapshot()
-        except ValueError:
-            return None
-
-    def get_model_messages(self, *, reminder: str | None = None) -> list[ChatMessage]:
+    def get_model_messages(
+        self,
+        *,
+        reminder: str | None = None,
+        system_salt: str | None = None,
+    ) -> list[ChatMessage]:
         return render_model_messages(
             self.chat_history,
             system_prompt=self.get_system_prompt(),
             semantic_search_result_preview=lambda *_, **kw: [],
             reminder=reminder,
+            system_salt=system_salt,
         )
 
     # ------------------------------------------------------------------- #
@@ -596,28 +394,8 @@ class GrcAgent:
     # Session / validation helpers
     # ------------------------------------------------------------------- #
 
-    def _reset_validation_tracking(self) -> None:
-        """Align save gating with the current live session state."""
-        self._last_validation_ok = self.session.last_validation_ok
-        self._last_validated_state_revision = None
-        if self.session.last_validation_ok:
-            self._last_validated_state_revision = self.session.state_revision
-        elif not self.session.is_dirty:
-            self._last_validated_state_revision = self.session.state_revision
-
-    def _record_successful_validation(self) -> None:
-        self._last_validation_ok = True
-        self._last_validated_state_revision = self.session.state_revision
-
-    def _replace_session(self, session: FlowgraphSession, *, reason: str = "load_grc") -> None:
-        self.session = session
-        self._reset_validation_tracking()
-        self._record_active_session_history(reason=reason)
-        self._history_lineage_key = None
-        self._maybe_record_baseline_checkpoint(reason=reason)
-
     def _checkpoint_before(self, tool_name: str) -> GraphSnapshot | None:
-        if tool_name != "change_graph" or self.session.flowgraph is None:
+        if tool_name not in self._MUTATING_TOOLS or self.session.flowgraph is None:
             return None
         try:
             return snapshot_session(self.session)
@@ -653,7 +431,7 @@ class GrcAgent:
         result: dict[str, Any],
         before: GraphSnapshot | None,
     ) -> None:
-        if tool_name != "change_graph":
+        if tool_name not in self._MUTATING_TOOLS:
             return
         if self.session.flowgraph is None:
             return
@@ -705,8 +483,6 @@ class GrcAgent:
         tool_name: str,
         ok: bool,
         message: str,
-        *,
-        include_active_session: bool | None = None,
         **extra: Any,
     ) -> ToolResult:
         """Build the common structured result payload returned by every tool."""
@@ -716,12 +492,11 @@ class GrcAgent:
             "message": message,
         }
         result.update(extra)
-        if not ok and "error_type" not in result:
-            result["error_type"] = ErrorCode.INTERNAL_ERROR
-        if include_active_session is None:
-            include_active_session = tool_name != "change_graph"
-        if include_active_session:
-            result["active_session"] = self.active_session_snapshot()
+        if not ok:
+            if "error_type" not in result:
+                result["error_type"] = ErrorCode.INTERNAL_ERROR
+            if "errors" not in result:
+                result["errors"] = [{"code": result["error_type"], "message": message}]
         return result
 
     def _payload_result(
@@ -730,15 +505,10 @@ class GrcAgent:
         payload: dict[str, Any],
         *,
         default_message: str | None = None,
-        include_active_session: bool | None = None,
     ) -> ToolResult:
         result = dict(payload)
         if default_message is not None and "message" not in result:
             result["message"] = default_message
-        if include_active_session is None:
-            include_active_session = tool_name not in MVP_MODEL_TOOL_NAMES
-        if include_active_session:
-            result["active_session"] = self.active_session_snapshot()
         result = self._enforce_tool_output_budget(result)
         return result
 
@@ -746,8 +516,6 @@ class GrcAgent:
         """Clamp oversized wrapper payloads to a bounded JSON budget."""
         max_bytes = self._guardrails_cfg.max_tool_output_bytes
         max_list_items = self._guardrails_cfg.max_compact_list_items
-        max_stderr_chars = self._guardrails_cfg.max_validation_stderr_chars
-        max_validation_errors = self._guardrails_cfg.max_validation_errors
         try:
             size = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
         except Exception:
@@ -757,8 +525,7 @@ class GrcAgent:
         if size <= max_bytes:
             return payload
         compact = dict(payload)
-        for key in ("items", "results", "sources"):
-            value = compact.get(key)
+        for key, value in list(compact.items()):
             if isinstance(value, list) and len(value) > max_list_items:
                 original_len = len(value)
                 compact[key] = value[:max_list_items]
@@ -766,35 +533,8 @@ class GrcAgent:
                     f"... [TRUNCATED: was {original_len} items, kept {max_list_items}]"
                 )
                 compact["output_truncated"] = True
-        validation_errors = compact.get("validation_errors")
-        if isinstance(validation_errors, list) and len(validation_errors) > max_validation_errors:
-            original_len = len(validation_errors)
-            compact["validation_errors"] = validation_errors[:max_validation_errors]
-            compact["validation_errors_truncated"] = (
-                f"... [TRUNCATED: was {original_len} items, kept {max_validation_errors}]"
-            )
-            compact["output_truncated"] = True
-        validation = compact.get("validation_result")
-        if isinstance(validation, dict):
-            stderr = validation.get("stderr")
-            if isinstance(stderr, str) and len(stderr) > max_stderr_chars:
-                validation = dict(validation)
-                original_len = len(stderr)
-                validation["stderr"] = (
-                    stderr[: max_stderr_chars - 1].rstrip()
-                    + f"… [TRUNCATED: was {original_len} chars, kept {max_stderr_chars}]"
-                )
-                compact["validation_result"] = validation
-                compact["output_truncated"] = True
         compact["output_bytes"] = min(size, max_bytes)
         return compact
-
-    def _record_active_session_history(self, *, reason: str) -> None:
-        snapshot = self.active_session_snapshot()
-        if snapshot is None:
-            return
-        self._session_snapshot = dict(snapshot)
-        self._session_snapshot["reason"] = reason
 
     def _missing_session_result(self, tool_name: str) -> ToolResult | None:
         if self.session.flowgraph is not None:
@@ -820,10 +560,6 @@ class GrcAgent:
             view=view,
             targets=targets or [],
         )
-
-    def _search_blocks_version_token(self) -> str:
-        catalog_token = _catalog_version_token(self.catalog_root)
-        return f"catalog={catalog_token}"
 
     def _query_knowledge(
         self,

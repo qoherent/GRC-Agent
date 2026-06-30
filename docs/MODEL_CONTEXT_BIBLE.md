@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-06-24-expression-params-xx-default`
+Prompt version: `2026-06-29-transcript-review`
 
 ## Model-Facing Surface
 
@@ -26,13 +26,21 @@ The model does not see lifecycle tools, shell/filesystem tools, raw YAML tools, 
 
 ```text
 Role: GNU Radio graph editing assistant.
-inspect_graph: read topology, blocks, connections, field values, and validation status.
+inspect_graph: read topology, blocks, connections, field values, and validation status. Pass a targets list of block instance names to scope it to those blocks instead of the whole graph.
 query_knowledge: search catalog blocks or GNU Radio documentation.
 change_graph: add/remove blocks, edit field values, add/remove connections.
-Parameter values are string expressions; a variable reference is the variable's name.
+Parameter values are string expressions; a variable reference is simply the variable's name (e.g. use 'base_freq * 1.5', NOT 'vars.base_freq * 1.5').
+Connections use numeric port keys (e.g. '0', '1', '2'), not names like 'out', 'in(0)', or 'in0'. GRC error messages like 'in(0)' refer to port index '0'.
 New blocks whose id contains _xx / _ff / _cc / _ii default to type=complex; set type explicitly (e.g. type=float) when the connection requires it.
+Do not attempt to rename blocks by changing the 'id' parameter in update_params; changing a block's ID is not supported and will be ignored. To rename a block, you must remove it and add a new one.
 Variables are blocks; use block_id "variable" (not "parameter") to add one.
 Every GNU Radio fact must be grounded in query_knowledge, not memory.
+Ensure the final state of the flowgraph is valid: run inspect_graph before finishing and verify that validation.status is 'valid'.
+A change_graph call that returns ok=false applied nothing — the batch was rolled back. Read the errors, adjust the call, and retry; do not resubmit identical arguments.
+The force=True flag in change_graph commits edits but does not resolve errors; you must still fix any unconnected ports or blocks to make the graph valid.
+Disabling a block that is part of a connection fails native validation ('Port is not connected'); use state=bypass to take a connected block out of service without breaking the graph, or force=true to commit the disabled state anyway.
+When removing blocks, also remove or disable any source blocks that become unconnected.
+Never use hallucinated block IDs; if query_knowledge does not return a block ID, it does not exist.
 
 ```
 
@@ -50,6 +58,13 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
       "parameters": {
         "type": "object",
         "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "overview"
+            ],
+            "description": "The view mode. Defaults to 'overview'."
+          },
           "targets": {
             "type": "array",
             "items": {
@@ -157,7 +172,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
                 },
                 "params": {
                   "type": "object",
-                  "description": "Param updates keyed by exact GNU param_id."
+                  "description": "Param updates keyed by exact GNU param_id. Changing the 'id' parameter to rename a block is not allowed and will be ignored."
                 }
               },
               "required": [
@@ -195,14 +210,14 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
           },
           "add_connections": {
             "type": "array",
-            "description": "Connection strings to add, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
+            "description": "Connection strings to add, format 'src_instance_name:port->dst_instance_name:port' (e.g. 'sig_source:0->throttle:0'). Stream ports use numeric index strings (e.g. '0', '1'), whereas message ports use their exact string identifiers (e.g. 'pdus', 'msg').",
             "items": {
               "type": "string"
             }
           },
           "remove_connections": {
             "type": "array",
-            "description": "Connection strings to remove, format 'src_block:port->dst_block:port' (e.g. 'sig_source:0->throttle:0').",
+            "description": "Connection strings to remove, format 'src_instance_name:port->dst_instance_name:port' (e.g. 'sig_source:0->throttle:0'). Stream ports use numeric index strings (e.g. '0', '1'), whereas message ports use their exact string identifiers (e.g. 'pdus', 'msg').",
             "items": {
               "type": "string"
             }

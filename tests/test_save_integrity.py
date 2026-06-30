@@ -44,8 +44,6 @@ def _mark_session_valid(session: FlowgraphSession) -> None:
 
 def _mark_agent_valid(agent: GrcAgent) -> None:
     _mark_session_valid(agent.session)
-    agent._last_validation_ok = True
-    agent._last_validated_state_revision = agent.session.state_revision
 
 
 def _block_param_value(session: FlowgraphSession, instance_name: str, param_key: str) -> object:

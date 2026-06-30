@@ -25,19 +25,19 @@ def test_variables_table_mapping(qtbot):
         "ok": True,
         "view": "overview",
         "state_revision": 1,
-        "summary": {
+        "graph": {
             "blocks": [
                 {
                     "instance_name": "samp_rate",
                     "block_id": "variable",
                     "role": "variable",
-                    "value": "32000",
+                    "params": {"value": "32000"},
                 },
                 {
                     "instance_name": "freq",
                     "block_id": "variable",
                     "role": "variable",
-                    "value": "1000",
+                    "params": {"value": "1000"},
                 },
                 {
                     "instance_name": "analog_sig_source_x_0",
@@ -54,19 +54,14 @@ def test_variables_table_mapping(qtbot):
     assert widget.variables_table.rowCount() == 2
 
     # Check values
-    name_item_1 = widget.variables_table.item(0, 0)
-    val_item_1 = widget.variables_table.item(0, 1)
-    assert name_item_1.text() == "samp_rate"
-    assert val_item_1.text() == "32000"
-
-    name_item_2 = widget.variables_table.item(1, 0)
-    val_item_2 = widget.variables_table.item(1, 1)
-    assert name_item_2.text() == "freq"
-    assert val_item_2.text() == "1000"
+    assert widget.variables_table.item(0, 0).text() == "samp_rate"
+    assert widget.variables_table.item(0, 1).text() == "32000"
+    assert widget.variables_table.item(1, 0).text() == "freq"
+    assert widget.variables_table.item(1, 1).text() == "1000"
 
 
-def test_blocks_tree_mapping(qtbot):
-    """Verify that blocks from inspect_graph populate QTreeWidget categorised by role."""
+def test_inspector_tree_grouping(qtbot):
+    """Verify blocks are grouped under StrEnum-derived category labels."""
     widget = InspectorWidget()
     qtbot.addWidget(widget)
 
@@ -74,13 +69,13 @@ def test_blocks_tree_mapping(qtbot):
         "ok": True,
         "view": "overview",
         "state_revision": 1,
-        "summary": {
+        "graph": {
             "blocks": [
                 {
                     "instance_name": "samp_rate",
                     "block_id": "variable",
                     "role": "variable",
-                    "value": "32000",
+                    "params": {"value": "32000"},
                 },
                 {
                     "instance_name": "analog_sig_source_x_0",
@@ -117,13 +112,13 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
         "ok": True,
         "view": "overview",
         "state_revision": 1,
-        "summary": {
+        "graph": {
             "blocks": [
                 {
                     "instance_name": "samp_rate",
                     "block_id": "variable",
                     "role": "variable",
-                    "value": "32000",
+                    "params": {"value": "32000"},
                 },
                 {
                     "instance_name": "analog_sig_source_x_0",
@@ -228,7 +223,7 @@ def test_expansion_state_uses_user_role(qtbot):
         "ok": True,
         "view": "overview",
         "state_revision": 1,
-        "summary": {
+        "graph": {
             "blocks": [
                 {
                     "instance_name": "analog_sig_source_x_0",
@@ -273,7 +268,7 @@ def test_scroll_clamp_on_smaller_range(qtbot):
         "ok": True,
         "view": "overview",
         "state_revision": 1,
-        "summary": {"blocks": many_blocks, "connections": []},
+        "graph": {"blocks": many_blocks, "connections": []},
     }
     widget.update_state(payload)
     # Simulate the user scrolling to a high value.
@@ -286,7 +281,7 @@ def test_scroll_clamp_on_smaller_range(qtbot):
         "ok": True,
         "view": "overview",
         "state_revision": 2,
-        "summary": {"blocks": [], "connections": []},
+        "graph": {"blocks": [], "connections": []},
     }
     widget.update_state(tiny_payload)
     # Scroll must be clamped to the new maximum (which is now 0 since the

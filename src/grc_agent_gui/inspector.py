@@ -150,22 +150,20 @@ class InspectorWidget(QWidget):
         conn_scroll = self.connections_list.verticalScrollBar().value()
 
         # 2. Extract sections from overview payload (flat shape, Phase 6+).
-        graph = inspect_graph_data.get("graph", inspect_graph_data.get("summary", {})) or {}
+        graph = inspect_graph_data.get("graph") or {}
         blocks = graph.get("blocks", []) or []
         connections = graph.get("connections", []) or []
 
-        # 3. Repopulate Variables Table
         variables = [
-            b for b in blocks if b.get("block_id") == "variable" or b.get("role") == "variable"
+            b for b in blocks if b.get("role") == "variable"
         ]
         self.variables_table.setRowCount(0)
         self.variables_table.setRowCount(len(variables))
         for row_idx, var in enumerate(variables):
             name_item = QTableWidgetItem(str(var.get("instance_name", "")))
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            # Retrieve value from params dictionary if available, falling back to direct value key for mock compatibility
             params_dict = var.get("params", {}) or {}
-            val_str = str(params_dict.get("value", var.get("value", "")))
+            val_str = str(params_dict.get("value", ""))
             val_item = QTableWidgetItem(val_str)
             val_item.setFlags(val_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.variables_table.setItem(row_idx, 0, name_item)

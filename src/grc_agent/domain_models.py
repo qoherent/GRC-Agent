@@ -108,6 +108,7 @@ class ErrorCode:
     MODEL_NOT_FOUND = "model_not_found"
     INIT_FAILED = "init_failed"
     BACKEND_UNREACHABLE = "backend_unreachable"
+    EMPTY_MODEL_RESPONSE = "empty_model_response"
 
 
 def build_error_payload(

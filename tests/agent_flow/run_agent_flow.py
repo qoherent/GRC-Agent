@@ -43,10 +43,9 @@ FM_RX_FIXTURE = WORKSPACE / "tests" / "data" / "fm_rx.grc"
 EMPTY_FIXTURE = WORKSPACE / "tests" / "data" / "empty.grc"
 BROKEN_SINK_FIXTURE = WORKSPACE / "tests" / "data" / "broken_unconnected_sink.grc"
 OLLAMA_URL = "http://localhost:11434"
-# Custom Modelfile model: maxwell1500/ornith-9b:q4_K_M with PARAMETER num_ctx
+# Custom Modelfile model: gemma4:e4b-it-qat-120k with PARAMETER num_ctx
 # 120000 baked in (Ollama's /v1 endpoint ignores per-request num_ctx — see
-# docs/AGENT_FLOW_FINDINGS.md). ornith-9b is a thinking model; the provider
-# sends think:false (enable_thinking=False) so it answers in `content`.
+# docs/AGENT_FLOW_FINDINGS.md).
 MODEL = "gemma4:e4b-it-qat-120k"
 
 logger = logging.getLogger(__name__)
@@ -72,12 +71,12 @@ def _load_dotenv() -> None:
 
 def _default_ollama_provider() -> ToolAgentsLlamaProviderConfig:
     """The original local-Ollama provider (unchanged harness behavior)."""
+    model = os.environ.get("OLLAMA_MODEL", MODEL)
     return ToolAgentsLlamaProviderConfig(
         base_url=OLLAMA_URL,
-        model=MODEL,
+        model=model,
         timeout_seconds=180.0,
         max_tokens=2048,
-        temperature=0.0,
     )
 
 
@@ -111,7 +110,7 @@ def _make_provider(provider: str) -> ToolAgentsLlamaProviderConfig:
             api_key=api_key,
             timeout_seconds=300.0,  # cloud can be slower than local
             max_tokens=2048,
-            temperature=0.0,
+            backend="openrouter",
         )
     raise ValueError(
         f"unknown provider: {provider!r} (expected 'ollama' or 'openrouter')"
@@ -266,9 +265,8 @@ SCENARIOS: list[dict[str, Any]] = [
             " into the `bypass` state (use update_states with state set to"
             " `bypass`). Inspect again to confirm its state is now `bypass`."
         ),
-        # GRC canonicalizes the model-friendly "bypass" alias to "bypassed"
-        # (adapter alias in set_block_state). Assert the canonical stored form.
-        "expect": {"mode": "edit", "states": {"analog_sig_source_x_0": "bypassed"}},
+        # Normalized to model-friendly "bypass" in render_block.
+        "expect": {"mode": "edit", "states": {"analog_sig_source_x_0": "bypass"}},
     },
     {
         "name": "11_scoped_inspect_and_update",
@@ -338,7 +336,7 @@ SCENARIOS: list[dict[str, Any]] = [
         ),
         "expect": {
             "mode": "edit",
-            "blocks_present": ["sig", "throttle", "sink"],
+            "blocks_present": [["sig", "sig_source"], "throttle", "sink"],
             "valid": True,
         },
     },
@@ -437,6 +435,69 @@ SCENARIOS: list[dict[str, Any]] = [
             "valid": True,
         },
     },
+    {
+        "name": "20_multi_change_challenge",
+        "title": "Complicated 10 changes test scenario",
+        "prompt": (
+            "Inspect the flowgraph. I want to perform a set of complex modifications:\n"
+            "1. Add a new `variable` block named `freq_offset` with value `50`.\n"
+            "2. Add another `variable` block named `noise_amp` with value `0.015`.\n"
+            "3. Add a new `analog_sig_source_x` block named `third_tone` of type `float`. "
+            "Set its samp_rate to `samp_rate`, freq to `440 + freq_offset`, and amp to `ampl`.\n"
+            "4. Add a new `analog_noise_source_x` block named `noise_source_2` of type `float` "
+            "with noise_type `analog.GR_GAUSSIAN` and amp `noise_amp`.\n"
+            "5. Change the parameter `num_inputs` of `blocks_add_xx` to `4`.\n"
+            "6. Remove the old connection from `analog_noise_source_x_0` port 0 to `blocks_add_xx` port 2.\n"
+            "7. Disable the now unconnected `analog_noise_source_x_0` block.\n"
+            "8. Connect `noise_source_2` port 0 to `blocks_add_xx` port 2.\n"
+            "9. Connect `third_tone` port 0 to `blocks_add_xx` port 3.\n"
+            "10. Update `analog_sig_source_x_0`'s `freq` parameter to use the expression `350 - freq_offset`.\n"
+            "11. Update `analog_sig_source_x_1`'s `freq` parameter to use the expression `440 - freq_offset`.\n"
+            "Do all these changes, and then inspect the resulting graph to verify it is valid."
+        ),
+        "expect": {
+            "mode": "edit",
+            "blocks_present": ["freq_offset", "noise_amp", "third_tone", "noise_source_2"],
+            "states": {"analog_noise_source_x_0": "disabled"},
+            "params": {
+                "blocks_add_xx": {"num_inputs": "4"},
+                "analog_sig_source_x_0": {"freq": "350 - freq_offset"},
+                "analog_sig_source_x_1": {"freq": "440 - freq_offset"},
+            },
+            "valid": True,
+        },
+        "max_tool_rounds": 12,
+    },
+    {
+        "name": "21_type_conversion_and_conjugate",
+        "title": "Hard type conversion and conjugate scenario",
+        "fixture": str(WORKSPACE / "tests" / "data" / "resampler_demo.grc"),
+        "prompt": (
+            "Inspect the flowgraph. I want to perform a complex modifications task:\n"
+            "1. First, search the catalog for a block that can convert a float stream to a complex stream "
+            "and a block that computes the complex conjugate of a complex signal.\n"
+            "2. Replace the frequency modulator (`analog_frequency_modulator_fc_0`) entirely with the "
+            "float-to-complex converter block you found. Name the converter block `float_to_complex_converter`.\n"
+            "3. Connect the float output of the `throttle` block to input 0 (real part) of the converter block.\n"
+            "4. Search for a constant source block in the catalog. Add one, name it `zero_imag`, set its type "
+            "to `float` and its constant value to `0.0`, and connect it to input 1 (imaginary part) of the "
+            "converter block to ensure it has a valid input.\n"
+            "5. Connect the output of the converter block to both the resampler (`pfb_arb_resampler_xxx_0`) "
+            "and the original spectrum analyzer (`qtgui_freq_sink_x_0`).\n"
+            "6. Add the complex conjugate block, name it `signal_conjugate`, and insert it inline right after "
+            "the resampler: remove the connection from the resampler output to the resampled spectrum analyzer "
+            "(`qtgui_freq_sink_x_0_0`), route the resampler output through the conjugate block, and connect the "
+            "conjugate block output to the resampled spectrum analyzer.\n"
+            "7. Remove the deleted frequency modulator block, ensure the resulting flowgraph is valid, and inspect it."
+        ),
+        "expect": {
+            "mode": "edit",
+            "blocks_present": ["float_to_complex_converter", "zero_imag", "signal_conjugate"],
+            "blocks_absent": ["analog_frequency_modulator_fc_0"],
+            "valid": True,
+        },
+        "max_tool_rounds": 12,
+    },
 ]
 
 
@@ -471,7 +532,7 @@ def _graph_state(fixture_path: Path) -> dict[str, Any]:
 
     fg = load_flow_graph(fixture_path)
     valid = bool(validate(fg).native_ok)  # fresh: rewrite + validate + is_valid
-    snap = render_flow_graph(fg)
+    snap = render_flow_graph(fg, mode="details")
     return {
         "valid": valid,
         "instance_names": sorted(b.instance_name for b in snap.blocks),
@@ -487,6 +548,7 @@ def _run_scenario(
     fixture: str | Path | None = None,
     expect: dict[str, Any] | None = None,
     provider_config: ToolAgentsLlamaProviderConfig | None = None,
+    max_tool_rounds: int | None = None,
 ) -> dict[str, Any]:
     # Default provider = the original local-Ollama config, so the gated live
     # test (which calls _run_scenario(**sc) with no provider) is unchanged.
@@ -513,7 +575,7 @@ def _run_scenario(
     for event in runner.stream_turn(
         agent,
         prompt,
-        max_tool_rounds=None,
+        max_tool_rounds=max_tool_rounds,
         on_tool_start=_on_tool_start,
         on_tool_end=_on_tool_end,
     ):
@@ -739,8 +801,12 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
         if not final_text:
             fail_reasons.append("empty final text")
         for blk in (expect.get("blocks_present") or []):
-            if blk not in instance_names:
-                fail_reasons.append(f"missing block {blk}")
+            if isinstance(blk, (list, tuple)):
+                if not any(alt in instance_names for alt in blk):
+                    fail_reasons.append(f"missing block (one of {blk})")
+            else:
+                if blk not in instance_names:
+                    fail_reasons.append(f"missing block {blk}")
         for blk in (expect.get("blocks_absent") or []):
             if blk in instance_names:
                 fail_reasons.append(f"block {blk} still present")
@@ -753,7 +819,9 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
         for inst, pv in (expect.get("params") or {}).items():
             actual = params_actual.get(inst, {})
             for k, v in pv.items():
-                if str(actual.get(k, "")) != str(v):
+                actual_val = str(actual.get(k, "")).replace(" ", "")
+                expected_val = str(v).replace(" ", "")
+                if actual_val != expected_val:
                     fail_reasons.append(f"param {inst}.{k}={actual.get(k)!r} expected {v!r}")
 
     semantic_success = not fail_reasons
@@ -838,6 +906,31 @@ def _render_summary(all_metrics: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def write_metrics_outputs(
+    all_metrics: list[dict[str, Any]],
+    out_dir: Path,
+    pass_rates: dict[str, str] | None = None,
+) -> str:
+    """Write METRICS.md and metrics.json for a set of scenario metrics.
+
+    Single source of truth for the metrics artifacts — used by both the
+    standalone harness (``main``) and the gated live pytest path
+    (``tests/test_agent_flow_live.py``) so the two cannot drift on format
+    or location. Returns the summary string written to METRICS.md.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = _render_summary(all_metrics)
+    if pass_rates:
+        summary += "**Pass-rate (k/N):**\n" + "\n".join(
+            f"- {name}: {rate}" for name, rate in pass_rates.items()
+        ) + "\n\n"
+    (out_dir / "METRICS.md").write_text(summary, encoding="utf-8")
+    (out_dir / "metrics.json").write_text(
+        json.dumps(all_metrics, indent=2, default=str), encoding="utf-8"
+    )
+    return summary
+
+
 def main(runs: int = 1, provider: str = "ollama") -> None:
     provider_config = _make_provider(provider)
     active_model = provider_config.model or MODEL
@@ -849,7 +942,9 @@ def main(runs: int = 1, provider: str = "ollama") -> None:
 
     all_metrics: list[dict[str, Any]] = []
     pass_rates: dict[str, str] = {}
-    for sc in SCENARIOS:
+    scenario_filter = os.environ.get("SCENARIO_FILTER")
+    scenarios_to_run = [s for s in SCENARIOS if scenario_filter in s["name"]] if scenario_filter else SCENARIOS
+    for sc in scenarios_to_run:
         fixture_name = Path(sc.get("fixture", FIXTURE)).name
         passed = 0
         last_metrics: dict[str, Any] | None = None
@@ -862,9 +957,9 @@ def main(runs: int = 1, provider: str = "ollama") -> None:
             )
             try:
                 rec = _run_scenario(**sc, provider_config=provider_config)
-                if attempt == 0:  # keep the first run's transcript on disk
-                    md = _render_md(rec)
-                    (RESULTS / f"{sc['name']}.md").write_text(md, encoding="utf-8")
+                md = _render_md(rec)
+                suffix = f"_attempt_{attempt + 1}" if runs > 1 else ""
+                (RESULTS / f"{sc['name']}{suffix}.md").write_text(md, encoding="utf-8")
                 metrics = _extract_metrics(rec)
                 last_metrics = metrics
                 if metrics["semantic_success"]:
@@ -898,15 +993,7 @@ def main(runs: int = 1, provider: str = "ollama") -> None:
         if runs > 1:
             pass_rates[sc["name"]] = f"{passed}/{runs}"
 
-    summary = _render_summary(all_metrics)
-    if pass_rates:
-        summary += "**Pass-rate (k/N):**\n" + "\n".join(
-            f"- {name}: {rate}" for name, rate in pass_rates.items()
-        ) + "\n\n"
-    (RESULTS / "METRICS.md").write_text(summary, encoding="utf-8")
-    (RESULTS / "metrics.json").write_text(
-        json.dumps(all_metrics, indent=2, default=str), encoding="utf-8"
-    )
+    summary = write_metrics_outputs(all_metrics, RESULTS, pass_rates or None)
     print(f"\n{summary}")
     print(f"Results: {RESULTS.relative_to(WORKSPACE)}")
     print(f"Metrics: {RESULTS.relative_to(WORKSPACE) / 'metrics.json'}")

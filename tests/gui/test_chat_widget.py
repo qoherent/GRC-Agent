@@ -267,7 +267,7 @@ def test_block_nesting_prevention(qtbot):
 
     assert "You:" in lines_before
     assert "Hello" in lines_before
-    assert "⚡ my_tool" in lines_before
+    assert any("⚡ my_tool" in line for line in lines_before)
     assert "✓ Graph updated" in lines_before
     assert "✗ some error" in lines_before
 
@@ -334,3 +334,53 @@ def test_finalize_stream_keeps_final_text_when_present(qtbot):
 
     plain = widget.chat_display.toPlainText()
     assert "final answer" in plain
+
+
+def test_tool_finished_expand_collapse(qtbot):
+    """Verify that tool_finished outputs are rendered, collapsed by default, and can be toggled via link clicks."""
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    # Append tool output
+    widget.append_tool_finished("inspect_graph", '{"nodes": [], "edges": []}')
+
+    # Collapsed by default: verify text contains "inspect_graph output" and "expand" but NOT the JSON text
+    html_before = widget.chat_display.toHtml()
+    assert "inspect_graph" in html_before
+    assert "expand" in html_before
+    assert "nodes" not in html_before
+
+    # Click the toggle link (by manually triggering the anchor clicked logic)
+    # The toggle URL is "toggle:0" because it's the first message in history (index 0)
+    from PySide6.QtCore import QUrl
+    widget._on_anchor_clicked(QUrl("toggle:0"))
+
+    # Expanded: verify text now contains "collapse" and the JSON text
+    html_after = widget.chat_display.toHtml()
+    assert "collapse" in html_after
+    assert "nodes" in html_after
+
+
+def test_thinking_expand_collapse(qtbot):
+    """Verify that thinking blocks are extracted, collapsed by default, and can be toggled."""
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    # Append assistant message with think tags
+    widget.append_message("assistant", "<think>I am analyzing the graph.</think>Done analyzing.")
+
+    # Collapsed by default: verify "Thinking Process" and "expand" exist, and the main response "Done analyzing." exists, but the thinking text does not
+    html_before = widget.chat_display.toHtml()
+    assert "Thinking Process" in html_before
+    assert "expand" in html_before
+    assert "Done analyzing" in html_before
+    assert "I am analyzing" not in html_before
+
+    # Toggle the thinking block: URL is "toggle-thinking:0" (index 0)
+    from PySide6.QtCore import QUrl
+    widget._on_anchor_clicked(QUrl("toggle-thinking:0"))
+
+    # Expanded: verify "collapse" and the thinking text exist
+    html_after = widget.chat_display.toHtml()
+    assert "collapse" in html_after
+    assert "I am analyzing" in html_after

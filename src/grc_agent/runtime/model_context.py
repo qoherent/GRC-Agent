@@ -169,11 +169,17 @@ def render_model_messages(
     system_prompt: str,
     semantic_search_result_preview: PreviewCallback,
     reminder: str | None = None,
+    system_salt: str | None = None,
 ) -> list[ChatMessage]:
     """Render ``chat_history`` into the message list handed to the provider."""
     raw_messages = chat_history.get_messages()
     pruned = _prune_completed_episodes(raw_messages)
-    messages: list[ChatMessage] = [ChatMessage.create_system_message(system_prompt)]
+
+    sys_msg = system_prompt
+    if system_salt:
+        sys_msg += f"\n# {system_salt}"
+
+    messages: list[ChatMessage] = [ChatMessage.create_system_message(sys_msg)]
     for message in pruned:
         messages.append(_ensure_serializable(message, preview=semantic_search_result_preview))
     if reminder:
@@ -184,7 +190,7 @@ def render_model_messages(
 
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-06-24-expression-params-xx-default"
+__version__ = "2026-06-29-transcript-review"
 
 
 def build_system_prompt(session_id: str | None = None) -> str:
@@ -192,14 +198,29 @@ def build_system_prompt(session_id: str | None = None) -> str:
     prefix = f"Session ID: {session_id}\n" if session_id else ""
     return prefix + (
         "Role: GNU Radio graph editing assistant.\n"
-        "inspect_graph: read topology, blocks, connections, field values, and validation status.\n"
+        "inspect_graph: read topology, blocks, connections, field values, and validation status. "
+        "Pass a targets list of block instance names to scope it to those blocks instead of the whole graph.\n"
         "query_knowledge: search catalog blocks or GNU Radio documentation.\n"
         "change_graph: add/remove blocks, edit field values, add/remove connections.\n"
-        "Parameter values are string expressions; a variable reference is the variable's name.\n"
+        "Parameter values are string expressions; a variable reference is simply the variable's name (e.g. use 'base_freq * 1.5', NOT 'vars.base_freq * 1.5').\n"
+        "Connections use numeric port keys (e.g. '0', '1', '2'), not names like 'out', 'in(0)', or 'in0'. GRC error messages like 'in(0)' refer to port index '0'.\n"
         "New blocks whose id contains _xx / _ff / _cc / _ii default to type=complex; "
         "set type explicitly (e.g. type=float) when the connection requires it.\n"
+        "Do not attempt to rename blocks by changing the 'id' parameter in update_params; "
+        "changing a block's ID is not supported and will be ignored. To rename a block, you must remove it and add a new one.\n"
         'Variables are blocks; use block_id "variable" (not "parameter") to add one.\n'
         "Every GNU Radio fact must be grounded in query_knowledge, not memory.\n"
+        "Ensure the final state of the flowgraph is valid: run inspect_graph before finishing "
+        "and verify that validation.status is 'valid'.\n"
+        "A change_graph call that returns ok=false applied nothing — the batch was rolled back. "
+        "Read the errors, adjust the call, and retry; do not resubmit identical arguments.\n"
+        "The force=True flag in change_graph commits edits but does not resolve errors; "
+        "you must still fix any unconnected ports or blocks to make the graph valid.\n"
+        "Disabling a block that is part of a connection fails native validation ('Port is not connected'); "
+        "use state=bypass to take a connected block out of service without breaking the graph, "
+        "or force=true to commit the disabled state anyway.\n"
+        "When removing blocks, also remove or disable any source blocks that become unconnected.\n"
+        "Never use hallucinated block IDs; if query_knowledge does not return a block ID, it does not exist.\n"
     )
 
 

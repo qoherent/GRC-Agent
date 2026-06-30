@@ -19,6 +19,16 @@ if TYPE_CHECKING:
 
 VALID_VIEWS = {"overview"}
 
+# Redundant/dead fields stripped from the model-facing inspect payload:
+# - top-level ``ok``: mirrors ``validation.status`` and the outer transport
+#   envelope already carries its own ``ok`` (the dual-ok ambiguity).
+# - top-level ``errors``: always ``[]`` (real errors live in
+#   ``validation.errors``).
+# - ``validation.native_ok``: always ``== (status == "valid")``.
+# All three carry zero information. Internal consumers (flowgraph_session,
+# run_agent_flow) read the :class:`GrcFlowgraph` model directly, not this dump.
+_INSPECT_PAYLOAD_EXCLUDE = {"ok": True, "errors": True, "validation": {"native_ok": True}}
+
 
 # --------------------------------------------------------------------------- #
 # inspect_graph                                                                #
@@ -28,7 +38,7 @@ VALID_VIEWS = {"overview"}
 def inspect_graph(
     agent: GrcAgent,
     *,
-    view: str,
+    view: str = "overview",
     targets: list[str],
 ) -> ToolResult:
     selected_view = str(view).strip().lower()
@@ -66,7 +76,7 @@ def inspect_graph(
     else:
         result = _specific(agent, targets=normalized_targets)
 
-    return agent._payload_result("inspect_graph", result, include_active_session=False)
+    return agent._payload_result("inspect_graph", result)
 
 
 def _overview(agent: GrcAgent) -> dict[str, Any]:
@@ -76,7 +86,9 @@ def _overview(agent: GrcAgent) -> dict[str, Any]:
             agent, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
         )
     snapshot = render_flow_graph(fg, mode=OVERVIEW)
-    payload = snapshot.model_dump(exclude_none=True)
+    payload = snapshot.model_dump(
+        exclude_none=True, exclude=_INSPECT_PAYLOAD_EXCLUDE
+    )
     return _base_payload(agent, graph=payload)
 
 
@@ -95,7 +107,9 @@ def _specific(agent: GrcAgent, *, targets: list[str]) -> dict[str, Any]:
             agent, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
         )
     snapshot = render_flow_graph(fg, mode=OVERVIEW)
-    payload = snapshot.model_dump(exclude_none=True)
+    payload = snapshot.model_dump(
+        exclude_none=True, exclude=_INSPECT_PAYLOAD_EXCLUDE
+    )
 
     blocks = payload.get("blocks", [])
     connections = payload.get("connections", [])
@@ -133,10 +147,11 @@ def _base_payload(
     *,
     graph: dict[str, Any] | None = None,
     errors: list[dict[str, str]] | None = None,
-    ok: bool = True,
+    ok: bool | None = None,
 ) -> dict[str, Any]:
+    actual_ok = ok if ok is not None else (not bool(errors))
     payload: dict[str, Any] = {
-        "ok": ok,
+        "ok": actual_ok,
         "graph": graph if graph is not None else {},
     }
     if errors:

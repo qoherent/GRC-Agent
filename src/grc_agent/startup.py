@@ -181,8 +181,9 @@ def _build_fallback_provider(
         api_key=api_key,
         timeout_seconds=config.llama.request_timeout_seconds,
         max_tokens=config.llama.max_tokens,
-        temperature=config.llama.temperature,
         enable_thinking=config.llama.enable_thinking,
+        backend=config.llama.backend,
+        max_tool_rounds=config.llama.max_tool_rounds,
     )
 
 

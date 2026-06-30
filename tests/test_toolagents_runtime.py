@@ -12,7 +12,6 @@ from grc_agent.agent import GrcAgent
 from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
 from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.toolagents_runtime import (
-    ToolAgentsHistoryAdapter,
     ToolAgentsRegistryBuilder,
     ToolAgentsToolDelegate,
     _function_tool_from_openai_tool,
@@ -152,31 +151,7 @@ class ToolAgentsHistoryTests(unittest.TestCase):
         self.assertEqual(len(message.content), 1)
 
 
-class ToolAgentsHistoryAdapterToolMessageTests(unittest.TestCase):
-    """The JSON-only helper path (``ToolAgentsJsonClient``) still goes
-    through ``ToolAgentsHistoryAdapter.from_openai_messages``. The runtime
-    model path uses typed ``ChatMessage`` objects and ``ChatHistory`` now;
-    the helper path is the only consumer of the dict adapter."""
-
-    def test_user_message_round_trip(self) -> None:
-        payload = {"role": "user", "content": "What is the sample rate?"}
-        msgs = ToolAgentsHistoryAdapter.from_openai_messages([payload])
-        self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0].role, ChatMessageRole.User)
-        text = next(c for c in msgs[0].content if isinstance(c, TextContent))
-        self.assertEqual(text.content, "What is the sample rate?")
-
-    def test_assistant_message_round_trip(self) -> None:
-        payload = {"role": "assistant", "content": "The sample rate is 32000."}
-        msgs = ToolAgentsHistoryAdapter.from_openai_messages([payload])
-        self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0].role, ChatMessageRole.Assistant)
-        text = next(c for c in msgs[0].content if isinstance(c, TextContent))
-        self.assertEqual(text.content, "The sample rate is 32000.")
-
-    def test_empty_input_returns_empty_list(self) -> None:
-        self.assertEqual(ToolAgentsHistoryAdapter.from_openai_messages([]), [])
-
+class RuntimeChatHistoryContractTests(unittest.TestCase):
     def test_runtime_path_uses_typed_chat_history(self) -> None:
         """The main ``run_turn`` path stores the assistant ``ChatMessage``
         returned by ``chat_agent.step`` directly into the agent's
@@ -191,6 +166,56 @@ class ToolAgentsHistoryAdapterToolMessageTests(unittest.TestCase):
         last = agent.chat_history.get_messages()[-1]
         self.assertEqual(last.role, ChatMessageRole.Assistant)
         self.assertEqual(last.get_as_text(), "hello back")
+
+
+class RuntimeDirectivePersistenceTests(unittest.TestCase):
+    """``agent.chat_history`` is the source of truth and must not be
+    permanently mutated by the turn loop. Episode pruning happens
+    transiently on a snapshot inside ``render_model_messages`` at
+    send-time; the persisted history keeps every message (including
+    ``<runtime_directive>`` notes and the original message structure)."""
+
+    def _runner_with_final(self, agent: GrcAgent) -> Any:
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="m",
+            timeout_seconds=1.0,
+        )
+        chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
+
+        def _step(*_args: Any, **_kwargs: Any) -> Any:
+            return _assistant_text("done")
+
+        chat_agent.step = _step  # type: ignore[method-assign]
+        return ToolAgentsRunner(cfg, chat_agent=chat_agent)
+
+    def test_runtime_directive_survives_a_turn(self) -> None:
+        from grc_agent.agent import GrcAgent
+
+        agent = GrcAgent()
+        # A directive note sits in dead history (before the last human
+        # message), exactly where the model_context pruner would strip it
+        # if the turn loop mutated history in place.
+        agent.chat_history.add_user_message(
+            "<runtime_directive>\nprior loop note\n</runtime_directive>"
+        )
+        agent.chat_history.add_user_message("the prior user question")
+        agent.chat_history.add_message(_assistant_text("prior answer"))
+        runner = self._runner_with_final(agent)
+
+        list(runner.stream_turn(agent, "a follow-up message"))
+
+        texts = [m.get_as_text() for m in agent.chat_history.get_messages()]
+        self.assertTrue(
+            any("<runtime_directive>" in (t or "") for t in texts),
+            "a runtime-directive message already in history must not be "
+            "permanently stripped by the turn loop",
+        )
 
 
 class ToolAgentsProviderConfigTests(unittest.TestCase):
@@ -379,6 +404,134 @@ class ToolAgentsRunnerBackendUnreachableTests(unittest.TestCase):
         result = final_events[0].get("result", {})
         self.assertFalse(result.get("ok"))
         self.assertEqual(result.get("error_type"), "backend_unreachable")
+
+
+class ToolAgentsRunnerLoopDetectionTests(unittest.TestCase):
+    """Repeated identical failing change_graph calls must be detected: a
+    factual note is injected on the 2nd occurrence and the turn stops on the
+    3rd (the cause of every safety-ceiling in the agent_flow review)."""
+
+    def _change_graph_call(self, args: Any) -> ChatMessage:
+        import datetime
+        import uuid
+
+        from ToolAgents.data_models.messages import ToolCallContent
+
+        tc = ToolCallContent(
+            tool_call_id=str(uuid.uuid4()),
+            tool_call_name="change_graph",
+            tool_call_arguments=args,
+        )
+        now = datetime.datetime.now()
+        return ChatMessage(
+            id=str(uuid.uuid4()),
+            role=ChatMessageRole.Assistant,
+            content=[tc],
+            created_at=now,
+            updated_at=now,
+        )
+
+    def _runner_with_scripted_step(self, agent: GrcAgent, calls: list[ChatMessage]) -> Any:
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="m",
+            timeout_seconds=1.0,
+        )
+        chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
+        call_iter = iter(calls)
+
+        def _step(*_args: Any, **_kwargs: Any) -> Any:
+            return next(call_iter, _assistant_text("done"))
+
+        chat_agent.step = _step  # type: ignore[method-assign]
+        return ToolAgentsRunner(cfg, chat_agent=chat_agent)
+
+    def test_repeated_identical_failing_change_graph_stops_turn(self) -> None:
+        from pathlib import Path
+
+        from grc_agent.flowgraph_session import FlowgraphSession
+
+        session = FlowgraphSession()
+        session.load(str(Path(__file__).resolve().parent / "data" / "dial_tone.grc"))
+        agent = GrcAgent(session=session)
+        # remove_blocks on a non-existent block fails identically every time.
+        args = {"remove_blocks": ["does_not_exist"]}
+        calls = [self._change_graph_call(args) for _ in range(5)]
+        runner = self._runner_with_scripted_step(agent, calls)
+
+        events = list(runner.stream_turn(agent, "remove nonexistent"))
+        finals = [e for e in events if e.get("event") == "final"]
+        self.assertEqual(len(finals), 1)
+        result = finals[0].get("result", {})
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_type"), "safety_ceiling_reached")
+        self.assertIn("identically", result.get("assistant_text", ""))
+        # The factual note was injected (user-role model_message) on the 2nd.
+        user_notes = [
+            e
+            for e in events
+            if e.get("event") == "model_message" and e.get("role") == "user"
+        ]
+        self.assertTrue(user_notes, "loop note should be injected on 2nd failure")
+
+
+class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
+    """When the model returns empty content and no tool calls on every retry
+    attempt, the runner must synthesize a factual, non-empty terminal
+    assistant_text and mark the final result with a typed error_type
+    (scenario 01: 'empty final text')."""
+
+    def _runner_with_scripted_step(self, agent: GrcAgent, calls: list[ChatMessage]) -> Any:
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="m",
+            timeout_seconds=1.0,
+        )
+        chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
+        call_iter = iter(calls)
+
+        def _step(*_args: Any, **_kwargs: Any) -> Any:
+            return next(call_iter, _assistant_text("done"))
+
+        chat_agent.step = _step  # type: ignore[method-assign]
+        return ToolAgentsRunner(cfg, chat_agent=chat_agent)
+
+    def test_empty_terminal_synthesizes_factual_text_and_typed_error(self) -> None:
+        agent = GrcAgent()
+        # Every retry attempt (3) returns empty content and no tool calls.
+        calls = [_assistant_text("") for _ in range(5)]
+        runner = self._runner_with_scripted_step(agent, calls)
+
+        events = list(runner.stream_turn(agent, "hi"))
+        finals = [e for e in events if e.get("event") == "final"]
+        self.assertEqual(len(finals), 1)
+        result = finals[0].get("result", {})
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_type"), "empty_model_response")
+        text = str(result.get("assistant_text", ""))
+        self.assertTrue(text, "assistant_text must be non-empty")
+        self.assertIn("No response was generated", text)
+
+    def test_empty_terminal_chunk_carries_synthesized_text(self) -> None:
+        agent = GrcAgent()
+        calls = [_assistant_text("") for _ in range(5)]
+        runner = self._runner_with_scripted_step(agent, calls)
+
+        events = list(runner.stream_turn(agent, "hi"))
+        chunks = [e for e in events if e.get("event") == "chunk"]
+        self.assertTrue(chunks, "a chunk event should be emitted")
+        self.assertIn("No response was generated", str(chunks[-1].get("text", "")))
 
 
 if __name__ == "__main__":

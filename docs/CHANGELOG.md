@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Codebase Audit & Performance Polishing
+
+- **Engineering Rule Compliance**: Eliminated all violations identified in the codebase audit (such as hidden allowlists, hardcoded heuristics, silent overrides, and duplicate logic).
+- **Concise Catalog Search Output**: Renders catalog queries using Stage B parameter filtering (`OVERVIEW` mode) by default. Strip `"Core > "` category prefix, round distances to 3 decimal places, omit empty lists/dicts, and format boolean enums compactly (e.g. `bool=False`). Saves **~50% of tokens** per hit.
+- **Removed Tool-Round Ceiling Enforcement**: Completely removed the hard tool-round ceiling checks in `ToolAgentsRunner` to let models iterate until completion.
+- **Improved Local Model Prompting**: Refined system prompt template with clear instructions on graph validation invariants, orphaned block resolution, intermediate force flag commits, and strict catalog lookup grounding. Boosted Ornith-9B scenario 06 pass rate to **5/5 (100% success)**.
+
 ### Agent flow optimization (5/8 → 7/8 semantic success)
 
 - **Schema flattening:** `add_connections` and `remove_blocks` now use flat strings (depth 3→2). Read/write symmetric with `inspect_graph` output.

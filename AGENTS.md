@@ -49,7 +49,8 @@ Three model-facing wrapper tools (the entire MVP model surface):
 
 `search_blocks` and `ask_grc_docs` are internal engines under `query_knowledge`, not separately surfaced to the model. Both go through the same `embeddinggemma:latest` + sqlite-vec pipeline.
 
-- No new model-facing tool, schema field, or system-prompt change without maintainer authorization.
+- Tool schema and system-prompt tuning are permitted for general fixes and clarifying system boundary constraints. Do not implement ad-hoc or hardcoded prompt/schema rules targeting specific test scenarios or individual block instances.
+- No new model-facing tool or schema field changes without maintainer authorization.
 - Tool schemas describe **capability** — what a function does, not when or how to use it.
 - **No in-band control flow:** no ALL-CAPS directives, behavioral commands, or procedural recipes in model-visible strings. The system prompt is the only behavioral authority.
 

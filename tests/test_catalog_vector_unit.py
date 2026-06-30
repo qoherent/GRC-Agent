@@ -185,3 +185,87 @@ def test_visible_params_filters_real_qtgui_time_sink_x():
     # Semantically meaningful params must be kept.
     for kept in ("type", "name", "srate"):
         assert kept in visible, f"{kept} must be kept"
+
+
+# --- Phase 2 regression guard: id drop, stream-domain drop, distance -------- #
+
+
+def test_keep_param_drops_id_uniformly():
+    """The 'id' param is the block's instance name — redundant with the
+    instance_name field every payload already carries. keep_param must drop it
+    in every mode (one uniform rule)."""
+    from grc_agent.runtime.param_filter import DETAILS, OVERVIEW, keep_param
+
+    for mode in (OVERVIEW, DETAILS):
+        assert (
+            keep_param(
+                hide="none",
+                category="General",
+                dtype="raw",
+                value="samp_rate",
+                default="samp_rate",
+                mode=mode,
+                param_key="id",
+            )
+            is False
+        )
+    # a non-id param with otherwise-kept attributes still survives
+    assert (
+        keep_param(
+            hide="none",
+            category="General",
+            dtype="enum",
+            value="float",
+            default="complex",
+            mode=OVERVIEW,
+            param_key="type",
+        )
+        is True
+    )
+
+
+def test_block_description_payload_drops_id_keeps_domain():
+    """The model-facing catalog payload drops the redundant 'id' param but
+    KEEPS port domain (project policy: do not cut information from tool
+    outputs). Never emits label/default_params."""
+    from grc_agent.catalog.schema import (
+        BlockDescription,
+        NormalizedParameter,
+        NormalizedPort,
+    )
+    from grc_agent.runtime.param_filter import OVERVIEW
+
+    desc = BlockDescription(
+        block_id="blocks_multiply_xx",
+        label="Multiply",
+        category_path=["Math Operators"],
+        flags=[],
+        parameters=[
+            NormalizedParameter(id="id", dtype="raw", default="blocks_multiply_xx"),
+            NormalizedParameter(id="type", dtype="enum", default="complex",
+                                options=["complex", "float", "int", "short"]),
+            NormalizedParameter(id="vlen", dtype="int", default="1"),
+        ],
+        inputs=[NormalizedPort(id="0", domain="stream", dtype="complex"),
+                NormalizedPort(id="msg", domain="message", dtype="message")],
+        outputs=[NormalizedPort(id="0", domain="stream", dtype="complex")],
+        asserts=[],
+        documentation=None,
+        doc_url=None,
+        warnings=[],
+        signature="blocks_multiply_xx()",
+    )
+    payload = desc.to_payload(mode=OVERVIEW)
+    # id dropped (redundant with instance_name)
+    assert "id" not in payload["params"]
+    # meaningful params kept
+    assert "type" in payload["params"]
+    # no rich-shape fields
+    assert "label" not in payload
+    assert "default_params" not in payload
+    # domain is preserved (stream AND message) — info is not cut
+    stream_port = next(p for p in payload["inputs"] if p.get("id") == "0")
+    assert stream_port.get("domain", "stream") == "stream"
+    assert stream_port["dtype"] == "complex"
+    msg_port = next(p for p in payload["inputs"] if p.get("id") == "msg")
+    assert msg_port.get("domain") == "message"

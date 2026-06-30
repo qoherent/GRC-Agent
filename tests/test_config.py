@@ -39,7 +39,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.agent.max_tool_result_chars, 4000)
         self.assertEqual(config.agent.history_compact_budget, 100000)
         self.assertEqual(config.llama.max_tool_rounds, 8)
-        self.assertEqual(config.llama.temperature, 0.0)
         self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 5)
@@ -68,7 +67,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     'backend = "openrouter"\n'
                     "max_tokens = 2048\n"
                     "max_tool_rounds = 42\n"
-                    "temperature = 0.2\n"
                     "enable_thinking = true\n"
                     "request_timeout_seconds = 30.0\n"
                     "\n[agent]\n"
@@ -103,7 +101,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "model='m'\n"
                     "max_tokens=1024\n"
                     "max_tool_rounds=1\n"
-                    "temperature=0.0\n"
                     "enable_thinking=false\n"
                     "request_timeout_seconds=1.0\n"
                     "\n[agent]\n"
@@ -137,7 +134,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     'backend = "ollama"\n'
                     "max_tokens = 1024\n"
                     "max_tool_rounds = 1\n"
-                    "temperature = 0.0\n"
                     "enable_thinking = false\n"
                     "request_timeout_seconds = 1.0\n"
                     "\n[agent]\n"
@@ -152,7 +148,7 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             env_config = Path(tmpdir) / "env.toml"
             env_config.write_text(
-                "[llama]\nserver_url='http://localhost:11434'\nmodel='m'\nmax_tokens=1\nmax_tool_rounds=1\ntemperature=0.0\nenable_thinking=false\nrequest_timeout_seconds=1.0\n",
+                "[llama]\nserver_url='http://localhost:11434'\nmodel='m'\nmax_tokens=1\nmax_tool_rounds=1\nenable_thinking=false\nrequest_timeout_seconds=1.0\n",
                 encoding="utf-8",
             )
 
@@ -187,7 +183,6 @@ class RuntimeConfigTests(unittest.TestCase):
                         'model = "m"\n'
                         "max_tokens = 1024\n"
                         "max_tool_rounds = 1\n"
-                        "temperature = 0.0\n"
                         "enable_thinking = false\n"
                         "request_timeout_seconds = 1.0\n"
                         "\n[agent]\n"
@@ -207,7 +202,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     'model = "m"\n'
                     "max_tokens = 1024\n"
                     "max_tool_rounds = 1\n"
-                    "temperature = 0.0\n"
                     "enable_thinking = false\n"
                     "request_timeout_seconds = 1.0\n"
                     "\n[agent]\n"

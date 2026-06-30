@@ -153,7 +153,6 @@ class ModelSwapRunnable(QRunnable):
 
             if self.backend == "ollama":
                 new_url = DEFAULT_OLLAMA_URL
-                from grc_agent.config import default_app_config
 
                 model_name = (
                     self.ollama_model_name
@@ -171,9 +170,9 @@ class ModelSwapRunnable(QRunnable):
                 except Exception:
                     local_models = []
 
-                model_exists = any(
-                    m == model_name or m == f"{model_name}:latest" for m in local_models
-                )
+                from grc_agent.toolagents_runtime import model_name_matches
+
+                model_exists = bool(model_name) and model_name_matches(model_name, local_models)
 
                 if not model_exists:
                     self.signals.progress.emit(f"Pulling model '{model_name}'...")
@@ -268,7 +267,6 @@ class MainWindow(QMainWindow):
         self._pending_swap_selection = None
         self.thread = None
         self.process_manager = None
-        self._safe_to_close = False
         self.active_session_id = None
         self.sessions_store = open_session_store(_default_sessions_db())
         # Backend reachability state. ``None`` means "unknown / not yet
@@ -441,8 +439,6 @@ class MainWindow(QMainWindow):
 
         # Initialize Process Manager
         self.process_manager = ProcessManager(self)
-        self._pending_close = False
-        self._safe_to_close = False
         self._last_applied_revision = None
         self._validation_stdout = ""
         self._validation_stderr = ""
@@ -455,9 +451,6 @@ class MainWindow(QMainWindow):
         self.process_manager.stderr_received.connect(self.on_process_stderr)
         self.process_manager.status_message.connect(self.on_process_status)
         self.process_manager.finished.connect(self.on_process_finished)
-        self.process_manager.finished.connect(self.on_deferred_close)
-        # Defer thread.finished binding until start_generation assigns self.thread,
-        # but the on_deferred_close gate (_pending_close) prevents double-firing.
 
         # Initialize inspector state and active GRC file path
         if self.agent.session and self.agent.session.path:
@@ -822,12 +815,6 @@ class MainWindow(QMainWindow):
         # Enforce dynamic cleanup sequence on turn completion
         self.worker.turn_finished.connect(self.cleanup_thread)
 
-        # Bind thread.finished once at creation so the deferred close path
-        # can fire on thread teardown without re-connecting on every X-click.
-        # cleanup_thread() disconnects this in its finally block to avoid
-        # post-destruction slot invocations.
-        self.thread.finished.connect(self.on_deferred_close)
-
         self.thread.start()
 
     def on_worker_started(self) -> None:
@@ -836,7 +823,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "model_toolbar"):
             self.model_toolbar.setEnabled(False)
         self.status_bar.showMessage("Agent is thinking...")
-        self.chat_widget.start_stream()
 
     def on_tool_started(self, name: str, args: str) -> None:
         """Show the running tool name in the status bar and chat indicator."""
@@ -860,6 +846,8 @@ class MainWindow(QMainWindow):
 
     def on_tool_finished(self, name: str, result: str) -> None:
         """Handle tool completion: show mutations, surface errors."""
+        self.chat_widget.append_tool_finished(name, result)
+
         if name == "change_graph" and result:
             self.chat_widget.append_mutation(result)
             self.refresh_inspector()
@@ -870,21 +858,29 @@ class MainWindow(QMainWindow):
 
         if self.active_session_id is not None:
             try:
-                if name == "change_graph" and result:
-                    if self._result_is_error(result):
-                        role = "error"
-                    else:
-                        role = "mutation"
-                else:
-                    if self._result_is_error(result):
-                        role = "error"
-                    else:
-                        role = "tool_finished"
+                # Always save tool_finished to DB
                 self.sessions_store.append(
                     self.active_session_id,
-                    role,
+                    "tool_finished",
                     result,
+                    payload={"tool_name": name},
                 )
+
+                # Save mutation or error to DB if applicable
+                if name == "change_graph" and result:
+                    self.sessions_store.append(
+                        self.active_session_id,
+                        "mutation",
+                        result,
+                        payload={"tool_name": name},
+                    )
+                if self._result_is_error(result):
+                    self.sessions_store.append(
+                        self.active_session_id,
+                        "error",
+                        f"{name}: {result[:300]}",
+                        payload={"tool_name": name},
+                    )
             except Exception as exc:
                 logger.exception("Failed to save tool finish to DB: %s", exc)
 
@@ -910,6 +906,8 @@ class MainWindow(QMainWindow):
 
     def on_response_chunk(self, text: str) -> None:
         """Append stream token chunks directly to the display."""
+        if not self.chat_widget._streaming:
+            self.chat_widget.start_stream()
         self.chat_widget.append_stream_chunk(text)
 
     def on_turn_finished(self, result: dict[str, Any]) -> None:
@@ -918,15 +916,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, "model_toolbar"):
             self.model_toolbar.setEnabled(True)
         assistant_text = result.get("assistant_text", "")
-        tool_calls_executed = int(result.get("tool_calls_executed", 0))
-        if not assistant_text.strip() and tool_calls_executed > 0:
-            # The model never produced text — the assistant message
-            # was a tool-call-only turn. Drop the empty streaming
-            # placeholder and the empty display row; the typed
-            # ``assistant_model`` row already carries the message.
-            self.chat_widget.drop_last_assistant()
-        else:
+        if assistant_text.strip():
+            if not self.chat_widget._streaming:
+                self.chat_widget.start_stream()
             self.chat_widget.finalize_stream(assistant_text)
+        else:
+            if self.chat_widget._streaming:
+                self.chat_widget.drop_last_assistant()
+            else:
+                self.chat_widget._streaming = False
         self.refresh_inspector()
         self.status_bar.setStyleSheet("")
         self.status_bar.showMessage("Ready")
@@ -977,17 +975,8 @@ class MainWindow(QMainWindow):
             logger.debug(f"Stale-graph warning check failed: {e}")
 
     def cleanup_thread(self) -> None:
-        """Gracefully wait for the execution thread to close and release resources.
-
-        Disconnects the thread.finished -> on_deferred_close binding before
-        terminating the thread to prevent a queued cross-thread slot from
-        firing against a destroyed C++ object.
-        """
+        """Gracefully wait for the execution thread to close and release resources."""
         if self.thread:
-            try:
-                self.thread.finished.disconnect(self.on_deferred_close)
-            except (TypeError, RuntimeError):
-                pass
             self.thread.quit()
             if not self.thread.wait(1500):
                 logger.warning(
@@ -1010,7 +999,7 @@ class MainWindow(QMainWindow):
 
     def on_inspector_refreshed(self, overview_data: dict[str, Any]) -> None:
         self.inspector_widget.update_state(overview_data)
-        graph = overview_data.get("graph", overview_data.get("summary", {})) or {}
+        graph = overview_data.get("graph", {}) or {}
         val_status = graph.get("validation", {}).get("status", "unknown")
         if val_status == "valid":
             self.validation_label.setText("🟢 Valid")
@@ -1104,38 +1093,23 @@ class MainWindow(QMainWindow):
                 or "unknown"
             )
 
+            chosen_model: str | None = None
+            server_url: str | None = None
             if selection.backend == "ollama":
-                self.llama_config = dataclasses.replace(
-                    self.llama_config,
-                    backend=selection.backend,
-                    server_url=DEFAULT_OLLAMA_URL,
-                    model=selection.ollama_model_name,
-                )
-                try:
-                    from grc_agent.config import resolve_config_path, update_toml_config_file
-
-                    config_path = resolve_config_path(None)
-                    if config_path:
-                        update_toml_config_file(
-                            config_path,
-                            {
-                                "backend": "ollama",
-                                "server_url": DEFAULT_OLLAMA_URL,
-                                "model": selection.ollama_model_name,
-                            },
-                        )
-                except Exception as exc:
-                    logger.warning("Failed to persist to grc_agent.toml: %s", exc)
-
+                chosen_model = selection.ollama_model_name
+                server_url = DEFAULT_OLLAMA_URL
             elif selection.backend == "openrouter":
-                env_model = default_openrouter_model()
+                chosen_model = default_openrouter_model()
+                server_url = DEFAULT_OPENROUTER_URL
+                model_name = chosen_model
+
+            if chosen_model is not None:
                 self.llama_config = dataclasses.replace(
                     self.llama_config,
                     backend=selection.backend,
-                    server_url=DEFAULT_OPENROUTER_URL,
-                    model=env_model,
+                    server_url=server_url,
+                    model=chosen_model,
                 )
-                model_name = env_model
                 try:
                     from grc_agent.config import resolve_config_path, update_toml_config_file
 
@@ -1144,9 +1118,9 @@ class MainWindow(QMainWindow):
                         update_toml_config_file(
                             config_path,
                             {
-                                "backend": "openrouter",
-                                "server_url": DEFAULT_OPENROUTER_URL,
-                                "model": env_model,
+                                "backend": selection.backend,
+                                "server_url": server_url,
+                                "model": chosen_model,
                             },
                         )
                 except Exception as exc:
@@ -1244,10 +1218,14 @@ class MainWindow(QMainWindow):
         same inspect/search/change evidence the user originally saw.
         """
         from grc_agent.chat_roles import (
+            ASSISTANT_MODEL_ROLE,
             DISPLAY_ROLES,
+            TOOL_MODEL_ROLE,
             chat_message_from_payload,
         )
         from grc_agent.sessions_store import get_session_sync, list_messages_sync
+
+        model_roles = {ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE}
 
         try:
             session_rec = get_session_sync(_default_sessions_db(), session_id)
@@ -1288,7 +1266,7 @@ class MainWindow(QMainWindow):
 
         model_replayed = 0
         for msg in messages:
-            if msg.role not in {"assistant_model", "tool_model"}:
+            if msg.role not in model_roles:
                 continue
             chat_message = chat_message_from_payload(msg.payload)
             if chat_message is None:
@@ -1305,7 +1283,7 @@ class MainWindow(QMainWindow):
                 logger.exception("Failed to replay model row %s: %s", msg.id, exc)
 
         if model_replayed == 0 and any(
-            msg.role not in {"assistant_model", "tool_model"} for msg in messages
+            msg.role not in model_roles for msg in messages
         ):
             self.status_bar.showMessage(
                 f"Session {session_id} predates the typed-history "
@@ -1328,7 +1306,7 @@ class MainWindow(QMainWindow):
             if msg.role == "system":
                 continue
             if msg.role in DISPLAY_ROLES:
-                self.chat_widget.append_message(msg.role, msg.text)
+                self.chat_widget.append_message(msg.role, msg.text, payload=msg.payload)
                 display_replayed += 1
 
         # 5. Keep the active session ID to allow active continuation.
@@ -1396,31 +1374,6 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Ready (last execution exit code: {exit_code})")
 
         self.refresh_inspector()
-
-    def on_deferred_close(self, *args: Any) -> None:
-        """Wait until all running subprocesses and threads are stopped before closing window."""
-        if not self._pending_close:
-            return
-
-        is_running = False
-        if self.process_manager:
-            if (
-                self.process_manager.compile_process
-                and self.process_manager.compile_process.state() == QProcess.ProcessState.Running
-            ):
-                is_running = True
-            if (
-                self.process_manager.run_process
-                and self.process_manager.run_process.state() == QProcess.ProcessState.Running
-            ):
-                is_running = True
-
-        worker_running = self.thread is not None and self.thread.isRunning()
-
-        if not is_running and not worker_running:
-            self._safe_to_close = True
-            self._pending_close = False
-            self.close()
 
     # ------------------------------------------------------------------
     # File drag-and-drop
