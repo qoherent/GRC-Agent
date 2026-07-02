@@ -1,10 +1,12 @@
-"""Tool schemas for the three MVP wrapper tools.
+"""Tool schemas for the MVP wrapper tools.
 
-The MVP model surface is three flat batch tools:
+The MVP model surface is:
 
-- ``inspect_graph`` (read)
-- ``query_knowledge`` (read — routes to ``search_blocks`` or ``ask_grc_docs``)
-- ``change_graph`` (write — flat batch mutations)
+- ``inspect_graph`` (read) — flowgraph topology / blocks / connections
+- ``query_knowledge`` (read) — routes to ``search_blocks`` or ``ask_grc_docs``
+- ``web_search`` (read) — Ollama's hosted web search API
+- ``web_fetch`` (read) — Ollama's hosted web page fetch API
+- ``change_graph`` (write) — flat batch graph mutations
 
 Internal engines (e.g. ``search_blocks``, ``ask_grc_docs``) are NOT surfaced
 to the model. They are called only by ``query_knowledge`` itself.
@@ -79,6 +81,36 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
             },
         },
         required=["query", "domain"],
+        strict=True,
+    ),
+    _schema(
+        "web_search",
+        "Search the live web via Ollama's hosted web search API. Returns up to 10 result snippets (title, url, content). Use this for current events, recent releases, or any question that requires information not in the local catalog or docs.",
+        {
+            "query": {
+                "type": "string",
+                "description": "The web search query.",
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum number of results to return (1-10, default 5).",
+                "minimum": 1,
+                "maximum": 10,
+            },
+        },
+        required=["query"],
+        strict=True,
+    ),
+    _schema(
+        "web_fetch",
+        "Fetch a single web page by URL via Ollama's hosted web fetch API. Returns the page title, the main content as markdown, and the list of links on the page. Use this after web_search to read a specific result in full.",
+        {
+            "url": {
+                "type": "string",
+                "description": "The URL of the web page to fetch.",
+            },
+        },
+        required=["url"],
         strict=True,
     ),
     _schema(

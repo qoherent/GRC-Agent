@@ -18,6 +18,8 @@ The default MVP chat surface exposes these wrapper tools, in order:
 
 - `inspect_graph`
 - `query_knowledge`
+- `web_search`
+- `web_fetch`
 - `change_graph`
 
 The model does not see lifecycle tools, shell/filesystem tools, raw YAML tools, direct transaction primitives, or low-level graph APIs.
@@ -105,6 +107,54 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
         "required": [
           "query",
           "domain"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "Search the live web via Ollama's hosted web search API. Returns up to 10 result snippets (title, url, content). Use this for current events, recent releases, or any question that requires information not in the local catalog or docs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The web search query."
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Maximum number of results to return (1-10, default 5).",
+            "minimum": 1,
+            "maximum": 10
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_fetch",
+      "description": "Fetch a single web page by URL via Ollama's hosted web fetch API. Returns the page title, the main content as markdown, and the list of links on the page. Use this after web_search to read a specific result in full.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The URL of the web page to fetch."
+          }
+        },
+        "required": [
+          "url"
         ],
         "additionalProperties": false
       },

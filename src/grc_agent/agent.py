@@ -28,6 +28,7 @@ from grc_agent.history import (
 from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
 from grc_agent.runtime.inspect_graph import inspect_graph as inspect_graph_wrapper
 from grc_agent.runtime.model_context import (
+    GRAPH_MUTATING_TOOL_NAME,
     MVP_MODEL_TOOL_NAMES,
     MVP_TOOL_SURFACE,
     build_system_prompt,
@@ -48,7 +49,7 @@ ToolCallable = Callable[..., ToolResult]
 
 class GrcAgent:
     """A thin integration layer between a language model and package-level owners."""
-    _MUTATING_TOOLS = {"change_graph"}
+    _MUTATING_TOOLS = {GRAPH_MUTATING_TOOL_NAME}
 
     def __init__(
         self,
@@ -287,7 +288,7 @@ class GrcAgent:
             return {}
 
         normalized = dict(kwargs)
-        if tool_name == "change_graph":
+        if tool_name == GRAPH_MUTATING_TOOL_NAME:
             normalized = copy.deepcopy(normalized)
         return normalized
 
@@ -386,6 +387,8 @@ class GrcAgent:
         return {
             "inspect_graph": self._inspect_graph,
             "query_knowledge": self._query_knowledge,
+            "web_search": self._web_search,
+            "web_fetch": self._web_fetch,
             "change_graph": self._change_graph,
         }
 
@@ -588,4 +591,28 @@ class GrcAgent:
             add_connections=add_connections,
             remove_connections=remove_connections,
             force=bool(force),
+        )
+
+    def _web_search(
+        self,
+        query: str,
+        max_results: int = 5,
+    ) -> ToolResult:
+        from grc_agent.runtime.web_search import web_search as _ws
+
+        result = _ws(query=query, max_results=max_results)
+        return self._payload_result(
+            "web_search",
+            result,
+            default_message=("Web search returned no results." if result.get("ok") else "Web search failed."),
+        )
+
+    def _web_fetch(self, url: str) -> ToolResult:
+        from grc_agent.runtime.web_search import web_fetch as _wf
+
+        result = _wf(url=url)
+        return self._payload_result(
+            "web_fetch",
+            result,
+            default_message=("Fetched page." if result.get("ok") else "Web fetch failed."),
         )

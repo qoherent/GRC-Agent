@@ -231,6 +231,8 @@ def build_system_prompt(session_id: str | None = None) -> str:
 MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
     "inspect_graph",
     "query_knowledge",
+    "web_search",
+    "web_fetch",
     "change_graph",
 )
 
