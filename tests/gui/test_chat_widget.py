@@ -500,6 +500,56 @@ def test_finalize_stream_keeps_final_text_when_present(qtbot):
     assert "final answer" in plain
 
 
+def test_tool_call_in_middle_of_text_renders_in_correct_order(qtbot):
+    """Regression for the original bug: a tool call that the model
+    issued in the middle of its response (text → tool → text) must
+    render between the pre-tool text and the post-tool text, not
+    at the bottom of the turn. The previous fragment-flattening
+    renderer put the tool call at the very end.
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    widget.append_message("user", "explain the loaded graph")
+    widget.start_stream()
+    # Pre-tool: reasoning + initial text
+    widget.append_stream_chunk(
+        "<think>Let me inspect the graph first.</think>"
+        "\nThe graph is a simple audio signal chain.\n\n"
+    )
+    # Tool call happens here
+    widget.append_status("inspect_graph", "{}")
+    widget.append_tool_finished("inspect_graph", '{"ok": true, "blocks": 3}')
+    # Post-tool: more text after the tool result
+    widget.start_stream()
+    widget.append_stream_chunk("It has 3 blocks total.")
+    widget.finalize_stream("It has 3 blocks total.")
+
+    # The fragment list reflects the temporal order.
+    asst = widget._history[1]
+    types = [f.get("type") for f in asst.get("fragments", [])]
+    assert types == ["text", "tool", "text"], (
+        f"Fragments must be [text, tool, text] (pre-tool text, tool "
+        f"call, post-tool text); got {types}"
+    )
+
+    # The rendered HTML places everything in the right position:
+    # thinking  <  pre-tool text  <  tool call  <  post-tool text.
+    html = widget.chat_display.toHtml()
+    import re
+
+    plain = re.sub(r"<[^>]+>", " ", html)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    think = plain.find("Let me inspect")
+    pre = plain.find("graph is a simple")
+    tool = plain.find("call inspect_graph")
+    post = plain.find("3 blocks total")
+    assert think < pre < tool < post, (
+        f"Rendered order must be thinking < pre-text < tool < "
+        f"post-text; got think={think} pre={pre} tool={tool} post={post}"
+    )
+
+
 def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
     """When the agent turn opens with a tool call (no pre-tool text),
     the empty assistant placeholder must persist so the rendered
@@ -507,12 +557,13 @@ def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
 
         Agent:
             call X (args) → result Y ▼ expand
-        Agent: The current graph is a simple...
+            The current graph is a simple...
 
     i.e. an "Agent:" header *before* the tool call (the empty
-    placeholder), then the tool row, then the next "Agent:" header
-    for the post-tool text. The pre-fix behavior dropped the empty
-    placeholder, so the tool call rendered before any "Agent:".
+    placeholder), then the tool row, then the post-tool text.
+    The pre-fix behavior dropped the empty placeholder AND
+    flattened the tool into a single bottom-of-turn row, so the
+    tool call rendered before any "Agent:" and after all the text.
     """
     widget = ChatWidget()
     qtbot.addWidget(widget)
@@ -528,105 +579,114 @@ def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
     # The MainWindow handler: empty stream → keep the placeholder.
     # (No drop_last_assistant call.)
 
-    # 3. Tool call starts.
+    # 3. Tool call starts — added as a fragment on the current turn.
     widget.append_status("inspect_graph", "{}")
 
-    # 4. Tool finishes — merged into the tool_started entry.
+    # 4. Tool finishes — fragment receives the result in-place.
     widget.append_tool_finished("inspect_graph", '{"ok": true}')
 
     # 5. Model streams its final reply (post-tool). The empty
-    #    placeholder from step 2 is reused.
+    #    placeholder from step 2 is reused as the agent bubble.
     widget.start_stream()
     widget.append_stream_chunk("The current graph is simple.")
     widget.finalize_stream("The current graph is simple.")
 
-    # --- Verify temporal ordering ---
+    # --- Verify fragment-based ordering ---
     roles = [msg["role"] for msg in widget._history]
-    # Expected: user, assistant (empty + post-tool text in one slot),
-    # tool_started (with the result merged in).
-    assert roles == ["user", "assistant", "tool_started"], (
-        f"Temporal order broken: {roles}"
+    # One user, one assistant. The tool call is a fragment inside
+    # the assistant — NOT a separate history row.
+    assert roles == ["user", "assistant"], f"Temporal order broken: {roles}"
+
+    # The single assistant entry has the post-tool text.
+    asst = widget._history[1]
+    assert "The current graph is simple" in asst["text"]
+
+    # And the fragment list has [tool, text] in that order.
+    frags = asst.get("fragments", [])
+    types = [f.get("type") for f in frags]
+    assert types == ["tool", "text"], (
+        f"Fragments must be [tool, text]; got {types}"
     )
+    tool_frag = frags[0]
+    assert tool_frag["name"] == "inspect_graph"
+    assert tool_frag.get("result", "").startswith("{")
+    assert '"ok": true' in tool_frag["result"]
+    assert frags[1].get("text", "").startswith("The current graph is simple")
 
-    # The single assistant entry has the post-tool text (the empty
-    # placeholder was reused).
-    asst = widget._history[1]["text"]
-    assert "The current graph is simple" in asst
-
-    # The tool row carries the result inline.
-    tool = widget._history[2]
-    assert tool["tool_name"] == "inspect_graph"
-    assert tool.get("result", "").startswith("{")
-    assert '"ok": true' in tool["result"]
+    # --- Verify rendered HTML places the tool call BEFORE the post-tool text ---
+    html = widget.chat_display.toHtml()
+    tool_idx = html.find("inspect_graph")
+    text_idx = html.find("The current graph is simple")
+    assert tool_idx >= 0, "tool call must appear in rendered HTML"
+    assert text_idx >= 0, "post-tool text must appear in rendered HTML"
+    assert tool_idx < text_idx, (
+        f"tool call must render BEFORE the post-tool text; "
+        f"tool_idx={tool_idx} text_idx={text_idx}"
+    )
 
 
 def test_tool_call_preserves_temporal_order(qtbot):
-    """Regression: when a tool call happens mid-stream, the pre-tool
-    assistant text must close its own bubble BEFORE the tool rows are
-    appended. Without this fix, ``append_stream_chunk`` keeps appending
-    post-tool reply text to the pre-tool assistant bubble (it searches
-    reversed history for the last assistant msg, which sits before the
-    tool rows), producing [agent reply] [tool call] instead of the
-    correct [pre-tool text] [tool call] [post-tool reply].
+    """Regression: when a tool call happens mid-stream, the agent's
+    pre-tool text must appear ABOVE the tool call in the rendered
+    HTML, and any post-tool text must appear BELOW it. Each tool
+    call + result lives as a fragment inside the active assistant
+    turn, not as a separate history row.
     """
     widget = ChatWidget()
     qtbot.addWidget(widget)
 
-    # --- Simulate the multi-round agent flow ---
-
     # 1. User sends a message
     widget.append_message("user", "What is this graph?")
 
-    # 2. Model starts streaming (pre-tool text or thinking)
+    # 2. Model starts streaming (pre-tool text)
     widget.start_stream()
-    widget.append_stream_chunk("<think>Let me inspect first.</think>")
     widget.append_stream_chunk("Let me check the graph.")
 
-    # 3. Tool call starts — this is where the fix applies.
-    #    The MainWindow handler finalizes the stream before
-    #    appending the tool status. The visible-text assistant
-    #    entry stays as the pre-tool bubble.
-    if widget._streaming:
-        final = widget.current_stream_text()
-        import re
-
-        visible = re.sub(r"<think>.*?</think>", "", final, flags=re.DOTALL).strip()
-        if visible:
-            widget.finalize_stream(final)
-
+    # 3. Tool call starts — the assistant turn's fragment list
+    #    becomes [text, tool].
     widget.append_status("inspect_graph", "{}")
 
-    # 4. Tool finishes — merged into the tool_started entry.
+    # 4. Tool finishes — fragment receives the result in-place.
     widget.append_tool_finished("inspect_graph", '{"ok": true}')
 
-    # 5. Model streams its final reply (post-tool). The previous
-    #    assistant has text, so start_stream creates a new entry.
+    # 5. Model streams its post-tool text — fragment list becomes
+    #    [text, tool, text]. The assistant bubble is the same entry
+    #    throughout.
     widget.start_stream()
     widget.append_stream_chunk("This is a signal source.")
     widget.finalize_stream("This is a signal source.")
 
-    # --- Verify temporal ordering ---
+    # --- Verify fragment-based ordering ---
     roles = [msg["role"] for msg in widget._history]
-    # Expected: user, assistant (pre-tool text), tool_started
-    # (with the result merged in), assistant (post-tool text).
-    assert roles == ["user", "assistant", "tool_started", "assistant"], (
-        f"Temporal order broken: {roles}"
+    assert roles == ["user", "assistant"], (
+        f"Tool call is a fragment, not a history row; got {roles}"
     )
 
-    # The pre-tool assistant text must NOT contain the post-tool reply.
-    pre_tool = widget._history[1]["text"]
-    assert "Let me check" in pre_tool
-    assert "signal source" not in pre_tool
+    asst = widget._history[1]
+    frags = asst.get("fragments", [])
+    types = [f.get("type") for f in frags]
+    assert types == ["text", "tool", "text"], (
+        f"Fragments must be [text, tool, text]; got {types}"
+    )
+    # Pre-tool text comes before the tool call.
+    assert "Let me check" in frags[0]["text"]
+    assert "signal source" not in frags[0]["text"]
+    # The tool fragment carries the result.
+    assert frags[1]["name"] == "inspect_graph"
+    assert '"ok": true' in frags[1]["result"]
+    # Post-tool text comes after the tool call.
+    assert "signal source" in frags[2]["text"]
+    assert "Let me check" not in frags[2]["text"]
 
-    # The post-tool assistant text must contain the final reply.
-    post_tool = widget._history[3]["text"]
-    assert "signal source" in post_tool
-    assert "Let me check" not in post_tool
-
-    # The tool row carries the result inline.
-    tool = widget._history[2]
-    assert tool["tool_name"] == "inspect_graph"
-    assert '"ok": true' in tool["result"]
+    # The rendered HTML preserves the order.
+    html = widget.chat_display.toHtml()
+    pre_idx = html.find("Let me check")
+    tool_idx = html.find("inspect_graph")
+    post_idx = html.find("This is a signal source")
+    assert pre_idx < tool_idx < post_idx, (
+        f"Rendered order must be pre < tool < post; "
+        f"got pre={pre_idx} tool={tool_idx} post={post_idx}"
+    )
 
 
 def test_tool_finished_expand_collapse(qtbot):

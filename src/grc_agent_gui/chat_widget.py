@@ -401,7 +401,21 @@ class ChatWidget(QWidget):
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
         url_str = url.toString()
-        if url_str.startswith("toggle:"):
+        if url_str.startswith("toggle-tool:"):
+            # New fragment-aware URL: assistant_idx:tool_idx.
+            try:
+                payload = url_str.removeprefix("toggle-tool:")
+                a_idx, t_idx = (int(x) for x in payload.split(":", 1))
+                entry = self._history[a_idx]
+                fragments = entry.get("fragments", [])
+                if 0 <= t_idx < len(fragments):
+                    fragments[t_idx]["expanded"] = not fragments[t_idx].get("expanded", False)
+                    entry["_rendered"] = None
+                    self._render_chat()
+            except (ValueError, IndexError):
+                pass
+        elif url_str.startswith("toggle:"):
+            # Legacy URL: history_idx of a standalone tool row.
             try:
                 idx = int(url_str.removeprefix("toggle:"))
                 self._history[idx]["expanded"] = not self._history[idx].get("expanded", False)
@@ -446,12 +460,15 @@ class ChatWidget(QWidget):
         self._render_chat()
 
     def append_tool_finished(self, name: str, result: str) -> None:
-        """Merge a completed tool output into the most-recent ``tool_started``.
+        """Merge a completed tool output into the most-recent tool
+        fragment of the active agent turn.
 
-        Each tool call renders as one line in the chat (call args +
-        result, with the result expandable). We avoid the historical
-        two-row layout ("call X" / "result X") because it doubles
-        every tool row in the chat without adding information.
+        Each agent turn is one assistant entry whose ``fragments``
+        list is walked in temporal order when the row is rendered.
+        A tool call sits in the fragment stream at the exact point
+        the model issued it — not at the bottom of the turn — so
+        the chat shows the pre-tool text, the tool row, and any
+        post-tool text in the order they happened.
         """
         # Pretty-print JSON results so the (collapsed) preview is
         # readable when the user expands the row.
@@ -462,25 +479,36 @@ class ChatWidget(QWidget):
                 pretty = json.dumps(parsed, indent=2, sort_keys=True)
             except Exception:
                 pass
-        # Find the most recent tool_started entry with a matching
-        # tool_name and no result yet. Walk back over any assistant /
-        # thinking entries that may sit between (the agent's pre-tool
-        # text bubble, if any).
+        # Find the active assistant turn (most recent entry) and
+        # look for the latest unfilled tool fragment with a matching
+        # name.
         for entry in reversed(self._history):
-            role = entry.get("role")
-            if role == "tool_started" and entry.get("tool_name") == name and not entry.get(
+            if entry.get("role") == "assistant":
+                for frag in reversed(entry.get("fragments", [])):
+                    if (
+                        frag.get("type") == "tool"
+                        and frag.get("name") == name
+                        and frag.get("result") is None
+                    ):
+                        frag["result"] = pretty
+                        entry["_rendered"] = None
+                        self._render_chat()
+                        return
+                break
+        # Legacy fallback: an external caller appended a tool_started
+        # row directly. Update that row in place.
+        for entry in reversed(self._history):
+            if entry.get("role") == "tool_started" and entry.get("tool_name") == name and not entry.get(
                 "result"
             ):
                 entry["result"] = pretty
                 entry["_rendered"] = None
                 self._render_chat()
                 return
-            if role == "tool_finished":
-                # Past a finished tool — stop searching; the new
-                # tool call belongs to a different turn.
+            if entry.get("role") == "tool_finished":
                 break
-        # Fallback: no matching tool_started found. Append a
-        # standalone tool_finished row so the result is still visible.
+        # Final fallback: append a standalone tool_finished row so
+        # the result is still visible.
         self.append_message(
             "tool_finished",
             pretty,
@@ -488,7 +516,27 @@ class ChatWidget(QWidget):
         )
 
     def append_status(self, name: str, args: str) -> None:
-        """Insert a styled tool-call status block with arguments."""
+        """Add a tool call to the active agent turn.
+
+        Closes the current text fragment and appends a tool fragment
+        at the exact point in the turn where the model issued the
+        call. The tool row renders inline with the surrounding text
+        fragments (pre-tool text above, post-tool text below).
+        """
+        self._streaming = False
+        self._stream_header_printed = False
+        assistant = self._current_assistant_entry()
+        if assistant is not None:
+            fragments = assistant.setdefault("fragments", [])
+            fragments.append(
+                {"type": "tool", "name": name, "args": args, "result": None, "expanded": False}
+            )
+            assistant["_rendered"] = None
+            self._render_chat()
+            return
+        # No active assistant turn (rare — caller invoked a tool
+        # without first opening a turn). Fall back to a standalone
+        # tool_started row.
         self.append_message(
             "tool_started",
             "",
@@ -510,93 +558,127 @@ class ChatWidget(QWidget):
     def start_stream(self) -> None:
         """Start a text streaming session, locking updates to plain-text mode.
 
-        If a previous turn's empty assistant placeholder is still in
-        the history (typically because the turn began with a tool
-        call), reuse it so the agent bubble stays contiguous across
-        ``Agent: (empty) → tool call → result → Agent: text``.
+        Each agent turn is one assistant entry whose ``fragments``
+        list is walked in temporal order. A turn is "open" between
+        the first response chunk and the next tool call, turn end,
+        or new user message. If the most recent history entry is
+        the same agent turn (no user/tool boundary in between),
+        reuse it so text chunks append to the current text fragment.
+        Otherwise start a new turn.
         """
         self._streaming = True
         self._stream_header_printed = False
-        # Look back for an empty assistant entry we can reuse. We
-        # must skip past intervening tool_started/tool_finished
-        # entries (the tool call that consumed the placeholder).
-        for entry in reversed(self._history):
-            role = entry.get("role")
-            if role in ("tool_started", "tool_finished"):
-                continue
-            if role == "assistant" and not entry.get("text", "").strip():
-                entry["_rendered"] = None
-                break
-            # Anything else (a user message, a non-empty assistant)
-            # means a new turn.
-            self._history.append({"role": "assistant", "text": "", "_rendered": None})
-            break
-        else:
-            # Empty history — first turn.
-            self._history.append({"role": "assistant", "text": "", "_rendered": None})
+        # Reuse the most recent assistant entry if it is part of the
+        # current turn. The boundary condition is a user message,
+        # a fresh assistant entry, or no history at all.
+        if not (self._history and self._history[-1].get("role") == "assistant"):
+            self._history.append(
+                {
+                    "role": "assistant",
+                    "fragments": [],
+                    "text": "",
+                    "_rendered": None,
+                    "thinking_expanded": False,
+                }
+            )
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.chat_display.setTextCursor(cursor)
 
+    def _current_assistant_entry(self) -> dict[str, Any] | None:
+        """Return the active assistant turn (most recent entry), or None."""
+        if self._history and self._history[-1].get("role") == "assistant":
+            return self._history[-1]
+        return None
+
+    def _open_new_text_fragment(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Append a fresh text fragment to *entry* and return it.
+
+        Used when text starts streaming after a tool call (or any
+        non-text content), so the new text sits in the right
+        position in the turn.
+        """
+        fragments = entry.setdefault("fragments", [])
+        frag: dict[str, Any] = {"type": "text", "text": ""}
+        fragments.append(frag)
+        return frag
+
     def append_stream_chunk(self, text: str) -> None:
-        """Append raw stream text incrementally to prevent UI flicker."""
-        if self._streaming:
-            # Find the active assistant message to append the stream chunk to
-            assistant_msg = None
-            for msg in reversed(self._history):
-                if msg["role"] == "assistant":
-                    assistant_msg = msg
-                    break
+        """Append raw stream text incrementally to prevent UI flicker.
 
-            if assistant_msg is not None:
-                assistant_msg["text"] += text
-                assistant_msg["_rendered"] = None
+        Text is appended to the current text fragment of the active
+        assistant turn. If the last fragment is not a text fragment
+        (e.g. a tool row), a new text fragment is opened so the
+        post-tool text sits in the right position in the turn.
+        """
+        if not self._streaming:
+            self.start_stream()
+        assistant = self._current_assistant_entry()
+        if assistant is None:
+            return
 
-            cursor = self.chat_display.textCursor()
+        # Update the fragment model first, so any re-render that
+        # fires from another handler sees the latest text.
+        fragments = assistant.setdefault("fragments", [])
+        if not fragments or fragments[-1].get("type") != "text":
+            fragments.append({"type": "text", "text": text})
+        else:
+            fragments[-1]["text"] += text
+        # Maintain the legacy flat text field used by export_markdown
+        # and a few older assertions.
+        assistant["text"] = assistant.get("text", "") + text
+        assistant["_rendered"] = None
+
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+        if not self._stream_header_printed:
+            # Break out of any previous block (user msg, tool row).
+            cursor.insertBlock(QTextBlockFormat())
+            cursor.insertHtml(
+                f'<div style="margin-top: 12px; margin-bottom: 4px; border-left: 2px solid {_COLOR_AGENT_BORDER}; padding-left: 6px;">'
+                f'<b style="color: {_COLOR_AGENT};">Agent:</b>'
+                "</div>"
+            )
             cursor.movePosition(QTextCursor.MoveOperation.End)
+            block_format = QTextBlockFormat()
+            block_format.setLeftMargin(8)
+            block_format.setTopMargin(4)
+            cursor.insertBlock(block_format)
+            self._stream_header_printed = True
 
-            if not self._stream_header_printed:
-                # Break out of any previous block (like a user message or a tool status block)
-                cursor.insertBlock(QTextBlockFormat())
-
-                # Insert the styled "Agent:" header
-                cursor.insertHtml(
-                    f'<div style="margin-top: 12px; margin-bottom: 4px; border-left: 2px solid {_COLOR_AGENT_BORDER}; padding-left: 6px;">'
-                    f'<b style="color: {_COLOR_AGENT};">Agent:</b>'
-                    "</div>"
-                )
-
-                # Move to the end of the header and start the indented block for streaming
-                cursor.movePosition(QTextCursor.MoveOperation.End)
-                block_format = QTextBlockFormat()
-                block_format.setLeftMargin(8)
-                block_format.setTopMargin(4)
-                cursor.insertBlock(block_format)
-
-                self._stream_header_printed = True
-
-            self.chat_display.setTextCursor(cursor)
-            self.chat_display.insertPlainText(text)
-            self.chat_display.ensureCursorVisible()
+        self.chat_display.setTextCursor(cursor)
+        self.chat_display.insertPlainText(text)
+        self.chat_display.ensureCursorVisible()
 
     def finalize_stream(self, final_text: str) -> None:
-        """Finalize the stream and apply the definitive highlighted markdown HTML."""
+        """Finalize the stream and apply the definitive highlighted markdown HTML.
+
+        The final text replaces the current text fragment (it is the
+        authoritative post-stream text for the chunk that just
+        finished). The full turn re-renders from the fragment
+        model.
+        """
         self._streaming = False
         self._stream_header_printed = False
         for msg in reversed(self._history):
             if msg["role"] == "assistant":
+                fragments = msg.get("fragments", [])
+                if fragments and fragments[-1].get("type") == "text":
+                    fragments[-1]["text"] = final_text
+                else:
+                    fragments.append({"type": "text", "text": final_text})
                 msg["text"] = final_text
                 msg["_rendered"] = None
                 break
         self._render_chat()
 
     def drop_last_assistant(self) -> None:
-
         """Remove the most recent ``assistant`` row from the visible log.
 
-        Used when a turn ends with an empty assistant text (the model
-        only issued tool calls). The display row would otherwise show
-        an empty "Agent:" bubble.
+        Used when a turn ends with an empty assistant text (the
+        model only issued tool calls). The display row would
+        otherwise show an empty "Agent:" bubble.
         """
         self._streaming = False
         self._stream_header_printed = False
@@ -631,11 +713,183 @@ class ChatWidget(QWidget):
                 lines.append(text)
                 lines.append("")
             elif role == "assistant":
+                # Walk fragments so the export preserves the temporal
+                # order of text and tool calls.
                 lines.append("## Agent")
                 lines.append("")
-                lines.append(text)
-                lines.append("")
+                if entry.get("fragments"):
+                    for frag in entry["fragments"]:
+                        if frag.get("type") == "text":
+                            lines.append(frag.get("text", ""))
+                            lines.append("")
+                        elif frag.get("type") == "tool":
+                            lines.append(
+                                f"```\n{frag.get('name', '')}({frag.get('args', '')})\n```"
+                            )
+                            if frag.get("result") is not None:
+                                lines.append("")
+                                lines.append("Result:")
+                                lines.append("")
+                                lines.append(f"```\n{frag['result']}\n```")
+                                lines.append("")
+                else:
+                    lines.append(text)
+                    lines.append("")
         return "\n".join(lines).rstrip() + "\n"
+
+    def _render_assistant_entry(self, msg: dict[str, Any], idx: int) -> str:
+        """Render one assistant turn by walking its fragment list in order.
+
+        The order of fragments is the temporal order in which the
+        model emitted them — text chunks, tool calls, and
+        reasoning blocks all live in the same list. This is what
+        fixes the previous bug where the tool call was rendered
+        at the bottom of the turn even when the model issued it
+        in the middle of its response.
+        """
+        fragments = msg.get("fragments", []) or []
+        # If the entry has no fragments (legacy / freshly opened),
+        # fall back to the flat ``text`` field so older data still
+        # renders.
+        if not fragments:
+            text = msg.get("text", "")
+            thinking_content = extract_thinking_content(text)
+            clean_text = strip_think_blocks(text) if thinking_content else text
+            body = markdown_to_highlighted_html(clean_text)
+            thinking_html = self._render_thinking_panel(
+                thinking_content,
+                assistant_idx=idx,
+                expanded=msg.get("thinking_expanded", False),
+            )
+            return self._wrap_agent_bubble(thinking_html + body)
+
+        body_parts: list[str] = []
+        for f_idx, frag in enumerate(fragments):
+            ftype = frag.get("type")
+            if ftype == "text":
+                body_parts.append(markdown_to_highlighted_html(frag.get("text", "")))
+            elif ftype == "tool":
+                body_parts.append(self._render_tool_fragment(frag, idx, f_idx))
+
+        # Thinking blocks live inside text fragments. Walk the
+        # fragments again, extract the <think>…</think> content, and
+        # render it as one consolidated Thinking panel at the top
+        # of the agent bubble. Multiple rounds' thinking is
+        # concatenated — round-level streaming can attach a
+        # separate <think> segment per tool-calling round.
+        thinking_text = ""
+        for frag in fragments:
+            if frag.get("type") == "text":
+                t = extract_thinking_content(frag.get("text", ""))
+                if t:
+                    thinking_text += t + "\n\n"
+        thinking_text = thinking_text.strip()
+        thinking_html = (
+            self._render_thinking_panel(
+                thinking_text,
+                assistant_idx=idx,
+                expanded=msg.get("thinking_expanded", False),
+            )
+            if thinking_text
+            else ""
+        )
+
+        return self._wrap_agent_bubble(thinking_html + "".join(body_parts))
+
+    def _render_thinking_panel(
+        self, thinking_text: str, *, assistant_idx: int, expanded: bool
+    ) -> str:
+        """Render the collapsible Thinking panel.
+
+        No char count, capital T, "▼ expand" / "▲ collapse" toggle,
+        tool-call color. The thinking body is only emitted when
+        expanded. ``assistant_idx`` is the history-row index of
+        the parent assistant entry (used in the toggle URL).
+        """
+        if not thinking_text:
+            return ""
+        toggle_label = "▲ collapse" if expanded else "▼ expand"
+        thinking_box = ""
+        if expanded:
+            thinking_box = (
+                f'<pre style="margin-top: 6px; padding: 8px; background-color: {_COLOR_THINKING_BG}; '
+                f'color: #8a7c50; font-family: monospace; border-radius: 3px; '
+                f'border: 1px solid {_COLOR_THINKING_BORDER}; overflow-x: auto; white-space: pre-wrap;">'
+                f"{html.escape(thinking_text)}</pre>"
+            )
+        return (
+            f'<div style="margin-top: 4px; margin-bottom: 8px; padding: 4px 8px; '
+            f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
+            f'font-family: monospace; border-radius: 3px;">'
+            f'<span style="color: {_COLOR_TOOL_CALL};">Thinking</span>'
+            f'<a href="toggle-thinking:{assistant_idx}" '
+            f'style="color: {_COLOR_TOOL_CALL}; text-decoration: none; margin-left: 8px;">'
+            f"{toggle_label}</a>"
+            f"{thinking_box}"
+            f"</div>"
+        )
+
+    def _render_tool_fragment(self, frag: dict[str, Any], assistant_idx: int, tool_idx: int) -> str:
+        """Render a single tool call fragment as ``call name (args) → result ▼ expand``.
+
+        The toggle URL is ``toggle-tool:assistant_idx:tool_idx`` so
+        multiple tools in one turn each get their own expand state.
+        """
+        name = html.escape(str(frag.get("name", "")))
+        args = html.escape(str(frag.get("args", "")))
+        result = frag.get("result")
+        if result is None:
+            return (
+                f'<div style="margin-top: 4px; margin-bottom: 4px; padding: 4px 8px; '
+                f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
+                f'font-family: monospace; border-radius: 3px;">'
+                f'<span style="color: {_COLOR_TOOL_CALL};">call </span>'
+                f'<span style="color: {_COLOR_TOOL_NAME};">{name}</span>'
+                f' <span style="color: #485a60;">({args})</span>'
+                f' <span style="color: #485a60;">…</span>'
+                f"</div>"
+            )
+        is_expanded = frag.get("expanded", False)
+        safe_output = html.escape(result)
+        if is_expanded:
+            toggle = (
+                f'<a href="toggle-tool:{assistant_idx}:{tool_idx}" '
+                f'style="color: {_COLOR_TOOL_CALL}; text-decoration: none; margin-left: 8px;">▲ collapse</a>'
+            )
+            body = (
+                f'<pre style="margin-top: 6px; padding: 8px; background-color: #100e0c; '
+                f'color: #7a7060; font-family: monospace; border-radius: 3px; '
+                f'border: 1px solid {_COLOR_TOOL_CALL_BORDER}; overflow-x: auto; white-space: pre-wrap;">{safe_output}</pre>'
+            )
+        else:
+            toggle = (
+                f'<a href="toggle-tool:{assistant_idx}:{tool_idx}" '
+                f'style="color: {_COLOR_TOOL_CALL}; text-decoration: none; margin-left: 8px;">▼ expand</a>'
+            )
+            body = ""
+        return (
+            f'<div style="margin-top: 4px; margin-bottom: 4px; padding: 4px 8px; '
+            f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
+            f'font-family: monospace; border-radius: 3px;">'
+            f'<span style="color: {_COLOR_TOOL_CALL};">call </span>'
+            f'<span style="color: {_COLOR_TOOL_NAME};">{name}</span>'
+            f' <span style="color: #485a60;">({args})</span>'
+            f' <span style="color: {_COLOR_TOOL_CALL};">→ result</span>'
+            f"{toggle}"
+            f"{body}"
+            f"</div>"
+        )
+
+    def _wrap_agent_bubble(self, body_html: str) -> str:
+        """Wrap a rendered agent body in the standard Agent: bubble."""
+        return (
+            f'<div style="margin-bottom: 10px; padding: 6px 8px; border-left: 2px solid {_COLOR_AGENT_BORDER}; background-color: {_COLOR_AGENT_BG}; border-radius: 3px;">'
+            f'<b style="color: {_COLOR_AGENT};">Agent:</b>'
+            f'<div style="margin-top: 4px; padding-left: 4px; color: #9aabb0;">'
+            f"{body_html}"
+            f"</div>"
+            f"</div>"
+        )
 
     def _render_chat(self) -> None:
         """Render all messages in the chat history, applying markdown and code styling.
@@ -657,56 +911,7 @@ class ChatWidget(QWidget):
             if role == "user":
                 cached = render_user_message_html(text, font_size_px=self._user_text_px)
             elif role == "assistant":
-                # Check for thinking block(s). Round-level streaming can
-                # attach a separate <think> segment per tool-calling round,
-                # so all of them are combined rather than just the first.
-                thinking_content = extract_thinking_content(text)
-                clean_text = strip_think_blocks(text) if thinking_content else text
-
-                body = markdown_to_highlighted_html(clean_text)
-
-                thinking_html = ""
-                if thinking_content:
-                    is_thinking_expanded = msg.get("thinking_expanded", False)
-                    safe_thinking = html.escape(thinking_content)
-                    # Default (collapsed) always renders a one-line
-                    # summary so reasoning never "disappears" from
-                    # the chat after streaming. The label uses the
-                    # tool-call color, capital T, and "expand" /
-                    # "collapse" — no char count.
-                    toggle_label = "▲ collapse" if is_thinking_expanded else "▼ expand"
-                    thinking_toggle = (
-                        f'<a href="toggle-thinking:{idx}" '
-                        f'style="color: {_COLOR_TOOL_CALL}; text-decoration: none; margin-left: 8px;">'
-                        f"{toggle_label}</a>"
-                    )
-                    thinking_box = ""
-                    if is_thinking_expanded:
-                        thinking_box = (
-                            f'<pre style="margin-top: 6px; padding: 8px; background-color: {_COLOR_THINKING_BG}; '
-                            f'color: #8a7c50; font-family: monospace; border-radius: 3px; '
-                            f'border: 1px solid {_COLOR_THINKING_BORDER}; overflow-x: auto; white-space: pre-wrap;">{safe_thinking}</pre>'
-                        )
-
-                    thinking_html = (
-                        f'<div style="margin-top: 4px; margin-bottom: 8px; padding: 4px 8px; '
-                        f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
-                        f'font-family: monospace; border-radius: 3px;">'
-                        f'<span style="color: {_COLOR_TOOL_CALL};">Thinking</span>'
-                        f"{thinking_toggle}"
-                        f"{thinking_box}"
-                        f"</div>"
-                    )
-
-                cached = (
-                    f'<div style="margin-bottom: 10px; padding: 6px 8px; border-left: 2px solid {_COLOR_AGENT_BORDER}; background-color: {_COLOR_AGENT_BG}; border-radius: 3px;">'
-                    f'<b style="color: {_COLOR_AGENT};">Agent:</b>'
-                    f'<div style="margin-top: 4px; padding-left: 4px; color: #9aabb0;">'
-                    f"{thinking_html}"
-                    f"{body}"
-                    f"</div>"
-                    f"</div>"
-                )
+                cached = self._render_assistant_entry(msg, idx)
             elif role == "tool_started":
                 name = str(msg.get("tool_name", ""))
                 args = str(msg.get("args", ""))
