@@ -76,7 +76,6 @@ class LlamaConfig:
     backend: str = "ollama"
     max_tokens: int = 4096
     max_tool_rounds: int = 8
-    enable_thinking: bool = False
     request_timeout_seconds: float = 120.0
 
 
@@ -85,9 +84,7 @@ class RetrievalConfig:
     """Configurable defaults for wrapper retrieval behavior."""
 
     search_blocks_default_k: int
-    search_blocks_max_k: int
     ask_grc_docs_default_k: int
-    ask_grc_docs_max_k: int
 
 
 @dataclass(frozen=True)
@@ -102,25 +99,19 @@ class GuardrailsConfig:
     """Configurable defaults for bounded outputs and inspect limits."""
 
     max_tool_output_bytes: int
-    max_validation_errors: int
-    max_validation_stderr_chars: int
     max_compact_list_items: int
     max_inspect_targets: int = 8
 
 
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
     search_blocks_default_k=5,
-    search_blocks_max_k=12,
-    ask_grc_docs_default_k=3,
-    ask_grc_docs_max_k=8,
+    ask_grc_docs_default_k=5,
 )
 
 DEFAULT_HISTORY_CONFIG = HistoryConfig(checkpoint_retention=100)
 
 DEFAULT_GUARDRAILS_CONFIG = GuardrailsConfig(
     max_tool_output_bytes=32768,
-    max_validation_errors=8,
-    max_validation_stderr_chars=1200,
     max_compact_list_items=5,
 )
 
@@ -265,12 +256,6 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 context="[llama]",
             ),
 
-            enable_thinking=_optional_bool(
-                llama_table,
-                "enable_thinking",
-                default=defaults.llama.enable_thinking,
-                context="[llama]",
-            ),
             request_timeout_seconds=_optional_positive_float(
                 llama_table,
                 "request_timeout_seconds",
@@ -398,22 +383,10 @@ def _retrieval_config(
             default=defaults.search_blocks_default_k,
             context="[agent.retrieval]",
         ),
-        search_blocks_max_k=_optional_positive_int(
-            table,
-            "search_blocks_max_k",
-            default=defaults.search_blocks_max_k,
-            context="[agent.retrieval]",
-        ),
         ask_grc_docs_default_k=_optional_positive_int(
             table,
             "ask_grc_docs_default_k",
             default=defaults.ask_grc_docs_default_k,
-            context="[agent.retrieval]",
-        ),
-        ask_grc_docs_max_k=_optional_positive_int(
-            table,
-            "ask_grc_docs_max_k",
-            default=defaults.ask_grc_docs_max_k,
             context="[agent.retrieval]",
         ),
     )
@@ -446,18 +419,6 @@ def _guardrails_config(
             default=defaults.max_tool_output_bytes,
             context="[agent.guardrails]",
         ),
-        max_validation_errors=_optional_positive_int(
-            table,
-            "max_validation_errors",
-            default=defaults.max_validation_errors,
-            context="[agent.guardrails]",
-        ),
-        max_validation_stderr_chars=_optional_positive_int(
-            table,
-            "max_validation_stderr_chars",
-            default=defaults.max_validation_stderr_chars,
-            context="[agent.guardrails]",
-        ),
         max_compact_list_items=_optional_positive_int(
             table,
             "max_compact_list_items",
@@ -474,19 +435,13 @@ def _guardrails_config(
 
 
 def _validate_cross_field_constraints(config: AppConfig) -> None:
-    retrieval = config.agent.retrieval
 
     if config.llama.backend not in ALLOWED_BACKENDS:
         raise ConfigError(
             f"[llama].backend must be one of {sorted(ALLOWED_BACKENDS)}; found '{config.llama.backend}'."
         )
 
-    if retrieval.search_blocks_default_k > retrieval.search_blocks_max_k:
-        raise ConfigError(
-            "[agent.retrieval].search_blocks_default_k must be <= search_blocks_max_k."
-        )
-    if retrieval.ask_grc_docs_default_k > retrieval.ask_grc_docs_max_k:
-        raise ConfigError("[agent.retrieval].ask_grc_docs_default_k must be <= ask_grc_docs_max_k.")
+
 
 
 def update_toml_config_file(config_path: Path, updates: dict[str, Any]) -> None:

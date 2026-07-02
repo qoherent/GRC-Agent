@@ -18,8 +18,8 @@ The bridge: `grc_native_adapter.py` is the **only** module that imports `gnuradi
 | `runtime/catalog_vector.py` | sqlite-vec + embeddinggemma index for the GNU Radio catalog. |
 | `runtime/doc_answer.py` | sqlite-vec + embeddinggemma RAG for GNU Radio docs wiki. |
 | `runtime/search_blocks.py` | Vector search over the catalog (`BlockDescription` payload, Stage A filtered). |
-| `runtime/model_context.py` | `render_model_messages` + MVP `ToolSurface` (3-tool profile). |
-| `runtime/tool_schemas.py` | MVP tool JSON schemas (3 tools). |
+| `runtime/model_context.py` | `render_model_messages` + MVP `ToolSurface` (5-tool profile). |
+| `runtime/tool_schemas.py` | MVP tool JSON schemas (5 tools). |
 | `runtime/clarification.py` | `normalize_pending_clarification` + `resolve_pending_clarification_state`. |
 | `runtime/connection_ids.py` | `connection_id` (build) + `parse_connection_id` (parse). |
 | `agent.py` | MVP `GrcAgent`: tool registry, dispatch, lifecycle, history journal. |
@@ -39,13 +39,15 @@ Data flow: `.grc file` → `grc_native_adapter.load_flow_graph()` → `Flowgraph
 
 ## Tool surface
 
-Three model-facing wrapper tools (the entire MVP model surface):
+Five model-facing wrapper tools (the entire MVP model surface):
 
 | Tool | Direction | Engine |
 |------|-----------|--------|
 | `inspect_graph` | read | `grc_native_adapter.render_flow_graph()` → `GrcFlowgraph` (Stage A + B filtered) |
+| `query_knowledge` | read | `runtime/search_blocks.search_blocks()` (catalog) **or** `runtime/doc_answer.ask_grc_docs()` (docs RAG) |
+| `web_search` | read | `runtime/web_search.web_search()` — Ollama web search API |
+| `web_fetch` | read | `runtime/web_search.web_fetch()` — Ollama web fetch API |
 | `change_graph` | write | `runtime/change_graph.dispatch_flat_change_graph_batch()` + `grc_native_adapter.apply_mutation()` |
-| `query_knowledge` | read | `runtime/search_blocks.search_blocks()` (catalog: vector search + `BlockDescription` payload) **or** `runtime/doc_answer.ask_grc_docs()` (docs RAG: KNN → top-5 full md files → LLM-grounded answer) |
 
 `search_blocks` and `ask_grc_docs` are internal engines under `query_knowledge`, not separately surfaced to the model. Both go through the same `embeddinggemma:latest` + sqlite-vec pipeline.
 
@@ -79,14 +81,14 @@ Three model-facing wrapper tools (the entire MVP model surface):
 - **Block lookup:** use native `flow_graph.get_block(name)`, not a manual scan.
 - **Graph identity:** file-bytes SHA-256 (cross-session) + `state_revision` counter (in-session). No deep-JSON hashing.
 - **Atomic save:** temp file → fsync → `os.replace()` → directory fsync. Lock via `fcntl.flock` on `.grc_agent/<name>.lock`. Backup saved before each save.
-- **Tool surface:** `agent.py` only registers the 3 MVP tools. No internal tools, no legacy tool registry.
+- **Tool surface:** `agent.py` only registers the 5 MVP tools. No internal tools, no legacy tool registry.
 - **`change_graph` output:** `{"ok": true}` on success; `{"ok": false, "error_type": "...", "errors": [...]}` on failure. No `committed`, `ops_applied`, `state_revision`, `validation`, `hint`, `rejected_phase`, `graph_unchanged`, `native_validation_errors`, or `rollback` fields.
 
 ## Test gate
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (273 passed, 5 skipped) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (328 passed, 6 skipped) |
 | `grc_native` | `pytest -m grc_native` (30 passed, 1 skipped; requires GNU Radio) |
 | `gui` | `xvfb-run pytest -m gui` (6 passed) |
 

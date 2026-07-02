@@ -37,7 +37,6 @@ class DoctorBackendTests(unittest.TestCase):
                         'model = "m"\n'
                         "max_tokens = 1024\n"
                         "max_tool_rounds = 1\n"
-                        "enable_thinking = false\n"
                         "request_timeout_seconds = 1.0\n"
                         "\n[agent]\n"
                         "history_compact_budget = 1000\n"
@@ -70,7 +69,6 @@ class DoctorBackendTests(unittest.TestCase):
                         'model = "m"\n'
                         "max_tokens = 1024\n"
                         "max_tool_rounds = 1\n"
-                        "enable_thinking = false\n"
                         "request_timeout_seconds = 1.0\n"
                         "\n[agent]\n"
                         "history_compact_budget = 1000\n"

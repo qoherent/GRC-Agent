@@ -22,6 +22,8 @@ def test_ui_font_metrics_at_zoom_1():
     assert f.mono_px == 14
     assert f.small_px == 12
     assert f.chat_pt == 12
+    # user_text_px is 1.3x chat_pt (clamped to 10 floor).
+    assert f.user_text_px == 15
 
 
 def test_ui_font_metrics_at_zoom_3_5_default():
@@ -31,6 +33,8 @@ def test_ui_font_metrics_at_zoom_3_5_default():
     assert f.mono_px == 49
     assert f.small_px == 42
     assert f.chat_pt == 42
+    # 1.3x chat_pt = 54 (rounded down from 54.6).
+    assert f.user_text_px == 54
 
 
 def test_ui_font_metrics_floor_clamps_at_low_zoom():

@@ -26,7 +26,6 @@ class StartupTests(unittest.TestCase):
                 model="test-model",
                 max_tokens=256,
                 max_tool_rounds=8,
-                enable_thinking=False,
                 request_timeout_seconds=2.0,
             ),
             agent=AgentConfig(

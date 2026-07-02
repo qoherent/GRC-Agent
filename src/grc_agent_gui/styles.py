@@ -10,16 +10,26 @@ def ui_font_metrics(zoom_factor: float = 1.0) -> UIFontMetrics:
     point size passed to :func:`QTextDocument.setDefaultFont`; Qt converts
     pt → px using the configured DPI (``1pt ≈ 1.333 CSS px``), so
     ``chat_pt * 0.75`` ≈ the ``body_px`` the QTextBrowser will inherit.
+
+    ``user_text_px`` is the size used for the user-message body div (the
+    agent markdown body still inherits ``chat_pt`` via the document
+    default). User messages get a slightly larger size because plain
+    user-typed text is the primary read surface and benefits from
+    being more legible than the agent's mixed-content markdown.
     """
     body = max(12, int(15 * zoom_factor))
     mono = max(11, int(14 * zoom_factor))
     small = max(10, int(12 * zoom_factor))
     chat_pt = max(9, round(body * 0.8))
+    # User text: 1.3x the chat_pt baseline so the user's own input
+    # is the most prominent text in the conversation.
+    user_text_px = max(10, int(chat_pt * 1.3))
     return UIFontMetrics(
         body_px=body,
         mono_px=mono,
         small_px=small,
         chat_pt=chat_pt,
+        user_text_px=user_text_px,
     )
 
 
@@ -31,6 +41,7 @@ class UIFontMetrics:
     mono_px: int
     small_px: int
     chat_pt: int
+    user_text_px: int
 
 
 def get_stylesheet(zoom_factor: float = 1.0) -> str:

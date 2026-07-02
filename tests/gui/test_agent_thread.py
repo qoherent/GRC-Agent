@@ -53,7 +53,9 @@ def test_agent_worker_emits_start_signal(qtbot):
 
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
-        mock_runner.run_turn.return_value = {"ok": True, "assistant_text": "Done"}
+        mock_runner.stream_turn.return_value = iter(
+            [{"event": "final", "result": {"ok": True, "assistant_text": "Done"}}]
+        )
         mock_runner_class.return_value = mock_runner
 
         worker = AgentWorker(mock_agent, "test prompt", mock_provider)
@@ -186,20 +188,23 @@ def test_no_agent_monkey_patch():
 
 
 def test_runtime_hook_passes_observers():
-    """Assert that run_turn is called with observers on_tool_start and on_tool_end."""
+    """Assert that stream_turn is called with observers on_tool_start and on_tool_end."""
     mock_agent = MagicMock()
     mock_provider = MagicMock()
 
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
+        mock_runner.stream_turn.return_value = iter(
+            [{"event": "final", "result": {"ok": True, "assistant_text": "Done"}}]
+        )
         mock_runner_class.return_value = mock_runner
 
         worker = AgentWorker(mock_agent, "test prompt", mock_provider)
         worker.run_turn()
 
-        # Verify run_turn was called with the observer hooks
-        mock_runner.run_turn.assert_called_once()
-        kwargs = mock_runner.run_turn.call_args[1]
+        # Verify stream_turn was called with the observer hooks
+        mock_runner.stream_turn.assert_called_once()
+        kwargs = mock_runner.stream_turn.call_args[1]
         assert "on_tool_start" in kwargs
         assert "on_tool_end" in kwargs
 
@@ -213,10 +218,10 @@ def test_thread_lifecycle_on_error(qtbot):
     window.show()
     qtbot.addWidget(window)
 
-    # We patch ToolAgentsRunner to raise an exception on run_turn
+    # We patch ToolAgentsRunner to raise an exception on stream_turn
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
-        mock_runner.run_turn.side_effect = RuntimeError("Simulated runner crash")
+        mock_runner.stream_turn.side_effect = RuntimeError("Simulated runner crash")
         mock_runner_class.return_value = mock_runner
 
         window.start_generation("test prompt")
@@ -243,8 +248,8 @@ def test_tool_end_skipped_when_cancelled():
 
 
 def test_throttled_stream_emits_turn_finished(qtbot):
-    """2.5: after the QTimer-driven stream finishes, the deferred
-    turn_finished signal must fire exactly once with the original result.
+    """After all of stream_turn's events drain, turn_finished must fire
+    exactly once with the final result.
     """
 
     mock_agent = MagicMock()
@@ -253,11 +258,12 @@ def test_throttled_stream_emits_turn_finished(qtbot):
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
         mock_runner_class.return_value = mock_runner
-        # 64 chars of text = 4 chunks of 16; emit 5 ticks of the timer.
-        mock_runner.run_turn.return_value = {
-            "ok": True,
-            "assistant_text": "x" * 64,
-        }
+        mock_runner.stream_turn.return_value = iter(
+            [
+                {"event": "chunk", "text": "x" * 64},
+                {"event": "final", "result": {"ok": True, "assistant_text": "x" * 64}},
+            ]
+        )
 
         worker = AgentWorker(mock_agent, "test", mock_provider)
         finished_payloads: list[dict] = []
@@ -265,15 +271,12 @@ def test_throttled_stream_emits_turn_finished(qtbot):
 
         worker.run_turn()
 
-        # Spin the event loop until the streaming timer drains and turn_finished fires.
         qtbot.waitUntil(lambda: len(finished_payloads) == 1, timeout=2000)
         assert finished_payloads[0]["assistant_text"] == "x" * 64
 
 
 def test_cancel_drops_pending_turn_finished(qtbot):
-    """2.5: cancel() must drop the pending result so the deferred
-    turn_finished does not fire post-cancel.
-    """
+    """cancel() must not result in more than one turn_finished emission."""
     from PySide6.QtCore import QEventLoop, QTimer
 
     mock_agent = MagicMock()
@@ -282,10 +285,15 @@ def test_cancel_drops_pending_turn_finished(qtbot):
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
         mock_runner_class.return_value = mock_runner
-        mock_runner.run_turn.return_value = {
-            "ok": True,
-            "assistant_text": "abcdefghij" * 10,  # plenty of text to stream
-        }
+        mock_runner.stream_turn.return_value = iter(
+            [
+                {"event": "chunk", "text": "abcdefghij" * 10},
+                {
+                    "event": "final",
+                    "result": {"ok": True, "assistant_text": "abcdefghij" * 10},
+                },
+            ]
+        )
         mock_runner.provider.client = MagicMock()
 
         worker = AgentWorker(mock_agent, "test", mock_provider)
@@ -293,20 +301,15 @@ def test_cancel_drops_pending_turn_finished(qtbot):
         worker.turn_finished.connect(lambda r: finished_payloads.append(r))
 
         worker.run_turn()
-        # Cancel before any timer tick can fire.
         worker.cancel()
 
-        # Allow a couple of timer ticks to happen (they should all be no-ops).
         loop = QEventLoop()
         QTimer.singleShot(150, loop.quit)
         loop.exec()
 
-        # Contract: ``turn_finished`` is emitted at most once. The
-        # pre-change throttle-based path accidentally satisfied
-        # ``== []`` by deferring the emit through a QTimer that
-        # ``cancel()`` then nulled. The new direct-emit path can
-        # fire once before cancel arrives; the test only forbids
-        # multiple emissions.
+        # Contract: turn_finished is emitted at most once regardless of
+        # whether cancel() arrives before or after the (synchronous) turn
+        # already completed.
         assert len(finished_payloads) <= 1
 
 
@@ -326,15 +329,19 @@ def test_cancel_timer_safety_cross_thread(qtbot):
     def mock_run_turn(*args, **kwargs):
         run_started.set()
         block_event.wait(timeout=3)
-        return {
-            "ok": True,
-            "assistant_text": "hello streaming text",
-        }
+        return iter(
+            [
+                {
+                    "event": "final",
+                    "result": {"ok": True, "assistant_text": "hello streaming text"},
+                }
+            ]
+        )
 
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
         mock_runner_class.return_value = mock_runner
-        mock_runner.run_turn.side_effect = mock_run_turn
+        mock_runner.stream_turn.side_effect = mock_run_turn
         mock_runner.provider.client = mock_client
 
         thread = QThread()
@@ -370,12 +377,8 @@ def test_cancel_timer_safety_cross_thread(qtbot):
 
 
 def test_no_double_emit_turn_finished(qtbot):
-    """C2: cancel() during streaming must not result in double-emit of
-    ``turn_finished``. The previous throttle-based path accidentally
-    satisfied this assertion by deferring the emit through a QTimer
-    that ``cancel()`` then nulled. The new direct-emit path is
-    equivalent in behavior: ``turn_finished`` is emitted at most
-    once per turn.
+    """cancel() during/after a turn must not result in a double-emit of
+    ``turn_finished``: it is emitted at most once per turn.
     """
     mock_agent = MagicMock()
     mock_provider = MagicMock()
@@ -383,10 +386,17 @@ def test_no_double_emit_turn_finished(qtbot):
     with patch("grc_agent_gui.workers.ToolAgentsRunner") as mock_runner_class:
         mock_runner = MagicMock()
         mock_runner_class.return_value = mock_runner
-        mock_runner.run_turn.return_value = {
-            "ok": True,
-            "assistant_text": "some streaming words to typewriter out",
-        }
+        mock_runner.stream_turn.return_value = iter(
+            [
+                {
+                    "event": "final",
+                    "result": {
+                        "ok": True,
+                        "assistant_text": "some streaming words to typewriter out",
+                    },
+                }
+            ]
+        )
 
         worker = AgentWorker(mock_agent, "test", mock_provider)
         emitted_payloads = []

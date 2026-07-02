@@ -84,7 +84,6 @@ class GuiLaunchOnProbeFailureTests(unittest.TestCase):
             provider_config=bootstrap_result.provider_config,
             llama_config=llama_config,
             bootstrap_result=bootstrap_result,
-            setup_mode=False,
         )
 
     def test_main_window_instantiates_when_probe_failed(self) -> None:

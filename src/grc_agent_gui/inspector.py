@@ -2,7 +2,6 @@ import logging
 import os
 from typing import Any
 
-from grc_agent.domain_models import BlockRole
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -50,9 +49,7 @@ class InspectorWidget(QWidget):
 
         # ToolBar / Header panel with Open in GRC button
         header_layout = QHBoxLayout()
-        self.header_label = QLabel("<b>Flowgraph Inspector</b>", self)
-        header_layout.addWidget(self.header_label)
-
+        header_layout.addWidget(QLabel("<b>Flowgraph Inspector</b>", self))
         header_layout.addStretch()
 
         self.open_grc_btn = QPushButton("Open in GRC", self)
@@ -87,11 +84,9 @@ class InspectorWidget(QWidget):
         """Update the path to the active GRC file and enable the companion launch button."""
         self.grc_file_path = path
         self.open_grc_btn.setEnabled(bool(path))
-        # Reset failure state when the path is reassigned.
-        if path:
-            self.open_grc_btn.setToolTip(
-                "Open the active flowgraph in the GNU Radio Companion editor."
-            )
+        self.open_grc_btn.setToolTip(
+            "Open the active flowgraph in the GNU Radio Companion editor."
+        )
 
     def open_in_grc(self) -> None:
         """Launch the official gnuradio-companion GUI editor detached.
@@ -176,30 +171,31 @@ class InspectorWidget(QWidget):
         # substring matching on block_id/role — one uniform rule.
         self.blocks_tree.clear()
 
-        categories: dict[str, list[dict[str, Any]]] = {
-            "variables": [],
-            "sources": [],
-            "sinks": [],
-            "other_blocks": [],
-        }
-        display_names = {
-            "variables": "Variables",
-            "sources": "Sources",
-            "sinks": "Sinks",
-            "other_blocks": "Other Blocks",
-        }
-        # Native BlockRole -> GUI category. Roles not listed here
-        # (transform, message_or_event, metadata, unknown) fold into
-        # ``other_blocks``.
+        # Single ordered mapping: key → (display_name, empty list).
+        # Using one structure avoids the hand-synced parallel-dict pattern.
+        _CATEGORIES = [
+            ("variables", "Variables"),
+            ("sources", "Sources"),
+            ("sinks", "Sinks"),
+            ("other_blocks", "Other Blocks"),
+        ]
+        categories = {key: [] for key, _ in _CATEGORIES}
+        display_names = {key: name for key, name in _CATEGORIES}
+
+        # Native BlockRole string values → GUI category. Roles not listed
+        # here (transform, message_or_event, metadata, unknown) fold into
+        # ``other_blocks``. String comparison avoids ``BlockRole()``
+        # construction which raises ``ValueError`` on unknown role strings.
         category_for_role = {
-            BlockRole.VARIABLE: "variables",
-            BlockRole.SOURCE: "sources",
-            BlockRole.SINK: "sinks",
+            "variable": "variables",
+            "source": "sources",
+            "sink": "sinks",
         }
 
         for block in blocks:
-            role = BlockRole(str(block.get("role", "")).lower())
-            categories[category_for_role.get(role, "other_blocks")].append(block)
+            role_str = str(block.get("role", "")).lower()
+            cat = category_for_role.get(role_str, "other_blocks")
+            categories[cat].append(block)
 
         for cat_key, cat_blocks in categories.items():
             if not cat_blocks:

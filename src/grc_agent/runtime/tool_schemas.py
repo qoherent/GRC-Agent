@@ -216,7 +216,7 @@ def build_tool_schemas(
     """Return the MVP tool schemas, filtered to the requested names if any.
 
     Tool order matters — models prefer earlier tools. The MVP order is:
-    inspect_graph, query_knowledge, change_graph.
+    inspect_graph, query_knowledge, web_search, web_fetch, change_graph.
     """
     if tool_names is None:
         return list(_MVP_SCHEMAS)

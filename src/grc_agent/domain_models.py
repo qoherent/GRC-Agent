@@ -39,6 +39,14 @@ class BlockState(StrEnum):
     BYPASS = "bypass"
 
 
+class ValidationStatus(StrEnum):
+    """Wire-format ``GrcValidation.status`` values."""
+
+    VALID = "valid"
+    INVALID = "invalid"
+    UNKNOWN = "unknown"
+
+
 # --------------------------------------------------------------------------- #
 # Outbound models (state to the model). extra="forbid" locks the wire shape.  #
 # --------------------------------------------------------------------------- #
@@ -59,7 +67,7 @@ class GrcValidation(BaseModel):
     """A GRC validation result as seen by the model."""
 
     model_config = ConfigDict(extra="forbid")
-    status: str = "unknown"
+    status: str = ValidationStatus.UNKNOWN
     errors: list[str] = Field(default_factory=list)
     native_ok: bool | None = None
 
@@ -108,6 +116,7 @@ class ErrorCode:
     MODEL_NOT_FOUND = "model_not_found"
     BACKEND_UNREACHABLE = "backend_unreachable"
     EMPTY_MODEL_RESPONSE = "empty_model_response"
+    NO_FINAL = "no_final"
 
 
 class ToolValidationCode:

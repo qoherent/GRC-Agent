@@ -17,9 +17,10 @@ from ToolAgents.data_models.messages import (
 )
 
 PreviewCallback = Callable[..., list[dict[str, Any]]]
-# Model-facing tool names (the 3 MVP tools). Kept in sync with
-# MVP_MODEL_TOOL_NAMES in runtime/model_context.py; derived at runtime
-# in P2 to break the import cycle between tool_context <-> model_context.
+# Tools whose results go through wrapper-result compaction.
+# Kept in sync with MVP_MODEL_TOOL_NAMES in runtime/model_context.py;
+# derived at runtime in P2 to break the import cycle
+# between tool_context <-> model_context.
 _MODEL_WRAPPER_NAMES: frozenset[str] = frozenset({
     "inspect_graph",
     "query_knowledge",

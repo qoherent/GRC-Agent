@@ -144,12 +144,15 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
     sources_item.setExpanded(True)
     assert sources_item.isExpanded()
 
-    # Mock scroll range and value for headless testing
-    widget.blocks_tree.verticalScrollBar().setRange(0, 100)
-    widget.blocks_tree.verticalScrollBar().setValue(50)
+    # Mock scroll range and value for headless testing using a mock scrollbar
+    from unittest.mock import MagicMock, patch
+    mock_bar = MagicMock()
+    mock_bar.minimum.return_value = 0
+    mock_bar.maximum.return_value = 100
+    mock_bar.value.return_value = 50
 
-    # Perform refresh
-    widget.update_state(mock_payload_1)
+    with patch.object(widget.blocks_tree, "verticalScrollBar", return_value=mock_bar):
+        widget.update_state(mock_payload_1)
 
     # Assert expanded state and scroll are preserved
     new_sources_item = None
@@ -160,7 +163,7 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
             break
 
     assert new_sources_item.isExpanded(), "Expanded category state was lost"
-    assert widget.blocks_tree.verticalScrollBar().value() == 50
+    mock_bar.setValue.assert_called_with(50)
 
 
 def test_open_in_grc_is_detached(qtbot):

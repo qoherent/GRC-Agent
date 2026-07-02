@@ -8,7 +8,6 @@ model = "gemma4:e4b-it-qat-120k"
 embedding_model = "embeddinggemma:latest"
 max_tokens = 4096
 max_tool_rounds = 8
-enable_thinking = false
 request_timeout_seconds = 120.0
 
 [agent]
@@ -17,15 +16,11 @@ max_tool_result_chars = 4000
 
 [agent.retrieval]
 search_blocks_default_k = 5
-search_blocks_max_k = 12
-ask_grc_docs_default_k = 3
-ask_grc_docs_max_k = 6
+ask_grc_docs_default_k = 5
 
 [agent.history]
 checkpoint_retention = 100
 
 [agent.guardrails]
 max_tool_output_bytes = 32768
-max_validation_errors = 8
-max_validation_stderr_chars = 1200
 max_compact_list_items = 3

@@ -39,11 +39,9 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.agent.max_tool_result_chars, 4000)
         self.assertEqual(config.agent.history_compact_budget, 100000)
         self.assertEqual(config.llama.max_tool_rounds, 8)
-        self.assertFalse(config.llama.enable_thinking)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 5)
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
-        self.assertEqual(config.agent.guardrails.max_validation_stderr_chars, 1200)
         self.assertEqual(config.agent.guardrails.max_compact_list_items, 3)
 
     def test_load_app_config_falls_back_to_builtin_defaults_when_no_file_exists(
@@ -67,7 +65,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     'backend = "openrouter"\n'
                     "max_tokens = 2048\n"
                     "max_tool_rounds = 42\n"
-                    "enable_thinking = true\n"
                     "request_timeout_seconds = 30.0\n"
                     "\n[agent]\n"
                     "history_compact_budget = 5000\n"
@@ -85,37 +82,12 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.server_url, "http://127.0.0.1:9000")
         self.assertEqual(config.llama.model, "custom-model")
         self.assertEqual(config.llama.backend, "openrouter")
-        self.assertTrue(config.llama.enable_thinking)
         self.assertEqual(config.llama.max_tool_rounds, 42)
         self.assertEqual(config.agent.max_tool_result_chars, 8000)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 7)
         self.assertEqual(config.agent.history.checkpoint_retention, 140)
 
-    def test_load_app_config_rejects_cross_field_invalid_ranges(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "invalid.toml"
-            config_path.write_text(
-                (
-                    "[llama]\n"
-                    "server_url='http://localhost:11434'\n"
-                    "model='m'\n"
-                    "max_tokens=1024\n"
-                    "max_tool_rounds=1\n"
-                    "enable_thinking=false\n"
-                    "request_timeout_seconds=1.0\n"
-                    "\n[agent]\n"
-                    "history_compact_budget=1000\n"
-                    "\n[agent.retrieval]\n"
-                    "ask_grc_docs_default_k=10\n"
-                    "ask_grc_docs_max_k=3\n"
-                ),
-                encoding="utf-8",
-            )
 
-            with self.assertRaisesRegex(
-                ConfigError, "ask_grc_docs_default_k must be <= ask_grc_docs_max_k"
-            ):
-                load_app_config(config_path)
 
     def test_load_app_config_rejects_missing_model(self) -> None:
         """A config file without [llama].model must be a hard error.
@@ -134,7 +106,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     'backend = "ollama"\n'
                     "max_tokens = 1024\n"
                     "max_tool_rounds = 1\n"
-                    "enable_thinking = false\n"
                     "request_timeout_seconds = 1.0\n"
                     "\n[agent]\n"
                     "history_compact_budget = 1000\n"
@@ -148,7 +119,7 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             env_config = Path(tmpdir) / "env.toml"
             env_config.write_text(
-                "[llama]\nserver_url='http://localhost:11434'\nmodel='m'\nmax_tokens=1\nmax_tool_rounds=1\nenable_thinking=false\nrequest_timeout_seconds=1.0\n",
+                "[llama]\nserver_url='http://localhost:11434'\nmodel='m'\nmax_tokens=1\nmax_tool_rounds=1\nrequest_timeout_seconds=1.0\n",
                 encoding="utf-8",
             )
 
@@ -183,7 +154,6 @@ class RuntimeConfigTests(unittest.TestCase):
                         'model = "m"\n'
                         "max_tokens = 1024\n"
                         "max_tool_rounds = 1\n"
-                        "enable_thinking = false\n"
                         "request_timeout_seconds = 1.0\n"
                         "\n[agent]\n"
                         "history_compact_budget = 1000\n"
@@ -202,7 +172,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     'model = "m"\n'
                     "max_tokens = 1024\n"
                     "max_tool_rounds = 1\n"
-                    "enable_thinking = false\n"
                     "request_timeout_seconds = 1.0\n"
                     "\n[agent]\n"
                     "history_compact_budget = 1000\n"

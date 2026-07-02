@@ -3,11 +3,12 @@
 This is the GUI-side adapter around :class:`grc_agent.toolagents_runtime.ToolAgentsRunner`.
 It keeps a strict signal-only boundary with the main GUI thread.
 
-The streaming path uses ``ChatToolAgent.stream_step`` to deliver model
-tokens as they arrive, replacing the previous post-hoc 16-char QTimer
-throttle. When streaming is not available from the provider, the worker
-falls back to ``ToolAgentsRunner.run_turn`` and emits the final text in
-one chunk.
+Consumes ``ToolAgentsRunner.stream_turn`` and emits a ``response_chunk``
+signal as each round's event arrives (round-level streaming): the
+assistant's text for a tool-calling round (including any ``<think>``
+reasoning) appears as soon as that round completes, rather than only the
+final round's text appearing after the whole turn (which may include
+several tool round-trips) finishes.
 """
 
 from __future__ import annotations
@@ -17,17 +18,9 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from grc_agent.chat_roles import (
-    ASSISTANT_MODEL_ROLE,
-    TOOL_MODEL_ROLE,
-    chat_message_payload,
-)
+from grc_agent.chat_roles import ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE
 from grc_agent.toolagents_runtime import ToolAgentsRunner
-from PySide6.QtCore import QMetaObject, QObject, Qt, Signal
-from ToolAgents.data_models.messages import (
-    ChatMessage,
-    ChatMessageRole,
-)
+from PySide6.QtCore import QObject, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +33,9 @@ class AgentWorker(QObject):
     * ``started`` — when the turn has begun.
     * ``tool_started(name, args_json)`` — before each tool call.
     * ``tool_finished(name, result_json)`` — after each tool call.
-    * ``response_chunk(text)`` — model output chunk (real or fallback).
+    * ``response_chunk(text)`` — one round's model output text, emitted as
+      each round completes (or a fallback emitted once, for the final-only
+      error paths that never produce a round chunk).
     * ``model_message_added(role, payload_json)`` — typed ``ChatMessage``
       serialized as JSON, for the model-history rows the resume path
       replays. ``role`` is one of ``assistant_model`` / ``tool_model``.
@@ -97,17 +92,38 @@ class AgentWorker(QObject):
             if self._is_cancelled:
                 raise RuntimeError("Worker execution cancelled before starting.")
 
-            result = self.runner.run_turn(
+            result: dict[str, Any] = {}
+            chunk_emitted = False
+            for event in self.runner.stream_turn(
                 self.agent,
                 self.user_message,
                 on_tool_start=self._emit_tool_started,
                 on_tool_end=self._emit_tool_finished,
-            )
+            ):
+                if self._is_cancelled:
+                    break
+                kind = event.get("event")
+                if kind == "model_message":
+                    role = event.get("role")
+                    payload = event.get("payload")
+                    if role in (ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE) and payload is not None:
+                        self.model_message_added.emit(role, json.dumps(payload, sort_keys=True))
+                elif kind == "chunk":
+                    text = event.get("text", "")
+                    if text:
+                        self.response_chunk.emit(text)
+                        chunk_emitted = True
+                elif kind == "final":
+                    result = event.get("result", {})
+
             if not self._is_cancelled:
-                self._emit_typed_messages(self.agent.chat_history.get_messages())
-                text = result.get("assistant_text", "")
-                if text:
-                    self.response_chunk.emit(text)
+                # A few final-only error paths (backend unreachable, safety
+                # ceiling) never yield a "chunk" event; fall back to the
+                # result's assistant_text so the chat bubble is never empty.
+                if not chunk_emitted:
+                    text = result.get("assistant_text", "")
+                    if text:
+                        self.response_chunk.emit(text)
                 self.turn_finished.emit(result)
                 # When the backend is unreachable, the GUI must surface
                 # the typed hint into the chat bubble *and* reset the
@@ -116,6 +132,15 @@ class AgentWorker(QObject):
                 # mutations always run on the main thread.
                 if result.get("error_type") == "backend_unreachable":
                     self.backend_unreachable.emit(result)
+            else:
+                # TH-1 fix: a cancelled worker MUST still emit turn_finished
+                # so MainWindow.on_turn_finished fires and calls
+                # cleanup_thread(). Without this, the QThread stays alive
+                # and the next start_generation hits the "thread still
+                # running" guard — locking the user out of further prompts.
+                self.turn_finished.emit(
+                    {"ok": False, "error_type": "cancelled", "assistant_text": ""}
+                )
         except Exception as exc:
             logger.exception("AgentWorker failed during turn execution")
             self.turn_finished.emit(
@@ -130,17 +155,7 @@ class AgentWorker(QObject):
         finally:
             self.runner = None
 
-    def _emit_typed_messages(self, messages: list[ChatMessage]) -> None:
-        for message in messages:
-            role = _role_to_model_role(message)
-            if role is None:
-                continue
-            payload = chat_message_payload(message)
-            self.model_message_added.emit(role, json.dumps(payload, sort_keys=True))
-
     def _emit_tool_started(self, name: str, args: dict[str, Any]) -> None:
-        if self._is_cancelled:
-            raise RuntimeError("Worker execution cancelled by user request.")
         self.tool_started.emit(name, json.dumps(args, sort_keys=True, default=str))
 
     def _emit_tool_finished(self, name: str, result: Any) -> None:
@@ -150,7 +165,6 @@ class AgentWorker(QObject):
 
     def cancel(self) -> None:
         self._is_cancelled = True
-        QMetaObject.invokeMethod(self, "_stop_stream_and_clear", Qt.QueuedConnection)
         runner = self.runner
         if runner and hasattr(runner, "provider") and runner.provider:
             try:
@@ -160,14 +174,6 @@ class AgentWorker(QObject):
                     logger.info("Forcefully closed HTTP client socket for active worker.")
             except Exception as exc:
                 logger.warning(f"Error during forceful close of HTTP client socket: {exc}")
-
-
-def _role_to_model_role(message: ChatMessage) -> str | None:
-    if message.role == ChatMessageRole.Assistant:
-        return ASSISTANT_MODEL_ROLE
-    if message.role == ChatMessageRole.Tool:
-        return TOOL_MODEL_ROLE
-    return None
 
 
 __all__ = ["AgentWorker"]

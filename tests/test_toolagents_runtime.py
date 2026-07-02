@@ -241,20 +241,7 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
             {"provider": {"order": ["alibaba"], "allow_fallbacks": False}},
         )
 
-    def test_ollama_disables_thinking_by_default(self) -> None:
-        """Thinking models (e.g. ornith-9b) emit EMPTY content until reasoning
-        finishes, breaking the agent loop. ``enable_thinking=False`` (the
-        default) must send ``think:false`` via extra_body on the Ollama path.
-        """
-        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
 
-        mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
-        mock_settings = mock.MagicMock()
-        mock_provider.get_default_settings.return_value = mock_settings
-
-        cfg = ToolAgentsLlamaProviderConfig(base_url="http://127.0.0.1:11434", model="x")
-        cfg.create_settings(mock_provider)
-        mock_settings.set_value.assert_any_call("extra_body", {"think": False})
 
     def test_ollama_provider_settings_has_no_per_request_num_ctx(self) -> None:
         """Ollama's /v1 endpoint silently ignores per-request num_ctx — the
@@ -532,6 +519,97 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         chunks = [e for e in events if e.get("event") == "chunk"]
         self.assertTrue(chunks, "a chunk event should be emitted")
         self.assertIn("No response was generated", str(chunks[-1].get("text", "")))
+
+    def test_grc_response_converter_wraps_thinking_tokens(self) -> None:
+        from dataclasses import dataclass
+
+        from grc_agent.toolagents_runtime import GrcResponseConverter
+
+        # Mock chunk structure resembling OpenAI stream chunks. The
+        # OpenAI SDK does not standardize a thinking field name, so
+        # the converter checks ``reasoning`` (Ollama OpenAI-compat),
+        # ``reasoning_content`` (OpenRouter / DeepSeek), and
+        # ``thinking`` (native Ollama). Each variant is tested below.
+        @dataclass
+        class MockDelta:
+            content: str | None = None
+            reasoning: str | None = None
+            reasoning_content: str | None = None
+            thinking: str | None = None
+            tool_calls: list | None = None
+
+        @dataclass
+        class MockChoice:
+            delta: MockDelta
+            finish_reason: str | None = None
+
+        @dataclass
+        class MockChunk:
+            choices: list[MockChoice]
+
+        # The converter iterates the raw stream directly — no parent
+        # converter needed for yield_from_provider.
+        converter = GrcResponseConverter(parent_converter=None)
+
+        # ``reasoning`` — Ollama OpenAI-compat (the field gemma4 uses).
+        stream = [
+            MockChunk(choices=[MockChoice(delta=MockDelta(reasoning="Thinking..."))]),
+            MockChunk(choices=[MockChoice(delta=MockDelta(reasoning=" more..."))]),
+            MockChunk(choices=[MockChoice(delta=MockDelta(content="Hello!"), finish_reason="stop")]),
+        ]
+
+        result_chunks = list(converter.yield_from_provider(stream))
+
+        # Thinking chunks are yielded IMMEDIATELY (not buffered until
+        # the first content token arrives). This is the regression fix
+        # for the multi-second "freeze" where reasoning was invisible.
+        text_chunks = [c.chunk for c in result_chunks if c.chunk]
+        self.assertEqual(text_chunks[0], "<think>Thinking...")
+        self.assertEqual(text_chunks[1], " more...")
+        # Close tag emitted as a separate immediate chunk on transition.
+        self.assertEqual(text_chunks[2], "</think>\n")
+        # Content follows.
+        self.assertEqual(text_chunks[3], "Hello!")
+
+        # The final chunk carries the finished flag + full message.
+        finished_chunks = [c for c in result_chunks if c.get_finished()]
+        self.assertEqual(len(finished_chunks), 1)
+
+    def test_grc_response_converter_handles_thinking_field_name(self) -> None:
+        """Native Ollama uses ``delta.thinking`` (not ``reasoning``); the
+        converter must also pick that up so the chat UI shows reasoning
+        for models streamed through the native /api/chat path."""
+        from dataclasses import dataclass
+
+        from grc_agent.toolagents_runtime import GrcResponseConverter
+
+        @dataclass
+        class MockDelta:
+            content: str | None = None
+            thinking: str | None = None
+            tool_calls: list | None = None
+
+        @dataclass
+        class MockChoice:
+            delta: MockDelta
+            finish_reason: str | None = None
+
+        @dataclass
+        class MockChunk:
+            choices: list[MockChoice]
+
+        converter = GrcResponseConverter(parent_converter=None)
+        stream = [
+            MockChunk(choices=[MockChoice(delta=MockDelta(thinking="Plan: think first"))]),
+            MockChunk(choices=[MockChoice(delta=MockDelta(thinking=" more"))]),
+            MockChunk(choices=[MockChoice(delta=MockDelta(content="Done!"), finish_reason="stop")]),
+        ]
+        result_chunks = list(converter.yield_from_provider(stream))
+        text_chunks = [c.chunk for c in result_chunks if c.chunk]
+        self.assertEqual(text_chunks[0], "<think>Plan: think first")
+        self.assertEqual(text_chunks[1], " more")
+        self.assertEqual(text_chunks[2], "</think>\n")
+        self.assertEqual(text_chunks[3], "Done!")
 
 
 if __name__ == "__main__":

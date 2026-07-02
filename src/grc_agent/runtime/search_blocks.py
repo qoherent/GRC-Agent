@@ -102,11 +102,10 @@ def _render_hit(raw_block: Any, distance: float) -> dict[str, Any] | None:
 def search_blocks(
     agent: GrcAgent,
     query: str,
-    k: int | None = None,
 ) -> ToolResult:
     """Vector search over the GNU Radio catalog.
 
-    Returns the top-``k`` blocks whose embedded label/category/param text
+    Returns the top blocks whose embedded label/category/param text
     is closest to the query. Each result is the Stage-A-filtered
     :class:`BlockDescription` payload (``block_id``, ``label``, ``category``,
     ``params``, ``inputs``, ``outputs``) plus a ``distance`` score.
@@ -115,8 +114,7 @@ def search_blocks(
     if not q:
         return _tool_error(agent, "query must be non-empty.")
 
-    limit_value = agent._retrieval_cfg.search_blocks_default_k if k is None else int(k)
-    limit = max(1, min(limit_value, agent._retrieval_cfg.search_blocks_max_k))
+    limit = agent._retrieval_cfg.search_blocks_default_k
 
     if not _ensure_catalog_index(agent):
         return _tool_error(

@@ -38,7 +38,6 @@ def _make_llama_config(**overrides: object) -> LlamaConfig:
         backend="ollama",
         max_tokens=4096,
         max_tool_rounds=8,
-        enable_thinking=False,
         request_timeout_seconds=120.0,
     )
     base.update(overrides)

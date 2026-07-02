@@ -134,7 +134,7 @@ class VectorCatalogLiveTests(unittest.TestCase):
 
         for q in queries:
             with mock.patch("grc_agent.runtime.search_blocks.CATALOG_DB_PATH", str(type(self).test_db)):
-                result = search_blocks(agent, q, k=3)
+                result = search_blocks(agent, q)
 
             self.assertTrue(result.get("ok"))
 
