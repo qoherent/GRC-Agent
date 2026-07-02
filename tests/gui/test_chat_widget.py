@@ -127,6 +127,156 @@ def test_unknown_language_does_not_eat_code_line(qtbot):
     assert "gnu" not in html_result
 
 
+def test_markdown_to_highlighted_html_strips_serif_font_family(qtbot):
+    """Regression: ``QTextDocument.toHtml()`` emits ``<body style=" font-family:; ...">``
+    with an empty font-family declaration. Qt's HTML renderer falls back to
+    its default serif font for the body, which used to make the agent's
+    markdown body render in Times while headers / user messages / tool
+    output stayed sans-serif. The markdown helper must strip font-family
+    so the body inherits from the document default font set via
+    ``setDefaultFont`` in :func:`MainWindow.apply_zoom`.
+    """
+    from grc_agent_gui.chat_widget import markdown_to_highlighted_html
+
+    out = markdown_to_highlighted_html("Hello *world* — **bold** text.")
+
+    # The function should extract the body content (paragraphs / spans),
+    # NOT the entire <html> wrapper with Qt's inline font-family on <body>.
+    assert "<html>" not in out, (
+        "markdown_to_highlighted_html should extract body content, not "
+        f"leak the full <html> wrapper:\n{out}"
+    )
+    assert "</html>" not in out
+    # Critically: no inline font-family anywhere — body must inherit.
+    assert "font-family" not in out.lower(), (
+        f"markdown_to_highlighted_html leaked an inline font-family "
+        f"declaration that breaks font inheritance:\n{out}"
+    )
+    # And the actual rendered text is still there.
+    assert "Hello" in out
+    assert "world" in out
+
+
+def test_assistant_message_uses_unified_font(qtbot):
+    """Regression: assistant message body (markdown-rendered) must inherit
+    the document font — no inline font-family declarations on the body
+    or its descendants. Mirrors ``test_markdown_to_highlighted_html_strips_serif_font_family``
+    at the message-render layer.
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+    widget.append_message("assistant", "Hello *world* — **bold** text.")
+    rendered = widget._history[0]["_rendered"]
+    assert rendered is not None
+    assert "font-family" not in rendered.lower()
+
+
+def test_tool_name_color_parity_between_call_and_result(qtbot):
+    """The tool NAME (e.g. ``inspect_graph``) must use the same color in
+    both ``call inspect_graph ({})`` and ``result inspect_graph`` rows —
+    only the role label (``call``/``result``) and the row chrome differ.
+    Regression: the result row used to color the name in a one-off rust
+    hex (``#6a5040``) while the call row used a different teal.
+    """
+    from grc_agent_gui.chat_widget import _COLOR_TOOL_NAME
+
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+    widget.append_message(
+        "tool_started", "", payload={"tool_name": "inspect_graph", "args": "{}"}
+    )
+    widget.append_message(
+        "tool_finished", "{}", payload={"tool_name": "inspect_graph", "expanded": False}
+    )
+
+    call_rendered = widget._history[0]["_rendered"]
+    result_rendered = widget._history[1]["_rendered"]
+
+    expected_color = f"color: {_COLOR_TOOL_NAME};"
+    assert expected_color in call_rendered, (
+        f"call row missing unified tool name color {expected_color}:\n{call_rendered}"
+    )
+    assert expected_color in result_rendered, (
+        f"result row missing unified tool name color {expected_color}:\n{result_rendered}"
+    )
+    # The legacy one-off rust color must be gone.
+    assert "color: #6a5040;" not in result_rendered, (
+        f"result row still uses legacy rust color:\n{result_rendered}"
+    )
+    assert "color: #6a8a96;" not in call_rendered, (
+        f"call row still uses legacy teal color:\n{call_rendered}"
+    )
+
+
+def test_user_message_background_is_visually_distinct(qtbot):
+    """User message row must use a background color that stands out from
+    the main chat background so the user can scan the conversation flow
+    at a glance. Regression: the previous ``_COLOR_USER_BG`` was nearly
+    identical to the main ``#1e1e2e`` QWidget background.
+    """
+    from grc_agent_gui.chat_widget import _COLOR_USER_BG
+
+    main_bg = "#1e1e2e"
+    assert _COLOR_USER_BG.lower() != main_bg.lower(), (
+        "_COLOR_USER_BG must differ from the main QWidget background"
+    )
+
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+    widget.append_message("user", "Hello")
+    rendered = widget._history[0]["_rendered"]
+    assert f"background-color: {_COLOR_USER_BG}" in rendered, (
+        f"user row missing its distinct background:\n{rendered}"
+    )
+
+
+def test_thinking_persistence_for_thinking_capable_models(qtbot):
+    """End-to-end demo of the thinking flow as it would render for a
+    thinking-capable model (e.g. qwen3, deepseek-r1). The current
+    default model (gemma4:e4b-it-qat-120k) is non-reasoning so no
+    `` tags ever reach the chat — this test pins the UI behavior
+    on the surface so any regression is caught by CI rather than by
+    the user trying it with a thinking model manually.
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    # Simulate what a thinking model streams: a final assistant message
+    # whose text contains both the <think>…</think> reasoning block and
+    # the visible response. Round-level streaming can attach multiple
+    # <think> segments — they should all collapse into one summary row.
+    thinking_a = "Plan: inspect the graph first"
+    thinking_b = "Now I have enough to answer"
+    widget.append_message(
+        "assistant",
+        f"<think>{thinking_a}</think>"
+        f"<think>{thinking_b}</think>"
+        f"The current graph is a simple audio playback system.",
+    )
+
+    rendered = widget._history[0]["_rendered"]
+    # The header line is always visible.
+    assert "thinking" in rendered.lower()
+    # The combined char count is shown.
+    expected_count = len(thinking_a) + 1 + len(thinking_b) + 1
+    assert f"{expected_count} chars" in rendered
+    # The visible response survived the regex strip.
+    assert "audio playback system" in rendered
+    # The reasoning text is hidden in the default (collapsed) state.
+    assert thinking_a not in rendered
+    assert thinking_b not in rendered
+
+    # Toggle open — the user clicks ▼ show thinking.
+    from PySide6.QtCore import QUrl
+
+    widget._on_anchor_clicked(QUrl("toggle-thinking:0"))
+    expanded = widget._history[0]["_rendered"]
+    assert thinking_a in expanded
+    assert thinking_b in expanded
+    # Header still persists.
+    assert f"{expected_count} chars" in expanded
+
+
 def test_streaming_does_not_prepend_agent_bold(qtbot):
     """2.4: start_stream() must NOT inject the bold 'Agent:' prefix into the live
     QTextBrowser. The prefix is added by the final _render_chat() call only.
@@ -267,9 +417,9 @@ def test_block_nesting_prevention(qtbot):
 
     assert "You:" in lines_before
     assert "Hello" in lines_before
-    assert any("⚡ my_tool" in line for line in lines_before)
-    assert "✓ Graph updated" in lines_before
-    assert "✗ some error" in lines_before
+    assert any("call my_tool" in line for line in lines_before)
+    assert any("graph updated" in line.lower() for line in lines_before)
+    assert any("some error" in line.lower() for line in lines_before)
 
     # Stream some chunks
     widget.start_stream()
@@ -320,13 +470,13 @@ def test_drop_last_assistant_removes_empty_placeholder(qtbot):
     # No "Agent:" header since the only assistant row was dropped.
     assert "Agent:" not in plain
 
-
 def test_finalize_stream_keeps_final_text_when_present(qtbot):
     """Sanity: ``finalize_stream`` is the path used when the model
     *did* produce text. Empty-text case is covered above.
     """
     widget = ChatWidget()
     qtbot.addWidget(widget)
+
     widget.append_message("user", "hi")
     widget.start_stream()
     widget.append_stream_chunk("partial")
@@ -334,6 +484,69 @@ def test_finalize_stream_keeps_final_text_when_present(qtbot):
 
     plain = widget.chat_display.toPlainText()
     assert "final answer" in plain
+
+
+def test_tool_call_preserves_temporal_order(qtbot):
+    """Regression: when a tool call happens mid-stream, the pre-tool
+    assistant text must close its own bubble BEFORE the tool rows are
+    appended. Without this fix, ``append_stream_chunk`` keeps appending
+    post-tool reply text to the pre-tool assistant bubble (it searches
+    reversed history for the last assistant msg, which sits before the
+    tool rows), producing [agent reply] [tool call] instead of the
+    correct [pre-tool text] [tool call] [tool result] [post-tool reply].
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    # --- Simulate the multi-round agent flow ---
+
+    # 1. User sends a message
+    widget.append_message("user", "What is this graph?")
+
+    # 2. Model starts streaming (pre-tool text or thinking)
+    widget.start_stream()
+    widget.append_stream_chunk("<think>Let me inspect first.</think>")
+    widget.append_stream_chunk("Let me check the graph.")
+
+    # 3. Tool call starts — this is where the fix applies.
+    #    The MainWindow handler finalizes/drops the stream before
+    #    appending the tool status. We simulate that here.
+    if widget._streaming:
+        final = widget.current_stream_text()
+        import re
+
+        visible = re.sub(r"<think>.*?</think>", "", final, flags=re.DOTALL).strip()
+        if visible:
+            widget.finalize_stream(final)
+        else:
+            widget.drop_last_assistant()
+
+    widget.append_status("inspect_graph", "{}")
+
+    # 4. Tool finishes
+    widget.append_tool_finished("inspect_graph", '{"ok": true}')
+
+    # 5. Model streams its final reply (post-tool)
+    widget.start_stream()
+    widget.append_stream_chunk("This is a signal source.")
+    widget.finalize_stream("This is a signal source.")
+
+    # --- Verify temporal ordering ---
+    roles = [msg["role"] for msg in widget._history]
+    # Expected: user, assistant(pre-tool), tool_started, tool_finished, assistant(post-tool)
+    assert roles == ["user", "assistant", "tool_started", "tool_finished", "assistant"], (
+        f"Temporal order broken: {roles}"
+    )
+
+    # The pre-tool assistant text must NOT contain the post-tool reply.
+    pre_tool = widget._history[1]["text"]
+    assert "Let me check" in pre_tool
+    assert "signal source" not in pre_tool
+
+    # The post-tool assistant text must contain the final reply.
+    post_tool = widget._history[4]["text"]
+    assert "signal source" in post_tool
+    assert "Let me check" not in post_tool
 
 
 def test_tool_finished_expand_collapse(qtbot):
@@ -362,25 +575,235 @@ def test_tool_finished_expand_collapse(qtbot):
 
 
 def test_thinking_expand_collapse(qtbot):
-    """Verify that thinking blocks are extracted, collapsed by default, and can be toggled."""
+    """Verify that thinking blocks are extracted, collapsed by default, and can be toggled.
+
+    Default (collapsed) state MUST keep a one-line summary header visible
+    so reasoning does not "disappear" from the chat after streaming ends.
+    """
     widget = ChatWidget()
     qtbot.addWidget(widget)
 
     # Append assistant message with think tags
-    widget.append_message("assistant", "<think>I am analyzing the graph.</think>Done analyzing.")
+    thinking_text = "I am analyzing the graph structure"
+    widget.append_message(
+        "assistant",
+        f"<think>{thinking_text}.</think>Done analyzing.",
+    )
 
-    # Collapsed by default: verify "Thinking Process" and "expand" exist, and the main response "Done analyzing." exists, but the thinking text does not
+    # Collapsed by default: the header line with char count and the
+    # "show thinking" toggle must persist in the rendered HTML.
     html_before = widget.chat_display.toHtml()
-    assert "Thinking Process" in html_before
-    assert "expand" in html_before
+    assert "thinking" in html_before.lower()
+    assert "show thinking" in html_before
     assert "Done analyzing" in html_before
-    assert "I am analyzing" not in html_before
+    assert thinking_text not in html_before, (
+        "thinking content must be hidden in the collapsed default state"
+    )
+    # char count is shown so the user can tell at a glance that
+    # reasoning was emitted.
+    assert f"{len(thinking_text) + 1} chars" in html_before
 
     # Toggle the thinking block: URL is "toggle-thinking:0" (index 0)
     from PySide6.QtCore import QUrl
+
     widget._on_anchor_clicked(QUrl("toggle-thinking:0"))
 
-    # Expanded: verify "collapse" and the thinking text exist
+    # Expanded: verify "collapse" and the thinking text exist, and the
+    # header (with char count) is still present.
     html_after = widget.chat_display.toHtml()
     assert "collapse" in html_after
-    assert "I am analyzing" in html_after
+    assert thinking_text in html_after
+    # The header persists in the expanded state too.
+    assert f"{len(thinking_text) + 1} chars" in html_after
+
+
+def test_main_window_zoom_actions(qtbot, monkeypatch, tmp_path):
+    """Verify that zoom in, zoom out, and reset zoom actions modify the zoom factor correctly.
+
+    QSettings caches its file path on first use within a QApplication
+    session, so subsequent tests can see whatever value prior tests
+    wrote to the persisted settings file. We force a known starting
+    point via :func:`zoom_reset` instead of asserting the default.
+    """
+    from unittest.mock import MagicMock
+
+    from grc_agent_gui.main_window import MainWindow
+
+    db_path = tmp_path / "sessions.db"
+    import grc_agent_gui.main_window
+    monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
+
+    mock_agent = MagicMock()
+    mock_agent.session = None
+    from ToolAgents.data_models.chat_history import ChatHistory
+    mock_agent.chat_history = ChatHistory()
+    mock_provider = MagicMock()
+
+    window = MainWindow(mock_agent, mock_provider)
+    qtbot.addWidget(window)
+
+    # Anchor at a known starting point.
+    window.zoom_reset()
+    assert window._zoom_factor == 1.0
+
+    # Zoom in: add 0.1.
+    window.zoom_in()
+    assert abs(window._zoom_factor - 1.1) < 1e-5
+
+    # Zoom out twice: subtract 0.2.
+    window.zoom_out()
+    window.zoom_out()
+    assert abs(window._zoom_factor - 0.9) < 1e-5
+
+    # Zoom reset always snaps to 1.0 regardless of where we are.
+    window.zoom_reset()
+    assert window._zoom_factor == 1.0
+
+
+def test_ui_font_metrics_is_single_source_of_truth():
+    """ui_font_metrics is the only place body / mono / small / chat sizes
+    are defined for a given zoom. ``get_stylesheet`` and the chat document
+    default font must both consume it — no per-callsite scaling rules."""
+    from grc_agent_gui.styles import get_stylesheet, ui_font_metrics
+
+    for zoom in (0.5, 1.0, 1.5, 2.0, 3.0):
+        f = ui_font_metrics(zoom)
+        # every metric strictly scales up with zoom — no max() clamps
+        # quietly absorbing the difference.
+        assert f.body_px == max(12, int(15 * zoom))
+        assert f.mono_px == max(11, int(14 * zoom))
+        assert f.small_px == max(10, int(12 * zoom))
+        # chat_pt should track body_px (point→px is ~0.8).
+        assert f.chat_pt == max(9, round(f.body_px * 0.8))
+
+        # The stylesheet must embed exactly the same body_px.
+        body_rule = f"font-size: {f.body_px}px;"
+        assert body_rule in get_stylesheet(zoom)
+
+
+def test_chat_html_does_not_contain_legacy_em_overrides():
+    """Inline chat HTML should inherit the document font (1em) rather
+    than carrying hand-picked em ratios like ``0.85em`` that fight the
+    unified font cascade."""
+    widget = ChatWidget()
+
+    # Render every role we ship in chat.
+    widget.append_message("user", "hi")
+    widget.append_message("assistant", "hello back")
+    widget.append_message("assistant", "<thinkreasoning here.</think>response")
+    widget.append_message("tool_started", "", payload={"tool_name": "x", "args": "y"})
+    widget.append_message("tool_finished", "{}", payload={"tool_name": "x", "expanded": False})
+    widget.append_message("mutation", "")
+    widget.append_message("error", "boom")
+
+    for entry in widget._history:
+        rendered = entry.get("_rendered") or ""
+        assert "0.85em" not in rendered, f"legacy 0.85em override in {entry['role']}: {rendered}"
+        assert "0.9em" not in rendered, f"legacy 0.9em override in {entry['role']}: {rendered}"
+
+
+def test_user_message_text_color_is_near_white(qtbot):
+    """The user message body text must render in a near-white color so
+    it stays legible at every zoom level. The previous ``#a0a8b8`` (dim
+    blue-gray) was hard to read against the dark background."""
+    from grc_agent_gui.chat_widget import _COLOR_USER_TEXT
+
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+    widget.append_message("user", "hello there")
+    rendered = widget._history[0]["_rendered"]
+    assert _COLOR_USER_TEXT in rendered
+
+
+def test_user_message_html_uses_zoomable_font_size(qtbot):
+    """The user message body div must carry an explicit ``font-size`` so
+    the text grows with zoom instead of inheriting the document default
+    (which the markdown path doesn't apply uniformly)."""
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+    widget.set_chat_pt(28)  # simulates the value applied by MainWindow.apply_zoom
+    widget.append_message("user", "hi")
+    rendered = widget._history[0]["_rendered"]
+    assert "font-size: 28px" in rendered
+
+
+def test_agent_and_user_panels_are_visually_distinct():
+    """User and agent bubbles must use clearly different background
+    colors — the previous near-identical dark tints made scanning
+    long chats hard. Single source of truth: the two color tokens
+    in chat_widget.py."""
+    from grc_agent_gui import chat_widget
+
+    assert chat_widget._COLOR_USER_BG != chat_widget._COLOR_AGENT_BG
+    # And neither one is a near-identical dim tint of the other —
+    # the hex pairs must be visibly different (delta >= 0x10 per
+    # channel on at least one component).
+    def _hex(c: str) -> tuple[int, int, int]:
+        c = c.lstrip("#")
+        return (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+
+    ur, ug, ub = _hex(chat_widget._COLOR_USER_BG)
+    ar, ag, ab = _hex(chat_widget._COLOR_AGENT_BG)
+    channel_diff = max(abs(ur - ar), abs(ug - ag), abs(ub - ab))
+    assert channel_diff >= 0x10, (
+        f"agent/user bg too similar: user={chat_widget._COLOR_USER_BG} agent={chat_widget._COLOR_AGENT_BG}"
+    )
+
+
+# ── strip_inline_math shim ─────────────────────────────────────────────────
+# The chat renderer has no LaTeX engine. The shim turns the common
+# inline-math patterns (µ, ², ₙ, ·) into unicode, and falls back to a
+# <code> span for anything it cannot safely rewrite.
+
+def test_strip_inline_math_rewrites_simple_greek_and_superscripts():
+    from grc_agent_gui.chat_widget import strip_inline_math
+
+    out = strip_inline_math("The bandwidth is $350\\text{--}\\mu\\text{Hz}$.")
+    assert "350" in out
+    assert "Hz" in out
+    # \\mu -> µ, \\text{...} -> contents unwrapped
+    assert "µ" in out
+    # No raw TeX survives in the simple case.
+    assert "\\text{" not in out
+    assert "\\mu" not in out
+
+
+def test_strip_inline_math_rewrites_superscripts_and_subscripts():
+    from grc_agent_gui.chat_widget import strip_inline_math
+
+    assert "f²" in strip_inline_math("$f^2$")
+    assert "x₁" in strip_inline_math("$x_1$")
+    # \cdot → ·, with whatever surrounding whitespace the input had.
+    assert "·" in strip_inline_math("$a \\cdot b$")
+
+
+def test_strip_inline_math_falls_back_to_code_for_unsupported():
+    """Anything containing unsupported macros or multi-line math is
+    rendered as a `<code>` span so the original is at least visible."""
+    from grc_agent_gui.chat_widget import strip_inline_math
+
+    out = strip_inline_math("Result: $\\frac{1}{2}$ and $E = mc^{2}$.")
+    # At least one segment is replaced with a code span.
+    assert "<code>" in out
+    # The code span contains the original LaTeX so the user can still read it.
+    assert "\\frac" in out or "mc^{2}" in out
+
+
+def test_strip_inline_math_leaves_plain_text_alone():
+    from grc_agent_gui.chat_widget import strip_inline_math
+
+    # The shim must not touch prose that contains no TeX-flavored math.
+    # Note: bare $5 / $currency style substrings ARE ambiguous with
+    # math in LaTeX; we only require the shim to leave well-formed
+    # prose alone. The dollar sign is rare in our domain prose.
+    text = "Plain text without math. The answer is 5 dollars, not 4."
+    assert strip_inline_math(text) == text
+
+
+def test_strip_inline_math_handles_display_math():
+    from grc_agent_gui.chat_widget import strip_inline_math
+
+    out = strip_inline_math("Display: $$x = 1$$ end.")
+    # Display math at minimum loses the `$$` markers.
+    assert "$$" not in out
+    assert "x = 1" in out

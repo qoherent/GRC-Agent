@@ -10,7 +10,7 @@ UPDATE_MODEL_CONTEXT_BIBLE=1 uv run python -m unittest tests.test_model_context_
 
 Normal test mode fails when this file is stale.
 
-Prompt version: `2026-06-29-transcript-review`
+Prompt version: `2026-07-02-concise-no-latex`
 
 ## Model-Facing Surface
 
@@ -41,6 +41,8 @@ The force=True flag in change_graph commits edits but does not resolve errors; y
 Disabling a block that is part of a connection fails native validation ('Port is not connected'); use state=bypass to take a connected block out of service without breaking the graph, or force=true to commit the disabled state anyway.
 When removing blocks, also remove or disable any source blocks that become unconnected.
 Never use hallucinated block IDs; if query_knowledge does not return a block ID, it does not exist.
+When the user asks a question, answer concisely: lead with the direct answer, then add only the context needed to act on it.
+Do not use LaTeX or TeX math notation in chat replies; write math inline in plain text (e.g. `350 microHz`, `f^2`, `x_i`).
 
 ```
 

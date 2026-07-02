@@ -10,11 +10,12 @@ from grc_agent.config import (
     DEFAULT_OPENROUTER_URL,
     default_openrouter_model,
 )
+from grc_agent.domain_models import ValidationStatus
+from grc_agent.runtime.model_context import GRAPH_MUTATING_TOOL_NAME
 from grc_agent.sessions_store import open_session_store
 from PySide6.QtCore import (
     QEvent,
     QObject,
-    QProcess,
     QRunnable,
     QSettings,
     Qt,
@@ -23,7 +24,7 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QAction, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -38,11 +39,27 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .chat_widget import ChatWidget
+from .chat_widget import ChatWidget, strip_think_blocks
 from .inspector import InspectorWidget
 from .model_toolbar import ModelToolbar
 from .process_manager import ProcessManager
 from .sidebar_widget import SidebarWidget
+from .ui_constants import (
+    BACKEND_STATUS_MARKER,
+    COLOR_BASE,
+    COLOR_BLUE,
+    COLOR_GREEN,
+    COLOR_RED,
+    COLOR_SUBTEXT,
+    COLOR_SURFACE,
+    COLOR_TEXT,
+    COLOR_YELLOW,
+    INVALID_ICON,
+    MODEL_SELECTOR_MARKER,
+    SPLITTER,
+    UNVALIDATED_ICON,
+    VALID_ICON,
+)
 from .workers import AgentWorker
 
 logger = logging.getLogger(__name__)
@@ -257,7 +274,6 @@ class MainWindow(QMainWindow):
         parent: QWidget = None,
         *,
         bootstrap_result: Any = None,
-        setup_mode: bool = True,
     ) -> None:
         super().__init__(parent)
         self.agent = agent
@@ -288,8 +304,6 @@ class MainWindow(QMainWindow):
         icon_path = Path(__file__).parent / "resources" / "icon.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        # Accept drops of `.grc` files onto the main window.
-        self.setAcceptDrops(True)
 
         # Add File Menu
         menubar = self.menuBar()
@@ -317,10 +331,28 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_output_action)
 
         file_menu.addSeparator()
-        self.recent_sessions_action = QAction("&Session Sidebar", self)
+        self.recent_sessions_action = QAction("Session Side&bar", self)
         self.recent_sessions_action.setShortcut("Ctrl+Shift+H")
         self.recent_sessions_action.triggered.connect(self.toggle_sidebar)
         file_menu.addAction(self.recent_sessions_action)
+
+        # View Menu
+        view_menu = menubar.addMenu("&View")
+
+        zoom_in_action = QAction("Zoom &In", self)
+        zoom_in_action.setShortcuts(["Ctrl++", "Ctrl+="])
+        zoom_in_action.triggered.connect(self.zoom_in)
+        view_menu.addAction(zoom_in_action)
+
+        zoom_out_action = QAction("Zoom &Out", self)
+        zoom_out_action.setShortcut("Ctrl+-")
+        zoom_out_action.triggered.connect(self.zoom_out)
+        view_menu.addAction(zoom_out_action)
+
+        zoom_reset_action = QAction("Reset &Zoom", self)
+        zoom_reset_action.setShortcut("Ctrl+0")
+        zoom_reset_action.triggered.connect(self.zoom_reset)
+        view_menu.addAction(zoom_reset_action)
 
         # Help Menu
         help_menu = menubar.addMenu("&Help")
@@ -333,11 +365,34 @@ class MainWindow(QMainWindow):
         help_menu.addAction(open_docs_action)
 
         self._settings = QSettings("GRC_Agent", "GUI")
+        self._zoom_factor = float(self._settings.value("window/zoom_factor", 3.5))
         geom = self._settings.value("window/geometry")
         if geom:
             self.restoreGeometry(geom)
         else:
             self.resize(800, 600)
+
+        # Status Bar (moved to top to prevent initialization order issues with status bar widgets)
+        self.status_bar = QStatusBar(self)
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("Ready")
+
+        # Permanent (never overwritten by transient tool-name messages)
+        # indicator for whether the agent is currently generating.
+        self.generation_status_label = QLabel(self)
+        self._set_generation_status_label(False)
+        self.status_bar.addPermanentWidget(self.generation_status_label)
+
+        self.connection_status_label = QLabel("● checking", self)
+        self.connection_status_label.setStyleSheet(f"color: {COLOR_YELLOW};")
+        self.status_bar.addPermanentWidget(self.connection_status_label)
+
+        self.model_status_label = QLabel(self)
+        self.status_bar.addPermanentWidget(self.model_status_label)
+        self._update_model_status_label()
+
+        self.validation_label = QLabel("Unknown", self)
+        self.status_bar.addPermanentWidget(self.validation_label)
 
         # Central layout initialization
         central_widget = QWidget(self)
@@ -377,11 +432,15 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
 
-        # Set default splitter proportions (e.g. 9% sidebar, 50% chat, remaining for inspector)
+        # Set default splitter proportions (initial paint, before any saved
+        # window state is restored — see SplitterProportions).
         total_width = self.width() or 800
-        sidebar_w = max(80, int(total_width * 0.09))
-        chat_w = int(total_width * 0.50)
-        inspector_w = max(200, total_width - sidebar_w - chat_w)
+        sidebar_w = max(
+            SPLITTER.sidebar_min_px_initial,
+            int(total_width * SPLITTER.sidebar_fraction_initial),
+        )
+        chat_w = int(total_width * SPLITTER.chat_fraction)
+        inspector_w = max(SPLITTER.inspector_min_px, total_width - sidebar_w - chat_w)
         splitter.setSizes([sidebar_w, chat_w, inspector_w])
         v_splitter.addWidget(splitter)
 
@@ -395,7 +454,6 @@ class MainWindow(QMainWindow):
         console_controls.addStretch()
 
         self.validate_btn = QPushButton("Validate", console_panel)
-        self.validate_btn.setObjectName("validateButton")
         console_controls.addWidget(self.validate_btn)
         console_layout.addLayout(console_controls)
 
@@ -434,14 +492,12 @@ class MainWindow(QMainWindow):
         self.chat_display = self.chat_widget.chat_display
         self.chat_input.returnPressed.connect(self.send_prompt)
         self.chat_input.installEventFilter(self)
+        self.chat_widget.stop_clicked.connect(self._on_stop_clicked)
 
         # Splitter states are restored in showEvent once window geometry is fully realized.
 
         # Initialize Process Manager
         self.process_manager = ProcessManager(self)
-        self._last_applied_revision = None
-        self._validation_stdout = ""
-        self._validation_stderr = ""
 
         # Wire execution buttons & process manager signals
         self.validate_btn.clicked.connect(self.on_validate_clicked)
@@ -458,24 +514,14 @@ class MainWindow(QMainWindow):
         self.refresh_inspector()
         self.refresh_sidebar_sessions()
 
-        # Status Bar
-        self.status_bar = QStatusBar(self)
-        self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready")
-
-        self.model_status_label = QLabel(self)
-        self.model_status_label.setObjectName("modelStatusLabel")
-        self.status_bar.addPermanentWidget(self.model_status_label)
-        self._update_model_status_label()
-
-        self.validation_label = QLabel("Unknown", self)
-        self.status_bar.addPermanentWidget(self.validation_label)
         self.update_ui_state()
 
         # Probe Ollama after the event loop starts (non-blocking).
         from PySide6.QtCore import QTimer
 
         QTimer.singleShot(0, self._probe_and_populate_models)
+
+        self.apply_zoom(self._zoom_factor)
 
     def _resolve_model_status(self) -> str:
         """Build a single-line summary of the loaded model for the status bar."""
@@ -500,11 +546,11 @@ class MainWindow(QMainWindow):
         """Render the model status string into the permanent status-bar label."""
         try:
             self.model_status_label.setText(self._resolve_model_status())
-            self.model_status_label.setStyleSheet("color: #cdd6f4;")
+            self.model_status_label.setStyleSheet(f"color: {COLOR_TEXT};")
         except Exception as exc:
             logger.debug("Failed to render model status label: %s", exc)
             self.model_status_label.setText("Model: unknown")
-            self.model_status_label.setStyleSheet("color: #a6adc8;")
+            self.model_status_label.setStyleSheet(f"color: {COLOR_SUBTEXT};")
 
     def update_ui_state(self) -> None:
         """Enable or disable chat and validation controls based on active session state."""
@@ -520,19 +566,79 @@ class MainWindow(QMainWindow):
                 "Backend unreachable — use the toolbar to retry or select a different model."
             )
             self.validation_label.setText("Backend Down")
-            self.validation_label.setStyleSheet("color: #f38ba8;")
+            self.validation_label.setStyleSheet(f"color: {COLOR_RED};")
             self._render_backend_unreachable_banner()
         elif has_graph:
             self.chat_input.setPlaceholderText(
                 "Ask the assistant to modify or summarize the flowgraph..."
             )
-            self.validation_label.setStyleSheet("color: #a6e3a1;")
+            self.validation_label.setText(f"{VALID_ICON} Valid")
+            self.validation_label.setStyleSheet(f"color: {COLOR_GREEN};")
         else:
             self.chat_input.setPlaceholderText(
                 "Please load a .grc flowgraph (File -> Open) to start chatting..."
             )
             self.validation_label.setText("No Graph")
-            self.validation_label.setStyleSheet("color: #a6adc8;")
+            self.validation_label.setStyleSheet(f"color: {COLOR_SUBTEXT};")
+
+    def zoom_in(self) -> None:
+        self.apply_zoom(self._zoom_factor + 0.1)
+
+    def zoom_out(self) -> None:
+        self.apply_zoom(self._zoom_factor - 0.1)
+
+    def zoom_reset(self) -> None:
+        self.apply_zoom(1.0)
+
+    def apply_zoom(self, zoom_factor: float) -> None:
+        # Clamp zoom factor to reasonable boundaries to prevent UI layout bugs
+        self._zoom_factor = max(0.5, min(4.0, zoom_factor))
+        self._settings.setValue("window/zoom_factor", self._zoom_factor)
+
+        # Regenerate and apply global stylesheet
+        from PySide6.QtWidgets import QApplication
+
+        from grc_agent_gui.styles import get_stylesheet, ui_font_metrics
+
+        QApplication.instance().setStyleSheet(get_stylesheet(self._zoom_factor))
+
+        # Apply the same font to the chat QTextBrowser document so that
+        # HTML content (which is immune to Qt stylesheets) also scales.
+        # chat_pt comes from the same ui_font_metrics() used by the
+        # stylesheet — one source of truth for body / mono / small / chat.
+        if hasattr(self, "chat_widget") and self.chat_widget is not None:
+            from PySide6.QtGui import QFont
+
+            chat_pt = ui_font_metrics(self._zoom_factor).chat_pt
+            font = QFont("Ubuntu Sans", chat_pt)
+            self.chat_widget.chat_display.document().setDefaultFont(font)
+            # Push the same chat_pt down to the chat widget so the
+            # user-message body div (which lives outside the document
+            # font cascade) tracks zoom uniformly.
+            self.chat_widget.set_chat_pt(chat_pt)
+
+        # Apply zoom to the model toolbar
+        if hasattr(self, "model_toolbar") and self.model_toolbar is not None:
+            self.model_toolbar.apply_zoom(self._zoom_factor)
+
+        # Invalidate rendered chat cache and trigger re-render
+        if hasattr(self, "chat_widget") and self.chat_widget is not None:
+            for msg in self.chat_widget._history:
+                msg["_rendered"] = None
+            self.chat_widget._render_chat()
+
+    def set_backend_connected(self, connected: bool | None) -> None:
+        if not hasattr(self, "connection_status_label"):
+            return
+        if connected is None:
+            self.connection_status_label.setText("● checking")
+            self.connection_status_label.setStyleSheet(f"color: {COLOR_YELLOW};")
+        elif connected:
+            self.connection_status_label.setText("● connected")
+            self.connection_status_label.setStyleSheet(f"color: {COLOR_GREEN};")
+        else:
+            self.connection_status_label.setText("● unreachable")
+            self.connection_status_label.setStyleSheet(f"color: {COLOR_RED};")
 
     def _on_backend_unreachable(self, result: dict[str, Any]) -> None:
         """Worker callback: backend is unreachable, switch to degraded mode."""
@@ -542,8 +648,7 @@ class MainWindow(QMainWindow):
             f"Backend unreachable at {self._server_url_display()} — chat disabled, "
             f"use the toolbar to retry or select a different model."
         )
-        if hasattr(self, "model_toolbar"):
-            self.model_toolbar.set_status(connected=False)
+        self.set_backend_connected(False)
         self.update_ui_state()
 
     def _on_backend_recovered(self) -> None:
@@ -568,11 +673,10 @@ class MainWindow(QMainWindow):
         if not hint:
             return
         history = self.chat_widget.get_history()
-        marker = "[backend status]"
         for entry in history:
-            if entry.get("text", "").startswith(marker):
+            if entry.get("text", "").startswith(BACKEND_STATUS_MARKER):
                 return
-        self.chat_widget.append_error(f"{marker} {hint}")
+        self.chat_widget.append_error(f"{BACKEND_STATUS_MARKER} {hint}")
 
     # ------------------------------------------------------------------
     # Model toolbar handlers (replace the setup wizard + Model dialog)
@@ -612,6 +716,8 @@ class MainWindow(QMainWindow):
         """User clicked refresh — re-probe and repopulate the model list."""
         self._probe_and_populate_models()
 
+
+
     def _probe_and_populate_models(self) -> None:
         """Probe Ollama and populate the toolbar's model dropdown."""
         from grc_agent.model_manager import discover_ollama_models
@@ -630,10 +736,10 @@ class MainWindow(QMainWindow):
         current = self.model_toolbar.current_model()
         self.model_toolbar.set_models(models, current=current or (models[0] if models else ""))
         if models:
-            self.model_toolbar.set_status(connected=True)
+            self.set_backend_connected(True)
             self.backend_reachable = True
         else:
-            self.model_toolbar.set_status(connected=False)
+            self.set_backend_connected(False)
             self.backend_reachable = False
         self.update_ui_state()
 
@@ -663,30 +769,55 @@ class MainWindow(QMainWindow):
                 self.h_splitter.restoreState(h_state)
                 sizes = self.h_splitter.sizes()
                 if len(sizes) == 3:
-                    # 1. Sidebar should be max 20% of total width. If it's larger or collapsed, set it to 18%.
-                    max_sidebar_w = int(total_w * 0.20)
+                    # 1. Sidebar should be max SPLITTER.sidebar_fraction_max of
+                    #    total width. If it's larger or collapsed, restore it.
+                    max_sidebar_w = int(total_w * SPLITTER.sidebar_fraction_max)
                     if (
-                        sizes[0] > max_sidebar_w or sizes[0] < 50
+                        sizes[0] > max_sidebar_w
+                        or sizes[0] < SPLITTER.sidebar_collapsed_floor_px
                     ) and not self.sidebar_widget.isHidden():
-                        sizes[0] = max(150, int(total_w * 0.18))
+                        sizes[0] = max(
+                            SPLITTER.sidebar_min_px_restored,
+                            int(total_w * SPLITTER.sidebar_fraction_restored),
+                        )
 
                     # 2. Ensure inspector (index 2) has a sensible size and was not collapsed by older 2-widget settings
-                    if sizes[2] < 50 and not self.inspector_widget.isHidden():
-                        sizes[2] = max(200, int(total_w * 0.32))
+                    if (
+                        sizes[2] < SPLITTER.sidebar_collapsed_floor_px
+                        and not self.inspector_widget.isHidden()
+                    ):
+                        sizes[2] = max(
+                            SPLITTER.inspector_min_px,
+                            int(total_w * SPLITTER.inspector_fraction),
+                        )
 
                     # 3. Chat gets the remainder
-                    sizes[1] = max(300, total_w - sizes[0] - sizes[2])
+                    sizes[1] = max(SPLITTER.chat_min_px, total_w - sizes[0] - sizes[2])
                     self.h_splitter.setSizes(sizes)
             else:
-                sidebar_w = max(150, int(total_w * 0.18))
-                chat_w = int(total_w * 0.50)
-                inspector_w = max(200, total_w - sidebar_w - chat_w)
+                sidebar_w = max(
+                    SPLITTER.sidebar_min_px_restored,
+                    int(total_w * SPLITTER.sidebar_fraction_restored),
+                )
+                chat_w = int(total_w * SPLITTER.chat_fraction)
+                inspector_w = max(SPLITTER.inspector_min_px, total_w - sidebar_w - chat_w)
                 self.h_splitter.setSizes([sidebar_w, chat_w, inspector_w])
 
             # Restore vertical splitter state
             v_state = self._settings.value("window/v_splitter")
             if v_state:
                 self.v_splitter.restoreState(v_state)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Cancel running worker, clean up thread, and close DB on close."""
+        self._on_stop_clicked()
+        self.cleanup_thread()
+        if hasattr(self, "sessions_store") and self.sessions_store is not None:
+            try:
+                self.sessions_store.close()
+            except Exception as exc:
+                logger.warning("Failed to close sessions DB on window exit: %s", exc)
+        event.accept()
 
     def _ensure_active_session_db_record(self, first_user_prompt: str) -> None:
         """Create a new session record in SQLite if one isn't currently active."""
@@ -822,14 +953,47 @@ class MainWindow(QMainWindow):
         self.chat_input.setEnabled(False)
         if hasattr(self, "model_toolbar"):
             self.model_toolbar.setEnabled(False)
+        self.chat_widget.set_generating(True)
+        self._set_generation_status_label(True)
         self.status_bar.showMessage("Agent is thinking...")
+
+    def _set_generation_status_label(self, is_generating: bool) -> None:
+        """Persistent (never overwritten by tool-name messages) run-state indicator."""
+        if is_generating:
+            self.generation_status_label.setText("● Generating…")
+            self.generation_status_label.setStyleSheet(f"color: {COLOR_BLUE};")
+        else:
+            self.generation_status_label.setText("○ Idle")
+            self.generation_status_label.setStyleSheet(f"color: {COLOR_SUBTEXT};")
+
+    def _on_stop_clicked(self) -> None:
+        """User clicked Stop: cancel the in-flight worker, if any."""
+        if self.worker is not None:
+            self.worker.cancel()
+            self.status_bar.showMessage("Stopping…")
 
     def on_tool_started(self, name: str, args: str) -> None:
         """Show the running tool name in the status bar and chat indicator."""
+        # Close the in-flight assistant stream so tool calls render in the
+        # correct temporal position. Without this, append_stream_chunk
+        # keeps appending post-tool reply text to the pre-tool assistant
+        # bubble (it searches reversed history for the last assistant msg,
+        # which sits before the tool rows), producing
+        # [agent reply] [tool call] instead of [tool call] [agent reply].
+        if self.chat_widget._streaming:
+            final = self.chat_widget.current_stream_text()
+            visible = strip_think_blocks(final)
+            if visible:
+                self.chat_widget.finalize_stream(final)
+            else:
+                # No visible content — drop the placeholder so we don't
+                # leave an empty "Agent:" bubble before the tool call.
+                self.chat_widget.drop_last_assistant()
+
         self.status_bar.showMessage(f"-- {name}...")
         self.status_bar.setStyleSheet(
-            "QStatusBar { color: #89b4fa; background-color: #11111b; "
-            "border-top: 1px solid #45475a; font-size: 12px; padding: 2px 8px; } "
+            f"QStatusBar {{ color: {COLOR_BLUE}; background-color: {COLOR_BASE}; "
+            f"border-top: 1px solid {COLOR_SURFACE}; font-size: 0.9em; padding: 2px 8px; }} "
             "QStatusBar::item { border: none; }"
         )
         self.chat_widget.append_status(name, args)
@@ -848,7 +1012,7 @@ class MainWindow(QMainWindow):
         """Handle tool completion: show mutations, surface errors."""
         self.chat_widget.append_tool_finished(name, result)
 
-        if name == "change_graph" and result:
+        if name == GRAPH_MUTATING_TOOL_NAME and result:
             self.chat_widget.append_mutation(result)
             self.refresh_inspector()
         if self._result_is_error(result):
@@ -867,7 +1031,7 @@ class MainWindow(QMainWindow):
                 )
 
                 # Save mutation or error to DB if applicable
-                if name == "change_graph" and result:
+                if name == GRAPH_MUTATING_TOOL_NAME and result:
                     self.sessions_store.append(
                         self.active_session_id,
                         "mutation",
@@ -886,22 +1050,19 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _result_is_error(result_str: str) -> bool:
-        """Read the structured result, not a substring of its serialization.
+        """Read the structured result's canonical ``ok`` flag.
 
-        Tool results are JSON objects with an ``ok`` flag (or an
-        ``error_type`` field). Deserializing once is uniform and avoids the
-        ad-hoc "'ok': False" / '"ok": false' / "'ok\": false" triple that
-        the old substring scan needed.
+        Every tool result is built by ``GrcAgent._tool_result`` /
+        ``build_error_payload`` (see domain_models.py), both of which
+        guarantee an ``ok: bool`` key — ``ok: False`` is the single
+        canonical error signal callers can rely on.
         """
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
             return result_str.strip().lower().startswith("error")
-        if isinstance(parsed, dict):
-            if "ok" in parsed:
-                return not bool(parsed["ok"])
-            if "error_type" in parsed:
-                return True
+        if isinstance(parsed, dict) and "ok" in parsed:
+            return not bool(parsed["ok"])
         return False
 
     def on_response_chunk(self, text: str) -> None:
@@ -915,16 +1076,18 @@ class MainWindow(QMainWindow):
         self.chat_input.setEnabled(True)
         if hasattr(self, "model_toolbar"):
             self.model_toolbar.setEnabled(True)
+        self.chat_widget.set_generating(False)
+        self._set_generation_status_label(False)
         assistant_text = result.get("assistant_text", "")
-        if assistant_text.strip():
-            if not self.chat_widget._streaming:
-                self.chat_widget.start_stream()
-            self.chat_widget.finalize_stream(assistant_text)
-        else:
-            if self.chat_widget._streaming:
-                self.chat_widget.drop_last_assistant()
-            else:
-                self.chat_widget._streaming = False
+        if self.chat_widget._streaming:
+            # Finalize with everything streamed across every round (this
+            # turn's own chunk(s) already flowed in via response_chunk,
+            # so the accumulated text is authoritative), not just the
+            # terminal round's assistant_text, which would discard any
+            # earlier tool-round reasoning/<think> content.
+            self.chat_widget.finalize_stream(self.chat_widget.current_stream_text())
+        elif assistant_text.strip():
+            self.chat_widget.append_message("assistant", assistant_text)
         self.refresh_inspector()
         self.status_bar.setStyleSheet("")
         self.status_bar.showMessage("Ready")
@@ -942,37 +1105,6 @@ class MainWindow(QMainWindow):
                 logger.exception("Failed to save assistant reply to DB: %s", exc)
 
         self.refresh_sidebar_sessions()
-
-        # Audit 4.6: warn if the on-disk graph has been mutated while a
-        # flowgraph is still running. The running subprocess has its own
-        # in-memory state and will not pick up the change until it is
-        # restarted.
-        self._check_stale_running_graph()
-
-    def _check_stale_running_graph(self) -> None:
-        """Show a status-bar warning if the on-disk graph diverges from the running flowgraph."""
-        try:
-            if self.process_manager is None or self.process_manager.run_process is None:
-                return
-            if self.process_manager.run_process.state() != QProcess.ProcessState.Running:
-                return
-            session = getattr(self.agent, "session", None)
-            if session is None:
-                return
-            current_revision = getattr(session, "state_revision", None)
-            if current_revision is None:
-                return
-            if self._last_applied_revision is None:
-                self._last_applied_revision = current_revision
-                return
-            if current_revision != self._last_applied_revision:
-                self._last_applied_revision = current_revision
-                self.status_bar.showMessage(
-                    f"Flowgraph running with stale graph (revision {current_revision}). "
-                    "Stop and re-run to apply changes."
-                )
-        except Exception as e:
-            logger.debug(f"Stale-graph warning check failed: {e}")
 
     def cleanup_thread(self) -> None:
         """Gracefully wait for the execution thread to close and release resources."""
@@ -1000,16 +1132,16 @@ class MainWindow(QMainWindow):
     def on_inspector_refreshed(self, overview_data: dict[str, Any]) -> None:
         self.inspector_widget.update_state(overview_data)
         graph = overview_data.get("graph", {}) or {}
-        val_status = graph.get("validation", {}).get("status", "unknown")
-        if val_status == "valid":
-            self.validation_label.setText("🟢 Valid")
-            self.validation_label.setStyleSheet("color: #a6e3a1;")
-        elif val_status == "invalid":
-            self.validation_label.setText("🔴 Invalid")
-            self.validation_label.setStyleSheet("color: #f38ba8;")
+        val_status = graph.get("validation", {}).get("status", ValidationStatus.UNKNOWN)
+        if val_status == ValidationStatus.VALID:
+            self.validation_label.setText(f"{VALID_ICON} Valid")
+            self.validation_label.setStyleSheet(f"color: {COLOR_GREEN};")
+        elif val_status == ValidationStatus.INVALID:
+            self.validation_label.setText(f"{INVALID_ICON} Invalid")
+            self.validation_label.setStyleSheet(f"color: {COLOR_RED};")
         else:
-            self.validation_label.setText("⚪ Unvalidated")
-            self.validation_label.setStyleSheet("color: #a6adc8;")
+            self.validation_label.setText(f"{UNVALIDATED_ICON} Unvalidated")
+            self.validation_label.setStyleSheet(f"color: {COLOR_SUBTEXT};")
 
     def open_file_dialog(self) -> None:
         file_name, _ = QFileDialog.getOpenFileName(
@@ -1021,9 +1153,8 @@ class MainWindow(QMainWindow):
     def open_file(self, file_path: Path) -> None:
         """Load ``file_path`` into the agent and refresh the inspector.
 
-        Shared by the file dialog and the drag-and-drop handler. Surfaces
-        a ``QMessageBox`` on failure so the user gets a clear error
-        rather than a tiny status-bar message.
+        Surfaces a ``QMessageBox`` on failure so the user gets a clear
+        error rather than a tiny status-bar message.
         """
         from grc_agent.session import load_grc
 
@@ -1135,7 +1266,7 @@ class MainWindow(QMainWindow):
             backend = getattr(self.llama_config, "backend", "ollama")
             self.model_toolbar.set_backend(backend)
             self.model_toolbar.set_current_model(model_name)
-            self.model_toolbar.set_status(connected=True)
+            self.set_backend_connected(True)
         # Persist to preferences.json so the selection survives restarts.
         try:
             from grc_agent.config import update_last_model, update_provider_chosen
@@ -1152,7 +1283,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Model switched to {model_name}", 5000)
         self.chat_widget.append_message(
             "assistant",
-            f"[model selector] Switched to `{model_name}`. "
+            f"{MODEL_SELECTOR_MARKER} Switched to `{model_name}`. "
             "Existing chat history is preserved; "
             "the next turn uses the new model.",
         )
@@ -1164,10 +1295,9 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Model swap failed: {message}", 8000)
         self.chat_widget.append_message(
             "assistant",
-            f"[model selector] Model swap failed: {message}",
+            f"{MODEL_SELECTOR_MARKER} Model swap failed: {message}",
         )
-        if hasattr(self, "model_toolbar"):
-            self.model_toolbar.set_status(connected=False)
+        self.set_backend_connected(False)
 
     def refresh_sidebar_sessions(self) -> None:
         """Fetch all sessions from the database and populate the sidebar list."""
@@ -1189,8 +1319,11 @@ class MainWindow(QMainWindow):
         if should_show:
             # When showing, make sure it has a non-zero size
             sizes = self.h_splitter.sizes()
-            if len(sizes) == 3 and sizes[0] < 50:
-                sizes[0] = max(80, int(self.width() * 0.09))
+            if len(sizes) == 3 and sizes[0] < SPLITTER.sidebar_collapsed_floor_px:
+                sizes[0] = max(
+                    SPLITTER.sidebar_min_px_initial,
+                    int(self.width() * SPLITTER.sidebar_fraction_initial),
+                )
                 self.h_splitter.setSizes(sizes)
 
     def start_new_chat_session(self) -> None:
@@ -1300,11 +1433,10 @@ class MainWindow(QMainWindow):
             self.active_session_id = None
             return
 
-        # 4. Replay display rows into the chat widget.
+        # 4. Replay display rows into the chat widget. DISPLAY_ROLES already
+        # excludes "system" rows, so no separate skip is needed.
         display_replayed = 0
         for msg in messages:
-            if msg.role == "system":
-                continue
             if msg.role in DISPLAY_ROLES:
                 self.chat_widget.append_message(msg.role, msg.text, payload=msg.payload)
                 display_replayed += 1
@@ -1338,8 +1470,6 @@ class MainWindow(QMainWindow):
         """Handler for 'Validate' button click."""
         if self.agent.session and self.agent.session.path:
             self.console_log.clear()
-            self._validation_stdout = ""
-            self._validation_stderr = ""
             self.process_manager.validate_graph(self.agent.session)
         else:
             self.on_process_status("Error: No active flowgraph session path.")
@@ -1348,17 +1478,14 @@ class MainWindow(QMainWindow):
         """Disable validate button while compilation is active."""
         self.validate_btn.setEnabled(False)
         self.status_bar.showMessage("Validating flowgraph...")
-        self._last_applied_revision = None
 
     def on_process_stdout(self, text: str) -> None:
         """Append standard output chunks to the console log."""
-        self._validation_stdout += text
         self.console_log.insertPlainText(text)
         self.console_log.ensureCursorVisible()
 
     def on_process_stderr(self, text: str) -> None:
         """Append standard error chunks to the console log."""
-        self._validation_stderr += text
         self.console_log.insertPlainText(text)
         self.console_log.ensureCursorVisible()
 
@@ -1375,9 +1502,6 @@ class MainWindow(QMainWindow):
 
         self.refresh_inspector()
 
-    # ------------------------------------------------------------------
-    # File drag-and-drop
-    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # File menu: Open Output Folder, Export Chat
     # ------------------------------------------------------------------

@@ -190,7 +190,7 @@ def render_model_messages(
 
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-06-29-transcript-review"
+__version__ = "2026-07-02-concise-no-latex"
 
 
 def build_system_prompt(session_id: str | None = None) -> str:
@@ -221,6 +221,8 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "or force=true to commit the disabled state anyway.\n"
         "When removing blocks, also remove or disable any source blocks that become unconnected.\n"
         "Never use hallucinated block IDs; if query_knowledge does not return a block ID, it does not exist.\n"
+        "When the user asks a question, answer concisely: lead with the direct answer, then add only the context needed to act on it.\n"
+        "Do not use LaTeX or TeX math notation in chat replies; write math inline in plain text (e.g. `350 microHz`, `f^2`, `x_i`).\n"
     )
 
 
@@ -231,6 +233,11 @@ MVP_MODEL_TOOL_NAMES: tuple[str, ...] = (
     "query_knowledge",
     "change_graph",
 )
+
+# The one tool in the MVP surface that mutates the flowgraph. Single source
+# of truth so the agent's checkpoint/journal logic and the GUI's
+# mutation-rendering logic agree on the same name.
+GRAPH_MUTATING_TOOL_NAME: str = "change_graph"
 
 
 @dataclass(frozen=True)

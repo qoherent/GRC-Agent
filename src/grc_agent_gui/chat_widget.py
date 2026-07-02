@@ -8,9 +8,16 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.lexers.special import TextLexer
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QTextBlockFormat, QTextCursor, QTextDocument
-from PySide6.QtWidgets import QLineEdit, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
 
 # Layered defense against XSS / event-handler injection. QTextBrowser does
 # not execute JavaScript or load remote resources, but we still strip
@@ -74,6 +81,12 @@ def sanitize_html(html_str: str) -> str:
 
 def markdown_to_highlighted_html(markdown_text: str) -> str:
     """Convert markdown text to HTML, using Pygments for inline-styled code blocks."""
+    # Pre-process inline math (LaTeX) to either unicode (common case)
+    # or a <code> span (fallback) before handing off to Qt's markdown
+    # parser, which has no LaTeX engine of its own. The shim is
+    # intentionally narrow — see ``strip_inline_math``.
+    markdown_text = strip_inline_math(markdown_text)
+
     parts = markdown_text.split("```")
     final_html_parts = []
 
@@ -84,12 +97,19 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
             doc = QTextDocument()
             doc.setMarkdown(part)
             part_html = doc.toHtml()
-            doc.deleteLater()
 
-            body_start = part_html.find("<body>")
-            body_end = part_html.find("</body>")
-            if body_start != -1 and body_end != -1:
-                part_html = part_html[body_start + 6 : body_end]
+            # ``QTextDocument.toHtml()`` always emits ``<body style=" font-family:; ...">``
+            # with an empty font-family declaration; Qt's HTML renderer falls
+            # back to its default (serif) for the body, which made the
+            # agent's markdown body render in Times while every other text
+            # element stayed sans-serif. Match ``<body>`` with *any* attributes
+            # (not just the literal ``<body>``), then strip every font-family
+            # declaration so the body inherits from the document default font
+            # set via ``setDefaultFont`` in :func:`MainWindow.apply_zoom`.
+            body_match = re.search(r"<body[^>]*>(.*?)</body>", part_html, flags=re.DOTALL)
+            if body_match:
+                part_html = body_match.group(1)
+            part_html = re.sub(r"font-family\s*:\s*[^;\"]*;?", "", part_html, flags=re.IGNORECASE)
             final_html_parts.append(part_html)
         else:
             lines = part.split("\n")
@@ -97,25 +117,7 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
                 continue
 
             lang = lines[0].strip()
-            common_langs = {
-                "python",
-                "py",
-                "cpp",
-                "c++",
-                "c",
-                "bash",
-                "sh",
-                "yaml",
-                "yml",
-                "json",
-                "xml",
-                "html",
-            }
-            if lang.lower() in common_langs:
-                code = "\n".join(lines[1:])
-            else:
-                lang = "text"
-                code = "\n".join(lines[1:])
+            code = "\n".join(lines[1:])
 
             try:
                 lexer = get_lexer_by_name(lang)
@@ -128,7 +130,7 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
             formatter = HtmlFormatter(
                 style="monokai",
                 noclasses=True,
-                cssstyles="font-family: monospace; font-size: 10pt; background-color: #181825; color: #cdd6f4; padding: 8px; border-radius: 4px; border: 1px solid #45475a; line-height: 1.4;",
+                cssstyles="font-family: monospace; background-color: #181825; color: #cdd6f4; padding: 8px; border-radius: 4px; border: 1px solid #45475a; line-height: 1.4;",
             )
             highlighted_code = highlight(code, lexer, formatter)
             final_html_parts.append(highlighted_code)
@@ -136,10 +138,185 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
     return sanitize_html("".join(final_html_parts))
 
 
-def render_user_message_html(text: str) -> str:
-    """Render a user message as a simple, sanitized bold-header HTML block."""
+# ── Inline-math shim ──────────────────────────────────────────────────────
+# QTextBrowser has no LaTeX engine. ``strip_inline_math`` rewrites the
+# common patterns the local model emits (greek letters, superscripts,
+# subscripts, dots) into unicode so they read as plain text, and falls
+# back to a ``<code>`` span for anything it cannot safely handle. The
+# function is intentionally narrow — it never tries to be a full TeX
+# renderer. Anything ambiguous is preserved verbatim inside the code span
+# so the user can read it.
+_MATH_FALLBACK = re.compile(r"\$+([^\n]+?)\$+")
+
+
+def _rewrite_math_segment(body: str) -> str | None:
+    """Try to rewrite a single ``$...$`` / ``$$...$$`` body to plain text.
+
+    Returns ``None`` if the body contains anything the shim cannot safely
+    rewrite (unsupported macros, multi-line content, mismatched braces,
+    etc.) — the caller then falls back to a ``<code>`` span.
+    """
+    if not body or "\n" in body:
+        return None
+    s = body
+
+    # Unsupported macros (anything that would need a real TeX engine).
+    if re.search(r"\\(frac|sqrt|sum|int|prod|lim|sin|cos|tan|log|ln|exp|alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|nu|xi|pi|rho|sigma|tau|phi|chi|psi|omega|leq|geq|neq|approx|rightarrow|leftarrow|Rightarrow|Leftarrow|to|infty|partial|nabla|forall|exists|in|notin|subset|supset|cup|cap|emptyset|mathbb|mathrm|mathit|mathbf|mathcal|binom|begin|end)\b", s):
+        return None
+    # Unbalanced / nested braces are not supported (we only handle
+    # \text{...}).
+    if s.count("{") != s.count("}"):
+        return None
+    # Square brackets / pipe / hat in math mode are display-only.
+    if re.search(r"[\[\]|<>]", s):
+        return None
+
+    # \text{...} -> contents
+    def _text_sub(match: re.Match[str]) -> str:
+        return match.group(1)
+
+    s = re.sub(r"\\text\{([^{}]*)\}", _text_sub, s)
+
+    # Greek letters (single replacements only; no \foo{bar} patterns
+    # left at this point).
+    s = s.replace("\\mu", "µ")
+    s = s.replace("\\cdot", "·")
+    s = s.replace("\\times", "×")
+    s = s.replace("\\pm", "±")
+    s = s.replace("\\to", "→")
+    s = s.replace("\\rightarrow", "→")
+    s = s.replace("\\leftarrow", "←")
+    s = s.replace("\\infty", "∞")
+    s = s.replace("\\approx", "≈")
+    s = s.replace("\\neq", "≠")
+    s = s.replace("\\leq", "≤")
+    s = s.replace("\\geq", "≥")
+    s = s.replace("\\deg", "°")
+
+    # Superscripts: only single-char unicode (digit / common letter).
+    super_map = {
+        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+        "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+        "n": "ⁿ", "i": "ⁱ", "T": "ᵀ", "+": "⁺", "-": "⁻",
+    }
+    s = re.sub(r"\^([0-9A-Za-z+\-])", lambda m: super_map.get(m.group(1), m.group(0)), s)
+
+    # Subscripts.
+    sub_map = {
+        "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+        "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+        "i": "ᵢ", "j": "ⱼ",
+    }
+    s = re.sub(r"_([0-9A-Za-z])", lambda m: sub_map.get(m.group(1), m.group(0)), s)
+
+    # LaTeX dashes.
+    s = s.replace("---", "—")
+    s = s.replace("--", "–")
+    s = s.replace("``", "“").replace("''", "”")
+
+    # Stray backslashes that survived the replacements → drop them
+    # (they would otherwise render as raw TeX).
+    s = s.replace("\\", "")
+
+    # If any backslash-free TeX-ish artifact remains (curly braces, $,
+    # a leading backslash we did not recognize), give up.
+    if re.search(r"[{}]|\\\w|\$", s):
+        return None
+
+    return s
+
+
+def strip_inline_math(text: str) -> str:
+    """Rewrite inline ``$...$`` and display ``$$...$$`` math to plain text.
+
+    Cases the shim can rewrite (``\\mu``, ``\\text{...}``, ``^N``, ``_N``,
+    ``\\cdot``, ``\\to``, etc.) are emitted as plain unicode text so the
+    QTextBrowser displays them correctly. Anything the shim cannot
+    safely rewrite is left in a ``<code>`` span so the original
+    notation stays visible to the user.
+
+    Plain prose (no ``$``) is returned unchanged.
+    """
+    if "$" not in text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        delimiters = match.group(0).split(match.group(1))[0]  # "$" or "$$"
+        body = match.group(1)
+        rewritten = _rewrite_math_segment(body)
+        if rewritten is None:
+            return f"<code>{html.escape(delimiters + body + delimiters)}</code>"
+        return rewritten
+
+    return _MATH_FALLBACK.sub(_replace, text)
+
+
+def strip_think_blocks(text: str) -> str:
+    """Remove all ``<think>...</think>`` blocks from *text* and return the remainder stripped.
+
+    Shared by the chat renderer (``_render_chat``) and the MainWindow
+    streaming handler (``on_tool_started``) so the two don't reimplement
+    the same regex.
+    """
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def extract_thinking_content(text: str) -> str | None:
+    """Extract and join all ``<think>...</think>`` blocks from *text*.
+
+    Returns ``None`` if no non-empty thinking block is found.
+    """
+    think_matches = re.findall(r"<think>(.*?)</think>", text, flags=re.DOTALL)
+    if not think_matches:
+        return None
+    joined = "\n\n".join(m.strip() for m in think_matches if m.strip())
+    return joined or None
+
+
+# ── Accent colors for each message type (dim/muted) ─────────────────────────
+# user        #4a5568  dim slate-blue
+# agent       #3d5a45  dim sage-green
+# tool call   #2e4a52  dim steel-teal
+# tool result #5a5080  dim muted indigo
+# thinking    #4a4220  dim olive
+_COLOR_USER = "#cdd6f4"          # primary text color for the "You:" label
+_COLOR_USER_TEXT = "#e8eaf0"     # near-white for the user message body
+_COLOR_USER_BG = "#243049"       # distinct blue-tinted panel (lighter for contrast)
+_COLOR_USER_BORDER = "#4d6298"   # matching blue border
+_COLOR_AGENT = "#a6e3a1"         # sage-green label (success-palette green)
+_COLOR_AGENT_BG = "#1b1d22"      # neutral dark grey — distinct from the user blue panel
+_COLOR_AGENT_BORDER = "#3a4250"  # neutral border
+_COLOR_TOOL_CALL = "#3a6070"     # dim steel-teal label
+_COLOR_TOOL_CALL_BG = "#0f1a1e" # near-black w/ teal tint
+_COLOR_TOOL_CALL_BORDER = "#1e3540"  # muted teal border
+_COLOR_TOOL_NAME = "#7a9cb0"     # teal-leaning name (used in both call + result)
+_COLOR_TOOL_RESULT = "#5a5080"   # dim muted indigo label
+_COLOR_TOOL_RESULT_BG = "#131018"  # near-black w/ indigo tint
+_COLOR_TOOL_RESULT_BORDER = "#2a2440"  # muted indigo border
+_COLOR_THINKING = "#6b5f30"      # dim olive-yellow label
+_COLOR_THINKING_BG = "#161410"   # near-black w/ olive tint
+_COLOR_THINKING_BORDER = "#332e18"   # muted olive border
+
+
+def render_user_message_html(text: str, *, font_size_px: int | None = None) -> str:
+    """Render a user message as a simple, sanitized bold-header HTML block.
+
+    ``font_size_px`` is sourced from the same :func:`ui_font_metrics` the
+    chat-display QFont uses, so the user-message body tracks zoom
+    uniformly instead of inheriting the markdown path's document default.
+    """
     safe = html.escape(text).replace("\n", "<br/>")
-    return f'<div style="margin-bottom: 12px;"><b style="color: #89b4fa;">You:</b><div style="margin-top: 4px; padding-left: 8px;">{safe}</div></div>'
+    body_style = (
+        f"margin-top: 4px; padding-left: 4px; color: {_COLOR_USER_TEXT};"
+    )
+    if font_size_px is not None and font_size_px > 0:
+        body_style += f" font-size: {font_size_px}px;"
+    return (
+        f'<div style="margin-bottom: 12px; padding: 6px 8px; border-left: 2px solid {_COLOR_USER_BORDER}; background-color: {_COLOR_USER_BG}; border-radius: 3px;">'
+        f'<b style="color: {_COLOR_USER};">You:</b>'
+        f'<div style="{body_style}">{safe}</div>'
+        f'</div>'
+    )
 
 
 class ChatWidget(QWidget):
@@ -151,11 +328,18 @@ class ChatWidget(QWidget):
     - Flicker-free streaming via insertPlainText() during the stream and
       a single setHtml() on turn completion.
     """
+    stop_clicked = Signal()
+
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
         self._history: list[dict[str, Any]] = []
         self._streaming = False
         self._stream_header_printed = False
+        # chat_pt from ui_font_metrics(zoom_factor). Set by
+        # MainWindow.apply_zoom so the user-message body HTML tracks
+        # the chat-display default font size. None means "use the
+        # document default" (matches the pre-zoom-history behavior).
+        self._chat_pt: int | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -165,10 +349,44 @@ class ChatWidget(QWidget):
         self.chat_display.anchorClicked.connect(self._on_anchor_clicked)
         layout.addWidget(self.chat_display)
 
+        input_row = QHBoxLayout()
+        input_row.setContentsMargins(0, 0, 0, 0)
+
         self.chat_input = QLineEdit(self)
         self.chat_input.setPlaceholderText("Ask the GRC Agent...")
         self.chat_input.setMinimumHeight(32)
-        layout.addWidget(self.chat_input)
+        input_row.addWidget(self.chat_input)
+
+        self.stop_btn = QPushButton("■ Stop", self)
+        self.stop_btn.setToolTip("Stop the agent's current response")
+        self.stop_btn.setMinimumHeight(32)
+        self.stop_btn.setVisible(False)
+        self.stop_btn.clicked.connect(self.stop_clicked.emit)
+        input_row.addWidget(self.stop_btn)
+
+        layout.addLayout(input_row)
+
+    def set_generating(self, is_generating: bool) -> None:
+        """Show/enable the Stop button while a turn is in flight."""
+        self.stop_btn.setVisible(is_generating)
+        self.stop_btn.setEnabled(is_generating)
+
+    def set_chat_pt(self, chat_pt: int) -> None:
+        """Update the chat-point size used for user-message body HTML.
+
+        Called from :func:`MainWindow.apply_zoom` so the user-message
+        bubble grows / shrinks with the chat display's default font
+        rather than inheriting a different (smaller) cascade.
+        """
+        if chat_pt <= 0:
+            return
+        if chat_pt == self._chat_pt:
+            return
+        self._chat_pt = chat_pt
+        for msg in self._history:
+            if msg.get("role") == "user":
+                msg["_rendered"] = None
+        self._render_chat()
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
         url_str = url.toString()
@@ -204,6 +422,12 @@ class ChatWidget(QWidget):
             raise ValueError(
                 f"unknown display role: {role!r}; expected one of {sorted(DISPLAY_ROLES)}"
             )
+        if role == "tool_finished":
+            try:
+                parsed = json.loads(text)
+                text = json.dumps(parsed, indent=2, sort_keys=True)
+            except Exception:
+                pass
         entry = {"role": role, "text": text, "_rendered": None}
         if payload:
             entry.update(payload)
@@ -212,33 +436,27 @@ class ChatWidget(QWidget):
 
     def append_tool_finished(self, name: str, result: str) -> None:
         """Append a completed tool output block."""
-        self._history.append(
-            {
-                "role": "tool_finished",
-                "tool_name": name,
-                "text": result,
-                "expanded": False,
-                "_rendered": None,
-            }
+        self.append_message(
+            "tool_finished",
+            result,
+            payload={"tool_name": name, "expanded": False},
         )
-        self._render_chat()
 
     def append_status(self, name: str, args: str) -> None:
         """Insert a styled tool-call status block with arguments."""
-        self._history.append(
-            {"role": "tool_started", "tool_name": name, "args": args, "_rendered": None}
+        self.append_message(
+            "tool_started",
+            "",
+            payload={"tool_name": name, "args": args},
         )
-        self._render_chat()
 
     def append_mutation(self, result: str) -> None:
         """Insert a styled mutation summary line."""
-        self._history.append({"role": "mutation", "text": result, "_rendered": None})
-        self._render_chat()
+        self.append_message("mutation", result)
 
     def append_error(self, text: str) -> None:
         """Insert a styled error line."""
-        self._history.append({"role": "error", "text": text, "_rendered": None})
-        self._render_chat()
+        self.append_message("error", text)
 
     def start_stream(self) -> None:
         """Start a text streaming session, locking updates to plain-text mode."""
@@ -272,8 +490,8 @@ class ChatWidget(QWidget):
 
                 # Insert the styled "Agent:" header
                 cursor.insertHtml(
-                    '<div style="margin-top: 12px; margin-bottom: 4px;">'
-                    '<b style="color: #a6e3a1;">Agent:</b>'
+                    f'<div style="margin-top: 12px; margin-bottom: 4px; border-left: 2px solid {_COLOR_AGENT_BORDER}; padding-left: 6px;">'
+                    f'<b style="color: {_COLOR_AGENT};">Agent:</b>'
                     "</div>"
                 )
 
@@ -314,6 +532,13 @@ class ChatWidget(QWidget):
         if self._history and self._history[-1]["role"] == "assistant":
             self._history.pop()
         self._render_chat()
+
+    def current_stream_text(self) -> str:
+        """Return the text accumulated so far in the most recent assistant row."""
+        for msg in reversed(self._history):
+            if msg["role"] == "assistant":
+                return msg.get("text", "")
+        return ""
 
     def get_history(self) -> list[dict[str, str]]:
         """Return a copy of the in-memory chat history for export."""
@@ -359,16 +584,13 @@ class ChatWidget(QWidget):
                 continue
 
             if role == "user":
-                cached = render_user_message_html(text)
+                cached = render_user_message_html(text, font_size_px=self._chat_pt)
             elif role == "assistant":
-                # Check for thinking block
-                match = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
-                if match:
-                    thinking_content = match.group(1).strip()
-                    clean_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-                else:
-                    thinking_content = None
-                    clean_text = text
+                # Check for thinking block(s). Round-level streaming can
+                # attach a separate <think> segment per tool-calling round,
+                # so all of them are combined rather than just the first.
+                thinking_content = extract_thinking_content(text)
+                clean_text = strip_think_blocks(text) if thinking_content else text
 
                 body = markdown_to_highlighted_html(clean_text)
 
@@ -376,31 +598,40 @@ class ChatWidget(QWidget):
                 if thinking_content:
                     is_thinking_expanded = msg.get("thinking_expanded", False)
                     safe_thinking = html.escape(thinking_content)
+                    char_count = len(thinking_content)
+                    # Default (collapsed) always renders a one-line summary
+                    # so reasoning never "disappears" from the chat after
+                    # streaming — same persist / collapse pattern as
+                    # tool_finished below.
+                    toggle_label = "▲ collapse" if is_thinking_expanded else "▼ show thinking"
+                    thinking_toggle = (
+                        f'<a href="toggle-thinking:{idx}" '
+                        f'style="color: {_COLOR_THINKING}; text-decoration: none; margin-left: 8px;">'
+                        f"{toggle_label}</a>"
+                    )
+                    thinking_box = ""
                     if is_thinking_expanded:
-                        thinking_toggle = f'<a href="toggle-thinking:{idx}" style="color: #f9e2af; text-decoration: none; font-weight: bold;">▲ collapse</a>'
                         thinking_box = (
-                            f'<pre style="margin-top: 4px; padding: 8px; background-color: #181825; '
-                            f"color: #f9e2af; font-family: monospace; font-size: 11px; border-radius: 4px; "
-                            f'border: 1px solid #f9e2af; overflow-x: auto; white-space: pre-wrap;">{safe_thinking}</pre>'
+                            f'<pre style="margin-top: 6px; padding: 8px; background-color: {_COLOR_THINKING_BG}; '
+                            f'color: #8a7c50; font-family: monospace; border-radius: 3px; '
+                            f'border: 1px solid {_COLOR_THINKING_BORDER}; overflow-x: auto; white-space: pre-wrap;">{safe_thinking}</pre>'
                         )
-                    else:
-                        thinking_toggle = f'<a href="toggle-thinking:{idx}" style="color: #f9e2af; text-decoration: none; font-weight: bold;">▼ expand</a>'
-                        thinking_box = ""
 
                     thinking_html = (
                         f'<div style="margin-top: 4px; margin-bottom: 8px; padding: 4px 8px; '
-                        f"border-left: 2px solid #f9e2af; background-color: #1e1e2e; "
-                        f'font-family: monospace; font-size: 12px; border-radius: 4px;">'
-                        f'<span style="color: #f9e2af;">Thinking Process </span>'
+                        f'border-left: 2px solid {_COLOR_THINKING_BORDER}; background-color: {_COLOR_THINKING_BG}; '
+                        f'font-family: monospace; border-radius: 3px;">'
+                        f'<span style="color: {_COLOR_THINKING};">thinking</span>'
+                        f'<span style="color: #7a7050;"> · {char_count} chars</span>'
                         f"{thinking_toggle}"
                         f"{thinking_box}"
                         f"</div>"
                     )
 
                 cached = (
-                    f'<div style="margin-bottom: 12px;">'
-                    f'<b style="color: #a6e3a1;">Agent:</b>'
-                    f'<div style="margin-top: 4px; padding-left: 8px;">'
+                    f'<div style="margin-bottom: 10px; padding: 6px 8px; border-left: 2px solid {_COLOR_AGENT_BORDER}; background-color: {_COLOR_AGENT_BG}; border-radius: 3px;">'
+                    f'<b style="color: {_COLOR_AGENT};">Agent:</b>'
+                    f'<div style="margin-top: 4px; padding-left: 4px; color: #9aabb0;">'
                     f"{thinking_html}"
                     f"{body}"
                     f"</div>"
@@ -412,59 +643,53 @@ class ChatWidget(QWidget):
                 safe_name = html.escape(name)
                 safe_args = html.escape(args)
                 cached = (
-                    f'<div style="margin-top: 6px; margin-bottom: 2px; padding: 4px 8px; '
-                    f"border-left: 2px solid #89b4fa; background-color: #1e1e2e; "
-                    f'font-family: monospace; font-size: 12px; border-radius: 4px;">'
-                    f'<span style="color: #89b4fa; font-weight: bold;">⚡ {safe_name}</span>'
-                    f' <span style="color: #a6adc8; font-size: 11px;">({safe_args})</span>'
+                    f'<div style="margin-top: 4px; margin-bottom: 2px; padding: 4px 8px; '
+                    f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
+                    f'font-family: monospace;  border-radius: 3px;">'
+                    f'<span style="color: {_COLOR_TOOL_CALL};">call </span>'
+                    f'<span style="color: {_COLOR_TOOL_NAME};">{safe_name}</span>'
+                    f' <span style="color: #485a60; ">({safe_args})</span>'
                     f"</div>"
                 )
             elif role == "mutation":
                 cached = (
-                    '<div style="color: #a6e3a1; border-left: 3px solid #a6e3a1; '
-                    'padding-left: 8px; margin: 6px 0; font-size: 13px;">&#10003; Graph updated</div>'
+                    '<div style="color: #3d5a45; border-left: 2px solid #1e3028; '
+                    'background-color: #0e120f; padding: 4px 8px; margin: 4px 0;  border-radius: 3px;">&#10003; graph updated</div>'
                 )
             elif role == "error":
                 cached = (
-                    f'<div style="color: #f38ba8; border-left: 3px solid #f38ba8; '
-                    f'padding-left: 8px; margin: 6px 0; font-size: 13px;">&#10007; {html.escape(text[:200])}</div>'
+                    f'<div style="color: #7a3535; border-left: 2px solid #3a1a1a; '
+                    f'background-color: #130e0e; padding: 4px 8px; margin: 4px 0;  border-radius: 3px;">&#10007; {html.escape(text[:200])}</div>'
                 )
             elif role == "tool_finished":
                 tool_name = msg.get("tool_name") or "Tool"
                 is_expanded = msg.get("expanded", False)
-                raw_output = text
-                try:
-                    parsed = json.loads(raw_output)
-                    pretty_output = json.dumps(parsed, indent=2, sort_keys=True)
-                except Exception:
-                    pretty_output = raw_output
+                pretty_output = text
 
                 safe_tool_name = html.escape(tool_name)
                 safe_output = html.escape(pretty_output)
 
                 if is_expanded:
-                    toggle_link = f'<a href="toggle:{idx}" style="color: #89b4fa; text-decoration: none; font-weight: bold;">▲ collapse</a>'
+                    toggle_link = f'<a href="toggle:{idx}" style="color: {_COLOR_TOOL_RESULT}; text-decoration: none;">▲ collapse</a>'
                     output_block = (
-                        f'<pre style="margin-top: 4px; padding: 8px; background-color: #181825; '
-                        f"color: #cdd6f4; font-family: monospace; font-size: 11px; border-radius: 4px; "
-                        f'border: 1px solid #45475a; overflow-x: auto; white-space: pre-wrap;">{safe_output}</pre>'
+                        f'<pre style="margin-top: 4px; padding: 8px; background-color: #100e0c; '
+                        f'color: #7a7060; font-family: monospace;  border-radius: 3px; '
+                        f'border: 1px solid {_COLOR_TOOL_RESULT_BORDER}; overflow-x: auto; white-space: pre-wrap;">{safe_output}</pre>'
                     )
                 else:
-                    toggle_link = f'<a href="toggle:{idx}" style="color: #89b4fa; text-decoration: none; font-weight: bold;">▼ expand</a>'
+                    toggle_link = f'<a href="toggle:{idx}" style="color: {_COLOR_TOOL_RESULT}; text-decoration: none;">▼ expand</a>'
                     output_block = ""
 
                 cached = (
-                    f'<div style="margin-top: 2px; margin-bottom: 6px; padding: 4px 8px; '
-                    f"border-left: 2px solid #a6e3a1; background-color: #1e1e2e; "
-                    f'font-family: monospace; font-size: 12px; border-radius: 4px;">'
-                    f'<span style="color: #a6adc8;">{safe_tool_name} output </span>'
+                    f'<div style="margin-top: 2px; margin-bottom: 4px; padding: 4px 8px; '
+                    f'border-left: 2px solid {_COLOR_TOOL_RESULT_BORDER}; background-color: {_COLOR_TOOL_RESULT_BG}; '
+                    f'font-family: monospace;  border-radius: 3px;">'
+                    f'<span style="color: {_COLOR_TOOL_RESULT};">result </span>'
+                    f'<span style="color: {_COLOR_TOOL_NAME};">{safe_tool_name} </span>'
                     f"{toggle_link}"
                     f"{output_block}"
                     f"</div>"
                 )
-            else:
-                body = markdown_to_highlighted_html(text)
-                cached = f'<div style="margin-bottom: 12px;"><b style="color: #a6e3a1;">Agent:</b><div style="margin-top: 4px; padding-left: 8px;">{body}</div></div>'
 
             msg["_rendered"] = cached
             if cached:
@@ -472,10 +697,15 @@ class ChatWidget(QWidget):
 
         scroll_bar = self.chat_display.verticalScrollBar()
         old_val = scroll_bar.value()
+        # Stick to the bottom on every re-render (new message, tool call,
+        # streamed chunk, ...) as long as the user was already at/near the
+        # bottom. If they scrolled up to read history, leave them there
+        # instead of yanking the view down on every update.
+        was_at_bottom = old_val >= scroll_bar.maximum() - 4
 
         self.chat_display.setHtml("".join(html_contents))
 
-        if self._streaming:
+        if self._streaming or was_at_bottom:
             scroll_bar.setValue(scroll_bar.maximum())
         else:
-            scroll_bar.setValue(max(scroll_bar.minimum(), min(old_val, scroll_bar.maximum())))
+            scroll_bar.setValue(old_val)

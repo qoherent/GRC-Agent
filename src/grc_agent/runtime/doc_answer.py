@@ -302,14 +302,15 @@ def _generate_grounded_answer(
         timeout=agent._llama_request_timeout_seconds,
     )
 
-    extra_body = {}
-    if "openrouter.ai" not in openai_base_url:
-        extra_body["think"] = False
+    # No `extra_body` overrides: the local Ollama chat model
+    # (``gemma4:e4b-it-qat-120k`` and similar) is reasoning-capable and
+    # benefits from default thinking. We deliberately do NOT pass
+    # ``think: false`` here — it would silently strip the model's
+    # reasoning tokens from the docs-RAG pipeline.
 
     completion = client.chat.completions.create(
         model=agent._llama_model,
         messages=[{"role": "user", "content": prompt}],
-        extra_body=extra_body,
     )
     return completion.choices[0].message.content.strip()
 
@@ -317,18 +318,12 @@ def _generate_grounded_answer(
 def ask_grc_docs(
     agent: GrcAgent,
     question: str,
-    k: int | None = None,
 ) -> ToolResult:
     """Ground one GNU Radio docs question in the wiki corpus.
 
-    Flow: embed question → sqlite-vec KNN → take the top-k **chunks**
+    Flow: embed question → sqlite-vec KNN → take the default chunks
     directly (each ≤256 words, already the most relevant sections) → single
     LLM call produces a concise, grounded answer.
-
-    ``k`` controls the number of chunks (default from
-    ``agent._retrieval_cfg.ask_grc_docs_default_k``). Sending chunks instead
-    of full files eliminates the old 75% silent-truncation and cuts the
-    grounding call's input tokens ~10×.
     """
     if not isinstance(question, str) or not question.strip():
         return agent._tool_result(
@@ -338,11 +333,7 @@ def ask_grc_docs(
             error_type=ErrorCode.INVALID_REQUEST,
         )
 
-    num_chunks = (
-        k
-        if isinstance(k, int) and k > 0
-        else agent._retrieval_cfg.ask_grc_docs_default_k
-    )
+    num_chunks = agent._retrieval_cfg.ask_grc_docs_default_k
 
     try:
         store = VectorDocsStore(DB_PATH, agent._llama_server_url)

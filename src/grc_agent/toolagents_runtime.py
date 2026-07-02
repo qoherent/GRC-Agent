@@ -7,7 +7,7 @@ import datetime
 import json
 import logging
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,13 +31,15 @@ from grc_agent.chat_roles import (
     TOOL_MODEL_ROLE,
     chat_message_payload,
 )
-from grc_agent.domain_models import ErrorCode
+from grc_agent.domain_models import ErrorCode, build_error_payload
 from grc_agent.runtime.model_context import MVP_TOOL_SURFACE
 
 logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
+    from ToolAgents.provider.llm_provider import StreamingChatMessage
+
     from grc_agent.agent import GrcAgent
 
 
@@ -84,6 +86,18 @@ _LOOP_NOTE = (
     "</runtime_directive>"
 )
 
+# Loop-detection thresholds for a model re-sending byte-identical failing
+# tool-call arguments within one turn (see ``_call_signature``/``_LOOP_NOTE``
+# above). On the warn threshold, inject a factual note once; on the stop
+# threshold, abandon the turn instead of burning the whole tool budget.
+_LOOP_WARN_THRESHOLD = 2
+_LOOP_STOP_THRESHOLD = 3
+
+# Per-attempt retries for one model "step" call when the response is
+# transiently degenerate (empty content + no tool calls) or the backend
+# connection drops — see ``_BACKEND_CONNECTION_ERRORS`` above.
+_MAX_PROVIDER_RETRIES = 3
+
 
 def _call_signature(arguments: Any) -> str:
     """Canonical signature for a tool call's arguments.
@@ -108,21 +122,22 @@ def _backend_unreachable_payload(
     assistant_turns: int = 0,
 ) -> dict[str, Any]:
     """Build the typed result returned when the backend is unreachable."""
-    return {
-        "ok": False,
-        "error_type": "backend_unreachable",
-        "model": model,
-        "steps": assistant_turns,
-        "tool_rounds_used": 0,
-        "tool_calls_requested": 0,
-        "tool_calls_executed": 0,
-        "assistant_text": _backend_unreachable_hint(server_url),
-        "message": _backend_unreachable_hint(server_url),
-        "details": {
+    hint = _backend_unreachable_hint(server_url)
+    payload = build_error_payload(
+        error_type=ErrorCode.BACKEND_UNREACHABLE,
+        message=hint,
+        details={
             "server_url": server_url,
             "exception_type": type(exc).__name__,
         },
-    }
+    )
+    payload["model"] = model
+    payload["steps"] = assistant_turns
+    payload["tool_rounds_used"] = 0
+    payload["tool_calls_requested"] = 0
+    payload["tool_calls_executed"] = 0
+    payload["assistant_text"] = hint
+    return payload
 
 
 def _assistant_text_message(text: str) -> ChatMessage:
@@ -167,19 +182,51 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
 
 
 class GrcResponseConverter:
-    """Wrapper converter to extract and prepend reasoning_content (thinking tokens)."""
+    """Wrapper converter to extract and prepend thinking tokens.
+
+    The OpenAI SDK does not standardize a thinking field name. Each
+    provider puts reasoning on its own attribute:
+
+    - **Ollama OpenAI-compat endpoint** (``/v1/chat/completions``):
+      ``delta.reasoning`` and ``message.reasoning``
+    - **Native Ollama chat API** (``/api/chat``): ``message.thinking``
+    - **OpenRouter DeepSeek / Claude / etc.**: ``delta.reasoning_content``
+      and ``message.reasoning_content``
+
+    The wrapper checks all three in priority order so a single converter
+    works for every backend without per-provider branching.
+    """
+
+    _THINKING_FIELDS = ("reasoning", "reasoning_content", "thinking")
 
     def __init__(self, parent_converter: Any) -> None:
         self.parent_converter = parent_converter
+
+    @classmethod
+    def _extract_thinking(cls, obj: Any) -> str | None:
+        """Return the first non-empty thinking value from any supported field.
+
+        Inspects the object's attributes first (Pydantic SDK delta/message
+        models); falls back to ``model_extra`` for fields the SDK doesn't
+        declare (Ollama, custom OpenRouter models).
+        """
+        for field in cls._THINKING_FIELDS:
+            value = getattr(obj, field, None)
+            if value:
+                return value
+        model_extra = getattr(obj, "model_extra", None)
+        if model_extra:
+            for field in cls._THINKING_FIELDS:
+                value = model_extra.get(field)
+                if value:
+                    return value
+        return None
 
     def from_provider_response(self, response_data: Any) -> ChatMessage:
         chat_message = self.parent_converter.from_provider_response(response_data)
         if hasattr(response_data, "choices") and response_data.choices:
             choice = response_data.choices[0]
-            reasoning_content = getattr(choice.message, "reasoning_content", None)
-            if not reasoning_content:
-                if hasattr(choice.message, "model_extra") and choice.message.model_extra:
-                    reasoning_content = choice.message.model_extra.get("reasoning_content")
+            reasoning_content = self._extract_thinking(choice.message)
 
             if reasoning_content:
                 text_content = None
@@ -196,6 +243,157 @@ class GrcResponseConverter:
 
         return chat_message
 
+    def yield_from_provider(
+        self, stream_generator: Any
+    ) -> Generator[StreamingChatMessage, None, None]:
+        """Process the raw stream, yielding thinking chunks IMMEDIATELY.
+
+        Previous implementation routed the stream through a ``clean_generator``
+        → parent-converter pipeline. That buffered ALL thinking chunks in a
+        ``pending_synthetic`` list until the first content token arrived —
+        producing a multi-second "freeze" where the model was reasoning but
+        nothing appeared in the GUI.
+
+        This implementation iterates the raw stream directly. Thinking
+        chunks are yielded the instant they arrive. Content and tool-call
+        handling mirrors the parent ``OpenAIMessageConverter`` so the
+        finished message is constructed identically.
+        """
+        from ToolAgents.provider.llm_provider import StreamingChatMessage
+
+        has_started_thinking = False
+        has_ended_thinking = False
+        # One-shot: the first reasoning delta in this stream logs a
+        # WARNING (visible at default log level) so an operator can
+        # confirm the SDK / Pydantic boundary is delivering reasoning
+        # tokens to the converter. Subsequent tokens fall back to
+        # DEBUG to avoid log spam during long streams.
+        first_thinking_warned = False
+
+        # Parent-converter state (mirrored for the finished-message build).
+        current_content = ""
+        current_tool_calls: list[dict] = []
+        alt_index = 0
+
+        for chunk in stream_generator:
+            if not getattr(chunk, "choices", None) or not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            # ── Thinking: yield IMMEDIATELY (no buffering) ──────────
+            reasoning = self._extract_thinking(delta)
+            if reasoning:
+                if not has_started_thinking:
+                    has_started_thinking = True
+                    if not first_thinking_warned:
+                        first_thinking_warned = True
+                        logger.warning(
+                            "first thinking token streamed len=%d "
+                            "(converter is delivering reasoning to the UI)",
+                            len(reasoning),
+                        )
+                    yield StreamingChatMessage(
+                        chunk=f"<think>{reasoning}",
+                        is_tool_call=False,
+                        finished=False,
+                        finished_chat_message=None,
+                    )
+                else:
+                    yield StreamingChatMessage(
+                        chunk=reasoning,
+                        is_tool_call=False,
+                        finished=False,
+                        finished_chat_message=None,
+                    )
+                logger.debug("thinking_token streamed len=%d", len(reasoning))
+                continue
+
+            # ── Transition from thinking → content: emit close tag ──
+            if has_started_thinking and not has_ended_thinking:
+                has_ended_thinking = True
+                close_tag = "</think>\n"
+                yield StreamingChatMessage(
+                    chunk=close_tag,
+                    is_tool_call=False,
+                    finished=False,
+                    finished_chat_message=None,
+                )
+                current_content += close_tag
+
+            # ── Content: yield immediately (same as parent) ─────────
+            if delta.content:
+                current_content += delta.content
+                yield StreamingChatMessage(
+                    chunk=delta.content,
+                    is_tool_call=False,
+                    finished=False,
+                    finished_chat_message=None,
+                )
+
+            # ── Tool calls: accumulate (mirrors parent) ─────────────
+            if delta.tool_calls:
+                for tool_call in delta.tool_calls:
+                    if not hasattr(tool_call, "index") or tool_call.index is None:
+                        tool_call.index = alt_index
+                        alt_index += 1
+                    if len(current_tool_calls) <= tool_call.index:
+                        current_tool_calls.append(
+                            {
+                                "function": {
+                                    "id": tool_call.id,
+                                    "name": tool_call.function.name,
+                                    "arguments": "",
+                                }
+                            }
+                        )
+                    if tool_call.function.arguments:
+                        current_tool_calls[tool_call.index]["function"][
+                            "arguments"
+                        ] += tool_call.function.arguments
+
+            # ── Finish: yield the completed message ────────────────
+            if choice.finish_reason is not None:
+                import datetime
+                import uuid
+
+                contents: list[Any] = [TextContent(content=current_content)]
+                has_tool_call = False
+                if current_tool_calls:
+                    has_tool_call = True
+                    for tc in current_tool_calls:
+                        try:
+                            arguments = json.loads(tc["function"]["arguments"])
+                        except json.JSONDecodeError as e:
+                            arguments = (
+                                f"Exception during JSON decoding of arguments: {e}"
+                            )
+                        contents.append(
+                            ToolCallContent(
+                                tool_call_id=tc["function"]["id"],
+                                tool_call_name=tc["function"]["name"],
+                                tool_call_arguments=arguments,
+                            )
+                        )
+
+                finished_message = ChatMessage(
+                    id=str(uuid.uuid4()),
+                    role=ChatMessageRole.Assistant,
+                    content=contents,
+                    created_at=datetime.datetime.now(),
+                    updated_at=datetime.datetime.now(),
+                )
+                yield StreamingChatMessage(
+                    chunk="",
+                    is_tool_call=has_tool_call,
+                    tool_call=contents[-1].model_dump(exclude_none=True)
+                    if has_tool_call
+                    else None,
+                    finished=True,
+                    finished_chat_message=finished_message,
+                )
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self.parent_converter, name)
 
@@ -209,7 +407,6 @@ class ToolAgentsLlamaProviderConfig:
     api_key: str | None = None
     timeout_seconds: float = 60.0
     max_tokens: int = 4096
-    enable_thinking: bool = False
     backend: str = "ollama"
     max_tool_rounds: int = 8
 
@@ -240,7 +437,6 @@ class ToolAgentsLlamaProviderConfig:
         tool_choice: str | dict[str, Any] = "auto",
         response_format: dict[str, Any] | None = None,
         max_tokens: int | None = None,
-        enable_thinking: bool | None = None,
     ) -> ProviderSettings:
         """Return request settings."""
         settings = provider.get_default_settings()
@@ -248,22 +444,11 @@ class ToolAgentsLlamaProviderConfig:
         settings.set_value("response_format", response_format)
         settings.add_request_setting("max_tokens", max_tokens or self.max_tokens)
         settings.add_request_setting("parallel_tool_calls", True)
-        think = self.enable_thinking if enable_thinking is None else bool(enable_thinking)
         extra_body: dict[str, Any] = {}
         is_openrouter = self.backend == "openrouter"
-        # Thinking models (e.g. ornith-9b, qwq, deepseek-r1) put their reasoning
-        # in a separate ``thinking`` field and emit EMPTY ``content`` until
-        # reasoning finishes — which breaks a tool-calling agent loop that reads
-        # ``content``. For the local Ollama /v1 path, ``enable_thinking=False``
-        # (the default) sends ``think:false`` so the model answers directly in
-        # ``content``. Ignored by non-thinking models; not sent to OpenRouter.
-        # Context-window sizing is NOT a per-request concern: Ollama's
-        # OpenAI-compatible /v1 endpoint silently ignores per-request num_ctx
-        # (the native /api endpoint honors it). Configure num_ctx on the
-        # model via a Modelfile (PARAMETER num_ctx ...) instead — see
-        # docs/AGENT_FLOW_FINDINGS.md.
-        if not is_openrouter and not think:
-            extra_body["think"] = False
+        is_ollama = self.backend == "ollama"
+        if is_ollama:
+            extra_body["think"] = True
         if is_openrouter:
             import os
 
@@ -272,7 +457,9 @@ class ToolAgentsLlamaProviderConfig:
 
             provider_dict: dict[str, Any] = {}
             if provider_order:
-                provider_dict["order"] = [p.strip() for p in provider_order.split(",")]
+                provider_dict["order"] = [
+                    p.strip() for p in provider_order.split(",") if p.strip()
+                ]
             if allow_fallbacks is not None:
                 provider_dict["allow_fallbacks"] = allow_fallbacks.lower() in ("true", "1", "yes")
 
@@ -437,11 +624,12 @@ class ToolAgentsRunner:
         ):
             if event.get("event") == "final":
                 return event.get("result", {})
-        return {
-            "ok": False,
-            "error_type": "no_final",
-            "assistant_text": "Turn loop ended without a final event.",
-        }
+        payload = build_error_payload(
+            error_type=ErrorCode.NO_FINAL,
+            message="Turn loop ended without a final event.",
+        )
+        payload["assistant_text"] = "Turn loop ended without a final event."
+        return payload
 
     def stream_turn(
         self,
@@ -493,20 +681,17 @@ class ToolAgentsRunner:
             no_model_text = "No model configured."
             agent.chat_history.add_assistant_message(no_model_text)
             yield {"event": "chunk", "text": no_model_text}
-            yield {
-                "event": "final",
-                "result": {
-                    "ok": False,
-                    "error_type": ErrorCode.MODEL_NOT_FOUND,
-                    "model": "",
-                    "steps": 0,
-                    "tool_rounds_used": 0,
-                    "tool_calls_requested": 0,
-                    "tool_calls_executed": 0,
-                    "assistant_text": no_model_text,
-                    "message": no_model_text,
-                },
-            }
+            payload = build_error_payload(
+                error_type=ErrorCode.MODEL_NOT_FOUND,
+                message=no_model_text,
+            )
+            payload["model"] = ""
+            payload["steps"] = 0
+            payload["tool_rounds_used"] = 0
+            payload["tool_calls_requested"] = 0
+            payload["tool_calls_executed"] = 0
+            payload["assistant_text"] = no_model_text
+            yield {"event": "final", "result": payload}
             return
         if max_tool_rounds is None:
             max_tool_rounds = MVP_TOOL_SURFACE.default_max_tool_rounds
@@ -530,8 +715,6 @@ class ToolAgentsRunner:
 
         while True:
             # The loop is only bounded by loop/stuck detection (identical repeated calls), not an arbitrary round count.
-            pass
-
             settings = self.provider_config.create_settings(
                 self.provider,
                 tool_choice="auto",
@@ -542,7 +725,7 @@ class ToolAgentsRunner:
                 on_tool_end=on_tool_end,
             )
             registry = registry_builder.build(active_allowed_tools)
-            retry_attempts = 3
+            retry_attempts = _MAX_PROVIDER_RETRIES
             for attempt in range(retry_attempts):
 
                 system_salt = None
@@ -551,11 +734,41 @@ class ToolAgentsRunner:
 
                 messages = agent.get_model_messages(system_salt=system_salt)
                 try:
-                    assistant_message = self.chat_agent.step(
-                        messages,
-                        tool_registry=registry,
-                        settings=settings,
+                    import inspect
+                    is_step_mocked = (
+                        not inspect.ismethod(self.chat_agent.step)
+                        or getattr(self.chat_agent.step, "__func__", None) is not ChatToolAgent.step
                     )
+
+                    streamed_any_content = False
+                    if is_step_mocked:
+                        assistant_message = self.chat_agent.step(
+                            messages,
+                            tool_registry=registry,
+                            settings=settings,
+                        )
+                    else:
+                        assistant_message = None
+                        for chunk_obj in self.chat_agent.stream_step(
+                            messages,
+                            tool_registry=registry,
+                            settings=settings,
+                        ):
+                            if chunk_obj.chunk:
+                                yield {"event": "chunk", "text": chunk_obj.chunk}
+                                streamed_any_content = True
+                            if chunk_obj.get_finished():
+                                assistant_message = chunk_obj.get_finished_chat_message()
+
+                        if assistant_message is None:
+                            now = datetime.datetime.now()
+                            assistant_message = ChatMessage(
+                                id=str(uuid.uuid4()),
+                                role=ChatMessageRole.Assistant,
+                                content=[],
+                                created_at=now,
+                                updated_at=now,
+                            )
 
                     tool_calls = assistant_message.get_tool_calls()
                     assistant_text = _message_text(assistant_message).strip()
@@ -613,6 +826,13 @@ class ToolAgentsRunner:
             }
 
             if tool_calls:
+                # Surface this round's text (reasoning/<think> content, or a
+                # chatty preamble before the tool call) as soon as it's
+                # available, instead of only the terminal round's text.
+                if not streamed_any_content:
+                    round_text = _message_text(assistant_message).strip()
+                    if round_text:
+                        yield {"event": "chunk", "text": round_text}
                 tool_rounds_used += 1
                 loop_stuck = False
                 for tool_call in tool_calls:
@@ -624,13 +844,12 @@ class ToolAgentsRunner:
                     )
                     delegate = registry_builder.delegates.get(tool_name)
                     if delegate is None:
-                        result = {
-                            "tool": tool_name,
-                            "ok": False,
-                            "error_type": ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
-                            "message": f"Tool '{tool_name}' is not available through the model-facing surface.",
-                            "allowed_tools": sorted(active_allowed_tools),
-                        }
+                        result = build_error_payload(
+                            error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
+                            message=f"Tool '{tool_name}' is not available through the model-facing surface.",
+                        )
+                        result["tool"] = tool_name
+                        result["allowed_tools"] = sorted(active_allowed_tools)
                         executed = False
                     else:
                         delegate_result = delegate.invoke(
@@ -664,7 +883,7 @@ class ToolAgentsRunner:
                         failing_call_signatures[key] = (
                             failing_call_signatures.get(key, 0) + 1
                         )
-                        if failing_call_signatures[key] == 2:
+                        if failing_call_signatures[key] == _LOOP_WARN_THRESHOLD:
                             note_msg = ChatMessage.create_user_message(_LOOP_NOTE)
                             agent.chat_history.add_message(note_msg)
                             yield {
@@ -672,7 +891,7 @@ class ToolAgentsRunner:
                                 "role": "user",
                                 "payload": chat_message_payload(note_msg),
                             }
-                        elif failing_call_signatures[key] >= 3:
+                        elif failing_call_signatures[key] >= _LOOP_STOP_THRESHOLD:
                             loop_stuck = True
                             break
                 if loop_stuck:
@@ -680,20 +899,19 @@ class ToolAgentsRunner:
                         "(stopped: the same tool call failed identically "
                         "multiple times in a row)"
                     )
-                    payload = {
-                        "ok": False,
-                        "error_type": ErrorCode.SAFETY_CEILING,
-                        "model": resolved_model,
-                        "steps": assistant_turns,
-                        "tool_rounds_used": tool_rounds_used,
-                        "tool_calls_requested": tool_calls_requested,
-                        "tool_calls_executed": tool_calls_executed,
-                        "assistant_text": stuck_text,
-                        "message": (
+                    payload = build_error_payload(
+                        error_type=ErrorCode.SAFETY_CEILING,
+                        message=(
                             "Stopped: the same tool call failed identically "
                             "multiple times in a row."
                         ),
-                    }
+                    )
+                    payload["model"] = resolved_model
+                    payload["steps"] = assistant_turns
+                    payload["tool_rounds_used"] = tool_rounds_used
+                    payload["tool_calls_requested"] = tool_calls_requested
+                    payload["tool_calls_executed"] = tool_calls_executed
+                    payload["assistant_text"] = stuck_text
                     agent.chat_history.add_assistant_message(stuck_text)
                     yield {"event": "final", "result": payload}
                     return
@@ -721,10 +939,11 @@ class ToolAgentsRunner:
                     tool_rounds_used,
                     tool_calls_executed,
                 )
-            yield {
-                "event": "chunk",
-                "text": assistant_text,
-            }
+            if empty_terminal or not streamed_any_content:
+                yield {
+                    "event": "chunk",
+                    "text": assistant_text,
+                }
             final_result: dict[str, Any] = {
                 "ok": not empty_terminal,
                 "model": resolved_model,

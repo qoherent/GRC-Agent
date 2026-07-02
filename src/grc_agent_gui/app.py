@@ -27,196 +27,10 @@ logger = logging.getLogger(__name__)
 _GUI_TEMP_DIR_MIN_AGE_SECONDS = 3600
 
 
-_STYLESHEET = """
-QMainWindow {
-    background-color: #1e1e2e;
-}
-QWidget {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    font-size: 13px;
-}
-QScrollBar:vertical {
-    border: none;
-    background: #11111b;
-    width: 8px;
-    margin: 0px;
-    border-radius: 4px;
-}
-QScrollBar::handle:vertical {
-    background: #45475a;
-    min-height: 20px;
-    border-radius: 4px;
-}
-QScrollBar::handle:vertical:hover {
-    background: #585b70;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-    height: 0px;
-}
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-    background: none;
-}
-QScrollBar:horizontal {
-    border: none;
-    background: #11111b;
-    height: 8px;
-    margin: 0px;
-    border-radius: 4px;
-}
-QScrollBar::handle:horizontal {
-    background: #45475a;
-    min-width: 20px;
-    border-radius: 4px;
-}
-QScrollBar::handle:horizontal:hover {
-    background: #585b70;
-}
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    width: 0px;
-}
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-    background: none;
-}
-QTextBrowser {
-    background-color: #181825;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 6px;
-    selection-background-color: #45475a;
-    selection-color: #cdd6f4;
-}
-QLineEdit {
-    background-color: #313244;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 6px 10px;
-    color: #cdd6f4;
-    font-size: 13px;
-}
-QLineEdit:focus {
-    border: 1px solid #89b4fa;
-}
-QTableWidget, QTreeWidget, QListWidget {
-    background-color: #181825;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    alternate-background-color: #1e1e2e;
-    outline: none;
-}
-QTableWidget::item, QTreeWidget::item, QListWidget::item {
-    padding: 3px 6px;
-    border: none;
-}
-QTableWidget::item:selected, QTreeWidget::item:selected, QListWidget::item:selected {
-    background-color: #45475a;
-    color: #cdd6f4;
-}
-QHeaderView::section {
-    background-color: #313244;
-    color: #cdd6f4;
-    padding: 4px 8px;
-    border: none;
-    border-bottom: 1px solid #45475a;
-    font-weight: bold;
-}
-QPlainTextEdit {
-    background-color: #181825;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 4px;
-    color: #a6e3a1;
-    font-family: monospace;
-    font-size: 12px;
-}
-QSplitter::handle {
-    background-color: #45475a;
-}
-QSplitter::handle:horizontal {
-    width: 2px;
-}
-QSplitter::handle:vertical {
-    height: 2px;
-}
-QStatusBar {
-    background-color: #11111b;
-    color: #a6adc8;
-    border-top: 1px solid #45475a;
-    font-size: 12px;
-    padding: 2px 8px;
-}
-QStatusBar::item {
-    border: none;
-}
-QPushButton {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 5px 14px;
-    font-size: 12px;
-}
-QPushButton:hover {
-    background-color: #45475a;
-}
-QPushButton:pressed {
-    background-color: #585b70;
-}
-QPushButton:disabled {
-    background-color: #1e1e2e;
-    color: #585b70;
-    border-color: #45475a;
-}
-QLabel {
-    color: #cdd6f4;
-    font-size: 13px;
-}
-QToolTip {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 4px;
-}
-QPushButton#runButton {
-    background-color: #40a02b;
-    color: #1e1e2e;
-    font-weight: bold;
-    border: 1px solid #40a02b;
-}
-QPushButton#runButton:hover {
-    background-color: #54b43f;
-}
-QPushButton#runButton:pressed {
-    background-color: #2e7d1e;
-}
-QPushButton#runButton:disabled {
-    background-color: #313244;
-    color: #585b70;
-    border-color: #45475a;
-}
-QPushButton#stopButton {
-    background-color: #d20f39;
-    color: #1e1e2e;
-    font-weight: bold;
-    border: 1px solid #d20f39;
-}
-QPushButton#stopButton:hover {
-    background-color: #e64545;
-}
-QPushButton#stopButton:pressed {
-    background-color: #b00c2e;
-}
-QPushButton#stopButton:disabled {
-    background-color: #313244;
-    color: #585b70;
-    border-color: #45475a;
-}
-"""
+from grc_agent_gui.styles import get_stylesheet
 
 
-def _prune_orphan_temp_dirs() -> list[str]:
+def _prune_orphan_temp_dirs() -> None:
     """Remove stale ``grc_agent_run_*`` directories from ``/tmp``.
 
     ``ProcessManager`` creates one of these for every compile/run
@@ -227,21 +41,19 @@ def _prune_orphan_temp_dirs() -> list[str]:
     its mtime is older than :data:`_GUI_TEMP_DIR_MIN_AGE_SECONDS`;
     that floor avoids racing with a freshly-spawned compile from a
     concurrently-running GUI process under a different user.
-
-    Returns the list of removed paths (empty if none).
     """
     try:
         tmp_root = Path(tempfile.gettempdir())
     except OSError as exc:
         logger.debug("_prune_orphan_temp_dirs: gettempdir failed: %s", exc)
-        return []
-    removed: list[str] = []
+        return
     cutoff = time.time() - _GUI_TEMP_DIR_MIN_AGE_SECONDS
     try:
         entries = list(tmp_root.glob("grc_agent_run_*"))
     except OSError as exc:
         logger.debug("_prune_orphan_temp_dirs: glob failed on %s: %s", tmp_root, exc)
-        return removed
+        return
+    removed = 0
     for entry in entries:
         if not entry.is_dir():
             continue
@@ -255,12 +67,11 @@ def _prune_orphan_temp_dirs() -> list[str]:
             continue
         try:
             shutil.rmtree(entry, ignore_errors=True)
-            removed.append(str(entry))
+            removed += 1
         except OSError as exc:
             logger.debug("_prune_orphan_temp_dirs: rmtree failed on %s: %s", entry, exc)
     if removed:
-        logger.info("_prune_orphan_temp_dirs removed=%d", len(removed))
-    return removed
+        logger.info("_prune_orphan_temp_dirs removed=%d", removed)
 
 
 def main() -> None:
@@ -289,7 +100,12 @@ def main() -> None:
     icon_path = Path(__file__).parent / "resources" / "icon.png"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
-    app.setStyleSheet(_STYLESHEET)
+
+    from PySide6.QtCore import QSettings
+    settings = QSettings("GRC_Agent", "GUI")
+    zoom_factor = float(settings.value("window/zoom_factor", 3.5))
+    app.setStyleSheet(get_stylesheet(zoom_factor))
+
 
     config = load_app_config()
     # Overlay user preferences (e.g. the model last picked in the
@@ -361,7 +177,6 @@ def main() -> None:
         provider_config=result.provider_config,
         llama_config=config.llama,
         bootstrap_result=result,
-        setup_mode=True,
     )
     app.aboutToQuit.connect(window.process_manager.shutdown)
     window.show()
