@@ -100,14 +100,23 @@ class ModelToolbar(QFrame):
         layout.addWidget(self.graph_path_label, stretch=1)
 
         self.open_location_btn = QToolButton(self)
-        self.open_location_btn.setText("\U0001F4C2")  # 📂
+        # Closed-folder icon — the universal "this is a folder"
+        # glyph. The previous open-folder (📂) icon was visually
+        # similar to the browse button's icon and read as
+        # "open file" rather than "open the folder this file
+        # lives in".
+        self.open_location_btn.setText("\U0001F4C1")  # 📁
         self.open_location_btn.setToolTip("Open the folder containing the loaded .grc file")
         self.open_location_btn.setEnabled(False)
         self.open_location_btn.clicked.connect(self.open_graph_location_requested.emit)
         layout.addWidget(self.open_location_btn)
 
         self.browse_btn = QToolButton(self)
-        self.browse_btn.setText("\U0001F50D")  # 🔍
+        # "Open file" emoji — a file with a folded corner, the
+        # universal "open a document" glyph. The previous
+        # magnifying-glass icon (🔍) was misleading: users
+        # associate it with "search", not "browse for a file".
+        self.browse_btn.setText("\U0001F4C4")  # 📄
         self.browse_btn.setToolTip("Browse for a .grc file to load (File > Open)")
         self.browse_btn.clicked.connect(self.browse_graph_requested.emit)
         layout.addWidget(self.browse_btn)

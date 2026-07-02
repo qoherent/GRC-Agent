@@ -96,6 +96,27 @@ def test_open_location_button_emits_signal_only_when_graph_loaded(qtbot):
     assert emitted
 
 
+def test_toolbar_icons_are_not_confusing_magnifying_glass(qtbot):
+    """The toolbar buttons must use icons that clearly map to their
+    actions. The previous set (📂 for "open folder" + 🔍 for
+    "browse") was confusing — the magnifying glass reads as
+    "search" rather than "browse for a file", and the open-folder
+    icon was visually ambiguous.
+    """
+    widget = ModelToolbar()
+    qtbot.addWidget(widget)
+
+    # The "open containing folder" button must NOT use the old
+    # 📂 emoji (open-file-folder) and the "browse" button must
+    # NOT use the 🔍 emoji (search).
+    assert "\U0001F4C2" not in widget.open_location_btn.text(), (
+        f"open_location_btn still uses 📂; text={widget.open_location_btn.text()!r}"
+    )
+    assert "🔍" not in widget.browse_btn.text(), (
+        f"browse_btn still uses 🔍 (magnifying glass); text={widget.browse_btn.text()!r}"
+    )
+
+
 def test_toolbar_layout_order_graph_model_provider(qtbot):
     """The toolbar lays widgets out left-to-right in this order:
     graph section (label + name + 📂 + 🔍), then the model section
