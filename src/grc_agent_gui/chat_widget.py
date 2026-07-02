@@ -340,6 +340,10 @@ class ChatWidget(QWidget):
         # the chat-display default font size. None means "use the
         # document default" (matches the pre-zoom-history behavior).
         self._chat_pt: int | None = None
+        # user_text_px from ui_font_metrics — the user-message body
+        # size, intentionally larger than chat_pt (the agent's
+        # markdown body inherits the document default of chat_pt).
+        self._user_text_px: int | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -371,18 +375,25 @@ class ChatWidget(QWidget):
         self.stop_btn.setVisible(is_generating)
         self.stop_btn.setEnabled(is_generating)
 
-    def set_chat_pt(self, chat_pt: int) -> None:
+    def set_chat_pt(self, chat_pt: int, user_text_px: int | None = None) -> None:
         """Update the chat-point size used for user-message body HTML.
 
         Called from :func:`MainWindow.apply_zoom` so the user-message
         bubble grows / shrinks with the chat display's default font
         rather than inheriting a different (smaller) cascade.
+
+        ``user_text_px`` is the user-message body size. It defaults to
+        ``chat_pt`` for backwards compatibility; the MainWindow passes
+        the dedicated ``ui_font_metrics(...).user_text_px`` so the
+        user text is consistently 1.3x larger than the agent body.
         """
         if chat_pt <= 0:
             return
-        if chat_pt == self._chat_pt:
+        new_user_text = user_text_px if (user_text_px and user_text_px > 0) else chat_pt
+        if chat_pt == self._chat_pt and new_user_text == self._user_text_px:
             return
         self._chat_pt = chat_pt
+        self._user_text_px = new_user_text
         for msg in self._history:
             if msg.get("role") == "user":
                 msg["_rendered"] = None
@@ -435,10 +446,44 @@ class ChatWidget(QWidget):
         self._render_chat()
 
     def append_tool_finished(self, name: str, result: str) -> None:
-        """Append a completed tool output block."""
+        """Merge a completed tool output into the most-recent ``tool_started``.
+
+        Each tool call renders as one line in the chat (call args +
+        result, with the result expandable). We avoid the historical
+        two-row layout ("call X" / "result X") because it doubles
+        every tool row in the chat without adding information.
+        """
+        # Pretty-print JSON results so the (collapsed) preview is
+        # readable when the user expands the row.
+        pretty = result
+        if result:
+            try:
+                parsed = json.loads(result)
+                pretty = json.dumps(parsed, indent=2, sort_keys=True)
+            except Exception:
+                pass
+        # Find the most recent tool_started entry with a matching
+        # tool_name and no result yet. Walk back over any assistant /
+        # thinking entries that may sit between (the agent's pre-tool
+        # text bubble, if any).
+        for entry in reversed(self._history):
+            role = entry.get("role")
+            if role == "tool_started" and entry.get("tool_name") == name and not entry.get(
+                "result"
+            ):
+                entry["result"] = pretty
+                entry["_rendered"] = None
+                self._render_chat()
+                return
+            if role == "tool_finished":
+                # Past a finished tool — stop searching; the new
+                # tool call belongs to a different turn.
+                break
+        # Fallback: no matching tool_started found. Append a
+        # standalone tool_finished row so the result is still visible.
         self.append_message(
             "tool_finished",
-            result,
+            pretty,
             payload={"tool_name": name, "expanded": False},
         )
 
@@ -458,11 +503,37 @@ class ChatWidget(QWidget):
         """Insert a styled error line."""
         self.append_message("error", text)
 
+    def append_info(self, text: str) -> None:
+        """Insert a plain informational line (e.g. graph loaded)."""
+        self.append_message("info", text)
+
     def start_stream(self) -> None:
-        """Start a text streaming session, locking updates to plain-text mode."""
+        """Start a text streaming session, locking updates to plain-text mode.
+
+        If a previous turn's empty assistant placeholder is still in
+        the history (typically because the turn began with a tool
+        call), reuse it so the agent bubble stays contiguous across
+        ``Agent: (empty) → tool call → result → Agent: text``.
+        """
         self._streaming = True
         self._stream_header_printed = False
-        self._history.append({"role": "assistant", "text": "", "_rendered": None})
+        # Look back for an empty assistant entry we can reuse. We
+        # must skip past intervening tool_started/tool_finished
+        # entries (the tool call that consumed the placeholder).
+        for entry in reversed(self._history):
+            role = entry.get("role")
+            if role in ("tool_started", "tool_finished"):
+                continue
+            if role == "assistant" and not entry.get("text", "").strip():
+                entry["_rendered"] = None
+                break
+            # Anything else (a user message, a non-empty assistant)
+            # means a new turn.
+            self._history.append({"role": "assistant", "text": "", "_rendered": None})
+            break
+        else:
+            # Empty history — first turn.
+            self._history.append({"role": "assistant", "text": "", "_rendered": None})
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.chat_display.setTextCursor(cursor)
@@ -584,7 +655,7 @@ class ChatWidget(QWidget):
                 continue
 
             if role == "user":
-                cached = render_user_message_html(text, font_size_px=self._chat_pt)
+                cached = render_user_message_html(text, font_size_px=self._user_text_px)
             elif role == "assistant":
                 # Check for thinking block(s). Round-level streaming can
                 # attach a separate <think> segment per tool-calling round,
@@ -598,15 +669,15 @@ class ChatWidget(QWidget):
                 if thinking_content:
                     is_thinking_expanded = msg.get("thinking_expanded", False)
                     safe_thinking = html.escape(thinking_content)
-                    char_count = len(thinking_content)
-                    # Default (collapsed) always renders a one-line summary
-                    # so reasoning never "disappears" from the chat after
-                    # streaming — same persist / collapse pattern as
-                    # tool_finished below.
-                    toggle_label = "▲ collapse" if is_thinking_expanded else "▼ show thinking"
+                    # Default (collapsed) always renders a one-line
+                    # summary so reasoning never "disappears" from
+                    # the chat after streaming. The label uses the
+                    # tool-call color, capital T, and "expand" /
+                    # "collapse" — no char count.
+                    toggle_label = "▲ collapse" if is_thinking_expanded else "▼ expand"
                     thinking_toggle = (
                         f'<a href="toggle-thinking:{idx}" '
-                        f'style="color: {_COLOR_THINKING}; text-decoration: none; margin-left: 8px;">'
+                        f'style="color: {_COLOR_TOOL_CALL}; text-decoration: none; margin-left: 8px;">'
                         f"{toggle_label}</a>"
                     )
                     thinking_box = ""
@@ -619,10 +690,9 @@ class ChatWidget(QWidget):
 
                     thinking_html = (
                         f'<div style="margin-top: 4px; margin-bottom: 8px; padding: 4px 8px; '
-                        f'border-left: 2px solid {_COLOR_THINKING_BORDER}; background-color: {_COLOR_THINKING_BG}; '
+                        f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
                         f'font-family: monospace; border-radius: 3px;">'
-                        f'<span style="color: {_COLOR_THINKING};">thinking</span>'
-                        f'<span style="color: #7a7050;"> · {char_count} chars</span>'
+                        f'<span style="color: {_COLOR_TOOL_CALL};">Thinking</span>'
                         f"{thinking_toggle}"
                         f"{thinking_box}"
                         f"</div>"
@@ -640,17 +710,55 @@ class ChatWidget(QWidget):
             elif role == "tool_started":
                 name = str(msg.get("tool_name", ""))
                 args = str(msg.get("args", ""))
+                result = msg.get("result")
                 safe_name = html.escape(name)
                 safe_args = html.escape(args)
-                cached = (
-                    f'<div style="margin-top: 4px; margin-bottom: 2px; padding: 4px 8px; '
-                    f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
-                    f'font-family: monospace;  border-radius: 3px;">'
-                    f'<span style="color: {_COLOR_TOOL_CALL};">call </span>'
-                    f'<span style="color: {_COLOR_TOOL_NAME};">{safe_name}</span>'
-                    f' <span style="color: #485a60; ">({safe_args})</span>'
-                    f"</div>"
-                )
+                # Single row per tool call: call + (optional) result.
+                # Same color for both halves (no teal/indigo split).
+                if result is None:
+                    # Still running.
+                    cached = (
+                        f'<div style="margin-top: 4px; margin-bottom: 4px; padding: 4px 8px; '
+                        f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
+                        f'font-family: monospace; border-radius: 3px;">'
+                        f'<span style="color: {_COLOR_TOOL_CALL};">call </span>'
+                        f'<span style="color: {_COLOR_TOOL_NAME};">{safe_name}</span>'
+                        f' <span style="color: #485a60;">({safe_args})</span>'
+                        f' <span style="color: #485a60;">…</span>'
+                        f"</div>"
+                    )
+                else:
+                    is_expanded = msg.get("expanded", False)
+                    safe_output = html.escape(result)
+                    if is_expanded:
+                        toggle_link = (
+                            f'<a href="toggle:{idx}" '
+                            f'style="color: {_COLOR_TOOL_CALL}; text-decoration: none; margin-left: 8px;">▲ collapse</a>'
+                        )
+                        output_block = (
+                            f'<pre style="margin-top: 6px; padding: 8px; background-color: #100e0c; '
+                            f'color: #7a7060; font-family: monospace; border-radius: 3px; '
+                            f'border: 1px solid {_COLOR_TOOL_CALL_BORDER}; overflow-x: auto; white-space: pre-wrap;">{safe_output}</pre>'
+                        )
+                    else:
+                        toggle_link = (
+                            f'<a href="toggle:{idx}" '
+                            f'style="color: {_COLOR_TOOL_CALL}; text-decoration: none; margin-left: 8px;">▼ expand</a>'
+                        )
+                        output_block = ""
+
+                    cached = (
+                        f'<div style="margin-top: 4px; margin-bottom: 4px; padding: 4px 8px; '
+                        f'border-left: 2px solid {_COLOR_TOOL_CALL_BORDER}; background-color: {_COLOR_TOOL_CALL_BG}; '
+                        f'font-family: monospace; border-radius: 3px;">'
+                        f'<span style="color: {_COLOR_TOOL_CALL};">call </span>'
+                        f'<span style="color: {_COLOR_TOOL_NAME};">{safe_name}</span>'
+                        f' <span style="color: #485a60;">({safe_args})</span>'
+                        f' <span style="color: {_COLOR_TOOL_CALL};">→ result</span>'
+                        f"{toggle_link}"
+                        f"{output_block}"
+                        f"</div>"
+                    )
             elif role == "mutation":
                 cached = (
                     '<div style="color: #3d5a45; border-left: 2px solid #1e3028; '
@@ -660,6 +768,12 @@ class ChatWidget(QWidget):
                 cached = (
                     f'<div style="color: #7a3535; border-left: 2px solid #3a1a1a; '
                     f'background-color: #130e0e; padding: 4px 8px; margin: 4px 0;  border-radius: 3px;">&#10007; {html.escape(text[:200])}</div>'
+                )
+            elif role == "info":
+                cached = (
+                    f'<div style="color: #a6adc8; border-left: 2px solid #313244; '
+                    f'background-color: #181825; padding: 4px 8px; margin: 4px 0; '
+                    f'border-radius: 3px;">&#8505; {html.escape(text)}</div>'
                 )
             elif role == "tool_finished":
                 tool_name = msg.get("tool_name") or "Tool"

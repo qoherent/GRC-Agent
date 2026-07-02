@@ -264,6 +264,24 @@ class RoundTripTests(_StoreTestCase):
         msgs = self.store.list_messages(sid)
         self.assertEqual(msgs, [])
 
+    def test_clear_all_wipes_every_session(self) -> None:
+        """``clear_all`` is the canonical 'reset history' primitive the
+        sidebar's "Clear all" button calls. It must remove every
+        session row and every message row in one synchronous call,
+        and return the number of sessions it removed."""
+        ids = [self._open_session(title=f"S{i}") for i in range(3)]
+        for sid in ids:
+            self.store.append(sid, "user", "hi")
+        self.store.flush(timeout=2.0)
+
+        removed = self.store.clear_all()
+
+        self.assertEqual(removed, 3)
+        rows = self.store._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
+        self.assertEqual(rows, 0)
+        mrows = self.store._writer_conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+        self.assertEqual(mrows, 0)
+
     def test_unicode_text_round_trip(self) -> None:
         sid = self._open_session()
         text = "你好，世界! 🌍 Привет мир"

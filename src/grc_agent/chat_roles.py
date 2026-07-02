@@ -12,7 +12,7 @@ from typing import Any
 from ToolAgents.data_models.messages import ChatMessage
 
 DISPLAY_ROLES: frozenset[str] = frozenset(
-    {"user", "assistant", "tool_started", "tool_finished", "mutation", "error"}
+    {"user", "assistant", "tool_started", "tool_finished", "mutation", "error", "info"}
 )
 ASSISTANT_MODEL_ROLE = "assistant_model"
 TOOL_MODEL_ROLE = "tool_model"

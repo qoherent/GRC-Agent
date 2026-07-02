@@ -255,26 +255,26 @@ def test_thinking_persistence_for_thinking_capable_models(qtbot):
     )
 
     rendered = widget._history[0]["_rendered"]
-    # The header line is always visible.
-    assert "thinking" in rendered.lower()
-    # The combined char count is shown.
-    expected_count = len(thinking_a) + 1 + len(thinking_b) + 1
-    assert f"{expected_count} chars" in rendered
+    # The header line is always visible (capital T, "Thinking").
+    assert "Thinking" in rendered
+    assert "▼ expand" in rendered
+    # No char count suffix per the spec.
+    assert "chars" not in rendered
     # The visible response survived the regex strip.
     assert "audio playback system" in rendered
     # The reasoning text is hidden in the default (collapsed) state.
     assert thinking_a not in rendered
     assert thinking_b not in rendered
 
-    # Toggle open — the user clicks ▼ show thinking.
+    # Toggle open — the user clicks ▼ expand.
     from PySide6.QtCore import QUrl
 
     widget._on_anchor_clicked(QUrl("toggle-thinking:0"))
     expanded = widget._history[0]["_rendered"]
     assert thinking_a in expanded
     assert thinking_b in expanded
-    # Header still persists.
-    assert f"{expected_count} chars" in expanded
+    # Header still persists (with "▲ collapse" toggle).
+    assert "▲ collapse" in expanded
 
 
 def test_streaming_does_not_prepend_agent_bold(qtbot):
@@ -401,6 +401,20 @@ def test_export_markdown_empty_chat_is_minimal(qtbot):
     assert md.rstrip().endswith("GRC Agent chat export")
 
 
+def test_info_role_renders_simple_confirmation_line(qtbot):
+    """Loading a .grc graph must drop a one-line confirmation in the
+    chatbox so the user has visible proof the load succeeded (status-bar
+    flicker is too transient)."""
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+    widget.append_info("Loaded: dial_tone.grc")
+    rendered = widget._history[0]["_rendered"]
+    assert "Loaded: dial_tone.grc" in rendered
+    # No markdown chrome — just a single info panel.
+    assert "border-left" in rendered
+    assert "background-color" in rendered
+
+
 def test_block_nesting_prevention(qtbot):
     """Verify that appending status blocks, errors, mutations, and stream chunks does not nest them in previous HTML blocks."""
     widget = ChatWidget()
@@ -486,6 +500,66 @@ def test_finalize_stream_keeps_final_text_when_present(qtbot):
     assert "final answer" in plain
 
 
+def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
+    """When the agent turn opens with a tool call (no pre-tool text),
+    the empty assistant placeholder must persist so the rendered
+    output is::
+
+        Agent:
+            call X (args) → result Y ▼ expand
+        Agent: The current graph is a simple...
+
+    i.e. an "Agent:" header *before* the tool call (the empty
+    placeholder), then the tool row, then the next "Agent:" header
+    for the post-tool text. The pre-fix behavior dropped the empty
+    placeholder, so the tool call rendered before any "Agent:".
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    # 1. User sends a message
+    widget.append_message("user", "explain the loaded graph")
+
+    # 2. Model starts streaming — but immediately issues a tool call
+    #    (no pre-tool text). The empty assistant placeholder is
+    #    created and must NOT be dropped.
+    widget.start_stream()
+    assert widget._streaming
+    # The MainWindow handler: empty stream → keep the placeholder.
+    # (No drop_last_assistant call.)
+
+    # 3. Tool call starts.
+    widget.append_status("inspect_graph", "{}")
+
+    # 4. Tool finishes — merged into the tool_started entry.
+    widget.append_tool_finished("inspect_graph", '{"ok": true}')
+
+    # 5. Model streams its final reply (post-tool). The empty
+    #    placeholder from step 2 is reused.
+    widget.start_stream()
+    widget.append_stream_chunk("The current graph is simple.")
+    widget.finalize_stream("The current graph is simple.")
+
+    # --- Verify temporal ordering ---
+    roles = [msg["role"] for msg in widget._history]
+    # Expected: user, assistant (empty + post-tool text in one slot),
+    # tool_started (with the result merged in).
+    assert roles == ["user", "assistant", "tool_started"], (
+        f"Temporal order broken: {roles}"
+    )
+
+    # The single assistant entry has the post-tool text (the empty
+    # placeholder was reused).
+    asst = widget._history[1]["text"]
+    assert "The current graph is simple" in asst
+
+    # The tool row carries the result inline.
+    tool = widget._history[2]
+    assert tool["tool_name"] == "inspect_graph"
+    assert tool.get("result", "").startswith("{")
+    assert '"ok": true' in tool["result"]
+
+
 def test_tool_call_preserves_temporal_order(qtbot):
     """Regression: when a tool call happens mid-stream, the pre-tool
     assistant text must close its own bubble BEFORE the tool rows are
@@ -493,7 +567,7 @@ def test_tool_call_preserves_temporal_order(qtbot):
     post-tool reply text to the pre-tool assistant bubble (it searches
     reversed history for the last assistant msg, which sits before the
     tool rows), producing [agent reply] [tool call] instead of the
-    correct [pre-tool text] [tool call] [tool result] [post-tool reply].
+    correct [pre-tool text] [tool call] [post-tool reply].
     """
     widget = ChatWidget()
     qtbot.addWidget(widget)
@@ -509,8 +583,9 @@ def test_tool_call_preserves_temporal_order(qtbot):
     widget.append_stream_chunk("Let me check the graph.")
 
     # 3. Tool call starts — this is where the fix applies.
-    #    The MainWindow handler finalizes/drops the stream before
-    #    appending the tool status. We simulate that here.
+    #    The MainWindow handler finalizes the stream before
+    #    appending the tool status. The visible-text assistant
+    #    entry stays as the pre-tool bubble.
     if widget._streaming:
         final = widget.current_stream_text()
         import re
@@ -518,23 +593,23 @@ def test_tool_call_preserves_temporal_order(qtbot):
         visible = re.sub(r"<think>.*?</think>", "", final, flags=re.DOTALL).strip()
         if visible:
             widget.finalize_stream(final)
-        else:
-            widget.drop_last_assistant()
 
     widget.append_status("inspect_graph", "{}")
 
-    # 4. Tool finishes
+    # 4. Tool finishes — merged into the tool_started entry.
     widget.append_tool_finished("inspect_graph", '{"ok": true}')
 
-    # 5. Model streams its final reply (post-tool)
+    # 5. Model streams its final reply (post-tool). The previous
+    #    assistant has text, so start_stream creates a new entry.
     widget.start_stream()
     widget.append_stream_chunk("This is a signal source.")
     widget.finalize_stream("This is a signal source.")
 
     # --- Verify temporal ordering ---
     roles = [msg["role"] for msg in widget._history]
-    # Expected: user, assistant(pre-tool), tool_started, tool_finished, assistant(post-tool)
-    assert roles == ["user", "assistant", "tool_started", "tool_finished", "assistant"], (
+    # Expected: user, assistant (pre-tool text), tool_started
+    # (with the result merged in), assistant (post-tool text).
+    assert roles == ["user", "assistant", "tool_started", "assistant"], (
         f"Temporal order broken: {roles}"
     )
 
@@ -544,41 +619,56 @@ def test_tool_call_preserves_temporal_order(qtbot):
     assert "signal source" not in pre_tool
 
     # The post-tool assistant text must contain the final reply.
-    post_tool = widget._history[4]["text"]
+    post_tool = widget._history[3]["text"]
     assert "signal source" in post_tool
     assert "Let me check" not in post_tool
 
+    # The tool row carries the result inline.
+    tool = widget._history[2]
+    assert tool["tool_name"] == "inspect_graph"
+    assert '"ok": true' in tool["result"]
+
 
 def test_tool_finished_expand_collapse(qtbot):
-    """Verify that tool_finished outputs are rendered, collapsed by default, and can be toggled via link clicks."""
+    """Tool calls render as a single line that shows ``call name
+    (args) → result ▼ expand`` and the expand link toggles the
+    result body. Merged in-place so tool_started and tool_finished
+    share the same history row.
+    """
     widget = ChatWidget()
     qtbot.addWidget(widget)
 
-    # Append tool output
+    # Append a tool call (no result yet) and then a result. With the
+    # merge contract, the result is stored on the same tool_started
+    # row — there is no separate tool_finished row.
+    widget.append_status("inspect_graph", "{}")
     widget.append_tool_finished("inspect_graph", '{"nodes": [], "edges": []}')
 
-    # Collapsed by default: verify text contains "inspect_graph output" and "expand" but NOT the JSON text
+    # Only one tool row in history (call + result merged).
+    tool_rows = [m for m in widget._history if m["role"] == "tool_started"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0].get("result") is not None
+
     html_before = widget.chat_display.toHtml()
+    # Single line: call + result on the same row, expand toggle
+    # present, result body hidden.
     assert "inspect_graph" in html_before
     assert "expand" in html_before
     assert "nodes" not in html_before
 
-    # Click the toggle link (by manually triggering the anchor clicked logic)
-    # The toggle URL is "toggle:0" because it's the first message in history (index 0)
+    # Click the toggle link.
     from PySide6.QtCore import QUrl
     widget._on_anchor_clicked(QUrl("toggle:0"))
 
-    # Expanded: verify text now contains "collapse" and the JSON text
     html_after = widget.chat_display.toHtml()
     assert "collapse" in html_after
     assert "nodes" in html_after
 
 
 def test_thinking_expand_collapse(qtbot):
-    """Verify that thinking blocks are extracted, collapsed by default, and can be toggled.
-
-    Default (collapsed) state MUST keep a one-line summary header visible
-    so reasoning does not "disappear" from the chat after streaming ends.
+    """Thinking blocks render as a one-line summary ("Thinking ▼
+    expand") with no char count, in the tool-call color. Toggling
+    reveals the reasoning body.
     """
     widget = ChatWidget()
     qtbot.addWidget(widget)
@@ -590,31 +680,38 @@ def test_thinking_expand_collapse(qtbot):
         f"<think>{thinking_text}.</think>Done analyzing.",
     )
 
-    # Collapsed by default: the header line with char count and the
-    # "show thinking" toggle must persist in the rendered HTML.
-    html_before = widget.chat_display.toHtml()
-    assert "thinking" in html_before.lower()
-    assert "show thinking" in html_before
-    assert "Done analyzing" in html_before
+    # Collapsed by default: the header line is "Thinking" (capital
+    # T, no char count, with "▼ expand" toggle). Must persist in the
+    # rendered HTML so reasoning does not "disappear".
+    html_before = widget.chat_display.toHtml().lower()
+    assert "thinking" in html_before
+    assert "show thinking" not in html_before
+    assert "expand" in html_before
+    # No char count suffix per the spec. We use a regex to avoid the
+    # QTextBrowser's default HTML head which contains "charset".
+    import re
+
+    assert not re.search(r"\b\d+ chars\b", html_before), (
+        f"char count must be omitted per spec, got: {html_before!r}"
+    )
+    assert "done analyzing" in html_before.lower()
     assert thinking_text not in html_before, (
         "thinking content must be hidden in the collapsed default state"
     )
-    # char count is shown so the user can tell at a glance that
-    # reasoning was emitted.
-    assert f"{len(thinking_text) + 1} chars" in html_before
 
     # Toggle the thinking block: URL is "toggle-thinking:0" (index 0)
     from PySide6.QtCore import QUrl
 
     widget._on_anchor_clicked(QUrl("toggle-thinking:0"))
 
-    # Expanded: verify "collapse" and the thinking text exist, and the
-    # header (with char count) is still present.
+    # Expanded: verify "collapse" and the thinking text exist.
     html_after = widget.chat_display.toHtml()
     assert "collapse" in html_after
     assert thinking_text in html_after
-    # The header persists in the expanded state too.
-    assert f"{len(thinking_text) + 1} chars" in html_after
+    # No char count in the expanded state either.
+    import re
+
+    assert not re.search(r"\b\d+ chars\b", html_after)
 
 
 def test_main_window_zoom_actions(qtbot, monkeypatch, tmp_path):
@@ -675,6 +772,8 @@ def test_ui_font_metrics_is_single_source_of_truth():
         assert f.small_px == max(10, int(12 * zoom))
         # chat_pt should track body_px (point→px is ~0.8).
         assert f.chat_pt == max(9, round(f.body_px * 0.8))
+        # user_text_px is 1.3x chat_pt (clamped to 10 floor).
+        assert f.user_text_px == max(10, int(f.chat_pt * 1.3))
 
         # The stylesheet must embed exactly the same body_px.
         body_rule = f"font-size: {f.body_px}px;"
@@ -718,13 +817,15 @@ def test_user_message_text_color_is_near_white(qtbot):
 def test_user_message_html_uses_zoomable_font_size(qtbot):
     """The user message body div must carry an explicit ``font-size`` so
     the text grows with zoom instead of inheriting the document default
-    (which the markdown path doesn't apply uniformly)."""
+    (which the markdown path doesn't apply uniformly). The user body
+    uses the dedicated ``user_text_px`` (1.3x chat_pt) so the user's
+    own input is more prominent than the agent's markdown body."""
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    widget.set_chat_pt(28)  # simulates the value applied by MainWindow.apply_zoom
+    widget.set_chat_pt(28, user_text_px=36)  # 1.3x, as MainWindow passes
     widget.append_message("user", "hi")
     rendered = widget._history[0]["_rendered"]
-    assert "font-size: 28px" in rendered
+    assert "font-size: 36px" in rendered
 
 
 def test_agent_and_user_panels_are_visually_distinct():

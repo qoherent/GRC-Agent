@@ -6,8 +6,6 @@ or reload past sessions directly inside the main window.
 
 from __future__ import annotations
 
-import logging
-
 from grc_agent.sessions_store import SessionRecord
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -20,8 +18,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-logger = logging.getLogger(__name__)
-
 
 class SidebarWidget(QWidget):
     """Left sidebar listing past sessions, with 'New Chat' and collapse button."""
@@ -29,6 +25,7 @@ class SidebarWidget(QWidget):
     session_selected = Signal(int)  # session_id
     new_chat_requested = Signal()
     collapse_requested = Signal()
+    clear_all_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,11 +53,22 @@ class SidebarWidget(QWidget):
         self.new_chat_btn.clicked.connect(self.new_chat_requested.emit)
         header.addWidget(self.new_chat_btn, stretch=1)
 
+        self.clear_all_btn = QPushButton("Clear all", self)
+        self.clear_all_btn.setObjectName("clearAllButton")
+        self.clear_all_btn.setToolTip("Delete every session from the history database")
+        self.clear_all_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #f38ba8; border: 1px solid #45475a; "
+            "border-radius: 4px; padding: 4px 8px; font-size: 0.85em; } "
+            "QPushButton:hover { background-color: #45475a; color: #f5c2c2; }"
+        )
+        self.clear_all_btn.clicked.connect(self.clear_all_requested.emit)
+        header.addWidget(self.clear_all_btn)
+
         self.collapse_btn = QPushButton("◀", self)
         self.collapse_btn.setObjectName("collapseSidebarButton")
         self.collapse_btn.setToolTip("Collapse Sidebar")
         self.collapse_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #a6adc8; border: none; font-size: 14px; padding: 4px; } "
+            "QPushButton { background-color: transparent; color: #a6adc8; border: none; font-size: 1.1em; padding: 4px; } "
             "QPushButton:hover { color: #f38ba8; }"
         )
         self.collapse_btn.clicked.connect(self.collapse_requested.emit)
@@ -71,7 +79,7 @@ class SidebarWidget(QWidget):
         # Section Label
         label = QLabel("Recent Chats", self)
         label.setStyleSheet(
-            "color: #bac2de; font-size: 11px; font-weight: bold; margin-top: 6px; padding-left: 2px;"
+            "color: #bac2de; font-size: 0.85em; font-weight: bold; margin-top: 6px; padding-left: 2px;"
         )
         layout.addWidget(label)
 
@@ -92,7 +100,7 @@ class SidebarWidget(QWidget):
         for s in sessions:
             title = s.title or "(untitled)"
             display_date = s.started_at[:10] if len(s.started_at) >= 10 else s.started_at
-            item = QListWidgetItem(f"💬 {title}\n  {display_date} · msgs={s.message_count}")
+            item = QListWidgetItem(f"💬 {title}\n  {display_date}")
             item.setData(Qt.ItemDataRole.UserRole, s.id)
             item.setToolTip(
                 f"Session #{s.id}\nModel: {s.model_alias or 'N/A'}\nGraph: {s.graph_path or 'N/A'}"

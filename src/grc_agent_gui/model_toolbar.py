@@ -1,7 +1,11 @@
 """Inline model selection toolbar — replaces the setup wizard and Model dialog.
 
 A thin horizontal bar at the top of the chat area with:
-  [Provider ▾]  [Model ▾]  [● Status]  [↻ Refresh]
+  [Provider ▾]  [Model ▾]  [↻ Refresh]  |  [Graph: <name>]  [📂]  [🔍]
+
+Backend connectivity and model status are surfaced in the main
+window's permanent status bar (``connection_status_label`` and
+``model_status_label``), not in this toolbar.
 
 The toolbar is a pure UI widget. Discovery, swapping, and persistence
 are orchestrated by :class:`MainWindow` via signals.
@@ -11,6 +15,7 @@ from __future__ import annotations
 
 from grc_agent.config import ALLOWED_BACKENDS
 from PySide6.QtCore import Signal
+from PySide6.QtGui import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -27,58 +32,9 @@ assert {_BACKEND_OLLAMA, _BACKEND_OPENROUTER} == ALLOWED_BACKENDS, (
     f"GUI backends out of sync with config.ALLOWED_BACKENDS={ALLOWED_BACKENDS}"
 )
 _PLACEHOLDER_MODEL = "(select model)"
+_NO_GRAPH_PLACEHOLDER = "(no graph loaded)"
 
-_STYLE = """
-QFrame#modelToolbar {
-    background-color: #181825;
-    border-bottom: 1px solid #313244;
-}
-QLabel#toolbarLabel {
-    color: #a6adc8;
-    font-size: 11px;
-}
-QComboBox {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 3px 8px;
-    min-height: 20px;
-    font-size: 12px;
-}
-QComboBox:hover {
-    border-color: #585b70;
-}
-QComboBox::drop-down {
-    border: none;
-    width: 18px;
-}
-QComboBox QAbstractItemView {
-    background-color: #313244;
-    color: #cdd6f4;
-    selection-background-color: #45475a;
-    border: 1px solid #45475a;
-}
-QToolButton {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 3px 6px;
-    font-size: 12px;
-}
-QToolButton:hover {
-    border-color: #89b4fa;
-    color: #89b4fa;
-}
-QToolButton:disabled {
-    color: #585b70;
-    border-color: #313244;
-}
-QLabel#statusConnected { color: #a6e3a1; font-size: 11px; }
-QLabel#statusDisconnected { color: #f38ba8; font-size: 11px; }
-QLabel#statusNoModel { color: #f9e2af; font-size: 11px; }
-"""
+# _STYLE removed. Style is generated dynamically by grc_agent_gui.styles.get_model_toolbar_style.
 
 
 class ModelToolbar(QFrame):
@@ -92,10 +48,20 @@ class ModelToolbar(QFrame):
         swap, probe, and persistence.
     refresh_requested():
         Emitted when the user clicks the refresh button.
+    open_graph_location_requested():
+        Emitted when the user clicks the "open containing folder"
+        button. The MainWindow resolves the folder from the
+        currently-loaded graph path.
+    browse_graph_requested():
+        Emitted when the user clicks the "browse for a .grc" button.
+        The MainWindow opens a QFileDialog and routes the picked
+        file through :meth:`MainWindow.open_file`.
     """
 
     connect_requested = Signal(str, str)
     refresh_requested = Signal()
+    open_graph_location_requested = Signal()
+    browse_graph_requested = Signal()
 
     def __init__(
         self,
@@ -107,7 +73,8 @@ class ModelToolbar(QFrame):
         super().__init__(parent)
         self.setObjectName("modelToolbar")
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setStyleSheet(_STYLE)
+        from grc_agent_gui.styles import get_model_toolbar_style
+        self.setStyleSheet(get_model_toolbar_style(1.0))
         self._suppress_signals = False
 
         layout = QHBoxLayout(self)
@@ -139,18 +106,50 @@ class ModelToolbar(QFrame):
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         layout.addWidget(self.model_combo, stretch=1)
 
-        self.status_label = QLabel(self)
-        self.status_label.setObjectName("statusNoModel")
-        layout.addWidget(self.status_label)
-
         self.refresh_btn = QToolButton(self)
         self.refresh_btn.setText("\u21bb")  # ↻
         self.refresh_btn.setToolTip("Refresh model list")
         self.refresh_btn.clicked.connect(self.refresh_requested.emit)
         layout.addWidget(self.refresh_btn)
 
-        self._update_status(model)
+        # Separator (vertical line) between the model-selection side
+        # and the graph-path side of the toolbar.
+        separator = QFrame(self)
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(separator)
+
+        graph_label = QLabel("Graph", self)
+        graph_label.setObjectName("toolbarLabel")
+        layout.addWidget(graph_label)
+
+        self.graph_path_label = QLabel(_NO_GRAPH_PLACEHOLDER, self)
+        self.graph_path_label.setObjectName("graphPathLabel")
+        self.graph_path_label.setToolTip("Path of the currently loaded .grc flowgraph")
+        self.graph_path_label.setMinimumWidth(160)
+        self.graph_path_label.setTextInteractionFlags(
+            self.graph_path_label.textInteractionFlags() | Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.graph_path_label, stretch=1)
+
+        self.open_location_btn = QToolButton(self)
+        self.open_location_btn.setText("\U0001F4C2")  # 📂
+        self.open_location_btn.setToolTip("Open the folder containing the loaded .grc file")
+        self.open_location_btn.setEnabled(False)
+        self.open_location_btn.clicked.connect(self.open_graph_location_requested.emit)
+        layout.addWidget(self.open_location_btn)
+
+        self.browse_btn = QToolButton(self)
+        self.browse_btn.setText("\U0001F50D")  # 🔍
+        self.browse_btn.setToolTip("Browse for a .grc file to load (File > Open)")
+        self.browse_btn.clicked.connect(self.browse_graph_requested.emit)
+        layout.addWidget(self.browse_btn)
+
         self.set_backend(backend)
+        # Tracks the absolute path of the currently loaded graph so
+        # ``open_graph_location_requested`` handlers can resolve the
+        # parent folder without re-reading the agent session.
+        self._graph_path: str = ""
 
     def set_backend(self, backend: str) -> None:
         idx = 0 if backend == _BACKEND_OLLAMA else 1
@@ -165,7 +164,6 @@ class ModelToolbar(QFrame):
             env_model = default_openrouter_model()
             self.model_combo.clear()
             self.model_combo.setEditText(env_model)
-            self._update_status(env_model)
 
     def set_models(self, models: list[str], *, current: str = "") -> None:
         self._suppress_signals = True
@@ -182,7 +180,6 @@ class ModelToolbar(QFrame):
         else:
             self.model_combo.setEditText(_PLACEHOLDER_MODEL)
         self._suppress_signals = False
-        self._update_status(effective)
 
     def set_current_model(self, model: str) -> None:
         self._suppress_signals = True
@@ -192,20 +189,6 @@ class ModelToolbar(QFrame):
         else:
             self.model_combo.setEditText(model)
         self._suppress_signals = False
-        self._update_status(model)
-
-    def set_status(self, connected: bool | None) -> None:
-        if connected is None:
-            self.status_label.setObjectName("statusNoModel")
-            self.status_label.setText("\u25cf checking")
-        elif connected:
-            self.status_label.setObjectName("statusConnected")
-            self.status_label.setText("\u25cf connected")
-        else:
-            self.status_label.setObjectName("statusDisconnected")
-            self.status_label.setText("\u25cf unreachable")
-        self.status_label.setStyleSheet(self.styleSheet())
-        self._force_style_refresh()
 
     def current_backend(self) -> str:
         return self.provider_combo.currentData()
@@ -230,17 +213,38 @@ class ModelToolbar(QFrame):
         if model and model != _PLACEHOLDER_MODEL:
             self.connect_requested.emit(self.current_backend(), model)
 
-    def _update_status(self, model: str) -> None:
-        if not model or model == _PLACEHOLDER_MODEL:
-            self.status_label.setObjectName("statusNoModel")
-            self.status_label.setText("\u25cf no model")
-        else:
-            self.status_label.setObjectName("statusConnected")
-            self.status_label.setText("\u25cf ready")
-        self._force_style_refresh()
-
     def _force_style_refresh(self) -> None:
         style = self.style()
         if style is not None:
             style.unpolish(self)
             style.polish(self)
+
+    def apply_zoom(self, zoom_factor: float) -> None:
+        from grc_agent_gui.styles import get_model_toolbar_style
+        self.setStyleSheet(get_model_toolbar_style(zoom_factor))
+        self._force_style_refresh()
+
+    def set_graph_path(self, path: str) -> None:
+        """Update the toolbar's graph-path display.
+
+        ``path`` is the absolute path of the currently loaded
+        ``.grc`` file. Pass an empty string to clear the display
+        (e.g. when a session resumes with no graph).
+        """
+        self._graph_path = path or ""
+        if not self._graph_path:
+            self.graph_path_label.setText(_NO_GRAPH_PLACEHOLDER)
+            self.open_location_btn.setEnabled(False)
+            return
+        # Show only the filename in the toolbar (the full path lives in
+        # the tooltip to keep the bar narrow).
+        from pathlib import Path
+
+        name = Path(self._graph_path).name
+        self.graph_path_label.setText(name)
+        self.graph_path_label.setToolTip(self._graph_path)
+        self.open_location_btn.setEnabled(True)
+
+    def current_graph_path(self) -> str:
+        """Return the absolute path of the loaded graph (or ``""``)."""
+        return self._graph_path

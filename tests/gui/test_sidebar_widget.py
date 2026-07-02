@@ -47,6 +47,22 @@ def test_sidebar_widget_builds_and_populates(qtbot):
     assert item.data(Qt.ItemDataRole.UserRole) == 1
 
 
+def test_sidebar_item_text_omits_msgs_count(qtbot):
+    """Recent-chats row must show only title + date — the ``msgs=N`` count
+    was a noise token (it duplicated the chat widget's own indicator and
+    pushed the date off-screen in long lists)."""
+    widget = SidebarWidget()
+    qtbot.addWidget(widget)
+
+    sessions = [_make_session(id=1, title="Alpha", message_count=3)]
+    widget.populate_sessions(sessions)
+    text = widget.list_widget.item(0).text()
+    assert "msgs=" not in text
+    assert "Alpha" in text
+    # The date still appears, just without the msgs=N suffix.
+    assert "2026-06-01" in text
+
+
 def test_sidebar_signals_emitted(qtbot):
     widget = SidebarWidget()
     qtbot.addWidget(widget)
@@ -86,6 +102,79 @@ def test_sidebar_signals_emitted(qtbot):
     widget.session_selected.connect(on_session_selected)
     widget._on_item_double_clicked(widget.list_widget.item(0))
     assert selected_session_id == 42
+
+
+def test_sidebar_clear_all_emits_signal(qtbot):
+    """The "Clear all history" button must emit ``clear_all_requested``
+    so the main window can wipe the sessions DB and confirm with the
+    user."""
+    widget = SidebarWidget()
+    qtbot.addWidget(widget)
+    assert hasattr(widget, "clear_all_btn"), "SidebarWidget must expose a clear_all button"
+    assert hasattr(widget, "clear_all_requested"), "SidebarWidget must expose the clear_all_requested signal"
+
+    emitted = False
+
+    def on_clear():
+        nonlocal emitted
+        emitted = True
+
+    widget.clear_all_requested.connect(on_clear)
+    widget.clear_all_btn.click()
+    assert emitted
+
+
+def test_main_window_clear_all_wipes_sessions_db(qtbot, tmp_path, monkeypatch):
+    """Clicking the sidebar's Clear all button must (a) prompt the
+    user, (b) wipe every row from the sessions DB, and (c) refresh
+    the sidebar list."""
+    db_path = tmp_path / "sessions.db"
+    import grc_agent_gui.main_window
+
+    monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
+
+    SessionStore._instance = None
+
+    mock_agent = MagicMock()
+    mock_agent.session = None
+    mock_provider = MagicMock()
+
+    window = MainWindow(mock_agent, mock_provider)
+    qtbot.addWidget(window)
+
+    # Seed two sessions so the list is non-empty.
+    for i in range(2):
+        sid = window.sessions_store.open_session(
+            graph_path="",
+            graph_hash="",
+            model_alias="m",
+            backend="ollama",
+            title=f"S{i}",
+        )
+        window.sessions_store.append(sid, "user", "hi")
+    window.sessions_store.flush(timeout=2.0)
+
+    # Bypass the user-confirmation dialog.
+    monkeypatch.setattr(
+        "grc_agent_gui.main_window.QMessageBox.question",
+        lambda *a, **kw: __import__("PySide6").QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+
+    # Trigger the same handler the button click would.
+    window._on_clear_all_history()
+
+    # The DB is empty.
+    rows = window.sessions_store._writer_conn.execute(
+        "SELECT count(*) FROM sessions"
+    ).fetchone()[0]
+    assert rows == 0
+    # The sidebar list is empty.
+    assert window.sidebar_widget.list_widget.count() == 0
+    # The active session is reset.
+    assert window.active_session_id is None
+
+    window.sessions_store.close()
+    SessionStore._instance = None
 
 
 def test_main_window_sidebar_integration(qtbot, tmp_path, monkeypatch):

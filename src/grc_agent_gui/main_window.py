@@ -426,6 +426,7 @@ class MainWindow(QMainWindow):
         self.sidebar_widget.session_selected.connect(self._open_past_session)
         self.sidebar_widget.new_chat_requested.connect(self.start_new_chat_session)
         self.sidebar_widget.collapse_requested.connect(self.toggle_sidebar)
+        self.sidebar_widget.clear_all_requested.connect(self._on_clear_all_history)
 
         # Set stretch factors: only the Chat widget expands, sidebar and inspector keep fixed widths on resize.
         splitter.setStretchFactor(0, 0)
@@ -483,6 +484,8 @@ class MainWindow(QMainWindow):
         )
         self.model_toolbar.connect_requested.connect(self._on_toolbar_connect)
         self.model_toolbar.refresh_requested.connect(self._on_toolbar_refresh)
+        self.model_toolbar.open_graph_location_requested.connect(self._on_open_graph_location)
+        self.model_toolbar.browse_graph_requested.connect(self.open_file_dialog)
 
         main_layout.addWidget(self.model_toolbar)
         main_layout.addWidget(v_splitter)
@@ -609,13 +612,17 @@ class MainWindow(QMainWindow):
         if hasattr(self, "chat_widget") and self.chat_widget is not None:
             from PySide6.QtGui import QFont
 
-            chat_pt = ui_font_metrics(self._zoom_factor).chat_pt
+            metrics = ui_font_metrics(self._zoom_factor)
+            chat_pt = metrics.chat_pt
             font = QFont("Ubuntu Sans", chat_pt)
             self.chat_widget.chat_display.document().setDefaultFont(font)
-            # Push the same chat_pt down to the chat widget so the
-            # user-message body div (which lives outside the document
-            # font cascade) tracks zoom uniformly.
-            self.chat_widget.set_chat_pt(chat_pt)
+            # Push the same chat_pt + user_text_px down to the chat
+            # widget so the user-message body div (which lives outside
+            # the document font cascade) tracks zoom uniformly, and
+            # the user text is consistently larger than the agent
+            # body so the user's own input is the most prominent
+            # text in the conversation.
+            self.chat_widget.set_chat_pt(chat_pt, user_text_px=metrics.user_text_px)
 
         # Apply zoom to the model toolbar
         if hasattr(self, "model_toolbar") and self.model_toolbar is not None:
@@ -973,22 +980,22 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Stopping…")
 
     def on_tool_started(self, name: str, args: str) -> None:
-        """Show the running tool name in the status bar and chat indicator."""
-        # Close the in-flight assistant stream so tool calls render in the
-        # correct temporal position. Without this, append_stream_chunk
-        # keeps appending post-tool reply text to the pre-tool assistant
-        # bubble (it searches reversed history for the last assistant msg,
-        # which sits before the tool rows), producing
-        # [agent reply] [tool call] instead of [tool call] [agent reply].
+        """Show the running tool name in the status bar and chat indicator.
+
+        Finalize any in-flight assistant stream so tool calls render in
+        the correct temporal position. The empty assistant placeholder
+        (created by ``start_stream``) is intentionally NOT dropped —
+        the chat widget's ``start_stream`` reuses it across
+        ``Agent: text → tool call → result → Agent: text`` so the
+        whole turn renders under one "Agent:" header.
+        """
         if self.chat_widget._streaming:
             final = self.chat_widget.current_stream_text()
             visible = strip_think_blocks(final)
             if visible:
                 self.chat_widget.finalize_stream(final)
-            else:
-                # No visible content — drop the placeholder so we don't
-                # leave an empty "Agent:" bubble before the tool call.
-                self.chat_widget.drop_last_assistant()
+            # else: keep the empty assistant entry — the next
+            # ``start_stream`` reuses it for the post-tool text.
 
         self.status_bar.showMessage(f"-- {name}...")
         self.status_bar.setStyleSheet(
@@ -1176,8 +1183,44 @@ class MainWindow(QMainWindow):
         self.agent.session = loaded
         self.inspector_widget.set_grc_file_path(str(file_path))
         self.refresh_inspector()
+        # Update the toolbar's graph-path label so the user can see
+        # which file is loaded at a glance and use the open-location
+        # / browse buttons to navigate.
+        self.model_toolbar.set_graph_path(str(file_path))
+        # Drop a visible confirmation in the chatbox so the user has
+        # proof the load succeeded. The status-bar message is too
+        # transient (auto-clears on the next event).
+        self.chat_widget.append_info(f"Loaded graph: {file_path.name}")
         self.status_bar.showMessage(f"Loaded {file_path}")
         self.update_ui_state()
+
+    def _on_open_graph_location(self) -> None:
+        """Open the OS file manager at the folder of the loaded .grc.
+
+        Wired to the model toolbar's "open containing folder" button.
+        Shows a status-bar hint (not a modal) if the path is missing
+        or the folder does not exist on disk.
+        """
+        path = self.model_toolbar.current_graph_path()
+        if not path:
+            self.status_bar.showMessage("No graph loaded.", 5000)
+            return
+        from pathlib import Path
+
+        folder = Path(path).expanduser().parent
+        if not folder.exists():
+            self._show_error(
+                "Folder missing",
+                f"The folder for {path} no longer exists on disk.",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            self._show_error(
+                "Open folder",
+                f"Could not open {folder} in the system file manager.",
+            )
+            return
+        self.status_bar.showMessage(f"Opened {folder}", 5000)
 
     def save_file(self) -> None:
         if not (self.agent.session and self.agent.session.path):
@@ -1334,6 +1377,38 @@ class MainWindow(QMainWindow):
         self.active_session_id = None
         self.sidebar_widget.list_widget.clearSelection()
         self.status_bar.showMessage("Started a fresh chat session.", 5000)
+
+    def _on_clear_all_history(self) -> None:
+        """Wipe every session row from the on-disk sessions DB.
+
+        Triggered by the sidebar's "Clear all" button. Prompts the
+        user (destructive action), then calls
+        :meth:`SessionStore.clear_all` and refreshes the sidebar.
+        """
+        confirm = QMessageBox.question(
+            self,
+            "Clear all chat history?",
+            "This permanently deletes every session from the local "
+            "history database. The currently-open chat (if any) is "
+            "also closed. This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            removed = self.sessions_store.clear_all()
+        except Exception as exc:
+            logger.exception("Failed to clear session history: %s", exc)
+            self.status_bar.showMessage(f"Clear failed: {exc}", 8000)
+            return
+        # Drop the in-memory chat and any resume state.
+        self.chat_widget.clear()
+        if hasattr(self.agent, "reset_chat_session"):
+            self.agent.reset_chat_session()
+        self.active_session_id = None
+        self.sidebar_widget.list_widget.clear()
+        self.status_bar.showMessage(f"Cleared {removed} session(s) from history.", 5000)
 
     def _open_past_session(self, session_id: int) -> None:
         """Clear the chat widget, autoload the associated .grc graph, and replay past messages.

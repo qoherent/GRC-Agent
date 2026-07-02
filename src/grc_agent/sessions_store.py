@@ -498,6 +498,22 @@ class SessionStore:
         drain, False on timeout."""
         return self._drained.wait(timeout)
 
+    def clear_all(self) -> int:
+        """Delete every session and its messages from the on-disk DB.
+
+        Synchronous (bypasses the writer queue) so the caller can
+        re-open the sessions list immediately after the call returns
+        and observe the empty state.
+
+        Returns the number of session rows that were removed.
+        """
+        # Count first so the caller can report a useful number.
+        before = self._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
+        self._writer_conn.execute("DELETE FROM messages")
+        self._writer_conn.execute("DELETE FROM sessions")
+        self._writer_conn.commit()
+        return int(before)
+
     def close(self) -> None:
         """Stop the writer thread and close the DB.
 
