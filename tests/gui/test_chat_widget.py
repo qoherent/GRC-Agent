@@ -172,40 +172,40 @@ def test_assistant_message_uses_unified_font(qtbot):
 
 
 def test_tool_name_color_parity_between_call_and_result(qtbot):
-    """The tool NAME (e.g. ``inspect_graph``) must use the same color in
-    both ``call inspect_graph ({})`` and ``result inspect_graph`` rows —
-    only the role label (``call``/``result``) and the row chrome differ.
-    Regression: the result row used to color the name in a one-off rust
-    hex (``#6a5040``) while the call row used a different teal.
+    """The tool NAME (e.g. ``inspect_graph``) must use the same
+    color in the call part and the result part of a single merged
+    ``call inspect_graph ({}) → result`` row. The previous two-row
+    layout had the call and result in two different history rows
+    with two different name colors; the fragment-based render keeps
+    the color unified.
     """
     from grc_agent_gui.chat_widget import _COLOR_TOOL_NAME
 
     widget = ChatWidget()
     qtbot.addWidget(widget)
-    widget.append_message(
-        "tool_started", "", payload={"tool_name": "inspect_graph", "args": "{}"}
-    )
-    widget.append_message(
-        "tool_finished", "{}", payload={"tool_name": "inspect_graph", "expanded": False}
-    )
 
-    call_rendered = widget._history[0]["_rendered"]
-    result_rendered = widget._history[1]["_rendered"]
+    # Single tool row: call + result merged on the same fragment.
+    widget.append_message("user", "Inspect the graph.")
+    widget.start_stream()
+    widget.append_status("inspect_graph", "{}")
+    widget.append_tool_finished("inspect_graph", '{"ok": true}')
 
+    assistant = widget._history[1]
+    tool_fragment = assistant["fragments"][0]
+    assert tool_fragment["name"] == "inspect_graph"
+    # Result is pretty-printed JSON; just check the content is in
+    # there.
+    assert "ok" in tool_fragment["result"]
+    assert "true" in tool_fragment["result"]
+
+    rendered = assistant["_rendered"]
     expected_color = f"color: {_COLOR_TOOL_NAME};"
-    assert expected_color in call_rendered, (
-        f"call row missing unified tool name color {expected_color}:\n{call_rendered}"
-    )
-    assert expected_color in result_rendered, (
-        f"result row missing unified tool name color {expected_color}:\n{result_rendered}"
+    assert expected_color in rendered, (
+        f"tool row missing unified tool name color {expected_color}:\n{rendered}"
     )
     # The legacy one-off rust color must be gone.
-    assert "color: #6a5040;" not in result_rendered, (
-        f"result row still uses legacy rust color:\n{result_rendered}"
-    )
-    assert "color: #6a8a96;" not in call_rendered, (
-        f"call row still uses legacy teal color:\n{call_rendered}"
-    )
+    assert "color: #6a5040;" not in rendered
+    assert "color: #6a8a96;" not in rendered
 
 
 def test_user_message_background_is_visually_distinct(qtbot):
@@ -455,35 +455,6 @@ def test_block_nesting_prevention(qtbot):
     assert "response text" in lines_after
 
 
-def test_drop_last_assistant_removes_empty_placeholder(qtbot):
-    """When a turn ends with an empty assistant text (the model
-    only issued tool calls), the chat widget should drop the
-    streaming placeholder so the user does not see an empty
-    "Agent:" bubble.
-    """
-    widget = ChatWidget()
-    qtbot.addWidget(widget)
-
-    widget.append_message("user", "Inspect the graph.")
-    widget.start_stream()
-    # The model never produced text; the streaming placeholder is
-    # an empty assistant row.
-    assert widget._history[-1]["role"] == "assistant"
-    assert widget._history[-1]["text"] == ""
-
-    widget.drop_last_assistant()
-
-    # The empty assistant row is gone.
-    roles = [row["role"] for row in widget._history]
-    assert "assistant" not in roles
-    # The user row is still there.
-    assert "user" in roles
-
-    plain = widget.chat_display.toPlainText()
-    assert "Inspect the graph." in plain
-    # No "Agent:" header since the only assistant row was dropped.
-    assert "Agent:" not in plain
-
 def test_finalize_stream_keeps_final_text_when_present(qtbot):
     """Sanity: ``finalize_stream`` is the path used when the model
     *did* produce text. Empty-text case is covered above.
@@ -576,8 +547,6 @@ def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
     #    created and must NOT be dropped.
     widget.start_stream()
     assert widget._streaming
-    # The MainWindow handler: empty stream → keep the placeholder.
-    # (No drop_last_assistant call.)
 
     # 3. Tool call starts — added as a fragment on the current turn.
     widget.append_status("inspect_graph", "{}")
@@ -597,9 +566,15 @@ def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
     # the assistant — NOT a separate history row.
     assert roles == ["user", "assistant"], f"Temporal order broken: {roles}"
 
-    # The single assistant entry has the post-tool text.
+    # The single assistant entry has the post-tool text in the
+    # last text fragment of the fragments list.
     asst = widget._history[1]
-    assert "The current graph is simple" in asst["text"]
+    post_tool_text = next(
+        f["text"]
+        for f in reversed(asst.get("fragments", []))
+        if f.get("type") == "text"
+    )
+    assert "The current graph is simple" in post_tool_text
 
     # And the fragment list has [tool, text] in that order.
     frags = asst.get("fragments", [])
@@ -698,16 +673,23 @@ def test_tool_finished_expand_collapse(qtbot):
     widget = ChatWidget()
     qtbot.addWidget(widget)
 
-    # Append a tool call (no result yet) and then a result. With the
-    # merge contract, the result is stored on the same tool_started
-    # row — there is no separate tool_finished row.
+    # The tool row lives as a fragment inside the active assistant
+    # turn. We open the turn (the MainWindow's handler always does
+    # this before any tool call), append the call, and store the
+    # result on the same fragment.
+    widget.append_message("user", "Inspect the graph.")
+    widget.start_stream()
     widget.append_status("inspect_graph", "{}")
     widget.append_tool_finished("inspect_graph", '{"nodes": [], "edges": []}')
 
-    # Only one tool row in history (call + result merged).
-    tool_rows = [m for m in widget._history if m["role"] == "tool_started"]
-    assert len(tool_rows) == 1
-    assert tool_rows[0].get("result") is not None
+    # One assistant row, with a single tool fragment carrying the
+    # result. The legacy standalone tool_started/tool_finished
+    # rows are no longer created.
+    assert widget._history[0]["role"] == "user"
+    assert widget._history[1]["role"] == "assistant"
+    tool_frags = [f for f in widget._history[1]["fragments"] if f["type"] == "tool"]
+    assert len(tool_frags) == 1
+    assert tool_frags[0]["result"] == '{\n  "edges": [],\n  "nodes": []\n}'
 
     html_before = widget.chat_display.toHtml()
     # Single line: call + result on the same row, expand toggle
@@ -716,9 +698,11 @@ def test_tool_finished_expand_collapse(qtbot):
     assert "expand" in html_before
     assert "nodes" not in html_before
 
-    # Click the toggle link.
+    # Click the toggle link. The URL format is
+    # ``toggle-tool:assistant_idx:tool_idx``.
     from PySide6.QtCore import QUrl
-    widget._on_anchor_clicked(QUrl("toggle:0"))
+
+    widget._on_anchor_clicked(QUrl("toggle-tool:1:0"))
 
     html_after = widget.chat_display.toHtml()
     assert "collapse" in html_after
@@ -846,14 +830,18 @@ def test_chat_html_does_not_contain_legacy_em_overrides():
     unified font cascade."""
     widget = ChatWidget()
 
-    # Render every role we ship in chat.
+    # Render every role we ship in chat, plus a tool fragment inside
+    # an assistant turn (the post-2026-07-02 way to render tools).
     widget.append_message("user", "hi")
     widget.append_message("assistant", "hello back")
     widget.append_message("assistant", "<thinkreasoning here.</think>response")
-    widget.append_message("tool_started", "", payload={"tool_name": "x", "args": "y"})
-    widget.append_message("tool_finished", "{}", payload={"tool_name": "x", "expanded": False})
+    widget.append_message("user", "go")
+    widget.start_stream()
+    widget.append_status("inspect_graph", "{}")
+    widget.append_tool_finished("inspect_graph", '{"ok": true}')
     widget.append_message("mutation", "")
     widget.append_message("error", "boom")
+    widget.append_message("info", "loaded")
 
     for entry in widget._history:
         rendered = entry.get("_rendered") or ""

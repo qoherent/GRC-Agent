@@ -1087,11 +1087,11 @@ class MainWindow(QMainWindow):
         self._set_generation_status_label(False)
         assistant_text = result.get("assistant_text", "")
         if self.chat_widget._streaming:
-            # Finalize with everything streamed across every round (this
-            # turn's own chunk(s) already flowed in via response_chunk,
-            # so the accumulated text is authoritative), not just the
-            # terminal round's assistant_text, which would discard any
-            # earlier tool-round reasoning/<think> content.
+            # Finalize the in-flight text fragment with the
+            # authoritative streamed text. The chat widget walks
+            # the active turn's fragments in order, so the
+            # pre-tool text (in its own fragment) and the
+            # post-tool text (this fragment) stay distinct.
             self.chat_widget.finalize_stream(self.chat_widget.current_stream_text())
         elif assistant_text.strip():
             self.chat_widget.append_message("assistant", assistant_text)
