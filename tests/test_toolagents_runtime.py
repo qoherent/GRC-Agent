@@ -32,6 +32,15 @@ def _assistant_text(text: str) -> ChatMessage:
     )
 
 
+def _extra_body_from(mock_settings: Any) -> dict[str, Any]:
+    """Extract the ``extra_body`` dict passed to ``settings.set_value``."""
+    for call in mock_settings.set_value.call_args_list:
+        args, _ = call
+        if len(args) >= 2 and args[0] == "extra_body":
+            return args[1]
+    return {}
+
+
 class ToolAgentsImportTests(unittest.TestCase):
     def test_dependency_imports(self) -> None:
         from ToolAgents import ToolRegistry
@@ -236,12 +245,8 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
             )
             cfg.create_settings(mock_provider)
 
-        mock_settings.set_value.assert_any_call(
-            "extra_body",
-            {"provider": {"order": ["alibaba"], "allow_fallbacks": False}},
-        )
-
-
+        extra_body = _extra_body_from(mock_settings)
+        self.assertEqual(extra_body["provider"], {"order": ["alibaba"], "allow_fallbacks": False})
 
     def test_ollama_provider_settings_has_no_per_request_num_ctx(self) -> None:
         """Ollama's /v1 endpoint silently ignores per-request num_ctx — the
@@ -273,6 +278,224 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
                 assert "options" not in value.get("extra_body", {}), (
                     f"extra_body must not contain 'options' (num_ctx is dead on /v1): {value}"
                 )
+
+
+class OpenRouterWebPluginTests(unittest.TestCase):
+    """OpenRouter web search is a request-side ``plugins`` augmentation in
+    ``extra_body`` — there is no standalone search REST endpoint. On by
+    default for the openrouter backend; the Ollama backend never adds it
+    (its web_search/web_fetch tools hit Ollama's own hosted API)."""
+
+    def _cfg_and_settings(self, backend: str, base_url: str):
+        from grc_agent.toolagents_runtime import GrcOpenAIChatAPI, ToolAgentsLlamaProviderConfig
+
+        mock_provider = mock.MagicMock(spec=GrcOpenAIChatAPI)
+        mock_settings = mock.MagicMock()
+        mock_provider.get_default_settings.return_value = mock_settings
+        cfg = ToolAgentsLlamaProviderConfig(base_url=base_url, model="m", backend=backend)
+        cfg.create_settings(mock_provider)
+        return cfg, mock_settings
+
+    def test_web_plugin_on_by_default_for_openrouter(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            _, mock_settings = self._cfg_and_settings("openrouter", "https://openrouter.ai/api")
+        extra_body = _extra_body_from(mock_settings)
+        self.assertEqual(extra_body["plugins"], [{"id": "web", "max_results": 5}])
+
+    def test_web_plugin_opt_out_via_env(self) -> None:
+        with mock.patch.dict("os.environ", {"OPENROUTER_WEB_SEARCH": "false"}, clear=True):
+            _, mock_settings = self._cfg_and_settings("openrouter", "https://openrouter.ai/api")
+        extra_body = _extra_body_from(mock_settings)
+        self.assertNotIn("plugins", extra_body)
+
+    def test_web_plugin_max_results_clamped_to_10(self) -> None:
+        env = {"OPENROUTER_WEB_SEARCH_MAX_RESULTS": "999"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            _, mock_settings = self._cfg_and_settings("openrouter", "https://openrouter.ai/api")
+        self.assertEqual(_extra_body_from(mock_settings)["plugins"][0]["max_results"], 10)
+
+    def test_web_plugin_domain_filters_parsed(self) -> None:
+        env = {
+            "OPENROUTER_WEB_SEARCH_INCLUDE_DOMAINS": "a.com, b.com",
+            "OPENROUTER_WEB_SEARCH_EXCLUDE_DOMAINS": "reddit.com",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            _, mock_settings = self._cfg_and_settings("openrouter", "https://openrouter.ai/api")
+        plugin = _extra_body_from(mock_settings)["plugins"][0]
+        self.assertEqual(plugin["include_domains"], ["a.com", "b.com"])
+        self.assertEqual(plugin["exclude_domains"], ["reddit.com"])
+
+    def test_web_plugin_coexists_with_provider_routing(self) -> None:
+        env = {"OPENROUTER_PROVIDER_ORDER": "alibaba"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            _, mock_settings = self._cfg_and_settings("openrouter", "https://openrouter.ai/api")
+        extra_body = _extra_body_from(mock_settings)
+        self.assertEqual(extra_body["provider"], {"order": ["alibaba"]})
+        self.assertIn("plugins", extra_body)
+
+    def test_ollama_backend_never_adds_web_plugin(self) -> None:
+        """The Ollama path must stay fully separate from the OpenRouter plugin."""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            _, mock_settings = self._cfg_and_settings("ollama", "http://127.0.0.1:11434")
+        extra_body = _extra_body_from(mock_settings)
+        self.assertNotIn("plugins", extra_body)
+        self.assertEqual(extra_body, {"think": True})
+
+
+class UrlCitationSurfacingTests(unittest.TestCase):
+    """OpenRouter's web plugin returns ``url_citation`` annotations on the
+    assistant message. Without surfacing them the model's grounding is
+    invisible, so GrcResponseConverter must render a Sources footnote."""
+
+    def _converter(self) -> Any:
+        from grc_agent.toolagents_runtime import GrcResponseConverter
+
+        parent = mock.MagicMock()
+        parent.from_provider_response.side_effect = lambda response_data: ChatMessage(
+            id=str(uuid.uuid4()),
+            role=ChatMessageRole.Assistant,
+            content=[
+                TextContent(content=getattr(response_data.choices[0].message, "content", "") or "")
+            ],
+            created_at=datetime.datetime.now(),
+            updated_at=datetime.datetime.now(),
+        )
+        return GrcResponseConverter(parent)
+
+    def _citation(self, title: str, url: str, content: str = ""):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            type="url_citation",
+            url_citation=SimpleNamespace(title=title, url=url, content=content),
+        )
+
+    def _delta(self, content=None, annotations=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            content=content,
+            tool_calls=None,
+            annotations=annotations,
+            reasoning=None,
+            reasoning_content=None,
+            thinking=None,
+            model_extra=None,
+        )
+
+    def _response(self, content: str, annotations=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=content, annotations=annotations or []),
+                    delta=None,
+                    finish_reason=None,
+                )
+            ]
+        )
+
+    def test_non_stream_citations_appended_as_sources_footnote(self) -> None:
+        converter = self._converter()
+        response = self._response(
+            "The answer.",
+            annotations=[self._citation("Example", "https://example.com/a")],
+        )
+
+        message = converter.from_provider_response(response)
+
+        text = "".join(c.content for c in message.content if isinstance(c, TextContent))
+        self.assertIn("The answer.", text)
+        self.assertIn("Sources:", text)
+        self.assertIn("[Example](https://example.com/a)", text)
+
+    def test_non_stream_no_annotations_leaves_text_unchanged(self) -> None:
+        converter = self._converter()
+        message = converter.from_provider_response(self._response("Plain answer."))
+
+        text = "".join(c.content for c in message.content if isinstance(c, TextContent))
+        self.assertNotIn("Sources:", text)
+        self.assertEqual(text, "Plain answer.")
+
+    def test_non_stream_skips_non_url_citation_annotations(self) -> None:
+        from types import SimpleNamespace
+
+        converter = self._converter()
+        other = SimpleNamespace(type="something_else", url_citation=None)
+        response = self._response("Answer.", annotations=[other])
+
+        message = converter.from_provider_response(response)
+        text = "".join(c.content for c in message.content if isinstance(c, TextContent))
+        self.assertNotIn("Sources:", text)
+
+    def test_stream_citations_appended_at_finish(self) -> None:
+        from types import SimpleNamespace
+
+        converter = self._converter()
+        citation = self._citation("Stream Src", "https://example.com/s")
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=self._delta(content="Hello world"),
+                        finish_reason=None,
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=self._delta(annotations=[citation]),
+                        finish_reason="stop",
+                    )
+                ]
+            ),
+        ]
+
+        emitted = list(converter.yield_from_provider(chunks))
+        finished = [e for e in emitted if e.finished]
+        self.assertTrue(finished, "stream must emit a finished event")
+        text = "".join(
+            c.content
+            for c in finished[-1].finished_chat_message.content
+            if isinstance(c, TextContent)
+        )
+        self.assertIn("Hello world", text)
+        self.assertIn("Sources:", text)
+        self.assertIn("[Stream Src](https://example.com/s)", text)
+
+
+class OpenRouterToolSurfaceTests(unittest.TestCase):
+    """On OpenRouter the `web` plugin grounds the model natively, so the
+    Ollama-hosted web_search/web_fetch tools are dropped from the surfaced
+    tool set (they cannot run against OpenRouter)."""
+
+    def test_ollama_only_tools_are_exactly_the_web_pair(self) -> None:
+        from grc_agent.toolagents_runtime import _OLLAMA_ONLY_TOOLS
+
+        self.assertEqual(set(_OLLAMA_ONLY_TOOLS), {"web_search", "web_fetch"})
+
+    def test_openrouter_filtered_surface_drops_web_tools(self) -> None:
+        from grc_agent.toolagents_runtime import _OLLAMA_ONLY_TOOLS
+
+        agent = GrcAgent()
+        # Mirror the runner's active-allowed-tools computation for openrouter.
+        active = set(MVP_TOOL_SURFACE.model_tool_names) - set(_OLLAMA_ONLY_TOOLS)
+        names = {s["function"]["name"] for s in agent.get_tool_schemas_for_turn(active)}
+        self.assertNotIn("web_search", names)
+        self.assertNotIn("web_fetch", names)
+        self.assertIn("inspect_graph", names)
+        self.assertIn("change_graph", names)
+
+    def test_ollama_surface_keeps_web_tools(self) -> None:
+        agent = GrcAgent()
+        names = {
+            s["function"]["name"]
+            for s in agent.get_tool_schemas_for_turn(set(MVP_TOOL_SURFACE.model_tool_names))
+        }
+        self.assertIn("web_search", names)
+        self.assertIn("web_fetch", names)
 
 
 class OpenRouterDelegatesToSDKTests(unittest.TestCase):
@@ -460,9 +683,7 @@ class ToolAgentsRunnerLoopDetectionTests(unittest.TestCase):
         self.assertIn("identically", result.get("assistant_text", ""))
         # The factual note was injected (user-role model_message) on the 2nd.
         user_notes = [
-            e
-            for e in events
-            if e.get("event") == "model_message" and e.get("role") == "user"
+            e for e in events if e.get("event") == "model_message" and e.get("role") == "user"
         ]
         self.assertTrue(user_notes, "loop note should be injected on 2nd failure")
 
@@ -555,7 +776,9 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         stream = [
             MockChunk(choices=[MockChoice(delta=MockDelta(reasoning="Thinking..."))]),
             MockChunk(choices=[MockChoice(delta=MockDelta(reasoning=" more..."))]),
-            MockChunk(choices=[MockChoice(delta=MockDelta(content="Hello!"), finish_reason="stop")]),
+            MockChunk(
+                choices=[MockChoice(delta=MockDelta(content="Hello!"), finish_reason="stop")]
+            ),
         ]
 
         result_chunks = list(converter.yield_from_provider(stream))

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### OpenRouter web search (plugin)
+
+- **Web grounding on OpenRouter**: the OpenRouter backend now activates the `web` plugin (`extra_body["plugins"]=[{"id":"web",...}]`) on by default, so the model's answers are grounded with live web results. OpenRouter returns `url_citation` annotations, which are surfaced as a `Sources:` footnote on the assistant message (both streaming and non-streaming paths).
+- **Backends stay separate**: the Ollama backend keeps its existing `web_search`/`web_fetch` REST tools unchanged. On OpenRouter those Ollama-hosted tools are dropped from the surfaced tool set (they cannot run against OpenRouter); the plugin replaces them.
+- **Config**: opt out with `OPENROUTER_WEB_SEARCH=false`; tune `OPENROUTER_WEB_SEARCH_MAX_RESULTS` (1–10), `OPENROUTER_WEB_SEARCH_INCLUDE_DOMAINS`/`_EXCLUDE_DOMAINS` (CSV).
+
 ### Codebase Audit & Performance Polishing
 
 - **Engineering Rule Compliance**: Eliminated all violations identified in the codebase audit (such as hidden allowlists, hardcoded heuristics, silent overrides, and duplicate logic).

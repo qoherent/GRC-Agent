@@ -117,7 +117,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "web_search",
-      "description": "Search the live web via Ollama's hosted web search API. Returns up to 10 result snippets (title, url, content). Use this for current events, recent releases, or any question that requires information not in the local catalog or docs.",
+      "description": "Search the live web. Returns up to 10 result snippets (title, url, content). Use this for current events, recent releases, or any question that requires information not in the local catalog or docs.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -144,7 +144,7 @@ These are the exact schemas returned by `build_tool_schemas(MVP_MODEL_TOOL_NAMES
     "type": "function",
     "function": {
       "name": "web_fetch",
-      "description": "Fetch a single web page by URL via Ollama's hosted web fetch API. Returns the page title, the main content as markdown, and the list of links on the page. Use this after web_search to read a specific result in full.",
+      "description": "Fetch a single web page by URL. Returns the page title, the main content as markdown, and the list of links on the page. Use this after web_search to read a specific result in full.",
       "parameters": {
         "type": "object",
         "properties": {

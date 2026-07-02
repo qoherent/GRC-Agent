@@ -45,11 +45,15 @@ Five model-facing wrapper tools (the entire MVP model surface):
 |------|-----------|--------|
 | `inspect_graph` | read | `grc_native_adapter.render_flow_graph()` → `GrcFlowgraph` (Stage A + B filtered) |
 | `query_knowledge` | read | `runtime/search_blocks.search_blocks()` (catalog) **or** `runtime/doc_answer.ask_grc_docs()` (docs RAG) |
-| `web_search` | read | `runtime/web_search.web_search()` — Ollama web search API |
-| `web_fetch` | read | `runtime/web_search.web_fetch()` — Ollama web fetch API |
+| `web_search` | read | `runtime/web_search.web_search()` — Ollama hosted web search (**Ollama backend only**) |
+| `web_fetch` | read | `runtime/web_search.web_fetch()` — Ollama hosted web fetch (**Ollama backend only**) |
 | `change_graph` | write | `runtime/change_graph.dispatch_flat_change_graph_batch()` + `grc_native_adapter.apply_mutation()` |
 
 `search_blocks` and `ask_grc_docs` are internal engines under `query_knowledge`, not separately surfaced to the model. Both go through the same `embeddinggemma:latest` + sqlite-vec pipeline.
+
+**Web search is backend-split (no mixing):**
+- **Ollama:** `web_search`/`web_fetch` are model-facing tools hitting Ollama's hosted REST API (`OLLAMA_API_KEY`-gated).
+- **OpenRouter:** no standalone search REST API exists. Web grounding is a request-side plugin — `ToolAgentsLlamaProviderConfig.create_settings()` injects `extra_body["plugins"]=[{"id":"web",...}]` (on by default, env-controlled: `OPENROUTER_WEB_SEARCH`, `OPENROUTER_WEB_SEARCH_MAX_RESULTS`, `OPENROUTER_WEB_SEARCH_INCLUDE_DOMAINS`/`_EXCLUDE_DOMAINS`), and `GrcResponseConverter` surfaces the returned `url_citation` annotations as a `Sources:` footnote (both stream + non-stream). The Ollama web tools are dropped from the surfaced tool set on OpenRouter via `_OLLAMA_ONLY_TOOLS`.
 
 - Tool schema and system-prompt tuning are permitted for general fixes and clarifying system boundary constraints. Do not implement ad-hoc or hardcoded prompt/schema rules targeting specific test scenarios or individual block instances.
 - No new model-facing tool or schema field changes without maintainer authorization.
@@ -88,7 +92,7 @@ Five model-facing wrapper tools (the entire MVP model surface):
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (328 passed, 6 skipped) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (341 passed, 6 skipped) |
 | `grc_native` | `pytest -m grc_native` (30 passed, 1 skipped; requires GNU Radio) |
 | `gui` | `xvfb-run pytest -m gui` (6 passed) |
 

@@ -6,6 +6,7 @@ import copy
 import datetime
 import json
 import logging
+import os
 import uuid
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
@@ -97,6 +98,66 @@ _LOOP_STOP_THRESHOLD = 3
 # transiently degenerate (empty content + no tool calls) or the backend
 # connection drops — see ``_BACKEND_CONNECTION_ERRORS`` above.
 _MAX_PROVIDER_RETRIES = 3
+
+
+# -- OpenRouter web-search plugin (request-side augmentation) ---------------
+#
+# OpenRouter has no standalone web-search REST endpoint. Web search is a
+# request-side plugin: ``extra_body["plugins"] = [{"id": "web", ...}]`` grounds
+# the model's answer with live results and OpenRouter returns ``url_citation``
+# annotations on the assistant message (surfaced by GrcResponseConverter).
+# On by default for the OpenRouter backend; opt out with OPENROUTER_WEB_SEARCH=false.
+# The Ollama backend never reads these — its web_search/web_fetch tools hit
+# Ollama's own hosted API (fully separate path).
+
+# Model-facing tools bound to the Ollama backend. On OpenRouter the `web`
+# plugin replaces them, so they are dropped from the surfaced tool set there.
+_OLLAMA_ONLY_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch"})
+
+
+def _env_truthy(var: str, *, default: bool) -> bool:
+    raw = os.getenv(var)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("true", "1", "yes", "on")
+
+
+def _env_int_clamped(var: str, *, default: int, lo: int, hi: int) -> int:
+    raw = os.getenv(var)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(lo, min(value, hi))
+
+
+def _env_csv(var: str) -> list[str] | None:
+    raw = os.getenv(var)
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return parts or None
+
+
+def _openrouter_web_plugin() -> dict[str, Any] | None:
+    """Build the OpenRouter ``web`` plugin config from env, or None when off."""
+    if not _env_truthy("OPENROUTER_WEB_SEARCH", default=True):
+        return None
+    plugin: dict[str, Any] = {
+        "id": "web",
+        "max_results": _env_int_clamped(
+            "OPENROUTER_WEB_SEARCH_MAX_RESULTS", default=5, lo=1, hi=10
+        ),
+    }
+    include = _env_csv("OPENROUTER_WEB_SEARCH_INCLUDE_DOMAINS")
+    exclude = _env_csv("OPENROUTER_WEB_SEARCH_EXCLUDE_DOMAINS")
+    if include:
+        plugin["include_domains"] = include
+    if exclude:
+        plugin["exclude_domains"] = exclude
+    return plugin
 
 
 def _call_signature(arguments: Any) -> str:
@@ -222,6 +283,62 @@ class GrcResponseConverter:
                     return value
         return None
 
+    @classmethod
+    def _extract_url_citations(cls, obj: Any) -> list[dict[str, str]]:
+        """Collect ``url_citation`` annotations from a message or delta.
+
+        Works for both non-streaming ``choice.message`` and streaming
+        ``choice.delta`` — the OpenAI SDK declares ``annotations`` on both.
+        Returns ``[{title, url, content?}]`` in encounter order.
+
+        OpenRouter's ``web`` plugin returns these annotations; without
+        surfacing them the model's web grounding is invisible to the user.
+        """
+        raw: Any = getattr(obj, "annotations", None)
+        if not raw:
+            model_extra = getattr(obj, "model_extra", None)
+            if model_extra:
+                raw = model_extra.get("annotations")
+        if not raw:
+            return []
+        out: list[dict[str, str]] = []
+        for ann in raw:
+            if getattr(ann, "type", None) != "url_citation":
+                continue
+            citation = getattr(ann, "url_citation", None) or ann
+            url = getattr(citation, "url", None)
+            if url is None and isinstance(citation, dict):
+                url = citation.get("url")
+            if not url:
+                continue
+            title = (
+                getattr(citation, "title", None)
+                or (citation.get("title") if isinstance(citation, dict) else None)
+                or url
+            )
+            content = (
+                getattr(citation, "content", None)
+                or (citation.get("content") if isinstance(citation, dict) else None)
+                or ""
+            )
+            entry: dict[str, str] = {"title": title, "url": url}
+            if content:
+                entry["content"] = content
+            out.append(entry)
+        return out
+
+    @staticmethod
+    def _render_citations_footnote(citations: list[dict[str, str]]) -> str:
+        """Render a ``Sources:`` markdown footnote, or ``""`` when empty."""
+        if not citations:
+            return ""
+        lines = ["", "Sources:"]
+        for c in citations:
+            title = c.get("title") or c.get("url") or "source"
+            url = c.get("url")
+            lines.append(f"- [{title}]({url})" if url else f"- {title}")
+        return "\n".join(lines)
+
     def from_provider_response(self, response_data: Any) -> ChatMessage:
         chat_message = self.parent_converter.from_provider_response(response_data)
         if hasattr(response_data, "choices") and response_data.choices:
@@ -240,6 +357,18 @@ class GrcResponseConverter:
                     text_content.content = think_tag_block + text_content.content
                 else:
                     chat_message.content.insert(0, TextContent(content=think_tag_block))
+
+            footnote = self._render_citations_footnote(self._extract_url_citations(choice.message))
+            if footnote:
+                text_content = None
+                for content in chat_message.content:
+                    if isinstance(content, TextContent) and isinstance(content.content, str):
+                        text_content = content
+                        break
+                if text_content is not None:
+                    text_content.content = text_content.content.rstrip() + "\n" + footnote
+                else:
+                    chat_message.content.append(TextContent(content=footnote))
 
         return chat_message
 
@@ -273,6 +402,7 @@ class GrcResponseConverter:
         # Parent-converter state (mirrored for the finished-message build).
         current_content = ""
         current_tool_calls: list[dict] = []
+        current_citations: list[dict[str, str]] = []
         alt_index = 0
 
         for chunk in stream_generator:
@@ -349,14 +479,32 @@ class GrcResponseConverter:
                             }
                         )
                     if tool_call.function.arguments:
-                        current_tool_calls[tool_call.index]["function"][
-                            "arguments"
-                        ] += tool_call.function.arguments
+                        current_tool_calls[tool_call.index]["function"]["arguments"] += (
+                            tool_call.function.arguments
+                        )
+
+            # ── Web citations: accumulate url_citation annotations ──
+            # OpenRouter's web plugin streams ``url_citation`` entries via
+            # ``delta.annotations``; surfaced as a Sources footnote at finish.
+            delta_citations = self._extract_url_citations(delta)
+            if delta_citations:
+                current_citations.extend(delta_citations)
 
             # ── Finish: yield the completed message ────────────────
             if choice.finish_reason is not None:
                 import datetime
                 import uuid
+
+                footnote = self._render_citations_footnote(current_citations)
+                if footnote:
+                    footnote_chunk = "\n" + footnote
+                    current_content += footnote_chunk
+                    yield StreamingChatMessage(
+                        chunk=footnote_chunk,
+                        is_tool_call=False,
+                        finished=False,
+                        finished_chat_message=None,
+                    )
 
                 contents: list[Any] = [TextContent(content=current_content)]
                 has_tool_call = False
@@ -366,9 +514,7 @@ class GrcResponseConverter:
                         try:
                             arguments = json.loads(tc["function"]["arguments"])
                         except json.JSONDecodeError as e:
-                            arguments = (
-                                f"Exception during JSON decoding of arguments: {e}"
-                            )
+                            arguments = f"Exception during JSON decoding of arguments: {e}"
                         contents.append(
                             ToolCallContent(
                                 tool_call_id=tc["function"]["id"],
@@ -387,9 +533,7 @@ class GrcResponseConverter:
                 yield StreamingChatMessage(
                     chunk="",
                     is_tool_call=has_tool_call,
-                    tool_call=contents[-1].model_dump(exclude_none=True)
-                    if has_tool_call
-                    else None,
+                    tool_call=contents[-1].model_dump(exclude_none=True) if has_tool_call else None,
                     finished=True,
                     finished_chat_message=finished_message,
                 )
@@ -450,21 +594,21 @@ class ToolAgentsLlamaProviderConfig:
         if is_ollama:
             extra_body["think"] = True
         if is_openrouter:
-            import os
-
             provider_order = os.getenv("OPENROUTER_PROVIDER_ORDER")
             allow_fallbacks = os.getenv("OPENROUTER_ALLOW_FALLBACKS")
 
             provider_dict: dict[str, Any] = {}
             if provider_order:
-                provider_dict["order"] = [
-                    p.strip() for p in provider_order.split(",") if p.strip()
-                ]
+                provider_dict["order"] = [p.strip() for p in provider_order.split(",") if p.strip()]
             if allow_fallbacks is not None:
                 provider_dict["allow_fallbacks"] = allow_fallbacks.lower() in ("true", "1", "yes")
 
             if provider_dict:
                 extra_body["provider"] = provider_dict
+
+            web_plugin = _openrouter_web_plugin()
+            if web_plugin is not None:
+                extra_body["plugins"] = [web_plugin]
 
         if extra_body:
             settings.set_value("extra_body", extra_body)
@@ -712,6 +856,11 @@ class ToolAgentsRunner:
 
         logger.info("turn_start model=%s message=%s", resolved_model, user_message[:80])
         active_allowed_tools = set(MVP_TOOL_SURFACE.model_tool_names)
+        # web_search/web_fetch are Ollama-hosted REST tools. On OpenRouter the
+        # `web` plugin grounds the model natively, so those tools are not
+        # surfaced (they cannot run against OpenRouter). Backends stay separate.
+        if self.provider_config.backend == "openrouter":
+            active_allowed_tools -= _OLLAMA_ONLY_TOOLS
 
         while True:
             # The loop is only bounded by loop/stuck detection (identical repeated calls), not an arbitrary round count.
@@ -727,7 +876,6 @@ class ToolAgentsRunner:
             registry = registry_builder.build(active_allowed_tools)
             retry_attempts = _MAX_PROVIDER_RETRIES
             for attempt in range(retry_attempts):
-
                 system_salt = None
                 if attempt > 0:
                     system_salt = f"retry_salt: {uuid.uuid4()}"
@@ -735,6 +883,7 @@ class ToolAgentsRunner:
                 messages = agent.get_model_messages(system_salt=system_salt)
                 try:
                     import inspect
+
                     is_step_mocked = (
                         not inspect.ismethod(self.chat_agent.step)
                         or getattr(self.chat_agent.step, "__func__", None) is not ChatToolAgent.step
@@ -873,16 +1022,10 @@ class ToolAgentsRunner:
                     # "no in-band control flow"); on the third identical failure
                     # stop the turn instead of burning the whole tool budget.
                     # One uniform rule for every tool, keyed by (tool_name, sig).
-                    if (
-                        executed
-                        and isinstance(result, dict)
-                        and result.get("ok") is False
-                    ):
+                    if executed and isinstance(result, dict) and result.get("ok") is False:
                         sig = _call_signature(tool_call.tool_call_arguments)
                         key = (tool_name, sig)
-                        failing_call_signatures[key] = (
-                            failing_call_signatures.get(key, 0) + 1
-                        )
+                        failing_call_signatures[key] = failing_call_signatures.get(key, 0) + 1
                         if failing_call_signatures[key] == _LOOP_WARN_THRESHOLD:
                             note_msg = ChatMessage.create_user_message(_LOOP_NOTE)
                             agent.chat_history.add_message(note_msg)
@@ -896,8 +1039,7 @@ class ToolAgentsRunner:
                             break
                 if loop_stuck:
                     stuck_text = (
-                        "(stopped: the same tool call failed identically "
-                        "multiple times in a row)"
+                        "(stopped: the same tool call failed identically multiple times in a row)"
                     )
                     payload = build_error_payload(
                         error_type=ErrorCode.SAFETY_CEILING,
@@ -926,8 +1068,7 @@ class ToolAgentsRunner:
             _replace_last_assistant_text(agent.chat_history, assistant_text)
             if empty_terminal:
                 logger.warning(
-                    "turn_end ok=False empty_model_response steps=%d "
-                    "tool_rounds=%d tool_calls=%d",
+                    "turn_end ok=False empty_model_response steps=%d tool_rounds=%d tool_calls=%d",
                     assistant_turns,
                     tool_rounds_used,
                     tool_calls_executed,

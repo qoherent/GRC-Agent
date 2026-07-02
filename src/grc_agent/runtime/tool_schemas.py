@@ -4,8 +4,9 @@ The MVP model surface is:
 
 - ``inspect_graph`` (read) — flowgraph topology / blocks / connections
 - ``query_knowledge`` (read) — routes to ``search_blocks`` or ``ask_grc_docs``
-- ``web_search`` (read) — Ollama's hosted web search API
-- ``web_fetch`` (read) — Ollama's hosted web page fetch API
+- ``web_search`` (read) — live web search (Ollama backend only; surfaced via
+  the `web` plugin on OpenRouter)
+- ``web_fetch`` (read) — fetch a web page by URL (Ollama backend only)
 - ``change_graph`` (write) — flat batch graph mutations
 
 Internal engines (e.g. ``search_blocks``, ``ask_grc_docs``) are NOT surfaced
@@ -85,7 +86,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
     ),
     _schema(
         "web_search",
-        "Search the live web via Ollama's hosted web search API. Returns up to 10 result snippets (title, url, content). Use this for current events, recent releases, or any question that requires information not in the local catalog or docs.",
+        "Search the live web. Returns up to 10 result snippets (title, url, content). Use this for current events, recent releases, or any question that requires information not in the local catalog or docs.",
         {
             "query": {
                 "type": "string",
@@ -103,7 +104,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
     ),
     _schema(
         "web_fetch",
-        "Fetch a single web page by URL via Ollama's hosted web fetch API. Returns the page title, the main content as markdown, and the list of links on the page. Use this after web_search to read a specific result in full.",
+        "Fetch a single web page by URL. Returns the page title, the main content as markdown, and the list of links on the page. Use this after web_search to read a specific result in full.",
         {
             "url": {
                 "type": "string",

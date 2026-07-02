@@ -17,7 +17,13 @@ Runs as a sidekick window alongside GRC (GUI).
     model's chat template must include the `{{ .Tools }}` section or the agent
     cannot call its tools.
   - **OpenRouter** (cloud): set `OPENROUTER_API_KEY` (and optionally
-    `OPENROUTER_MODEL`) in a `.env` file at the repo root.
+    `OPENROUTER_MODEL`) in a `.env` file at the repo root. Web search is
+    enabled by default on OpenRouter via the `web` plugin (the model's
+    answers are grounded with live results and cite sources). To disable,
+    set `OPENROUTER_WEB_SEARCH=false`; tune with
+    `OPENROUTER_WEB_SEARCH_MAX_RESULTS` (1–10) and
+    `OPENROUTER_WEB_SEARCH_INCLUDE_DOMAINS`/`_EXCLUDE_DOMAINS` (CSV).
+    Note: each grounded turn incurs OpenRouter credit charges.
 
 ### Setup
 ```bash
