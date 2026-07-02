@@ -94,3 +94,40 @@ def test_open_location_button_emits_signal_only_when_graph_loaded(qtbot):
     widget.open_graph_location_requested.connect(on_open)
     widget.open_location_btn.click()
     assert emitted
+
+
+def test_toolbar_layout_order_graph_model_provider(qtbot):
+    """The toolbar lays widgets out left-to-right in this order:
+    graph section (label + name + 📂 + 🔍), then the model section
+    (label + combo), then the provider section (label + combo).
+    The refresh button lives next to the model combo since it
+    refreshes the model list.
+    """
+    from PySide6.QtWidgets import QComboBox, QLabel, QToolButton, QWidget
+
+    widget = ModelToolbar()
+    qtbot.addWidget(widget)
+    children = widget.children()
+
+    # Collect the visible widgets in the layout, in left-to-right
+    # order. We walk the children list filtering for things with
+    # geometry in the toolbar.
+    visible: list[QWidget] = []
+    for c in children:
+        if isinstance(c, (QLabel, QToolButton, QComboBox)) and c.parent() is widget:
+            visible.append(c)
+
+    # Verify the section markers rather than the exact sequence,
+    # which is brittle to cosmetic tweaks. The graph section must
+    # be leftmost; the model combo must be left of the provider
+    # combo.
+    graph_section = [
+        c for c in visible if isinstance(c, QLabel) and c.text() == "Graph"
+    ]
+    assert graph_section, "graph label not found in toolbar"
+    assert visible.index(graph_section[0]) < visible.index(widget.model_combo), (
+        "graph section must be left of the model combo"
+    )
+    assert visible.index(widget.model_combo) < visible.index(widget.provider_combo), (
+        "model combo must be left of the provider combo"
+    )

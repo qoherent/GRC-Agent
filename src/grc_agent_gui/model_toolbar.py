@@ -81,44 +81,11 @@ class ModelToolbar(QFrame):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(8)
 
-        provider_label = QLabel("Provider", self)
-        provider_label.setObjectName("toolbarLabel")
-        layout.addWidget(provider_label)
-
-        self.provider_combo = QComboBox(self)
-        self.provider_combo.addItem("Ollama (Local)", _BACKEND_OLLAMA)
-        self.provider_combo.addItem("OpenRouter (Cloud)", _BACKEND_OPENROUTER)
-        self.provider_combo.setCurrentIndex(0 if backend == _BACKEND_OLLAMA else 1)
-        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        layout.addWidget(self.provider_combo)
-
-        model_label = QLabel("Model", self)
-        model_label.setObjectName("toolbarLabel")
-        layout.addWidget(model_label)
-
-        self.model_combo = QComboBox(self)
-        self.model_combo.setEditable(True)
-        self.model_combo.setMinimumWidth(220)
-        if model:
-            self.model_combo.setEditText(model)
-        else:
-            self.model_combo.setEditText(_PLACEHOLDER_MODEL)
-        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
-        layout.addWidget(self.model_combo, stretch=1)
-
-        self.refresh_btn = QToolButton(self)
-        self.refresh_btn.setText("\u21bb")  # ↻
-        self.refresh_btn.setToolTip("Refresh model list")
-        self.refresh_btn.clicked.connect(self.refresh_requested.emit)
-        layout.addWidget(self.refresh_btn)
-
-        # Separator (vertical line) between the model-selection side
-        # and the graph-path side of the toolbar.
-        separator = QFrame(self)
-        separator.setFrameShape(QFrame.Shape.VLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(separator)
-
+        # Left-to-right layout, per the 2026-07-02 spec:
+        #   [Graph section] | [Model section + refresh] | [Provider section]
+        # The graph (the file the user is editing) is the leftmost
+        # element; the model (the assistant's identity) sits in the
+        # middle; the provider (the backend) is rightmost.
         graph_label = QLabel("Graph", self)
         graph_label.setObjectName("toolbarLabel")
         layout.addWidget(graph_label)
@@ -144,6 +111,52 @@ class ModelToolbar(QFrame):
         self.browse_btn.setToolTip("Browse for a .grc file to load (File > Open)")
         self.browse_btn.clicked.connect(self.browse_graph_requested.emit)
         layout.addWidget(self.browse_btn)
+
+        # Vertical separator between the graph section and the
+        # model / provider selection.
+        graph_separator = QFrame(self)
+        graph_separator.setFrameShape(QFrame.Shape.VLine)
+        graph_separator.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(graph_separator)
+
+        # Model section (middle).
+        model_label = QLabel("Model", self)
+        model_label.setObjectName("toolbarLabel")
+        layout.addWidget(model_label)
+
+        self.model_combo = QComboBox(self)
+        self.model_combo.setEditable(True)
+        self.model_combo.setMinimumWidth(220)
+        if model:
+            self.model_combo.setEditText(model)
+        else:
+            self.model_combo.setEditText(_PLACEHOLDER_MODEL)
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        layout.addWidget(self.model_combo, stretch=1)
+
+        self.refresh_btn = QToolButton(self)
+        self.refresh_btn.setText("\u21bb")  # ↻
+        self.refresh_btn.setToolTip("Refresh model list")
+        self.refresh_btn.clicked.connect(self.refresh_requested.emit)
+        layout.addWidget(self.refresh_btn)
+
+        # Vertical separator between model and provider.
+        provider_separator = QFrame(self)
+        provider_separator.setFrameShape(QFrame.Shape.VLine)
+        provider_separator.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(provider_separator)
+
+        # Provider section (right).
+        provider_label = QLabel("Provider", self)
+        provider_label.setObjectName("toolbarLabel")
+        layout.addWidget(provider_label)
+
+        self.provider_combo = QComboBox(self)
+        self.provider_combo.addItem("Ollama (Local)", _BACKEND_OLLAMA)
+        self.provider_combo.addItem("OpenRouter (Cloud)", _BACKEND_OPENROUTER)
+        self.provider_combo.setCurrentIndex(0 if backend == _BACKEND_OLLAMA else 1)
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        layout.addWidget(self.provider_combo)
 
         self.set_backend(backend)
         # Tracks the absolute path of the currently loaded graph so

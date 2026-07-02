@@ -885,11 +885,18 @@ class ChatWidget(QWidget):
         )
 
     def _wrap_agent_bubble(self, body_html: str) -> str:
-        """Wrap a rendered agent body in the standard Agent: bubble."""
+        """Wrap a rendered agent body in the standard Agent: bubble.
+
+        Body text uses the primary text color (#cdd6f4) so the
+        final-rendered chat matches the streaming phase (which
+        inherits the same QTextBrowser default). The previous
+        #9aabb0 (dim teal) was readable but dulled the chat
+        relative to the streaming text.
+        """
         return (
             f'<div style="margin-bottom: 10px; padding: 6px 8px; border-left: 2px solid {_COLOR_AGENT_BORDER}; background-color: {_COLOR_AGENT_BG}; border-radius: 3px;">'
             f'<b style="color: {_COLOR_AGENT};">Agent:</b>'
-            f'<div style="margin-top: 4px; padding-left: 4px; color: #9aabb0;">'
+            f'<div style="margin-top: 4px; padding-left: 4px; color: #cdd6f4;">'
             f"{body_html}"
             f"</div>"
             f"</div>"

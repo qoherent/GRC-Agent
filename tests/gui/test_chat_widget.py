@@ -876,6 +876,32 @@ def test_user_message_html_uses_zoomable_font_size(qtbot):
     assert "font-size: 36px" in rendered
 
 
+def test_agent_body_text_uses_high_contrast_color(qtbot):
+    """The agent's body text must use a high-contrast color
+    (close to the primary text color, #cdd6f4) so the chat is
+    easy to read. The previous #9aabb0 (dim teal) was readable
+    during streaming — the QTextBrowser default — but appeared
+    dull after the final render. Both phases must look the same.
+    """
+    widget = ChatWidget()
+    qtbot.addWidget(widget)
+
+    widget.append_message("user", "hi")
+    widget.append_message("assistant", "graph answer text")
+
+    asst = widget._history[1]
+    rendered = asst["_rendered"]
+    # The body div's color must be the high-contrast primary text
+    # color, NOT the dim teal #9aabb0 that was the previous
+    # default.
+    assert "color: #9aabb0" not in rendered, (
+        f"agent body still uses dim teal #9aabb0:\n{rendered}"
+    )
+    assert "color: #cdd6f4" in rendered, (
+        f"agent body must use the high-contrast primary text color:\n{rendered}"
+    )
+
+
 def test_agent_and_user_panels_are_visually_distinct():
     """User and agent bubbles must use clearly different background
     colors — the previous near-identical dark tints made scanning
