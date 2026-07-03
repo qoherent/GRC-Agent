@@ -25,9 +25,12 @@ static block-definition metadata.
 
 from __future__ import annotations
 
+import logging
 import re
 from functools import cache
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from grc_agent.runtime.block_semantics import evaluated_param_hides
 
@@ -123,14 +126,17 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
         from grc_agent.grc_native_adapter import get_platform_or_none
 
         platform = get_platform_or_none()
-    except Exception:
+    except Exception as exc:
+        logger.debug("param_metadata platform_import_failed block=%s: %s: %s", block_type, type(exc).__name__, exc)
         return {}
     if platform is None:
+        logger.debug("param_metadata no_platform block=%s", block_type)
         return {}
     try:
         flow_graph = platform.make_flow_graph()
         block = flow_graph.new_block(block_type)
-    except Exception:
+    except Exception as exc:
+        logger.debug("param_metadata new_block_failed block=%s: %s: %s", block_type, type(exc).__name__, exc)
         return {}
     if block is None:
         return {}
@@ -143,7 +149,8 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
             }
             for name, param in block.params.items()
         }
-    except Exception:
+    except Exception as exc:
+        logger.debug("param_metadata collect_failed block=%s: %s: %s", block_type, type(exc).__name__, exc)
         return {}
 
 
