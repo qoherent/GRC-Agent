@@ -38,6 +38,7 @@ Design constraints:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import queue
@@ -136,6 +137,25 @@ class _PendingMessage:
     text: str
     payload: str | None  # pre-serialized JSON; matches the column name
     created_at: str
+
+
+@dataclass
+class _LifecycleCommand:
+    """Strict actor pattern: main-thread lifecycle ops enqueue this.
+
+    The main thread NEVER executes SQL on the writer's connection
+    (shared connections across threads are unsafe for concurrent
+    SQLite transactions).  Instead, lifecycle methods build one of
+    these envelopes, push it onto ``_q``, and block on
+    ``future.result(timeout)``.  The writer thread pops the command,
+    runs the SQL on its exclusive connection, and resolves the
+    future with the result (or exception) so the main thread can
+    unblock.
+    """
+
+    kind: str  # "open", "end", "replace"
+    kwargs: dict[str, Any]
+    future: "concurrent.futures.Future[Any]"
 
 
 _SQL_SCHEMA = """
@@ -377,21 +397,28 @@ class SessionStore:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = (db_path or default_sessions_db_path()).expanduser()
+        # Message-write queue (append): high-volume, bounded by _QUEUE_MAX.
         self._q: queue.Queue[_PendingMessage] = queue.Queue(maxsize=_QUEUE_MAX)
+        # Lifecycle-actor queue (open/end/replace/clear_all): low-volume,
+        # bounded by _QUEUE_MAX.  Separate queue so the message-batch
+        # driller doesn't have to discriminate types.
+        self._lifecycle_q: queue.Queue[_LifecycleCommand] = queue.Queue(
+            maxsize=_QUEUE_MAX
+        )
         self._closed_sessions: queue.Queue[int] = queue.Queue(maxsize=_QUEUE_MAX)
         # ``_drained`` is cleared on every enqueue and set by the
         # writer when it has nothing to do. ``flush()`` blocks on
         # it.
         self._drained = threading.Event()
         self._drained.set()
-        self._open_session_lock = threading.Lock()
         # The writer holds its own connection (a single connection
         # per thread is the SQLite-recommended pattern). The main
-        # thread's read methods open *fresh, short-lived*
-        # connections to avoid the cross-thread
-        # ``ProgrammingError`` Python's sqlite3 raises when a
-        # connection is touched by a thread other than the one
-        # that created it.
+        # thread NEVER touches ``_writer_conn`` — the strict actor
+        # pattern guarantees one writer at a time. Lifecycle
+        # methods (open/end/replace) build a ``_LifecycleCommand``
+        # with a Future and block the main thread on its result;
+        # the writer thread executes the SQL on its exclusive
+        # connection and resolves the future.
         self._writer_conn = _open_db(self._db_path, validate_integrity=True)
 
         # The writer's run() loop body.
@@ -400,6 +427,28 @@ class SessionStore:
         self._writer.start()
 
     # --- public, non-blocking ---
+
+    def _enqueue_lifecycle(
+        self, kind: str, kwargs: dict[str, Any], *, timeout: float = 5.0
+    ) -> Any:
+        """Enqueue one ``_LifecycleCommand`` and block on its Future.
+
+        Shared backbone for ``open_session``, ``end_active_session``,
+        ``replace_active_session`` and ``clear_all``.  The caller-
+        supplied ``timeout`` is bounded so a wedged writer can't lock
+        the GUI thread indefinitely.
+        """
+        future: "concurrent.futures.Future[Any]" = concurrent.futures.Future()
+        cmd = _LifecycleCommand(kind=kind, kwargs=kwargs, future=future)
+        self._lifecycle_q.put(cmd)
+        self._drained.clear()
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            raise RuntimeError(
+                f"SessionStore writer thread did not handle {kind!r} "
+                f"lifecycle command within {timeout:.1f}s"
+            ) from exc
 
     def open_session(
         self,
@@ -411,37 +460,30 @@ class SessionStore:
         title: str = "",
         started_at: str | None = None,
     ) -> int:
-        """Open a new session synchronously and return its id.
+        """Open a new session and return its id.
 
-        The session row insert is synchronous (we need the id
-        before any ``append`` can target it). Subsequent
-        ``append`` calls are non-blocking.
+        Strict actor pattern: the main thread enqueues a
+        ``_LifecycleCommand(kind="open", ...)`` and blocks on its
+        Future; the writer thread executes the INSERT on its
+        exclusive connection.  No SQL ever runs on the main thread.
 
         ``started_at`` is exposed as a parameter for tests; the
         GUI/CLI should let it default to "now."
-
-        Uses the writer's connection (which is shared across
-        threads under ``check_same_thread=False``) under a lock
-        to avoid a same-second race where two threads open
-        sessions that would otherwise not see each other.
         """
         ts = started_at or _utcnow_iso()
-        with self._open_session_lock:
-            cur = self._writer_conn.execute(
-                "INSERT INTO sessions "
-                "(graph_path, graph_hash, started_at, model_alias, backend, title) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    graph_path,
-                    graph_hash,
-                    ts,
-                    model_alias,
-                    backend,
-                    title,
-                ),
+        return int(
+            self._enqueue_lifecycle(
+                "open",
+                {
+                    "graph_path": graph_path,
+                    "graph_hash": graph_hash,
+                    "model_alias": model_alias,
+                    "backend": backend,
+                    "title": title,
+                    "started_at": ts,
+                },
             )
-            session_id = int(cur.lastrowid)
-        return session_id
+        )
 
     def append(
         self,
@@ -494,22 +536,19 @@ class SessionStore:
         self._drained.clear()
 
     def end_active_session(self, session_id: int | None) -> None:
-        """Synchronously finalize a session row (``ended_at`` + ``message_count``).
+        """Finalize a session row (``ended_at`` + ``message_count``).
 
-        No-op when ``session_id`` is ``None``.  Runs a single
-        synchronous ``UPDATE`` on the writer's connection under the
-        open-session lock so the GUI gets immediate confirmation that
-        the row is closed (no queue delay).
+        No-op when ``session_id`` is ``None``.  Strict actor pattern:
+        enqueues an ``end`` lifecycle command and blocks on its
+        Future; the writer thread executes the UPDATE on its
+        exclusive connection so no SQL ever runs on the main thread.
         """
         if session_id is None:
             return
-        with self._open_session_lock:
-            self._writer_conn.execute(
-                "UPDATE sessions SET ended_at = ?, "
-                "message_count = (SELECT COUNT(*) FROM messages WHERE session_id = ?) "
-                "WHERE id = ?",
-                (_utcnow_iso(), session_id, session_id),
-            )
+        self._enqueue_lifecycle(
+            "end",
+            {"session_id": session_id},
+        )
 
     def replace_active_session(
         self,
@@ -523,33 +562,26 @@ class SessionStore:
     ) -> int:
         """Atomically close ``old_id`` (if not ``None``) and open a new row.
 
-        Returns the new session id.  Both statements run inside one
-        explicit ``BEGIN``/``COMMIT`` on the writer's connection under
-        the open-session lock, so the close + open are transactionally
-        atomic at the SQLite level (per the reinforcement from design
-        review).
+        Returns the new session id.  Strict actor pattern: enqueues a
+        ``replace`` lifecycle command and blocks on its Future; the
+        writer thread executes the close + open inside one
+        ``BEGIN``/``COMMIT`` block on its exclusive connection,
+        guaranteeing transactional atomicity AND serializing all
+        lifecycle operations behind a single writer thread.
         """
-        with self._open_session_lock:
-            self._writer_conn.execute("BEGIN")
-            try:
-                if old_id is not None:
-                    self._writer_conn.execute(
-                        "UPDATE sessions SET ended_at = ?, "
-                        "message_count = (SELECT COUNT(*) FROM messages "
-                        "WHERE session_id = ?) WHERE id = ?",
-                        (_utcnow_iso(), old_id, old_id),
-                    )
-                cur = self._writer_conn.execute(
-                    "INSERT INTO sessions "
-                    "(graph_path, graph_hash, started_at, model_alias, backend, title) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (graph_path, graph_hash, _utcnow_iso(), model_alias, backend, title),
-                )
-                self._writer_conn.execute("COMMIT")
-            except Exception:
-                self._writer_conn.execute("ROLLBACK")
-                raise
-            return int(cur.lastrowid)
+        return int(
+            self._enqueue_lifecycle(
+                "replace",
+                {
+                    "old_id": old_id,
+                    "graph_path": graph_path,
+                    "graph_hash": graph_hash,
+                    "model_alias": model_alias,
+                    "backend": backend,
+                    "title": title,
+                },
+            )
+        )
 
     def flush(self, timeout: float = 5.0) -> bool:
         """Block until the writer is caught up. Returns True on
@@ -559,18 +591,15 @@ class SessionStore:
     def clear_all(self) -> int:
         """Delete every session and its messages from the on-disk DB.
 
-        Synchronous (bypasses the writer queue) so the caller can
+        Strict actor pattern: enqueues a ``clear_all`` lifecycle
+        command and blocks on its Future.  The writer thread counts,
+        deletes, and returns the count via the Future.  The caller can
         re-open the sessions list immediately after the call returns
         and observe the empty state.
 
         Returns the number of session rows that were removed.
         """
-        # Count first so the caller can report a useful number.
-        before = self._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
-        self._writer_conn.execute("DELETE FROM messages")
-        self._writer_conn.execute("DELETE FROM sessions")
-        self._writer_conn.commit()
-        return int(before)
+        return int(self._enqueue_lifecycle("clear_all", {}))
 
     def close(self) -> None:
         """Stop the writer thread and close the DB.
@@ -713,61 +742,199 @@ class SessionStore:
     # --- internal: writer thread ---
 
     def _run(self) -> None:
-        """Drain the message queue in batches under one transaction.
+        """Drain the lifecycle queue first, then the message batch.
 
-        Runs forever until :attr:`_stop` is set. Sleeps briefly
+        Runs forever until :attr:`_stop` is set.  Sleeps briefly
         when the queue is empty so we do not spin.
+
+        Lifecycle commands are drained FIRST because they unblock a
+        main thread waiting on a Future.  Message batches then commit
+        under their own transaction.  All SQL runs exclusively on the
+        writer thread — the main thread never touches ``_writer_conn``.
         """
         try:
             while not self._stop.is_set():
+                lifecycle = self._drain_lifecycle()
                 batch = self._drain_batch()
                 closed = self._drain_closes()
-                if not batch and not closed:
+                if not lifecycle and not batch and not closed:
                     self._drained.set()
                     time.sleep(0.005)
                     continue
-                try:
-                    self._writer_conn.execute("BEGIN")
-                    if batch:
-                        for r in batch:
-                            row = self._writer_conn.execute(
-                                "SELECT COALESCE(MAX(sequence), -1) + 1 "
-                                "FROM messages WHERE session_id = ?",
-                                (r.session_id,),
-                            ).fetchone()
-                            next_seq = int(row[0])
-                            self._writer_conn.execute(
-                                "INSERT INTO messages "
-                                "(id, session_id, sequence, role, text, payload, created_at) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (
-                                    r.id,
-                                    r.session_id,
-                                    next_seq,
-                                    r.role,
-                                    r.text,
-                                    r.payload,
-                                    r.created_at,
-                                ),
-                            )
-                    if closed:
-                        for sid in closed:
-                            self._writer_conn.execute(
-                                "UPDATE sessions SET ended_at = ?, "
-                                "message_count = (SELECT COUNT(*) FROM messages "
-                                "WHERE session_id = ?) WHERE id = ?",
-                                (_utcnow_iso(), sid, sid),
-                            )
-                    self._writer_conn.execute("COMMIT")
-                except sqlite3.Error as exc:
-                    logger.exception("sessions_writer_batch_failed: %s", exc)
-                    # Roll back so the next batch starts clean.
+                # Process lifecycle commands first (they hold Futures).
+                if lifecycle:
+                    self._drain_lifecycle_commands(lifecycle)
+                # Then commit the message batch under its own BEGIN.
+                if batch or closed:
                     try:
-                        self._writer_conn.execute("ROLLBACK")
-                    except sqlite3.Error:
-                        pass
+                        self._writer_conn.execute("BEGIN")
+                        if batch:
+                            for r in batch:
+                                row = self._writer_conn.execute(
+                                    "SELECT COALESCE(MAX(sequence), -1) + 1 "
+                                    "FROM messages WHERE session_id = ?",
+                                    (r.session_id,),
+                                ).fetchone()
+                                next_seq = int(row[0])
+                                self._writer_conn.execute(
+                                    "INSERT INTO messages "
+                                    "(id, session_id, sequence, role, text, "
+                                    "payload, created_at) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    (
+                                        r.id,
+                                        r.session_id,
+                                        next_seq,
+                                        r.role,
+                                        r.text,
+                                        r.payload,
+                                        r.created_at,
+                                    ),
+                                )
+                        if closed:
+                            for sid in closed:
+                                self._writer_conn.execute(
+                                    "UPDATE sessions SET ended_at = ?, "
+                                    "message_count = (SELECT COUNT(*) FROM "
+                                    "messages WHERE session_id = ?) "
+                                    "WHERE id = ?",
+                                    (_utcnow_iso(), sid, sid),
+                                )
+                        self._writer_conn.execute("COMMIT")
+                    except sqlite3.Error as exc:
+                        logger.exception(
+                            "sessions_writer_batch_failed: %s", exc
+                        )
+                        try:
+                            self._writer_conn.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
         except Exception:  # noqa: BLE001 - we want a logged crash
             logger.exception("sessions_writer_crashed")
+
+    def _drain_lifecycle(self) -> list[_LifecycleCommand]:
+        """Pop all currently-queued lifecycle commands (non-blocking)."""
+        commands: list[_LifecycleCommand] = []
+        while True:
+            try:
+                commands.append(self._lifecycle_q.get_nowait())
+            except queue.Empty:
+                break
+        return commands
+
+    def _drain_lifecycle_commands(self, commands: list[_LifecycleCommand]) -> None:
+        """Execute one lifecycle command at a time, resolving its Future.
+
+        Each command runs in its own BEGIN/COMMIT transaction so the
+        result can be returned to the main thread on success / raised
+        as an exception on failure.  The writer thread is the only
+        thread that touches ``_writer_conn`` — the actor pattern.
+        """
+        for cmd in commands:
+            try:
+                if cmd.kind == "open":
+                    result = self._exec_open(cmd.kwargs)
+                elif cmd.kind == "end":
+                    self._exec_end(cmd.kwargs)
+                    result = None
+                elif cmd.kind == "replace":
+                    result = self._exec_replace(cmd.kwargs)
+                elif cmd.kind == "clear_all":
+                    result = self._exec_clear_all(cmd.kwargs)
+                else:
+                    raise RuntimeError(f"unknown lifecycle kind: {cmd.kind!r}")
+                cmd.future.set_result(result)
+            except Exception as exc:
+                cmd.future.set_exception(exc)
+                logger.exception(
+                    "sessions_lifecycle_command_failed kind=%s", cmd.kind
+                )
+
+    def _exec_open(self, kwargs: dict[str, Any]) -> int:
+        # ``_writer_conn`` is in autocommit mode (isolation_level=None),
+        # so ``with self._writer_conn:`` doesn't auto-transaction.
+        # Wrap in explicit BEGIN/COMMIT for the atomic insert.
+        self._writer_conn.execute("BEGIN")
+        try:
+            cur = self._writer_conn.execute(
+                "INSERT INTO sessions "
+                "(graph_path, graph_hash, started_at, model_alias, backend, title) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["graph_path"],
+                    kwargs["graph_hash"],
+                    kwargs["started_at"],
+                    kwargs["model_alias"],
+                    kwargs["backend"],
+                    kwargs["title"],
+                ),
+            )
+            new_id = int(cur.lastrowid)
+            self._writer_conn.execute("COMMIT")
+        except Exception:
+            self._writer_conn.execute("ROLLBACK")
+            raise
+        return new_id
+
+    def _exec_end(self, kwargs: dict[str, Any]) -> None:
+        sid = kwargs["session_id"]
+        self._writer_conn.execute("BEGIN")
+        try:
+            self._writer_conn.execute(
+                "UPDATE sessions SET ended_at = ?, "
+                "message_count = (SELECT COUNT(*) FROM messages "
+                "WHERE session_id = ?) WHERE id = ?",
+                (_utcnow_iso(), sid, sid),
+            )
+            self._writer_conn.execute("COMMIT")
+        except Exception:
+            self._writer_conn.execute("ROLLBACK")
+            raise
+
+    def _exec_replace(self, kwargs: dict[str, Any]) -> int:
+        old_id = kwargs.get("old_id")
+        self._writer_conn.execute("BEGIN")
+        try:
+            if old_id is not None:
+                self._writer_conn.execute(
+                    "UPDATE sessions SET ended_at = ?, "
+                    "message_count = (SELECT COUNT(*) FROM messages "
+                    "WHERE session_id = ?) WHERE id = ?",
+                    (_utcnow_iso(), old_id, old_id),
+                )
+            cur = self._writer_conn.execute(
+                "INSERT INTO sessions "
+                "(graph_path, graph_hash, started_at, model_alias, backend, title) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["graph_path"],
+                    kwargs["graph_hash"],
+                    _utcnow_iso(),
+                    kwargs["model_alias"],
+                    kwargs["backend"],
+                    kwargs["title"],
+                ),
+            )
+            new_id = int(cur.lastrowid)
+            self._writer_conn.execute("COMMIT")
+        except Exception:
+            self._writer_conn.execute("ROLLBACK")
+            raise
+        return new_id
+
+    def _exec_clear_all(self, _kwargs: dict[str, Any]) -> int:
+        self._writer_conn.execute("BEGIN")
+        try:
+            before = self._writer_conn.execute(
+                "SELECT count(*) FROM sessions"
+            ).fetchone()[0]
+            self._writer_conn.execute("DELETE FROM messages")
+            self._writer_conn.execute("DELETE FROM sessions")
+            self._writer_conn.execute("COMMIT")
+        except Exception:
+            self._writer_conn.execute("ROLLBACK")
+            raise
+        return int(before)
 
     def _drain_batch(self) -> list[_PendingMessage]:
         """Pop up to ``_BATCH_MAX`` messages, blocking at most
