@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -65,6 +66,12 @@ class AgentWorker(QObject):
         self.provider_config = provider_config
         self.runner: ToolAgentsRunner | None = None
         self._is_cancelled = False
+        # Cooperative cancellation token: set by `cancel()` from the main
+        # thread, checked cooperatively by the runner inside its stream
+        # loop. Replaces the old approach of forcibly closing the HTTP
+        # client socket, which made cancellation non-cooperative and
+        # could leave the SSOT desynced from the in-memory chat history.
+        self._cancel_event = threading.Event()
         # Wire the cross-thread callback via a Qt signal so the
         # GUI-level handler always runs on the main thread.
         if on_backend_unreachable is not None:
@@ -99,6 +106,7 @@ class AgentWorker(QObject):
                 self.user_message,
                 on_tool_start=self._emit_tool_started,
                 on_tool_end=self._emit_tool_finished,
+                cancel_event=self._cancel_event,
             ):
                 if self._is_cancelled:
                     break
@@ -164,16 +172,21 @@ class AgentWorker(QObject):
         self.tool_finished.emit(name, json.dumps(result, sort_keys=True, default=str))
 
     def cancel(self) -> None:
+        """Cooperatively cancel the in-flight turn.
+
+        Sets the cancel event so ``ToolAgentsRunner._fetch_model_response``
+        notices at the next chunk boundary and breaks the stream
+        cleanly.  No hard-kill of the HTTP client — that was
+        the source of SSOT/desync races (worker thread dies mid-
+        event-loop while Qt-queued ``sessions_store.append`` slots
+        haven't drained yet).
+
+        The ``self._is_cancelled`` flag is kept as a fast-path for the
+        consumer loop in ``run_turn`` so the generator is torn down
+        without waiting for the next chunk to arrive.
+        """
         self._is_cancelled = True
-        runner = self.runner
-        if runner and hasattr(runner, "provider") and runner.provider:
-            try:
-                client = getattr(runner.provider, "client", None)
-                if client:
-                    client.close()
-                    logger.info("Forcefully closed HTTP client socket for active worker.")
-            except Exception as exc:
-                logger.warning(f"Error during forceful close of HTTP client socket: {exc}")
+        self._cancel_event.set()
 
 
 __all__ = ["AgentWorker"]

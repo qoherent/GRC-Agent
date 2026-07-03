@@ -152,8 +152,16 @@ def test_ui_lockout_during_generation(qtbot):
     assert window.chat_input.isEnabled()
 
 
-def test_cancel_does_not_leak_http_client():
-    """Verify that calling cancel() closes the HTTP client socket of the ToolAgentsRunner provider."""
+def test_cancel_cooperatively_signals_without_force_closing_client():
+    """Verify that ``cancel()`` sets the cooperative event flag and
+    does NOT forcibly close the HTTP client socket.
+
+    The old behavior of force-closing the client made cancellation
+    non-cooperative: the worker thread died mid-event-loop while
+    queued ``sessions_store.append`` slots hadn't drained, causing
+    SSOT desync races.  Phase E now uses a ``threading.Event`` cancel
+    token that the runner checks between chunks.
+    """
     mock_agent = MagicMock()
     mock_provider = MagicMock()
     mock_client = MagicMock()
@@ -165,8 +173,14 @@ def test_cancel_does_not_leak_http_client():
     worker.runner = mock_runner
 
     worker.cancel()
+    # Fast-path flag is set (used by the event consumer loop).
     assert worker._is_cancelled is True
-    mock_client.close.assert_called_once()
+    # Cooperative cancel event is set (the actual mechanism the runner
+    # checks between stream chunks).
+    assert worker._cancel_event.is_set()
+    # The HTTP client is NOT forcibly closed — that was the
+    # hard-kill source of SSOT desyncs.
+    mock_client.close.assert_not_called()
 
 
 def test_no_agent_monkey_patch():
@@ -314,7 +328,12 @@ def test_cancel_drops_pending_turn_finished(qtbot):
 
 
 def test_cancel_timer_safety_cross_thread(qtbot):
-    """C1: cancel() called from main thread must safely stop timer on the worker thread."""
+    """C1: cancel() called from main thread must safely signal the
+    worker thread without force-closing the HTTP client (Phase E).
+
+    The cooperative cancel token is set; the runner's stream loop
+    observes it at the next chunk boundary and tears down cleanly.
+    """
     import threading
 
     from PySide6.QtCore import QThread
@@ -366,8 +385,11 @@ def test_cancel_timer_safety_cross_thread(qtbot):
             thread.quit()
             assert thread.wait(2000)
 
-            # Verify client close was called
-            mock_client.close.assert_called_once()
+            # Cooperative cancel token is set.
+            assert worker._cancel_event.is_set()
+            # The HTTP client is NOT forcibly closed — that was the
+            # hard-kill source of SSOT desyncs.
+            mock_client.close.assert_not_called()
 
         finally:
             block_event.set()

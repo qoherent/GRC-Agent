@@ -7,6 +7,7 @@ import datetime
 import json
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
@@ -839,6 +840,7 @@ class ToolAgentsRunner:
         max_tool_rounds: int | None = None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, Any], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Run one bounded ToolAgents-backed model turn.
 
@@ -857,6 +859,7 @@ class ToolAgentsRunner:
             max_tool_rounds=max_tool_rounds,
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
+            cancel_event=cancel_event,
         ):
             if event.get("event") == "final":
                 return event.get("result", {})
@@ -876,8 +879,16 @@ class ToolAgentsRunner:
         max_tool_rounds: int | None = None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, Any], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield events from one bounded turn. Same loop as ``run_turn``.
+
+        ``cancel_event`` (optional, ``threading.Event``-like) is checked
+        cooperatively inside ``_fetch_model_response``'s stream loop.
+        When set, the in-flight provider stream is closed cleanly,
+        whatever partial message has been accumulated is persisted to
+        ``agent.chat_history`` and emitted as one ``assistant_model``
+        SSOT event before returning.  No hard-kill of the HTTP client.
 
         Events:
 
@@ -900,6 +911,7 @@ class ToolAgentsRunner:
             max_tool_rounds=max_tool_rounds,
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
+            cancel_event=cancel_event,
         )
 
     # ------------------------------------------------------------------ #
@@ -938,6 +950,7 @@ class ToolAgentsRunner:
         settings: ProviderSettings,
         resolved_model: str,
         assistant_turns: int,
+        cancel_event: "threading.Event | None" = None,
     ) -> Generator[dict[str, Any], None, tuple[ChatMessage, bool] | None]:
         """Run the provider-retry loop and stream-consume ``stream_step``.
 
@@ -946,8 +959,17 @@ class ToolAgentsRunner:
         then ``return``s ``None`` to signal the caller to terminate.
 
         Returns ``(assistant_message, streamed_any_content)`` on success,
-        or ``None`` after the unreachable final has already been emitted.
-        Logic-identical to the retry + stream-consume loop previously inlined.
+        ``None`` after the unreachable final has already been emitted,
+        and ``None`` (with a ``assistant_model`` event already yielded)
+        on cooperative cancel — the caller checks ``fetched is None``
+        and terminates the turn.
+
+        ``cancel_event`` is checked between chunks. When set, the
+        in-flight stream is abandoned cleanly (the Python generator
+        from ``stream_step`` runs to exhaustion or breaks naturally);
+        whatever assistant message was being assembled is appended to
+        ``agent.chat_history`` with a "cancelled" note, emitted as one
+        ``assistant_model`` SSOT event, and we return ``None``.
         """
         retry_attempts = _MAX_PROVIDER_RETRIES
         for attempt in range(retry_attempts):
@@ -959,16 +981,58 @@ class ToolAgentsRunner:
             try:
                 streamed_any_content = False
                 assistant_message = None
+                cancelled = False
                 for chunk_obj in self.chat_agent.stream_step(
                     messages,
                     tool_registry=registry,
                     settings=settings,
                 ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        cancelled = True
+                        break
                     if chunk_obj.chunk:
                         yield {"event": "chunk", "text": chunk_obj.chunk}
                         streamed_any_content = True
                     if chunk_obj.get_finished():
                         assistant_message = chunk_obj.get_finished_chat_message()
+
+                if cancelled:
+                    cancel_text = "(cancelled by user)"
+                    if assistant_message is None:
+                        # Stream was abandoned before any usable content
+                        # arrived — synthesize a minimal assistant message
+                        # so the SSOT emit path matches the normal
+                        # terminal emission.
+                        now = datetime.datetime.now()
+                        assistant_message = ChatMessage(
+                            id=str(uuid.uuid4()),
+                            role=ChatMessageRole.Assistant,
+                            content=[TextContent(content=cancel_text)],
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        agent.chat_history.add_message(assistant_message)
+                    else:
+                        # Partial content exists.  Append the
+                        # cancellation note to whatever was already
+                        # streamed — the SSOT now reflects what the user
+                        # saw plus the cancellation marker.  The message
+                        # is rewritten in place; ``_replace_last_assistant_text``
+                        # mutated the chat_history's last ChatMessage
+                        # object itself, so we read it back by reference.
+                        _replace_last_assistant_text(
+                            agent.chat_history,
+                            (
+                                _message_text(assistant_message).rstrip()
+                                + f"\n\n{cancel_text}"
+                            ),
+                        )
+                    yield {
+                        "event": "model_message",
+                        "role": ASSISTANT_MODEL_ROLE,
+                        "payload": chat_message_payload(assistant_message),
+                    }
+                    return None
 
                 if assistant_message is None:
                     now = datetime.datetime.now()
@@ -1168,6 +1232,7 @@ class ToolAgentsRunner:
         max_tool_rounds: int | None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None,
         on_tool_end: Callable[[str, Any], None] | None,
+        cancel_event: "threading.Event | None" = None,
     ) -> Iterator[dict[str, Any]]:
         # Persist the user message first — before any model / error check —
         # so the prompt is always in the SSOT regardless of what happens next.
@@ -1233,7 +1298,12 @@ class ToolAgentsRunner:
             registry = registry_builder.build(active_allowed_tools)
 
             fetched = yield from self._fetch_model_response(
-                agent, registry, settings, resolved_model, assistant_turns
+                agent,
+                registry,
+                settings,
+                resolved_model,
+                assistant_turns,
+                cancel_event=cancel_event,
             )
             if fetched is None:
                 return
