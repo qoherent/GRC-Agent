@@ -9,7 +9,10 @@ visible tool.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _EVALUATED_HIDE_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, str]] = {}
 
@@ -38,14 +41,23 @@ def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]
         from grc_agent.grc_native_adapter import get_platform_or_none
 
         platform = get_platform_or_none()
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "evaluated_param_hides platform_import_failed block=%s: %s: %s",
+            block_type, type(exc).__name__, exc,
+        )
         return {}
     if platform is None:
+        logger.debug("evaluated_param_hides no_platform block=%s", block_type)
         return {}
     try:
         flow_graph = platform.make_flow_graph()
         block = flow_graph.new_block(block_type)
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "evaluated_param_hides new_block_failed block=%s: %s: %s",
+            block_type, type(exc).__name__, exc,
+        )
         return {}
     # ``new_block`` returns None for control blocks (variable, parameter,
     # options, etc.) — the platform does not model them as instance blocks
@@ -59,12 +71,22 @@ def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]
             if param is not None:
                 try:
                     param.value = "" if value is None else str(value)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "evaluated_param_hides set_value_failed block=%s key=%s: %s: %s",
+                        block_type, key, type(exc).__name__, exc,
+                    )
         try:
             flow_graph.rewrite()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "evaluated_param_hides rewrite_failed block=%s: %s: %s",
+                block_type, type(exc).__name__, exc,
+            )
         return {str(name): str(param.hide) for name, param in block.params.items()}
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "evaluated_param_hides collect_failed block=%s: %s: %s",
+            block_type, type(exc).__name__, exc,
+        )
         return {}
