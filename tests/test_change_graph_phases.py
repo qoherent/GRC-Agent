@@ -164,3 +164,34 @@ def test_phase_auto_resolve_types_no_op_when_type_already_set(ctx_factory):
     ctx.type_already_set = {"dc"}  # batch already set the type
     _phase_auto_resolve_types(ctx)
     assert ctx.errors == []
+
+
+# --- Task 4: phase methods 6-7 (remove_connections / add_connections) ---
+
+
+def test_phase_remove_connections_unparseable_records_error(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_remove_connections
+
+    _session, ctx = ctx_factory
+    ctx.remove_connections_list = ["garbage_no_arrow_here"]
+    _phase_remove_connections(ctx)
+    assert any(e["code"] == "invalid_connection" for e in ctx.errors)
+
+
+def test_phase_remove_connections_missing_arrow_suggests_remove_blocks(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_remove_connections
+
+    _session, ctx = ctx_factory
+    ctx.remove_connections_list = ["my_block"]  # no "->"
+    _phase_remove_connections(ctx)
+    err = next(e for e in ctx.errors if e["code"] == "invalid_connection")
+    assert "Did you mean to pass" in err["message"]
+
+
+def test_phase_add_connections_unparseable_records_error(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_add_connections
+
+    _session, ctx = ctx_factory
+    ctx.add_connections_list = ["garbage"]
+    _phase_add_connections(ctx)
+    assert any(e["code"] == "invalid_connection" for e in ctx.errors)

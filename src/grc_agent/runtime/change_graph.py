@@ -254,6 +254,93 @@ def _phase_update_states(ctx: ChangeGraphContext) -> None:
             ctx.errors.append({"code": "update_states_failed", "message": str(exc)})
 
 
+def _phase_remove_connections(ctx: ChangeGraphContext) -> None:
+    """Remove each connection; idempotent (missing edges are skipped silently).
+
+    Behavior is identical to the original inline block (lines 317-353 of
+    the pre-refactor file).  Parsed once via ``parse_connection_id``;
+    on parse failure records ``invalid_connection`` with a hint that
+    suggests ``remove_blocks`` when the input looks like a block name
+    instead.  On adapter KeyError (edge already gone) the operation is
+    silent — the desired state has already been achieved.
+    """
+    for entry in ctx.remove_connections_list:
+        conn_id = str(entry).strip()
+        parsed = parse_connection_id(conn_id)
+        if not parsed:
+            hint = ""
+            if "->" not in conn_id:
+                hint = (
+                    f" Did you mean to pass {conn_id!r} to "
+                    "remove_blocks instead?"
+                )
+            ctx.errors.append({
+                "code": "invalid_connection",
+                "message": f"unparseable connection_id: {conn_id!r}.{hint}",
+            })
+            continue
+        try:
+            apply_mutation(
+                ctx.fg,
+                "remove_connection",
+                src_block=parsed["src_block"],
+                src_port=str(parsed["src_port"]),
+                dst_block=parsed["dst_block"],
+                dst_port=str(parsed["dst_port"]),
+            )
+            ctx.ops_applied += 1
+        except KeyError:
+            pass  # already gone — desired state achieved.
+        except Exception as exc:
+            ctx.errors.append({
+                "code": "remove_connection_failed",
+                "message": str(exc),
+            })
+
+
+def _phase_add_connections(ctx: ChangeGraphContext) -> None:
+    """Add each connection; failed connections carry a dtype-aware hint.
+
+    Behavior is identical to the original inline block (the
+    ``add_connections`` loop in the dispatcher, after the
+    ``remove_connections`` loop).
+    """
+    for entry in ctx.add_connections_list:
+        parsed = parse_connection_id(str(entry))
+        if not parsed:
+            ctx.errors.append({
+                "code": "invalid_connection",
+                "message": f"unparseable connection: {entry!r}",
+            })
+            continue
+        try:
+            apply_mutation(
+                ctx.fg,
+                "add_connection",
+                src_block=parsed["src_block"],
+                src_port=str(parsed["src_port"]),
+                dst_block=parsed["dst_block"],
+                dst_port=str(parsed["dst_port"]),
+            )
+            ctx.ops_applied += 1
+        except Exception as exc:
+            hint = _connection_dtype_hint(
+                ctx.fg,
+                parsed["src_block"],
+                str(parsed["src_port"]),
+                parsed["dst_block"],
+                str(parsed["dst_port"]),
+                ctx.new_block_names,
+            )
+            entry_err: dict[str, str] = {
+                "code": "add_connection_failed",
+                "message": str(exc),
+            }
+            if hint:
+                entry_err["hint"] = hint
+            ctx.errors.append(entry_err)
+
+
 def dispatch_flat_change_graph_batch(
     agent: Any,
     *,
