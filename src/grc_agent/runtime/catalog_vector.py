@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import sqlite_vec
+from grc_agent.runtime._vector_store_base import VectorStoreBase
 from grc_agent.runtime.doc_answer import get_embedding
 from grc_agent.runtime.param_filter import visible_param_keys
 
@@ -197,18 +198,12 @@ def embed_query(
     return get_embedding(server_url, _QUERY_PREFIX + query, model=model)
 
 
-class VectorCatalogStore:
+class VectorCatalogStore(VectorStoreBase):
     """sqlite-vec backed KNN store for GNU Radio catalog blocks."""
 
     def __init__(self, db_path: Path, server_url: str):
         self.db_path = db_path
         self.server_url = server_url
-
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        return conn
 
     def init_db(self, conn: sqlite3.Connection) -> None:
         conn.execute(

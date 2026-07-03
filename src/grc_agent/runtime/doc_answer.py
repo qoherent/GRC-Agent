@@ -31,11 +31,13 @@ import sqlite_vec
 from grc_agent.domain_models import ErrorCode
 from grc_agent.runtime._embedding_config import (
     _DOCUMENT_PREFIX,
+    _EMBED_DIM,
     _EMBED_MAX_WORDS,
     _EMBED_MODEL,
     _MAX_CONTEXT_WORDS,
     _QUERY_PREFIX,
 )
+from grc_agent.runtime._vector_store_base import VectorStoreBase
 from grc_agent.runtime.llm_client import call_agent_llm
 from grc_agent.runtime.llm_client import cap_words as _cap_words
 
@@ -118,18 +120,12 @@ def compose_chunk_text(path: Path, heading: str, body: str) -> str:
 _EMBED_DIM = 768  # embeddinggemma float32
 
 
-class VectorDocsStore:
+class VectorDocsStore(VectorStoreBase):
     """sqlite-vec backed KNN store over the GNU Radio docs wiki."""
 
     def __init__(self, db_path: Path, server_url: str):
         self.db_path = db_path
         self.server_url = server_url
-
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        return conn
 
     def init_db(self, conn: sqlite3.Connection) -> None:
         conn.execute(
