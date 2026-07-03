@@ -953,12 +953,13 @@ class MainWindow(QMainWindow):
 
         Centralizes the lifecycle transition so every code path that
         replaces or discards the active session goes through one
-        place.  The session store's ``close_session`` enqueues the
-        ``ended_at`` / ``message_count`` update asynchronously.
+        place.  Delegates to the backend's synchronous
+        ``end_active_session`` so ``ended_at`` / ``message_count``
+        are finalized immediately (no queue delay).
         """
         if self.active_session_id is not None:
             try:
-                self.sessions_store.close_session(self.active_session_id)
+                self.sessions_store.end_active_session(self.active_session_id)
             except Exception as exc:
                 logger.warning(
                     "Failed to close session %s: %s", self.active_session_id, exc
@@ -998,7 +999,8 @@ class MainWindow(QMainWindow):
             title += "..."
 
         try:
-            self.active_session_id = self.sessions_store.open_session(
+            self.active_session_id = self.sessions_store.replace_active_session(
+                None,
                 graph_path=graph_path,
                 graph_hash=graph_hash,
                 model_alias=model_alias,

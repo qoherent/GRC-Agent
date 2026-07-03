@@ -247,6 +247,71 @@ class RoundTripTests(_StoreTestCase):
         self.assertEqual(rec.message_count, 3)
         self.assertIsNotNone(rec.ended_at)
 
+    def test_end_active_session_synchronous_close(self) -> None:
+        """``end_active_session`` is synchronous: the row is finalized
+        immediately (no flush needed)."""
+        sid = self._open_session()
+        for _ in range(5):
+            self.store.append(sid, "user", "hi")
+        self.store.flush(timeout=2.0)
+        self.store.end_active_session(sid)
+        rec = self.store.get_session(sid)
+        assert rec is not None
+        self.assertIsNotNone(rec.ended_at)
+        self.assertEqual(rec.message_count, 5)
+
+    def test_end_active_session_noop_on_none(self) -> None:
+        """Passing ``None`` is a safe no-op (no exception, no row touched)."""
+        before = self.store._writer_conn.execute(
+            "SELECT count(*) FROM sessions"
+        ).fetchone()[0]
+        self.store.end_active_session(None)
+        after = self.store._writer_conn.execute(
+            "SELECT count(*) FROM sessions"
+        ).fetchone()[0]
+        self.assertEqual(before, after)
+
+    def test_replace_active_session_closes_old_and_opens_new(self) -> None:
+        """``replace_active_session`` atomically closes the old row and
+        opens a new one.  The old row's ``ended_at`` is set; the new
+        row exists and is open (``ended_at`` is NULL)."""
+        old_sid = self._open_session(title="old")
+        for _ in range(2):
+            self.store.append(old_sid, "user", "hi")
+        self.store.flush(timeout=2.0)
+
+        new_sid = self.store.replace_active_session(
+            old_sid,
+            graph_path="/tmp/new.grc",
+            graph_hash="grc:new",
+            model_alias="new-model",
+            backend="ollama",
+            title="new",
+        )
+        self.assertNotEqual(new_sid, old_sid)
+
+        old_rec = self.store.get_session(old_sid)
+        assert old_rec is not None
+        self.assertIsNotNone(old_rec.ended_at, "old session must be closed")
+        self.assertEqual(old_rec.message_count, 2)
+
+        new_rec = self.store.get_session(new_sid)
+        assert new_rec is not None
+        self.assertIsNone(new_rec.ended_at, "new session must be open")
+        self.assertEqual(new_rec.title, "new")
+
+    def test_replace_active_session_with_none_old_just_opens(self) -> None:
+        """When ``old_id`` is ``None``, only the INSERT runs."""
+        new_sid = self.store.replace_active_session(
+            None,
+            graph_path="/tmp/x.grc",
+            graph_hash="grc:x",
+            title="solo",
+        )
+        rec = self.store.get_session(new_sid)
+        assert rec is not None
+        self.assertIsNone(rec.ended_at)
+
     def test_cascade_delete_session_deletes_messages(self) -> None:
         sid = self._open_session()
         self.store.append(sid, "user", "hi")

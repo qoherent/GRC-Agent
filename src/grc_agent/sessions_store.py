@@ -493,6 +493,64 @@ class SessionStore:
         self._closed_sessions.put(session_id)
         self._drained.clear()
 
+    def end_active_session(self, session_id: int | None) -> None:
+        """Synchronously finalize a session row (``ended_at`` + ``message_count``).
+
+        No-op when ``session_id`` is ``None``.  Runs a single
+        synchronous ``UPDATE`` on the writer's connection under the
+        open-session lock so the GUI gets immediate confirmation that
+        the row is closed (no queue delay).
+        """
+        if session_id is None:
+            return
+        with self._open_session_lock:
+            self._writer_conn.execute(
+                "UPDATE sessions SET ended_at = ?, "
+                "message_count = (SELECT COUNT(*) FROM messages WHERE session_id = ?) "
+                "WHERE id = ?",
+                (_utcnow_iso(), session_id, session_id),
+            )
+
+    def replace_active_session(
+        self,
+        old_id: int | None,
+        *,
+        graph_path: str,
+        graph_hash: str,
+        model_alias: str | None = None,
+        backend: str | None = None,
+        title: str = "",
+    ) -> int:
+        """Atomically close ``old_id`` (if not ``None``) and open a new row.
+
+        Returns the new session id.  Both statements run inside one
+        explicit ``BEGIN``/``COMMIT`` on the writer's connection under
+        the open-session lock, so the close + open are transactionally
+        atomic at the SQLite level (per the reinforcement from design
+        review).
+        """
+        with self._open_session_lock:
+            self._writer_conn.execute("BEGIN")
+            try:
+                if old_id is not None:
+                    self._writer_conn.execute(
+                        "UPDATE sessions SET ended_at = ?, "
+                        "message_count = (SELECT COUNT(*) FROM messages "
+                        "WHERE session_id = ?) WHERE id = ?",
+                        (_utcnow_iso(), old_id, old_id),
+                    )
+                cur = self._writer_conn.execute(
+                    "INSERT INTO sessions "
+                    "(graph_path, graph_hash, started_at, model_alias, backend, title) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (graph_path, graph_hash, _utcnow_iso(), model_alias, backend, title),
+                )
+                self._writer_conn.execute("COMMIT")
+            except Exception:
+                self._writer_conn.execute("ROLLBACK")
+                raise
+            return int(cur.lastrowid)
+
     def flush(self, timeout: float = 5.0) -> bool:
         """Block until the writer is caught up. Returns True on
         drain, False on timeout."""
