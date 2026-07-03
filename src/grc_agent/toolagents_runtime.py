@@ -202,18 +202,6 @@ def _backend_unreachable_payload(
     return payload
 
 
-def _assistant_text_message(text: str) -> ChatMessage:
-    """Build a typed ``ChatMessage`` carrying plain assistant text."""
-    now = datetime.datetime.now()
-    return ChatMessage(
-        id=str(uuid.uuid4()),
-        role=ChatMessageRole.Assistant,
-        content=[TextContent(content=text)],
-        created_at=now,
-        updated_at=now,
-    )
-
-
 class GrcOpenAIChatAPI(OpenAIChatAPI):
     """OpenAI-compatible provider.
 
