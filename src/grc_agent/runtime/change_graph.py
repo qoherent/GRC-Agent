@@ -377,51 +377,40 @@ def dispatch_flat_change_graph_batch(
         )
 
     errors: list[dict[str, str]] = []
-    ops_applied = 0
+    ctx = ChangeGraphContext(
+        agent=agent,
+        fg=fg,
+        errors=errors,
+        raw_add_blocks=add_blocks,
+        raw_remove_blocks=remove_blocks,
+        raw_update_params=update_params,
+        raw_update_states=update_states,
+        raw_add_connections=add_connections,
+        raw_remove_connections=remove_connections,
+    )
 
     # Snapshot serialized form before any mutation to detect true no-ops.
     from grc_agent.grc_native_adapter import serialize_flow_graph as _serialize_fg
 
-    before_serialized: str | None = None
     if agent.session.path is not None:
         try:
-            before_serialized = _serialize_fg(fg)
+            ctx.before_serialized = _serialize_fg(fg)
         except Exception:
-            before_serialized = None
+            ctx.before_serialized = None
 
     # Capture a pre-batch snapshot for rollback. Uses GRC-native
     # export_data/import_data (not file reload) so unsaved dirty edits
     # are preserved on rollback.
-    before_snapshot = capture_session_state(agent.session)
-
-    def _record_error(code: str, message: str, *, hint: str | None = None) -> None:
-        entry: dict[str, str] = {"code": code, "message": message}
-        if hint:
-            entry["hint"] = hint
-        errors.append(entry)
-
-    # Collect instance names added in this batch (used by connection hint
-    # and by auto-resolve).
-    new_block_names: set[str] = set()
-    for entry in _as_list(add_blocks, "add_blocks", errors):
-        if isinstance(entry, dict):
-            name = str(entry.get("instance_name", "")).strip()
-            if name:
-                new_block_names.add(name)
+    ctx.before_snapshot = capture_session_state(agent.session)
 
     # Capture the pre-batch edge set and the blocks being removed, so that a
     # removal which orphans another block's port can be traced causally and
     # surfaced as a validation hint (deterministic topology offloading).
-    pre_edges: set[str] = {
+    ctx.pre_edges = {
         connection_id(c.source_block.name, c.source_port.key,
                       c.sink_block.name, c.sink_port.key)
         for c in fg.connections
     }
-    removed_names: set[str] = set()
-    for entry in _as_list(remove_blocks, "remove_blocks", errors):
-        name = str(entry).strip()
-        if name:
-            removed_names.add(name)
 
     # Track which new blocks had `type` explicitly set by the model — via
     # EITHER add_blocks params OR an update_params entry on a new block.
@@ -429,199 +418,40 @@ def dispatch_flat_change_graph_batch(
     # update_params (so ports created by a same-batch `num_inputs` bump exist
     # when the neighbor dtype is read), so it would otherwise overwrite a type
     # set via update_params.
-    type_already_set: set[str] = set()
-    for entry in _as_list(add_blocks, "add_blocks", errors):
-        if isinstance(entry, dict):
-            params = entry.get("params")
-            name = str(entry.get("instance_name", "")).strip()
-            if name and isinstance(params, dict) and "type" in params:
-                type_already_set.add(name)
-    for entry in _as_list(update_params, "update_params", errors):
-        if isinstance(entry, dict):
-            params = entry.get("params")
-            name = str(entry.get("instance_name", "")).strip()
-            if name in new_block_names and isinstance(params, dict) and "type" in params:
-                type_already_set.add(name)
+    ctx.type_already_set = {
+        name for name in ctx.new_block_names
+        if name in {
+            *(str(e.get("instance_name", "")).strip()
+              for e in ctx.add_blocks_list
+              if isinstance(e, dict) and "type" in (e.get("params") or {})),
+            *(str(e.get("instance_name", "")).strip()
+              for e in ctx.update_params_list
+              if isinstance(e, dict) and "type" in (e.get("params") or {})
+              and str(e.get("instance_name", "")).strip() in ctx.new_block_names),
+        }
+    }
 
-    # add_blocks
-    add_blocks_list = _as_list(add_blocks, "add_blocks", errors)
-    add_connections_list = _as_list(add_connections, "add_connections", errors)
-    for entry in add_blocks_list:
-        if not isinstance(entry, dict):
-            continue
-        block_id = str(entry.get("block_id", "")).strip()
-        instance_name = str(entry.get("instance_name", "")).strip()
-        if not block_id or not instance_name:
-            _record_error(
-                "invalid_block", f"add_blocks entry needs block_id and instance_name: {entry}"
-            )
-            continue
-        # Duplicate name detection: GRC allows duplicate names but they
-        # cause validation chaos. Reject here with a clear error.
-        try:
-            fg.get_block(instance_name)
-            _record_error("duplicate_block_name", f"a block named {instance_name!r} already exists")
-            continue
-        except KeyError:
-            pass
-        try:
-            apply_mutation(
-                fg,
-                "add_block",
-                block_type=block_id,
-                instance_name=instance_name,
-                parameters=entry.get("params") or {},
-                state=entry.get("state"),
-            )
-            ops_applied += 1
-        except KeyError as exc:
-            _record_error("parameter_not_found", str(exc))
-        except Exception as exc:
-            _record_error("add_block_failed", str(exc))
+    # --- Run the seven ordered phases ---
+    _phase_add_blocks(ctx)
+    _phase_remove_blocks(ctx)
+    _phase_update_params(ctx)
+    _phase_auto_resolve_types(ctx)
+    _phase_update_states(ctx)
+    _phase_remove_connections(ctx)
+    _phase_add_connections(ctx)
 
-    # remove_blocks
-    for entry in _as_list(remove_blocks, "remove_blocks", errors):
-        name = str(entry).strip()
-        if not name:
-            continue
-        if "->" in name:
-            _record_error(
-                "remove_block_failed",
-                f"You passed {name!r} to remove_blocks. This looks like a connection ID. "
-                "Connections must be removed using the remove_connections parameter, not remove_blocks."
-            )
-            continue
-        try:
-            apply_mutation(fg, "remove_block", instance_name=name)
-            ops_applied += 1
-        except Exception as exc:
-            _record_error("remove_block_failed", str(exc))
-
-    # update_params
-    for entry in _as_list(update_params, "update_params", errors):
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("instance_name", "")).strip()
-        params = entry.get("params") or {}
-        if not name:
-            _record_error("invalid_update", f"update_params entry needs instance_name: {entry}")
-            continue
-        try:
-            apply_mutation(fg, "update_params", instance_name=name, params=params)
-            ops_applied += 1
-        except KeyError as exc:
-            _record_error("parameter_not_found", str(exc))
-        except Exception as exc:
-            _record_error("update_params_failed", str(exc))
-
-    # Auto-resolve missing `type` params on newly-added polymorphic blocks.
-    # Runs AFTER update_params (and the rewrite it triggers) so that ports
-    # created by a same-batch structural change — e.g. bumping `num_inputs` on
-    # an adder to expose port 3 — already exist when the neighbor dtype is read.
-    # Uniform rule: if a newly-added block (a) was added in this batch,
-    # (b) did not have `type` set explicitly (add_blocks or update_params), and
-    # (c) is connected to a block whose port dtype resolves, set its `type` to
-    # that dtype so the connection validates.
-    for name in new_block_names:
-        if name in type_already_set:
-            continue
-        try:
-            block = fg.get_block(name)
-        except KeyError:
-            continue
-        if "type" not in block.params:
-            continue
-        dtype = _neighbor_dtype_for(fg, name, add_connections_list, new_block_names)
-        if not dtype:
-            continue
-        try:
-            block.params["type"].set_value(dtype)
-            fg.rewrite()
-        except Exception as exc:
-            logger.warning("Failed to auto-resolve type for block %s: %s", name, exc)
-
-    # update_states
-    for entry in _as_list(update_states, "update_states", errors):
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("instance_name", "")).strip()
-        state = str(entry.get("state", "")).strip()
-        if not name or not state:
-            _record_error(
-                "invalid_state", f"update_states entry needs instance_name and state: {entry}"
-            )
-            continue
-        try:
-            apply_mutation(fg, "update_states", instance_name=name, state=state)
-            ops_applied += 1
-        except Exception as exc:
-            _record_error("update_states_failed", str(exc))
-
-    # remove_connections (MUST run before add_connections so inline-insert
-    # doesn't create a transient double-upstream that GRC rejects).
-    # Idempotent: if the edge is already gone (e.g. cascaded by a prior
-    # remove_block), skip silently — the desired state is already achieved.
-    for entry in _as_list(remove_connections, "remove_connections", errors):
-        conn_id = str(entry).strip()
-        parsed = parse_connection_id(conn_id)
-        if not parsed:
-            hint = ""
-            if "->" not in conn_id:
-                hint = f" Did you mean to pass {conn_id!r} to remove_blocks instead?"
-            _record_error("invalid_connection", f"unparseable connection_id: {conn_id!r}.{hint}")
-            continue
-        try:
-            apply_mutation(
-                fg,
-                "remove_connection",
-                src_block=parsed["src_block"],
-                src_port=str(parsed["src_port"]),
-                dst_block=parsed["dst_block"],
-                dst_port=str(parsed["dst_port"]),
-            )
-            ops_applied += 1
-        except KeyError:
-            pass
-        except Exception as exc:
-            _record_error("remove_connection_failed", str(exc))
-
-    # add_connections (flat strings: "src:port->dst:port")
-    for entry in _as_list(add_connections, "add_connections", errors):
-        parsed = parse_connection_id(str(entry))
-        if not parsed:
-            _record_error("invalid_connection", f"unparseable connection: {entry!r}")
-            continue
-        try:
-            apply_mutation(
-                fg,
-                "add_connection",
-                src_block=parsed["src_block"],
-                src_port=str(parsed["src_port"]),
-                dst_block=parsed["dst_block"],
-                dst_port=str(parsed["dst_port"]),
-            )
-            ops_applied += 1
-        except Exception as exc:
-            hint = _connection_dtype_hint(
-                fg,
-                parsed["src_block"],
-                str(parsed["src_port"]),
-                parsed["dst_block"],
-                str(parsed["dst_port"]),
-                new_block_names,
-            )
-            _record_error("add_connection_failed", str(exc), hint=hint)
+    ops_applied = ctx.ops_applied
 
     # Validate the final state.
     validation = validate(fg) if ops_applied else None
     validation_ok = validation.native_ok if validation else True
     if not validation_ok and not force:
-        _restore_snapshot(agent, before_snapshot)
+        _restore_snapshot(agent, ctx.before_snapshot)
         committed = False
     elif errors:
         # Adapter errors (unknown param, missing block, etc.) cannot be bypassed
         # by force — force only suppresses native-validation failures.
-        _restore_snapshot(agent, before_snapshot)
+        _restore_snapshot(agent, ctx.before_snapshot)
         committed = False
     else:
         committed = True
@@ -633,7 +463,7 @@ def dispatch_flat_change_graph_batch(
             after_serialized = _serialize_fg(fg)
         except Exception:
             after_serialized = None
-        if agent.session.path is not None and before_serialized != after_serialized:
+        if agent.session.path is not None and ctx.before_serialized != after_serialized:
             try:
                 agent.session.save()
             except Exception as exc:
@@ -658,18 +488,18 @@ def dispatch_flat_change_graph_batch(
     # invalid so it can decide whether to fix the issue or set force=true.
     if validation_errors and not validation_native_ok:
         type_hint = _type_hint_for_validation(
-            fg, validation_errors, new_block_names
+            fg, validation_errors, ctx.new_block_names
         )
         orphaned_hints = (
-            _orphaned_port_hints(pre_edges, removed_names) if removed_names else {}
+            _orphaned_port_hints(ctx.pre_edges, ctx.removed_names)
+            if ctx.removed_names else {}
         )
         for entry in _validation_error_entries(validation_errors, type_hint, orphaned_hints):
             payload.setdefault("errors", []).append(entry)
         if not committed:
             payload["error_type"] = ErrorCode.GNU_VALIDATION_FAILED
 
-    result = agent._payload_result("change_graph", payload)
-    return result
+    return agent._payload_result("change_graph", payload)
 
 
 # --------------------------------------------------------------------------- #

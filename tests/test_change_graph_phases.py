@@ -195,3 +195,68 @@ def test_phase_add_connections_unparseable_records_error(ctx_factory):
     ctx.add_connections_list = ["garbage"]
     _phase_add_connections(ctx)
     assert any(e["code"] == "invalid_connection" for e in ctx.errors)
+
+
+# --- Task 5: wire-format regression (locks the public contract) ---
+
+
+def test_dispatch_wire_format_ok_true_on_success():
+    """The wire payload must remain ``{'ok': True}`` on a no-op commit.
+
+    A no-op (empty batch + no-ops) means no validation runs, no
+    rollback runs, no save runs — the dispatcher just returns ok=True.
+    Verifies the wire format on the simplest happy path so any future
+    refactor that adds new keys to the payload is caught.
+    """
+    from unittest import mock
+
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    mock_agent = mock.Mock()
+    mock_agent._missing_session_result.return_value = None
+    mock_agent.session.file_integrity_state.return_value = {
+        "externally_modified": False
+    }
+    mock_agent.session.path = None
+
+    mock_fg = mock.Mock()
+    mock_fg.blocks = []
+    mock_fg.connections = []
+    mock_agent.session.flowgraph = mock_fg
+
+    mock_agent._payload_result.side_effect = (
+        lambda tool_name, payload: payload
+    )
+
+    payload = dispatch_flat_change_graph_batch(mock_agent)
+    assert payload["ok"] is True
+    # Wire contract is unchanged: none of these forbidden keys appear.
+    for forbidden in (
+        "committed", "state_revision", "validation",
+        "rollback", "ops_applied", "native_validation_errors",
+        "rejected_phase", "graph_unchanged", "hint",
+    ):
+        assert forbidden not in payload, (
+            f"wire key {forbidden!r} must not appear in success payload"
+        )
+    # ``errors`` is only present on failure.
+    assert "errors" not in payload
+
+
+def test_dispatch_wire_format_missing_session_has_ok_false():
+    """Failed preflight returns ok=False + a typed error_type."""
+    from unittest import mock
+
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    fake_agent = mock.Mock()
+    fake_agent._missing_session_result.return_value = {
+        "ok": False, "error_type": "no_session", "errors": []
+    }
+    payload = dispatch_flat_change_graph_batch(fake_agent, add_blocks=[])
+    assert payload["ok"] is False
+    assert payload["error_type"] == "no_session"
+    for forbidden in ("committed", "rollback", "state_revision"):
+        assert forbidden not in payload, (
+            f"wire key {forbidden!r} must not appear on no_session"
+        )
