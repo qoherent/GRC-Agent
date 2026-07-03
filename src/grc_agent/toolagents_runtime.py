@@ -10,6 +10,7 @@ import os
 import uuid
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import httpx as _httpx
@@ -772,6 +773,22 @@ class ToolAgentsRegistryBuilder:
         return registry
 
 
+@dataclass(frozen=True)
+class _ToolDispatchOutcome:
+    """Result of one tool-dispatch round inside ``_run_turn_events``."""
+
+    executed_count: int
+    loop_stuck: bool
+
+
+class _LoopDecision(Enum):
+    """Outcome of ``_evaluate_loop_state`` for one tool call."""
+
+    CONTINUE = "continue"
+    WARN = "warn"
+    STOP = "stop"
+
+
 class ToolAgentsRunner:
     """Bounded model turn runner using ToolAgents step calls."""
 
@@ -859,6 +876,263 @@ class ToolAgentsRunner:
             on_tool_end=on_tool_end,
         )
 
+    # ------------------------------------------------------------------ #
+    # _run_turn_events helpers (structural decomposition — no logic change)
+    # ------------------------------------------------------------------ #
+
+    def _evaluate_loop_state(
+        self,
+        tool_name: str,
+        tool_call_arguments: Any,
+        result: Any,
+        executed: bool,
+        failing_call_signatures: dict[tuple[str, str], int],
+    ) -> _LoopDecision:
+        """Return CONTINUE / WARN / STOP for one tool call.
+
+        Mutates ``failing_call_signatures`` in place.  Logic-identical to
+        the inline checks previously embedded in the tool-dispatch loop.
+        """
+        if not (executed and isinstance(result, dict) and result.get("ok") is False):
+            return _LoopDecision.CONTINUE
+        sig = _call_signature(tool_call_arguments)
+        key = (tool_name, sig)
+        failing_call_signatures[key] = failing_call_signatures.get(key, 0) + 1
+        count = failing_call_signatures[key]
+        if count == _LOOP_WARN_THRESHOLD:
+            return _LoopDecision.WARN
+        if count >= _LOOP_STOP_THRESHOLD:
+            return _LoopDecision.STOP
+        return _LoopDecision.CONTINUE
+
+    def _fetch_model_response(
+        self,
+        agent: GrcAgent,
+        registry: ToolRegistry,
+        settings: ProviderSettings,
+        resolved_model: str,
+        assistant_turns: int,
+    ) -> Generator[dict[str, Any], None, tuple[ChatMessage, bool] | None]:
+        """Run the provider-retry loop and stream-consume ``stream_step``.
+
+        Yields ``{"event": "chunk", ...}`` during streaming, and on
+        backend-unreachable yields the assistant_model + final events,
+        then ``return``s ``None`` to signal the caller to terminate.
+
+        Returns ``(assistant_message, streamed_any_content)`` on success,
+        or ``None`` after the unreachable final has already been emitted.
+        Logic-identical to the retry + stream-consume loop previously inlined.
+        """
+        retry_attempts = _MAX_PROVIDER_RETRIES
+        for attempt in range(retry_attempts):
+            system_salt = None
+            if attempt > 0:
+                system_salt = f"retry_salt: {uuid.uuid4()}"
+
+            messages = agent.get_model_messages(system_salt=system_salt)
+            try:
+                streamed_any_content = False
+                assistant_message = None
+                for chunk_obj in self.chat_agent.stream_step(
+                    messages,
+                    tool_registry=registry,
+                    settings=settings,
+                ):
+                    if chunk_obj.chunk:
+                        yield {"event": "chunk", "text": chunk_obj.chunk}
+                        streamed_any_content = True
+                    if chunk_obj.get_finished():
+                        assistant_message = chunk_obj.get_finished_chat_message()
+
+                if assistant_message is None:
+                    now = datetime.datetime.now()
+                    assistant_message = ChatMessage(
+                        id=str(uuid.uuid4()),
+                        role=ChatMessageRole.Assistant,
+                        content=[],
+                        created_at=now,
+                        updated_at=now,
+                    )
+
+                tool_calls = assistant_message.get_tool_calls()
+                assistant_text = _message_text(assistant_message).strip()
+
+                if not tool_calls and not assistant_text:
+                    if attempt < retry_attempts - 1:
+                        logger.warning(
+                            "Degenerate empty response with no tool calls "
+                            "(attempt %d/%d). Retrying...",
+                            attempt + 1,
+                            retry_attempts,
+                        )
+                        continue
+
+                return (assistant_message, streamed_any_content)
+            except _BACKEND_CONNECTION_ERRORS as exc:
+                if attempt < retry_attempts - 1:
+                    logger.warning(
+                        "Backend connection error (attempt %d/%d): %s. Retrying...",
+                        attempt + 1,
+                        retry_attempts,
+                        exc,
+                    )
+                    continue
+                logger.warning(
+                    "Backend unreachable during turn: model=%s url=%s error=%s",
+                    resolved_model,
+                    self.provider_config.base_url,
+                    exc,
+                )
+                payload = _backend_unreachable_payload(
+                    exc=exc,
+                    model=resolved_model,
+                    server_url=self.provider_config.base_url,
+                    assistant_turns=assistant_turns,
+                )
+                agent.chat_history.add_assistant_message(payload["assistant_text"])
+                yield {
+                    "event": "model_message",
+                    "role": ASSISTANT_MODEL_ROLE,
+                    "payload": chat_message_payload(
+                        agent.chat_history.get_messages()[-1]
+                    ),
+                }
+                yield {"event": "final", "result": payload}
+                return None
+        return None  # pragma: no cover — unreachable; the loop above always returns
+
+    def _dispatch_tools(
+        self,
+        agent: GrcAgent,
+        assistant_message: ChatMessage,
+        tool_calls: list[Any],
+        registry_builder: ToolAgentsRegistryBuilder,
+        active_allowed_tools: set[str],
+        *,
+        resolved_model: str,
+        assistant_turns: int,
+        tool_rounds_used: int,
+        tool_calls_executed: int,
+        failing_call_signatures: dict[tuple[str, str], int],
+        streamed_any_content: bool,
+    ) -> Generator[dict[str, Any], None, _ToolDispatchOutcome]:
+        """Execute one round's tool calls; return counts + loop-stuck state.
+
+        Yields the non-terminal ``assistant_model`` model_message, the
+        per-tool ``tool_model`` model_messages, the loop-note
+        ``user_model`` model_message when ``_evaluate_loop_state`` returns
+        WARN, and on STOP yields the safety-ceiling model_message + final
+        then terminates.
+
+        Counter bookkeeping mirrors the original in-line implementation
+        exactly (the caller passes the pre-round ``tool_calls_executed``
+        and ``tool_rounds_used``; the outcome carries the round delta).
+        """
+        # Non-terminal round: emit immediately (text is not rewritten).
+        yield {
+            "event": "model_message",
+            "role": ASSISTANT_MODEL_ROLE,
+            "payload": chat_message_payload(assistant_message),
+        }
+        # Surface this round's text (reasoning/think content, or a
+        # chatty preamble before the tool call) as soon as it's
+        # available, instead of only the terminal round's text.
+        if not streamed_any_content:
+            round_text = _message_text(assistant_message).strip()
+            if round_text:
+                yield {"event": "chunk", "text": round_text}
+
+        round_executed = 0
+        loop_stuck = False
+        for tool_call in tool_calls:
+            tool_name = tool_call.tool_call_name
+            logger.info(
+                "tool_call name=%s args=%s",
+                tool_name,
+                str(tool_call.tool_call_arguments)[:120],
+            )
+            delegate = registry_builder.delegates.get(tool_name)
+            if delegate is None:
+                result = build_error_payload(
+                    error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
+                    message=(
+                        f"Tool '{tool_name}' is not available through "
+                        "the model-facing surface."
+                    ),
+                )
+                result["tool"] = tool_name
+                result["allowed_tools"] = sorted(active_allowed_tools)
+                executed = False
+            else:
+                delegate_result = delegate.invoke(
+                    tool_call.tool_call_arguments,
+                    allowed_tool_names=active_allowed_tools,
+                )
+                result = delegate_result.result
+                executed = delegate_result.executed
+            if executed:
+                round_executed += 1
+            tool_result_message = _tool_result_message(tool_call, result)
+            agent.chat_history.add_message(tool_result_message)
+            yield {
+                "event": "model_message",
+                "role": TOOL_MODEL_ROLE,
+                "payload": chat_message_payload(tool_result_message),
+            }
+            decision = self._evaluate_loop_state(
+                tool_name,
+                tool_call.tool_call_arguments,
+                result,
+                executed,
+                failing_call_signatures,
+            )
+            if decision is _LoopDecision.WARN:
+                note_msg = ChatMessage.create_user_message(_LOOP_NOTE)
+                agent.chat_history.add_message(note_msg)
+                yield {
+                    "event": "model_message",
+                    "role": USER_MODEL_ROLE,
+                    "payload": chat_message_payload(note_msg),
+                }
+            elif decision is _LoopDecision.STOP:
+                loop_stuck = True
+                break
+
+        if loop_stuck:
+            stuck_text = (
+                "(stopped: the same tool call failed identically "
+                "multiple times in a row)"
+            )
+            payload = build_error_payload(
+                error_type=ErrorCode.SAFETY_CEILING,
+                message=(
+                    "Stopped: the same tool call failed identically "
+                    "multiple times in a row."
+                ),
+            )
+            payload["model"] = resolved_model
+            payload["steps"] = assistant_turns
+            payload["tool_rounds_used"] = tool_rounds_used
+            payload["tool_calls_requested"] = len(tool_calls)
+            payload["tool_calls_executed"] = tool_calls_executed + round_executed
+            payload["assistant_text"] = stuck_text
+            agent.chat_history.add_assistant_message(stuck_text)
+            yield {
+                "event": "model_message",
+                "role": ASSISTANT_MODEL_ROLE,
+                "payload": chat_message_payload(
+                    agent.chat_history.get_messages()[-1]
+                ),
+            }
+            yield {"event": "final", "result": payload}
+            return _ToolDispatchOutcome(
+                executed_count=round_executed, loop_stuck=True
+            )
+
+        return _ToolDispatchOutcome(
+            executed_count=round_executed, loop_stuck=False
+        )
+
     def _run_turn_events(
         self,
         agent: GrcAgent,
@@ -931,81 +1205,14 @@ class ToolAgentsRunner:
                 on_tool_end=on_tool_end,
             )
             registry = registry_builder.build(active_allowed_tools)
-            retry_attempts = _MAX_PROVIDER_RETRIES
-            for attempt in range(retry_attempts):
-                system_salt = None
-                if attempt > 0:
-                    system_salt = f"retry_salt: {uuid.uuid4()}"
 
-                messages = agent.get_model_messages(system_salt=system_salt)
-                try:
-                    streamed_any_content = False
-                    assistant_message = None
-                    for chunk_obj in self.chat_agent.stream_step(
-                        messages,
-                        tool_registry=registry,
-                        settings=settings,
-                    ):
-                        if chunk_obj.chunk:
-                            yield {"event": "chunk", "text": chunk_obj.chunk}
-                            streamed_any_content = True
-                        if chunk_obj.get_finished():
-                            assistant_message = chunk_obj.get_finished_chat_message()
+            fetched = yield from self._fetch_model_response(
+                agent, registry, settings, resolved_model, assistant_turns
+            )
+            if fetched is None:
+                return
+            assistant_message, streamed_any_content = fetched
 
-                    if assistant_message is None:
-                        now = datetime.datetime.now()
-                        assistant_message = ChatMessage(
-                            id=str(uuid.uuid4()),
-                            role=ChatMessageRole.Assistant,
-                            content=[],
-                            created_at=now,
-                            updated_at=now,
-                        )
-
-                    tool_calls = assistant_message.get_tool_calls()
-                    assistant_text = _message_text(assistant_message).strip()
-
-                    if not tool_calls and not assistant_text:
-                        if attempt < retry_attempts - 1:
-                            logger.warning(
-                                "Degenerate empty response with no tool calls (attempt %d/%d). Retrying...",
-                                attempt + 1,
-                                retry_attempts,
-                            )
-                            continue
-
-                    break
-                except _BACKEND_CONNECTION_ERRORS as exc:
-                    if attempt < retry_attempts - 1:
-                        logger.warning(
-                            "Backend connection error (attempt %d/%d): %s. Retrying...",
-                            attempt + 1,
-                            retry_attempts,
-                            exc,
-                        )
-                        continue
-                    logger.warning(
-                        "Backend unreachable during turn: model=%s url=%s error=%s",
-                        resolved_model,
-                        self.provider_config.base_url,
-                        exc,
-                    )
-                    payload = _backend_unreachable_payload(
-                        exc=exc,
-                        model=resolved_model,
-                        server_url=self.provider_config.base_url,
-                        assistant_turns=assistant_turns,
-                    )
-                    agent.chat_history.add_assistant_message(payload["assistant_text"])
-                    yield {
-                        "event": "model_message",
-                        "role": ASSISTANT_MODEL_ROLE,
-                        "payload": chat_message_payload(
-                            agent.chat_history.get_messages()[-1]
-                        ),
-                    }
-                    yield {"event": "final", "result": payload}
-                    return
             assistant_turns += 1
             tool_calls = assistant_message.get_tool_calls()
             tool_calls_requested += len(tool_calls)
@@ -1013,101 +1220,23 @@ class ToolAgentsRunner:
             agent.chat_history.add_message(assistant_message)
 
             if tool_calls:
-                # Non-terminal round: emit immediately (text is not rewritten).
-                yield {
-                    "event": "model_message",
-                    "role": ASSISTANT_MODEL_ROLE,
-                    "payload": chat_message_payload(assistant_message),
-                }
-                # Surface this round's text (reasoning/<think> content, or a
-                # chatty preamble before the tool call) as soon as it's
-                # available, instead of only the terminal round's text.
-                if not streamed_any_content:
-                    round_text = _message_text(assistant_message).strip()
-                    if round_text:
-                        yield {"event": "chunk", "text": round_text}
                 tool_rounds_used += 1
-                loop_stuck = False
-                for tool_call in tool_calls:
-                    tool_name = tool_call.tool_call_name
-                    logger.info(
-                        "tool_call name=%s args=%s",
-                        tool_name,
-                        str(tool_call.tool_call_arguments)[:120],
-                    )
-                    delegate = registry_builder.delegates.get(tool_name)
-                    if delegate is None:
-                        result = build_error_payload(
-                            error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
-                            message=f"Tool '{tool_name}' is not available through the model-facing surface.",
-                        )
-                        result["tool"] = tool_name
-                        result["allowed_tools"] = sorted(active_allowed_tools)
-                        executed = False
-                    else:
-                        delegate_result = delegate.invoke(
-                            tool_call.tool_call_arguments,
-                            allowed_tool_names=active_allowed_tools,
-                        )
-                        result = delegate_result.result
-                        executed = delegate_result.executed
-                    if executed:
-                        tool_calls_executed += 1
-                    tool_result_message = _tool_result_message(tool_call, result)
-                    agent.chat_history.add_message(tool_result_message)
-                    yield {
-                        "event": "model_message",
-                        "role": TOOL_MODEL_ROLE,
-                        "payload": chat_message_payload(tool_result_message),
-                    }
-                    # Loop detection: a repeated identical failing tool call
-                    # means the model is stuck re-sending the same arguments.
-                    # Inform once with a factual note (no directive — AGENTS.md
-                    # "no in-band control flow"); on the third identical failure
-                    # stop the turn instead of burning the whole tool budget.
-                    # One uniform rule for every tool, keyed by (tool_name, sig).
-                    if executed and isinstance(result, dict) and result.get("ok") is False:
-                        sig = _call_signature(tool_call.tool_call_arguments)
-                        key = (tool_name, sig)
-                        failing_call_signatures[key] = failing_call_signatures.get(key, 0) + 1
-                        if failing_call_signatures[key] == _LOOP_WARN_THRESHOLD:
-                            note_msg = ChatMessage.create_user_message(_LOOP_NOTE)
-                            agent.chat_history.add_message(note_msg)
-                            yield {
-                                "event": "model_message",
-                                "role": USER_MODEL_ROLE,
-                                "payload": chat_message_payload(note_msg),
-                            }
-                        elif failing_call_signatures[key] >= _LOOP_STOP_THRESHOLD:
-                            loop_stuck = True
-                            break
-                if loop_stuck:
-                    stuck_text = (
-                        "(stopped: the same tool call failed identically multiple times in a row)"
-                    )
-                    payload = build_error_payload(
-                        error_type=ErrorCode.SAFETY_CEILING,
-                        message=(
-                            "Stopped: the same tool call failed identically "
-                            "multiple times in a row."
-                        ),
-                    )
-                    payload["model"] = resolved_model
-                    payload["steps"] = assistant_turns
-                    payload["tool_rounds_used"] = tool_rounds_used
-                    payload["tool_calls_requested"] = tool_calls_requested
-                    payload["tool_calls_executed"] = tool_calls_executed
-                    payload["assistant_text"] = stuck_text
-                    agent.chat_history.add_assistant_message(stuck_text)
-                    yield {
-                        "event": "model_message",
-                        "role": ASSISTANT_MODEL_ROLE,
-                        "payload": chat_message_payload(
-                            agent.chat_history.get_messages()[-1]
-                        ),
-                    }
-                    yield {"event": "final", "result": payload}
+                outcome = yield from self._dispatch_tools(
+                    agent,
+                    assistant_message,
+                    tool_calls,
+                    registry_builder,
+                    active_allowed_tools,
+                    resolved_model=resolved_model,
+                    assistant_turns=assistant_turns,
+                    tool_rounds_used=tool_rounds_used,
+                    tool_calls_executed=tool_calls_executed,
+                    failing_call_signatures=failing_call_signatures,
+                    streamed_any_content=streamed_any_content,
+                )
+                if outcome.loop_stuck:
                     return
+                tool_calls_executed += outcome.executed_count
                 continue
 
             assistant_text = _message_text(assistant_message)
