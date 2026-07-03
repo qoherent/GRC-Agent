@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 # Add src to system path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 
@@ -982,3 +984,48 @@ def test_strip_inline_math_handles_display_math():
     # Display math at minimum loses the `$$` markers.
     assert "$$" not in out
     assert "x = 1" in out
+
+
+# --- WS3: allow-list + think-block regex + sanitize per-tag ---
+
+
+def test_think_block_regex_is_a_single_module_constant(qtbot):
+    """Both helpers share one regex constant."""
+    from grc_agent_gui import chat_widget
+    import re
+
+    assert hasattr(chat_widget, "_THINK_BLOCK_RE")
+    assert isinstance(chat_widget._THINK_BLOCK_RE, re.Pattern)
+    s1 = chat_widget.strip_think_blocks("A <think>Plan: x</think> B")
+    s2 = chat_widget.extract_thinking_content("A <think>Plan: x</think> B")
+    assert s1 == "A  B"
+    assert s2 == "Plan: x"
+
+
+def test_math_shim_uses_allow_list_not_deny_list(qtbot):
+    from grc_agent_gui import chat_widget
+
+    assert hasattr(chat_widget, "_MATH_ALLOW_LIST")
+    assert isinstance(chat_widget._MATH_ALLOW_LIST, frozenset)
+
+
+def test_unknown_macro_fails_closed_to_code_span(qtbot):
+    from grc_agent_gui.chat_widget import strip_inline_math
+
+    out = strip_inline_math("Define $\\operatorname{sinc}(x)$ here.")
+    assert "<code>" in out
+    assert "\\operatorname" in out
+
+
+@pytest.mark.parametrize("tag", sorted([
+    "script", "iframe", "object", "embed", "style", "link", "meta",
+    "form", "input", "button", "select", "textarea", "base",
+    "frame", "frameset", "applet", "svg", "math",
+]))
+def test_sanitizer_strips_tag(qtbot, tag):
+    from grc_agent_gui.chat_widget import sanitize_html
+
+    unsafe = f"<p>safe</p><{tag}>dangerous</{tag}>"
+    out = sanitize_html(unsafe).lower()
+    assert f"<{tag}" not in out, f"<{tag}> not stripped:\n{out}"
+    assert "dangerous" not in out

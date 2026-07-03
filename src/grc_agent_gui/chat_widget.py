@@ -148,6 +148,26 @@ def markdown_to_highlighted_html(markdown_text: str) -> str:
 # so the user can read it.
 _MATH_FALLBACK = re.compile(r"\$+([^\n]+?)\$+")
 
+# Allow-list of LaTeX macros we can safely rewrite to unicode. Anything
+# not in this list fails closed (becomes a <code> span in strip_inline_math).
+# Deny-lists leak (we never know what new macros the model might emit);
+# allow-lists fail closed — every new macro defaults to "show as code".
+_MATH_ALLOW_LIST = frozenset({
+    "text", "mu", "cdot", "times", "pm", "to", "rightarrow",
+    "leftarrow", "infty", "approx", "neq", "leq", "geq", "deg",
+})
+# Single-character super/subscript allow-lists.
+_SUPER_MAP = {
+    "0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
+    "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",
+    "n": "\u207f", "i": "\u2071", "T": "\u1d40", "+": "\u207a", "-": "\u207b",
+}
+_SUB_MAP = {
+    "0": "\u2080", "1": "\u2081", "2": "\u2082", "3": "\u2083", "4": "\u2084",
+    "5": "\u2085", "6": "\u2086", "7": "\u2087", "8": "\u2088", "9": "\u2089",
+    "i": "\u1d62", "j": "\u2c7c",
+}
+
 
 def _rewrite_math_segment(body: str) -> str | None:
     """Try to rewrite a single ``$...$`` / ``$$...$$`` body to plain text.
@@ -155,16 +175,18 @@ def _rewrite_math_segment(body: str) -> str | None:
     Returns ``None`` if the body contains anything the shim cannot safely
     rewrite (unsupported macros, multi-line content, mismatched braces,
     etc.) — the caller then falls back to a ``<code>`` span.
+
+    Policy is allow-list-based: every ``\\name`` token must appear in
+    ``_MATH_ALLOW_LIST``. Anything else → refuse to render.
     """
     if not body or "\n" in body:
         return None
     s = body
-
-    # Unsupported macros (anything that would need a real TeX engine).
-    if re.search(r"\\(frac|sqrt|sum|int|prod|lim|sin|cos|tan|log|ln|exp|alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|nu|xi|pi|rho|sigma|tau|phi|chi|psi|omega|leq|geq|neq|approx|rightarrow|leftarrow|Rightarrow|Leftarrow|to|infty|partial|nabla|forall|exists|in|notin|subset|supset|cup|cap|emptyset|mathbb|mathrm|mathit|mathbf|mathcal|binom|begin|end)\b", s):
-        return None
-    # Unbalanced / nested braces are not supported (we only handle
-    # \text{...}).
+    # Single uniform rule: any macro outside _MATH_ALLOW_LIST blocks the rewrite.
+    for match in re.finditer(r"\\([A-Za-z]+)", s):
+        if match.group(1) not in _MATH_ALLOW_LIST:
+            return None
+    # Unbalanced / nested braces are not supported (we only handle \text{...}).
     if s.count("{") != s.count("}"):
         return None
     # Square brackets / pipe / hat in math mode are display-only.
@@ -172,54 +194,37 @@ def _rewrite_math_segment(body: str) -> str | None:
         return None
 
     # \text{...} -> contents
-    def _text_sub(match: re.Match[str]) -> str:
-        return match.group(1)
+    s = re.sub(r"\\text\{([^{}]*)\}", lambda m: m.group(1), s)
 
-    s = re.sub(r"\\text\{([^{}]*)\}", _text_sub, s)
+    # Greek letters + symbols (allow-list only — see _MATH_ALLOW_LIST).
+    for name, char in (
+        ("text", None),  # handled above
+        ("mu", "\u00b5"), ("cdot", "\u00b7"), ("times", "\u00d7"), ("pm", "\u00b1"),
+        ("to", "\u2192"), ("rightarrow", "\u2192"), ("leftarrow", "\u2190"),
+        ("infty", "\u221e"), ("approx", "\u2248"), ("neq", "\u2260"),
+        ("leq", "\u2264"), ("geq", "\u2265"), ("deg", "\u00b0"),
+    ):
+        if char is not None:
+            s = s.replace("\\" + name, char)
 
-    # Greek letters (single replacements only; no \foo{bar} patterns
-    # left at this point).
-    s = s.replace("\\mu", "µ")
-    s = s.replace("\\cdot", "·")
-    s = s.replace("\\times", "×")
-    s = s.replace("\\pm", "±")
-    s = s.replace("\\to", "→")
-    s = s.replace("\\rightarrow", "→")
-    s = s.replace("\\leftarrow", "←")
-    s = s.replace("\\infty", "∞")
-    s = s.replace("\\approx", "≈")
-    s = s.replace("\\neq", "≠")
-    s = s.replace("\\leq", "≤")
-    s = s.replace("\\geq", "≥")
-    s = s.replace("\\deg", "°")
+    # Superscript / subscript — reject any char not in the map.
+    s = re.sub(r"\^([0-9A-Za-z+\-])",
+               lambda m: _SUPER_MAP.get(m.group(1), "\x00"), s)
+    if "\x00" in s:
+        return None
+    s = re.sub(r"_([0-9A-Za-z])",
+               lambda m: _SUB_MAP.get(m.group(1), "\x00"), s)
+    if "\x00" in s:
+        return None
 
-    # Superscripts: only single-char unicode (digit / common letter).
-    super_map = {
-        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
-        "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
-        "n": "ⁿ", "i": "ⁱ", "T": "ᵀ", "+": "⁺", "-": "⁻",
-    }
-    s = re.sub(r"\^([0-9A-Za-z+\-])", lambda m: super_map.get(m.group(1), m.group(0)), s)
+    # LaTeX dashes + quotes.
+    s = s.replace("---", "\u2014").replace("--", "\u2013")
+    s = s.replace("``", "\u201c").replace("''", "\u201d")
 
-    # Subscripts.
-    sub_map = {
-        "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
-        "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
-        "i": "ᵢ", "j": "ⱼ",
-    }
-    s = re.sub(r"_([0-9A-Za-z])", lambda m: sub_map.get(m.group(1), m.group(0)), s)
-
-    # LaTeX dashes.
-    s = s.replace("---", "—")
-    s = s.replace("--", "–")
-    s = s.replace("``", "“").replace("''", "”")
-
-    # Stray backslashes that survived the replacements → drop them
-    # (they would otherwise render as raw TeX).
+    # Stray backslashes that survived the replacements → drop them.
     s = s.replace("\\", "")
 
-    # If any backslash-free TeX-ish artifact remains (curly braces, $,
-    # a leading backslash we did not recognize), give up.
+    # If any backslash-free TeX-ish artifact remains, give up.
     if re.search(r"[{}]|\\\w|\$", s):
         return None
 
@@ -251,6 +256,9 @@ def strip_inline_math(text: str) -> str:
     return _MATH_FALLBACK.sub(_replace, text)
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", flags=re.DOTALL)
+
+
 def strip_think_blocks(text: str) -> str:
     """Remove all ``<think>...</think>`` blocks from *text* and return the remainder stripped.
 
@@ -266,7 +274,7 @@ def extract_thinking_content(text: str) -> str | None:
 
     Returns ``None`` if no non-empty thinking block is found.
     """
-    think_matches = re.findall(r"<think>(.*?)</think>", text, flags=re.DOTALL)
+    think_matches = _THINK_BLOCK_RE.findall(text)
     if not think_matches:
         return None
     joined = "\n\n".join(m.strip() for m in think_matches if m.strip())
