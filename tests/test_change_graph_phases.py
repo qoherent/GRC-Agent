@@ -75,3 +75,58 @@ def test_context_accumulates_errors(ctx_factory):
     assert ctx.errors == []
     ctx.errors.append({"code": "test", "message": "x"})
     assert ctx.errors == [{"code": "test", "message": "x"}]
+
+
+# --- Task 2: phase methods 1-3 (add_blocks / remove_blocks / update_params) ---
+
+
+def test_phase_add_blocks_applies_one_entry(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_add_blocks
+
+    session, ctx = ctx_factory
+    ctx.add_blocks_list = [
+        {"block_id": "analog_const_source_x", "instance_name": "dc",
+         "params": {"const": "0.0", "type": "float"}}
+    ]
+    ctx.new_block_names = {"dc"}
+    _phase_add_blocks(ctx)
+    assert "dc" in [b.name for b in session.flowgraph.blocks]
+    assert ctx.ops_applied == 1
+
+
+def test_phase_add_blocks_records_duplicate_name_error(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_add_blocks
+
+    session, ctx = ctx_factory
+    ctx.add_blocks_list = [
+        {"block_id": "analog_const_source_x", "instance_name": "dc"}
+    ]
+    ctx.new_block_names = {"dc"}
+    _phase_add_blocks(ctx)
+    assert ctx.ops_applied == 1
+    ctx.errors.clear()
+    _phase_add_blocks(ctx)
+    assert any(e["code"] == "duplicate_block_name" for e in ctx.errors)
+    assert ctx.ops_applied == 1  # second add did not increment
+
+
+def test_phase_remove_blocks_rejects_connection_id(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_remove_blocks
+
+    _session, ctx = ctx_factory
+    ctx.remove_blocks_list = ["src:0->dst:0"]
+    _phase_remove_blocks(ctx)
+    assert any(
+        e["code"] == "remove_block_failed"
+        and "connection" in e["message"].lower()
+        for e in ctx.errors
+    )
+
+
+def test_phase_update_params_missing_instance_name_records_error(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_update_params
+
+    _session, ctx = ctx_factory
+    ctx.update_params_list = [{"params": {"value": "1"}}]
+    _phase_update_params(ctx)
+    assert any(e["code"] == "invalid_update" for e in ctx.errors)

@@ -98,6 +98,103 @@ def _as_list_safe(value: Any) -> list[Any]:
     return [value]  # pragma: no cover - dispatcher normalizes this
 
 
+def _phase_add_blocks(ctx: ChangeGraphContext) -> None:
+    """Add every entry in ``ctx.add_blocks_list`` via the native adapter.
+
+    Behavior is identical to the original inline block (lines 203-237 of
+    the pre-refactor file): duplicate-name detection runs first; missing
+    block_id/instance_name → ``invalid_block``; KeyError on adapter →
+    ``parameter_not_found``; anything else → ``add_block_failed``.
+    """
+    for entry in ctx.add_blocks_list:
+        if not isinstance(entry, dict):
+            continue
+        block_id = str(entry.get("block_id", "")).strip()
+        instance_name = str(entry.get("instance_name", "")).strip()
+        if not block_id or not instance_name:
+            ctx.errors.append({
+                "code": "invalid_block",
+                "message": f"add_blocks entry needs block_id and instance_name: {entry}",
+            })
+            continue
+        try:
+            ctx.fg.get_block(instance_name)
+            ctx.errors.append({
+                "code": "duplicate_block_name",
+                "message": f"a block named {instance_name!r} already exists",
+            })
+            continue
+        except KeyError:
+            pass
+        try:
+            apply_mutation(
+                ctx.fg,
+                "add_block",
+                block_type=block_id,
+                instance_name=instance_name,
+                parameters=entry.get("params") or {},
+                state=entry.get("state"),
+            )
+            ctx.ops_applied += 1
+        except KeyError as exc:
+            ctx.errors.append({"code": "parameter_not_found", "message": str(exc)})
+        except Exception as exc:
+            ctx.errors.append({"code": "add_block_failed", "message": str(exc)})
+
+
+def _phase_remove_blocks(ctx: ChangeGraphContext) -> None:
+    """Remove each block name; reject connection-id strings with a clear hint.
+
+    Behavior is identical to the original inline block (lines 239-255).
+    """
+    for entry in ctx.remove_blocks_list:
+        name = str(entry).strip()
+        if not name:
+            continue
+        if "->" in name:
+            ctx.errors.append({
+                "code": "remove_block_failed",
+                "message": (
+                    f"You passed {name!r} to remove_blocks. This looks like a "
+                    "connection ID. Connections must be removed using the "
+                    "remove_connections parameter, not remove_blocks."
+                ),
+            })
+            continue
+        try:
+            apply_mutation(ctx.fg, "remove_block", instance_name=name)
+            ctx.ops_applied += 1
+        except Exception as exc:
+            ctx.errors.append({"code": "remove_block_failed", "message": str(exc)})
+
+
+def _phase_update_params(ctx: ChangeGraphContext) -> None:
+    """Apply each ``update_params`` entry; missing instance_name → ``invalid_update``.
+
+    Behavior is identical to the original inline block (lines 257-272).
+    """
+    for entry in ctx.update_params_list:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("instance_name", "")).strip()
+        params = entry.get("params") or {}
+        if not name:
+            ctx.errors.append({
+                "code": "invalid_update",
+                "message": f"update_params entry needs instance_name: {entry}",
+            })
+            continue
+        try:
+            apply_mutation(
+                ctx.fg, "update_params", instance_name=name, params=params
+            )
+            ctx.ops_applied += 1
+        except KeyError as exc:
+            ctx.errors.append({"code": "parameter_not_found", "message": str(exc)})
+        except Exception as exc:
+            ctx.errors.append({"code": "update_params_failed", "message": str(exc)})
+
+
 def dispatch_flat_change_graph_batch(
     agent: Any,
     *,
