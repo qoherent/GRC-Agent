@@ -130,3 +130,37 @@ def test_phase_update_params_missing_instance_name_records_error(ctx_factory):
     ctx.update_params_list = [{"params": {"value": "1"}}]
     _phase_update_params(ctx)
     assert any(e["code"] == "invalid_update" for e in ctx.errors)
+
+
+# --- Task 3: phase methods 4-5 (update_states / auto_resolve_types) ---
+
+
+def test_phase_update_states_validates_presence(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_update_states
+
+    _session, ctx = ctx_factory
+    ctx.update_states_list = [
+        {"instance_name": "samp_rate", "state": "disabled"}
+    ]
+    _phase_update_states(ctx)
+    assert ctx.ops_applied == 1
+    assert ctx.errors == []
+
+
+def test_phase_update_states_missing_keys_records_error(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_update_states
+
+    _session, ctx = ctx_factory
+    ctx.update_states_list = [{"state": "disabled"}]  # no instance_name
+    _phase_update_states(ctx)
+    assert any(e["code"] == "invalid_state" for e in ctx.errors)
+
+
+def test_phase_auto_resolve_types_no_op_when_type_already_set(ctx_factory):
+    from grc_agent.runtime.change_graph import _phase_auto_resolve_types
+
+    _session, ctx = ctx_factory
+    ctx.new_block_names = {"dc"}
+    ctx.type_already_set = {"dc"}  # batch already set the type
+    _phase_auto_resolve_types(ctx)
+    assert ctx.errors == []

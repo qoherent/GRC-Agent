@@ -195,6 +195,65 @@ def _phase_update_params(ctx: ChangeGraphContext) -> None:
             ctx.errors.append({"code": "update_params_failed", "message": str(exc)})
 
 
+def _phase_auto_resolve_types(ctx: ChangeGraphContext) -> None:
+    """Set ``type`` on newly-added blocks that don't have it explicit.
+
+    Uniform rule: skip if the block already has a ``type`` set (via
+    ``add_blocks`` OR ``update_params``); otherwise derive the dtype from the
+    first neighbor port in ``ctx.add_connections_list`` and assign it.
+
+    Behavior is identical to the original inline block (lines 274-298 of
+    the pre-refactor file).
+    """
+    for name in ctx.new_block_names:
+        if name in ctx.type_already_set:
+            continue
+        try:
+            block = ctx.fg.get_block(name)
+        except KeyError:
+            continue
+        if "type" not in block.params:
+            continue
+        dtype = _neighbor_dtype_for(
+            ctx.fg, name, ctx.add_connections_list, ctx.new_block_names
+        )
+        if not dtype:
+            continue
+        try:
+            block.params["type"].set_value(dtype)
+            ctx.fg.rewrite()
+        except Exception as exc:
+            logger.warning(
+                "Failed to auto-resolve type for block %s: %s", name, exc
+            )
+
+
+def _phase_update_states(ctx: ChangeGraphContext) -> None:
+    """Apply each ``update_states`` entry; missing keys → invalid_state.
+
+    Behavior is identical to the original inline block (lines 300-315 of
+    the pre-refactor file).
+    """
+    for entry in ctx.update_states_list:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("instance_name", "")).strip()
+        state = str(entry.get("state", "")).strip()
+        if not name or not state:
+            ctx.errors.append({
+                "code": "invalid_state",
+                "message": (
+                    f"update_states entry needs instance_name and state: {entry}"
+                ),
+            })
+            continue
+        try:
+            apply_mutation(ctx.fg, "update_states", instance_name=name, state=state)
+            ctx.ops_applied += 1
+        except Exception as exc:
+            ctx.errors.append({"code": "update_states_failed", "message": str(exc)})
+
+
 def dispatch_flat_change_graph_batch(
     agent: Any,
     *,
