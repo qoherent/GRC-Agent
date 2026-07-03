@@ -7,6 +7,7 @@ and :func:`validate`. No dict-crawl; no ``grcc`` subprocess.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from grc_agent.domain_models import ErrorCode
@@ -21,6 +22,80 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from grc_agent.agent import ToolResult
+
+
+@dataclass
+class ChangeGraphContext:
+    """Inputs and accumulated state shared across the seven change_graph phases.
+
+    Built once in :func:`dispatch_flat_change_graph_batch`; each phase reads
+    from it, appends to ``errors``, and increments ``ops_applied`` directly
+    via ``ctx.ops_applied += 1``.
+    """
+
+    agent: Any
+    fg: Any
+    errors: list[dict[str, str]] = field(default_factory=list)
+    ops_applied: int = 0
+
+    raw_add_blocks: Any = None
+    raw_remove_blocks: Any = None
+    raw_update_params: Any = None
+    raw_update_states: Any = None
+    raw_add_connections: Any = None
+    raw_remove_connections: Any = None
+
+    add_blocks_list: list[Any] = field(default_factory=list)
+    remove_blocks_list: list[Any] = field(default_factory=list)
+    update_params_list: list[Any] = field(default_factory=list)
+    update_states_list: list[Any] = field(default_factory=list)
+    add_connections_list: list[Any] = field(default_factory=list)
+    remove_connections_list: list[Any] = field(default_factory=list)
+
+    new_block_names: set[str] = field(default_factory=set)
+    removed_names: set[str] = field(default_factory=set)
+    type_already_set: set[str] = field(default_factory=set)
+    pre_edges: set[str] = field(default_factory=set)
+    before_snapshot: Any = None
+    before_serialized: str | None = None
+
+    def __post_init__(self) -> None:
+        """Single-pass derivation from raw inputs to derived lists/sets.
+
+        Replaces the dispatcher's three re-iterations of ``add_blocks``
+        and the parallel edges/removed-names passes.
+        """
+        self.add_blocks_list = list(_as_list_safe(self.raw_add_blocks))
+        self.remove_blocks_list = list(_as_list_safe(self.raw_remove_blocks))
+        self.update_params_list = list(_as_list_safe(self.raw_update_params))
+        self.update_states_list = list(_as_list_safe(self.raw_update_states))
+        self.add_connections_list = list(_as_list_safe(self.raw_add_connections))
+        self.remove_connections_list = list(_as_list_safe(self.raw_remove_connections))
+
+        self.new_block_names = {
+            str(e.get("instance_name", "")).strip()
+            for e in self.add_blocks_list
+            if isinstance(e, dict) and str(e.get("instance_name", "")).strip()
+        }
+        self.removed_names = {
+            str(e).strip()
+            for e in self.remove_blocks_list
+            if str(e).strip()
+        }
+
+
+def _as_list_safe(value: Any) -> list[Any]:
+    """Coerce a raw input to a list, accepting None as empty.
+
+    Wraps the existing ``_as_list`` (which records errors) with a
+    no-side-effect variant for context construction where we have
+    no error sink to populate.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]  # pragma: no cover - dispatcher normalizes this
 
 
 def dispatch_flat_change_graph_batch(

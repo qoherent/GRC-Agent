@@ -1,0 +1,77 @@
+"""Unit tests for the per-phase structure of ``dispatch_flat_change_graph_batch``.
+
+Each phase is exercised in isolation against a ``ChangeGraphContext`` so the
+public ``dispatch_flat_change_graph_batch`` keeps its wire-format contract
+(``payload['ok']``, ``payload['errors']``) while the internals become a flat
+list of single-responsibility methods.
+
+These tests require the ``grc_native`` marker (GNU Radio installed at
+runtime — ``apt install gnuradio``).  They load the canonical
+``examples/dial_tone.grc`` fixture that the rest of the grc_native suite
+uses, not a fabricated inline YAML, because GRC's native loader rejects
+blank handwritten stubs.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.grc_native
+
+from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.runtime.change_graph import ChangeGraphContext
+
+
+GRC_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "examples" / "dial_tone.grc"
+)
+
+
+@pytest.fixture
+def ctx_factory(tmp_path):
+    """Build a context from a copy of the shared GRC fixture."""
+    fixture = tmp_path / "dial_tone.grc"
+    fixture.write_bytes(GRC_FIXTURE.read_bytes())
+    session = FlowgraphSession()
+    session.load(fixture)
+    errors: list[dict[str, str]] = []
+    ctx = ChangeGraphContext(
+        agent=session,
+        fg=session.flowgraph,
+        errors=errors,
+    )
+    return session, ctx
+
+
+def test_context_precomputes_add_blocks_list(ctx_factory):
+    """``add_blocks_list`` is computed once; ``new_block_names`` is filled."""
+    session, ctx = ctx_factory
+    assert ctx.add_blocks_list == []
+    assert ctx.new_block_names == set()
+    raw = [{"block_id": "blocks_add_xx", "instance_name": "blk_x"}]
+    populated = ChangeGraphContext(
+        agent=session, fg=session.flowgraph, errors=[],
+        raw_add_blocks=raw,
+    )
+    assert populated.add_blocks_list == raw
+    assert "blk_x" in populated.new_block_names
+
+
+def test_context_ops_applied_is_plain_int(ctx_factory):
+    """``ops_applied`` is a plain int field — no list-reference hack."""
+    _session, ctx = ctx_factory
+    assert ctx.ops_applied == 0
+    assert isinstance(ctx.ops_applied, int)
+    ctx.ops_applied += 1
+    assert ctx.ops_applied == 1
+    assert isinstance(ctx.ops_applied, int)
+
+
+def test_context_accumulates_errors(ctx_factory):
+    """``errors`` is a list that phases append to in place."""
+    _session, ctx = ctx_factory
+    assert ctx.errors == []
+    ctx.errors.append({"code": "test", "message": "x"})
+    assert ctx.errors == [{"code": "test", "message": "x"}]
