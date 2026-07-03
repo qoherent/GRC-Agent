@@ -26,7 +26,7 @@ from ToolAgents.data_models.messages import (
     ToolCallResultContent,
 )
 from ToolAgents.provider import OpenAIChatAPI
-from ToolAgents.provider.llm_provider import ProviderSettings
+from ToolAgents.provider.llm_provider import ProviderSettings, StreamingChatMessage
 
 from grc_agent.chat_roles import (
     ASSISTANT_MODEL_ROLE,
@@ -41,8 +41,6 @@ logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
-    from ToolAgents.provider.llm_provider import StreamingChatMessage
-
     from grc_agent.agent import GrcAgent
 
 
@@ -232,6 +230,76 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
         self.response_converter = GrcResponseConverter(self.response_converter)
 
 
+class _StreamFinalizer:
+    """Encapsulate the "finalize now vs wait for trailing usage" decision.
+
+    Ollama sends usage on a trailing chunk after ``finish_reason``;
+    OpenRouter sends it on the same chunk. This keeps the
+    pending/finalize bookkeeping out of ``yield_from_provider``'s main
+    yield loop.
+    """
+
+    def __init__(self) -> None:
+        self.current_usage: dict[str, Any] | None = None
+        self._pending: dict[str, Any] | None = None
+
+    def _build(self, pending: dict[str, Any]) -> ChatMessage:
+        return ChatMessage(
+            id=str(uuid.uuid4()),
+            role=ChatMessageRole.Assistant,
+            content=pending["contents"],
+            created_at=datetime.datetime.now(),
+            updated_at=datetime.datetime.now(),
+            additional_information=(
+                {"usage": self.current_usage} if self.current_usage else {}
+            ),
+        )
+
+    def _finished_event(self, pending: dict[str, Any]) -> StreamingChatMessage:
+        return StreamingChatMessage(
+            chunk="",
+            is_tool_call=pending["has_tool_call"],
+            tool_call=pending["tool_call"],
+            finished=True,
+            finished_chat_message=self._build(pending),
+        )
+
+    def record_usage(
+        self, usage_dump: dict[str, Any] | None
+    ) -> StreamingChatMessage | None:
+        """Store usage when present; finalize now if a finish is pending.
+
+        Mirrors the original "usage arrives on a chunk after
+        finish_reason" branch — the trailing usage-only chunk for a
+        turn that already hit finish_reason forces an immediate
+        finalize.
+        """
+        if usage_dump is not None:
+            self.current_usage = usage_dump
+        if usage_dump is not None and self._pending is not None:
+            event = self._finished_event(self._pending)
+            self._pending = None
+            return event
+        return None
+
+    def schedule(
+        self, pending: dict[str, Any], *, usage_on_this_chunk: bool
+    ) -> StreamingChatMessage | None:
+        """On finish_reason: finalize now if usage is here, else defer."""
+        if usage_on_this_chunk:
+            return self._finished_event(pending)
+        self._pending = pending
+        return None
+
+    def drain(self) -> StreamingChatMessage | None:
+        """End of stream: finalize if still pending (usage never arrived)."""
+        if self._pending is not None:
+            event = self._finished_event(self._pending)
+            self._pending = None
+            return event
+        return None
+
+
 class GrcResponseConverter:
     """Wrapper converter to extract and prepend thinking tokens.
 
@@ -377,9 +445,13 @@ class GrcResponseConverter:
         chunks are yielded the instant they arrive. Content and tool-call
         handling mirrors the parent ``OpenAIMessageConverter`` so the
         finished message is constructed identically.
-        """
-        from ToolAgents.provider.llm_provider import StreamingChatMessage
 
+        The "finalize now vs wait for trailing usage" decision is delegated
+        to ``_StreamFinalizer`` — keeps the main yield loop free of
+        pending/defer bookkeeping (Ollama trailing-usage vs OpenRouter
+        same-chunk divergence is collapsed into ``record_usage`` /
+        ``schedule`` / ``drain``).
+        """
         has_started_thinking = False
         has_ended_thinking = False
         # One-shot: the first reasoning delta in this stream logs a
@@ -393,29 +465,9 @@ class GrcResponseConverter:
         current_content = ""
         current_tool_calls: list[dict] = []
         current_citations: list[dict[str, str]] = []
-        current_usage: dict[str, Any] | None = None
         alt_index = 0
 
-        # ``stream_options.include_usage`` puts the real usage numbers on a
-        # TRAILING chunk after ``finish_reason`` for some backends (Ollama:
-        # a separate chunk with ``choices=[]``) but on the SAME chunk as
-        # ``finish_reason`` for others (OpenRouter). ``pending_finalize``
-        # defers building the finished message until we've seen whichever
-        # comes last, so usage is never dropped by finalizing too early.
-        pending_finalize: dict[str, Any] | None = None
-
-        def _build_finished_message(pending: dict[str, Any]) -> ChatMessage:
-            import datetime
-            import uuid
-
-            return ChatMessage(
-                id=str(uuid.uuid4()),
-                role=ChatMessageRole.Assistant,
-                content=pending["contents"],
-                created_at=datetime.datetime.now(),
-                updated_at=datetime.datetime.now(),
-                additional_information={"usage": current_usage} if current_usage else {},
-            )
+        finalizer = _StreamFinalizer()
 
         for chunk in stream_generator:
             # ── Usage: capture on ANY chunk, including the trailing
@@ -423,21 +475,11 @@ class GrcResponseConverter:
             # ``stream_options.include_usage`` is set — the ``continue``
             # below would otherwise skip it entirely.
             chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                current_usage = chunk_usage.model_dump()
-                if pending_finalize is not None:
-                    # The trailing usage-only chunk for a turn that already
-                    # hit finish_reason — finalize now that usage is known.
-                    finished_message = _build_finished_message(pending_finalize)
-                    yield StreamingChatMessage(
-                        chunk="",
-                        is_tool_call=pending_finalize["has_tool_call"],
-                        tool_call=pending_finalize["tool_call"],
-                        finished=True,
-                        finished_chat_message=finished_message,
-                    )
-                    pending_finalize = None
-                    continue
+            usage_dump = chunk_usage.model_dump() if chunk_usage is not None else None
+            deferred = finalizer.record_usage(usage_dump)
+            if deferred is not None:
+                yield deferred
+                continue
 
             if not getattr(chunk, "choices", None) or not chunk.choices:
                 continue
@@ -558,31 +600,15 @@ class GrcResponseConverter:
                     "has_tool_call": has_tool_call,
                     "tool_call": contents[-1].model_dump(exclude_none=True) if has_tool_call else None,
                 }
-                if chunk_usage is not None:
-                    # Usage arrived on this same chunk (OpenRouter-style) —
-                    # finalize immediately, no more chunks needed.
-                    yield StreamingChatMessage(
-                        chunk="",
-                        is_tool_call=pending["has_tool_call"],
-                        tool_call=pending["tool_call"],
-                        finished=True,
-                        finished_chat_message=_build_finished_message(pending),
-                    )
-                else:
-                    # Usage may still arrive on a trailing chunk
-                    # (Ollama-style) — wait for it before finalizing.
-                    pending_finalize = pending
+                finished_event = finalizer.schedule(
+                    pending, usage_on_this_chunk=chunk_usage is not None
+                )
+                if finished_event is not None:
+                    yield finished_event
 
-        if pending_finalize is not None:
-            # Stream ended without a trailing usage chunk ever arriving —
-            # finalize now with whatever usage we have (possibly none).
-            yield StreamingChatMessage(
-                chunk="",
-                is_tool_call=pending_finalize["has_tool_call"],
-                tool_call=pending_finalize["tool_call"],
-                finished=True,
-                finished_chat_message=_build_finished_message(pending_finalize),
-            )
+        eof_event = finalizer.drain()
+        if eof_event is not None:
+            yield eof_event
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.parent_converter, name)
