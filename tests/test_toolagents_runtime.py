@@ -14,7 +14,12 @@ from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.toolagents_runtime import (
     ToolAgentsRegistryBuilder,
     ToolAgentsToolDelegate,
+    _compatible_properties,
+    _compatible_property_schema,
+    _first_supported_schema_type,
     _function_tool_from_openai_tool,
+    _is_primitive_item_schema,
+    _toolagents_compatible_schema,
 )
 from ToolAgents import FunctionTool
 from ToolAgents.agents import ChatToolAgent
@@ -848,6 +853,146 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         self.assertEqual(text_chunks[1], " more")
         self.assertEqual(text_chunks[2], "</think>\n")
         self.assertEqual(text_chunks[3], "Done!")
+
+
+class SchemaShimTests(unittest.TestCase):
+    """Lock down the transformation rules of the ToolAgents 0.3.0 schema shim.
+
+    These functions exist solely to work around ToolAgents' narrow JSON
+    Schema -> Pydantic converter.  Without coverage, bumping the library
+    or accidentally editing them could silently change the wire schema.
+    """
+
+    def test_description_stripped_from_each_property(self) -> None:
+        out = _compatible_property_schema({"type": "string", "description": "x"})
+        self.assertEqual(out.get("type"), "string")
+        self.assertNotIn("description", out)
+
+    def test_missing_type_not_added_to_output(self) -> None:
+        # ``field_type`` defaults to "string" locally but the function
+        # never writes it back to the output when the input omits "type".
+        # Lock down the actual (somewhat surprising) behavior.
+        out = _compatible_property_schema({"description": "d"})
+        self.assertIsNone(out.get("type"))
+        self.assertNotIn("description", out)
+
+    def test_list_type_collapses_to_first_supported(self) -> None:
+        self.assertEqual(
+            _first_supported_schema_type(["string", "null"]), "string"
+        )
+        self.assertEqual(
+            _first_supported_schema_type(["null", "integer"]), "integer"
+        )
+
+    def test_list_type_with_no_supported_member_falls_back_to_string(self) -> None:
+        self.assertEqual(_first_supported_schema_type(["null", "foo"]), "string")
+
+    def test_first_supported_returns_string_when_empty_or_all_unsupported(self) -> None:
+        self.assertEqual(_first_supported_schema_type([]), "string")
+        self.assertEqual(_first_supported_schema_type(["weird"]), "string")
+        self.assertEqual(_first_supported_schema_type([5]), "string")
+
+    def test_array_primitive_items_become_empty_dict(self) -> None:
+        out = _compatible_property_schema(
+            {"type": "array", "items": {"type": "string"}}
+        )
+        self.assertEqual(out.get("items"), {})
+
+    def test_array_no_items_becomes_empty_dict(self) -> None:
+        out = _compatible_property_schema({"type": "array"})
+        self.assertEqual(out.get("items"), {})
+
+    def test_array_object_items_passthrough_to_compatible_properties(self) -> None:
+        # _compatible_properties is called on the items schema; it
+        # treats each key as a property name. ``"type"`` (value
+        # "object") is filtered (not a dict); ``"properties"`` is
+        # recursed. Lock down the actual contract.
+        out = _compatible_property_schema(
+            {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"k": {"type": "integer"}},
+                },
+            }
+        )
+        items = out["items"]
+        self.assertIn("properties", items)
+        self.assertIn("k", items["properties"])
+        self.assertEqual(items["properties"]["k"]["type"], "integer")
+
+    def test_object_properties_recursed_descriptions_stripped(self) -> None:
+        out = _compatible_property_schema(
+            {
+                "type": "object",
+                "properties": {"inner": {"type": "number", "description": "d"}},
+                "additionalProperties": {"type": "string"},
+            }
+        )
+        self.assertEqual(out["properties"]["inner"]["type"], "number")
+        self.assertNotIn("description", out["properties"]["inner"])
+        # additionalProperties at the top level is not recursed.
+        self.assertEqual(
+            out["additionalProperties"], {"type": "string"}
+        )
+
+    def test_is_primitive_item_schema_predicate(self) -> None:
+        self.assertTrue(_is_primitive_item_schema({"type": "string"}))
+        self.assertFalse(
+            _is_primitive_item_schema({"type": "object", "properties": {}})
+        )
+        self.assertFalse(_is_primitive_item_schema({}))
+
+    def test_compatible_properties_filters_non_dict_values(self) -> None:
+        out = _compatible_properties(
+            {"ok": {"type": "string"}, "bad": "x"}
+        )
+        self.assertIn("ok", out)
+        self.assertNotIn("bad", out)
+
+    def test_compatible_properties_returns_empty_for_non_dict(self) -> None:
+        self.assertEqual(_compatible_properties(None), {})
+        self.assertEqual(_compatible_properties("x"), {})
+
+    def test_function_name_and_top_level_preserved(self) -> None:
+        schema = {
+            "function": {
+                "name": "change_graph",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "add_blocks": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "blocks to add",
+                        },
+                        "force": {"type": "boolean", "description": "bypass val"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        }
+        out = _toolagents_compatible_schema(schema)
+        self.assertEqual(out["function"]["name"], "change_graph")
+        # additionalProperties preserved verbatim.
+        self.assertEqual(
+            out["function"]["parameters"]["additionalProperties"], False
+        )
+        # Top-level ``description`` on each property is stripped.
+        self.assertNotIn(
+            "description", out["function"]["parameters"]["properties"]["add_blocks"]
+        )
+        self.assertNotIn(
+            "description", out["function"]["parameters"]["properties"]["force"]
+        )
+        # ``items`` for an array with object schema is replaced with ``{}``
+        # (the function passes it through _compatible_properties which
+        # iterates ``items`` as a properties dict and only the "type"
+        # key survives; "type" value "object" is a string, not a dict,
+        # so it's filtered out — items ends up empty).
+        self.assertEqual(
+            out["function"]["parameters"]["properties"]["add_blocks"]["items"], {}
+        )
 
 
 if __name__ == "__main__":
