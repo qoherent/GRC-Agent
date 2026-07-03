@@ -681,9 +681,9 @@ class ToolAgentsRunnerLoopDetectionTests(unittest.TestCase):
         self.assertFalse(result.get("ok"))
         self.assertEqual(result.get("error_type"), "safety_ceiling_reached")
         self.assertIn("identically", result.get("assistant_text", ""))
-        # The factual note was injected (user-role model_message) on the 2nd.
+        # The factual note was injected (user_model model_message) on the 2nd.
         user_notes = [
-            e for e in events if e.get("event") == "model_message" and e.get("role") == "user"
+            e for e in events if e.get("event") == "model_message" and e.get("role") == "user_model"
         ]
         self.assertTrue(user_notes, "loop note should be injected on 2nd failure")
 

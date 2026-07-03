@@ -1061,13 +1061,9 @@ class MainWindow(QMainWindow):
 
         self.chat_widget.append_message("user", prompt)
 
-        # Auto-save
+        # Auto-save: the user_model event from the runtime persists
+        # the full ChatMessage; the display write is redundant (SSOT).
         self._ensure_active_session_db_record(prompt)
-        if self.active_session_id is not None:
-            try:
-                self.sessions_store.append(self.active_session_id, "user", prompt)
-            except Exception as exc:
-                logger.exception("Failed to save user prompt to DB: %s", exc)
 
         self.start_generation(prompt)
 
@@ -1151,18 +1147,12 @@ class MainWindow(QMainWindow):
         )
         self.chat_widget.append_status(name, args)
 
-        if self.active_session_id is not None:
-            try:
-                self.sessions_store.append(
-                    self.active_session_id,
-                    "tool_started",
-                    f"Tool: {name}\nArgs: {args}",
-                )
-            except Exception as exc:
-                logger.exception("Failed to save tool start to DB: %s", exc)
-
     def on_tool_finished(self, name: str, result: str) -> None:
-        """Handle tool completion: show mutations, surface errors."""
+        """Handle tool completion: show mutations, surface errors.
+
+        DB persistence is handled by the ``tool_model`` event from the
+        runtime (SSOT); the chat-widget calls below are display-only.
+        """
         self.chat_widget.append_tool_finished(name, result)
 
         if name == GRAPH_MUTATING_TOOL_NAME and result:
@@ -1172,34 +1162,6 @@ class MainWindow(QMainWindow):
             self.chat_widget.append_error(f"{name}: {result[:300]}")
         self.status_bar.showMessage("Agent is thinking...")
         self.status_bar.setStyleSheet("")
-
-        if self.active_session_id is not None:
-            try:
-                # Always save tool_finished to DB
-                self.sessions_store.append(
-                    self.active_session_id,
-                    "tool_finished",
-                    result,
-                    payload={"tool_name": name},
-                )
-
-                # Save mutation or error to DB if applicable
-                if name == GRAPH_MUTATING_TOOL_NAME and result:
-                    self.sessions_store.append(
-                        self.active_session_id,
-                        "mutation",
-                        result,
-                        payload={"tool_name": name},
-                    )
-                if self._result_is_error(result):
-                    self.sessions_store.append(
-                        self.active_session_id,
-                        "error",
-                        f"{name}: {result[:300]}",
-                        payload={"tool_name": name},
-                    )
-            except Exception as exc:
-                logger.exception("Failed to save tool finish to DB: %s", exc)
 
     @staticmethod
     def _result_is_error(result_str: str) -> bool:
@@ -1247,15 +1209,8 @@ class MainWindow(QMainWindow):
 
         self.chat_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
-        if self.active_session_id is not None:
-            try:
-                self.sessions_store.append(
-                    self.active_session_id,
-                    "assistant",
-                    assistant_text,
-                )
-            except Exception as exc:
-                logger.exception("Failed to save assistant reply to DB: %s", exc)
+        # Terminal assistant text is persisted by the runtime's
+        # assistant_model event (SSOT); no display-row write needed.
 
         self.refresh_sidebar_sessions()
 
@@ -1629,27 +1584,21 @@ class MainWindow(QMainWindow):
     def _open_past_session(self, session_id: int) -> None:
         """Clear the chat widget, autoload the associated .grc graph, and replay past messages.
 
-        Per the agreed design, the next user message starts a
-        fresh turn on the new model; the old conversation is
-        preserved in the sessions DB and can be reopened again.
-
-        The DB has two kinds of rows: display rows (existing
-        ``user``/``assistant``/``tool_*``/``mutation``/``error`` text)
-        and model rows (``assistant_model``/``tool_model`` with the
-        typed ``ChatMessage`` in the ``payload`` column). Display rows
-        are replayed into the chat widget; model rows are replayed into
-        the agent's ``ChatHistory`` so the next model step has the
-        same inspect/search/change evidence the user originally saw.
+        The DB stores only typed ``*_model`` rows (``user_model``,
+        ``assistant_model``, ``tool_model``) carrying full
+        ``ChatMessage`` payloads.  Both the agent's ``ChatHistory``
+        and the chat widget are reconstructed from this single source
+        of truth — the widget derives user prompts, assistant text,
+        tool-call fragments, and tool results by parsing the typed
+        payloads, so resumed sessions show full tool history.
         """
+        import json as _json
+
         from grc_agent.chat_roles import (
-            ASSISTANT_MODEL_ROLE,
-            DISPLAY_ROLES,
-            TOOL_MODEL_ROLE,
+            MODEL_ROLES,
             chat_message_from_payload,
         )
         from grc_agent.sessions_store import get_session_sync, list_messages_sync
-
-        model_roles = {ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE}
 
         try:
             session_rec = get_session_sync(_default_sessions_db(), session_id)
@@ -1675,26 +1624,34 @@ class MainWindow(QMainWindow):
         else:
             self.chat_widget.clear()
 
-        # 2. Reset the agent's chat session to clear any prior in-memory history.
-        #    and any prior in-memory history. The new ``ChatHistory`` is
-        #    populated from the model rows below.
+        # 2. Reset the agent's chat session.  The new ``ChatHistory``
+        #    is populated from the model rows below.
         if hasattr(self.agent, "reset_chat_session"):
             self.agent.reset_chat_session()
 
-        # 3. Replay model rows into the agent's ``ChatHistory``. The
-        #    typed ``ChatMessage`` objects carry the original tool
-        #    calls and tool results so the model has full context on
-        #    the next turn. Sessions written before the model rows
-        #    existed are *not* supported — they contain no
-        #    ``assistant_model`` / ``tool_model`` rows and the model
-        #    has no typed history to resume from. AGENTS.md forbids
-        #    backward-compat shims; delete the legacy session and
-        #    start fresh.
+        # 3. Single-walk reconstruction from *_model rows.
+        #    Sessions with no model rows are legacy and refused
+        #    (AGENTS.md: no backward-compat shims).
+        model_rows = [m for m in messages if m.role in MODEL_ROLES]
 
-        model_replayed = 0
-        for msg in messages:
-            if msg.role not in model_roles:
-                continue
+        if not model_rows and any(m.role not in MODEL_ROLES for m in messages):
+            self.status_bar.showMessage(
+                f"Session {session_id} predates the typed-history "
+                "format and cannot be resumed. Start a new chat to "
+                "continue.",
+                8000,
+            )
+            logger.warning(
+                "Session %s has no *_model rows; refusing to "
+                "synthesize a typed history.",
+                session_id,
+            )
+            return
+
+        from ToolAgents.data_models.messages import TextContent, ToolCallContent
+
+        replayed = 0
+        for msg in model_rows:
             chat_message = chat_message_from_payload(msg.payload)
             if chat_message is None:
                 logger.warning(
@@ -1705,42 +1662,55 @@ class MainWindow(QMainWindow):
                 continue
             try:
                 self.agent.chat_history.add_message(chat_message)
-                model_replayed += 1
             except Exception as exc:
                 logger.exception("Failed to replay model row %s: %s", msg.id, exc)
+                continue
 
-        if model_replayed == 0 and any(
-            msg.role not in model_roles for msg in messages
-        ):
-            self.status_bar.showMessage(
-                f"Session {session_id} predates the typed-history "
-                "format and cannot be resumed. Start a new chat to "
-                "continue.",
-                8000,
-            )
-            logger.warning(
-                "Session %s has no assistant_model/tool_model rows; "
-                "refusing to synthesize a typed history. User must "
-                "start a new chat.",
-                session_id,
-            )
-            self.active_session_id = None
-            return
+            # --- derive display from the typed payload ---
+            if msg.role == "user_model":
+                self.chat_widget.append_message("user", chat_message.get_as_text())
 
-        # 4. Replay display rows into the chat widget. DISPLAY_ROLES already
-        # excludes "system" rows, so no separate skip is needed.
-        display_replayed = 0
-        for msg in messages:
-            if msg.role in DISPLAY_ROLES:
-                self.chat_widget.append_message(msg.role, msg.text, payload=msg.payload)
-                display_replayed += 1
+            elif msg.role == "assistant_model":
+                text_parts = [
+                    c.content for c in chat_message.content
+                    if isinstance(c, TextContent) and isinstance(c.content, str)
+                ]
+                text = "\n".join(p for p in text_parts if p)
+                tool_calls = [
+                    c for c in chat_message.content if isinstance(c, ToolCallContent)
+                ]
+                if tool_calls:
+                    # Non-terminal: text preamble + tool-call fragments.
+                    if text:
+                        if not self.chat_widget._streaming:
+                            self.chat_widget.start_stream()
+                        self.chat_widget.append_stream_chunk(text)
+                    for tc in tool_calls:
+                        args_str = _json.dumps(
+                            tc.tool_call_arguments, sort_keys=True, default=str
+                        )
+                        self.chat_widget.append_status(tc.tool_call_name, args_str)
+                else:
+                    # Terminal assistant text.
+                    if text:
+                        if self.chat_widget._streaming:
+                            self.chat_widget.finalize_stream(text)
+                        else:
+                            self.chat_widget.append_message("assistant", text)
 
-        # 5. Keep the active session ID to allow active continuation.
+            elif msg.role == "tool_model":
+                for result_content in chat_message.get_tool_call_results():
+                    name = result_content.tool_call_name
+                    result_text = result_content.tool_call_result
+                    self.chat_widget.append_tool_finished(name, result_text)
+
+            replayed += 1
+
+        # 4. Keep the active session ID to allow active continuation.
         self.active_session_id = session_id
 
         self.status_bar.showMessage(
-            f"Resumed session {session_id} "
-            f"({display_replayed} display, {model_replayed} model rows).",
+            f"Resumed session {session_id} ({replayed} model rows).",
             5000,
         )
 

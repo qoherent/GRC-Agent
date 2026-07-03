@@ -30,6 +30,7 @@ from ToolAgents.provider.llm_provider import ProviderSettings
 from grc_agent.chat_roles import (
     ASSISTANT_MODEL_ROLE,
     TOOL_MODEL_ROLE,
+    USER_MODEL_ROLE,
     chat_message_payload,
 )
 from grc_agent.domain_models import ErrorCode, build_error_payload
@@ -881,10 +882,23 @@ class ToolAgentsRunner:
         on_tool_start: Callable[[str, dict[str, Any]], None] | None,
         on_tool_end: Callable[[str, Any], None] | None,
     ) -> Iterator[dict[str, Any]]:
+        # Persist the user message first — before any model / error check —
+        # so the prompt is always in the SSOT regardless of what happens next.
+        agent.compact_history()
+        agent.chat_history.add_user_message(user_message)
+        yield {
+            "event": "model_message",
+            "role": USER_MODEL_ROLE,
+            "payload": chat_message_payload(agent.chat_history.get_messages()[-1]),
+        }
+        agent._turn_user_message = user_message
+
         resolved_model = model or self.provider_config.model
         if not isinstance(resolved_model, str) or not resolved_model.strip():
             no_model_text = "No model configured."
             agent.chat_history.add_assistant_message(no_model_text)
+            yield {"event": "model_message", "role": ASSISTANT_MODEL_ROLE,
+                   "payload": chat_message_payload(agent.chat_history.get_messages()[-1])}
             yield {"event": "chunk", "text": no_model_text}
             payload = build_error_payload(
                 error_type=ErrorCode.MODEL_NOT_FOUND,
@@ -902,11 +916,6 @@ class ToolAgentsRunner:
             max_tool_rounds = MVP_TOOL_SURFACE.default_max_tool_rounds
         if self.provider_config.max_tool_rounds:
             max_tool_rounds = max(max_tool_rounds, self.provider_config.max_tool_rounds)
-
-        agent.compact_history()
-        agent.chat_history.add_user_message(user_message)
-
-        agent._turn_user_message = user_message
 
         tool_calls_executed = 0
         tool_calls_requested = 0
@@ -1019,7 +1028,7 @@ class ToolAgentsRunner:
                         "event": "model_message",
                         "role": ASSISTANT_MODEL_ROLE,
                         "payload": chat_message_payload(
-                            _assistant_text_message(payload["assistant_text"])
+                            agent.chat_history.get_messages()[-1]
                         ),
                     }
                     yield {"event": "final", "result": payload}
@@ -1029,13 +1038,14 @@ class ToolAgentsRunner:
             tool_calls_requested += len(tool_calls)
 
             agent.chat_history.add_message(assistant_message)
-            yield {
-                "event": "model_message",
-                "role": ASSISTANT_MODEL_ROLE,
-                "payload": chat_message_payload(assistant_message),
-            }
 
             if tool_calls:
+                # Non-terminal round: emit immediately (text is not rewritten).
+                yield {
+                    "event": "model_message",
+                    "role": ASSISTANT_MODEL_ROLE,
+                    "payload": chat_message_payload(assistant_message),
+                }
                 # Surface this round's text (reasoning/<think> content, or a
                 # chatty preamble before the tool call) as soon as it's
                 # available, instead of only the terminal round's text.
@@ -1092,7 +1102,7 @@ class ToolAgentsRunner:
                             agent.chat_history.add_message(note_msg)
                             yield {
                                 "event": "model_message",
-                                "role": "user",
+                                "role": USER_MODEL_ROLE,
                                 "payload": chat_message_payload(note_msg),
                             }
                         elif failing_call_signatures[key] >= _LOOP_STOP_THRESHOLD:
@@ -1116,6 +1126,13 @@ class ToolAgentsRunner:
                     payload["tool_calls_executed"] = tool_calls_executed
                     payload["assistant_text"] = stuck_text
                     agent.chat_history.add_assistant_message(stuck_text)
+                    yield {
+                        "event": "model_message",
+                        "role": ASSISTANT_MODEL_ROLE,
+                        "payload": chat_message_payload(
+                            agent.chat_history.get_messages()[-1]
+                        ),
+                    }
                     yield {"event": "final", "result": payload}
                     return
                 continue
@@ -1127,6 +1144,15 @@ class ToolAgentsRunner:
             if empty_terminal:
                 assistant_text = _EMPTY_MODEL_RESPONSE_TEXT
             _replace_last_assistant_text(agent.chat_history, assistant_text)
+            # Emit the authoritative terminal assistant_model (post-rewrite)
+            # so the SSOT row carries the final text the user saw.
+            yield {
+                "event": "model_message",
+                "role": ASSISTANT_MODEL_ROLE,
+                "payload": chat_message_payload(
+                    agent.chat_history.get_messages()[-1]
+                ),
+            }
             if empty_terminal:
                 logger.warning(
                     "turn_end ok=False empty_model_response steps=%d tool_rounds=%d tool_calls=%d",

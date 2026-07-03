@@ -18,7 +18,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from grc_agent.chat_roles import ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE
+from grc_agent.chat_roles import ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE, USER_MODEL_ROLE
 from grc_agent.toolagents_runtime import ToolAgentsRunner
 from PySide6.QtCore import QObject, Signal
 
@@ -106,7 +106,7 @@ class AgentWorker(QObject):
                 if kind == "model_message":
                     role = event.get("role")
                     payload = event.get("payload")
-                    if role in (ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE) and payload is not None:
+                    if role in (USER_MODEL_ROLE, ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE) and payload is not None:
                         self.model_message_added.emit(role, json.dumps(payload, sort_keys=True))
                 elif kind == "chunk":
                     text = event.get("text", "")

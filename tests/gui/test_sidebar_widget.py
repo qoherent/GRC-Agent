@@ -306,8 +306,7 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(window, "open_file", MagicMock())
     monkeypatch.setattr(window, "start_generation", MagicMock())
 
-    # Create a session and write messages — typed model rows for
-    # the agent's chat history, display rows for the chat widget.
+    # Create a session and write only typed *_model rows (SSOT).
     session_id = window.sessions_store.open_session(
         graph_path="",
         graph_hash="",
@@ -315,8 +314,6 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
         backend="ollama",
         title="Session Resumption Test",
     )
-    window.sessions_store.append(session_id, "user", "Hello agent")
-    window.sessions_store.append(session_id, "assistant", "Hello user")
     now = datetime.datetime.now()
     user_msg = ChatMessage(
         id="u-1",
@@ -353,7 +350,7 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
         updated_at=now,
     )
     window.sessions_store.append(
-        session_id, "assistant_model", "", payload=user_msg.model_dump(mode="json")
+        session_id, "user_model", "", payload=user_msg.model_dump(mode="json")
     )
     window.sessions_store.append(
         session_id, "assistant_model", "", payload=asst_msg.model_dump(mode="json")
@@ -383,29 +380,37 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
         == "inspect_graph"
     )
 
-    # 3. The chat widget shows the display rows.
+    # 3. The chat widget derives display from model rows — user and
+    #    assistant entries present, AND tool-call fragment with result.
     widget_history = window.chat_widget.get_history()
     widget_roles = [row["role"] for row in widget_history]
     assert "user" in widget_roles
     assert "assistant" in widget_roles
+    # The assistant entry must contain a tool fragment whose result is filled.
+    assistant_entries = [r for r in widget_history if r["role"] == "assistant"]
+    tool_frags = [
+        f for entry in assistant_entries
+        for f in entry.get("fragments", [])
+        if f.get("type") == "tool"
+    ]
+    assert len(tool_frags) == 1, "tool fragment must be visible after resume"
+    assert tool_frags[0]["name"] == "inspect_graph"
+    assert tool_frags[0]["result"] is not None, "tool result must be filled"
 
-    # 4. Send a new message and verify it appends to the same session.
+    # 4. Send a new message and verify the session is still active.
+    #    (start_generation is mocked, so no runtime user_model event
+    #    fires; the display write was removed by the SSOT consolidation.)
     window.chat_input.setText("How are you?")
     window.send_prompt()
-    window.sessions_store.flush(timeout=2.0)
 
     assert window.active_session_id == session_id
 
-    # 5. Database now has the original 5 rows + 1 new user row:
-    #    2 display (user, assistant) + 3 model (user, assistant,
-    #    tool) + 1 new user from send_prompt.
+    # 5. Database is unchanged — the 3 original model rows.
     messages = window.sessions_store._writer_conn.execute(
-        "SELECT role, text FROM messages WHERE session_id = ? ORDER BY sequence",
+        "SELECT role FROM messages WHERE session_id = ? ORDER BY sequence",
         (session_id,),
     ).fetchall()
-    assert len(messages) == 6
-    assert messages[-1][0] == "user"
-    assert messages[-1][1] == "How are you?"
+    assert len(messages) == 3
 
     # Explicit teardown
     window.sessions_store.close()
