@@ -14,10 +14,11 @@ need an adapter. The only model-facing concerns that live here are:
    format that small local backends may reject.
 3. Format ``ToolCallResultContent`` payloads into compact model-visible
    text (delegated to :mod:`grc_agent.runtime.tool_context`).
-4. Episodic memory pruning: strip tool_call and tool_result payloads from
-   completed prior turns so the model only sees tool activity from the
-   current active episode. An episode boundary is a terminal assistant
-   message (one that contains TextContent but no ToolCallContent).
+4. Runtime-directive stripping: drop ``<runtime_directive>`` user messages
+   (loop-detection notes) from completed prior turns so runtime hints do
+   not pollute the model's context.  Prior tool evidence (tool calls and
+   results) is deliberately retained across user-message boundaries — see
+   ``test_prior_tool_result_is_retained_across_episodes``.
 """
 
 from __future__ import annotations
@@ -97,7 +98,14 @@ def _is_human_user_message(message: ChatMessage) -> bool:
     return "<runtime_directive>" not in text
 
 
-def _strip_tool_content(message: ChatMessage) -> ChatMessage | None:
+def _drop_runtime_directive_messages(message: ChatMessage) -> ChatMessage | None:
+    """Drop User messages wrapping a ``<runtime_directive>`` block.
+
+    Despite the historical name, this function never stripped tool
+    content from assistant messages.  Its sole job is to remove
+    loop-detection notes (``_LOOP_NOTE``) so runtime hints do not
+    pollute the model's context on the next turn.
+    """
     if message.role == ChatMessageRole.User:
         text = message.get_as_text() if hasattr(message, "get_as_text") else ""
         if not text:
@@ -109,6 +117,15 @@ def _strip_tool_content(message: ChatMessage) -> ChatMessage | None:
 
 
 def _prune_completed_episodes(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Drop runtime-directive notes and merge adjacent same-role messages.
+
+    Despite the name, this function does NOT strip tool_call or
+    tool_result payloads from prior turns — prior tool evidence is
+    deliberately retained (see
+    ``test_prior_tool_result_is_retained_across_episodes``).  The
+    effective context-bloat control is the budget-driven
+    :func:`compact_chat_history`, not this function.
+    """
     human_boundary = -1
     for i in range(len(messages) - 1, -1, -1):
         if _is_human_user_message(messages[i]):
@@ -122,7 +139,7 @@ def _prune_completed_episodes(messages: list[ChatMessage]) -> list[ChatMessage]:
 
     pruned_dead: list[ChatMessage] = []
     for msg in dead_history:
-        stripped = _strip_tool_content(msg)
+        stripped = _drop_runtime_directive_messages(msg)
         if stripped is not None:
             pruned_dead.append(stripped)
 
