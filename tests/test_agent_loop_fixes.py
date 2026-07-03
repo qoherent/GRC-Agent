@@ -28,6 +28,17 @@ from ToolAgents.data_models.messages import (
     ToolCallContent,
     ToolCallResultContent,
 )
+from ToolAgents.provider.llm_provider import StreamingChatMessage
+
+
+def _stream_finished(msg: ChatMessage):
+    """Yield one terminal StreamingChatMessage wrapping ``msg``."""
+    yield StreamingChatMessage(
+        chunk="",
+        is_tool_call=False,
+        finished=True,
+        finished_chat_message=msg,
+    )
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -376,7 +387,10 @@ class Fix1CommitResultTests(unittest.TestCase):
         final_text_msg = _assistant_message("I updated the sample rate to 48000.")
 
         chat_agent = mock.MagicMock()
-        chat_agent.step.side_effect = [change_call, final_text_msg]
+        chat_agent.stream_step.side_effect = [
+            _stream_finished(change_call),
+            _stream_finished(final_text_msg),
+        ]
         chat_agent.get_default_settings.return_value = mock.MagicMock()
 
         runner = ToolAgentsRunner.__new__(ToolAgentsRunner)

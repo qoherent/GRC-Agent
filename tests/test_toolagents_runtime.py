@@ -19,6 +19,7 @@ from grc_agent.toolagents_runtime import (
 from ToolAgents import FunctionTool
 from ToolAgents.agents import ChatToolAgent
 from ToolAgents.data_models.messages import ChatMessage, ChatMessageRole, TextContent
+from ToolAgents.provider.llm_provider import StreamingChatMessage
 
 
 def _assistant_text(text: str) -> ChatMessage:
@@ -29,6 +30,20 @@ def _assistant_text(text: str) -> ChatMessage:
         content=[TextContent(content=text)],
         created_at=now,
         updated_at=now,
+    )
+
+
+def _stream_finished(msg: ChatMessage):
+    """Yield one terminal StreamingChatMessage wrapping ``msg``.
+
+    Mimics the old non-streaming ``step()`` return through the
+    ``stream_step`` path the runner now always uses.
+    """
+    yield StreamingChatMessage(
+        chunk="",
+        is_tool_call=False,
+        finished=True,
+        finished_chat_message=msg,
     )
 
 
@@ -197,10 +212,10 @@ class RuntimeDirectivePersistenceTests(unittest.TestCase):
         )
         chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
 
-        def _step(*_args: Any, **_kwargs: Any) -> Any:
-            return _assistant_text("done")
+        def _stream_step(*_args: Any, **_kwargs: Any) -> Any:
+            return _stream_finished(_assistant_text("done"))
 
-        chat_agent.step = _step  # type: ignore[method-assign]
+        chat_agent.stream_step = _stream_step  # type: ignore[method-assign]
         return ToolAgentsRunner(cfg, chat_agent=chat_agent)
 
     def test_runtime_directive_survives_a_turn(self) -> None:
@@ -576,7 +591,7 @@ class ToolAgentsRunnerBackendUnreachableTests(unittest.TestCase):
 
             raise openai.APIConnectionError(request=mock.MagicMock())
 
-        chat_agent.step = _raise_connection_error  # type: ignore[method-assign]
+        chat_agent.stream_step = _raise_connection_error  # type: ignore[method-assign]
         return ToolAgentsRunner(cfg, chat_agent=chat_agent)
 
     def test_run_turn_returns_typed_backend_unreachable(self) -> None:
@@ -655,10 +670,10 @@ class ToolAgentsRunnerLoopDetectionTests(unittest.TestCase):
         chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
         call_iter = iter(calls)
 
-        def _step(*_args: Any, **_kwargs: Any) -> Any:
-            return next(call_iter, _assistant_text("done"))
+        def _stream_step(*_args: Any, **_kwargs: Any) -> Any:
+            return _stream_finished(next(call_iter, _assistant_text("done")))
 
-        chat_agent.step = _step  # type: ignore[method-assign]
+        chat_agent.stream_step = _stream_step  # type: ignore[method-assign]
         return ToolAgentsRunner(cfg, chat_agent=chat_agent)
 
     def test_repeated_identical_failing_change_graph_stops_turn(self) -> None:
@@ -708,10 +723,10 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
         call_iter = iter(calls)
 
-        def _step(*_args: Any, **_kwargs: Any) -> Any:
-            return next(call_iter, _assistant_text("done"))
+        def _stream_step(*_args: Any, **_kwargs: Any) -> Any:
+            return _stream_finished(next(call_iter, _assistant_text("done")))
 
-        chat_agent.step = _step  # type: ignore[method-assign]
+        chat_agent.stream_step = _stream_step  # type: ignore[method-assign]
         return ToolAgentsRunner(cfg, chat_agent=chat_agent)
 
     def test_empty_terminal_synthesizes_factual_text_and_typed_error(self) -> None:

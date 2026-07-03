@@ -635,8 +635,7 @@ class ToolAgentsLlamaProviderConfig:
         settings.add_request_setting("parallel_tool_calls", True)
         # Ask for a final usage chunk on the stream so the GUI can show real
         # token/context usage measured from the response, not an estimate.
-        # Safe unconditionally: production always streams (stream_step);
-        # the only non-streaming step() call site is mocked-only in tests.
+        # Production always streams via stream_step.
         settings.add_request_setting("stream_options", {"include_usage": True})
         extra_body: dict[str, Any] = {}
         is_openrouter = self.backend == "openrouter"
@@ -940,42 +939,28 @@ class ToolAgentsRunner:
 
                 messages = agent.get_model_messages(system_salt=system_salt)
                 try:
-                    import inspect
-
-                    is_step_mocked = (
-                        not inspect.ismethod(self.chat_agent.step)
-                        or getattr(self.chat_agent.step, "__func__", None) is not ChatToolAgent.step
-                    )
-
                     streamed_any_content = False
-                    if is_step_mocked:
-                        assistant_message = self.chat_agent.step(
-                            messages,
-                            tool_registry=registry,
-                            settings=settings,
-                        )
-                    else:
-                        assistant_message = None
-                        for chunk_obj in self.chat_agent.stream_step(
-                            messages,
-                            tool_registry=registry,
-                            settings=settings,
-                        ):
-                            if chunk_obj.chunk:
-                                yield {"event": "chunk", "text": chunk_obj.chunk}
-                                streamed_any_content = True
-                            if chunk_obj.get_finished():
-                                assistant_message = chunk_obj.get_finished_chat_message()
+                    assistant_message = None
+                    for chunk_obj in self.chat_agent.stream_step(
+                        messages,
+                        tool_registry=registry,
+                        settings=settings,
+                    ):
+                        if chunk_obj.chunk:
+                            yield {"event": "chunk", "text": chunk_obj.chunk}
+                            streamed_any_content = True
+                        if chunk_obj.get_finished():
+                            assistant_message = chunk_obj.get_finished_chat_message()
 
-                        if assistant_message is None:
-                            now = datetime.datetime.now()
-                            assistant_message = ChatMessage(
-                                id=str(uuid.uuid4()),
-                                role=ChatMessageRole.Assistant,
-                                content=[],
-                                created_at=now,
-                                updated_at=now,
-                            )
+                    if assistant_message is None:
+                        now = datetime.datetime.now()
+                        assistant_message = ChatMessage(
+                            id=str(uuid.uuid4()),
+                            role=ChatMessageRole.Assistant,
+                            content=[],
+                            created_at=now,
+                            updated_at=now,
+                        )
 
                     tool_calls = assistant_message.get_tool_calls()
                     assistant_text = _message_text(assistant_message).strip()
