@@ -7,6 +7,7 @@ so both products do the same startup dance without duplication.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,6 +66,11 @@ def bootstrap_runtime(
     """
     effective_server_url = (server_url or config.llama.server_url).rstrip("/")
     effective_model = model_alias or config.llama.model
+    if api_key is None and config.llama.backend == "openrouter":
+        # .env is already loaded by this point — every caller builds
+        # `config` via default_app_config()/load_app_config(), both of
+        # which call _ensure_dotenv_loaded() first.
+        api_key = os.environ.get("OPENROUTER_API_KEY")
 
     result = RuntimeBootstrapResult()
 
@@ -117,6 +123,16 @@ def _probe_generic(
             headers["Authorization"] = f"Bearer {api_key}"
 
         response = client.get(url, headers=headers)
+        if response.status_code >= 400:
+            result.launch_status = "probe_failed"
+            result.health_evidence = None
+            message = (
+                f"{backend} server at {effective_server_url} returned "
+                f"HTTP {response.status_code}: {response.text[:200]}"
+            )
+            result.errors.append(message)
+            result.error_type = ErrorCode.BACKEND_UNREACHABLE
+            return
         try:
             parsed = response.json()
             if isinstance(parsed, dict) and "data" in parsed:

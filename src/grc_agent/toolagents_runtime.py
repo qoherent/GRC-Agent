@@ -403,9 +403,52 @@ class GrcResponseConverter:
         current_content = ""
         current_tool_calls: list[dict] = []
         current_citations: list[dict[str, str]] = []
+        current_usage: dict[str, Any] | None = None
         alt_index = 0
 
+        # ``stream_options.include_usage`` puts the real usage numbers on a
+        # TRAILING chunk after ``finish_reason`` for some backends (Ollama:
+        # a separate chunk with ``choices=[]``) but on the SAME chunk as
+        # ``finish_reason`` for others (OpenRouter). ``pending_finalize``
+        # defers building the finished message until we've seen whichever
+        # comes last, so usage is never dropped by finalizing too early.
+        pending_finalize: dict[str, Any] | None = None
+
+        def _build_finished_message(pending: dict[str, Any]) -> ChatMessage:
+            import datetime
+            import uuid
+
+            return ChatMessage(
+                id=str(uuid.uuid4()),
+                role=ChatMessageRole.Assistant,
+                content=pending["contents"],
+                created_at=datetime.datetime.now(),
+                updated_at=datetime.datetime.now(),
+                additional_information={"usage": current_usage} if current_usage else {},
+            )
+
         for chunk in stream_generator:
+            # ── Usage: capture on ANY chunk, including the trailing
+            # empty-``choices`` chunk some backends (Ollama) send when
+            # ``stream_options.include_usage`` is set — the ``continue``
+            # below would otherwise skip it entirely.
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                current_usage = chunk_usage.model_dump()
+                if pending_finalize is not None:
+                    # The trailing usage-only chunk for a turn that already
+                    # hit finish_reason — finalize now that usage is known.
+                    finished_message = _build_finished_message(pending_finalize)
+                    yield StreamingChatMessage(
+                        chunk="",
+                        is_tool_call=pending_finalize["has_tool_call"],
+                        tool_call=pending_finalize["tool_call"],
+                        finished=True,
+                        finished_chat_message=finished_message,
+                    )
+                    pending_finalize = None
+                    continue
+
             if not getattr(chunk, "choices", None) or not chunk.choices:
                 continue
 
@@ -490,11 +533,8 @@ class GrcResponseConverter:
             if delta_citations:
                 current_citations.extend(delta_citations)
 
-            # ── Finish: yield the completed message ────────────────
+            # ── Finish: build the completed message ─────────────────
             if choice.finish_reason is not None:
-                import datetime
-                import uuid
-
                 footnote = self._render_citations_footnote(current_citations)
                 if footnote:
                     footnote_chunk = "\n" + footnote
@@ -523,20 +563,36 @@ class GrcResponseConverter:
                             )
                         )
 
-                finished_message = ChatMessage(
-                    id=str(uuid.uuid4()),
-                    role=ChatMessageRole.Assistant,
-                    content=contents,
-                    created_at=datetime.datetime.now(),
-                    updated_at=datetime.datetime.now(),
-                )
-                yield StreamingChatMessage(
-                    chunk="",
-                    is_tool_call=has_tool_call,
-                    tool_call=contents[-1].model_dump(exclude_none=True) if has_tool_call else None,
-                    finished=True,
-                    finished_chat_message=finished_message,
-                )
+                pending = {
+                    "contents": contents,
+                    "has_tool_call": has_tool_call,
+                    "tool_call": contents[-1].model_dump(exclude_none=True) if has_tool_call else None,
+                }
+                if chunk_usage is not None:
+                    # Usage arrived on this same chunk (OpenRouter-style) —
+                    # finalize immediately, no more chunks needed.
+                    yield StreamingChatMessage(
+                        chunk="",
+                        is_tool_call=pending["has_tool_call"],
+                        tool_call=pending["tool_call"],
+                        finished=True,
+                        finished_chat_message=_build_finished_message(pending),
+                    )
+                else:
+                    # Usage may still arrive on a trailing chunk
+                    # (Ollama-style) — wait for it before finalizing.
+                    pending_finalize = pending
+
+        if pending_finalize is not None:
+            # Stream ended without a trailing usage chunk ever arriving —
+            # finalize now with whatever usage we have (possibly none).
+            yield StreamingChatMessage(
+                chunk="",
+                is_tool_call=pending_finalize["has_tool_call"],
+                tool_call=pending_finalize["tool_call"],
+                finished=True,
+                finished_chat_message=_build_finished_message(pending_finalize),
+            )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.parent_converter, name)
@@ -588,6 +644,11 @@ class ToolAgentsLlamaProviderConfig:
         settings.set_value("response_format", response_format)
         settings.add_request_setting("max_tokens", max_tokens or self.max_tokens)
         settings.add_request_setting("parallel_tool_calls", True)
+        # Ask for a final usage chunk on the stream so the GUI can show real
+        # token/context usage measured from the response, not an estimate.
+        # Safe unconditionally: production always streams (stream_step);
+        # the only non-streaming step() call site is mocked-only in tests.
+        settings.add_request_setting("stream_options", {"include_usage": True})
         extra_body: dict[str, Any] = {}
         is_openrouter = self.backend == "openrouter"
         is_ollama = self.backend == "ollama"

@@ -62,6 +62,7 @@ class ModelToolbar(QFrame):
     refresh_requested = Signal()
     open_graph_location_requested = Signal()
     browse_graph_requested = Signal()
+    edit_openrouter_model_requested = Signal()
 
     def __init__(
         self,
@@ -76,6 +77,16 @@ class ModelToolbar(QFrame):
         from grc_agent_gui.styles import get_model_toolbar_style
         self.setStyleSheet(get_model_toolbar_style(1.0))
         self._suppress_signals = False
+        # Remembers the last known-good Ollama model so switching the
+        # provider combo away from Ollama and back doesn't leave the
+        # OpenRouter model id sitting in the (now editable) combo — which
+        # would otherwise get sent straight to `ollama pull` on reconnect.
+        if backend == _BACKEND_OLLAMA and model:
+            self._last_ollama_model = model
+        else:
+            from grc_agent.config import default_app_config
+
+            self._last_ollama_model = default_app_config().llama.model
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
@@ -149,6 +160,13 @@ class ModelToolbar(QFrame):
         self.refresh_btn.clicked.connect(self.refresh_requested.emit)
         layout.addWidget(self.refresh_btn)
 
+        self.edit_model_btn = QToolButton(self)
+        self.edit_model_btn.setText("✏")  # pencil
+        self.edit_model_btn.setToolTip("Edit the OpenRouter model id")
+        self.edit_model_btn.clicked.connect(self.edit_openrouter_model_requested.emit)
+        self.edit_model_btn.setVisible(False)
+        layout.addWidget(self.edit_model_btn)
+
         # Vertical separator between model and provider.
         provider_separator = QFrame(self)
         provider_separator.setFrameShape(QFrame.Shape.VLine)
@@ -177,15 +195,29 @@ class ModelToolbar(QFrame):
         idx = 0 if backend == _BACKEND_OLLAMA else 1
         self._suppress_signals = True
         self.provider_combo.setCurrentIndex(idx)
-        self._suppress_signals = False
         editable = backend == _BACKEND_OLLAMA
-        self.model_combo.setEditable(editable)
-        if not editable:
+        if editable:
+            # The combo may currently hold an OpenRouter model id (from the
+            # non-editable branch below) — restore the last known-good
+            # Ollama model instead of leaving it there, or a subsequent
+            # swap would try to ``ollama pull`` an OpenRouter model id.
+            self.model_combo.clear()
+            self.model_combo.setEditable(True)
+            self.model_combo.setEditText(self._last_ollama_model or _PLACEHOLDER_MODEL)
+        else:
             from grc_agent.config import default_openrouter_model
 
-            env_model = default_openrouter_model()
+            # setEditText() is a no-op once setEditable(False) has already
+            # torn down the combo's internal QLineEdit — populate via
+            # addItem()/setCurrentIndex() instead, which works on a
+            # non-editable QComboBox.
+            env_model = default_openrouter_model() or _PLACEHOLDER_MODEL
             self.model_combo.clear()
-            self.model_combo.setEditText(env_model)
+            self.model_combo.addItem(env_model)
+            self.model_combo.setCurrentIndex(0)
+            self.model_combo.setEditable(False)
+        self.edit_model_btn.setVisible(not editable)
+        self._suppress_signals = False
 
     def set_models(self, models: list[str], *, current: str = "") -> None:
         self._suppress_signals = True
@@ -204,12 +236,20 @@ class ModelToolbar(QFrame):
         self._suppress_signals = False
 
     def set_current_model(self, model: str) -> None:
+        if self.current_backend() == _BACKEND_OLLAMA and model and model != _PLACEHOLDER_MODEL:
+            self._last_ollama_model = model
         self._suppress_signals = True
         idx = self.model_combo.findText(model)
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)
-        else:
+        elif self.model_combo.isEditable():
             self.model_combo.setEditText(model)
+        else:
+            # setEditText() is a no-op on a non-editable combo (OpenRouter);
+            # replace the single displayed item instead.
+            self.model_combo.clear()
+            self.model_combo.addItem(model)
+            self.model_combo.setCurrentIndex(0)
         self._suppress_signals = False
 
     def current_backend(self) -> str:

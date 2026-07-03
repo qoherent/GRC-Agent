@@ -600,19 +600,71 @@ class GrcAgent:
     ) -> ToolResult:
         from grc_agent.runtime.web_search import web_search as _ws
 
-        result = _ws(query=query, max_results=max_results)
-        return self._payload_result(
-            "web_search",
-            result,
-            default_message=("Web search returned no results." if result.get("ok") else "Web search failed."),
-        )
+        raw = _ws(query=query, max_results=max_results)
+        if not raw.get("ok"):
+            return self._payload_result("web_search", raw, default_message="Web search failed.")
+
+        results = raw.get("results", [])
+        if not results:
+            return self._payload_result(
+                "web_search", raw, default_message="Web search returned no results."
+            )
+
+        from grc_agent.runtime.web_answer import summarize_web_search
+
+        try:
+            answer = summarize_web_search(self, query=query, results=results)
+        except Exception as exc:
+            return self._tool_result(
+                "web_search",
+                ok=False,
+                message=f"Web search summarization failed: {exc}",
+                error_type=ErrorCode.INTERNAL_ERROR,
+            )
+
+        payload = {
+            "ok": True,
+            "query": query,
+            "answer": answer,
+            "sources": [{"title": r.get("title", ""), "url": r.get("url", "")} for r in results],
+        }
+        return self._payload_result("web_search", payload, default_message="Web search complete.")
 
     def _web_fetch(self, url: str) -> ToolResult:
         from grc_agent.runtime.web_search import web_fetch as _wf
 
-        result = _wf(url=url)
-        return self._payload_result(
-            "web_fetch",
-            result,
-            default_message=("Fetched page." if result.get("ok") else "Web fetch failed."),
-        )
+        raw = _wf(url=url)
+        if not raw.get("ok"):
+            return self._payload_result("web_fetch", raw, default_message="Web fetch failed.")
+
+        title = raw.get("title", "")
+        content = raw.get("content", "")
+        if not content:
+            return self._payload_result(
+                "web_fetch",
+                {"ok": True, "url": url, "title": title, "links": raw.get("links", [])},
+                default_message="Fetched page has no content.",
+            )
+
+        from grc_agent.runtime.web_answer import summarize_web_fetch
+
+        try:
+            summary = summarize_web_fetch(
+                self, url=url, title=title, content=content, context_question=self._turn_user_message
+            )
+        except Exception as exc:
+            return self._tool_result(
+                "web_fetch",
+                ok=False,
+                message=f"Web fetch summarization failed: {exc}",
+                error_type=ErrorCode.INTERNAL_ERROR,
+            )
+
+        payload = {
+            "ok": True,
+            "url": url,
+            "title": title,
+            "summary": summary,
+            "links": raw.get("links", []),
+        }
+        return self._payload_result("web_fetch", payload, default_message="Fetched page.")

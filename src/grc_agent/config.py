@@ -23,14 +23,23 @@ USER_CONFIG_DIR_NAME = "grc_agent"
 _DOTENV_LOADED = False
 
 
+def _env_file_candidates() -> list[Path]:
+    """Return the ``.env`` search path, in priority order.
+
+    Shared by :func:`_ensure_dotenv_loaded` (read) and
+    :func:`set_openrouter_model_env` (write) so both agree on which file is
+    "the" ``.env`` for this run.
+    """
+    return [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"]
+
+
 def _ensure_dotenv_loaded() -> None:
     global _DOTENV_LOADED
     if _DOTENV_LOADED:
         return
     import dotenv
 
-    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"]
-    for candidate in candidates:
+    for candidate in _env_file_candidates():
         if candidate.is_file():
             try:
                 dotenv.load_dotenv(candidate)
@@ -51,9 +60,33 @@ ALLOWED_BACKENDS = {"ollama", "openrouter"}
 
 
 def default_openrouter_model() -> str:
-    """Resolve the OpenRouter model from the environment, with one literal fallback."""
+    """Resolve the OpenRouter model from the environment, with one literal fallback.
+
+    Uses ``or`` (not the ``getenv`` default arg) so a present-but-empty
+    ``OPENROUTER_MODEL=`` in ``.env`` falls back too, instead of resolving
+    to ``""``.
+    """
     _ensure_dotenv_loaded()
-    return os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+    return os.getenv("OPENROUTER_MODEL") or "deepseek/deepseek-v4-flash"
+
+
+def set_openrouter_model_env(model: str, *, env_path: Path | None = None) -> Path:
+    """Persist ``OPENROUTER_MODEL`` into the ``.env`` file the app loads at startup.
+
+    Also updates ``os.environ`` so the change is visible in-process
+    immediately, without an app restart.
+    """
+    import dotenv
+
+    _ensure_dotenv_loaded()
+    if env_path is None:
+        env_path = next((c for c in _env_file_candidates() if c.is_file()), _env_file_candidates()[-1])
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if not env_path.exists():
+        env_path.touch()
+    dotenv.set_key(str(env_path), "OPENROUTER_MODEL", model)
+    os.environ["OPENROUTER_MODEL"] = model
+    return env_path
 
 
 class ConfigError(RuntimeError):
@@ -731,6 +764,7 @@ __all__ = [
     "load_user_preferences",
     "resolve_config_path",
     "save_user_preferences",
+    "set_openrouter_model_env",
     "update_last_model",
     "update_provider_chosen",
     "update_toml_config_file",

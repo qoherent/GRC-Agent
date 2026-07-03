@@ -84,7 +84,7 @@ blocks:
     id: variable
     parameters:
         comment: ''
-        value: '32000'
+        value: '64000'
     states:
         bus_sink: false
         bus_source: false
@@ -174,7 +174,7 @@ blocks:
         device_name: ''
         num_inputs: '1'
         ok_to_block: 'True'
-        samp_rate: '32000'
+        samp_rate: '64000'
     states:
         bus_sink: false
         bus_source: false

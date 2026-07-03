@@ -28,6 +28,7 @@ from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -128,9 +129,48 @@ _SLASH_COMMANDS: dict[str, Callable[["MainWindow"], None]] = {
 }
 
 
+def _fetch_context_length(backend: str, server_url: str, model_name: str) -> int | None:
+    """Look up ``model_name``'s real context window, or ``None`` on failure.
+
+    Never approximated — read straight from Ollama's ``/api/tags`` or
+    OpenRouter's public model catalog.
+    """
+    try:
+        if backend == "ollama":
+            from grc_agent.model_manager import get_ollama_context_length
+
+            return get_ollama_context_length(server_url, model_name)
+        from grc_agent.model_manager import get_openrouter_context_length
+
+        return get_openrouter_context_length(model_name)
+    except Exception as exc:
+        logger.debug("Context-length lookup failed: %s", exc)
+        return None
+
+
 class InspectorWorkerSignals(QObject):
     finished = Signal(dict)
     error = Signal(str)
+
+
+class ContextLengthWorkerSignals(QObject):
+    finished = Signal(object)
+
+
+class ContextLengthRunnable(QRunnable):
+    """One-shot background lookup of the active model's context window,
+    used at startup before any swap has happened."""
+
+    def __init__(self, backend: str, server_url: str, model_name: str) -> None:
+        super().__init__()
+        self.backend = backend
+        self.server_url = server_url
+        self.model_name = model_name
+        self.signals = ContextLengthWorkerSignals()
+
+    def run(self) -> None:
+        context_length = _fetch_context_length(self.backend, self.server_url, self.model_name)
+        self.signals.finished.emit(context_length)
 
 
 class ModelSwapWorkerSignals(QObject):
@@ -241,7 +281,9 @@ class ModelSwapRunnable(QRunnable):
             result = bootstrap_runtime(app_config, init_retrieval=False)
             if result.errors:
                 raise Exception(", ".join(result.errors))
-            self.signals.finished.emit(result)
+
+            context_length = _fetch_context_length(self.backend, new_url, new_model)
+            self.signals.finished.emit((result, context_length))
         except Exception as exc:
             logger.exception("Backend/model swap failure")
             self.signals.error.emit(f"Swap failed: {exc}")
@@ -391,6 +433,15 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self.model_status_label)
         self._update_model_status_label()
 
+        # Context/token usage — populated from the real API response
+        # usage field (see AgentWorker.model_message_added), never
+        # estimated. ``_context_window_max`` is the model's real context
+        # length, looked up once per model swap (and once at startup).
+        self._context_window_max: int | None = None
+        self.context_status_label = QLabel(self)
+        self.status_bar.addPermanentWidget(self.context_status_label)
+        self._update_context_usage_label(None)
+
         self.validation_label = QLabel("Unknown", self)
         self.status_bar.addPermanentWidget(self.validation_label)
 
@@ -486,6 +537,7 @@ class MainWindow(QMainWindow):
         self.model_toolbar.refresh_requested.connect(self._on_toolbar_refresh)
         self.model_toolbar.open_graph_location_requested.connect(self._on_open_graph_location)
         self.model_toolbar.browse_graph_requested.connect(self.open_file_dialog)
+        self.model_toolbar.edit_openrouter_model_requested.connect(self._on_edit_openrouter_model)
 
         main_layout.addWidget(self.model_toolbar)
         main_layout.addWidget(v_splitter)
@@ -523,8 +575,28 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QTimer
 
         QTimer.singleShot(0, self._probe_and_populate_models)
+        QTimer.singleShot(0, self._fetch_initial_context_length)
 
         self.apply_zoom(self._zoom_factor)
+
+    def _fetch_initial_context_length(self) -> None:
+        """Look up the startup model's context window in the background."""
+        if self.llama_config is None:
+            return
+        backend = getattr(self.llama_config, "backend", "ollama")
+        server_url = getattr(self.llama_config, "server_url", DEFAULT_OLLAMA_URL)
+        model_name = getattr(self.llama_config, "model", "")
+        if self.provider_config is not None:
+            model_name = getattr(self.provider_config, "model", "") or model_name
+        if not model_name:
+            return
+        runnable = ContextLengthRunnable(backend, server_url, model_name)
+        runnable.signals.finished.connect(self._on_initial_context_length)
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_initial_context_length(self, context_length: int | None) -> None:
+        self._context_window_max = context_length
+        self._update_context_usage_label(None)
 
     def _resolve_model_status(self) -> str:
         """Build a single-line summary of the loaded model for the status bar."""
@@ -554,6 +626,28 @@ class MainWindow(QMainWindow):
             logger.debug("Failed to render model status label: %s", exc)
             self.model_status_label.setText("Model: unknown")
             self.model_status_label.setStyleSheet(f"color: {COLOR_SUBTEXT};")
+
+    def _update_context_usage_label(self, usage: dict[str, Any] | None) -> None:
+        """Render real token usage (from the API response) into the status bar.
+
+        Never approximated: with no usage yet, shows "Context: —"; once a
+        turn completes, shows the exact ``total_tokens`` the backend
+        reported, against the model's real context window when that lookup
+        succeeded (never a guessed denominator).
+        """
+        total = usage.get("total_tokens") if isinstance(usage, dict) else None
+        max_ctx = self._context_window_max
+        if total is None:
+            if max_ctx:
+                self.context_status_label.setText(f"Context: — / {max_ctx:,}")
+            else:
+                self.context_status_label.setText("Context: —")
+            return
+        if max_ctx:
+            pct = (total / max_ctx) * 100
+            self.context_status_label.setText(f"Context: {total:,} / {max_ctx:,} ({pct:.1f}%)")
+        else:
+            self.context_status_label.setText(f"Context: {total:,} tokens")
 
     def update_ui_state(self) -> None:
         """Enable or disable chat and validation controls based on active session state."""
@@ -723,6 +817,30 @@ class MainWindow(QMainWindow):
         """User clicked refresh — re-probe and repopulate the model list."""
         self._probe_and_populate_models()
 
+    def _on_edit_openrouter_model(self) -> None:
+        """User clicked the pencil button — paste a custom OpenRouter model id."""
+        current = self.model_toolbar.current_model()
+        new_model, ok = QInputDialog.getText(
+            self,
+            "Edit OpenRouter Model",
+            "Paste an OpenRouter model id (e.g. anthropic/claude-sonnet-5):",
+            text=current,
+        )
+        new_model = new_model.strip()
+        if not ok or not new_model or new_model == current:
+            return
+
+        from grc_agent.config import set_openrouter_model_env
+
+        try:
+            set_openrouter_model_env(new_model)
+        except Exception as exc:
+            logger.warning("Failed to persist OPENROUTER_MODEL to .env: %s", exc)
+            self.status_bar.showMessage(f"Failed to save model to .env: {exc}", 8000)
+            return
+
+        self._on_toolbar_connect("openrouter", new_model)
+
 
 
     def _probe_and_populate_models(self) -> None:
@@ -817,14 +935,35 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Cancel running worker, clean up thread, and close DB on close."""
+        if not self._confirm_discard_unsaved_changes():
+            event.ignore()
+            return
         self._on_stop_clicked()
         self.cleanup_thread()
+        self._deactivate_active_session()
         if hasattr(self, "sessions_store") and self.sessions_store is not None:
             try:
                 self.sessions_store.close()
             except Exception as exc:
                 logger.warning("Failed to close sessions DB on window exit: %s", exc)
         event.accept()
+
+    def _deactivate_active_session(self) -> None:
+        """Close the active session row (if any) and drop the handle.
+
+        Centralizes the lifecycle transition so every code path that
+        replaces or discards the active session goes through one
+        place.  The session store's ``close_session`` enqueues the
+        ``ended_at`` / ``message_count`` update asynchronously.
+        """
+        if self.active_session_id is not None:
+            try:
+                self.sessions_store.close_session(self.active_session_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to close session %s: %s", self.active_session_id, exc
+                )
+            self.active_session_id = None
 
     def _ensure_active_session_db_record(self, first_user_prompt: str) -> None:
         """Create a new session record in SQLite if one isn't currently active."""
@@ -879,13 +1018,18 @@ class MainWindow(QMainWindow):
         The text column is empty (it is display-only for these roles);
         the full ``ChatMessage`` lives in the ``payload`` column.
         """
-        if self.active_session_id is None:
-            return
         try:
             payload = json.loads(payload_json) if payload_json else None
         except (TypeError, ValueError):
             payload = None
         if payload is None:
+            return
+        usage = None
+        if isinstance(payload, dict):
+            usage = payload.get("additional_information", {}).get("usage")
+        if usage:
+            self._update_context_usage_label(usage)
+        if self.active_session_id is None:
             return
         try:
             self.sessions_store.append(
@@ -1101,7 +1245,7 @@ class MainWindow(QMainWindow):
 
         self.chat_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
-        if self.active_session_id is not None and assistant_text.strip():
+        if self.active_session_id is not None:
             try:
                 self.sessions_store.append(
                     self.active_session_id,
@@ -1163,6 +1307,9 @@ class MainWindow(QMainWindow):
         Surfaces a ``QMessageBox`` on failure so the user gets a clear
         error rather than a tiny status-bar message.
         """
+        if not self._confirm_discard_unsaved_changes():
+            return
+
         from grc_agent.session import load_grc
 
         try:
@@ -1177,7 +1324,7 @@ class MainWindow(QMainWindow):
             )
             return
         self.chat_widget.clear()
-        self.active_session_id = None
+        self._deactivate_active_session()
         if hasattr(self.agent, "reset_chat_session"):
             self.agent.reset_chat_session()
         self.agent.session = loaded
@@ -1245,9 +1392,20 @@ class MainWindow(QMainWindow):
         """Update the status bar with progress from the swap worker."""
         self.status_bar.showMessage(message)
 
-    def _on_model_swap_finished(self, result: Any) -> None:
-        """Apply the new backend state and notify the user."""
+    def _on_model_swap_finished(self, payload: Any) -> None:
+        """Apply the new backend state and notify the user.
+
+        ``payload`` is normally ``(bootstrap_result, context_length)`` from
+        :class:`ModelSwapRunnable`; a bare ``bootstrap_result`` is also
+        accepted (e.g. direct calls from tests/recovery paths that don't
+        know the model's context length).
+        """
         import dataclasses
+
+        if isinstance(payload, tuple) and len(payload) == 2:
+            result, context_length = payload
+        else:
+            result, context_length = payload, None
 
         new_provider = getattr(result, "provider_config", None)
         if new_provider is None:
@@ -1304,19 +1462,25 @@ class MainWindow(QMainWindow):
         self.provider_config = new_provider
         self._set_swap_in_progress(False)
         self._update_model_status_label()
+        self._context_window_max = context_length
+        self._update_context_usage_label(None)
         # Sync the toolbar with the new model.
         if hasattr(self, "model_toolbar"):
             backend = getattr(self.llama_config, "backend", "ollama")
             self.model_toolbar.set_backend(backend)
             self.model_toolbar.set_current_model(model_name)
             self.set_backend_connected(True)
+            if backend == "ollama":
+                # Repopulate the dropdown with the full local model list
+                # now that we're back on Ollama (mirrors the refresh button).
+                self._probe_and_populate_models()
         # Persist to preferences.json so the selection survives restarts.
         try:
             from grc_agent.config import update_last_model, update_provider_chosen
 
             backend_str = getattr(self.llama_config, "backend", "ollama")
-            update_last_model(model_name)
-            update_provider_chosen(backend_str)
+            update_last_model(model=model_name)
+            update_provider_chosen(provider=backend_str)
         except Exception as exc:
             logger.warning("Failed to persist model selection to preferences: %s", exc)
         # Recovery path: a successful swap means the (possibly
@@ -1370,13 +1534,63 @@ class MainWindow(QMainWindow):
                 self.h_splitter.setSizes(sizes)
 
     def start_new_chat_session(self) -> None:
-        """Start a fresh chat session, resetting the GUI and the agent state."""
+        """Start a fresh chat session, unloading any graph and resetting agent state."""
+        if not self._confirm_discard_unsaved_changes():
+            return
+
+        from grc_agent.flowgraph_session import FlowgraphSession
+
         self.chat_widget.clear()
+        self._deactivate_active_session()
         if hasattr(self.agent, "reset_chat_session"):
             self.agent.reset_chat_session()
-        self.active_session_id = None
+        self.agent.session = FlowgraphSession()
+        self.inspector_widget.set_grc_file_path("")
+        self.refresh_inspector()
+        self.model_toolbar.set_graph_path("")
         self.sidebar_widget.list_widget.clearSelection()
+        self.update_ui_state()
         self.status_bar.showMessage("Started a fresh chat session.", 5000)
+
+    def _confirm_discard_unsaved_changes(self) -> bool:
+        """True if it's OK to replace/discard the current graph state now.
+
+        Prompts to save when the loaded flowgraph has unsaved changes
+        (``session.is_dirty``); returns False if the user cancels, so the
+        caller can abort whatever action triggered this check.
+        """
+        from grc_agent.flowgraph_session import FlowgraphSession
+
+        session = getattr(self.agent, "session", None)
+        if (
+            not isinstance(session, FlowgraphSession)
+            or session.flowgraph is None
+            or not session.is_dirty
+        ):
+            return True
+
+        buttons = QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel
+        default_button = QMessageBox.StandardButton.Cancel
+        if session.path:
+            buttons |= QMessageBox.StandardButton.Save
+            default_button = QMessageBox.StandardButton.Save
+
+        choice = QMessageBox.question(
+            self,
+            "Save changes?",
+            "The current flowgraph has unsaved changes. Save before continuing?",
+            buttons,
+            default_button,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return False
+        if choice == QMessageBox.StandardButton.Save:
+            try:
+                session.save()
+            except Exception as exc:
+                self._show_error("Save failed", str(exc))
+                return False
+        return True
 
     def _on_clear_all_history(self) -> None:
         """Wipe every session row from the on-disk sessions DB.
@@ -1406,7 +1620,7 @@ class MainWindow(QMainWindow):
         self.chat_widget.clear()
         if hasattr(self.agent, "reset_chat_session"):
             self.agent.reset_chat_session()
-        self.active_session_id = None
+        self._deactivate_active_session()
         self.sidebar_widget.list_widget.clear()
         self.status_bar.showMessage(f"Cleared {removed} session(s) from history.", 5000)
 
@@ -1442,6 +1656,9 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to open session %s: %s", exc)
             self.status_bar.showMessage(f"Open session failed: {exc}", 5000)
             return
+
+        # Close whatever session was active before switching.
+        self._deactivate_active_session()
 
         # 1. Autoload the GRC graph associated with the session.
         if session_rec and session_rec.graph_path:

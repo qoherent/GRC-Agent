@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import sqlite_vec
 from grc_agent.domain_models import ErrorCode
+from grc_agent.runtime.llm_client import call_agent_llm
+from grc_agent.runtime.llm_client import cap_words as _cap_words
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent, ToolResult
@@ -79,14 +81,6 @@ def embed_query(server_url: str, query: str, *, model: str = _EMBED_MODEL) -> li
 
 
 # --- Chunking ---------------------------------------------------------------
-
-
-def _cap_words(text: str, max_words: int) -> str:
-    """Cap ``text`` at ``max_words`` whitespace-separated words."""
-    words = text.split()
-    if len(words) <= max_words:
-        return text
-    return " ".join(words[:max_words]) + f" [TRUNCATED: was {len(words)} words]"
 
 
 def _chunk_markdown(path: Path) -> list[dict[str, str]]:
@@ -283,36 +277,7 @@ def _generate_grounded_answer(
         f"Question: {question}\n\n"
         f"Documentation:\n{context}"
     )
-    import os
-
-    from openai import OpenAI
-
-    base_url = agent._llama_server_url.rstrip("/")
-    if "openrouter.ai" in base_url and not base_url.endswith("/v1"):
-        openai_base_url = f"{base_url}/v1"
-    elif "11434" in base_url and not base_url.endswith("/v1"):
-        openai_base_url = f"{base_url}/v1"
-    else:
-        openai_base_url = base_url
-
-    api_key = os.environ.get("OPENROUTER_API_KEY") or "not-needed"
-    client = OpenAI(
-        base_url=openai_base_url,
-        api_key=api_key,
-        timeout=agent._llama_request_timeout_seconds,
-    )
-
-    # No `extra_body` overrides: the local Ollama chat model
-    # (``gemma4:e4b-it-qat-120k`` and similar) is reasoning-capable and
-    # benefits from default thinking. We deliberately do NOT pass
-    # ``think: false`` here — it would silently strip the model's
-    # reasoning tokens from the docs-RAG pipeline.
-
-    completion = client.chat.completions.create(
-        model=agent._llama_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return completion.choices[0].message.content.strip()
+    return call_agent_llm(agent, prompt)
 
 
 def ask_grc_docs(
