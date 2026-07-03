@@ -41,9 +41,8 @@ DB_DIR = Path(
 CATALOG_DB_PATH = DB_DIR / "catalog_v1.db"
 
 
-
-# --- Embedding constants: single source of truth in doc_answer ---------------
-from grc_agent.runtime.doc_answer import (
+# --- Embedding constants: single source of truth in _embedding_config ---------
+from grc_agent.runtime._embedding_config import (
     _DOCUMENT_PREFIX,
     _EMBED_DIM,
     _EMBED_MAX_WORDS,

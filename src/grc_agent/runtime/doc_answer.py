@@ -29,6 +29,13 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import sqlite_vec
 from grc_agent.domain_models import ErrorCode
+from grc_agent.runtime._embedding_config import (
+    _DOCUMENT_PREFIX,
+    _EMBED_MAX_WORDS,
+    _EMBED_MODEL,
+    _MAX_CONTEXT_WORDS,
+    _QUERY_PREFIX,
+)
 from grc_agent.runtime.llm_client import call_agent_llm
 from grc_agent.runtime.llm_client import cap_words as _cap_words
 
@@ -48,13 +55,6 @@ DB_DIR = Path(
 )
 DB_PATH = DB_DIR / "docs_v1.db"
 DOCS_DIR = Path(__file__).resolve().parents[3] / "docs" / "wiki_gnuradio_org"
-
-
-_QUERY_PREFIX = "task: search result | query: "
-_DOCUMENT_PREFIX = "task: search result | document: "
-_EMBED_MODEL = "embeddinggemma:latest"
-_EMBED_MAX_WORDS = 256
-_MAX_CONTEXT_WORDS = 6000
 
 
 # --- Embedding ---------------------------------------------------------------
