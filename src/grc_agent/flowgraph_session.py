@@ -16,7 +16,15 @@ from typing import Any
 
 from grc_agent.domain_models import BlockRole, ErrorCode, build_error_payload
 from grc_agent.grc_native_adapter import (
+    exclusive_file_lock,
+    get_platform,
     load_flow_graph,
+    refuse_ambiguous_save_target,
+    render_flow_graph,
+    serialize_raw_data,
+    validate,
+    write_flow_graph_atomic,
+    write_save_backup,
 )
 
 SUMMARY_PREVIEW_LIMIT = 3
@@ -82,12 +90,6 @@ class FlowgraphSession:
         integrity = self.file_integrity_state()
         if integrity.get("externally_modified"):
             raise OSError(f"Refusing to save: file changed on disk at {target}")
-        from grc_agent.grc_native_adapter import (
-            exclusive_file_lock,
-            refuse_ambiguous_save_target,
-            write_flow_graph_atomic,
-            write_save_backup,
-        )
 
         refuse_ambiguous_save_target(target)
         write_save_backup(target)
@@ -109,7 +111,6 @@ class FlowgraphSession:
                 error_type=ErrorCode.INVALID_REQUEST,
                 message="No flowgraph loaded.",
             )
-        from grc_agent.grc_native_adapter import render_flow_graph
 
         snapshot = render_flow_graph(self.flowgraph)
         if (
@@ -165,7 +166,6 @@ class FlowgraphSession:
     def validation_state(self) -> dict[str, Any]:
         if self.flowgraph is None:
             return {"status": "unknown", "errors": []}
-        from grc_agent.grc_native_adapter import validate
 
         v = validate(self.flowgraph)
         self.last_validation_ok = v.native_ok
@@ -182,8 +182,6 @@ class FlowgraphSession:
         cls, raw_data: dict[str, Any], path: str | Path | None = None
     ) -> FlowgraphSession:
         """Create a session from a raw data dict (GRC import_data format)."""
-        from grc_agent.grc_native_adapter import get_platform
-
         session = cls(path)
         fg = get_platform().make_flow_graph()
         fg.import_data(raw_data)
@@ -194,17 +192,14 @@ class FlowgraphSession:
     @staticmethod
     def _serialize_raw_data(raw_data: Any) -> str:
         """Serialize a raw data dict to GRC-native YAML."""
-        from grc_agent.grc_native_adapter import serialize_raw_data
-
         return serialize_raw_data(raw_data)
 
     def validate(self) -> bool:
         """Validate the loaded flowgraph. Returns is_valid."""
         if self.flowgraph is None:
             return False
-        from grc_agent.grc_native_adapter import validate as _validate
 
-        result = _validate(self.flowgraph)
+        result = validate(self.flowgraph)
         self.last_validation_ok = result.native_ok
         self.last_validation_revision = self._state_revision
         return bool(result.native_ok)

@@ -154,7 +154,7 @@ class SaveIntegrityTests(unittest.TestCase):
             _mark_session_valid(session)
 
             with mock.patch(
-                "grc_agent.grc_native_adapter.write_flow_graph_atomic",
+                "grc_agent.flowgraph_session.write_flow_graph_atomic",
                 side_effect=OSError("simulated save failure"),
             ):
                 with self.assertRaises(OSError):
@@ -172,7 +172,7 @@ class SaveIntegrityTests(unittest.TestCase):
             original_hash = session.persisted_file_sha256
 
             with mock.patch(
-                "grc_agent.grc_native_adapter.write_flow_graph_atomic",
+                "grc_agent.flowgraph_session.write_flow_graph_atomic",
                 side_effect=OSError("simulated autosave failure"),
             ):
                 result = agent.execute_tool(
