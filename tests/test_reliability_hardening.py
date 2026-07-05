@@ -21,7 +21,6 @@ import unittest
 from pathlib import Path
 
 from grc_agent.agent import GrcAgent
-from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.model_context import MVP_MODEL_TOOL_NAMES
 from grc_agent.runtime.tool_schemas import build_tool_schemas
@@ -76,7 +75,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
         errors = result.get("errors", [])
         self.assertTrue(errors, "Must return errors for duplicate block name")
         self.assertIn(
-            ErrorCode.DUPLICATE_BLOCK_NAME,
+            "duplicate_block_name",
             [e.get("code") for e in errors],
             "Error code must be duplicate_block_name",
         )

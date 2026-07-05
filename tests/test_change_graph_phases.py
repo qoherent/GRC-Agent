@@ -23,7 +23,6 @@ pytestmark = pytest.mark.grc_native
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.change_graph import ChangeGraphContext
 
-
 GRC_FIXTURE = (
     Path(__file__).resolve().parents[1] / "examples" / "dial_tone.grc"
 )

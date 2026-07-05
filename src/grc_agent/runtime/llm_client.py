@@ -38,7 +38,7 @@ def _openai_base_url(server_url: str) -> str:
     return base
 
 
-def call_agent_llm(agent: "GrcAgent", prompt: str) -> str:
+def call_agent_llm(agent: GrcAgent, prompt: str) -> str:
     """Single-turn chat completion against the agent's configured backend.
 
     No ``extra_body`` overrides are sent — a reasoning-capable Ollama chat

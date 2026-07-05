@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -10,15 +9,12 @@ from grc_agent.domain_models import BlockRole, GrcFlowgraph
 from grc_agent.grc_native_adapter import (
     add_block,
     apply_mutation,
-    bind_to_flow_graph,
-    bump_revision,
     classify_role,
     connect,
     disconnect,
     get_platform,
     load_and_inspect,
     load_flow_graph,
-    new_graph_identity,
     remove_block,
     render_block,
     render_flow_graph,
@@ -65,47 +61,6 @@ def test_get_platform_missing_grc_raises_runtime_error(monkeypatch):
         adapter.get_platform()
     except RuntimeError as exc:
         assert "GRC Agent requires GNU Radio" in str(exc)
-
-
-def test_graph_identity_file_bytes():
-    identity = new_graph_identity(b"hello")
-    assert identity.file_sha256 is not None and len(identity.file_sha256) == 64
-    assert identity.file_sha256 == __import__("hashlib").sha256(b"hello").hexdigest()
-
-
-def test_graph_identity_no_bytes():
-    identity = new_graph_identity(None)
-    assert identity.file_sha256 is None
-
-
-def test_graph_identity_revision_bumps():
-    identity = new_graph_identity(b"x")
-    assert identity.revision == 0
-    bump_revision(identity)
-    bump_revision(identity)
-    assert identity.revision == 2
-
-
-def test_graph_identity_bind_sets_instance_id():
-    fg = get_platform().make_flow_graph()
-    identity = new_graph_identity(None)
-    bind_to_flow_graph(identity, fg)
-    assert identity.instance_id == id(fg)
-
-
-def test_no_deep_json_hash_function():
-    """The consultant rejected deep-JSON hashing. Only the file-bytes SHA exists."""
-    import grc_agent.grc_native_adapter as adapter
-
-    text = open(adapter.__file__).read()
-    assert "compute_graph_id" not in text
-    assert (
-        "json" not in re.findall(r"hashlib\.\w+|model_dump.*hash|json\.\w+", text).__str__()
-        or "json" in text
-    )  # noqa
-    # Tight check: hashlib is used (for sha256) but not for json.
-    assert "hashlib" in text
-    assert "model_dump" not in text
 
 
 # --- load_and_inspect --------------------------------------------------------- #

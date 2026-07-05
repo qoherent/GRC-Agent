@@ -73,21 +73,6 @@ class NormalizedParameter:
     option_attributes: dict[str, list[Any]] = field(default_factory=dict)
     base_key: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        payload = {
-            "id": self.id,
-            "label": self.label,
-            "dtype": self.dtype,
-            "default": self.default,
-            "category": self.category,
-            "hide": self.hide,
-            "options": list(self.options),
-            "option_labels": list(self.option_labels),
-            "option_attributes": dict(self.option_attributes),
-            "base_key": self.base_key,
-        }
-        return {key: value for key, value in payload.items() if value not in (None, [], {})}
-
     def to_compact_dict(self) -> dict[str, Any]:
         """Discovery shape: id/dtype/default only — no options, no label."""
         payload = {
@@ -112,20 +97,6 @@ class NormalizedPort:
     hide: bool | str | None = None
     color: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        payload = {
-            "label": self.label,
-            "domain": self.domain,
-            "id": self.id,
-            "dtype": self.dtype,
-            "vlen": self.vlen,
-            "multiplicity": self.multiplicity,
-            "optional": self.optional,
-            "hide": self.hide,
-            "color": self.color,
-        }
-        return {key: value for key, value in payload.items() if value is not None}
-
     def to_compact_dict(self) -> dict[str, Any]:
         """Discovery shape: id/domain/dtype only — no multiplicity/optional."""
         payload = {
@@ -149,7 +120,6 @@ class BlockDescription:
     outputs: list[NormalizedPort]
     asserts: list[str]
     documentation: str | None
-    doc_url: str | None
     warnings: list[str]
     signature: str
 
@@ -264,17 +234,6 @@ def split_category_path(value: Any) -> list[str]:
         if part:
             parts.append(part)
     return parts
-
-
-def string_values(value: Any) -> list[str]:
-    """Normalize an optional string-or-list-of-strings field into a string list."""
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        values = [compact_text(item) for item in value]
-        return [item for item in values if item]
-    compact = compact_text(value)
-    return [compact] if compact else []
 
 
 def optional_string(value: Any) -> str | None:

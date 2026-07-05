@@ -8,7 +8,6 @@ from __future__ import annotations
 from unittest import mock
 
 import pytest
-
 from grc_agent.runtime.block_semantics import (
     _EVALUATED_HIDE_CACHE,
     evaluated_param_hides,
@@ -31,7 +30,7 @@ def test_populated_on_first_call(mock_compute) -> None:
 
 @mock.patch("grc_agent.runtime.block_semantics._compute_evaluated_param_hides")
 def test_cache_hit_returns_same_dict_object(mock_compute) -> None:
-    mock_compute.return_value = result_dict = {"gain": "none"}
+    mock_compute.return_value = {"gain": "none"}
     first = evaluated_param_hides("blocks_amplifier", {"gain": "12"})
     second = evaluated_param_hides("blocks_amplifier", {"gain": "12"})
     assert first is second

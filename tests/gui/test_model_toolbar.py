@@ -152,3 +152,70 @@ def test_toolbar_layout_order_graph_model_provider(qtbot):
     assert visible.index(widget.model_combo) < visible.index(widget.provider_combo), (
         "model combo must be left of the provider combo"
     )
+
+
+def test_toolbar_exposes_embedding_model_field(qtbot):
+    """The toolbar must expose an embedding-model combo + pencil button +
+    change signal so the user can pick the embedding model per backend."""
+    widget = ModelToolbar()
+    qtbot.addWidget(widget)
+    assert hasattr(widget, "embed_combo")
+    assert hasattr(widget, "edit_embed_btn")
+    assert hasattr(widget, "embed_model_changed")
+    assert hasattr(widget, "current_embed_model")
+    # Defaults to the Ollama embedding model on the Ollama backend.
+    assert widget.current_embed_model() == "embeddinggemma:latest"
+
+
+def test_embedding_combo_editable_on_ollama_pencil_on_openrouter(qtbot):
+    """Mirrors the chat-model combo: editable on Ollama, non-editable with a
+    pencil button on OpenRouter."""
+    widget = ModelToolbar()
+    qtbot.addWidget(widget)
+    widget.show()  # isVisible() reflects real visibility only once shown.
+
+    widget.set_backend("ollama")
+    assert widget.embed_combo.isEditable()
+    assert not widget.edit_embed_btn.isVisible()
+
+    widget.set_backend("openrouter")
+    assert not widget.embed_combo.isEditable()
+    assert widget.edit_embed_btn.isVisible()
+
+
+def test_set_backend_openrouter_shows_perplexity_default(qtbot):
+    """On the OpenRouter backend the embedding combo shows the project default
+    OpenRouter embedding model (perplexity/pplx-embed-v1-0.6b)."""
+    widget = ModelToolbar()
+    qtbot.addWidget(widget)
+    widget.set_backend("openrouter")
+    assert widget.current_embed_model() == "perplexity/pplx-embed-v1-0.6b"
+
+
+def test_embed_model_changed_emits_on_ollama_edit(qtbot):
+    """Typing a new embedding model on the Ollama combo fires the change signal."""
+    widget = ModelToolbar()
+    qtbot.addWidget(widget)
+    widget.set_backend("ollama")
+    received: list[str] = []
+    widget.embed_model_changed.connect(lambda m: received.append(m))
+
+    widget.embed_combo.setEditText("nomic-embed-text")
+    # setEditText does not change the combo index; drive the handler directly
+    # as the currentIndexChanged signal would in the real editable combo.
+    widget._on_embed_model_changed(0)
+    assert received, "embed_model_changed did not fire"
+    assert "nomic-embed-text" in widget.current_embed_model()
+
+
+def test_set_current_embed_model_does_not_fire_signal(qtbot):
+    """Programmatic updates (e.g. after a backend swap) must not re-emit the
+    change signal — only user edits should."""
+    widget = ModelToolbar()
+    qtbot.addWidget(widget)
+    fired: list[str] = []
+    widget.embed_model_changed.connect(lambda m: fired.append(m))
+
+    widget.set_current_embed_model("nomic-embed-text")
+    assert not fired
+    assert widget.current_embed_model() == "nomic-embed-text"

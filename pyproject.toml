@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "grc-agent"
 version = "0.1.0"
 description = "Local GNU Radio Companion .grc assistant."
-readme = "README.md"
+readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "MIT"}
 authors = [{name = "Qoherent"}]
 keywords = [
@@ -16,7 +16,7 @@ keywords = [
     "agent",
     "code-generation",
     "local-llm",
-    "llama-cpp",
+    "ollama",
     "rag",
 ]
 classifiers = [
@@ -27,13 +27,16 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Code Generators",
     "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
-    "ToolAgents==0.3.0",
-    "numpy<2 ; python_full_version < '3.13'",
+    "ToolAgents>=0.3.0,<0.4.0",
+    "openai>=1.50",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
     "pydantic>=2.0",
     "pyyaml>=6.0.3",
     "sqlite-vec>=0.1.9",
@@ -55,9 +58,9 @@ dev = [
 Homepage = "https://github.com/qoherent/grc-agent"
 Repository = "https://github.com/qoherent/grc-agent"
 Issues = "https://github.com/qoherent/grc-agent/issues"
-Changelog = "https://github.com/qoherent/grc-agent/blob/main/docs/CHANGELOG.md"
+Changelog = "https://github.com/qoherent/grc-agent/releases"
 
-[project.scripts]
+[project.gui-scripts]
 grc-agent-gui = "grc_agent_gui.app:main"
 
 [tool.hatch.build.targets.wheel]

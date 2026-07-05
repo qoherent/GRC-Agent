@@ -538,6 +538,10 @@ class MainWindow(QMainWindow):
         self.model_toolbar.open_graph_location_requested.connect(self._on_open_graph_location)
         self.model_toolbar.browse_graph_requested.connect(self.open_file_dialog)
         self.model_toolbar.edit_openrouter_model_requested.connect(self._on_edit_openrouter_model)
+        self.model_toolbar.embed_model_changed.connect(self._on_embed_model_changed)
+        self.model_toolbar.edit_openrouter_embed_model_requested.connect(
+            self._on_edit_openrouter_embed_model
+        )
 
         main_layout.addWidget(self.model_toolbar)
         main_layout.addWidget(v_splitter)
@@ -830,16 +834,61 @@ class MainWindow(QMainWindow):
         if not ok or not new_model or new_model == current:
             return
 
-        from grc_agent.config import set_openrouter_model_env
+        from grc_agent.config import set_env_model
 
         try:
-            set_openrouter_model_env(new_model)
+            set_env_model("OPENROUTER_MODEL", new_model)
         except Exception as exc:
             logger.warning("Failed to persist OPENROUTER_MODEL to .env: %s", exc)
             self.status_bar.showMessage(f"Failed to save model to .env: {exc}", 8000)
             return
 
         self._on_toolbar_connect("openrouter", new_model)
+
+    def _embedding_env_var(self, backend: str) -> str:
+        return "OPENROUTER_EMBEDDING_MODEL" if backend == "openrouter" else "OLLAMA_EMBEDDING_MODEL"
+
+    def _persist_embedding_model(self, backend: str, model: str) -> bool:
+        """Write the embedding model to .env (bidirectional GUI sync). Returns False on failure."""
+        from grc_agent.config import set_env_model
+
+        try:
+            set_env_model(self._embedding_env_var(backend), model)
+        except Exception as exc:
+            logger.warning("Failed to persist embedding model to .env: %s", exc)
+            self.status_bar.showMessage(f"Failed to save embedding model to .env: {exc}", 8000)
+            return False
+        return True
+
+    def _on_embed_model_changed(self, model: str) -> None:
+        """User edited the embedding model (Ollama editable combo, or after a pencil edit)."""
+        backend = self.model_toolbar.current_backend()
+        if not self._persist_embedding_model(backend, model):
+            return
+        # Keep the agent's embedding runtime in sync; the per-backend index
+        # auto-rebuilds on next access (model-stamp mismatch in the store).
+        if hasattr(self, "agent") and self.agent is not None:
+            self.agent.reconfigure_llama_runtime(embedding_model=model)
+        self.status_bar.showMessage(f"Embedding model set to {model}", 5000)
+
+    def _on_edit_openrouter_embed_model(self) -> None:
+        """User clicked the embedding pencil — paste a custom OpenRouter embedding model id."""
+        current = self.model_toolbar.current_embed_model()
+        new_model, ok = QInputDialog.getText(
+            self,
+            "Edit OpenRouter Embedding Model",
+            "Paste an OpenRouter embedding model id (e.g. perplexity/pplx-embed-v1-0.6b):",
+            text=current,
+        )
+        new_model = new_model.strip()
+        if not ok or not new_model or new_model == current:
+            return
+        if not self._persist_embedding_model("openrouter", new_model):
+            return
+        self.model_toolbar.set_current_embed_model(new_model)
+        if hasattr(self, "agent") and self.agent is not None:
+            self.agent.reconfigure_llama_runtime(embedding_model=new_model)
+        self.status_bar.showMessage(f"Embedding model set to {new_model}", 5000)
 
 
 
@@ -1399,8 +1448,14 @@ class MainWindow(QMainWindow):
                     server_url=server_url,
                     model=chosen_model,
                 )
+                # Persist backend + server_url to grc_agent.toml; the model
+                # name to .env (the single source of truth for model names).
                 try:
-                    from grc_agent.config import resolve_config_path, update_toml_config_file
+                    from grc_agent.config import (
+                        resolve_config_path,
+                        set_env_model,
+                        update_toml_config_file,
+                    )
 
                     config_path = resolve_config_path(None)
                     if config_path:
@@ -1409,11 +1464,16 @@ class MainWindow(QMainWindow):
                             {
                                 "backend": selection.backend,
                                 "server_url": server_url,
-                                "model": chosen_model,
                             },
                         )
+                    env_var = (
+                        "OPENROUTER_MODEL"
+                        if selection.backend == "openrouter"
+                        else "OLLAMA_MODEL"
+                    )
+                    set_env_model(env_var, chosen_model)
                 except Exception as exc:
-                    logger.warning("Failed to persist to grc_agent.toml: %s", exc)
+                    logger.warning("Failed to persist model selection: %s", exc)
 
         self._pending_swap_selection = None
         self.provider_config = new_provider
@@ -1426,20 +1486,41 @@ class MainWindow(QMainWindow):
             backend = getattr(self.llama_config, "backend", "ollama")
             self.model_toolbar.set_backend(backend)
             self.model_toolbar.set_current_model(model_name)
+            # Show the embedding model for the now-active backend (resolved
+            # from .env by the config accessors the toolbar uses).
+            from grc_agent.config import default_embedding_model
+
+            self.model_toolbar.set_current_embed_model(default_embedding_model(backend))
             self.set_backend_connected(True)
             if backend == "ollama":
                 # Repopulate the dropdown with the full local model list
                 # now that we're back on Ollama (mirrors the refresh button).
                 self._probe_and_populate_models()
-        # Persist to preferences.json so the selection survives restarts.
+        # Keep the agent's cached LLM/embedding runtime in sync with the swap
+        # so the embedding path (and docs-RAG synthesis model) follows the
+        # active backend. The per-backend vector index auto-rebuilds on next
+        # access via the store's model-stamp check.
+        if hasattr(self, "agent") and self.agent is not None:
+            new_backend = getattr(self.llama_config, "backend", "ollama")
+            from grc_agent.config import default_chat_model, default_embedding_model
+
+            self.agent.reconfigure_llama_runtime(
+                backend=new_backend,
+                server_url=(
+                    DEFAULT_OPENROUTER_URL if new_backend == "openrouter" else DEFAULT_OLLAMA_URL
+                ),
+                chat_model=default_chat_model(new_backend),
+                embedding_model=default_embedding_model(new_backend),
+            )
+        # Persist the provider choice to preferences.json so the selected
+        # backend survives restarts. Model names live in .env, not here.
         try:
-            from grc_agent.config import update_last_model, update_provider_chosen
+            from grc_agent.config import update_provider_chosen
 
             backend_str = getattr(self.llama_config, "backend", "ollama")
-            update_last_model(model=model_name)
             update_provider_chosen(provider=backend_str)
         except Exception as exc:
-            logger.warning("Failed to persist model selection to preferences: %s", exc)
+            logger.warning("Failed to persist provider choice to preferences: %s", exc)
         # Recovery path: a successful swap means the (possibly
         # different) backend is reachable. Drop the degraded mode and
         # re-enable the chat input.

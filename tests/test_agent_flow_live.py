@@ -36,15 +36,6 @@ logging.basicConfig(level=logging.WARNING)
 OUT_DIR = Path(__file__).resolve().parent / "output" / "agent_flow"
 
 
-def _maybe_skip() -> None:
-    if not LIVE:
-        return
-    try:
-        from grc_agent.agent import GrcAgent  # noqa: F401
-    except ImportError as exc:
-        raise unittest.SkipTest(f"grc_agent not importable: {exc}") from exc
-
-
 @unittest.skipUnless(LIVE, "set GRC_AGENT_LIVE_MODEL=1 to run live-model agent flow tests")
 class AgentFlowLiveTests(unittest.TestCase):
     """End-to-end agent flow tests using a live Ollama model.

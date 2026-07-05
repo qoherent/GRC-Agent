@@ -21,7 +21,6 @@ def test_flowgraph_session_imports_the_names_it_uses():
     # __dict__ (proves the import lives at module top, not inside a method).
     assert "render_flow_graph" in fs_mod.__dict__
     assert "validate" in fs_mod.__dict__
-    assert "get_platform" in fs_mod.__dict__
     assert "serialize_raw_data" in fs_mod.__dict__
     assert "exclusive_file_lock" in fs_mod.__dict__
     assert "refuse_ambiguous_save_target" in fs_mod.__dict__

@@ -42,10 +42,6 @@ def _mark_session_valid(session: FlowgraphSession) -> None:
     session.last_validation_revision = session.state_revision
 
 
-def _mark_agent_valid(agent: GrcAgent) -> None:
-    _mark_session_valid(agent.session)
-
-
 def _block_param_value(session: FlowgraphSession, instance_name: str, param_key: str) -> object:
     assert session.flowgraph is not None
     for block in session.flowgraph.blocks:

@@ -19,7 +19,6 @@ from grc_agent.domain_models import BlockState
 from grc_agent.runtime.enums import SearchDomain
 
 VALID_INSPECT_VIEWS: frozenset[str] = frozenset({"overview"})
-WHOLE_GRAPH_WILDCARDS: frozenset[str] = frozenset({"all", "*"})
 
 
 def _schema(

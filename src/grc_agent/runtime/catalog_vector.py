@@ -39,13 +39,25 @@ DB_DIR = Path(
         str(Path(__file__).resolve().parents[1] / "vectors"),
     )
 )
-CATALOG_DB_PATH = DB_DIR / "catalog_v1.db"
+
+
+def catalog_db_path(backend: str) -> Path:
+    """Per-backend catalog vector DB: ``<DB_DIR>/catalog_<backend>.db``.
+
+    Each backend owns its own embedding model and therefore its own index;
+    switching backend swaps which pair is active without a rebuild.
+    """
+    return DB_DIR / f"catalog_{backend}.db"
+
+
+# Legacy module-level constant (ollama path) for importers that don't know the
+# active backend. The live pipeline resolves the per-backend path via the agent.
+CATALOG_DB_PATH = catalog_db_path("ollama")
 
 
 # --- Embedding constants: single source of truth in _embedding_config ---------
 from grc_agent.runtime._embedding_config import (
     _DOCUMENT_PREFIX,
-    _EMBED_DIM,
     _EMBED_MAX_WORDS,
     _EMBED_MODEL,
     _QUERY_PREFIX,
@@ -178,6 +190,7 @@ def embed_block_text(
     body: str,
     *,
     model: str = _EMBED_MODEL,
+    api_key: str = "not-needed",
 ) -> list[float]:
     """Embed a block text with the uniform document prefix.
 
@@ -188,24 +201,42 @@ def embed_block_text(
     """
     if not body.startswith(_DOCUMENT_PREFIX):
         body = _DOCUMENT_PREFIX + body
-    return get_embedding(server_url, body, model=model)
+    return get_embedding(server_url, body, model=model, api_key=api_key)
 
 
 def embed_query(
-    server_url: str, query: str, *, model: str = _EMBED_MODEL
+    server_url: str, query: str, *, model: str = _EMBED_MODEL, api_key: str = "not-needed"
 ) -> list[float]:
     """Embed a search query with the uniform query prefix."""
-    return get_embedding(server_url, _QUERY_PREFIX + query, model=model)
+    return get_embedding(server_url, _QUERY_PREFIX + query, model=model, api_key=api_key)
 
 
 class VectorCatalogStore(VectorStoreBase):
     """sqlite-vec backed KNN store for GNU Radio catalog blocks."""
 
-    def __init__(self, db_path: Path, server_url: str):
+    def __init__(
+        self,
+        db_path: Path,
+        server_url: str,
+        embedding_model: str,
+        *,
+        api_key: str = "not-needed",
+    ):
         self.db_path = db_path
         self.server_url = server_url
+        self.embedding_model = embedding_model
+        self.api_key = api_key
 
-    def init_db(self, conn: sqlite3.Connection) -> None:
+    def _table_chunks(self) -> str:
+        return "catalog_chunks"
+
+    def _table_idx(self) -> str:
+        return "catalog_idx"
+
+    def _table_fts(self) -> str:
+        return "catalog_fts"
+
+    def init_db(self, conn: sqlite3.Connection, dim: int) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS catalog_chunks ("
             "rowid INTEGER PRIMARY KEY, "
@@ -214,7 +245,7 @@ class VectorCatalogStore(VectorStoreBase):
         )
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS catalog_idx USING vec0("
-            f"embedding float[{_EMBED_DIM}])"
+            f"embedding float[{dim}])"
         )
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts "
@@ -258,19 +289,29 @@ class VectorCatalogStore(VectorStoreBase):
         ``categories`` (iterable of strings, may be nested — flattened),
         ``parameters`` (iterable of strings), ``ports`` (iterable of strings),
         ``documentation`` (str). Extra keys are ignored.
+
+        Idempotent: returns early when the index already matches the current
+        embedding model. Rebuilds (drops + re-ingests) when the stamped model
+        no longer matches, so switching embedding models is safe and automatic.
         """
         server_url = server_url or self.server_url
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = self._get_connection()
         try:
-            try:
-                count = conn.execute("SELECT count(*) FROM catalog_chunks").fetchone()[0]
-                if count > 0:
-                    return
-            except sqlite3.OperationalError:
-                pass
+            meta = self._read_embed_meta(conn)
+            if meta is not None and meta[0] == self.embedding_model and self._is_populated(conn):
+                return
 
-            self.init_db(conn)
+            # Either fresh, or the stamped model differs → probe dim + (re)build.
+            probe = embed_block_text(
+                server_url, _DOCUMENT_PREFIX + "dimension probe",
+                model=self.embedding_model, api_key=self.api_key,
+            )
+            dim = len(probe)
+
+            # Fresh DB or model mismatch → (re)build.
+            self._drop_index_tables(conn)
+            self.init_db(conn, dim)
             inserted = 0
             for block in blocks:
                 block_id = str(block.get("block_id", "")).strip()
@@ -288,7 +329,9 @@ class VectorCatalogStore(VectorStoreBase):
                     documentation=str(block.get("documentation", "") or ""),
                 )
                 try:
-                    embedding = embed_block_text(server_url, body)
+                    embedding = embed_block_text(
+                        server_url, body, model=self.embedding_model, api_key=self.api_key
+                    )
                 except Exception as exc:
                     logger.error("Failed to embed catalog block %s: %s", block_id, exc)
                     continue
@@ -307,6 +350,7 @@ class VectorCatalogStore(VectorStoreBase):
                     (rowid, body),
                 )
                 inserted += 1
+            self._write_embed_meta(conn, self.embedding_model, dim)
             conn.commit()
             logger.info("Catalog vector index ingested %d blocks.", inserted)
         finally:
@@ -387,13 +431,12 @@ def is_catalog_db_populated(db_path: Path) -> bool:
 def is_catalog_db_usable(db_path: Path, *, sample_size: int = 16) -> bool:
     """Sole gate: populated AND stored vectors have non-zero variance.
 
-    Mirrors :func:`grc_agent.runtime.doc_answer.is_db_usable` — one uniform
-    rule applied to every catalog DB regardless of provenance.
+    One uniform rule applied to every catalog DB regardless of provenance.
     """
     if not is_catalog_db_populated(db_path):
         return False
     try:
-        store = VectorCatalogStore(db_path, "")
+        store = VectorCatalogStore(db_path, "", "")
         conn = store._get_connection()
     except Exception:
         return False

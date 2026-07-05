@@ -46,11 +46,6 @@ class HistoryJournalTests(unittest.TestCase):
         self.assertEqual(rec["record_type"], "checkpoint")
         self.assertTrue(rec["accepted"])
 
-        # List records
-        records = journal.list_records()
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["id"], rec["id"])
-
         # Get record
         got = journal.get_record(rec["id"])
         self.assertEqual(got["id"], rec["id"])
@@ -63,7 +58,7 @@ class HistoryJournalTests(unittest.TestCase):
 
         # Run multiple records & list queries to ensure no file handle exhaustion
         for i in range(20):
-            journal.record_checkpoint(
+            rec = journal.record_checkpoint(
                 lineage_key=lineage,
                 session=session,
                 before=before,
@@ -71,7 +66,7 @@ class HistoryJournalTests(unittest.TestCase):
                 tool_name="change_graph",
                 operation_type="add",
             )
-            journal.list_records()
+            journal.get_record(rec["id"])
 
         # Unlink the database file. If a connection was leaked and left open, unlinking would fail
         # on Windows or we can check active handles.

@@ -6,7 +6,6 @@ benchmark_outputs/
 build/
 .cache/
 # Cache / eval artifacts
-!conftest.py
 demo/remotion/dist/
 demo/remotion/out/
 demo/video_outputs/
@@ -39,7 +38,6 @@ reports/
 *.restored.grc
 .ruff_cache/
 *.saved.grc
-!setup.py
 
 tmp/
 *.tmp.grc
@@ -49,7 +47,6 @@ wheels/
 
 vec1.so
 
-# Generated vector indexes (rebuilt at boot via GrcAgent.warmup_vector_index
-# or manually via scripts/regenerate_vectors.py)
+# Generated vector indexes (per-backend, rebuilt at boot via
+# GrcAgent.warmup_vector_index when the stamped embedding model changes)
 src/grc_agent/vectors/
-src/grc_agent/runtime/*.db

@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Packaging & embedding provider
+
+- **`.env` is the single source of truth for model names.** Chat and embedding
+  model names now live in `.env` (keyed by backend), not in `grc_agent.toml`.
+  New variables: `OLLAMA_MODEL`, `OLLAMA_EMBEDDING_MODEL`,
+  `OPENROUTER_EMBEDDING_MODEL` (defaults `gemma4:e4b-it-qat-120k`,
+  `embeddinggemma:latest`, `perplexity/pplx-embed-v1-0.6b`). The GUI writes
+  model changes back to `.env`, so hand-edits and GUI-edits stay in sync.
+  _**Breaking:**_ `[llama].model` and `[llama].embedding_model` are no longer
+  read from `grc_agent.toml`, and `preferences.json` no longer stores
+  `last_model`. Move any custom model names into `.env` (see `.env.example`).
+- **Embeddings work on both backends (Approach A).** The shared `get_embedding`
+  now uses the `openai` SDK against the OpenAI-compatible `/v1/embeddings`
+  endpoint for both Ollama and OpenRouter — mirroring how chat already used the
+  SDK. This deletes the bespoke `httpx` POST to Ollama's deprecated
+  `/api/embeddings` endpoint. OpenRouter mode now has working RAG (previously
+  it silently had none).
+- **Per-backend vector stores.** Each backend owns its own index pair
+  (`catalog_<backend>.db` / `docs_<backend>.db`); switching backend swaps which
+  pair is active without a rebuild. Dimension is probed from the first
+  embedding (no more hardcoded `_EMBED_DIM`), and each DB stamps its embedding
+  model and rebuilds automatically when the model changes — so swapping
+  embedding models is safe.
+- **GUI: embedding-model field.** The model toolbar now shows/edit the
+  embedding model alongside the chat model, for both backends. Backend/model
+  swaps call `GrcAgent.reconfigure_llama_runtime` so the embedding path and
+  the docs-RAG synthesis model follow the active backend.
+- **Direct deps declared.** `openai`, `python-dotenv`, and `httpx` are now
+  declared as direct dependencies (they were used directly but only
+  transitively declared — a latent packaging bug). The embedding pipeline no
+  longer imports `httpx` directly (it routes through the `openai` SDK); other
+  modules still use it for the Ollama REST/web-search tools.
+- **Distribution:** source-only via `uv` (git clone + `uv sync`). GNU Radio is
+  a hard system dep, so a PyPI `pip install` is intentionally not offered.
+- **Repo pruning:** removed unreferenced `docs/adhoc_cleaner_agent_prompt.md`
+  and stale `docs/superpowers/plans/`; fixed stale references in `.gitignore`,
+  `grc_agent.toml`, and `AGENTS.md`.
+
 ### OpenRouter web search (plugin)
 
 - **Web grounding on OpenRouter**: the OpenRouter backend now activates the `web` plugin (`extra_body["plugins"]=[{"id":"web",...}]`) on by default, so the model's answers are grounded with live web results. OpenRouter returns `url_citation` annotations, which are surfaced as a `Sources:` footnote on the assistant message (both streaming and non-streaming paths).

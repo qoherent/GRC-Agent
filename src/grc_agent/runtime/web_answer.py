@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 _MAX_CONTEXT_WORDS = 4000
 
 
-def summarize_web_search(agent: "GrcAgent", query: str, results: list[dict[str, Any]]) -> str:
+def summarize_web_search(agent: GrcAgent, query: str, results: list[dict[str, Any]]) -> str:
     """Condense raw web_search results into one concise, query-focused answer."""
     context_parts = [
         f"# Result {i + 1}: {r.get('title', '')} ({r.get('url', '')})\n{r.get('content', '')}"
@@ -53,7 +53,7 @@ def summarize_web_search(agent: "GrcAgent", query: str, results: list[dict[str, 
 
 
 def summarize_web_fetch(
-    agent: "GrcAgent",
+    agent: GrcAgent,
     url: str,
     title: str,
     content: str,

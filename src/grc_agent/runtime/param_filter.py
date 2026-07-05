@@ -157,46 +157,6 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
 def categories(block_type: str) -> dict[str, str]:
     """``{param_key: category}`` for one block type, from native GRC metadata."""
     return {k: v["category"] for k, v in param_metadata(block_type).items()}
-
-
-def filter_live_block_params(
-    block_type: str,
-    param_values: dict[str, Any],
-    *,
-    mode: str,
-    variable_names: set[str] | None = None,
-) -> dict[str, str]:
-    """Apply :func:`keep_param` to a live flowgraph block's ``{key: value}`` map.
-
-    Returns ``{param_key: value}`` for surviving params. Falls back to all
-    non-empty values if GRC hide-evaluation is unavailable (never silently
-    drops a param that might be useful).
-    """
-    hides = evaluated_param_hides(block_type, param_values)
-    if not hides:
-        return {str(k): str(v) for k, v in param_values.items() if str(v).strip()}
-
-    meta = param_metadata(block_type)
-    out: dict[str, str] = {}
-    for key, value in param_values.items():
-        ks = str(key)
-        info = meta.get(ks, {})
-        if keep_param(
-            hide=hides.get(ks, "all"),
-            category=info.get("category", DEFAULT_PARAM_TAB),
-            dtype=info.get("dtype", ""),
-            value=value,
-            default=info.get("default", ""),
-            mode=mode,
-            variable_names=variable_names,
-            param_key=ks,
-        ):
-            vs = str(value).strip()
-            if vs:
-                out[ks] = vs
-    return out
-
-
 def visible_param_keys(
     block_id: str,
     keys: list[str] | tuple[str, ...],

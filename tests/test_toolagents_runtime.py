@@ -390,19 +390,6 @@ class UrlCitationSurfacingTests(unittest.TestCase):
             url_citation=SimpleNamespace(title=title, url=url, content=content),
         )
 
-    def _delta(self, content=None, annotations=None):
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            content=content,
-            tool_calls=None,
-            annotations=annotations,
-            reasoning=None,
-            reasoning_content=None,
-            thinking=None,
-            model_extra=None,
-        )
-
     def _response(self, content: str, annotations=None):
         from types import SimpleNamespace
 
@@ -448,43 +435,6 @@ class UrlCitationSurfacingTests(unittest.TestCase):
         message = converter.from_provider_response(response)
         text = "".join(c.content for c in message.content if isinstance(c, TextContent))
         self.assertNotIn("Sources:", text)
-
-    def test_stream_citations_appended_at_finish(self) -> None:
-        from types import SimpleNamespace
-
-        converter = self._converter()
-        citation = self._citation("Stream Src", "https://example.com/s")
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=self._delta(content="Hello world"),
-                        finish_reason=None,
-                    )
-                ]
-            ),
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=self._delta(annotations=[citation]),
-                        finish_reason="stop",
-                    )
-                ]
-            ),
-        ]
-
-        emitted = list(converter.yield_from_provider(chunks))
-        finished = [e for e in emitted if e.finished]
-        self.assertTrue(finished, "stream must emit a finished event")
-        text = "".join(
-            c.content
-            for c in finished[-1].finished_chat_message.content
-            if isinstance(c, TextContent)
-        )
-        self.assertIn("Hello world", text)
-        self.assertIn("Sources:", text)
-        self.assertIn("[Stream Src](https://example.com/s)", text)
-
 
 class OpenRouterToolSurfaceTests(unittest.TestCase):
     """On OpenRouter the `web` plugin grounds the model natively, so the
@@ -760,100 +710,6 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         chunks = [e for e in events if e.get("event") == "chunk"]
         self.assertTrue(chunks, "a chunk event should be emitted")
         self.assertIn("No response was generated", str(chunks[-1].get("text", "")))
-
-    def test_grc_response_converter_wraps_thinking_tokens(self) -> None:
-        from dataclasses import dataclass
-
-        from grc_agent.toolagents_runtime import GrcResponseConverter
-
-        # Mock chunk structure resembling OpenAI stream chunks. The
-        # OpenAI SDK does not standardize a thinking field name, so
-        # the converter checks ``reasoning`` (Ollama OpenAI-compat),
-        # ``reasoning_content`` (OpenRouter / DeepSeek), and
-        # ``thinking`` (native Ollama). Each variant is tested below.
-        @dataclass
-        class MockDelta:
-            content: str | None = None
-            reasoning: str | None = None
-            reasoning_content: str | None = None
-            thinking: str | None = None
-            tool_calls: list | None = None
-
-        @dataclass
-        class MockChoice:
-            delta: MockDelta
-            finish_reason: str | None = None
-
-        @dataclass
-        class MockChunk:
-            choices: list[MockChoice]
-
-        # The converter iterates the raw stream directly — no parent
-        # converter needed for yield_from_provider.
-        converter = GrcResponseConverter(parent_converter=None)
-
-        # ``reasoning`` — Ollama OpenAI-compat (the field gemma4 uses).
-        stream = [
-            MockChunk(choices=[MockChoice(delta=MockDelta(reasoning="Thinking..."))]),
-            MockChunk(choices=[MockChoice(delta=MockDelta(reasoning=" more..."))]),
-            MockChunk(
-                choices=[MockChoice(delta=MockDelta(content="Hello!"), finish_reason="stop")]
-            ),
-        ]
-
-        result_chunks = list(converter.yield_from_provider(stream))
-
-        # Thinking chunks are yielded IMMEDIATELY (not buffered until
-        # the first content token arrives). This is the regression fix
-        # for the multi-second "freeze" where reasoning was invisible.
-        text_chunks = [c.chunk for c in result_chunks if c.chunk]
-        self.assertEqual(text_chunks[0], "<think>Thinking...")
-        self.assertEqual(text_chunks[1], " more...")
-        # Close tag emitted as a separate immediate chunk on transition.
-        self.assertEqual(text_chunks[2], "</think>\n")
-        # Content follows.
-        self.assertEqual(text_chunks[3], "Hello!")
-
-        # The final chunk carries the finished flag + full message.
-        finished_chunks = [c for c in result_chunks if c.get_finished()]
-        self.assertEqual(len(finished_chunks), 1)
-
-    def test_grc_response_converter_handles_thinking_field_name(self) -> None:
-        """Native Ollama uses ``delta.thinking`` (not ``reasoning``); the
-        converter must also pick that up so the chat UI shows reasoning
-        for models streamed through the native /api/chat path."""
-        from dataclasses import dataclass
-
-        from grc_agent.toolagents_runtime import GrcResponseConverter
-
-        @dataclass
-        class MockDelta:
-            content: str | None = None
-            thinking: str | None = None
-            tool_calls: list | None = None
-
-        @dataclass
-        class MockChoice:
-            delta: MockDelta
-            finish_reason: str | None = None
-
-        @dataclass
-        class MockChunk:
-            choices: list[MockChoice]
-
-        converter = GrcResponseConverter(parent_converter=None)
-        stream = [
-            MockChunk(choices=[MockChoice(delta=MockDelta(thinking="Plan: think first"))]),
-            MockChunk(choices=[MockChoice(delta=MockDelta(thinking=" more"))]),
-            MockChunk(choices=[MockChoice(delta=MockDelta(content="Done!"), finish_reason="stop")]),
-        ]
-        result_chunks = list(converter.yield_from_provider(stream))
-        text_chunks = [c.chunk for c in result_chunks if c.chunk]
-        self.assertEqual(text_chunks[0], "<think>Plan: think first")
-        self.assertEqual(text_chunks[1], " more")
-        self.assertEqual(text_chunks[2], "</think>\n")
-        self.assertEqual(text_chunks[3], "Done!")
-
 
 class SchemaShimTests(unittest.TestCase):
     """Lock down the transformation rules of the ToolAgents 0.3.0 schema shim.

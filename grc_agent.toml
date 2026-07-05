@@ -1,11 +1,12 @@
 [llama]
 server_url = "http://localhost:11434"
 backend = "ollama"
-# Custom Modelfile model: gemma4:e4b-it-qat with PARAMETER num_ctx 120000.
-# Ollama's /v1 endpoint ignores per-request num_ctx, so the 120K window is
-# baked into the model (see docs/AGENT_FLOW_FINDINGS.md).
-model = "gemma4:e4b-it-qat-120k"
-embedding_model = "embeddinggemma:latest"
+# Chat and embedding model names live in .env (OLLAMA_MODEL,
+# OLLAMA_EMBEDDING_MODEL, OPENROUTER_MODEL, OPENROUTER_EMBEDDING_MODEL) —
+# .env is the single source of truth, edited via the GUI or by hand.
+# Example: a custom Ollama Modelfile model gemma4:e4b-it-qat with
+# PARAMETER num_ctx 120000 (Ollama's /v1 endpoint ignores per-request
+# num_ctx, so a large context window must be baked into the Modelfile).
 max_tokens = 4096
 max_tool_rounds = 8
 request_timeout_seconds = 120.0

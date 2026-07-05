@@ -251,7 +251,6 @@ def test_block_description_payload_drops_id_keeps_domain():
         outputs=[NormalizedPort(id="0", domain="stream", dtype="complex")],
         asserts=[],
         documentation=None,
-        doc_url=None,
         warnings=[],
         signature="blocks_multiply_xx()",
     )

@@ -17,7 +17,6 @@ from typing import Any
 from grc_agent.domain_models import BlockRole, ErrorCode, build_error_payload
 from grc_agent.grc_native_adapter import (
     exclusive_file_lock,
-    get_platform,
     load_flow_graph,
     refuse_ambiguous_save_target,
     render_flow_graph,
@@ -175,20 +174,6 @@ class FlowgraphSession:
     def graph_id(self) -> str | None:
         return self._persisted_file_sha256
 
-    # -- raw-data construction (used by history.py) ---------------------------
-
-    @classmethod
-    def from_raw_data(
-        cls, raw_data: dict[str, Any], path: str | Path | None = None
-    ) -> FlowgraphSession:
-        """Create a session from a raw data dict (GRC import_data format)."""
-        session = cls(path)
-        fg = get_platform().make_flow_graph()
-        fg.import_data(raw_data)
-        fg.rewrite()
-        session.flowgraph = fg
-        return session
-
     @staticmethod
     def _serialize_raw_data(raw_data: Any) -> str:
         """Serialize a raw data dict to GRC-native YAML."""
@@ -246,17 +231,3 @@ class FlowgraphSession:
                 "hash_file_failed path=%s: %s", path, exc
             )
             return None
-
-    def get_top_block_class_name(self) -> str:
-        """Return the top-block class name (defaults to ``"top_block"``).
-
-        Single source of truth for the top-block identity; replaces
-        callers that reached into ``session.flowgraph.metadata["options"]
-        ["parameters"]["id"]`` directly.
-        """
-        if self.flowgraph is None:
-            return "top_block"
-        options = getattr(self.flowgraph, "options_block", None)
-        if options is None:
-            return "top_block"
-        return str(getattr(options, "name", "top_block") or "top_block")

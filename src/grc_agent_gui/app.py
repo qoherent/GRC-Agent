@@ -108,11 +108,12 @@ def main() -> None:
 
 
     config = load_app_config()
-    # Overlay user preferences (e.g. the model last picked in the
-    # GUI) onto the config. Preferences win over ``grc_agent.toml``
-    # for the model field; everything else is preserved. A malformed
-    # prefs file is logged and ignored by the loader; a load failure
-    # here is non-fatal.
+    # Overlay user preferences onto the config. Preferences carry only the
+    # last-chosen provider; when it differs from the toml backend the overlay
+    # re-resolves the chat + embedding models from .env for that backend.
+    # Model names themselves are never sourced from preferences — .env is the
+    # single source of truth. A malformed prefs file is logged and ignored by
+    # the loader; a load failure here is non-fatal.
     try:
         from grc_agent.config import (
             apply_user_preferences_to_llama_config,
@@ -120,11 +121,10 @@ def main() -> None:
         )
 
         prefs = load_user_preferences()
-        if prefs.last_model.model:
-            config = AppConfig(
-                llama=apply_user_preferences_to_llama_config(config.llama, prefs),
-                agent=config.agent,
-            )
+        config = AppConfig(
+            llama=apply_user_preferences_to_llama_config(config.llama, prefs),
+            agent=config.agent,
+        )
     except Exception as exc:  # noqa: BLE001 - defensive
         logger.debug("Failed to apply user preferences: %s", exc)
 

@@ -157,7 +157,7 @@ def test_main_window_clear_all_wipes_sessions_db(qtbot, tmp_path, monkeypatch):
     # Bypass the user-confirmation dialog.
     monkeypatch.setattr(
         "grc_agent_gui.main_window.QMessageBox.question",
-        lambda *a, **kw: __import__("PySide6").QtWidgets.QMessageBox.StandardButton.Yes,
+        lambda *a, **_kw: __import__("PySide6").QtWidgets.QMessageBox.StandardButton.Yes,
     )
 
     # Trigger the same handler the button click would.

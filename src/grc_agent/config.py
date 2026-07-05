@@ -7,8 +7,7 @@ import logging
 import os
 import tempfile
 import tomllib
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,7 @@ def _env_file_candidates() -> list[Path]:
     """Return the ``.env`` search path, in priority order.
 
     Shared by :func:`_ensure_dotenv_loaded` (read) and
-    :func:`set_openrouter_model_env` (write) so both agree on which file is
+    :func:`set_env_model` (write) so both agree on which file is
     "the" ``.env`` for this run.
     """
     return [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"]
@@ -50,31 +49,67 @@ def _ensure_dotenv_loaded() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Default backend endpoints and model — single source of truth.
-# The GUI toolbar, model swap state machine, and the LlamaConfig dataclass
-# default all read from these instead of inlining the literals.
+# Backend endpoints + model-name sources. ``.env`` is the single source of
+# truth for every model name (chat and embedding, both backends). The GUI
+# toolbar, model swap state machine, and the LlamaConfig build all resolve
+# through these accessors instead of reading model names from grc_agent.toml.
 # ---------------------------------------------------------------------------
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api"
 ALLOWED_BACKENDS = {"ollama", "openrouter"}
 
+_DEFAULT_OLLAMA_MODEL = "gemma4:e4b-it-qat-120k"
+_DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4-flash"
+_DEFAULT_OLLAMA_EMBEDDING_MODEL = "embeddinggemma:latest"
+_DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b"
 
-def default_openrouter_model() -> str:
-    """Resolve the OpenRouter model from the environment, with one literal fallback.
+
+def default_chat_model(backend: str) -> str:
+    """Resolve the chat model from ``.env`` for ``backend`` with a literal fallback.
 
     Uses ``or`` (not the ``getenv`` default arg) so a present-but-empty
-    ``OPENROUTER_MODEL=`` in ``.env`` falls back too, instead of resolving
-    to ``""``.
+    ``OLLAMA_MODEL=`` / ``OPENROUTER_MODEL=`` in ``.env`` falls back too.
     """
     _ensure_dotenv_loaded()
-    return os.getenv("OPENROUTER_MODEL") or "deepseek/deepseek-v4-flash"
+    if backend == "openrouter":
+        return os.getenv("OPENROUTER_MODEL") or _DEFAULT_OPENROUTER_MODEL
+    return os.getenv("OLLAMA_MODEL") or _DEFAULT_OLLAMA_MODEL
 
 
-def set_openrouter_model_env(model: str, *, env_path: Path | None = None) -> Path:
-    """Persist ``OPENROUTER_MODEL`` into the ``.env`` file the app loads at startup.
+def default_embedding_model(backend: str) -> str:
+    """Resolve the embedding model from ``.env`` for ``backend`` with a literal fallback."""
+    _ensure_dotenv_loaded()
+    if backend == "openrouter":
+        return os.getenv("OPENROUTER_EMBEDDING_MODEL") or _DEFAULT_OPENROUTER_EMBEDDING_MODEL
+    return os.getenv("OLLAMA_EMBEDDING_MODEL") or _DEFAULT_OLLAMA_EMBEDDING_MODEL
 
-    Also updates ``os.environ`` so the change is visible in-process
-    immediately, without an app restart.
+
+def default_openrouter_model() -> str:
+    """OpenRouter chat model (convenience accessor for the GUI)."""
+    return default_chat_model("openrouter")
+
+
+def default_ollama_model() -> str:
+    """Ollama chat model (convenience accessor for the GUI)."""
+    return default_chat_model("ollama")
+
+
+def default_ollama_embedding_model() -> str:
+    """Ollama embedding model (convenience accessor for the GUI)."""
+    return default_embedding_model("ollama")
+
+
+def default_openrouter_embedding_model() -> str:
+    """OpenRouter embedding model (convenience accessor for the GUI)."""
+    return default_embedding_model("openrouter")
+
+
+def set_env_model(var: str, value: str, *, env_path: Path | None = None) -> Path:
+    """Persist a model-name env var into the ``.env`` file and ``os.environ``.
+
+    The GUI bidirectional-sync path: writing here updates ``.env`` (so the
+    choice survives restarts) and ``os.environ`` (so the change is visible
+    in-process immediately, without a restart).
     """
     import dotenv
 
@@ -84,8 +119,8 @@ def set_openrouter_model_env(model: str, *, env_path: Path | None = None) -> Pat
     env_path.parent.mkdir(parents=True, exist_ok=True)
     if not env_path.exists():
         env_path.touch()
-    dotenv.set_key(str(env_path), "OPENROUTER_MODEL", model)
-    os.environ["OPENROUTER_MODEL"] = model
+    dotenv.set_key(str(env_path), var, value)
+    os.environ[var] = value
     return env_path
 
 
@@ -97,15 +132,18 @@ class ConfigError(RuntimeError):
 class LlamaConfig:
     """Configurable defaults for the model backend.
 
-    ``model`` is required: a config file without a model would silently
-    degrade every LLM call (chat completion, RAG synthesis) to a 400 from
-    the backend. The GUI/CLI provider-picker can still override the value
-    at runtime, but the parsed config must always carry a non-empty model.
+    ``model`` and ``embedding_model`` are resolved from ``.env`` (via
+    :func:`default_chat_model` / :func:`default_embedding_model`) at config
+    build time, keyed by ``backend``. The field defaults below are only
+    last-resort fallbacks for direct construction outside the config
+    loaders; ``default_app_config`` / ``load_app_config`` always populate
+    them from the environment so a parsed config never carries an empty
+    model (an empty model silently degrades every LLM/embedding call).
     """
 
     server_url: str = DEFAULT_OLLAMA_URL
-    model: str = "gemma4:e4b-it-qat-120k"
-    embedding_model: str = "embeddinggemma:latest"
+    model: str = _DEFAULT_OLLAMA_MODEL
+    embedding_model: str = _DEFAULT_OLLAMA_EMBEDDING_MODEL
     backend: str = "ollama"
     max_tokens: int = 4096
     max_tool_rounds: int = 8
@@ -181,8 +219,13 @@ def user_config_path() -> Path:
 def default_app_config() -> AppConfig:
     """Return the built-in runtime defaults used when no config file exists."""
     _ensure_dotenv_loaded()
+    backend = "ollama"
     config = AppConfig(
-        llama=LlamaConfig(),
+        llama=LlamaConfig(
+            model=default_chat_model(backend),
+            embedding_model=default_embedding_model(backend),
+            backend=backend,
+        ),
         agent=AgentConfig(
             history_compact_budget=100000,
         ),
@@ -260,22 +303,19 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
             ),
         )
 
+    llama_backend = _optional_non_empty_string(
+        llama_table,
+        "backend",
+        default=defaults.llama.backend,
+        context="[llama]",
+    )
+
     config = AppConfig(
         llama=LlamaConfig(
             server_url=_require_non_empty_string(llama_table, "server_url", context="[llama]"),
-            model=_require_non_empty_string(llama_table, "model", context="[llama]"),
-            embedding_model=_optional_non_empty_string(
-                llama_table,
-                "embedding_model",
-                default=defaults.llama.embedding_model,
-                context="[llama]",
-            ),
-            backend=_optional_non_empty_string(
-                llama_table,
-                "backend",
-                default=defaults.llama.backend,
-                context="[llama]",
-            ),
+            model=default_chat_model(llama_backend),
+            embedding_model=default_embedding_model(llama_backend),
+            backend=llama_backend,
             max_tokens=_optional_positive_int(
                 llama_table,
                 "max_tokens",
@@ -288,7 +328,6 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
                 default=defaults.llama.max_tool_rounds,
                 context="[llama]",
             ),
-
             request_timeout_seconds=_optional_positive_float(
                 llama_table,
                 "request_timeout_seconds",
@@ -330,32 +369,6 @@ def _require_positive_float(payload: dict[str, Any], key: str, *, context: str) 
     return float(value)
 
 
-def _require_non_negative_float(payload: dict[str, Any], key: str, *, context: str) -> float:
-    value = payload.get(key)
-    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
-        raise ConfigError(f"{context}.{key} must be a number greater than or equal to zero.")
-    return float(value)
-
-
-def _require_bool(payload: dict[str, Any], key: str, *, context: str) -> bool:
-    value = payload.get(key)
-    if not isinstance(value, bool):
-        raise ConfigError(f"{context}.{key} must be true or false.")
-    return value
-
-
-def _optional_bool(
-    payload: dict[str, Any],
-    key: str,
-    *,
-    default: bool,
-    context: str,
-) -> bool:
-    if key not in payload:
-        return default
-    return _require_bool(payload, key, context=context)
-
-
 def _optional_positive_int(
     payload: dict[str, Any],
     key: str,
@@ -390,18 +403,6 @@ def _optional_non_empty_string(
     if key not in payload:
         return default
     return _require_non_empty_string(payload, key, context=context)
-
-
-def _optional_non_negative_float(
-    payload: dict[str, Any],
-    key: str,
-    *,
-    default: float,
-    context: str,
-) -> float:
-    if key not in payload:
-        return default
-    return _require_non_negative_float(payload, key, context=context)
 
 
 def _retrieval_config(
@@ -554,18 +555,15 @@ PREFERENCES_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
-class LastModel:
-    """The model the user most recently loaded through the GUI/CLI."""
-
-    model: str = ""
-    saved_at: str = ""
-
-
-@dataclass(frozen=True)
 class UserPreferences:
-    """The full set of persisted user preferences."""
+    """The full set of persisted user preferences.
 
-    last_model: LastModel = field(default_factory=LastModel)
+    Model names are NOT persisted here — ``.env`` is the single source of
+    truth for chat and embedding models (see :func:`default_chat_model`).
+    Preferences only carry the last-chosen provider (so the GUI reopens on
+    the same backend) and the schema version.
+    """
+
     provider_chosen: str = ""
     schema_version: int = PREFERENCES_SCHEMA_VERSION
 
@@ -583,26 +581,10 @@ def user_preferences_path() -> Path:
     return Path.home() / ".config" / "grc_agent" / PREFS_FILE_NAME
 
 
-def _parse_last_model(raw: object) -> LastModel:
-    """Build a :class:`LastModel` from a raw JSON value."""
-    if not isinstance(raw, dict):
-        logger.info("preferences: dropping non-dict last_model=%r", raw)
-        return LastModel()
-    out: dict[str, str] = {}
-    for key in ("model", "saved_at"):
-        value = raw.get(key)
-        if isinstance(value, str):
-            out[key] = value
-        elif value is not None:
-            logger.info("preferences: dropping non-string last_model.%s=%r", key, value)
-    return LastModel(**out)
-
-
 def _parse_preferences(raw: object) -> UserPreferences:
     """Build a :class:`UserPreferences` from a raw JSON value."""
     if not isinstance(raw, dict):
         return default_user_preferences()
-    last_model = _parse_last_model(raw["last_model"]) if "last_model" in raw else LastModel()
     provider_chosen = ""
     if "provider_chosen" in raw:
         value = raw["provider_chosen"]
@@ -618,14 +600,9 @@ def _parse_preferences(raw: object) -> UserPreferences:
         else:
             logger.info("preferences: dropping non-int schema_version=%r", value)
     for unknown_key in raw:
-        if unknown_key not in (
-            "last_model",
-            "provider_chosen",
-            "schema_version",
-        ):
+        if unknown_key not in ("provider_chosen", "schema_version"):
             logger.info("preferences: ignoring unknown key %r", unknown_key)
     return UserPreferences(
-        last_model=last_model,
         provider_chosen=provider_chosen,
         schema_version=schema_version,
     )
@@ -691,37 +668,27 @@ def save_user_preferences(prefs: UserPreferences, *, path: Path | None = None) -
 
 
 def apply_user_preferences_to_llama_config(llama_config: Any, prefs: UserPreferences) -> Any:
-    """Overlay persisted preferences onto a :class:`LlamaConfig`."""
+    """Overlay persisted preferences onto a :class:`LlamaConfig`.
+
+    Only the provider choice is overlaid. When it flips the backend, the
+    chat + embedding models are re-resolved from ``.env`` for the new
+    backend so the config never carries a model belonging to the other
+    backend. Model names themselves are never read from preferences —
+    ``.env`` is the single source of truth.
+    """
     if not isinstance(llama_config, LlamaConfig):
         return llama_config
     import dataclasses
 
-    updated = llama_config
-    if prefs.last_model.model:
-        updated = dataclasses.replace(updated, model=prefs.last_model.model)
-    if prefs.provider_chosen in ALLOWED_BACKENDS:
-        updated = dataclasses.replace(updated, backend=prefs.provider_chosen)
-    return updated
-
-
-def update_last_model(
-    *,
-    model: str,
-    path: Path | None = None,
-) -> None:
-    """Convenience: write just the ``last_model`` fields."""
-    current = load_user_preferences(path=path)
-    saved_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    new_last = LastModel(
-        model=model,
-        saved_at=saved_at,
-    )
-    updated = UserPreferences(
-        last_model=new_last,
-        provider_chosen=current.provider_chosen,
-        schema_version=PREFERENCES_SCHEMA_VERSION,
-    )
-    save_user_preferences(updated, path=path)
+    if prefs.provider_chosen in ALLOWED_BACKENDS and prefs.provider_chosen != llama_config.backend:
+        new_backend = prefs.provider_chosen
+        return dataclasses.replace(
+            llama_config,
+            backend=new_backend,
+            model=default_chat_model(new_backend),
+            embedding_model=default_embedding_model(new_backend),
+        )
+    return llama_config
 
 
 def update_provider_chosen(
@@ -732,9 +699,7 @@ def update_provider_chosen(
     """Persist the user's provider-picker choice."""
     if provider not in ALLOWED_BACKENDS:
         raise ValueError(f"provider must be one of {sorted(ALLOWED_BACKENDS)}; got {provider!r}")
-    current = load_user_preferences(path=path)
     updated = UserPreferences(
-        last_model=current.last_model,
         provider_chosen=provider,
         schema_version=PREFERENCES_SCHEMA_VERSION,
     )
@@ -747,25 +712,32 @@ __all__ = [
     "CONFIG_ENV_VAR",
     "CONFIG_FILE_NAME",
     "ConfigError",
+    "DEFAULT_OLLAMA_URL",
+    "DEFAULT_OPENROUTER_URL",
     "GuardrailsConfig",
     "HistoryConfig",
-    "LastModel",
     "LlamaConfig",
     "PREFERENCES_SCHEMA_VERSION",
     "PREFS_FILE_NAME",
     "RetrievalConfig",
     "UserPreferences",
+    "ALLOWED_BACKENDS",
     "apply_user_preferences_to_llama_config",
     "collect_package_paths",
     "default_app_config",
+    "default_chat_model",
     "default_config_path",
+    "default_embedding_model",
+    "default_ollama_embedding_model",
+    "default_ollama_model",
+    "default_openrouter_embedding_model",
+    "default_openrouter_model",
     "default_user_preferences",
     "load_app_config",
     "load_user_preferences",
     "resolve_config_path",
     "save_user_preferences",
-    "set_openrouter_model_env",
-    "update_last_model",
+    "set_env_model",
     "update_provider_chosen",
     "update_toml_config_file",
     "user_config_path",

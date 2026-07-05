@@ -27,7 +27,7 @@ from ToolAgents.data_models.messages import (
     ToolCallResultContent,
 )
 from ToolAgents.provider import OpenAIChatAPI
-from ToolAgents.provider.llm_provider import ProviderSettings, StreamingChatMessage
+from ToolAgents.provider.llm_provider import ProviderSettings
 
 from grc_agent.chat_roles import (
     ASSISTANT_MODEL_ROLE,
@@ -231,75 +231,6 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
         self.response_converter = GrcResponseConverter(self.response_converter)
 
 
-class _StreamFinalizer:
-    """Encapsulate the "finalize now vs wait for trailing usage" decision.
-
-    Ollama sends usage on a trailing chunk after ``finish_reason``;
-    OpenRouter sends it on the same chunk. This keeps the
-    pending/finalize bookkeeping out of ``yield_from_provider``'s main
-    yield loop.
-    """
-
-    def __init__(self) -> None:
-        self.current_usage: dict[str, Any] | None = None
-        self._pending: dict[str, Any] | None = None
-
-    def _build(self, pending: dict[str, Any]) -> ChatMessage:
-        return ChatMessage(
-            id=str(uuid.uuid4()),
-            role=ChatMessageRole.Assistant,
-            content=pending["contents"],
-            created_at=datetime.datetime.now(),
-            updated_at=datetime.datetime.now(),
-            additional_information=(
-                {"usage": self.current_usage} if self.current_usage else {}
-            ),
-        )
-
-    def _finished_event(self, pending: dict[str, Any]) -> StreamingChatMessage:
-        return StreamingChatMessage(
-            chunk="",
-            is_tool_call=pending["has_tool_call"],
-            tool_call=pending["tool_call"],
-            finished=True,
-            finished_chat_message=self._build(pending),
-        )
-
-    def record_usage(
-        self, usage_dump: dict[str, Any] | None
-    ) -> StreamingChatMessage | None:
-        """Store usage when present; finalize now if a finish is pending.
-
-        Mirrors the original "usage arrives on a chunk after
-        finish_reason" branch — the trailing usage-only chunk for a
-        turn that already hit finish_reason forces an immediate
-        finalize.
-        """
-        if usage_dump is not None:
-            self.current_usage = usage_dump
-        if usage_dump is not None and self._pending is not None:
-            event = self._finished_event(self._pending)
-            self._pending = None
-            return event
-        return None
-
-    def schedule(
-        self, pending: dict[str, Any], *, usage_on_this_chunk: bool
-    ) -> StreamingChatMessage | None:
-        """On finish_reason: finalize now if usage is here, else defer."""
-        if usage_on_this_chunk:
-            return self._finished_event(pending)
-        self._pending = pending
-        return None
-
-    def drain(self) -> StreamingChatMessage | None:
-        """End of stream: finalize if still pending (usage never arrived)."""
-        if self._pending is not None:
-            event = self._finished_event(self._pending)
-            self._pending = None
-            return event
-        return None
-
 
 class GrcResponseConverter:
     """Wrapper converter to extract and prepend thinking tokens.
@@ -430,186 +361,6 @@ class GrcResponseConverter:
                     chat_message.content.append(TextContent(content=footnote))
 
         return chat_message
-
-    def yield_from_provider(
-        self, stream_generator: Any
-    ) -> Generator[StreamingChatMessage, None, None]:
-        """Process the raw stream, yielding thinking chunks IMMEDIATELY.
-
-        Previous implementation routed the stream through a ``clean_generator``
-        → parent-converter pipeline. That buffered ALL thinking chunks in a
-        ``pending_synthetic`` list until the first content token arrived —
-        producing a multi-second "freeze" where the model was reasoning but
-        nothing appeared in the GUI.
-
-        This implementation iterates the raw stream directly. Thinking
-        chunks are yielded the instant they arrive. Content and tool-call
-        handling mirrors the parent ``OpenAIMessageConverter`` so the
-        finished message is constructed identically.
-
-        The "finalize now vs wait for trailing usage" decision is delegated
-        to ``_StreamFinalizer`` — keeps the main yield loop free of
-        pending/defer bookkeeping (Ollama trailing-usage vs OpenRouter
-        same-chunk divergence is collapsed into ``record_usage`` /
-        ``schedule`` / ``drain``).
-        """
-        has_started_thinking = False
-        has_ended_thinking = False
-        # One-shot: the first reasoning delta in this stream logs a
-        # WARNING (visible at default log level) so an operator can
-        # confirm the SDK / Pydantic boundary is delivering reasoning
-        # tokens to the converter. Subsequent tokens fall back to
-        # DEBUG to avoid log spam during long streams.
-        first_thinking_warned = False
-
-        # Parent-converter state (mirrored for the finished-message build).
-        current_content = ""
-        current_tool_calls: list[dict] = []
-        current_citations: list[dict[str, str]] = []
-        alt_index = 0
-
-        finalizer = _StreamFinalizer()
-
-        for chunk in stream_generator:
-            # ── Usage: capture on ANY chunk, including the trailing
-            # empty-``choices`` chunk some backends (Ollama) send when
-            # ``stream_options.include_usage`` is set — the ``continue``
-            # below would otherwise skip it entirely.
-            chunk_usage = getattr(chunk, "usage", None)
-            usage_dump = chunk_usage.model_dump() if chunk_usage is not None else None
-            deferred = finalizer.record_usage(usage_dump)
-            if deferred is not None:
-                yield deferred
-                continue
-
-            if not getattr(chunk, "choices", None) or not chunk.choices:
-                continue
-
-            choice = chunk.choices[0]
-            delta = choice.delta
-
-            # ── Thinking: yield IMMEDIATELY (no buffering) ──────────
-            reasoning = self._extract_thinking(delta)
-            if reasoning:
-                if not has_started_thinking:
-                    has_started_thinking = True
-                    if not first_thinking_warned:
-                        first_thinking_warned = True
-                        logger.warning(
-                            "first thinking token streamed len=%d "
-                            "(converter is delivering reasoning to the UI)",
-                            len(reasoning),
-                        )
-                    yield StreamingChatMessage(
-                        chunk=f"<think>{reasoning}",
-                        is_tool_call=False,
-                        finished=False,
-                        finished_chat_message=None,
-                    )
-                else:
-                    yield StreamingChatMessage(
-                        chunk=reasoning,
-                        is_tool_call=False,
-                        finished=False,
-                        finished_chat_message=None,
-                    )
-                logger.debug("thinking_token streamed len=%d", len(reasoning))
-                continue
-
-            # ── Transition from thinking → content: emit close tag ──
-            if has_started_thinking and not has_ended_thinking:
-                has_ended_thinking = True
-                close_tag = "</think>\n"
-                yield StreamingChatMessage(
-                    chunk=close_tag,
-                    is_tool_call=False,
-                    finished=False,
-                    finished_chat_message=None,
-                )
-                current_content += close_tag
-
-            # ── Content: yield immediately (same as parent) ─────────
-            if delta.content:
-                current_content += delta.content
-                yield StreamingChatMessage(
-                    chunk=delta.content,
-                    is_tool_call=False,
-                    finished=False,
-                    finished_chat_message=None,
-                )
-
-            # ── Tool calls: accumulate (mirrors parent) ─────────────
-            if delta.tool_calls:
-                for tool_call in delta.tool_calls:
-                    if not hasattr(tool_call, "index") or tool_call.index is None:
-                        tool_call.index = alt_index
-                        alt_index += 1
-                    if len(current_tool_calls) <= tool_call.index:
-                        current_tool_calls.append(
-                            {
-                                "function": {
-                                    "id": tool_call.id,
-                                    "name": tool_call.function.name,
-                                    "arguments": "",
-                                }
-                            }
-                        )
-                    if tool_call.function.arguments:
-                        current_tool_calls[tool_call.index]["function"]["arguments"] += (
-                            tool_call.function.arguments
-                        )
-
-            # ── Web citations: accumulate url_citation annotations ──
-            # OpenRouter's web plugin streams ``url_citation`` entries via
-            # ``delta.annotations``; surfaced as a Sources footnote at finish.
-            delta_citations = self._extract_url_citations(delta)
-            if delta_citations:
-                current_citations.extend(delta_citations)
-
-            # ── Finish: build the completed message ─────────────────
-            if choice.finish_reason is not None:
-                footnote = self._render_citations_footnote(current_citations)
-                if footnote:
-                    footnote_chunk = "\n" + footnote
-                    current_content += footnote_chunk
-                    yield StreamingChatMessage(
-                        chunk=footnote_chunk,
-                        is_tool_call=False,
-                        finished=False,
-                        finished_chat_message=None,
-                    )
-
-                contents: list[Any] = [TextContent(content=current_content)]
-                has_tool_call = False
-                if current_tool_calls:
-                    has_tool_call = True
-                    for tc in current_tool_calls:
-                        try:
-                            arguments = json.loads(tc["function"]["arguments"])
-                        except json.JSONDecodeError as e:
-                            arguments = f"Exception during JSON decoding of arguments: {e}"
-                        contents.append(
-                            ToolCallContent(
-                                tool_call_id=tc["function"]["id"],
-                                tool_call_name=tc["function"]["name"],
-                                tool_call_arguments=arguments,
-                            )
-                        )
-
-                pending = {
-                    "contents": contents,
-                    "has_tool_call": has_tool_call,
-                    "tool_call": contents[-1].model_dump(exclude_none=True) if has_tool_call else None,
-                }
-                finished_event = finalizer.schedule(
-                    pending, usage_on_this_chunk=chunk_usage is not None
-                )
-                if finished_event is not None:
-                    yield finished_event
-
-        eof_event = finalizer.drain()
-        if eof_event is not None:
-            yield eof_event
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.parent_converter, name)
@@ -950,7 +701,7 @@ class ToolAgentsRunner:
         settings: ProviderSettings,
         resolved_model: str,
         assistant_turns: int,
-        cancel_event: "threading.Event | None" = None,
+        cancel_event: threading.Event | None = None,
     ) -> Generator[dict[str, Any], None, tuple[ChatMessage, bool] | None]:
         """Run the provider-retry loop and stream-consume ``stream_step``.
 
@@ -1232,7 +983,7 @@ class ToolAgentsRunner:
         max_tool_rounds: int | None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None,
         on_tool_end: Callable[[str, Any], None] | None,
-        cancel_event: "threading.Event | None" = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
         # Persist the user message first — before any model / error check —
         # so the prompt is always in the SSOT regardless of what happens next.

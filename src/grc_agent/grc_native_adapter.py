@@ -7,8 +7,6 @@ Public surface (consumed by Phase 6's cutover):
 
 - ``get_platform()`` — lazy singleton, never imports ``gnuradio`` at module
   top-level so CI without GNU Radio can still import the module.
-- ``GraphIdentity`` — file-bytes SHA-256 + per-``FlowGraph`` revision counter.
-  Per the consultant's perf review, no deep-JSON hashing of the Pydantic model.
 - ``load_flow_graph``, ``load_and_inspect`` — loading + Pydantic snapshot.
 - ``add_block``, ``remove_block``, ``set_param``, ``set_block_state``,
   ``connect``, ``disconnect``, ``apply_mutation``, ``validate`` —
@@ -33,7 +31,6 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -102,29 +99,6 @@ def get_platform_or_none() -> Any:
 
 # --------------------------------------------------------------------------- #
 # Graph identity (no deep-JSON hashing)                                        #
-# --------------------------------------------------------------------------- #
-
-
-@dataclass
-class GraphIdentity:
-    file_sha256: str | None
-    instance_id: int = 0
-    revision: int = 0
-
-
-def new_graph_identity(file_bytes: bytes | None) -> GraphIdentity:
-    sha = hashlib.sha256(file_bytes).hexdigest() if file_bytes else None
-    return GraphIdentity(file_sha256=sha)
-
-
-def bind_to_flow_graph(identity: GraphIdentity, flow_graph: Any) -> None:
-    identity.instance_id = id(flow_graph)
-
-
-def bump_revision(identity: GraphIdentity) -> None:
-    identity.revision += 1
-
-
 # --------------------------------------------------------------------------- #
 # Loading                                                                      #
 # --------------------------------------------------------------------------- #
@@ -289,9 +263,9 @@ def render_parameter(
     ):
         return None
     # Empty values carry no information; the bible's live path
-    # (filter_live_block_params) already strips them, so mirror that here so an
-    # empty enum such as realtime_scheduling="" never leaks into the inspect
-    # payload. Consistency fix, not a new omission.
+    # (keep_param in param_filter.py) already strips them, so mirror that
+    # here so an empty enum such as realtime_scheduling="" never leaks into
+    # the inspect payload.
     if not value.strip():
         return None
     return value

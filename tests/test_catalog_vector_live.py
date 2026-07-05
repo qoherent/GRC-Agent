@@ -4,7 +4,7 @@ These tests require:
   * the ``sqlite-vec`` package (pip-installed).
   * Ollama running at $GRC_AGENT_LLAMA_SERVER_URL (default http://localhost:11434).
   * The ``embeddinggemma:latest`` model pulled.
-  * A populated catalog DB at ``.grc_agent/vectors/catalog_v1.db``.
+  * A populated catalog DB at ``src/grc_agent/vectors/catalog_ollama.db``.
 
 They are GATED behind ``GRC_AGENT_LIVE_EMBED=1`` so the deterministic unit
 suite (no Ollama) still runs by default. Run with:
@@ -31,7 +31,7 @@ LIVE = os.environ.get("GRC_AGENT_LIVE_EMBED") == "1"
 # captured at module load. Tests in this module run only when LIVE is set,
 # so the env override is safe.
 _REAL_VECTORS_DIR = Path("src/grc_agent/vectors").resolve()
-if LIVE and Path(_REAL_VECTORS_DIR / "catalog_v1.db").exists():
+if LIVE and Path(_REAL_VECTORS_DIR / "catalog_ollama.db").exists():
     os.environ["GRC_AGENT_VECTORS_DIR"] = str(_REAL_VECTORS_DIR)
 
 
@@ -55,9 +55,9 @@ class VectorCatalogLiveTests(unittest.TestCase):
 
         # Copy the live DB so the test is read-only against production.
         cls.tmpdir = tempfile.mkdtemp(prefix="cat_live_")
-        cls.test_db = Path(cls.tmpdir) / "catalog_v1.db"
+        cls.test_db = Path(cls.tmpdir) / "catalog_ollama.db"
         shutil.copy(str(CATALOG_DB_PATH), str(cls.test_db))
-        cls.store = VectorCatalogStore(cls.test_db, "http://localhost:11434")
+        cls.store = VectorCatalogStore(cls.test_db, "http://localhost:11434", "embeddinggemma:latest")
         cls.embed_query = embed_query
 
     @classmethod

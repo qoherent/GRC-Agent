@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from unittest import mock
 
-import pytest
-
 from grc_agent.config import RetrievalConfig
 from grc_agent.domain_models import ErrorCode
 
@@ -26,6 +24,9 @@ class FakeAgent:
             search_blocks_default_k=5,
         )
         self._llama_server_url = llama_url
+        self._llama_backend = "ollama"
+        self._embedding_model = "embeddinggemma:latest"
+        self._embedding_api_key = "not-needed"
 
     def _tool_result(self, tool_name, *, ok, message=None, error_type=None):
         return {
@@ -51,11 +52,13 @@ def _hit(path="wiki/widget.md", heading="Widget", text="body text", distance=0.1
 def test_embedding_constants_live_in_dedicated_module():
     """Constants are the single source of truth across both stores."""
     import grc_agent.runtime._embedding_config as cfg
-    from grc_agent.runtime.doc_answer import _DOCUMENT_PREFIX, _QUERY_PREFIX
     from grc_agent.runtime.catalog_vector import (
         _DOCUMENT_PREFIX as _CDP,
+    )
+    from grc_agent.runtime.catalog_vector import (
         _QUERY_PREFIX as _CQP,
     )
+    from grc_agent.runtime.doc_answer import _DOCUMENT_PREFIX, _QUERY_PREFIX
     assert _DOCUMENT_PREFIX == cfg._DOCUMENT_PREFIX == _CDP
     assert _QUERY_PREFIX == cfg._QUERY_PREFIX == _CQP
 
@@ -111,7 +114,12 @@ def test_successful_call_includes_sources_and_answer():
         {"path": "wiki/widget.md", "distance": 0.05},
         {"path": "wiki/gizmo.md", "distance": 0.10},
     ]
-    eq.assert_called_once_with(fake_agent._llama_server_url, "What is a widget?")
+    eq.assert_called_once_with(
+        fake_agent._llama_server_url,
+        "What is a widget?",
+        model=fake_agent._embedding_model,
+        api_key=fake_agent._embedding_api_key,
+    )
 
 
 def test_prompt_includes_each_source_path_heading_and_body():

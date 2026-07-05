@@ -31,7 +31,6 @@ class RuntimeBootstrapResult:
     server_url: str = ""
     model_alias: str = ""
     launch_status: str = "skipped"
-    launch_pid: int | None = None
     retrieval_ok: bool = False
     errors: list[str] = field(default_factory=list)
     error_type: str | None = None

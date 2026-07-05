@@ -209,7 +209,6 @@ def render_model_messages(
 
 __version__ = "2026-07-02-concise-no-latex"
 
-
 def build_system_prompt(session_id: str | None = None) -> str:
     """Return the system prompt shipped to the model."""
     prefix = f"Session ID: {session_id}\n" if session_id else ""

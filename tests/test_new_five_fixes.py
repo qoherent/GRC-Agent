@@ -125,8 +125,6 @@ class TestCodebaseFixes(unittest.TestCase):
         # Should resolve to 'float' (from existing_src) rather than 'complex' (from new_dest)
         self.assertEqual(dtype, "float")
 
-    pass
-
 
 if __name__ == "__main__":
     unittest.main()

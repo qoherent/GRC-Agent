@@ -15,12 +15,11 @@ The bridge: `grc_native_adapter.py` is the **only** module that imports `gnuradi
 | `runtime/param_filter.py` | **The Bible** — single source of truth for parameter filtering (Stage A + Stage B). |
 | `runtime/inspect_graph.py` | MVP `inspect_graph` + `query_knowledge` wrapper (routes to catalog/docs). |
 | `runtime/change_graph.py` | MVP `change_graph` engine — flat batch mutations via the native GRC adapter. |
-| `runtime/catalog_vector.py` | sqlite-vec + embeddinggemma index for the GNU Radio catalog. |
-| `runtime/doc_answer.py` | sqlite-vec + embeddinggemma RAG for GNU Radio docs wiki. |
+| `runtime/catalog_vector.py` | sqlite-vec vector index for the GNU Radio catalog (per-backend embedder). |
+| `runtime/doc_answer.py` | sqlite-vec RAG for GNU Radio docs wiki; owns the shared `get_embedding` (OpenAI-compat `/v1/embeddings`, both backends). |
 | `runtime/search_blocks.py` | Vector search over the catalog (`BlockDescription` payload, Stage A filtered). |
 | `runtime/model_context.py` | `render_model_messages` + MVP `ToolSurface` (5-tool profile). |
 | `runtime/tool_schemas.py` | MVP tool JSON schemas (5 tools). |
-| `runtime/clarification.py` | `normalize_pending_clarification` + `resolve_pending_clarification_state`. |
 | `runtime/connection_ids.py` | `connection_id` (build) + `parse_connection_id` (parse). |
 | `agent.py` | MVP `GrcAgent`: tool registry, dispatch, lifecycle, history journal. |
 | `transaction.py` | `capture_session_state` / `restore_session_state` for `change_graph` rollback. |
@@ -49,7 +48,7 @@ Five model-facing wrapper tools (the entire MVP model surface):
 | `web_fetch` | read | `runtime/web_search.web_fetch()` — Ollama hosted web fetch (**Ollama backend only**) |
 | `change_graph` | write | `runtime/change_graph.dispatch_flat_change_graph_batch()` + `grc_native_adapter.apply_mutation()` |
 
-`search_blocks` and `ask_grc_docs` are internal engines under `query_knowledge`, not separately surfaced to the model. Both go through the same `embeddinggemma:latest` + sqlite-vec pipeline.
+`search_blocks` and `ask_grc_docs` are internal engines under `query_knowledge`, not separately surfaced to the model. Both use the shared `get_embedding` (OpenAI-compat `/v1/embeddings` via the `openai` SDK — one code path for Ollama and OpenRouter) + sqlite-vec. Each backend owns its own per-backend vector DB pair (`catalog_<backend>.db` / `docs_<backend>.db`), sized by a probed dimension and rebuilt automatically when the stamped embedding model changes. Embedding model names live in `.env` (`OLLAMA_EMBEDDING_MODEL`, `OPENROUTER_EMBEDDING_MODEL`); embedding follows the chat backend.
 
 **Web search is backend-split (no mixing):**
 - **Ollama:** `web_search`/`web_fetch` are model-facing tools hitting Ollama's hosted REST API (`OLLAMA_API_KEY`-gated).
@@ -64,7 +63,7 @@ Five model-facing wrapper tools (the entire MVP model surface):
 
 - **Manual execution loop:** `ToolAgentsRunner._run_turn_events` with bounded `.step()`.
 - **No result caching.** Every call hits the live backend fresh.
-- **Context window:** `num_ctx=120000` (model native 131072). Configured in `ToolAgentsLlamaProviderConfig`.
+- **Context window:** there is no per-request `num_ctx` — Ollama's `/v1` endpoint ignores it, so `ToolAgentsLlamaProviderConfig` deliberately sends none (regression-guarded by `tests/test_toolagents_runtime.py::test_ollama_provider_settings_has_no_per_request_num_ctx`). A large context window is baked into the Ollama Modelfile (e.g. `gemma4:e4b-it-qat-120k`).
 - **Context compaction:** one-pass proportional slicing with truncation flags.
 - **Wire-format role safety:** runtime directives injected as `user`-role only.
 - **`change_graph` output is minimal.** Success: `{"ok": true}`. Failure: `{"ok": false, "error_type": "...", "errors": [{"code": "...", "message": "..."}]}`. Validation errors surface as `errors[].code == "gnu_validation"`. The `force=True` flag bypasses validation but the batch is still applied; the model must read `ok` to know whether edits applied.
@@ -76,7 +75,7 @@ Five model-facing wrapper tools (the entire MVP model surface):
 - **Non-blocking flow.** Launch into degraded mode if backend unreachable; never `sys.exit()`.
 - **No result caching outside the transaction history.**
 - **No application-flow changes without permission.**
-- **No `gnuradio` imports outside `grc_native_adapter.py`** and auxiliary files (doctor, dogfood, session catalog paths).
+- **No `gnuradio` imports outside `grc_native_adapter.py`** and auxiliary files (doctor, session catalog paths).
 
 ## Key conventions
 
@@ -92,8 +91,8 @@ Five model-facing wrapper tools (the entire MVP model surface):
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (341 passed, 6 skipped) |
-| `grc_native` | `pytest -m grc_native` (30 passed, 1 skipped; requires GNU Radio) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (407 passed, 6 skipped) |
+| `grc_native` | `pytest -m grc_native` (75 passed, 1 skipped; requires GNU Radio) |
 | `gui` | `xvfb-run pytest -m gui` (6 passed) |
 
 Default CI command: `pytest -m "not grc_native and not gui and not llama_eval"`. The `docs/MODEL_CONTEXT_BIBLE.md` staleness guard (`tests/test_model_context_bible.py`) runs in this default gate.

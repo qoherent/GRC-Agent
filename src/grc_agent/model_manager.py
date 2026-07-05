@@ -12,7 +12,6 @@ and ``ollama pull <model>``.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
@@ -127,7 +126,6 @@ class OllamaBackendStatus:
     model_alias: str
     model_available: bool
     available_models: list[str] = field(default_factory=list)
-    start_command: str = ""
     pull_command: str = ""
     hint: str = ""
 
@@ -296,8 +294,7 @@ def pull_ollama_model(
 ) -> dict[str, Any]:
     """Pull an Ollama model from the registry using ``ollama pull``.
 
-    This is a blocking call. For GUI use, wrap it in a background thread with
-    progress reporting via :func:`stream_ollama_pull`.
+    This is a blocking call. For GUI use, wrap it in a background thread.
 
     Returns a dict with ``ok`` and either ``model`` or ``error``.
     """
@@ -322,58 +319,10 @@ def pull_ollama_model(
     return {"ok": True, "model": model_name}
 
 
-def stream_ollama_pull(
-    model_name: str,
-    *,
-    server_url: str = DEFAULT_OLLAMA_URL,
-) -> Any:
-    """Stream ``ollama pull`` progress as a generator of status dicts.
-
-    Yields parsed JSON status objects like:
-        ``{"status": "pulling manifest"}``
-        ``{"status": "downloading", "total": 123, "completed": 50}``
-        ``{"status": "success"}``
-
-    Callers iterate until exhaustion; the final yield is always an ``ok`` dict.
-    """
-    env: dict[str, str] = {}
-    if server_url and server_url != DEFAULT_OLLAMA_URL:
-        env["OLLAMA_HOST"] = server_url
-
-    try:
-        proc = subprocess.Popen(
-            ["ollama", "pull", model_name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env={**os.environ, **env},
-        )
-    except FileNotFoundError:
-        yield {"status": "error", "error": "ollama binary not found on PATH."}
-        return
-
-    assert proc.stdout is not None
-    try:
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                yield {"status": "progress", "raw": line}
-    finally:
-        proc.wait()
-        if proc.returncode != 0:
-            yield {"status": "error", "error": "Pull command failed."}
-
-
 __all__ = [
     "OllamaBackendStatus",
     "check_ollama_tool_support",
     "discover_ollama_models",
     "probe_ollama_backend",
     "pull_ollama_model",
-    "stream_ollama_pull",
 ]

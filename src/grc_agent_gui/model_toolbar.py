@@ -63,6 +63,8 @@ class ModelToolbar(QFrame):
     open_graph_location_requested = Signal()
     browse_graph_requested = Signal()
     edit_openrouter_model_requested = Signal()
+    embed_model_changed = Signal(str)
+    edit_openrouter_embed_model_requested = Signal()
 
     def __init__(
         self,
@@ -87,6 +89,10 @@ class ModelToolbar(QFrame):
             from grc_agent.config import default_app_config
 
             self._last_ollama_model = default_app_config().llama.model
+        # Same idea for the embedding model (Ollama side is editable).
+        from grc_agent.config import default_embedding_model
+
+        self._last_ollama_embed_model = default_embedding_model(_BACKEND_OLLAMA)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
@@ -167,6 +173,33 @@ class ModelToolbar(QFrame):
         self.edit_model_btn.setVisible(False)
         layout.addWidget(self.edit_model_btn)
 
+        # Embedding model section. Mirrors the chat model section: editable
+        # combo for Ollama (type any embedding model), non-editable + pencil
+        # edit for OpenRouter. The model name lives in .env per backend
+        # (OLLAMA_EMBEDDING_MODEL / OPENROUTER_EMBEDDING_MODEL).
+        embed_separator = QFrame(self)
+        embed_separator.setFrameShape(QFrame.Shape.VLine)
+        embed_separator.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(embed_separator)
+
+        embed_label = QLabel("Embed", self)
+        embed_label.setObjectName("toolbarLabel")
+        layout.addWidget(embed_label)
+
+        self.embed_combo = QComboBox(self)
+        self.embed_combo.setEditable(True)
+        self.embed_combo.setMinimumWidth(180)
+        self.embed_combo.setEditText(self._last_ollama_embed_model)
+        self.embed_combo.currentIndexChanged.connect(self._on_embed_model_changed)
+        layout.addWidget(self.embed_combo)
+
+        self.edit_embed_btn = QToolButton(self)
+        self.edit_embed_btn.setText("✏")  # pencil
+        self.edit_embed_btn.setToolTip("Edit the OpenRouter embedding model id")
+        self.edit_embed_btn.clicked.connect(self.edit_openrouter_embed_model_requested.emit)
+        self.edit_embed_btn.setVisible(False)
+        layout.addWidget(self.edit_embed_btn)
+
         # Vertical separator between model and provider.
         provider_separator = QFrame(self)
         provider_separator.setFrameShape(QFrame.Shape.VLine)
@@ -217,6 +250,20 @@ class ModelToolbar(QFrame):
             self.model_combo.setCurrentIndex(0)
             self.model_combo.setEditable(False)
         self.edit_model_btn.setVisible(not editable)
+        # Mirror the chat-model editability for the embedding combo.
+        if editable:
+            self.embed_combo.setEditable(True)
+            self.embed_combo.clear()
+            self.embed_combo.setEditText(self._last_ollama_embed_model)
+        else:
+            from grc_agent.config import default_openrouter_embedding_model
+
+            env_embed = default_openrouter_embedding_model() or _PLACEHOLDER_MODEL
+            self.embed_combo.clear()
+            self.embed_combo.addItem(env_embed)
+            self.embed_combo.setCurrentIndex(0)
+            self.embed_combo.setEditable(False)
+        self.edit_embed_btn.setVisible(not editable)
         self._suppress_signals = False
 
     def set_models(self, models: list[str], *, current: str = "") -> None:
@@ -259,6 +306,26 @@ class ModelToolbar(QFrame):
         text = self.model_combo.currentText().strip()
         return "" if text == _PLACEHOLDER_MODEL else text
 
+    def current_embed_model(self) -> str:
+        text = self.embed_combo.currentText().strip()
+        return "" if text == _PLACEHOLDER_MODEL else text
+
+    def set_current_embed_model(self, model: str) -> None:
+        """Update the embedding combo display without firing change signals."""
+        if self.current_backend() == _BACKEND_OLLAMA and model and model != _PLACEHOLDER_MODEL:
+            self._last_ollama_embed_model = model
+        self._suppress_signals = True
+        idx = self.embed_combo.findText(model)
+        if idx >= 0:
+            self.embed_combo.setCurrentIndex(idx)
+        elif self.embed_combo.isEditable():
+            self.embed_combo.setEditText(model)
+        else:
+            self.embed_combo.clear()
+            self.embed_combo.addItem(model)
+            self.embed_combo.setCurrentIndex(0)
+        self._suppress_signals = False
+
     def _on_provider_changed(self, _index: int) -> None:
         if self._suppress_signals:
             return
@@ -274,6 +341,15 @@ class ModelToolbar(QFrame):
         model = self.current_model()
         if model and model != _PLACEHOLDER_MODEL:
             self.connect_requested.emit(self.current_backend(), model)
+
+    def _on_embed_model_changed(self, _index: int) -> None:
+        if self._suppress_signals:
+            return
+        model = self.current_embed_model()
+        if model and model != _PLACEHOLDER_MODEL:
+            if self.current_backend() == _BACKEND_OLLAMA:
+                self._last_ollama_embed_model = model
+            self.embed_model_changed.emit(model)
 
     def _force_style_refresh(self) -> None:
         style = self.style()

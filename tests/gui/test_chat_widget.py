@@ -991,8 +991,9 @@ def test_strip_inline_math_handles_display_math():
 
 def test_think_block_regex_is_a_single_module_constant(qtbot):
     """Both helpers share one regex constant."""
-    from grc_agent_gui import chat_widget
     import re
+
+    from grc_agent_gui import chat_widget
 
     assert hasattr(chat_widget, "_THINK_BLOCK_RE")
     assert isinstance(chat_widget._THINK_BLOCK_RE, re.Pattern)

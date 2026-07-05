@@ -7,7 +7,6 @@ Restore always writes to a caller-provided copy path.
 from __future__ import annotations
 
 import copy
-import difflib
 import hashlib
 import json
 import logging
@@ -285,18 +284,6 @@ class GraphHistoryJournal:
         self._insert(record)
         return record
 
-    def list_records(self, *, accepted_only: bool = False) -> list[dict[str, Any]]:
-        with self._conn() as conn:
-            if accepted_only:
-                rows = conn.execute(
-                    "SELECT payload FROM history_records WHERE accepted=1 ORDER BY timestamp"
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT payload FROM history_records ORDER BY timestamp"
-                ).fetchall()
-        return [json.loads(row["payload"]) for row in rows]
-
     def get_record(self, record_id: str) -> dict[str, Any]:
         with self._conn() as conn:
             row = conn.execute(
@@ -305,53 +292,6 @@ class GraphHistoryJournal:
         if row is None:
             raise KeyError(record_id)
         return json.loads(row["payload"])
-
-    def diff_records(self, first_id: str, second_id: str) -> dict[str, Any]:
-        first = self.get_record(first_id)
-        second = self.get_record(second_id)
-        first_snapshot = _snapshot_from_record(first)
-        second_snapshot = _snapshot_from_record(second)
-        return {
-            "ok": True,
-            "from": first_id,
-            "to": second_id,
-            "before_hash": first_snapshot.graph_hash,
-            "after_hash": second_snapshot.graph_hash,
-            "graph_delta": graph_delta(first_snapshot, second_snapshot),
-            "text_diff": list(
-                difflib.unified_diff(
-                    FlowgraphSession._serialize_raw_data(first_snapshot.raw_data).splitlines(),
-                    FlowgraphSession._serialize_raw_data(second_snapshot.raw_data).splitlines(),
-                    fromfile=first_id,
-                    tofile=second_id,
-                    lineterm="",
-                )
-            ),
-        }
-
-    def restore_record(self, record_id: str, to_path: str | Path) -> dict[str, Any]:
-        record = self.get_record(record_id)
-        target = Path(to_path)
-        if target.exists():
-            return {
-                "ok": False,
-                "error_type": "restore_target_exists",
-                "message": f"Refusing to overwrite existing restore target: {target}",
-                "path": str(target),
-            }
-        snapshot = _snapshot_from_record(record)
-        session = FlowgraphSession.from_raw_data(snapshot.raw_data, path=target)
-        session.save(target)
-        valid = session.validate()
-        validation = session.validation_state()
-        return {
-            "ok": True,
-            "id": record_id,
-            "path": str(target),
-            "graph_hash": snapshot.graph_hash,
-            "validation": validation,
-            "valid": valid,
-        }
 
     def _base_record(
         self,
@@ -424,17 +364,6 @@ class GraphHistoryJournal:
                 drop_ids,
             )
             conn.commit()
-
-
-def _snapshot_from_record(record: dict[str, Any]) -> GraphSnapshot:
-    payload = record.get("graph_snapshot")
-    if not isinstance(payload, dict):
-        raise ValueError(f"History record {record.get('id')} has no graph snapshot.")
-    raw_data = payload.get("raw_data")
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"History record {record.get('id')} has invalid raw_data.")
-    session = FlowgraphSession.from_raw_data(raw_data)
-    return snapshot_session(session)
 
 
 def _record_id() -> str:

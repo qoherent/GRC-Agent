@@ -85,48 +85,30 @@ def _guard_real_vector_db(request: Any) -> Any:
         yield
         return
 
-    # Always check the REAL production path — not whatever
+    # Always check the REAL production paths — not whatever
     # GRC_AGENT_VECTORS_DIR points at (this conftest redirects that env
     # var to a per-session tmp dir above, so the redirected path is the
-    # one tests are allowed to touch).
-    db_path = Path(".grc_agent") / "vectors" / "docs_v1.db"
+    # one tests are allowed to touch). Per-backend DBs (docs_ollama /
+    # docs_openrouter) replaced the old docs_v1.db.
+    db_paths = [
+        Path(".grc_agent") / "vectors" / "docs_ollama.db",
+        Path(".grc_agent") / "vectors" / "docs_openrouter.db",
+    ]
 
     def _snapshot() -> tuple[bool, float | None]:
-        if not db_path.exists():
-            return (False, None)
-        return (True, db_path.stat().st_mtime_ns)
+        for db_path in db_paths:
+            if db_path.exists():
+                return (True, db_path.stat().st_mtime_ns)
+        return (False, None)
 
     before = _snapshot()
     yield
     after = _snapshot()
     if after != before:
         raise AssertionError(
-            f"Test touched the production vector DB at {db_path} "
+            f"Test touched a production vector DB under .grc_agent/vectors/ "
             f"(before={before}, after={after}). Tests must not call "
             f"GrcAgent.warmup_vector_index() or otherwise reach the real "
-            f"DB_PATH. Redirect via GRC_AGENT_VECTORS_DIR or import the "
-            f"live-integration tests under tests/retrieval_eval/."
+            f"per-backend DB paths. Redirect via GRC_AGENT_VECTORS_DIR or "
+            f"import the live-integration tests under tests/retrieval_eval/."
         )
-
-
-@pytest.fixture()
-def grc_agent_toml(tmp_home: Path) -> Any:
-    """Factory that writes a minimal ``grc_agent.toml`` under ``tmp_home``."""
-
-    def _make(**overrides: Any) -> Path:
-        target = tmp_home / ".config" / "grc_agent" / "config.toml"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        body = "[llama]\n"
-        body += 'server_url = "http://localhost:11434"\n'
-        body += 'model = "test-model"\n'
-        body += 'backend = "ollama"\n'
-        body += "max_tokens = 1024\n"
-        body += "max_tool_rounds = 4\n"
-        body += "request_timeout_seconds = 30.0\n"
-        for key, value in overrides.items():
-            body += f"{key} = {value!r}\n"
-        body += "\n[agent]\nhistory_compact_budget = 10000\n"
-        target.write_text(body, encoding="utf-8")
-        return target
-
-    return _make

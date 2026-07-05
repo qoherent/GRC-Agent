@@ -155,7 +155,7 @@ class _LifecycleCommand:
 
     kind: str  # "open", "end", "replace"
     kwargs: dict[str, Any]
-    future: "concurrent.futures.Future[Any]"
+    future: concurrent.futures.Future[Any]
 
 
 _SQL_SCHEMA = """
@@ -438,7 +438,7 @@ class SessionStore:
         supplied ``timeout`` is bounded so a wedged writer can't lock
         the GUI thread indefinitely.
         """
-        future: "concurrent.futures.Future[Any]" = concurrent.futures.Future()
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
         cmd = _LifecycleCommand(kind=kind, kwargs=kwargs, future=future)
         self._lifecycle_q.put(cmd)
         self._drained.clear()

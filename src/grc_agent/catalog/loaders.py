@@ -193,12 +193,6 @@ def get_catalog_snapshot(catalog_root: str | Path | None = None) -> CatalogSnaps
     return _get_cached_catalog_snapshot(str(root))
 
 
-def build_catalog_snapshot(catalog_root: str | Path | None = None) -> CatalogSnapshot:
-    """Build a fresh raw GNU catalog snapshot for the resolved root."""
-    root = discover_catalog_root(catalog_root).resolve()
-    return _build_catalog_snapshot_for_root(root)
-
-
 def find_block_source(
     block_id: str,
     *,
@@ -348,7 +342,6 @@ def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
         outputs=outputs,
         asserts=list(asserts),
         documentation=optional_string(payload.get("documentation")),
-        doc_url=optional_string(payload.get("doc_url")),
         warnings=warnings,
         signature=signature,
     )

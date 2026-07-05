@@ -161,7 +161,7 @@ class FtsPorterStemmingTests(unittest.TestCase):
             )
             from grc_agent.runtime.catalog_vector import VectorCatalogStore
 
-            store = VectorCatalogStore(db, "http://localhost:11434")
+            store = VectorCatalogStore(db, "http://localhost:11434", "embeddinggemma:latest")
             conn = store._get_connection()
             try:
                 from grc_agent.runtime.catalog_vector import fts_match
@@ -193,7 +193,7 @@ class HybridSearchTests(unittest.TestCase):
             )
             from grc_agent.runtime.catalog_vector import VectorCatalogStore
 
-            store = VectorCatalogStore(db, "http://localhost:11434")
+            store = VectorCatalogStore(db, "http://localhost:11434", "embeddinggemma:latest")
             # query vector identical to the multiply block → vector #1.
             # query text "multiplier" → lexical stem match on multiply.
             results = store.search(
@@ -213,7 +213,7 @@ class HybridSearchTests(unittest.TestCase):
             _write_test_db(db, [[1.0] + [0.0] * 767, [0.0, 1.0] + [0.0] * 766])
             from grc_agent.runtime.catalog_vector import VectorCatalogStore
 
-            store = VectorCatalogStore(db, "http://localhost:11434")
+            store = VectorCatalogStore(db, "http://localhost:11434", "embeddinggemma:latest")
             results = store.search("anything", [1.0] + [0.0] * 767, limit=5)
             self.assertTrue(results)
             # Pure vector: nearest neighbour is b1.

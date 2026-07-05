@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable
 
 import sqlite_vec
 
@@ -26,14 +25,16 @@ logger = logging.getLogger(__name__)
 class VectorStoreBase:
     """Thin skeleton for sqlite-vec backed KNN stores.
 
-    Subclasses MUST set ``self.db_path`` and ``self.server_url`` in
-    ``__init__``, and override the hook methods (``_table_chunks``,
-    ``_table_idx``, ``_vector_columns``, ``_chunk_columns``,
-    ``_read_chunk``).
+    Subclasses MUST set ``self.db_path``, ``self.server_url``,
+    ``self.embedding_model`` and ``self.api_key`` in ``__init__``, override
+    ``_table_chunks``, ``_table_idx``, and ``init_db``, and (optionally)
+    override ``_table_fts`` when an FTS5 table is in use.
     """
 
     db_path: Path
     server_url: str
+    embedding_model: str
+    api_key: str
 
     # --- hooks subclasses override ----------------------------------------
 
@@ -43,15 +44,8 @@ class VectorStoreBase:
     def _table_idx(self) -> str:
         raise NotImplementedError
 
-    def _vector_columns(self) -> str:
-        """``"embedding float[768]"`` etc."""
-        raise NotImplementedError
-
-    def _chunk_columns(self) -> str:
-        """SQL column definitions for the chunks table (after ``rowid`` PK)."""
-        raise NotImplementedError
-
-    def _read_chunk(self, conn: sqlite3.Connection, rowid: int) -> dict[str, Any] | None:
+    def init_db(self, conn: sqlite3.Connection, dim: int) -> None:
+        """Create the chunks/idx/fts tables sized for ``dim``. Subclasses override."""
         raise NotImplementedError
 
     # --- shared behavior ---------------------------------------------------
@@ -70,3 +64,42 @@ class VectorStoreBase:
             return n > 0
         except sqlite3.OperationalError:
             return False
+
+    # --- model stamp: rebuild when the embedding model changes -------------
+
+    def _embed_meta_table(self) -> str:
+        return "embed_meta"
+
+    def _read_embed_meta(self, conn: sqlite3.Connection) -> tuple[str, int] | None:
+        """Return ``(embedding_model, dim)`` stamped on this DB, or ``None``."""
+        try:
+            row = conn.execute(
+                f"SELECT model, dim FROM {self._embed_meta_table()} LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if not row:
+            return None
+        return (str(row[0]), int(row[1]))
+
+    def _write_embed_meta(self, conn: sqlite3.Connection, model: str, dim: int) -> None:
+        conn.execute(f"DROP TABLE IF EXISTS {self._embed_meta_table()}")
+        conn.execute(
+            f"CREATE TABLE {self._embed_meta_table()} (model TEXT NOT NULL, dim INTEGER NOT NULL)"
+        )
+        conn.execute(
+            f"INSERT INTO {self._embed_meta_table()} (model, dim) VALUES (?, ?)",
+            (model, dim),
+        )
+
+    def _drop_index_tables(self, conn: sqlite3.Connection) -> None:
+        """Drop the chunks/idx/fts tables (and meta) so a rebuild starts clean."""
+        for table in (
+            self._table_idx(),
+            self._table_chunks(),
+            self._embed_meta_table(),
+        ):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        fts = getattr(self, "_table_fts", None)
+        if callable(fts):
+            conn.execute(f"DROP TABLE IF EXISTS {fts()}")

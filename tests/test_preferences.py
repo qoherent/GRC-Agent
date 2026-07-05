@@ -3,6 +3,10 @@
 All filesystem-touching tests use ``tmp_path`` per the project
 convention in ``tests/conftest.py`` and never touch the developer's
 real ``~/.config/grc_agent/``.
+
+Preferences carry only the last-chosen provider (``provider_chosen``) and
+the schema version. Model names are NOT persisted here — ``.env`` is the
+single source of truth (see ``tests/test_env_model_config.py``).
 """
 
 from __future__ import annotations
@@ -11,21 +15,20 @@ import json
 import logging
 import os
 import unittest
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from grc_agent.config import (
+    ALLOWED_BACKENDS,
     PREFERENCES_SCHEMA_VERSION,
     PREFS_FILE_NAME,
-    LastModel,
     LlamaConfig,
     UserPreferences,
     apply_user_preferences_to_llama_config,
     default_user_preferences,
     load_user_preferences,
     save_user_preferences,
-    update_last_model,
+    update_provider_chosen,
     user_preferences_path,
 )
 
@@ -35,6 +38,7 @@ def _make_llama_config(**overrides: object) -> LlamaConfig:
     base = dict(
         server_url="http://127.0.0.1:8080",
         model="test-model",
+        embedding_model="test-embed",
         backend="ollama",
         max_tokens=4096,
         max_tool_rounds=8,
@@ -47,8 +51,7 @@ def _make_llama_config(**overrides: object) -> LlamaConfig:
 class DefaultsTests(unittest.TestCase):
     def test_default_preferences_have_expected_values(self) -> None:
         prefs = default_user_preferences()
-        self.assertEqual(prefs.last_model.model, "")
-        self.assertEqual(prefs.last_model.saved_at, "")
+        self.assertEqual(prefs.provider_chosen, "")
         self.assertEqual(prefs.schema_version, PREFERENCES_SCHEMA_VERSION)
 
 
@@ -68,9 +71,8 @@ class PathTests(unittest.TestCase):
 
 class LoadTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Make the preferences logger verbose and attach an
-        # in-memory handler so we can assert on INFO messages
-        # without depending on a root-level handler.
+        # Make the preferences logger verbose and attach an in-memory handler
+        # so we can assert on INFO messages without depending on a root handler.
         self._logger = logging.getLogger("grc_agent.config")
         self._original_level = self._logger.level
         self._logger.setLevel(logging.DEBUG)
@@ -98,12 +100,7 @@ class LoadTests(unittest.TestCase):
     def test_load_round_trip(self) -> None:
         with self.subTest("full"):
             target = Path("/tmp/rt_full.json")
-            original = UserPreferences(
-                last_model=LastModel(
-                    model="llama3.2",
-                    saved_at="2026-01-01T00:00:00Z",
-                ),
-            )
+            original = UserPreferences(provider_chosen="openrouter")
             save_user_preferences(original, path=target)
             loaded = load_user_preferences(path=target)
             self.assertEqual(loaded, original)
@@ -122,22 +119,17 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(prefs, default_user_preferences())
         self.assertTrue(self._has_log_containing("not valid JSON", min_level=logging.WARNING))
 
-    def test_load_wrong_types_returns_defaults_and_warns(self) -> None:
+    def test_load_wrong_provider_type_returns_default_and_warns(self) -> None:
         with tempfile_Target() as target:
-            target.write_text(json.dumps({"last_model": "not-a-dict"}), encoding="utf-8")
+            target.write_text(json.dumps({"provider_chosen": 123}), encoding="utf-8")
             prefs = load_user_preferences(path=target)
-        self.assertEqual(prefs.last_model, LastModel())
-        self.assertTrue(self._has_log_containing("non-dict last_model"))
+        self.assertEqual(prefs.provider_chosen, "")
+        self.assertTrue(self._has_log_containing("unknown provider_chosen"))
 
     def test_load_unknown_schema_version_returns_defaults(self) -> None:
         with tempfile_Target() as target:
             target.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 999,
-                        "last_model": {"model": "llama3.2"},
-                    }
-                ),
+                json.dumps({"schema_version": 999, "provider_chosen": "ollama"}),
                 encoding="utf-8",
             )
             prefs = load_user_preferences(path=target)
@@ -150,14 +142,14 @@ class LoadTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "last_model": {"model": "llama3.2"},
+                        "provider_chosen": "ollama",
                         "future_flag": True,
                     }
                 ),
                 encoding="utf-8",
             )
             prefs = load_user_preferences(path=target)
-        self.assertEqual(prefs.last_model.model, "llama3.2")
+        self.assertEqual(prefs.provider_chosen, "ollama")
         self.assertTrue(self._has_log_containing("future_flag"))
 
 
@@ -167,45 +159,29 @@ class SaveTests(unittest.TestCase):
         with tempfile_Target(suffix="parent_dir_marker") as marker:
             parent = marker.parent / "freshly_created_dir" / "prefs.json"
             self.assertFalse(parent.parent.exists())
-            save_user_preferences(
-                UserPreferences(last_model=LastModel(model="llama3.2")),
-                path=parent,
-            )
+            save_user_preferences(UserPreferences(provider_chosen="ollama"), path=parent)
             self.assertTrue(parent.exists())
             self.assertTrue(parent.parent.is_dir())
 
     def test_save_is_atomic(self) -> None:
         with tempfile_Target(suffix="prefs.json") as target:
-            save_user_preferences(
-                UserPreferences(last_model=LastModel(model="llama3.2")),
-                path=target,
-            )
+            save_user_preferences(UserPreferences(provider_chosen="ollama"), path=target)
             original_text = target.read_text(encoding="utf-8")
-            # Inject an os.replace failure; the target file must
-            # remain unchanged and the temp file must be cleaned up.
+            # Inject an os.replace failure; the target file must remain
+            # unchanged and the temp file must be cleaned up.
             with mock.patch("os.replace", side_effect=OSError("disk full")) as replace_mock:
                 with self.assertRaises(OSError):
-                    save_user_preferences(
-                        UserPreferences(last_model=LastModel(model="qwen2.5")),
-                        path=target,
-                    )
+                    save_user_preferences(UserPreferences(provider_chosen="openrouter"), path=target)
             replace_mock.assert_called_once()
             # The original file is untouched.
             self.assertEqual(target.read_text(encoding="utf-8"), original_text)
 
     def test_save_writes_sorted_keys(self) -> None:
         with tempfile_Target(suffix="prefs.json") as target:
-            save_user_preferences(
-                UserPreferences(
-                    last_model=LastModel(model="qwen2.5", saved_at="t"),
-                ),
-                path=target,
-            )
+            save_user_preferences(UserPreferences(provider_chosen="openrouter"), path=target)
             text = target.read_text(encoding="utf-8")
-            # json.dumps with sort_keys=True yields a stable,
-            # diff-friendly file. Just assert sorted fields.
-            self.assertLess(text.index('"last_model"'), text.index('"schema_version"'))
-            self.assertLess(text.index('"model"'), text.index('"saved_at"'))
+            # json.dumps with sort_keys=True yields a stable, diff-friendly file.
+            self.assertLess(text.index('"provider_chosen"'), text.index('"schema_version"'))
 
 
 class ApplyToLlamaConfigTests(unittest.TestCase):
@@ -214,50 +190,66 @@ class ApplyToLlamaConfigTests(unittest.TestCase):
         out = apply_user_preferences_to_llama_config(cfg, default_user_preferences())
         self.assertEqual(out, cfg)
 
-    def test_populated_prefs_override_model(self) -> None:
-        cfg = _make_llama_config(model="old-model")
-        out = apply_user_preferences_to_llama_config(
-            cfg,
-            UserPreferences(last_model=LastModel(model="new-model")),
-        )
-        self.assertEqual(out.model, "new-model")
+    def test_same_backend_is_noop(self) -> None:
+        cfg = _make_llama_config(backend="ollama")
+        out = apply_user_preferences_to_llama_config(cfg, UserPreferences(provider_chosen="ollama"))
+        self.assertEqual(out, cfg)
 
-    def test_apply_does_not_touch_other_fields(self) -> None:
-        cfg = _make_llama_config(
-            backend="ollama",
-            max_tokens=2048,
-        )
-        out = apply_user_preferences_to_llama_config(
-            cfg,
-            UserPreferences(last_model=LastModel(model="new-model")),
-        )
-        self.assertEqual(out.backend, "ollama")
-        self.assertEqual(out.max_tokens, 2048)
-        self.assertEqual(out.model, "new-model")
-
-
-class UpdateLastModelTests(unittest.TestCase):
-    def test_update_writes_last_model(self) -> None:
-        with tempfile_Target(suffix="prefs.json") as target:
-            update_last_model(
-                model="llama3.2",
-                path=target,
+    def test_provider_flip_re_resolves_models_from_env(self) -> None:
+        cfg = _make_llama_config(backend="ollama", model="ollama-chat", embedding_model="ollama-embed")
+        with mock.patch.dict(
+            os.environ,
+            {"OPENROUTER_MODEL": "or/chat", "OPENROUTER_EMBEDDING_MODEL": "or/embed"},
+        ):
+            out = apply_user_preferences_to_llama_config(
+                cfg, UserPreferences(provider_chosen="openrouter")
             )
+        self.assertEqual(out.backend, "openrouter")
+        self.assertEqual(out.model, "or/chat")
+        self.assertEqual(out.embedding_model, "or/embed")
+
+    def test_apply_preserves_non_model_fields(self) -> None:
+        cfg = _make_llama_config(backend="ollama", max_tokens=2048, server_url="http://x:1")
+        with mock.patch.dict(os.environ, {"OPENROUTER_MODEL": "or/chat", "OPENROUTER_EMBEDDING_MODEL": "or/embed"}):
+            out = apply_user_preferences_to_llama_config(
+                cfg, UserPreferences(provider_chosen="openrouter")
+            )
+        self.assertEqual(out.server_url, "http://x:1")
+        self.assertEqual(out.max_tokens, 2048)
+
+    def test_invalid_provider_is_ignored(self) -> None:
+        cfg = _make_llama_config(backend="ollama")
+        # provider_chosen must be a known backend to flip; unknown values are
+        # dropped by the loader so this just guards the no-flip path.
+        out = apply_user_preferences_to_llama_config(cfg, UserPreferences(provider_chosen=""))
+        self.assertEqual(out, cfg)
+
+
+class UpdateProviderChosenTests(unittest.TestCase):
+    def test_update_writes_provider_chosen(self) -> None:
+        with tempfile_Target(suffix="prefs.json") as target:
+            update_provider_chosen(provider="openrouter", path=target)
             loaded = load_user_preferences(path=target)
-        self.assertEqual(loaded.last_model.model, "llama3.2")
-        # saved_at is a recent ISO-8601 UTC timestamp.
-        parsed = datetime.strptime(loaded.last_model.saved_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=UTC
-        )
-        self.assertLess((datetime.now(UTC) - parsed).total_seconds(), 60)
+        self.assertEqual(loaded.provider_chosen, "openrouter")
+
+    def test_update_rejects_unknown_provider(self) -> None:
+        with self.assertRaisesRegex(ValueError, "provider must be"):
+            update_provider_chosen(provider="not-a-backend", path=Path("/tmp/unused.json"))
+
+    def test_all_allowed_backends_round_trip(self) -> None:
+        for backend in ALLOWED_BACKENDS:
+            with tempfile_Target(suffix="prefs.json") as target:
+                update_provider_chosen(provider=backend, path=target)
+                loaded = load_user_preferences(path=target)
+            self.assertEqual(loaded.provider_chosen, backend)
 
 
 def tempfile_Target(suffix: str = "preferences.json"):
     """Yield a unique path under tmp_path for the duration of a `with`.
 
-    Implemented as a context manager helper so individual tests stay
-    readable. Uses ``tempfile.mkstemp`` for the parent dir so tests
-    can run in parallel without colliding.
+    Implemented as a context manager helper so individual tests stay readable.
+    Uses ``tempfile.mkstemp`` for the parent dir so tests can run in parallel
+    without colliding.
     """
     import tempfile
 
@@ -276,30 +268,30 @@ def tempfile_Target(suffix: str = "preferences.json"):
 
 
 class PreferencesLoadPassthroughTests(unittest.TestCase):
-    """``load_user_preferences`` passes the persisted model through unchanged
+    """``load_user_preferences`` passes the persisted provider through unchanged
     and never creates a preferences file when one does not exist.
     """
 
-    def test_load_leaves_unrelated_models_unchanged(self) -> None:
+    def test_load_leaves_unrelated_provider_unchanged(self) -> None:
         with tempfile_Target(suffix="prefs.json") as target:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
-                json.dumps({"last_model": {"model": "llama3.2"}}),
+                json.dumps({"provider_chosen": "openrouter"}),
                 encoding="utf-8",
             )
             prefs = load_user_preferences(path=target)
-            self.assertEqual(prefs.last_model.model, "llama3.2")
+            self.assertEqual(prefs.provider_chosen, "openrouter")
             # And the on-disk file is untouched (no spurious rewrite).
             raw = json.loads(target.read_text(encoding="utf-8"))
-            self.assertEqual(raw["last_model"]["model"], "llama3.2")
+            self.assertEqual(raw["provider_chosen"], "openrouter")
 
-    def test_load_with_no_last_model_does_not_create_file(self) -> None:
+    def test_load_with_no_file_does_not_create_file(self) -> None:
         with tempfile_Target(suffix="prefs.json") as target:
-            # File does not exist — load returns defaults and must NOT
-            # create the file just to persist defaults.
+            # File does not exist — load returns defaults and must NOT create
+            # the file just to persist defaults.
             self.assertFalse(target.exists())
             prefs = load_user_preferences(path=target)
-            self.assertEqual(prefs.last_model.model, "")
+            self.assertEqual(prefs.provider_chosen, "")
             self.assertFalse(target.exists())
 
 

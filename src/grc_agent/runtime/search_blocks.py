@@ -19,8 +19,8 @@ from grc_agent.catalog.loaders import (
 from grc_agent.catalog.schema import BlockDescription
 from grc_agent.domain_models import ErrorCode
 from grc_agent.runtime.catalog_vector import (
-    CATALOG_DB_PATH,
     VectorCatalogStore,
+    catalog_db_path,
     embed_query,
     is_catalog_db_usable,
 )
@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 
 def _ensure_catalog_index(agent: GrcAgent) -> bool:
     """Build the vector index on the fly if missing. Returns True when usable."""
-    if is_catalog_db_usable(CATALOG_DB_PATH):
+    db_path = catalog_db_path(agent._llama_backend)
+    if is_catalog_db_usable(db_path):
         return True
     try:
         snapshot = get_catalog_snapshot(agent.catalog_root)
@@ -61,11 +62,18 @@ def _ensure_catalog_index(agent: GrcAgent) -> bool:
                     "documentation": str(payload.get("documentation") or ""),
                 }
             )
-        store = VectorCatalogStore(CATALOG_DB_PATH, agent._llama_server_url)
-        store.ingest_if_needed(blocks=blocks_payload, server_url=agent._llama_server_url)
+        store = VectorCatalogStore(
+            db_path,
+            agent._llama_server_url,
+            agent._embedding_model,
+            api_key=agent._embedding_api_key,
+        )
+        store.ingest_if_needed(
+            blocks=blocks_payload, server_url=agent._llama_server_url
+        )
     except Exception as exc:
         logger.warning("Catalog vector ingest failed: %s", exc)
-    return is_catalog_db_usable(CATALOG_DB_PATH)
+    return is_catalog_db_usable(db_path)
 
 
 def _render_hit(raw_block: Any, distance: float) -> dict[str, Any] | None:
@@ -121,21 +129,29 @@ def search_blocks(
             agent,
             "Catalog vector index not ready. Build with `make catalog-warmup` or restart the agent.",
             error_type=ErrorCode.RETRIEVAL_NOT_READY,
-            degraded=True,
         )
 
     try:
-        query_vec = embed_query(agent._llama_server_url, q)
+        query_vec = embed_query(
+            agent._llama_server_url,
+            q,
+            model=agent._embedding_model,
+            api_key=agent._embedding_api_key,
+        )
     except Exception as exc:
         return _tool_error(
             agent,
             f"Embedding backend unreachable: {exc}",
             error_type=ErrorCode.RETRIEVAL_NOT_READY,
-            degraded=True,
         )
 
     try:
-        store = VectorCatalogStore(CATALOG_DB_PATH, agent._llama_server_url)
+        store = VectorCatalogStore(
+            catalog_db_path(agent._llama_backend),
+            agent._llama_server_url,
+            agent._embedding_model,
+            api_key=agent._embedding_api_key,
+        )
         # Pull one extra neighbour so we can detect truncation.
         neighbours = store.search(q, query_vec, limit + 1)
     except Exception as exc:
@@ -143,7 +159,6 @@ def search_blocks(
             agent,
             f"Catalog vector search failed: {exc}",
             error_type=ErrorCode.RETRIEVAL_NOT_READY,
-            degraded=True,
         )
 
     try:
@@ -153,7 +168,6 @@ def search_blocks(
             agent,
             f"Catalog unavailable: {exc}",
             error_type=ErrorCode.RETRIEVAL_NOT_READY,
-            degraded=True,
         )
 
     rows: list[dict[str, Any]] = []
@@ -183,7 +197,6 @@ def _tool_error(
     message: str,
     *,
     error_type: str = ErrorCode.INVALID_REQUEST,
-    degraded: bool = False,
 ) -> ToolResult:
     payload = {
         "ok": False,

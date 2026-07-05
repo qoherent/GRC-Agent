@@ -26,12 +26,10 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import sqlite_vec
 from grc_agent.domain_models import ErrorCode
 from grc_agent.runtime._embedding_config import (
     _DOCUMENT_PREFIX,
-    _EMBED_DIM,
     _EMBED_MAX_WORDS,
     _EMBED_MODEL,
     _MAX_CONTEXT_WORDS,
@@ -55,31 +53,74 @@ DB_DIR = Path(
         str(Path(__file__).resolve().parents[1] / "vectors"),
     )
 )
-DB_PATH = DB_DIR / "docs_v1.db"
+
+
+def docs_db_path(backend: str) -> Path:
+    """Per-backend docs vector DB: ``<DB_DIR>/docs_<backend>.db``.
+
+    Each backend owns its own embedding model and therefore its own index;
+    switching backend swaps which pair is active without a rebuild.
+    """
+    return DB_DIR / f"docs_{backend}.db"
+
+
+# Legacy module-level constant (ollama path) for importers that don't know the
+# active backend. The live pipeline resolves the per-backend path via the agent.
+DB_PATH = docs_db_path("ollama")
 DOCS_DIR = Path(__file__).resolve().parents[3] / "docs" / "wiki_gnuradio_org"
 
 
 # --- Embedding ---------------------------------------------------------------
 
 
-def get_embedding(server_url: str, text: str, *, model: str = _EMBED_MODEL) -> list[float]:
-    """Embed one text via the local embeddinggemma server.
+def _openai_v1_base_url(server_url: str) -> str:
+    """Normalize a backend server URL to its OpenAI-compatible ``/v1`` endpoint.
 
-    Exposed as the single shared embedder; catalog blocks use the same call.
+    One uniform rule for both backends: Ollama (``http://localhost:11434``) and
+    OpenRouter (``https://openrouter.ai/api``) both expose ``/v1/embeddings``.
     """
-    response = httpx.post(
-        f"{server_url.rstrip('/')}/api/embeddings",
-        json={"model": model, "prompt": text},
-        timeout=30.0,
+    base = server_url.rstrip("/")
+    if base.endswith("/v1"):
+        return base
+    return f"{base}/v1"
+
+
+def get_embedding(
+    server_url: str,
+    text: str,
+    *,
+    model: str = _EMBED_MODEL,
+    api_key: str = "not-needed",
+    timeout: float = 30.0,
+) -> list[float]:
+    """Embed one text via the OpenAI-compatible ``/v1/embeddings`` endpoint.
+
+    Single code path for both backends (Approach A): Ollama
+    (``api_key`` ignored by the server) and OpenRouter (``api_key``
+    required). Mirrors how the chat path uses the ``openai`` SDK against
+    ``/v1/chat/completions`` for both backends. Exposed as the single shared
+    embedder; catalog blocks use the same call.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url=_openai_v1_base_url(server_url),
+        api_key=api_key,
+        timeout=timeout,
     )
-    response.raise_for_status()
-    payload = response.json()
-    return list(payload["embedding"])
+    response = client.embeddings.create(model=model, input=text)
+    return list(response.data[0].embedding)
 
 
-def embed_query(server_url: str, query: str, *, model: str = _EMBED_MODEL) -> list[float]:
+def embed_query(
+    server_url: str,
+    query: str,
+    *,
+    model: str = _EMBED_MODEL,
+    api_key: str = "not-needed",
+) -> list[float]:
     """Embed a search query with the uniform query prefix."""
-    return get_embedding(server_url, _QUERY_PREFIX + query, model=model)
+    return get_embedding(server_url, _QUERY_PREFIX + query, model=model, api_key=api_key)
 
 
 # --- Chunking ---------------------------------------------------------------
@@ -117,17 +158,30 @@ def compose_chunk_text(path: Path, heading: str, body: str) -> str:
 
 # --- Vector store ------------------------------------------------------------
 
-_EMBED_DIM = 768  # embeddinggemma float32
-
 
 class VectorDocsStore(VectorStoreBase):
     """sqlite-vec backed KNN store over the GNU Radio docs wiki."""
 
-    def __init__(self, db_path: Path, server_url: str):
+    def __init__(
+        self,
+        db_path: Path,
+        server_url: str,
+        embedding_model: str,
+        *,
+        api_key: str = "not-needed",
+    ):
         self.db_path = db_path
         self.server_url = server_url
+        self.embedding_model = embedding_model
+        self.api_key = api_key
 
-    def init_db(self, conn: sqlite3.Connection) -> None:
+    def _table_chunks(self) -> str:
+        return "docs_chunks"
+
+    def _table_idx(self) -> str:
+        return "docs_idx"
+
+    def init_db(self, conn: sqlite3.Connection, dim: int) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS docs_chunks ("
             "rowid INTEGER PRIMARY KEY, "
@@ -137,33 +191,44 @@ class VectorDocsStore(VectorStoreBase):
         )
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS docs_idx USING vec0("
-            f"embedding float[{_EMBED_DIM}])"
+            f"embedding float[{dim}])"
         )
 
     def ingest_if_needed(self, corpus_dir: Path | None = None) -> int:
         """Build the docs index from ``corpus_dir`` (default ``DOCS_DIR``).
 
-        Idempotent: returns early when ``docs_chunks`` is already populated.
+        Idempotent: returns early when the index already matches the current
+        embedding model. Rebuilds (drops + re-ingests) when the stamped model
+        no longer matches, so switching embedding models is safe and automatic.
         Returns the number of newly-inserted chunks.
         """
         corpus_dir = corpus_dir or DOCS_DIR
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = self._get_connection()
         try:
-            try:
-                count = conn.execute("SELECT count(*) FROM docs_chunks").fetchone()[0]
-                if count > 0:
-                    return 0
-            except sqlite3.OperationalError:
-                pass
+            meta = self._read_embed_meta(conn)
+            if meta is not None and meta[0] == self.embedding_model and self._is_populated(conn):
+                return 0
 
-            self.init_db(conn)
+            # Either fresh, or the stamped model differs → probe dim + (re)build.
+            probe = get_embedding(
+                self.server_url, _DOCUMENT_PREFIX + "dimension probe",
+                model=self.embedding_model, api_key=self.api_key,
+            )
+            dim = len(probe)
+
+            # Either fresh, or the stamped model/dim differs → (re)build.
+            self._drop_index_tables(conn)
+            self.init_db(conn, dim)
             inserted = 0
             for md_path in sorted(corpus_dir.glob("*.md")):
                 for chunk in _chunk_markdown(md_path):
                     embed_text = compose_chunk_text(md_path, chunk["heading"], chunk["text"])
                     try:
-                        embedding = get_embedding(self.server_url, embed_text)
+                        embedding = get_embedding(
+                            self.server_url, embed_text,
+                            model=self.embedding_model, api_key=self.api_key,
+                        )
                     except Exception as exc:
                         logger.warning("Failed to embed %s#%s: %s", md_path.name, chunk["heading"], exc)
                         continue
@@ -178,6 +243,7 @@ class VectorDocsStore(VectorStoreBase):
                         (rowid, sqlite_vec.serialize_float32(embedding)),
                     )
                     inserted += 1
+            self._write_embed_meta(conn, self.embedding_model, dim)
             conn.commit()
             logger.info("Docs vector index ingested %d chunks.", inserted)
             return inserted
@@ -213,26 +279,19 @@ class VectorDocsStore(VectorStoreBase):
             conn.close()
 
 
-def is_docs_db_usable(db_path: Path) -> bool:
-    """Sole gate: the docs DB exists and has chunks indexed."""
-    if not db_path.exists():
-        return False
-    try:
-        conn = sqlite3.connect(str(db_path))
-        total = conn.execute("SELECT count(*) FROM docs_chunks").fetchone()[0]
-        conn.close()
-    except sqlite3.Error:
-        return False
-    return total > 0
-
-
 # --- Warmup ------------------------------------------------------------------
 
 
-def initialize_vector_db_background(db_path: Path, server_url: str) -> None:
+def initialize_vector_db_background(
+    db_path: Path,
+    server_url: str,
+    embedding_model: str,
+    *,
+    api_key: str = "not-needed",
+) -> None:
     """Ingest the docs corpus if not yet indexed. Thread-safe; tolerates failures."""
     try:
-        store = VectorDocsStore(db_path, server_url)
+        store = VectorDocsStore(db_path, server_url, embedding_model, api_key=api_key)
         store.ingest_if_needed()
     except Exception as exc:
         logger.warning("docs vector warmup failed: %s", exc)
@@ -297,8 +356,18 @@ def ask_grc_docs(
     num_chunks = agent._retrieval_cfg.ask_grc_docs_default_k
 
     try:
-        store = VectorDocsStore(DB_PATH, agent._llama_server_url)
-        query_vec = embed_query(agent._llama_server_url, question.strip())
+        store = VectorDocsStore(
+            docs_db_path(agent._llama_backend),
+            agent._llama_server_url,
+            agent._embedding_model,
+            api_key=agent._embedding_api_key,
+        )
+        query_vec = embed_query(
+            agent._llama_server_url,
+            question.strip(),
+            model=agent._embedding_model,
+            api_key=agent._embedding_api_key,
+        )
         # Retrieve the top-k chunks directly — the KNN already ranks by
         # relevance; no file-level dedup or full-file reload needed.
         chunk_hits = store.search(query_vec, num_chunks)

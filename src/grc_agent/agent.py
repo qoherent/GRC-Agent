@@ -1,13 +1,14 @@
 """The GrcAgent: tool registry, dispatch, lifecycle, history journal.
 
-Exposes the 3-tool MVP model surface (inspect_graph, change_graph,
-query_knowledge) over a local FlowgraphSession backed by the native
-grc_native_adapter.
+Exposes the 5-tool MVP model surface (inspect_graph, query_knowledge,
+web_search, web_fetch, change_graph) over a local FlowgraphSession backed by
+the native grc_native_adapter.
 """
 
 import copy
 import json
 import logging
+import os
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -78,7 +79,14 @@ class GrcAgent:
             if isinstance(llama_model, str) and llama_model.strip()
             else llama_defaults.model
         )
+        self._llama_backend = llama_defaults.backend
         self._embedding_model = llama_defaults.embedding_model
+        # Embeddings ride the same backend as chat (Approach A): OpenRouter
+        # embeddings need OPENROUTER_API_KEY; Ollama ignores the key. Resolved
+        # once here and refreshable via ``reconfigure_llama_runtime`` after a
+        # GUI backend swap so the embedding path always matches the active chat
+        # backend.
+        self._embedding_api_key = self._resolve_embedding_api_key(self._llama_backend)
         self._llama_request_timeout_seconds = (
             float(llama_request_timeout_seconds)
             if isinstance(llama_request_timeout_seconds, int | float)
@@ -106,31 +114,73 @@ class GrcAgent:
     def warmup_vector_index(self) -> None:
         """Kick off background ingestion for both vector indexes (docs + catalog).
 
-        Production entry points (CLI, GUI) call this once after constructing
+        Production entry points (the GUI) call this once after constructing
         the agent so the indexes auto-create on first boot if missing. Both
-        stores are idempotent (no-op once populated), so this is safe to call
-        every boot. Tests MUST NOT call it: ingestion writes to the real DB
-        paths and would be affected by test-time mocks of the embedding
-        function.
+        stores are idempotent (no-op once the stamped embedding model
+        matches), so this is safe to call every boot. Tests MUST NOT call it:
+        ingestion writes to the real DB paths and would be affected by
+        test-time mocks of the embedding function.
         """
         import threading
 
         from grc_agent.retrieval import warmup_catalog_vector_index
-        from grc_agent.runtime.doc_answer import DB_PATH, initialize_vector_db_background
+        from grc_agent.runtime.doc_answer import docs_db_path, initialize_vector_db_background
 
+        backend = self._llama_backend
         server_url = self._llama_server_url
+        embedding_model = self._embedding_model
+        api_key = self._embedding_api_key
+        db_path = docs_db_path(backend)
 
         def _warm() -> None:
             try:
-                initialize_vector_db_background(DB_PATH, server_url)
+                initialize_vector_db_background(
+                    db_path, server_url, embedding_model, api_key=api_key
+                )
             except Exception:
                 logger.exception("docs vector index warmup failed")
             try:
-                warmup_catalog_vector_index(server_url=server_url)
+                warmup_catalog_vector_index(
+                    server_url=server_url,
+                    backend=backend,
+                    embedding_model=embedding_model,
+                    api_key=api_key,
+                )
             except Exception:
                 logger.exception("catalog vector index warmup failed")
 
         threading.Thread(target=_warm, daemon=True).start()
+
+    @staticmethod
+    def _resolve_embedding_api_key(backend: str) -> str:
+        """OpenRouter embeddings need ``OPENROUTER_API_KEY``; Ollama ignores it."""
+        if backend == "openrouter":
+            return os.environ.get("OPENROUTER_API_KEY") or "not-needed"
+        return "not-needed"
+
+    def reconfigure_llama_runtime(
+        self,
+        *,
+        backend: str | None = None,
+        server_url: str | None = None,
+        chat_model: str | None = None,
+        embedding_model: str | None = None,
+    ) -> None:
+        """Update the agent's cached LLM/embedding runtime params.
+
+        Called by the GUI after a successful backend/model swap so the
+        embedding path (which reads these cached attrs) stays in sync with
+        the active chat backend. Model names are sourced from ``.env``.
+        """
+        if backend is not None:
+            self._llama_backend = backend
+            self._embedding_api_key = self._resolve_embedding_api_key(self._llama_backend)
+        if server_url is not None and isinstance(server_url, str) and server_url.strip():
+            self._llama_server_url = server_url
+        if chat_model is not None and isinstance(chat_model, str) and chat_model.strip():
+            self._llama_model = chat_model
+        if embedding_model is not None and isinstance(embedding_model, str) and embedding_model.strip():
+            self._embedding_model = embedding_model
 
     def reset_chat_session(self) -> None:
         """Reset the chat session history and generate a new session ID to clear KV cache matching."""
@@ -349,7 +399,7 @@ class GrcAgent:
         return render_model_messages(
             self.chat_history,
             system_prompt=self.get_system_prompt(),
-            semantic_search_result_preview=lambda *_, **kw: [],
+            semantic_search_result_preview=lambda *a, **_kw: [],
             reminder=reminder,
             system_salt=system_salt,
         )

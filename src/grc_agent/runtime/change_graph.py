@@ -87,9 +87,8 @@ class ChangeGraphContext:
 def _as_list_safe(value: Any) -> list[Any]:
     """Coerce a raw input to a list, accepting None as empty.
 
-    Wraps the existing ``_as_list`` (which records errors) with a
-    no-side-effect variant for context construction where we have
-    no error sink to populate.
+    No-side-effect variant of list coercion for context construction where we
+    have no error sink to populate.
     """
     if value is None:
         return []
@@ -505,15 +504,6 @@ def dispatch_flat_change_graph_batch(
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
-
-
-def _as_list(value: Any, field_name: str, errors: list[dict[str, str]]) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    errors.append({"code": "invalid_field", "message": f"{field_name} must be a list."})
-    return []
 
 
 def _neighbor_dtype_for(
