@@ -115,7 +115,9 @@ def set_env_model(var: str, value: str, *, env_path: Path | None = None) -> Path
 
     _ensure_dotenv_loaded()
     if env_path is None:
-        env_path = next((c for c in _env_file_candidates() if c.is_file()), _env_file_candidates()[-1])
+        env_path = next(
+            (c for c in _env_file_candidates() if c.is_file()), _env_file_candidates()[-1]
+        )
     env_path.parent.mkdir(parents=True, exist_ok=True)
     if not env_path.exists():
         env_path.touch()
@@ -167,10 +169,8 @@ class HistoryConfig:
 
 @dataclass(frozen=True)
 class GuardrailsConfig:
-    """Configurable defaults for bounded outputs and inspect limits."""
+    """Configurable defaults for inspect limits."""
 
-    max_tool_output_bytes: int
-    max_compact_list_items: int
     max_inspect_targets: int = 8
 
 
@@ -181,18 +181,13 @@ DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig(
 
 DEFAULT_HISTORY_CONFIG = HistoryConfig(checkpoint_retention=100)
 
-DEFAULT_GUARDRAILS_CONFIG = GuardrailsConfig(
-    max_tool_output_bytes=32768,
-    max_compact_list_items=3,
-)
+DEFAULT_GUARDRAILS_CONFIG = GuardrailsConfig()
 
 
 @dataclass(frozen=True)
 class AgentConfig:
     """Configurable defaults for the GrcAgent behavior."""
 
-    history_compact_budget: int
-    max_tool_result_chars: int = 4000
     retrieval: RetrievalConfig = DEFAULT_RETRIEVAL_CONFIG
     history: HistoryConfig = DEFAULT_HISTORY_CONFIG
     guardrails: GuardrailsConfig = DEFAULT_GUARDRAILS_CONFIG
@@ -226,9 +221,7 @@ def default_app_config() -> AppConfig:
             embedding_model=default_embedding_model(backend),
             backend=backend,
         ),
-        agent=AgentConfig(
-            history_compact_budget=100000,
-        ),
+        agent=AgentConfig(),
     )
     _validate_cross_field_constraints(config)
     return config
@@ -280,15 +273,6 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
         history_table = agent_table.get("history")
         guardrails_table = agent_table.get("guardrails")
         agent_config = AgentConfig(
-            history_compact_budget=_require_positive_int(
-                agent_table, "history_compact_budget", context="[agent]"
-            ),
-            max_tool_result_chars=_optional_positive_int(
-                agent_table,
-                "max_tool_result_chars",
-                default=defaults.agent.max_tool_result_chars,
-                context="[agent]",
-            ),
             retrieval=_retrieval_config(
                 retrieval_table if isinstance(retrieval_table, dict) else {},
                 defaults=defaults.agent.retrieval,
@@ -447,18 +431,6 @@ def _guardrails_config(
     defaults: GuardrailsConfig,
 ) -> GuardrailsConfig:
     return GuardrailsConfig(
-        max_tool_output_bytes=_optional_positive_int(
-            table,
-            "max_tool_output_bytes",
-            default=defaults.max_tool_output_bytes,
-            context="[agent.guardrails]",
-        ),
-        max_compact_list_items=_optional_positive_int(
-            table,
-            "max_compact_list_items",
-            default=defaults.max_compact_list_items,
-            context="[agent.guardrails]",
-        ),
         max_inspect_targets=_optional_positive_int(
             table,
             "max_inspect_targets",
@@ -474,8 +446,6 @@ def _validate_cross_field_constraints(config: AppConfig) -> None:
         raise ConfigError(
             f"[llama].backend must be one of {sorted(ALLOWED_BACKENDS)}; found '{config.llama.backend}'."
         )
-
-
 
 
 def update_toml_config_file(config_path: Path, updates: dict[str, Any]) -> None:

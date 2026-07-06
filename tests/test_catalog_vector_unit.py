@@ -101,8 +101,8 @@ def test_compose_includes_passed_params_verbatim():
     assert "param: type" in text
 
 
-def test_compose_caps_at_256_words():
-    long_doc = " ".join(f"word{i}" for i in range(500))
+def test_compose_caps_at_900_words():
+    long_doc = " ".join(f"word{i}" for i in range(1500))
     text = compose_block_embed_text(
         block_id="x",
         label="X",
@@ -111,14 +111,14 @@ def test_compose_caps_at_256_words():
         ports=(),
         documentation=long_doc,
     )
-    # The cap is 256 words; allow a small slack for the prefix parts
+    # The cap is 900 words; allow a small slack for the prefix parts
     # (label, block_id, category) that share the budget.
     body_only = text.split("[TRUNCATED")[0]
     word_count = len(body_only.split())
-    assert word_count <= 270, f"body has {word_count} words, expected <= 270"
-    assert word_count < 506, "truncation did not happen"
+    assert word_count <= 910, f"body has {word_count} words, expected <= 910"
+    assert word_count < 1506, "truncation did not happen"
     assert "TRUNCATED" in text
-    assert "was 506 words, kept 256" in text
+    assert "was 1506 words, kept 900" in text
 
 
 # --- integration with the real GRC platform -------------------------------
@@ -193,7 +193,9 @@ def test_visible_params_filters_real_qtgui_time_sink_x():
 def test_keep_param_drops_id_uniformly():
     """The 'id' param is the block's instance name — redundant with the
     instance_name field every payload already carries. keep_param must drop it
-    in every mode (one uniform rule)."""
+    in every mode (one uniform rule). GRC's own native dtype for this param
+    is literally 'id' (see gnuradio.grc.core.params._build), which is what
+    keep_param actually gates on."""
     from grc_agent.runtime.param_filter import DETAILS, OVERVIEW, keep_param
 
     for mode in (OVERVIEW, DETAILS):
@@ -201,7 +203,7 @@ def test_keep_param_drops_id_uniformly():
             keep_param(
                 hide="none",
                 category="General",
-                dtype="raw",
+                dtype="id",
                 value="samp_rate",
                 default="samp_rate",
                 mode=mode,
@@ -241,13 +243,19 @@ def test_block_description_payload_drops_id_keeps_domain():
         category_path=["Math Operators"],
         flags=[],
         parameters=[
-            NormalizedParameter(id="id", dtype="raw", default="blocks_multiply_xx"),
-            NormalizedParameter(id="type", dtype="enum", default="complex",
-                                options=["complex", "float", "int", "short"]),
+            NormalizedParameter(id="id", dtype="id", default="blocks_multiply_xx"),
+            NormalizedParameter(
+                id="type",
+                dtype="enum",
+                default="complex",
+                options=["complex", "float", "int", "short"],
+            ),
             NormalizedParameter(id="vlen", dtype="int", default="1"),
         ],
-        inputs=[NormalizedPort(id="0", domain="stream", dtype="complex"),
-                NormalizedPort(id="msg", domain="message", dtype="message")],
+        inputs=[
+            NormalizedPort(id="0", domain="stream", dtype="complex"),
+            NormalizedPort(id="msg", domain="message", dtype="message"),
+        ],
         outputs=[NormalizedPort(id="0", domain="stream", dtype="complex")],
         asserts=[],
         documentation=None,

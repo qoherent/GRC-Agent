@@ -77,11 +77,7 @@ class ChangeGraphContext:
             for e in self.add_blocks_list
             if isinstance(e, dict) and str(e.get("instance_name", "")).strip()
         }
-        self.removed_names = {
-            str(e).strip()
-            for e in self.remove_blocks_list
-            if str(e).strip()
-        }
+        self.removed_names = {str(e).strip() for e in self.remove_blocks_list if str(e).strip()}
 
 
 def _as_list_safe(value: Any) -> list[Any]:
@@ -111,17 +107,21 @@ def _phase_add_blocks(ctx: ChangeGraphContext) -> None:
         block_id = str(entry.get("block_id", "")).strip()
         instance_name = str(entry.get("instance_name", "")).strip()
         if not block_id or not instance_name:
-            ctx.errors.append({
-                "code": "invalid_block",
-                "message": f"add_blocks entry needs block_id and instance_name: {entry}",
-            })
+            ctx.errors.append(
+                {
+                    "code": "invalid_block",
+                    "message": f"add_blocks entry needs block_id and instance_name: {entry}",
+                }
+            )
             continue
         try:
             ctx.fg.get_block(instance_name)
-            ctx.errors.append({
-                "code": "duplicate_block_name",
-                "message": f"a block named {instance_name!r} already exists",
-            })
+            ctx.errors.append(
+                {
+                    "code": "duplicate_block_name",
+                    "message": f"a block named {instance_name!r} already exists",
+                }
+            )
             continue
         except KeyError:
             pass
@@ -151,14 +151,16 @@ def _phase_remove_blocks(ctx: ChangeGraphContext) -> None:
         if not name:
             continue
         if "->" in name:
-            ctx.errors.append({
-                "code": "remove_block_failed",
-                "message": (
-                    f"You passed {name!r} to remove_blocks. This looks like a "
-                    "connection ID. Connections must be removed using the "
-                    "remove_connections parameter, not remove_blocks."
-                ),
-            })
+            ctx.errors.append(
+                {
+                    "code": "remove_block_failed",
+                    "message": (
+                        f"You passed {name!r} to remove_blocks. This looks like a "
+                        "connection ID. Connections must be removed using the "
+                        "remove_connections parameter, not remove_blocks."
+                    ),
+                }
+            )
             continue
         try:
             apply_mutation(ctx.fg, "remove_block", instance_name=name)
@@ -178,15 +180,15 @@ def _phase_update_params(ctx: ChangeGraphContext) -> None:
         name = str(entry.get("instance_name", "")).strip()
         params = entry.get("params") or {}
         if not name:
-            ctx.errors.append({
-                "code": "invalid_update",
-                "message": f"update_params entry needs instance_name: {entry}",
-            })
+            ctx.errors.append(
+                {
+                    "code": "invalid_update",
+                    "message": f"update_params entry needs instance_name: {entry}",
+                }
+            )
             continue
         try:
-            apply_mutation(
-                ctx.fg, "update_params", instance_name=name, params=params
-            )
+            apply_mutation(ctx.fg, "update_params", instance_name=name, params=params)
             ctx.ops_applied += 1
         except KeyError as exc:
             ctx.errors.append({"code": "parameter_not_found", "message": str(exc)})
@@ -213,18 +215,14 @@ def _phase_auto_resolve_types(ctx: ChangeGraphContext) -> None:
             continue
         if "type" not in block.params:
             continue
-        dtype = _neighbor_dtype_for(
-            ctx.fg, name, ctx.add_connections_list, ctx.new_block_names
-        )
+        dtype = _neighbor_dtype_for(ctx.fg, name, ctx.add_connections_list, ctx.new_block_names)
         if not dtype:
             continue
         try:
             block.params["type"].set_value(dtype)
             ctx.fg.rewrite()
         except Exception as exc:
-            logger.warning(
-                "Failed to auto-resolve type for block %s: %s", name, exc
-            )
+            logger.warning("Failed to auto-resolve type for block %s: %s", name, exc)
 
 
 def _phase_update_states(ctx: ChangeGraphContext) -> None:
@@ -239,12 +237,12 @@ def _phase_update_states(ctx: ChangeGraphContext) -> None:
         name = str(entry.get("instance_name", "")).strip()
         state = str(entry.get("state", "")).strip()
         if not name or not state:
-            ctx.errors.append({
-                "code": "invalid_state",
-                "message": (
-                    f"update_states entry needs instance_name and state: {entry}"
-                ),
-            })
+            ctx.errors.append(
+                {
+                    "code": "invalid_state",
+                    "message": (f"update_states entry needs instance_name and state: {entry}"),
+                }
+            )
             continue
         try:
             apply_mutation(ctx.fg, "update_states", instance_name=name, state=state)
@@ -269,14 +267,13 @@ def _phase_remove_connections(ctx: ChangeGraphContext) -> None:
         if not parsed:
             hint = ""
             if "->" not in conn_id:
-                hint = (
-                    f" Did you mean to pass {conn_id!r} to "
-                    "remove_blocks instead?"
-                )
-            ctx.errors.append({
-                "code": "invalid_connection",
-                "message": f"unparseable connection_id: {conn_id!r}.{hint}",
-            })
+                hint = f" Did you mean to pass {conn_id!r} to remove_blocks instead?"
+            ctx.errors.append(
+                {
+                    "code": "invalid_connection",
+                    "message": f"unparseable connection_id: {conn_id!r}.{hint}",
+                }
+            )
             continue
         try:
             apply_mutation(
@@ -291,10 +288,12 @@ def _phase_remove_connections(ctx: ChangeGraphContext) -> None:
         except KeyError:
             pass  # already gone — desired state achieved.
         except Exception as exc:
-            ctx.errors.append({
-                "code": "remove_connection_failed",
-                "message": str(exc),
-            })
+            ctx.errors.append(
+                {
+                    "code": "remove_connection_failed",
+                    "message": str(exc),
+                }
+            )
 
 
 def _phase_add_connections(ctx: ChangeGraphContext) -> None:
@@ -307,10 +306,12 @@ def _phase_add_connections(ctx: ChangeGraphContext) -> None:
     for entry in ctx.add_connections_list:
         parsed = parse_connection_id(str(entry))
         if not parsed:
-            ctx.errors.append({
-                "code": "invalid_connection",
-                "message": f"unparseable connection: {entry!r}",
-            })
+            ctx.errors.append(
+                {
+                    "code": "invalid_connection",
+                    "message": f"unparseable connection: {entry!r}",
+                }
+            )
             continue
         try:
             apply_mutation(
@@ -368,10 +369,12 @@ def dispatch_flat_change_graph_batch(
             {
                 "ok": False,
                 "error_type": ErrorCode.STALE_REVISION,
-                "errors": [{
-                    "code": ErrorCode.STALE_REVISION,
-                    "message": "file changed on disk; reload before editing",
-                }],
+                "errors": [
+                    {
+                        "code": ErrorCode.STALE_REVISION,
+                        "message": "file changed on disk; reload before editing",
+                    }
+                ],
             },
         )
 
@@ -406,8 +409,7 @@ def dispatch_flat_change_graph_batch(
     # removal which orphans another block's port can be traced causally and
     # surfaced as a validation hint (deterministic topology offloading).
     ctx.pre_edges = {
-        connection_id(c.source_block.name, c.source_port.key,
-                      c.sink_block.name, c.sink_port.key)
+        connection_id(c.source_block.name, c.source_port.key, c.sink_block.name, c.sink_port.key)
         for c in fg.connections
     }
 
@@ -418,15 +420,22 @@ def dispatch_flat_change_graph_batch(
     # when the neighbor dtype is read), so it would otherwise overwrite a type
     # set via update_params.
     ctx.type_already_set = {
-        name for name in ctx.new_block_names
-        if name in {
-            *(str(e.get("instance_name", "")).strip()
-              for e in ctx.add_blocks_list
-              if isinstance(e, dict) and "type" in (e.get("params") or {})),
-            *(str(e.get("instance_name", "")).strip()
-              for e in ctx.update_params_list
-              if isinstance(e, dict) and "type" in (e.get("params") or {})
-              and str(e.get("instance_name", "")).strip() in ctx.new_block_names),
+        name
+        for name in ctx.new_block_names
+        if name
+        in {
+            *(
+                str(e.get("instance_name", "")).strip()
+                for e in ctx.add_blocks_list
+                if isinstance(e, dict) and "type" in (e.get("params") or {})
+            ),
+            *(
+                str(e.get("instance_name", "")).strip()
+                for e in ctx.update_params_list
+                if isinstance(e, dict)
+                and "type" in (e.get("params") or {})
+                and str(e.get("instance_name", "")).strip() in ctx.new_block_names
+            ),
         }
     }
 
@@ -486,12 +495,9 @@ def dispatch_flat_change_graph_batch(
     # force=True, or rolled back). The model needs to know the graph is
     # invalid so it can decide whether to fix the issue or set force=true.
     if validation_errors and not validation_native_ok:
-        type_hint = _type_hint_for_validation(
-            fg, validation_errors, ctx.new_block_names
-        )
+        type_hint = _type_hint_for_validation(fg, validation_errors, ctx.new_block_names)
         orphaned_hints = (
-            _orphaned_port_hints(ctx.pre_edges, ctx.removed_names)
-            if ctx.removed_names else {}
+            _orphaned_port_hints(ctx.pre_edges, ctx.removed_names) if ctx.removed_names else {}
         )
         for entry in _validation_error_entries(validation_errors, type_hint, orphaned_hints):
             payload.setdefault("errors", []).append(entry)
@@ -676,9 +682,7 @@ def _connection_dtype_hint(
     return None
 
 
-def _orphaned_port_hints(
-    pre_edges: set[str], removed_names: set[str]
-) -> dict[str, str]:
+def _orphaned_port_hints(pre_edges: set[str], removed_names: set[str]) -> dict[str, str]:
     """Map orphaned block name -> causal hint.
 
     For each pre-batch edge that touched a removed block, the OTHER endpoint's

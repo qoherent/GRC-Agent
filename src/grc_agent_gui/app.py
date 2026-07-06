@@ -102,10 +102,10 @@ def main() -> None:
         app.setWindowIcon(QIcon(str(icon_path)))
 
     from PySide6.QtCore import QSettings
+
     settings = QSettings("GRC_Agent", "GUI")
     zoom_factor = float(settings.value("window/zoom_factor", 3.5))
     app.setStyleSheet(get_stylesheet(zoom_factor))
-
 
     config = load_app_config()
     # Overlay user preferences onto the config. Preferences carry only the

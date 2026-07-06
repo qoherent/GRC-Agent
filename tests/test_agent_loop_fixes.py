@@ -2,8 +2,6 @@
 
 Tests cover:
   Fix #1: No premature exit on commit (commit result flows as role:"tool")
-  Fix #2: Transient reminder (not in agent history), recency bias (at end),
-          template safety (Custom role tag, not role:"system" mid-stream)
   Fix #3: No forced_next_tool_name / forced tool_choice remnants
   Fix #4: update_states flat enum accepted; old object schema rejected
 """
@@ -19,8 +17,6 @@ from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
-from grc_agent.runtime.model_context import build_system_prompt, render_model_messages
-from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import (
     ChatMessage,
     ChatMessageRole,
@@ -40,6 +36,7 @@ def _stream_finished(msg: ChatMessage):
         finished_chat_message=msg,
     )
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -47,16 +44,6 @@ def _stream_finished(msg: ChatMessage):
 
 def _now() -> datetime.datetime:
     return datetime.datetime.now()
-
-
-def _user_message(text: str) -> ChatMessage:
-    return ChatMessage(
-        id=f"u-{text[:8]}",
-        role=ChatMessageRole.User,
-        content=[TextContent(content=text)],
-        created_at=_now(),
-        updated_at=_now(),
-    )
 
 
 def _assistant_message(text: str) -> ChatMessage:
@@ -88,253 +75,11 @@ def _assistant_with_tool_calls(calls: list[tuple[str, str, dict]]) -> ChatMessag
     )
 
 
-def _tool_history_record(name: str, content: dict, call_id: str = "fake-call-id") -> ChatMessage:
-    return ChatMessage(
-        id=f"t-{call_id}",
-        role=ChatMessageRole.Tool,
-        content=[
-            ToolCallResultContent(
-                tool_call_result_id=f"r-{call_id}",
-                tool_call_id=call_id,
-                tool_call_name=name,
-                tool_call_result=json.dumps(content, sort_keys=True),
-            )
-        ],
-        created_at=_now(),
-        updated_at=_now(),
-    )
-
-
 def _fixture_path(name: str) -> Path:
     return Path(__file__).resolve().parent / "data" / name
 
 
 # ---------------------------------------------------------------------------
-# Fix #2: Transient Reminder — never persisted to agent history
-# ---------------------------------------------------------------------------
-
-
-class Fix2TransientReminderTests(unittest.TestCase):
-    """render_model_messages uses reminder transiently — not persisted."""
-
-    def test_reminder_is_not_persisted_to_history(self) -> None:
-        history = ChatHistory()
-        history.add_message(_user_message("Change samp_rate to 48000"))
-        _messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Call inspect_graph first.",
-        )
-        self.assertEqual(history.get_message_count(), 1)
-        reminder_in_history = any(
-            "Runtime reminder" in (item.content if isinstance(item, TextContent) else "")
-            for message in history.get_messages()
-            for item in message.content
-            if isinstance(item, TextContent)
-        )
-        self.assertFalse(reminder_in_history)
-
-    def test_no_reminder_when_none_passed(self) -> None:
-        history = ChatHistory()
-        history.add_message(_user_message("What is the sample rate?"))
-        history.add_message(_tool_history_record("inspect_graph", {"ok": True, "view": "overview"}))
-        history.add_message(_assistant_message("The sample rate is 32000."))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder=None,
-        )
-        has_reminder = any("Runtime reminder" in message.get_as_text() for message in messages)
-        self.assertFalse(has_reminder)
-
-    def test_reminder_does_not_alter_agent_get_model_messages_history(self) -> None:
-        agent = GrcAgent()
-        agent.chat_history.add_user_message("Disable the throttle block.")
-        before_count = agent.chat_history.get_message_count()
-
-        msgs = agent.get_model_messages(reminder="You need inspect_graph evidence.")
-        after_count = agent.chat_history.get_message_count()
-
-        self.assertEqual(after_count, before_count)
-        has_reminder = any("runtime_directive" in m.get_as_text() for m in msgs)
-        self.assertTrue(has_reminder)
-
-
-# ---------------------------------------------------------------------------
-# Fix #2: Recency Bias — reminder at END of messages array
-# ---------------------------------------------------------------------------
-
-
-class Fix2RecencyBiasTests(unittest.TestCase):
-    """render_model_messages places the reminder at the END."""
-
-    def test_reminder_after_all_history(self) -> None:
-        history = ChatHistory()
-        history.add_message(_user_message("Inspect the graph."))
-        history.add_message(_tool_history_record("inspect_graph", {"ok": True, "summary": "..."}))
-        history.add_message(_assistant_message("I see the graph."))
-        history.add_message(_user_message("Now change samp_rate."))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Use change_graph now.",
-        )
-        self.assertEqual(messages[-1].role, ChatMessageRole.User)
-        self.assertIn("Use change_graph now.", messages[-1].get_as_text())
-        self.assertIn("<runtime_directive>", messages[-1].get_as_text())
-
-    def test_reminder_position_with_mixed_tool_history(self) -> None:
-        history = ChatHistory()
-        history.add_message(_user_message("Add an AGC block."))
-        history.add_message(
-            _assistant_with_tool_calls([("c1", "inspect_graph", {"view": "overview"})])
-        )
-        history.add_message(
-            _tool_history_record(
-                "inspect_graph",
-                {"ok": True, "view": "overview", "summary": "3 blocks"},
-                call_id="c1",
-            )
-        )
-        history.add_message(_assistant_with_tool_calls([("c2", "search_blocks", {"query": "AGC"})]))
-        history.add_message(
-            _tool_history_record(
-                "search_blocks",
-                {"ok": True, "candidates": []},
-                call_id="c2",
-            )
-        )
-        history.add_message(_assistant_message("I need to search more."))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Call the relevant tool now.",
-        )
-        self.assertGreater(len(messages), 2)
-        self.assertEqual(messages[-1].role, ChatMessageRole.User)
-        self.assertIn("Call the relevant tool now.", messages[-1].get_as_text())
-        self.assertIn("<runtime_directive>", messages[-1].get_as_text())
-        self.assertTrue(
-            messages[-1].get_as_text().endswith("</runtime_directive>"),
-            f"Reminder content should be wrapped: {messages[-1].get_as_text()!r}",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Fix #2: Template Safety — reminder role is Custom (tagged), not "system"
-# ---------------------------------------------------------------------------
-
-
-class Fix2TemplateSafetyTests(unittest.TestCase):
-    """render_model_messages reminder is role:User — safe for all chat
-    templates and standard on the OpenAI wire format."""
-
-    def test_reminder_uses_user_role_not_system(self) -> None:
-        history = ChatHistory()
-        history.add_message(_user_message("Change sample rate."))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Retry change_graph.",
-        )
-        self.assertEqual(messages[-1].role, ChatMessageRole.User)
-
-    def test_reminder_is_wrapped_in_runtime_directive(self) -> None:
-        """The reminder must be visually isolated from the human's
-        text so the model can tell the control plane apart from the
-        user. We wrap the body in ``<runtime_directive>`` tags.
-        """
-        history = ChatHistory()
-        history.add_message(_user_message("hi"))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Use change_graph now.",
-        )
-        body = messages[-1].get_as_text()
-        self.assertTrue(body.startswith("<runtime_directive>"))
-        self.assertTrue(body.endswith("</runtime_directive>"))
-        self.assertIn("Use change_graph now.", body)
-
-    def test_reminder_survives_openai_message_converter(self) -> None:
-        """Reminder must produce a wire-valid role:user message; an
-        earlier draft used a Custom-role tag that the OpenAI message
-        converter mapped to ``role: "runtime_reminder"`` — a non-
-        standard wire role that small backends may reject. Regression
-        test for the runtime-reminder turn-failure reported when the
-        chat-history refactor landed.
-        """
-        from ToolAgents.provider.message_converter.open_ai_message_converter import (
-            OpenAIMessageConverter,
-        )
-
-        history = ChatHistory()
-        history.add_message(_user_message("hi"))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Use change_graph now.",
-        )
-        # Drive the converter the same way chat_api.get_response does.
-        converter = OpenAIMessageConverter()
-        converted = converter.to_provider_format(messages)
-        wire_roles = {m["role"] for m in converted}
-        self.assertIn("user", wire_roles)
-        self.assertNotIn("runtime_reminder", wire_roles)
-        self.assertNotIn("custom", wire_roles)
-
-    def test_only_one_system_message_exists(self) -> None:
-        """The main system prompt is the sole role:system message."""
-        history = ChatHistory()
-        history.add_message(_user_message("Hello."))
-        history.add_message(_assistant_message("Hi! How can I help?"))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Call the relevant tool.",
-        )
-        system_count = sum(1 for m in messages if m.role == ChatMessageRole.System)
-        self.assertEqual(system_count, 1)
-
-    def test_no_system_message_after_user_assistant_pairs(self) -> None:
-        """No role:system message appears after user/assistant history begins."""
-        history = ChatHistory()
-        history.add_message(_user_message("Inspect."))
-        history.add_message(_tool_history_record("inspect_graph", {"ok": True}))
-        history.add_message(_assistant_message("Done."))
-        messages = render_model_messages(
-            history,
-            system_prompt=build_system_prompt("session"),
-            semantic_search_result_preview=lambda _r: [],
-            reminder="Continue with change_graph.",
-        )
-        saw_first_user = False
-        system_after_first_user = 0
-        for m in messages:
-            if m.role == ChatMessageRole.User and not saw_first_user:
-                saw_first_user = True
-            if saw_first_user and m.role == ChatMessageRole.System:
-                system_after_first_user += 1
-        self.assertEqual(
-            system_after_first_user,
-            0,
-            f"Found system message(s) mid-conversation in {messages}",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Fix #2: _tool_retry_reminder integration — reminder generation behavior
-# ---------------------------------------------------------------------------
-
-
 # Fix #1: No premature exit on commit — commit result is role:"tool"
 # ---------------------------------------------------------------------------
 
@@ -431,10 +176,7 @@ class Fix1CommitResultTests(unittest.TestCase):
             for item in m.content:
                 if isinstance(item, ToolCallResultContent):
                     payload = json.loads(item.tool_call_result)
-                    if (
-                        isinstance(payload, dict)
-                        and payload.get("ok") is True
-                    ):
+                    if isinstance(payload, dict) and payload.get("ok") is True:
                         ok_tool_payload = payload
         self.assertIsNotNone(
             ok_tool_payload,

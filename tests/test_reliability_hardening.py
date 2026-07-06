@@ -102,9 +102,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
         )
         # The batch may reject at the second add_block due to the first
         # having been staged in the snapshot
-        self.assertFalse(
-            result.get("ok", True), "Batch with duplicate block name must not succeed"
-        )
+        self.assertFalse(result.get("ok", True), "Batch with duplicate block name must not succeed")
 
     def test_graph_is_unchanged_after_duplicate_block_rejection(self) -> None:
         """Graph must be byte-identical after a duplicate block rejection."""

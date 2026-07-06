@@ -16,10 +16,11 @@ def clean_template_string(val: Any) -> str:
         return ""
     val_str = str(val)
     import re
+
     # 1. ${expression}=fallback -> fallback
-    val_str = re.sub(r'\$\{[^}]*\}=' , "", val_str)
+    val_str = re.sub(r"\$\{[^}]*\}=", "", val_str)
     # 2. ${expression} -> expression
-    val_str = re.sub(r'\$\{\s*([^}]+?)\s*\}', r'\1', val_str)
+    val_str = re.sub(r"\$\{\s*([^}]+?)\s*\}", r"\1", val_str)
     return val_str.strip()
 
 
@@ -190,7 +191,9 @@ class BlockDescription:
             "params": {
                 p.id: (
                     f"bool={clean_template_string(p.default)}"
-                    if p.dtype == "enum" and p.options and set(str(o) for o in p.options) == {"True", "False"}
+                    if p.dtype == "enum"
+                    and p.options
+                    and set(str(o) for o in p.options) == {"True", "False"}
                     else f"enum=[{','.join(str(o) for o in p.options)}]={clean_template_string(p.default)}"
                     if p.dtype == "enum" and p.options
                     else f"{clean_template_string(p.dtype) or '?'}={clean_template_string(p.default)}"

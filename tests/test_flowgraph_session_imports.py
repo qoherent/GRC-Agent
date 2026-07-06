@@ -36,15 +36,12 @@ def test_no_method_body_re_imports_grc_native_adapter():
         "from grc_agent.grc_native_adapter",
         "from grc_native_adapter",
     )
-    for name, member in inspect.getmembers(
-        FlowgraphSession, predicate=inspect.isfunction
-    ):
+    for name, member in inspect.getmembers(FlowgraphSession, predicate=inspect.isfunction):
         try:
             src = inspect.getsource(member)
         except OSError:
             continue
         for forbidden_marker in forbidden:
             assert forbidden_marker not in src, (
-                f"{name}() still has a deferred import: {forbidden_marker}\n"
-                f"{src[:200]}"
+                f"{name}() still has a deferred import: {forbidden_marker}\n{src[:200]}"
             )

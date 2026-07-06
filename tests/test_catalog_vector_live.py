@@ -57,7 +57,9 @@ class VectorCatalogLiveTests(unittest.TestCase):
         cls.tmpdir = tempfile.mkdtemp(prefix="cat_live_")
         cls.test_db = Path(cls.tmpdir) / "catalog_ollama.db"
         shutil.copy(str(CATALOG_DB_PATH), str(cls.test_db))
-        cls.store = VectorCatalogStore(cls.test_db, "http://localhost:11434", "embeddinggemma:latest")
+        cls.store = VectorCatalogStore(
+            cls.test_db, "http://localhost:11434", "embeddinggemma:latest"
+        )
         cls.embed_query = embed_query
 
     @classmethod
@@ -133,7 +135,9 @@ class VectorCatalogLiveTests(unittest.TestCase):
         out_dir.mkdir(parents=True, exist_ok=True)
 
         for q in queries:
-            with mock.patch("grc_agent.runtime.search_blocks.CATALOG_DB_PATH", str(type(self).test_db)):
+            with mock.patch(
+                "grc_agent.runtime.search_blocks.CATALOG_DB_PATH", str(type(self).test_db)
+            ):
                 result = search_blocks(agent, q)
 
             self.assertTrue(result.get("ok"))

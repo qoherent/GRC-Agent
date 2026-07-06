@@ -77,6 +77,7 @@ class ModelToolbar(QFrame):
         self.setObjectName("modelToolbar")
         self.setFrameShape(QFrame.Shape.NoFrame)
         from grc_agent_gui.styles import get_model_toolbar_style
+
         self.setStyleSheet(get_model_toolbar_style(1.0))
         self._suppress_signals = False
         # Remembers the last known-good Ollama model so switching the
@@ -112,7 +113,8 @@ class ModelToolbar(QFrame):
         self.graph_path_label.setToolTip("Path of the currently loaded .grc flowgraph")
         self.graph_path_label.setMinimumWidth(160)
         self.graph_path_label.setTextInteractionFlags(
-            self.graph_path_label.textInteractionFlags() | Qt.TextInteractionFlag.TextSelectableByMouse
+            self.graph_path_label.textInteractionFlags()
+            | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.graph_path_label, stretch=1)
 
@@ -122,7 +124,7 @@ class ModelToolbar(QFrame):
         # similar to the browse button's icon and read as
         # "open file" rather than "open the folder this file
         # lives in".
-        self.open_location_btn.setText("\U0001F4C1")  # 📁
+        self.open_location_btn.setText("\U0001f4c1")  # 📁
         self.open_location_btn.setToolTip("Open the folder containing the loaded .grc file")
         self.open_location_btn.setEnabled(False)
         self.open_location_btn.clicked.connect(self.open_graph_location_requested.emit)
@@ -133,7 +135,7 @@ class ModelToolbar(QFrame):
         # universal "open a document" glyph. The previous
         # magnifying-glass icon (🔍) was misleading: users
         # associate it with "search", not "browse for a file".
-        self.browse_btn.setText("\U0001F4C4")  # 📄
+        self.browse_btn.setText("\U0001f4c4")  # 📄
         self.browse_btn.setToolTip("Browse for a .grc file to load (File > Open)")
         self.browse_btn.clicked.connect(self.browse_graph_requested.emit)
         layout.addWidget(self.browse_btn)
@@ -359,6 +361,7 @@ class ModelToolbar(QFrame):
 
     def apply_zoom(self, zoom_factor: float) -> None:
         from grc_agent_gui.styles import get_model_toolbar_style
+
         self.setStyleSheet(get_model_toolbar_style(zoom_factor))
         self._force_style_refresh()
 

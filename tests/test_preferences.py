@@ -171,7 +171,9 @@ class SaveTests(unittest.TestCase):
             # unchanged and the temp file must be cleaned up.
             with mock.patch("os.replace", side_effect=OSError("disk full")) as replace_mock:
                 with self.assertRaises(OSError):
-                    save_user_preferences(UserPreferences(provider_chosen="openrouter"), path=target)
+                    save_user_preferences(
+                        UserPreferences(provider_chosen="openrouter"), path=target
+                    )
             replace_mock.assert_called_once()
             # The original file is untouched.
             self.assertEqual(target.read_text(encoding="utf-8"), original_text)
@@ -196,7 +198,9 @@ class ApplyToLlamaConfigTests(unittest.TestCase):
         self.assertEqual(out, cfg)
 
     def test_provider_flip_re_resolves_models_from_env(self) -> None:
-        cfg = _make_llama_config(backend="ollama", model="ollama-chat", embedding_model="ollama-embed")
+        cfg = _make_llama_config(
+            backend="ollama", model="ollama-chat", embedding_model="ollama-embed"
+        )
         with mock.patch.dict(
             os.environ,
             {"OPENROUTER_MODEL": "or/chat", "OPENROUTER_EMBEDDING_MODEL": "or/embed"},
@@ -210,7 +214,9 @@ class ApplyToLlamaConfigTests(unittest.TestCase):
 
     def test_apply_preserves_non_model_fields(self) -> None:
         cfg = _make_llama_config(backend="ollama", max_tokens=2048, server_url="http://x:1")
-        with mock.patch.dict(os.environ, {"OPENROUTER_MODEL": "or/chat", "OPENROUTER_EMBEDDING_MODEL": "or/embed"}):
+        with mock.patch.dict(
+            os.environ, {"OPENROUTER_MODEL": "or/chat", "OPENROUTER_EMBEDDING_MODEL": "or/embed"}
+        ):
             out = apply_user_preferences_to_llama_config(
                 cfg, UserPreferences(provider_chosen="openrouter")
             )

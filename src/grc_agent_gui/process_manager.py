@@ -139,12 +139,18 @@ class ProcessManager(QObject):
 
     def on_compile_stdout(self) -> None:
         if self.compile_process:
-            data = self.compile_process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            data = (
+                self.compile_process.readAllStandardOutput()
+                .data()
+                .decode("utf-8", errors="replace")
+            )
             self.stdout_received.emit(data)
 
     def on_compile_stderr(self) -> None:
         if self.compile_process:
-            data = self.compile_process.readAllStandardError().data().decode("utf-8", errors="replace")
+            data = (
+                self.compile_process.readAllStandardError().data().decode("utf-8", errors="replace")
+            )
             self.stderr_received.emit(data)
 
     def on_compilation_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:

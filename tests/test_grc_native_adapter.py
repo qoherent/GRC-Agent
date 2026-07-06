@@ -75,6 +75,7 @@ def test_load_and_inspect_random_bit_generator():
     assert "samp_rate" in instance_names
     # All rendered params must be visible (no Advanced/Config).
     from grc_agent.runtime.param_filter import param_metadata
+
     for block in out.blocks:
         meta = param_metadata(block.block_id)
         for k in block.params.keys():
@@ -347,10 +348,10 @@ def test_no_yaml_safe_load_in_adapter():
 
 def test_describe_block_payload_has_symmetry_keys():
     """Catalog description (query_knowledge output) must emit the same keys
-    that ``add_blocks``/``update_params`` accept: ``block_id`` and ``params``
-(encoded ``dtype=default`` strings). Guards the consultant-approved symmetry
-    contract. ``default_params`` was dropped (redundant — the default is
-    already the substring after ``=`` in each ``params`` value)."""
+        that ``add_blocks``/``update_params`` accept: ``block_id`` and ``params``
+    (encoded ``dtype=default`` strings). Guards the consultant-approved symmetry
+        contract. ``default_params`` was dropped (redundant — the default is
+        already the substring after ``=`` in each ``params`` value)."""
     from grc_agent.catalog.loaders import describe_block
 
     payload = describe_block("analog_sig_source_x")
@@ -395,8 +396,7 @@ def test_change_graph_orphaned_port_hint_names_the_removed_block():
     # Removing the adder makes the graph invalid (orphaned sources/sink).
     assert result["ok"] is False
     noise_error = next(
-        e for e in result["errors"]
-        if "analog_noise_source_x_0" in e.get("message", "")
+        e for e in result["errors"] if "analog_noise_source_x_0" in e.get("message", "")
     )
     # The hint must name the removed block that caused the orphan, so the
     # model can infer it must also remove/reconnect the noise source or force.
@@ -494,8 +494,7 @@ def test_qtgui_cosmetic_params_filtered_from_overview():
             from grc_agent.runtime.param_filter import categories
 
             assert categories(b["block_id"]).get(key) != "Config", (
-                f"Config-category param {key!r} leaked into overview for "
-                f"{b['block_id']!r}"
+                f"Config-category param {key!r} leaked into overview for {b['block_id']!r}"
             )
 
 
@@ -552,9 +551,7 @@ def test_type_hint_names_neighbor_dtype_not_source_type():
     )
     assert result["ok"] is False
     hints = [
-        e.get("hint", "")
-        for e in result.get("errors", [])
-        if e.get("code") == "gnu_validation"
+        e.get("hint", "") for e in result.get("errors", []) if e.get("code") == "gnu_validation"
     ]
     # The hint must point at 'float' (the dtype to adopt), NOT 'complex'.
     assert any("'third_tone' type enum includes 'float'" in h for h in hints), hints

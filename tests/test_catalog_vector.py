@@ -28,9 +28,7 @@ def _write_test_db(db_path: Path, vectors: list[list[float]]) -> None:
         conn.execute(
             "CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT)"
         )
-        conn.execute(
-            "CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[768])"
-        )
+        conn.execute("CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[768])")
         for i, vec in enumerate(vectors, start=1):
             conn.execute("INSERT INTO catalog_chunks VALUES(?, ?, ?)", (i, f"b{i}", "{}"))
             conn.execute(
@@ -42,9 +40,7 @@ def _write_test_db(db_path: Path, vectors: list[list[float]]) -> None:
         conn.close()
 
 
-def _write_test_db_with_fts(
-    db_path: Path, blocks: list[tuple[str, str, list[float]]]
-) -> None:
+def _write_test_db_with_fts(db_path: Path, blocks: list[tuple[str, str, list[float]]]) -> None:
     """Build a sqlite-vec DB WITH the FTS5 porter table populated.
 
     ``blocks`` is a list of (block_id, payload_text, vector).
@@ -60,13 +56,9 @@ def _write_test_db_with_fts(
             "CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT)"
         )
         conn.execute("CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[768])")
-        conn.execute(
-            "CREATE VIRTUAL TABLE catalog_fts USING fts5(content, tokenize='porter')"
-        )
+        conn.execute("CREATE VIRTUAL TABLE catalog_fts USING fts5(content, tokenize='porter')")
         for i, (bid, payload, vec) in enumerate(blocks, start=1):
-            conn.execute(
-                "INSERT INTO catalog_chunks VALUES(?, ?, ?)", (i, bid, payload)
-            )
+            conn.execute("INSERT INTO catalog_chunks VALUES(?, ?, ?)", (i, bid, payload))
             conn.execute(
                 "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
                 (i, sqlite_vec.serialize_float32(vec)),
@@ -155,7 +147,11 @@ class FtsPorterStemmingTests(unittest.TestCase):
             _write_test_db_with_fts(
                 db,
                 [
-                    ("blocks_multiply_xx", "block_id: blocks_multiply_xx label: Multiply", [0.1] * 768),
+                    (
+                        "blocks_multiply_xx",
+                        "block_id: blocks_multiply_xx label: Multiply",
+                        [0.1] * 768,
+                    ),
                     ("blocks_add_xx", "block_id: blocks_add_xx label: Add", [0.2] * 768),
                 ],
             )
@@ -187,7 +183,11 @@ class HybridSearchTests(unittest.TestCase):
             _write_test_db_with_fts(
                 db,
                 [
-                    ("blocks_multiply_xx", "block_id: blocks_multiply_xx Multiply", [1.0] + [0.0] * 767),
+                    (
+                        "blocks_multiply_xx",
+                        "block_id: blocks_multiply_xx Multiply",
+                        [1.0] + [0.0] * 767,
+                    ),
                     ("blocks_add_xx", "block_id: blocks_add_xx Add", [0.0, 1.0] + [0.0] * 766),
                 ],
             )
@@ -196,9 +196,7 @@ class HybridSearchTests(unittest.TestCase):
             store = VectorCatalogStore(db, "http://localhost:11434", "embeddinggemma:latest")
             # query vector identical to the multiply block → vector #1.
             # query text "multiplier" → lexical stem match on multiply.
-            results = store.search(
-                "multiplier", [1.0] + [0.0] * 767, limit=5
-            )
+            results = store.search("multiplier", [1.0] + [0.0] * 767, limit=5)
             self.assertTrue(results)
             for r in results:
                 self.assertIn("block_id", r)

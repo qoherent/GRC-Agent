@@ -152,20 +152,55 @@ _MATH_FALLBACK = re.compile(r"\$+([^\n]+?)\$+")
 # not in this list fails closed (becomes a <code> span in strip_inline_math).
 # Deny-lists leak (we never know what new macros the model might emit);
 # allow-lists fail closed — every new macro defaults to "show as code".
-_MATH_ALLOW_LIST = frozenset({
-    "text", "mu", "cdot", "times", "pm", "to", "rightarrow",
-    "leftarrow", "infty", "approx", "neq", "leq", "geq", "deg",
-})
+_MATH_ALLOW_LIST = frozenset(
+    {
+        "text",
+        "mu",
+        "cdot",
+        "times",
+        "pm",
+        "to",
+        "rightarrow",
+        "leftarrow",
+        "infty",
+        "approx",
+        "neq",
+        "leq",
+        "geq",
+        "deg",
+    }
+)
 # Single-character super/subscript allow-lists.
 _SUPER_MAP = {
-    "0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
-    "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",
-    "n": "\u207f", "i": "\u2071", "T": "\u1d40", "+": "\u207a", "-": "\u207b",
+    "0": "\u2070",
+    "1": "\u00b9",
+    "2": "\u00b2",
+    "3": "\u00b3",
+    "4": "\u2074",
+    "5": "\u2075",
+    "6": "\u2076",
+    "7": "\u2077",
+    "8": "\u2078",
+    "9": "\u2079",
+    "n": "\u207f",
+    "i": "\u2071",
+    "T": "\u1d40",
+    "+": "\u207a",
+    "-": "\u207b",
 }
 _SUB_MAP = {
-    "0": "\u2080", "1": "\u2081", "2": "\u2082", "3": "\u2083", "4": "\u2084",
-    "5": "\u2085", "6": "\u2086", "7": "\u2087", "8": "\u2088", "9": "\u2089",
-    "i": "\u1d62", "j": "\u2c7c",
+    "0": "\u2080",
+    "1": "\u2081",
+    "2": "\u2082",
+    "3": "\u2083",
+    "4": "\u2084",
+    "5": "\u2085",
+    "6": "\u2086",
+    "7": "\u2087",
+    "8": "\u2088",
+    "9": "\u2089",
+    "i": "\u1d62",
+    "j": "\u2c7c",
 }
 
 
@@ -199,21 +234,28 @@ def _rewrite_math_segment(body: str) -> str | None:
     # Greek letters + symbols (allow-list only — see _MATH_ALLOW_LIST).
     for name, char in (
         ("text", None),  # handled above
-        ("mu", "\u00b5"), ("cdot", "\u00b7"), ("times", "\u00d7"), ("pm", "\u00b1"),
-        ("to", "\u2192"), ("rightarrow", "\u2192"), ("leftarrow", "\u2190"),
-        ("infty", "\u221e"), ("approx", "\u2248"), ("neq", "\u2260"),
-        ("leq", "\u2264"), ("geq", "\u2265"), ("deg", "\u00b0"),
+        ("mu", "\u00b5"),
+        ("cdot", "\u00b7"),
+        ("times", "\u00d7"),
+        ("pm", "\u00b1"),
+        ("to", "\u2192"),
+        ("rightarrow", "\u2192"),
+        ("leftarrow", "\u2190"),
+        ("infty", "\u221e"),
+        ("approx", "\u2248"),
+        ("neq", "\u2260"),
+        ("leq", "\u2264"),
+        ("geq", "\u2265"),
+        ("deg", "\u00b0"),
     ):
         if char is not None:
             s = s.replace("\\" + name, char)
 
     # Superscript / subscript — reject any char not in the map.
-    s = re.sub(r"\^([0-9A-Za-z+\-])",
-               lambda m: _SUPER_MAP.get(m.group(1), "\x00"), s)
+    s = re.sub(r"\^([0-9A-Za-z+\-])", lambda m: _SUPER_MAP.get(m.group(1), "\x00"), s)
     if "\x00" in s:
         return None
-    s = re.sub(r"_([0-9A-Za-z])",
-               lambda m: _SUB_MAP.get(m.group(1), "\x00"), s)
+    s = re.sub(r"_([0-9A-Za-z])", lambda m: _SUB_MAP.get(m.group(1), "\x00"), s)
     if "\x00" in s:
         return None
 
@@ -288,20 +330,20 @@ def extract_thinking_content(text: str) -> str | None:
 #   agent     neutral dark grey panel + sage label
 #   tool call dim teal row (call + result share one row)
 #   thinking  olive panel (lives inside the agent bubble)
-_COLOR_USER = "#cdd6f4"          # primary text color for the "You:" label
-_COLOR_USER_TEXT = "#e8eaf0"     # near-white for the user message body
-_COLOR_USER_BG = "#243049"       # distinct blue-tinted panel (lighter for contrast)
-_COLOR_USER_BORDER = "#4d6298"   # matching blue border
-_COLOR_AGENT = "#a6e3a1"         # sage-green label (success-palette green)
-_COLOR_AGENT_BG = "#1b1d22"      # neutral dark grey — distinct from the user blue panel
+_COLOR_USER = "#cdd6f4"  # primary text color for the "You:" label
+_COLOR_USER_TEXT = "#e8eaf0"  # near-white for the user message body
+_COLOR_USER_BG = "#243049"  # distinct blue-tinted panel (lighter for contrast)
+_COLOR_USER_BORDER = "#4d6298"  # matching blue border
+_COLOR_AGENT = "#a6e3a1"  # sage-green label (success-palette green)
+_COLOR_AGENT_BG = "#1b1d22"  # neutral dark grey — distinct from the user blue panel
 _COLOR_AGENT_BORDER = "#3a4250"  # neutral border
-_COLOR_TOOL_CALL = "#3a6070"     # dim steel-teal label
-_COLOR_TOOL_CALL_BG = "#0f1a1e" # near-black w/ teal tint
+_COLOR_TOOL_CALL = "#3a6070"  # dim steel-teal label
+_COLOR_TOOL_CALL_BG = "#0f1a1e"  # near-black w/ teal tint
 _COLOR_TOOL_CALL_BORDER = "#1e3540"  # muted teal border
-_COLOR_TOOL_NAME = "#7a9cb0"     # teal-leaning name (used in both call + result)
-_COLOR_THINKING = "#6b5f30"      # dim olive-yellow label
-_COLOR_THINKING_BG = "#161410"   # near-black w/ olive tint
-_COLOR_THINKING_BORDER = "#332e18"   # muted olive border
+_COLOR_TOOL_NAME = "#7a9cb0"  # teal-leaning name (used in both call + result)
+_COLOR_THINKING = "#6b5f30"  # dim olive-yellow label
+_COLOR_THINKING_BG = "#161410"  # near-black w/ olive tint
+_COLOR_THINKING_BORDER = "#332e18"  # muted olive border
 
 # Inline style constants shared by the small status rows. Each row
 # has a left accent bar (border-left), a tinted background, a
@@ -367,16 +409,14 @@ def render_user_message_html(text: str, *, font_size_px: int | None = None) -> s
     uniformly instead of inheriting the markdown path's document default.
     """
     safe = html.escape(text).replace("\n", "<br/>")
-    body_style = (
-        f"margin-top: 4px; padding-left: 4px; color: {_COLOR_USER_TEXT};"
-    )
+    body_style = f"margin-top: 4px; padding-left: 4px; color: {_COLOR_USER_TEXT};"
     if font_size_px is not None and font_size_px > 0:
         body_style += f" font-size: {font_size_px}px;"
     return (
         f'<div style="margin-bottom: 12px; padding: 6px 8px; border-left: 2px solid {_COLOR_USER_BORDER}; background-color: {_COLOR_USER_BG}; border-radius: 3px;">'
         f'<b style="color: {_COLOR_USER};">You:</b>'
         f'<div style="{body_style}">{safe}</div>'
-        f'</div>'
+        f"</div>"
     )
 
 
@@ -389,6 +429,7 @@ class ChatWidget(QWidget):
     - Flicker-free streaming via insertPlainText() during the stream and
       a single setHtml() on turn completion.
     """
+
     stop_clicked = Signal()
 
     def __init__(self, parent: QWidget = None) -> None:
@@ -759,9 +800,7 @@ class ChatWidget(QWidget):
                         lines.append(frag.get("text", ""))
                         lines.append("")
                     elif frag.get("type") == "tool":
-                        lines.append(
-                            f"```\n{frag.get('name', '')}({frag.get('args', '')})\n```"
-                        )
+                        lines.append(f"```\n{frag.get('name', '')}({frag.get('args', '')})\n```")
                         if frag.get("result") is not None:
                             lines.append("")
                             lines.append("Result:")

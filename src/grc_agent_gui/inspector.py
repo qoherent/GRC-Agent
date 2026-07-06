@@ -84,9 +84,7 @@ class InspectorWidget(QWidget):
         """Update the path to the active GRC file and enable the companion launch button."""
         self.grc_file_path = path
         self.open_grc_btn.setEnabled(bool(path))
-        self.open_grc_btn.setToolTip(
-            "Open the active flowgraph in the GNU Radio Companion editor."
-        )
+        self.open_grc_btn.setToolTip("Open the active flowgraph in the GNU Radio Companion editor.")
 
     def open_in_grc(self) -> None:
         """Launch the official gnuradio-companion GUI editor detached.
@@ -150,9 +148,7 @@ class InspectorWidget(QWidget):
         blocks = graph.get("blocks", []) or []
         connections = graph.get("connections", []) or []
 
-        variables = [
-            b for b in blocks if b.get("role") == "variable"
-        ]
+        variables = [b for b in blocks if b.get("role") == "variable"]
         self.variables_table.setRowCount(0)
         self.variables_table.setRowCount(len(variables))
         for row_idx, var in enumerate(variables):

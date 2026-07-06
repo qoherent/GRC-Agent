@@ -58,7 +58,9 @@ def _assert_state(state: dict[str, Any], expect: dict[str, Any]) -> None:
     if "valid" in expect:
         assert state["valid"] == bool(expect["valid"]), f"graph valid={state['valid']}"
     for name, st in expect.get("states", {}).items():
-        assert str(state["states"].get(name)) == str(st), f"state {name}={state['states'].get(name)!r}"
+        assert str(state["states"].get(name)) == str(st), (
+            f"state {name}={state['states'].get(name)!r}"
+        )
     for name, pv in expect.get("params", {}).items():
         actual = state["params"].get(name, {})
         for k, v in pv.items():
@@ -80,11 +82,18 @@ CASES = [
     pytest.param(
         "dial_tone.grc",
         {
-            "add_blocks": [{"block_id": "blocks_throttle", "instance_name": "mid_throttle",
-                            "params": {"type": "float", "samples_per_second": "samp_rate"}}],
+            "add_blocks": [
+                {
+                    "block_id": "blocks_throttle",
+                    "instance_name": "mid_throttle",
+                    "params": {"type": "float", "samples_per_second": "samp_rate"},
+                }
+            ],
             "remove_connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"],
-            "add_connections": ["analog_sig_source_x_0:0->mid_throttle:0",
-                                "mid_throttle:0->blocks_add_xx:0"],
+            "add_connections": [
+                "analog_sig_source_x_0:0->mid_throttle:0",
+                "mid_throttle:0->blocks_add_xx:0",
+            ],
         },
         {"blocks_present": ["mid_throttle"], "valid": True},
         id="01_add_throttle",
@@ -98,33 +107,55 @@ CASES = [
     pytest.param(
         "dial_tone.grc",
         {
-            "add_blocks": [{"block_id": "variable", "instance_name": "gain_value",
-                            "params": {"value": "2.0"}}],
-            "update_params": [{"instance_name": "analog_sig_source_x_0", "params": {"amp": "gain_value"}}],
+            "add_blocks": [
+                {"block_id": "variable", "instance_name": "gain_value", "params": {"value": "2.0"}}
+            ],
+            "update_params": [
+                {"instance_name": "analog_sig_source_x_0", "params": {"amp": "gain_value"}}
+            ],
         },
-        {"blocks_present": ["gain_value"],
-         "params": {"analog_sig_source_x_0": {"amp": "gain_value"}}, "valid": True},
+        {
+            "blocks_present": ["gain_value"],
+            "params": {"analog_sig_source_x_0": {"amp": "gain_value"}},
+            "valid": True,
+        },
         id="04_add_and_remove_variable",
     ),
     pytest.param(
         "dial_tone.grc",
         {
             "remove_blocks": ["analog_noise_source_x_0"],
-            "add_blocks": [{"block_id": "analog_const_source_x", "instance_name": "dc_offset",
-                            "params": {"type": "float", "const": "0.0"}}],
+            "add_blocks": [
+                {
+                    "block_id": "analog_const_source_x",
+                    "instance_name": "dc_offset",
+                    "params": {"type": "float", "const": "0.0"},
+                }
+            ],
             "add_connections": ["dc_offset:0->blocks_add_xx:2"],
         },
-        {"blocks_absent": ["analog_noise_source_x_0"], "blocks_present": ["dc_offset"], "valid": True},
+        {
+            "blocks_absent": ["analog_noise_source_x_0"],
+            "blocks_present": ["dc_offset"],
+            "valid": True,
+        },
         id="05_full_rewire",
     ),
     pytest.param(
         "dial_tone.grc",
         {
-            "add_blocks": [{"block_id": "blocks_multiply_xx", "instance_name": "multiplier",
-                            "params": {"type": "float"}}],
-            "add_connections": ["analog_sig_source_x_0:0->multiplier:0",
-                                "analog_sig_source_x_1:0->multiplier:1",
-                                "multiplier:0->audio_sink:0"],
+            "add_blocks": [
+                {
+                    "block_id": "blocks_multiply_xx",
+                    "instance_name": "multiplier",
+                    "params": {"type": "float"},
+                }
+            ],
+            "add_connections": [
+                "analog_sig_source_x_0:0->multiplier:0",
+                "analog_sig_source_x_1:0->multiplier:1",
+                "multiplier:0->audio_sink:0",
+            ],
             "remove_blocks": ["analog_noise_source_x_0", "blocks_add_xx"],
         },
         {"blocks_present": ["multiplier"], "blocks_absent": ["blocks_add_xx"], "valid": True},
@@ -132,19 +163,28 @@ CASES = [
     ),
     pytest.param(
         "dial_tone.grc",
-        {"update_states": [{"instance_name": "analog_sig_source_x_0", "state": "disabled"}],
-         "force": True},
+        {
+            "update_states": [{"instance_name": "analog_sig_source_x_0", "state": "disabled"}],
+            "force": True,
+        },
         {"states": {"analog_sig_source_x_0": "disabled"}},
         id="07_force_disabled_connected_block",
     ),
     pytest.param(
         "fm_rx.grc",
         {
-            "add_blocks": [{"block_id": "blocks_throttle", "instance_name": "audio_throttle",
-                            "params": {"type": "float", "samples_per_second": "audio_rate"}}],
+            "add_blocks": [
+                {
+                    "block_id": "blocks_throttle",
+                    "instance_name": "audio_throttle",
+                    "params": {"type": "float", "samples_per_second": "audio_rate"},
+                }
+            ],
             "remove_connections": ["pfb_arb_resampler_xxx_0:0->audio_sink_0:0"],
-            "add_connections": ["pfb_arb_resampler_xxx_0:0->audio_throttle:0",
-                                "audio_throttle:0->audio_sink_0:0"],
+            "add_connections": [
+                "pfb_arb_resampler_xxx_0:0->audio_throttle:0",
+                "audio_throttle:0->audio_sink_0:0",
+            ],
         },
         {"blocks_present": ["audio_throttle"], "valid": True},
         id="08_fm_rx_insert_throttle",
@@ -159,15 +199,23 @@ CASES = [
         "dial_tone.grc",
         {
             "add_blocks": [
-                {"block_id": "blocks_throttle", "instance_name": "pre_throttle",
-                 "params": {"type": "float", "samples_per_second": "samp_rate"}},
-                {"block_id": "blocks_throttle", "instance_name": "post_throttle",
-                 "params": {"type": "float", "samples_per_second": "samp_rate"}},
+                {
+                    "block_id": "blocks_throttle",
+                    "instance_name": "pre_throttle",
+                    "params": {"type": "float", "samples_per_second": "samp_rate"},
+                },
+                {
+                    "block_id": "blocks_throttle",
+                    "instance_name": "post_throttle",
+                    "params": {"type": "float", "samples_per_second": "samp_rate"},
+                },
             ],
             "remove_connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"],
-            "add_connections": ["analog_sig_source_x_0:0->pre_throttle:0",
-                                "pre_throttle:0->post_throttle:0",
-                                "post_throttle:0->blocks_add_xx:0"],
+            "add_connections": [
+                "analog_sig_source_x_0:0->pre_throttle:0",
+                "pre_throttle:0->post_throttle:0",
+                "post_throttle:0->blocks_add_xx:0",
+            ],
         },
         {"blocks_present": ["pre_throttle", "post_throttle"], "valid": True},
         id="12_multiblock_batch_chain",
@@ -176,12 +224,26 @@ CASES = [
         "empty.grc",
         {
             "add_blocks": [
-                {"block_id": "analog_sig_source_x", "instance_name": "sig",
-                 "params": {"type": "float", "freq": "1000", "amp": "0.5", "samp_rate": "samp_rate"}},
-                {"block_id": "blocks_throttle", "instance_name": "throttle",
-                 "params": {"type": "float", "samples_per_second": "samp_rate"}},
-                {"block_id": "blocks_null_sink", "instance_name": "sink",
-                 "params": {"type": "float"}},
+                {
+                    "block_id": "analog_sig_source_x",
+                    "instance_name": "sig",
+                    "params": {
+                        "type": "float",
+                        "freq": "1000",
+                        "amp": "0.5",
+                        "samp_rate": "samp_rate",
+                    },
+                },
+                {
+                    "block_id": "blocks_throttle",
+                    "instance_name": "throttle",
+                    "params": {"type": "float", "samples_per_second": "samp_rate"},
+                },
+                {
+                    "block_id": "blocks_null_sink",
+                    "instance_name": "sink",
+                    "params": {"type": "float"},
+                },
             ],
             "add_connections": ["sig:0->throttle:0", "throttle:0->sink:0"],
         },
@@ -197,36 +259,68 @@ CASES = [
     pytest.param(
         "dial_tone.grc",
         {
-            "add_blocks": [{"block_id": "analog_sig_source_x", "instance_name": "third_tone",
-                            "params": {"type": "float", "freq": "550", "amp": "ampl", "samp_rate": "samp_rate"}}],
+            "add_blocks": [
+                {
+                    "block_id": "analog_sig_source_x",
+                    "instance_name": "third_tone",
+                    "params": {
+                        "type": "float",
+                        "freq": "550",
+                        "amp": "ampl",
+                        "samp_rate": "samp_rate",
+                    },
+                }
+            ],
             "update_params": [{"instance_name": "blocks_add_xx", "params": {"num_inputs": "4"}}],
             "add_connections": ["third_tone:0->blocks_add_xx:3"],
         },
-        {"blocks_present": ["third_tone"], "params": {"blocks_add_xx": {"num_inputs": "4"}}, "valid": True},
+        {
+            "blocks_present": ["third_tone"],
+            "params": {"blocks_add_xx": {"num_inputs": "4"}},
+            "valid": True,
+        },
         id="16_expand_adder_input",
     ),
     pytest.param(
         "dial_tone.grc",
         {
             "add_blocks": [
-                {"block_id": "variable", "instance_name": "base_freq", "params": {"value": "220.0"}},
-                {"block_id": "variable", "instance_name": "fifth", "params": {"value": "base_freq * 1.5"}},
+                {
+                    "block_id": "variable",
+                    "instance_name": "base_freq",
+                    "params": {"value": "220.0"},
+                },
+                {
+                    "block_id": "variable",
+                    "instance_name": "fifth",
+                    "params": {"value": "base_freq * 1.5"},
+                },
             ],
             "update_params": [
                 {"instance_name": "analog_sig_source_x_0", "params": {"freq": "base_freq"}},
                 {"instance_name": "analog_sig_source_x_1", "params": {"freq": "fifth"}},
             ],
         },
-        {"blocks_present": ["base_freq", "fifth"],
-         "params": {"analog_sig_source_x_0": {"freq": "base_freq"},
-                    "analog_sig_source_x_1": {"freq": "fifth"}}, "valid": True},
+        {
+            "blocks_present": ["base_freq", "fifth"],
+            "params": {
+                "analog_sig_source_x_0": {"freq": "base_freq"},
+                "analog_sig_source_x_1": {"freq": "fifth"},
+            },
+            "valid": True,
+        },
         id="17_expression_variables_chain",
     ),
     pytest.param(
         "fm_rx.grc",
         {
-            "add_blocks": [{"block_id": "qtgui_time_sink_x", "instance_name": "demod_probe",
-                            "params": {"type": "float", "srate": "in_rate"}}],
+            "add_blocks": [
+                {
+                    "block_id": "qtgui_time_sink_x",
+                    "instance_name": "demod_probe",
+                    "params": {"type": "float", "srate": "in_rate"},
+                }
+            ],
             "add_connections": ["analog_quadrature_demod_cf_0:0->demod_probe:0"],
         },
         {"blocks_present": ["demod_probe"], "valid": True},
@@ -235,12 +329,16 @@ CASES = [
     pytest.param(
         "fm_rx.grc",
         {
-            "remove_connections": ["analog_fm_deemph_0:0->pfb_arb_resampler_xxx_0:0",
-                                   "analog_fm_deemph_0:0->qtgui_freq_sink_x_0:0",
-                                   "analog_fm_deemph_0:0->qtgui_time_sink_x_0_0_0:0"],
-            "add_connections": ["analog_quadrature_demod_cf_0:0->pfb_arb_resampler_xxx_0:0",
-                                "analog_quadrature_demod_cf_0:0->qtgui_freq_sink_x_0:0",
-                                "analog_quadrature_demod_cf_0:0->qtgui_time_sink_x_0_0_0:0"],
+            "remove_connections": [
+                "analog_fm_deemph_0:0->pfb_arb_resampler_xxx_0:0",
+                "analog_fm_deemph_0:0->qtgui_freq_sink_x_0:0",
+                "analog_fm_deemph_0:0->qtgui_time_sink_x_0_0_0:0",
+            ],
+            "add_connections": [
+                "analog_quadrature_demod_cf_0:0->pfb_arb_resampler_xxx_0:0",
+                "analog_quadrature_demod_cf_0:0->qtgui_freq_sink_x_0:0",
+                "analog_quadrature_demod_cf_0:0->qtgui_time_sink_x_0_0_0:0",
+            ],
             "remove_blocks": ["analog_fm_deemph_0"],
         },
         {"blocks_absent": ["analog_fm_deemph_0"], "valid": True},
@@ -256,8 +354,15 @@ CASES = [
         "resampler_demo.grc",
         {
             "add_blocks": [
-                {"block_id": "blocks_float_to_complex", "instance_name": "float_to_complex_converter"},
-                {"block_id": "analog_const_source_x", "instance_name": "zero_imag", "params": {"type": "float", "const": "0.0"}},
+                {
+                    "block_id": "blocks_float_to_complex",
+                    "instance_name": "float_to_complex_converter",
+                },
+                {
+                    "block_id": "analog_const_source_x",
+                    "instance_name": "zero_imag",
+                    "params": {"type": "float", "const": "0.0"},
+                },
                 {"block_id": "blocks_conjugate_cc", "instance_name": "signal_conjugate"},
             ],
             "remove_connections": [
@@ -287,7 +392,9 @@ CASES = [
 
 
 @pytest.mark.parametrize("fixture,batch,expect", CASES)
-def test_engine_reaches_scenario_expect(fixture: str, batch: dict[str, Any], expect: dict[str, Any]) -> None:
+def test_engine_reaches_scenario_expect(
+    fixture: str, batch: dict[str, Any], expect: dict[str, Any]
+) -> None:
     """The engine (tool surface) can reach each scenario's goal state when the
     correct batch is applied — independent of model stochasticity."""
     _apply(fixture, batch, expect)

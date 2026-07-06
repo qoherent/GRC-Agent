@@ -120,7 +120,7 @@ def _cap_embed_body(parts: list[str], max_words: int) -> str:
     If the body would exceed ``max_words``, the body is truncated to
     ``max_words`` words and a visible flag is appended:
     ``[TRUNCATED by catalog embed: was N words, kept M]``. This mirrors
-    the docs pipeline's ``_EMBED_MAX_WORDS = 256`` cap and the
+    the docs pipeline's ``_EMBED_MAX_WORDS`` cap and the
     ``[TRUNCATED ...]`` convention from ``llm_client.cap_words``.
     """
     body = "\n".join(parts)
@@ -165,7 +165,7 @@ def compose_block_embed_text(
     Param filtering is the caller's responsibility
     (see :func:`grc_agent.runtime.param_filter.visible_param_keys`); this
     function trusts the ``parameters`` argument as the already-filtered list. The resulting
-    body is capped at 256 words; if the cap fires, a visible
+    body is capped at ``_EMBED_MAX_WORDS`` words; if the cap fires, a visible
     ``[TRUNCATED ...]`` flag is appended.
     """
     parts: list[str] = []
@@ -244,12 +244,10 @@ class VectorCatalogStore(VectorStoreBase):
             "payload TEXT)"
         )
         conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS catalog_idx USING vec0("
-            f"embedding float[{dim}])"
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS catalog_idx USING vec0(embedding float[{dim}])"
         )
         conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts "
-            "USING fts5(content, tokenize='porter')"
+            "CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts USING fts5(content, tokenize='porter')"
         )
 
     def _ensure_fts5(self, conn: sqlite3.Connection) -> None:
@@ -262,15 +260,11 @@ class VectorCatalogStore(VectorStoreBase):
         try:
             n = conn.execute("SELECT count(*) FROM catalog_fts").fetchone()[0]
         except sqlite3.OperationalError:
-            conn.execute(
-                "CREATE VIRTUAL TABLE catalog_fts USING fts5(content, tokenize='porter')"
-            )
+            conn.execute("CREATE VIRTUAL TABLE catalog_fts USING fts5(content, tokenize='porter')")
             n = 0
         if n > 0:
             return
-        for rid, payload in conn.execute(
-            "SELECT rowid, payload FROM catalog_chunks"
-        ).fetchall():
+        for rid, payload in conn.execute("SELECT rowid, payload FROM catalog_chunks").fetchall():
             conn.execute(
                 "INSERT INTO catalog_fts(rowid, content) VALUES (?, ?)",
                 (rid, payload or ""),
@@ -304,8 +298,10 @@ class VectorCatalogStore(VectorStoreBase):
 
             # Either fresh, or the stamped model differs → probe dim + (re)build.
             probe = embed_block_text(
-                server_url, _DOCUMENT_PREFIX + "dimension probe",
-                model=self.embedding_model, api_key=self.api_key,
+                server_url,
+                _DOCUMENT_PREFIX + "dimension probe",
+                model=self.embedding_model,
+                api_key=self.api_key,
             )
             dim = len(probe)
 
@@ -356,9 +352,7 @@ class VectorCatalogStore(VectorStoreBase):
         finally:
             conn.close()
 
-    def search(
-        self, query: str, query_vector: list[float], limit: int
-    ) -> list[dict[str, Any]]:
+    def search(self, query: str, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
         """Hybrid retrieval: weighted-RRF fusion of vector KNN + FTS5-porter.
 
         Pulls a ``FUSION_POOL``-wide candidate set from each backend, fuses via

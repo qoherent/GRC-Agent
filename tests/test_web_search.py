@@ -43,9 +43,10 @@ class WebSearchApiContractTests(unittest.TestCase):
             ]
         }
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "test-key"}), mock.patch(
-            "httpx.post", return_value=fake_response
-        ) as post:
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "test-key"}),
+            mock.patch("httpx.post", return_value=fake_response) as post,
+        ):
             web_search.web_search("what is ollama?")
 
         # Single POST to the web_search endpoint.
@@ -66,9 +67,10 @@ class WebSearchApiContractTests(unittest.TestCase):
         fake_response.raise_for_status = mock.MagicMock()
         fake_response.json.return_value = {"results": []}
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}), mock.patch(
-            "httpx.post", return_value=fake_response
-        ) as post:
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}),
+            mock.patch("httpx.post", return_value=fake_response) as post,
+        ):
             web_search.web_search("q", max_results=3)
 
         self.assertEqual(post.call_args.kwargs["json"], {"query": "q", "max_results": 3})
@@ -82,9 +84,10 @@ class WebSearchApiContractTests(unittest.TestCase):
         fake_response.raise_for_status = mock.MagicMock()
         fake_response.json.return_value = {"results": []}
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}), mock.patch(
-            "httpx.post", return_value=fake_response
-        ) as post:
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}),
+            mock.patch("httpx.post", return_value=fake_response) as post,
+        ):
             web_search.web_search("q", max_results=999)
 
         self.assertEqual(post.call_args.kwargs["json"]["max_results"], 10)
@@ -100,9 +103,10 @@ class WebSearchApiContractTests(unittest.TestCase):
             "links": ["https://ollama.com/", "https://ollama.com/models"],
         }
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "test-key"}), mock.patch(
-            "httpx.post", return_value=fake_response
-        ) as post:
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "test-key"}),
+            mock.patch("httpx.post", return_value=fake_response) as post,
+        ):
             web_search.web_fetch("https://ollama.com")
 
         post.assert_called_once()
@@ -126,23 +130,26 @@ class WebSearchResultShapeTests(unittest.TestCase):
     def test_web_search_returns_results_array(self) -> None:
         from grc_agent.runtime import web_search
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}), mock.patch(
-            "httpx.post",
-            return_value=self._ok(
-                {
-                    "results": [
-                        {
-                            "title": "A",
-                            "url": "https://example.com/a",
-                            "content": "snippet A",
-                        },
-                        {
-                            "title": "B",
-                            "url": "https://example.com/b",
-                            "content": "snippet B",
-                        },
-                    ]
-                }
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}),
+            mock.patch(
+                "httpx.post",
+                return_value=self._ok(
+                    {
+                        "results": [
+                            {
+                                "title": "A",
+                                "url": "https://example.com/a",
+                                "content": "snippet A",
+                            },
+                            {
+                                "title": "B",
+                                "url": "https://example.com/b",
+                                "content": "snippet B",
+                            },
+                        ]
+                    }
+                ),
             ),
         ):
             result = web_search.web_search("q")
@@ -155,8 +162,9 @@ class WebSearchResultShapeTests(unittest.TestCase):
     def test_web_search_empty_results(self) -> None:
         from grc_agent.runtime import web_search
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}), mock.patch(
-            "httpx.post", return_value=self._ok({"results": []})
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}),
+            mock.patch("httpx.post", return_value=self._ok({"results": []})),
         ):
             result = web_search.web_search("nothing")
 
@@ -166,14 +174,17 @@ class WebSearchResultShapeTests(unittest.TestCase):
     def test_web_fetch_returns_title_content_links(self) -> None:
         from grc_agent.runtime import web_search
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}), mock.patch(
-            "httpx.post",
-            return_value=self._ok(
-                {
-                    "title": "Ollama",
-                    "content": "Cloud models are now available...",
-                    "links": ["https://ollama.com/"],
-                }
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}),
+            mock.patch(
+                "httpx.post",
+                return_value=self._ok(
+                    {
+                        "title": "Ollama",
+                        "content": "Cloud models are now available...",
+                        "links": ["https://ollama.com/"],
+                    }
+                ),
             ),
         ):
             result = web_search.web_fetch("https://ollama.com")
@@ -203,9 +214,12 @@ class WebSearchErrorHandlingTests(unittest.TestCase):
         import httpx
         from grc_agent.runtime import web_search
 
-        with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}), mock.patch(
-            "httpx.post",
-            side_effect=httpx.HTTPError("401 Unauthorized"),
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}),
+            mock.patch(
+                "httpx.post",
+                side_effect=httpx.HTTPError("401 Unauthorized"),
+            ),
         ):
             result = web_search.web_search("q")
 
@@ -236,9 +250,12 @@ class WebSearchAgentIntegrationTests(unittest.TestCase):
 
         # Monkeypatch the module-level web_search call to assert the
         # agent's handler forwards query + max_results correctly.
-        with mock.patch.object(
-            web_search, "web_search", return_value={"ok": True, "results": []}
-        ) as patched, mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}):
+        with (
+            mock.patch.object(
+                web_search, "web_search", return_value={"ok": True, "results": []}
+            ) as patched,
+            mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "k"}),
+        ):
             result = agent_module.GrcAgent._web_search(agent, "test query", max_results=7)
 
         self.assertTrue(result["ok"])

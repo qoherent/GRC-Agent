@@ -1,23 +1,22 @@
 """LLM condensation for Ollama hosted web_search / web_fetch results.
 
 Raw search results (multiple ``{title, url, content}`` hits) and fetched
-pages (a full page body) can run to many thousands of tokens — feeding that
-straight into the GRC agent's context would flood it. Both tools instead
-route their raw output through one extra LLM call, via
-:func:`grc_agent.runtime.llm_client.call_agent_llm`, that distills it into
-the most concise answer relevant to the original request.
+pages (a full page body) are usually far larger than what's useful to a
+model turn. Both tools route their raw output through one extra LLM call,
+via :func:`grc_agent.runtime.llm_client.call_agent_llm` — reusing the
+agent's own configured backend/model, so the summarization call gets that
+model's full context window rather than an arbitrary word cap — that
+distills it into the most concise answer relevant to the original request.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from grc_agent.runtime.llm_client import call_agent_llm, cap_words
+from grc_agent.runtime.llm_client import call_agent_llm
 
 if TYPE_CHECKING:
     from grc_agent.agent import GrcAgent
-
-_MAX_CONTEXT_WORDS = 4000
 
 
 def summarize_web_search(agent: GrcAgent, query: str, results: list[dict[str, Any]]) -> str:
@@ -26,7 +25,7 @@ def summarize_web_search(agent: GrcAgent, query: str, results: list[dict[str, An
         f"# Result {i + 1}: {r.get('title', '')} ({r.get('url', '')})\n{r.get('content', '')}"
         for i, r in enumerate(results)
     ]
-    context = cap_words("\n\n---\n\n".join(context_parts), _MAX_CONTEXT_WORDS)
+    context = "\n\n---\n\n".join(context_parts)
     prompt = (
         "You are answering a question using live web search results. Each "
         "result below is a SHORT SNIPPET (title, URL, and a brief excerpt) "
@@ -60,7 +59,6 @@ def summarize_web_fetch(
     context_question: str = "",
 ) -> str:
     """Condense one fetched page's full content into a concise summary."""
-    body = cap_words(content, _MAX_CONTEXT_WORDS)
     focus = (
         f"The user's immediate message was: {context_question}\n"
         "Treat this as a hint of what to prioritize, not a strict filter — "
@@ -85,7 +83,7 @@ def summarize_web_fetch(
         f"{focus}"
         f"Page title: {title}\n"
         f"Page URL: {url}\n\n"
-        f"Page content:\n{body}"
+        f"Page content:\n{content}"
     )
     return call_agent_llm(agent, prompt)
 

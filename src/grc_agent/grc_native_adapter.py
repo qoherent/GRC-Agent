@@ -299,7 +299,9 @@ def render_block(
             unsorted_params.append((k, rendered))
 
     if evaluated_hides:
-        unsorted_params.sort(key=lambda item: (overview_rank(evaluated_hides.get(item[0], "all")), item[0]))
+        unsorted_params.sort(
+            key=lambda item: (overview_rank(evaluated_hides.get(item[0], "all")), item[0])
+        )
 
     parameters = {k: v for k, v in unsorted_params}
 
@@ -371,9 +373,7 @@ def _format_error(elem: Any, msg: Any) -> str:
     return f"{loc}: {msg}" if loc else str(msg)
 
 
-def port_object(
-    flow_graph: Any, block_name: str, port_key: str, *, kind: str
-) -> Any:
+def port_object(flow_graph: Any, block_name: str, port_key: str, *, kind: str) -> Any:
     """Return the live port object on ``block_name`` matching ``port_key``.
 
     Returns ``None`` when the block has no port with that key under
@@ -478,9 +478,7 @@ def set_block_state(block: Any, state: str) -> None:
     aliases = {"bypass": "bypassed"}
     canonical = aliases.get(state, state)
     if canonical not in block.STATE_LABELS:
-        raise ValueError(
-            f"Invalid state {state!r}; must be one of {block.STATE_LABELS}"
-        )
+        raise ValueError(f"Invalid state {state!r}; must be one of {block.STATE_LABELS}")
     block.state = canonical
 
 
@@ -641,9 +639,7 @@ def write_save_backup(target_path: Path) -> Path | None:
     try:
         backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
-        raise OSError(
-            f"Could not create save backup directory for {target_path}: {exc}"
-        ) from exc
+        raise OSError(f"Could not create save backup directory for {target_path}: {exc}") from exc
     with open(target_path, "rb") as f:
         old_hash = hashlib.sha256(f.read()).hexdigest()
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -677,9 +673,7 @@ def exclusive_file_lock(lock_path: Path) -> Iterator[None]:
 
                 _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
             except OSError as exc:
-                raise OSError(
-                    f"Could not acquire exclusive lock on {lock_path}: {exc}"
-                ) from exc
+                raise OSError(f"Could not acquire exclusive lock on {lock_path}: {exc}") from exc
             try:
                 yield
             finally:

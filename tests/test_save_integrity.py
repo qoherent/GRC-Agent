@@ -32,7 +32,9 @@ def _load_temp_session(tmpdir: str) -> FlowgraphSession:
 def _mutate_param(session: FlowgraphSession, instance_name: str, key: str, value: str) -> None:
     """Dirty the session via the adapter (replaces deleted session.set_param)."""
     assert session.flowgraph is not None
-    apply_mutation(session.flowgraph, "update_params", instance_name=instance_name, params={key: value})
+    apply_mutation(
+        session.flowgraph, "update_params", instance_name=instance_name, params={key: value}
+    )
     session.is_dirty = True
     session.bump_revision()
 
@@ -113,7 +115,6 @@ class SaveIntegrityTests(unittest.TestCase):
 
             self.assertIn("symlink", str(caught.exception))
             self.assertTrue(session.is_dirty)
-
 
     def test_change_graph_commit_refuses_externally_modified_active_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

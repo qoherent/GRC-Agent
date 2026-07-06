@@ -94,9 +94,7 @@ def test_write_metrics_outputs_pass_rates_append(tmp_path: Path) -> None:
     from tests.agent_flow.run_agent_flow import _extract_metrics, write_metrics_outputs
 
     metrics = [_extract_metrics(rec) for rec in _fake_recs()]
-    write_metrics_outputs(
-        metrics, tmp_path, pass_rates={"fake_read": "3/3", "fake_edit": "2/3"}
-    )
+    write_metrics_outputs(metrics, tmp_path, pass_rates={"fake_read": "3/3", "fake_edit": "2/3"})
     md = (tmp_path / "METRICS.md").read_text(encoding="utf-8")
     assert "**Pass-rate (k/N):**" in md
     assert "fake_read: 3/3" in md

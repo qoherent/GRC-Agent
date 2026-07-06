@@ -68,9 +68,7 @@ def _ensure_catalog_index(agent: GrcAgent) -> bool:
             agent._embedding_model,
             api_key=agent._embedding_api_key,
         )
-        store.ingest_if_needed(
-            blocks=blocks_payload, server_url=agent._llama_server_url
-        )
+        store.ingest_if_needed(blocks=blocks_payload, server_url=agent._llama_server_url)
     except Exception as exc:
         logger.warning("Catalog vector ingest failed: %s", exc)
     return is_catalog_db_usable(db_path)

@@ -11,16 +11,12 @@ from typing import Any
 
 from ToolAgents.data_models.messages import ChatMessage
 
-DISPLAY_ROLES: frozenset[str] = frozenset(
-    {"user", "assistant", "mutation", "error", "info"}
-)
+DISPLAY_ROLES: frozenset[str] = frozenset({"user", "assistant", "mutation", "error", "info"})
 USER_MODEL_ROLE = "user_model"
 ASSISTANT_MODEL_ROLE = "assistant_model"
 TOOL_MODEL_ROLE = "tool_model"
 
-MODEL_ROLES: frozenset[str] = frozenset(
-    {USER_MODEL_ROLE, ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE}
-)
+MODEL_ROLES: frozenset[str] = frozenset({USER_MODEL_ROLE, ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE})
 
 
 def chat_message_payload(message: ChatMessage) -> dict[str, Any]:

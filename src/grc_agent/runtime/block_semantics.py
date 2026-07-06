@@ -44,7 +44,9 @@ def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]
     except Exception as exc:
         logger.debug(
             "evaluated_param_hides platform_import_failed block=%s: %s: %s",
-            block_type, type(exc).__name__, exc,
+            block_type,
+            type(exc).__name__,
+            exc,
         )
         return {}
     if platform is None:
@@ -56,7 +58,9 @@ def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]
     except Exception as exc:
         logger.debug(
             "evaluated_param_hides new_block_failed block=%s: %s: %s",
-            block_type, type(exc).__name__, exc,
+            block_type,
+            type(exc).__name__,
+            exc,
         )
         return {}
     # ``new_block`` returns None for control blocks (variable, parameter,
@@ -74,19 +78,26 @@ def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]
                 except Exception as exc:
                     logger.debug(
                         "evaluated_param_hides set_value_failed block=%s key=%s: %s: %s",
-                        block_type, key, type(exc).__name__, exc,
+                        block_type,
+                        key,
+                        type(exc).__name__,
+                        exc,
                     )
         try:
             flow_graph.rewrite()
         except Exception as exc:
             logger.debug(
                 "evaluated_param_hides rewrite_failed block=%s: %s: %s",
-                block_type, type(exc).__name__, exc,
+                block_type,
+                type(exc).__name__,
+                exc,
             )
         return {str(name): str(param.hide) for name, param in block.params.items()}
     except Exception as exc:
         logger.debug(
             "evaluated_param_hides collect_failed block=%s: %s: %s",
-            block_type, type(exc).__name__, exc,
+            block_type,
+            type(exc).__name__,
+            exc,
         )
         return {}

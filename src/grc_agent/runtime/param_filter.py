@@ -21,6 +21,22 @@ All ``hide`` / ``category`` / ``dtype`` / ``default`` values are read off live
 GRC blocks (``gnuradio.grc.core``) via throwaway instantiation. ``hide`` is the
 GRC-*evaluated* visibility (depends on current param values); the others are
 static block-definition metadata.
+
+Three structural exceptions to the pure hide/category/dtype rule, applied
+before Stage A (see :func:`keep_param`):
+
+  - ``dtype == 'id'``: the block's instance name. Native GRC dtype, not a
+    name guess — GRC's own property editor (``gui/PropsDialog.py``,
+    ``gui/canvas/block.py``) branches on this exact dtype to force-show the
+    id field, so this mirrors upstream GRC, not an app invention.
+  - ``param_key == 'showports'``: no native GRC attribute distinguishes it
+    from any other boolean param — it is a per-``.block.yml`` community
+    naming convention with zero support in ``gnuradio.grc.core``. Kept as a
+    literal name check because no uniform-rule alternative exists.
+  - ``param_key.startswith('bus_structure_')``: not an app-invented
+    heuristic — GRC's own ``Block`` class (``gnuradio/grc/core/blocks/
+    block.py``, ``bus_structure_source``/``bus_structure_sink``
+    properties) reserves these exact literal keys itself.
 """
 
 from __future__ import annotations
@@ -49,7 +65,7 @@ EXCLUDED_PARAM_CATEGORIES: frozenset[str] = frozenset({ADVANCED_PARAM_TAB, "Conf
 # in its expression equals a variable block's name.
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
 
-DETAILS = "details"    # Stage A only (catalog describe_block / embed)
+DETAILS = "details"  # Stage A only (catalog describe_block / embed)
 OVERVIEW = "overview"  # Stage A + Stage B (inspect_graph overview)
 
 
@@ -76,11 +92,12 @@ def keep_param(
     Returns True if the param survives the pipeline for the given ``mode``.
     Pure function — no I/O, no side effects.
     """
-    # The 'id' param is the block's instance name — always redundant with
-    # ``instance_name`` (already carried by every model-visible block payload)
-    # and the system prompt forbids editing it. One uniform rule for every
-    # block, every mode, every tool.
-    if param_key == "id" or param_key == "showports" or param_key.startswith("bus_structure_"):
+    # 'id' is a native GRC dtype (see module docstring) — the block's instance
+    # name, always redundant with ``instance_name`` (already carried by every
+    # model-visible block payload); the system prompt forbids editing it.
+    # 'showports' and 'bus_structure_*' have no dtype/category signal (see
+    # module docstring) and are excluded by name as a documented exception.
+    if dtype == "id" or param_key == "showports" or param_key.startswith("bus_structure_"):
         return False
     if hide == "all":
         return False
@@ -91,7 +108,12 @@ def keep_param(
     if mode != OVERVIEW:
         return True
 
-    # Pure GRC property rule: drop 'hide: part' parameters in overview mode if they match default and don't reference a variable
+    # Drop 'hide: part' parameters in overview mode if they match default and
+    # don't reference a variable. 'type'/'generate_options' are excepted: both
+    # are ordinary enum params with no native GRC attribute marking them as
+    # structural (they drive which other params a block exposes) — this is
+    # app-level UX policy, not a GRC-derived rule, kept because no
+    # dtype/category-based alternative exists without behavior regression.
     if hide == "part" and param_key not in {"type", "generate_options"}:
         is_custom = str(value) != str(default)
         is_var_ref = variable_names and references_variable(value, variable_names)
@@ -99,6 +121,8 @@ def keep_param(
             return False
 
     if dtype == "enum":
+        # Same 'type'/'generate_options' exception as above, applied to the
+        # enum-specific keep rule.
         if str(value) != str(default) or param_key in {"type", "generate_options"}:
             return True
         return False
@@ -127,7 +151,12 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
 
         platform = get_platform_or_none()
     except Exception as exc:
-        logger.debug("param_metadata platform_import_failed block=%s: %s: %s", block_type, type(exc).__name__, exc)
+        logger.debug(
+            "param_metadata platform_import_failed block=%s: %s: %s",
+            block_type,
+            type(exc).__name__,
+            exc,
+        )
         return {}
     if platform is None:
         logger.debug("param_metadata no_platform block=%s", block_type)
@@ -136,7 +165,9 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
         flow_graph = platform.make_flow_graph()
         block = flow_graph.new_block(block_type)
     except Exception as exc:
-        logger.debug("param_metadata new_block_failed block=%s: %s: %s", block_type, type(exc).__name__, exc)
+        logger.debug(
+            "param_metadata new_block_failed block=%s: %s: %s", block_type, type(exc).__name__, exc
+        )
         return {}
     if block is None:
         return {}
@@ -150,13 +181,22 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
             for name, param in block.params.items()
         }
     except Exception as exc:
-        logger.debug("param_metadata collect_failed block=%s: %s: %s", block_type, type(exc).__name__, exc)
+        logger.debug(
+            "param_metadata collect_failed block=%s: %s: %s", block_type, type(exc).__name__, exc
+        )
         return {}
 
 
 def categories(block_type: str) -> dict[str, str]:
     """``{param_key: category}`` for one block type, from native GRC metadata."""
     return {k: v["category"] for k, v in param_metadata(block_type).items()}
+
+
+def dtypes(block_type: str) -> dict[str, str]:
+    """``{param_key: dtype}`` for one block type, from native GRC metadata."""
+    return {k: v["dtype"] for k, v in param_metadata(block_type).items()}
+
+
 def visible_param_keys(
     block_id: str,
     keys: list[str] | tuple[str, ...],
@@ -171,8 +211,7 @@ def visible_param_keys(
     if not hides:
         return list(keys)
     cats = categories(block_id)
-    # dtype is unavailable for a bare key list; pass "" so the gui_hint branch
-    # is skipped (a single cosmetic key in embed text is negligible).
+    param_dtypes = dtypes(block_id)
     # Missing hide entries default to "none" (kept) — embed text is conservative
     # and never silently drops a param whose visibility is unknown.
     return [
@@ -181,7 +220,7 @@ def visible_param_keys(
         if keep_param(
             hide=hides.get(str(key), "none"),
             category=cats.get(str(key), DEFAULT_PARAM_TAB),
-            dtype="",
+            dtype=param_dtypes.get(str(key), ""),
             value="",
             default="",
             mode=DETAILS,

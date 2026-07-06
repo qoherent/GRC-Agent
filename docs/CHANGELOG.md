@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### Context & session hardening audit
+
+- **Removed a real silent-drop bug in `sessions_store.py`.** The writer
+  thread's `_drain_batch()` re-enqueued part of a drained burst back onto its
+  own queue via `put_nowait`, dropping-and-logging on `queue.Full` —
+  reachable in practice because blocking producers refill freed slots
+  instantly. Fixed by removing the deferral entirely: once a message is
+  dequeued into the local batch it is always committed, never put back.
+  (A literal "make the re-enqueue blocking" fix was rejected — the writer is
+  the queue's sole consumer, so blocking there would deadlock it.)
+- **`param_filter.py`'s `id` exclusion is now dtype-driven, not name-driven.**
+  `dtype == "id"` replaces `param_key == "id"`, matching upstream GRC's own
+  property editor (which branches on this exact native dtype). The three
+  remaining name-based exceptions (`showports`, `bus_structure_*`,
+  `type`/`generate_options`) are now explicitly documented in the module
+  docstring with why each one can't be derived from hide/category/dtype
+  alone — two mirror names GRC's own object model reserves, one is
+  undocumented app-level UX policy.
+- **Deleted a dead code path that contradicted its own rule.** A `reminder`
+  parameter injected `<runtime_directive>` text into the *system* message,
+  contradicting the documented "runtime directives are user-role only" rule
+  — and was never actually called with a value anywhere in production (only
+  tests exercised it). The one live mechanism (a loop-detection notice)
+  already correctly used a user-role message and is unaffected.
+- **Removed hardcoded word caps on same-backend summarizer calls.**
+  `web_answer.py` and `doc_answer.py` capped context fed into an LLM call
+  that reuses the *same* configured chat backend/model as the main agent —
+  an arbitrary limit on a model that already has a large context window.
+- **Deleted dead guardrails config.** `max_tool_output_bytes`,
+  `max_compact_list_items`, `history_compact_budget`, `max_tool_result_chars`
+  had zero remaining consumers after an earlier compaction/budget-clamp
+  removal; the config kept accepting and validating them anyway.
+  `max_inspect_targets` (still live) is unaffected.
+- **`_EMBED_MAX_WORDS` raised from a 256-word guess to 900, cited against
+  real model limits.** `embeddinggemma` (Ollama) accepts 2048 tokens;
+  `pplx-embed-v1-0.6b` (OpenRouter) accepts 32K — Gemma is the binding
+  constraint. 900 words leaves ~16% margin even under a pessimistic
+  1.8 tokens/word ratio. This was load-bearing, not theoretical: a corpus
+  scan of the docs wiki found 60% of chunks were already being truncated at
+  256 words (median real chunk size is 403 words); the new cap cuts that to
+  28%. Verified against the live `embeddinggemma` endpoint and by rebuilding
+  both vector indexes end-to-end.
+
 ### Packaging & embedding provider
 
 - **`.env` is the single source of truth for model names.** Chat and embedding

@@ -237,7 +237,6 @@ class GrcOpenAIChatAPI(OpenAIChatAPI):
         self.response_converter = GrcResponseConverter(self.response_converter)
 
 
-
 class GrcResponseConverter:
     """Wrapper converter to extract and prepend thinking tokens.
 
@@ -367,6 +366,15 @@ class GrcResponseConverter:
                     chat_message.content.append(TextContent(content=footnote))
 
         return chat_message
+
+    def yield_from_provider(self, stream_generator: Any) -> Generator[Any, None, None]:
+        def safe_stream() -> Generator[Any, None, None]:
+            for chunk in stream_generator:
+                if hasattr(chunk, "choices") and not chunk.choices:
+                    continue
+                yield chunk
+
+        yield from self.parent_converter.yield_from_provider(safe_stream())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.parent_converter, name)
@@ -829,9 +837,7 @@ class ToolAgentsRunner:
                 yield {
                     "event": "model_message",
                     "role": ASSISTANT_MODEL_ROLE,
-                    "payload": chat_message_payload(
-                        agent.chat_history.get_messages()[-1]
-                    ),
+                    "payload": chat_message_payload(agent.chat_history.get_messages()[-1]),
                 }
                 yield {"event": "final", "result": payload}
                 return None
@@ -894,8 +900,7 @@ class ToolAgentsRunner:
                 result = build_error_payload(
                     error_type=ErrorCode.TOOL_NOT_ALLOWED_FOR_SURFACE,
                     message=(
-                        f"Tool '{tool_name}' is not available through "
-                        "the model-facing surface."
+                        f"Tool '{tool_name}' is not available through the model-facing surface."
                     ),
                 )
                 result["tool"] = tool_name
@@ -937,16 +942,10 @@ class ToolAgentsRunner:
                 break
 
         if loop_stuck:
-            stuck_text = (
-                "(stopped: the same tool call failed identically "
-                "multiple times in a row)"
-            )
+            stuck_text = "(stopped: the same tool call failed identically multiple times in a row)"
             payload = build_error_payload(
                 error_type=ErrorCode.SAFETY_CEILING,
-                message=(
-                    "Stopped: the same tool call failed identically "
-                    "multiple times in a row."
-                ),
+                message=("Stopped: the same tool call failed identically multiple times in a row."),
             )
             payload["model"] = resolved_model
             payload["steps"] = assistant_turns
@@ -958,18 +957,12 @@ class ToolAgentsRunner:
             yield {
                 "event": "model_message",
                 "role": ASSISTANT_MODEL_ROLE,
-                "payload": chat_message_payload(
-                    agent.chat_history.get_messages()[-1]
-                ),
+                "payload": chat_message_payload(agent.chat_history.get_messages()[-1]),
             }
             yield {"event": "final", "result": payload}
-            return _ToolDispatchOutcome(
-                executed_count=round_executed, loop_stuck=True
-            )
+            return _ToolDispatchOutcome(executed_count=round_executed, loop_stuck=True)
 
-        return _ToolDispatchOutcome(
-            executed_count=round_executed, loop_stuck=False
-        )
+        return _ToolDispatchOutcome(executed_count=round_executed, loop_stuck=False)
 
     def _run_turn_events(
         self,
@@ -984,7 +977,6 @@ class ToolAgentsRunner:
     ) -> Iterator[dict[str, Any]]:
         # Persist the user message first — before any model / error check —
         # so the prompt is always in the SSOT regardless of what happens next.
-        agent.compact_history()
         agent.chat_history.add_user_message(user_message)
         yield {
             "event": "model_message",
@@ -997,8 +989,11 @@ class ToolAgentsRunner:
         if not isinstance(resolved_model, str) or not resolved_model.strip():
             no_model_text = "No model configured."
             agent.chat_history.add_assistant_message(no_model_text)
-            yield {"event": "model_message", "role": ASSISTANT_MODEL_ROLE,
-                   "payload": chat_message_payload(agent.chat_history.get_messages()[-1])}
+            yield {
+                "event": "model_message",
+                "role": ASSISTANT_MODEL_ROLE,
+                "payload": chat_message_payload(agent.chat_history.get_messages()[-1]),
+            }
             yield {"event": "chunk", "text": no_model_text}
             payload = build_error_payload(
                 error_type=ErrorCode.MODEL_NOT_FOUND,
@@ -1095,9 +1090,7 @@ class ToolAgentsRunner:
             yield {
                 "event": "model_message",
                 "role": ASSISTANT_MODEL_ROLE,
-                "payload": chat_message_payload(
-                    agent.chat_history.get_messages()[-1]
-                ),
+                "payload": chat_message_payload(agent.chat_history.get_messages()[-1]),
             }
             if empty_terminal:
                 logger.warning(

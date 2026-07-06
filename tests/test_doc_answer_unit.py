@@ -42,7 +42,10 @@ class FakeAgent:
 
 def _hit(path="wiki/widget.md", heading="Widget", text="body text", distance=0.1):
     return {
-        "path": path, "heading": heading, "text": text, "distance": distance,
+        "path": path,
+        "heading": heading,
+        "text": text,
+        "distance": distance,
     }
 
 
@@ -59,6 +62,7 @@ def test_embedding_constants_live_in_dedicated_module():
         _QUERY_PREFIX as _CQP,
     )
     from grc_agent.runtime.doc_answer import _DOCUMENT_PREFIX, _QUERY_PREFIX
+
     assert _DOCUMENT_PREFIX == cfg._DOCUMENT_PREFIX == _CDP
     assert _QUERY_PREFIX == cfg._QUERY_PREFIX == _CQP
 
@@ -94,11 +98,12 @@ def test_successful_call_includes_sources_and_answer():
         _hit("wiki/widget.md", "Widget", "Widget text 1", 0.05),
         _hit("wiki/gizmo.md", "Gizmo", "Gizmo text 2", 0.10),
     ]
-    with mock.patch(
-        "grc_agent.runtime.doc_answer.VectorDocsStore"
-    ) as FakeStore, mock.patch(
-        "grc_agent.runtime.doc_answer._generate_grounded_answer",
-        return_value="Two relevant blocks were found.",
+    with (
+        mock.patch("grc_agent.runtime.doc_answer.VectorDocsStore") as FakeStore,
+        mock.patch(
+            "grc_agent.runtime.doc_answer._generate_grounded_answer",
+            return_value="Two relevant blocks were found.",
+        ),
     ):
         FakeStore.return_value.search.return_value = hits
         with mock.patch(
@@ -133,14 +138,20 @@ def test_prompt_includes_each_source_path_heading_and_body():
         return "answer"
 
     sources = [
-        {"path": "wiki/widget.md", "heading": "Widget", "distance": 0.1,
-         "content": "Widget reference body."},
-        {"path": "wiki/gizmo.md", "heading": "Gizmo", "distance": 0.2,
-         "content": "Gizmo reference body."},
+        {
+            "path": "wiki/widget.md",
+            "heading": "Widget",
+            "distance": 0.1,
+            "content": "Widget reference body.",
+        },
+        {
+            "path": "wiki/gizmo.md",
+            "heading": "Gizmo",
+            "distance": 0.2,
+            "content": "Gizmo reference body.",
+        },
     ]
-    with mock.patch(
-        "grc_agent.runtime.doc_answer.call_agent_llm", side_effect=fake_llm
-    ):
+    with mock.patch("grc_agent.runtime.doc_answer.call_agent_llm", side_effect=fake_llm):
         _generate_grounded_answer(FakeAgent(), "What?", sources)
     assert len(captured) == 1
     prompt = captured[0]
@@ -173,11 +184,12 @@ def test_no_chunk_hits_returns_retrieval_not_ready():
     from grc_agent.runtime.doc_answer import ask_grc_docs
 
     fake_agent = FakeAgent()
-    with mock.patch(
-        "grc_agent.runtime.doc_answer.VectorDocsStore"
-    ) as FakeStore, mock.patch(
-        "grc_agent.runtime.doc_answer.embed_query",
-        return_value=[0.0] * 768,
+    with (
+        mock.patch("grc_agent.runtime.doc_answer.VectorDocsStore") as FakeStore,
+        mock.patch(
+            "grc_agent.runtime.doc_answer.embed_query",
+            return_value=[0.0] * 768,
+        ),
     ):
         FakeStore.return_value.search.return_value = []
         payload = ask_grc_docs(fake_agent, question="alien topic")
@@ -191,14 +203,16 @@ def test_answer_generation_failure_returns_internal_error():
     from grc_agent.runtime.doc_answer import ask_grc_docs
 
     fake_agent = FakeAgent()
-    with mock.patch(
-        "grc_agent.runtime.doc_answer.VectorDocsStore"
-    ) as FakeStore, mock.patch(
-        "grc_agent.runtime.doc_answer.embed_query",
-        return_value=[0.0] * 768,
-    ), mock.patch(
-        "grc_agent.runtime.doc_answer._generate_grounded_answer",
-        side_effect=RuntimeError("LLM boom"),
+    with (
+        mock.patch("grc_agent.runtime.doc_answer.VectorDocsStore") as FakeStore,
+        mock.patch(
+            "grc_agent.runtime.doc_answer.embed_query",
+            return_value=[0.0] * 768,
+        ),
+        mock.patch(
+            "grc_agent.runtime.doc_answer._generate_grounded_answer",
+            side_effect=RuntimeError("LLM boom"),
+        ),
     ):
         FakeStore.return_value.search.return_value = [
             _hit("wiki/x.md", "X", "body", 0.1),

@@ -117,10 +117,13 @@ def _jsonschema_error_to_issue(error: JsonschemaValidationError) -> dict[str, An
         issue["max_items"] = error.validator_value
         issue["received_items"] = len(error.instance) if isinstance(error.instance, list) else 0
     elif error.validator == "additionalProperties":
-        allowed = set(error.schema.get("properties", {})) if isinstance(error.schema, dict) else set()
+        allowed = (
+            set(error.schema.get("properties", {})) if isinstance(error.schema, dict) else set()
+        )
         extra_keys = (
             [k for k in error.instance if k not in allowed]
-            if isinstance(error.instance, dict) else []
+            if isinstance(error.instance, dict)
+            else []
         )
         if extra_keys:
             issue["field"] = extra_keys[0]
@@ -141,12 +144,14 @@ def _schema_repair_instruction(
     missing = [
         issue.get("field")
         for issue in issues
-        if issue.get("code") == ToolValidationCode.MISSING_REQUIRED and isinstance(issue.get("field"), str)
+        if issue.get("code") == ToolValidationCode.MISSING_REQUIRED
+        and isinstance(issue.get("field"), str)
     ]
     invalid = [
         issue.get("field")
         for issue in issues
-        if issue.get("code") != ToolValidationCode.MISSING_REQUIRED and isinstance(issue.get("field"), str)
+        if issue.get("code") != ToolValidationCode.MISSING_REQUIRED
+        and isinstance(issue.get("field"), str)
     ]
     return {
         "tool": tool_name,

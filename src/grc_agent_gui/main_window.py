@@ -890,8 +890,6 @@ class MainWindow(QMainWindow):
             self.agent.reconfigure_llama_runtime(embedding_model=new_model)
         self.status_bar.showMessage(f"Embedding model set to {new_model}", 5000)
 
-
-
     def _probe_and_populate_models(self) -> None:
         """Probe Ollama and populate the toolbar's model dropdown."""
         from grc_agent.model_manager import discover_ollama_models
@@ -947,8 +945,7 @@ class MainWindow(QMainWindow):
                     #    total width. If it's larger or collapsed, restore it.
                     max_sidebar_w = int(total_w * SPLITTER.sidebar_fraction_max)
                     if (
-                        sizes[0] > max_sidebar_w
-                        or sizes[0] < SPLITTER.sidebar_collapsed_floor_px
+                        sizes[0] > max_sidebar_w or sizes[0] < SPLITTER.sidebar_collapsed_floor_px
                     ) and not self.sidebar_widget.isHidden():
                         sizes[0] = max(
                             SPLITTER.sidebar_min_px_restored,
@@ -1010,9 +1007,7 @@ class MainWindow(QMainWindow):
             try:
                 self.sessions_store.end_active_session(self.active_session_id)
             except Exception as exc:
-                logger.warning(
-                    "Failed to close session %s: %s", self.active_session_id, exc
-                )
+                logger.warning("Failed to close session %s: %s", self.active_session_id, exc)
             self.active_session_id = None
 
     def _ensure_active_session_db_record(self, first_user_prompt: str) -> None:
@@ -1467,9 +1462,7 @@ class MainWindow(QMainWindow):
                             },
                         )
                     env_var = (
-                        "OPENROUTER_MODEL"
-                        if selection.backend == "openrouter"
-                        else "OLLAMA_MODEL"
+                        "OPENROUTER_MODEL" if selection.backend == "openrouter" else "OLLAMA_MODEL"
                     )
                     set_env_model(env_var, chosen_model)
                 except Exception as exc:
@@ -1723,8 +1716,7 @@ class MainWindow(QMainWindow):
                 8000,
             )
             logger.warning(
-                "Session %s has no *_model rows; refusing to "
-                "synthesize a typed history.",
+                "Session %s has no *_model rows; refusing to synthesize a typed history.",
                 session_id,
             )
             return
@@ -1753,13 +1745,12 @@ class MainWindow(QMainWindow):
 
             elif msg.role == "assistant_model":
                 text_parts = [
-                    c.content for c in chat_message.content
+                    c.content
+                    for c in chat_message.content
                     if isinstance(c, TextContent) and isinstance(c.content, str)
                 ]
                 text = "\n".join(p for p in text_parts if p)
-                tool_calls = [
-                    c for c in chat_message.content if isinstance(c, ToolCallContent)
-                ]
+                tool_calls = [c for c in chat_message.content if isinstance(c, ToolCallContent)]
                 if tool_calls:
                     # Non-terminal: text preamble + tool-call fragments.
                     if text:
@@ -1767,9 +1758,7 @@ class MainWindow(QMainWindow):
                             self.chat_widget.start_stream()
                         self.chat_widget.append_stream_chunk(text)
                     for tc in tool_calls:
-                        args_str = _json.dumps(
-                            tc.tool_call_arguments, sort_keys=True, default=str
-                        )
+                        args_str = _json.dumps(tc.tool_call_arguments, sort_keys=True, default=str)
                         self.chat_widget.append_status(tc.tool_call_name, args_str)
                 else:
                     # Terminal assistant text.

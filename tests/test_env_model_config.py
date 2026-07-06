@@ -61,7 +61,9 @@ class ResolverTests(unittest.TestCase):
             self.assertEqual(default_chat_model("ollama"), _DEFAULT_OLLAMA_MODEL)
             self.assertEqual(default_chat_model("openrouter"), _DEFAULT_OPENROUTER_MODEL)
             self.assertEqual(default_embedding_model("ollama"), _DEFAULT_OLLAMA_EMBEDDING_MODEL)
-            self.assertEqual(default_embedding_model("openrouter"), _DEFAULT_OPENROUTER_EMBEDDING_MODEL)
+            self.assertEqual(
+                default_embedding_model("openrouter"), _DEFAULT_OPENROUTER_EMBEDDING_MODEL
+            )
 
     def test_convenience_accessors_delegate(self) -> None:
         env = {

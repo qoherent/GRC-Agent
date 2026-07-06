@@ -111,7 +111,9 @@ def test_sidebar_clear_all_emits_signal(qtbot):
     widget = SidebarWidget()
     qtbot.addWidget(widget)
     assert hasattr(widget, "clear_all_btn"), "SidebarWidget must expose a clear_all button"
-    assert hasattr(widget, "clear_all_requested"), "SidebarWidget must expose the clear_all_requested signal"
+    assert hasattr(widget, "clear_all_requested"), (
+        "SidebarWidget must expose the clear_all_requested signal"
+    )
 
     emitted = False
 
@@ -164,9 +166,7 @@ def test_main_window_clear_all_wipes_sessions_db(qtbot, tmp_path, monkeypatch):
     window._on_clear_all_history()
 
     # The DB is empty.
-    rows = window.sessions_store._writer_conn.execute(
-        "SELECT count(*) FROM sessions"
-    ).fetchone()[0]
+    rows = window.sessions_store._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
     assert rows == 0
     # The sidebar list is empty.
     assert window.sidebar_widget.list_widget.count() == 0
@@ -389,7 +389,8 @@ def test_open_past_session_resumes_context(qtbot, tmp_path, monkeypatch):
     # The assistant entry must contain a tool fragment whose result is filled.
     assistant_entries = [r for r in widget_history if r["role"] == "assistant"]
     tool_frags = [
-        f for entry in assistant_entries
+        f
+        for entry in assistant_entries
         for f in entry.get("fragments", [])
         if f.get("type") == "tool"
     ]

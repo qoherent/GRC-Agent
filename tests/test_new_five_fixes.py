@@ -26,7 +26,6 @@ from ToolAgents.data_models.chat_history import ChatHistory
 
 
 class TestCodebaseFixes(unittest.TestCase):
-
     def setUp(self) -> None:
         self.fixtures_dir = Path(__file__).resolve().parent / "data"
         self.dial_tone_path = self.fixtures_dir / "dial_tone.grc"
@@ -84,6 +83,7 @@ class TestCodebaseFixes(unittest.TestCase):
 
     def test_fix_1_neighbor_dtype_prioritization(self) -> None:
         """Verify _neighbor_dtype_for prioritizes existing blocks over new blocks."""
+
         # Mock a flowgraph with an existing block 'existing_src' (float)
         # and a newly added block 'new_dest' (complex).
         class MockPort:
@@ -103,6 +103,7 @@ class TestCodebaseFixes(unittest.TestCase):
                     "existing_src": MockBlock("existing_src", "float"),
                     "new_dest": MockBlock("new_dest", "complex"),
                 }
+
             def get_block(self, name: str) -> MockBlock:
                 return self.blocks[name]
 
@@ -117,10 +118,7 @@ class TestCodebaseFixes(unittest.TestCase):
 
         # middle_block neighbor check
         dtype = _neighbor_dtype_for(
-            fg,
-            "middle_block",
-            add_connections,
-            new_block_names=new_block_names
+            fg, "middle_block", add_connections, new_block_names=new_block_names
         )
         # Should resolve to 'float' (from existing_src) rather than 'complex' (from new_dest)
         self.assertEqual(dtype, "float")
@@ -128,4 +126,3 @@ class TestCodebaseFixes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -58,9 +58,7 @@ class VectorStoreBase:
 
     def _is_populated(self, conn: sqlite3.Connection) -> bool:
         try:
-            n = conn.execute(
-                f"SELECT count(*) FROM {self._table_chunks()}"
-            ).fetchone()[0]
+            n = conn.execute(f"SELECT count(*) FROM {self._table_chunks()}").fetchone()[0]
             return n > 0
         except sqlite3.OperationalError:
             return False

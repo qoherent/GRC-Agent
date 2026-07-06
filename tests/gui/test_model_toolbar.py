@@ -109,7 +109,7 @@ def test_toolbar_icons_are_not_confusing_magnifying_glass(qtbot):
     # The "open containing folder" button must NOT use the old
     # 📂 emoji (open-file-folder) and the "browse" button must
     # NOT use the 🔍 emoji (search).
-    assert "\U0001F4C2" not in widget.open_location_btn.text(), (
+    assert "\U0001f4c2" not in widget.open_location_btn.text(), (
         f"open_location_btn still uses 📂; text={widget.open_location_btn.text()!r}"
     )
     assert "🔍" not in widget.browse_btn.text(), (
@@ -142,9 +142,7 @@ def test_toolbar_layout_order_graph_model_provider(qtbot):
     # which is brittle to cosmetic tweaks. The graph section must
     # be leftmost; the model combo must be left of the provider
     # combo.
-    graph_section = [
-        c for c in visible if isinstance(c, QLabel) and c.text() == "Graph"
-    ]
+    graph_section = [c for c in visible if isinstance(c, QLabel) and c.text() == "Graph"]
     assert graph_section, "graph label not found in toolbar"
     assert visible.index(graph_section[0]) < visible.index(widget.model_combo), (
         "graph section must be left of the model combo"

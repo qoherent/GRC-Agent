@@ -87,9 +87,7 @@ def _overview(agent: GrcAgent) -> dict[str, Any]:
             agent, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
         )
     snapshot = render_flow_graph(fg, mode=OVERVIEW)
-    payload = snapshot.model_dump(
-        exclude_none=True, exclude=_INSPECT_PAYLOAD_EXCLUDE
-    )
+    payload = snapshot.model_dump(exclude_none=True, exclude=_INSPECT_PAYLOAD_EXCLUDE)
     return _base_payload(agent, graph=payload)
 
 
@@ -108,9 +106,7 @@ def _specific(agent: GrcAgent, *, targets: list[str]) -> dict[str, Any]:
             agent, errors=[{"code": "no_flowgraph", "message": "No flowgraph loaded."}]
         )
     snapshot = render_flow_graph(fg, mode=OVERVIEW)
-    payload = snapshot.model_dump(
-        exclude_none=True, exclude=_INSPECT_PAYLOAD_EXCLUDE
-    )
+    payload = snapshot.model_dump(exclude_none=True, exclude=_INSPECT_PAYLOAD_EXCLUDE)
 
     blocks = payload.get("blocks", [])
     connections = payload.get("connections", [])
@@ -131,9 +127,7 @@ def _specific(agent: GrcAgent, *, targets: list[str]) -> dict[str, Any]:
 
     requested = set(targets)
     payload["blocks"] = [b for b in blocks if b["instance_name"] in requested]
-    payload["connections"] = [
-        c for c in connections if _connection_touches(c, requested)
-    ]
+    payload["connections"] = [c for c in connections if _connection_touches(c, requested)]
     return _base_payload(agent, ok=True, graph=payload)
 
 
@@ -174,8 +168,6 @@ def _normalize_string_list(values: list[str], *, limit: int) -> list[str]:
             seen.add(s)
             out.append(s)
     return out[:limit]
-
-
 
 
 # --------------------------------------------------------------------------- #

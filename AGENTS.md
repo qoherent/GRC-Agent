@@ -2,6 +2,17 @@
 
 Rules for AI coding agents working on this codebase. Direct, data-driven, zero fluff.
 
+## Architectural Vision & Core Rules
+
+- **Simplify First**: Lean towards simplifying, not complicating. If a feature or approach is ad-hoc, hardcoded, or not essential, **remove it**.
+- **No Brittle Reinventions**: Reject complex manual implementations or from-scratch logic when reliable, standard libraries can replace them. Always opt for robust libraries to avoid reinventing the wheel.
+- **No Backward Compatibility**: Delete dead code completely. Do not write shims, dual-format persistence layers, or legacy bridges. Keep changes clean and direct.
+- **No Assumed Reasoning Failures**: Do not assume task failures are solely due to LLM reasoning. Audit the execution harness for context flooding, poor prompt construction, hidden ad-hoc logic, or silent error message clipping. Correctness lives at the source.
+- **Maximizing Context & No String-Based Clipping**: Do not enforce arbitrary 4k context limits. Always use the maximum context window the backend (Ollama/OpenRouter) supports. Never clip inputs or outputs (like error payloads or long tool results) using raw character slicing which breaks structured context.
+- **Be Bold, Objective, and Grounded**: Base every decision on grounded, verified observations, never on assumptions. Ask for clarification when requirements are ambiguous or when a major decision (e.g. library selection, backend config) needs to be made.
+
+---
+
 ## Architecture at a glance
 
 The bridge: `grc_native_adapter.py` is the **only** module that imports `gnuradio`. Everything else is pure Python over the Pydantic V2 surface it exposes.
@@ -26,17 +37,20 @@ The bridge: `grc_native_adapter.py` is the **only** module that imports `gnuradi
 
 Data flow: `.grc file` → `grc_native_adapter.load_flow_graph()` → `FlowgraphSession.flowgraph` → `render_flow_graph()` → `GrcFlowgraph` Pydantic model → tool result.
 
-## Engineering rules
+---
+
+## Engineering Rules
 
 - **No hand-picked heuristics.** No per-field allowlists, per-scenario branches, regex routing, or prompt folklore. If logic is needed, it is one uniform rule applied to every case. (Bible: `runtime/param_filter.py`.)
 - **Prefer native methods.** Use GNU Radio GRC's Python API — `param.hide`, `param.category`, `Block.is_variable`, `flow_graph.is_valid()`, etc.
 - **Fix at the source.** Correctness lives in the tool/handler that produces data, not in a post-processor.
 - **No silent transformation.** Any truncation, filtering, or omission in model-facing output must be explicitly flagged (e.g. an `omitted`/`truncated` field on the payload).
 - **Simplify by removal.** Prefer deleting code over adding it.
-- **No backward compatibility.** No shims, dual-format persistence, or legacy synthesis layers. Delete old paths in the same commit that obsoletes them.
 - **Evidence before assertions.** Every claim cites a verified observation, never intent. A green test is necessary, not sufficient — inspect actual data flow.
 
-## Tool surface
+---
+
+## Tool Surface
 
 Five model-facing wrapper tools (the entire MVP model surface):
 
@@ -59,7 +73,9 @@ Five model-facing wrapper tools (the entire MVP model surface):
 - Tool schemas describe **capability** — what a function does, not when or how to use it.
 - **No in-band control flow:** no ALL-CAPS directives, behavioral commands, or procedural recipes in model-visible strings. The system prompt is the only behavioral authority.
 
-## Runtime & state
+---
+
+## Runtime & State
 
 - **Manual execution loop:** `ToolAgentsRunner._run_turn_events` with bounded `.step()`.
 - **No result caching.** Every call hits the live backend fresh.
@@ -67,6 +83,8 @@ Five model-facing wrapper tools (the entire MVP model surface):
 - **Context compaction:** one-pass proportional slicing with truncation flags.
 - **Wire-format role safety:** runtime directives injected as `user`-role only.
 - **`change_graph` output is minimal.** Success: `{"ok": true}`. Failure: `{"ok": false, "error_type": "...", "errors": [{"code": "...", "message": "..."}]}`. Validation errors surface as `errors[].code == "gnu_validation"`. The `force=True` flag bypasses validation but the batch is still applied; the model must read `ok` to know whether edits applied.
+
+---
 
 ## Constraints (hard prohibitions)
 
@@ -77,9 +95,11 @@ Five model-facing wrapper tools (the entire MVP model surface):
 - **No application-flow changes without permission.**
 - **No `gnuradio` imports outside `grc_native_adapter.py`** and auxiliary files (doctor, session catalog paths).
 
-## Key conventions
+---
 
-- **Param filtering** (one rule, in `param_filter.py`): Stage A (every mode) drops `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`. Stage B (overview mode only) keeps `hide == "none"` OR `dtype == "enum"` OR `value != default` OR `references_variable`. Details mode = Stage A only; overview mode = Stage A + Stage B. Do not reimplement filtering inline.
+## Key Conventions
+
+- **Param filtering** (one rule, in `param_filter.py`): Stage A (every mode) drops `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`. Stage B (overview mode only) keeps `hide == "none"` OR `dtype == "enum"` OR `value != default` OR `references_variable`. Details mode = Stage A only; overview mode = Stage A + Stage B. Do not reimplement filtering inline. Three narrow, documented structural exceptions precede both stages (`dtype == "id"`, `showports`, `bus_structure_*`) — see the module docstring in `param_filter.py` for why each one can't be derived from a uniform hide/category/dtype rule.
 - **State values:** `enabled`, `disabled`, `bypass` (accept `bypassed` as alias). Use `Block.STATE_LABELS` for validation, not a hardcoded set.
 - **Block lookup:** use native `flow_graph.get_block(name)`, not a manual scan.
 - **Graph identity:** file-bytes SHA-256 (cross-session) + `state_revision` counter (in-session). No deep-JSON hashing.
@@ -87,11 +107,13 @@ Five model-facing wrapper tools (the entire MVP model surface):
 - **Tool surface:** `agent.py` only registers the 5 MVP tools. No internal tools, no legacy tool registry.
 - **`change_graph` output:** `{"ok": true}` on success; `{"ok": false, "error_type": "...", "errors": [...]}` on failure. No `committed`, `ops_applied`, `state_revision`, `validation`, `hint`, `rejected_phase`, `graph_unchanged`, `native_validation_errors`, or `rollback` fields.
 
-## Test gate
+---
+
+## Test Gate
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (407 passed, 6 skipped) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (388 passed, 6 skipped) |
 | `grc_native` | `pytest -m grc_native` (75 passed, 1 skipped; requires GNU Radio) |
 | `gui` | `xvfb-run pytest -m gui` (6 passed) |
 

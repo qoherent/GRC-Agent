@@ -187,7 +187,6 @@ class GraphHistoryJournal:
         finally:
             conn.close()
 
-
     def _init_db(self) -> None:
         if self.path.exists():
             with open(self.path, "rb") as handle:
@@ -379,7 +378,6 @@ def lineage_key_for_session(session: FlowgraphSession) -> str:
     graph_hash = f"{session.graph_id() or 'unknown'}:r{session.state_revision}"
     digest = hashlib.sha256(f"{path}\n{graph_hash}".encode()).hexdigest()[:16]
     return f"lineage:{digest}"
-
 
 
 def _result_validation(result: dict[str, Any]) -> dict[str, Any] | None:

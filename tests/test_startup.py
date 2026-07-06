@@ -29,7 +29,6 @@ class StartupTests(unittest.TestCase):
                 request_timeout_seconds=2.0,
             ),
             agent=AgentConfig(
-                history_compact_budget=100000,
                 retrieval=DEFAULT_RETRIEVAL_CONFIG,
                 history=DEFAULT_HISTORY_CONFIG,
                 guardrails=DEFAULT_GUARDRAILS_CONFIG,

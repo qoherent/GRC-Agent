@@ -36,18 +36,11 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(config.llama.model)
         self.assertTrue(config.llama.embedding_model)
         self.assertEqual(config.llama.max_tokens, 4096)
-        # The default per-payload truncation cap is 4000 chars —
-        # large enough to fit a full GNU Radio catalog JSON object
-        # for ``query_knowledge``, small enough that even ten
-        # such payloads still fit inside the 100K-char history
-        # budget and the 256K-token context window.
-        self.assertEqual(config.agent.max_tool_result_chars, 4000)
-        self.assertEqual(config.agent.history_compact_budget, 100000)
         self.assertEqual(config.llama.max_tool_rounds, 8)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 5)
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
-        self.assertEqual(config.agent.guardrails.max_compact_list_items, 3)
+        self.assertEqual(config.agent.guardrails.max_inspect_targets, 8)
 
     def test_load_app_config_falls_back_to_builtin_defaults_when_no_file_exists(
         self,
@@ -73,9 +66,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "max_tokens = 2048\n"
                     "max_tool_rounds = 42\n"
                     "request_timeout_seconds = 30.0\n"
-                    "\n[agent]\n"
-                    "history_compact_budget = 5000\n"
-                    "max_tool_result_chars = 8000\n"
                     "\n[agent.retrieval]\n"
                     "search_blocks_default_k = 7\n"
                     "\n[agent.history]\n"
@@ -95,7 +85,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.embedding_model, "custom-embed")
         self.assertEqual(config.llama.backend, "openrouter")
         self.assertEqual(config.llama.max_tool_rounds, 42)
-        self.assertEqual(config.agent.max_tool_result_chars, 8000)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 7)
         self.assertEqual(config.agent.history.checkpoint_retention, 140)
 
@@ -115,8 +104,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "max_tokens = 1024\n"
                     "max_tool_rounds = 1\n"
                     "request_timeout_seconds = 1.0\n"
-                    "\n[agent]\n"
-                    "history_compact_budget = 1000\n"
                 ),
                 encoding="utf-8",
             )
@@ -125,7 +112,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.backend, "ollama")
         self.assertTrue(config.llama.model)
         self.assertTrue(config.llama.embedding_model)
-
 
     def test_resolve_config_path_prefers_env_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -167,8 +153,6 @@ class RuntimeConfigTests(unittest.TestCase):
                         "max_tokens = 1024\n"
                         "max_tool_rounds = 1\n"
                         "request_timeout_seconds = 1.0\n"
-                        "\n[agent]\n"
-                        "history_compact_budget = 1000\n"
                     ),
                     encoding="utf-8",
                 )
@@ -185,8 +169,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "max_tokens = 1024\n"
                     "max_tool_rounds = 1\n"
                     "request_timeout_seconds = 1.0\n"
-                    "\n[agent]\n"
-                    "history_compact_budget = 1000\n"
                 ),
                 encoding="utf-8",
             )

@@ -22,15 +22,16 @@ Public surface:
 Design constraints:
 
 - The GUI/CLI enqueue messages via ``SessionStore.append``, which
-  returns immediately (non-blocking ``queue.Queue.put_nowait``).
-  All SQLite I/O happens on a single background ``daemon`` thread.
+  blocks on a bounded queue (``queue.Queue.put``) rather than
+  dropping messages — see Backpressure below. All SQLite I/O
+  happens on a single background ``daemon`` thread.
 - Batched commits: the writer drains up to 64 messages per
-  transaction with a 50 ms deadline.
+  transaction, waiting at most 50 ms for the first one.
 - Crash safety: WAL + transactions + ``PRAGMA integrity_check``
   on open. A crashed-mid-batch DB re-opens cleanly.
-- Backpressure: bounded queue (1000 entries); on overflow the
-  *oldest* un-committed message is dropped with a warning. The
-  in-memory chat widget is the source of truth for display.
+- Backpressure: bounded queue (1000 entries); once full, ``append``
+  blocks the calling thread until the writer drains a slot. No
+  message is ever silently dropped or evicted.
 - Single-writer rule: one writer thread per process. Multiple
   *processes* (two GUI windows) share the DB; SQLite WAL
   serializes them transparently.
@@ -294,7 +295,9 @@ def _open_db(db_path: Path, validate_integrity: bool = False) -> sqlite3.Connect
         integrity = conn.execute("PRAGMA integrity_check").fetchone()
         if integrity is None or integrity[0] != "ok":
             conn.close()
-            raise SessionStoreCorrupt(f"sessions DB at {db_path} failed integrity_check: {integrity!r}")
+            raise SessionStoreCorrupt(
+                f"sessions DB at {db_path} failed integrity_check: {integrity!r}"
+            )
     return conn
 
 
@@ -402,9 +405,7 @@ class SessionStore:
         # Lifecycle-actor queue (open/end/replace/clear_all): low-volume,
         # bounded by _QUEUE_MAX.  Separate queue so the message-batch
         # driller doesn't have to discriminate types.
-        self._lifecycle_q: queue.Queue[_LifecycleCommand] = queue.Queue(
-            maxsize=_QUEUE_MAX
-        )
+        self._lifecycle_q: queue.Queue[_LifecycleCommand] = queue.Queue(maxsize=_QUEUE_MAX)
         self._closed_sessions: queue.Queue[int] = queue.Queue(maxsize=_QUEUE_MAX)
         # ``_drained`` is cleared on every enqueue and set by the
         # writer when it has nothing to do. ``flush()`` blocks on
@@ -428,9 +429,7 @@ class SessionStore:
 
     # --- public, non-blocking ---
 
-    def _enqueue_lifecycle(
-        self, kind: str, kwargs: dict[str, Any], *, timeout: float = 5.0
-    ) -> Any:
+    def _enqueue_lifecycle(self, kind: str, kwargs: dict[str, Any], *, timeout: float = 5.0) -> Any:
         """Enqueue one ``_LifecycleCommand`` and block on its Future.
 
         Shared backbone for ``open_session``, ``end_active_session``,
@@ -507,21 +506,9 @@ class SessionStore:
             payload=json.dumps(payload) if payload is not None else None,
             created_at=_utcnow_iso(),
         )
-        try:
-            self._q.put_nowait(rec)
-        except queue.Full:
-            # Backpressure: drop the oldest and enqueue the new.
-            try:
-                dropped = self._q.get_nowait()
-                self._q.put_nowait(rec)
-                logger.warning(
-                    "sessions_queue_full dropped_id=%s role=%s session=%s",
-                    dropped.id,
-                    dropped.role,
-                    dropped.session_id,
-                )
-            except queue.Empty:  # extremely unlikely
-                pass
+        # Backpressure: block the producer thread if the queue is full
+        # to prevent data loss or sequential context corruption.
+        self._q.put(rec)
         self._drained.clear()
         return msg_id
 
@@ -738,7 +725,6 @@ class SessionStore:
                 raise
         return int(cur.rowcount or 0)
 
-
     # --- internal: writer thread ---
 
     def _run(self) -> None:
@@ -802,9 +788,7 @@ class SessionStore:
                                 )
                         self._writer_conn.execute("COMMIT")
                     except sqlite3.Error as exc:
-                        logger.exception(
-                            "sessions_writer_batch_failed: %s", exc
-                        )
+                        logger.exception("sessions_writer_batch_failed: %s", exc)
                         try:
                             self._writer_conn.execute("ROLLBACK")
                         except sqlite3.Error:
@@ -846,9 +830,7 @@ class SessionStore:
                 cmd.future.set_result(result)
             except Exception as exc:
                 cmd.future.set_exception(exc)
-                logger.exception(
-                    "sessions_lifecycle_command_failed kind=%s", cmd.kind
-                )
+                logger.exception("sessions_lifecycle_command_failed kind=%s", cmd.kind)
 
     def _exec_open(self, kwargs: dict[str, Any]) -> int:
         # ``_writer_conn`` is in autocommit mode (isolation_level=None),
@@ -925,9 +907,7 @@ class SessionStore:
     def _exec_clear_all(self, _kwargs: dict[str, Any]) -> int:
         self._writer_conn.execute("BEGIN")
         try:
-            before = self._writer_conn.execute(
-                "SELECT count(*) FROM sessions"
-            ).fetchone()[0]
+            before = self._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
             self._writer_conn.execute("DELETE FROM messages")
             self._writer_conn.execute("DELETE FROM sessions")
             self._writer_conn.execute("COMMIT")
@@ -938,38 +918,24 @@ class SessionStore:
 
     def _drain_batch(self) -> list[_PendingMessage]:
         """Pop up to ``_BATCH_MAX`` messages, blocking at most
-        ``_BATCH_TIMEOUT_S`` total."""
+        ``_BATCH_TIMEOUT_S`` for the first one.
+
+        Once a message is dequeued it lives only in this local ``batch``
+        list until committed — it is never put back on ``self._q``. The
+        writer thread is the queue's sole consumer, so a blocking put
+        here (to avoid dropping on ``queue.Full``) could deadlock: nothing
+        else would ever call ``.get()`` to free a slot.
+        """
         batch: list[_PendingMessage] = []
-        deadline = time.monotonic() + _BATCH_TIMEOUT_S
-        # First message: block until deadline (or one arrives).
         try:
             batch.append(self._q.get(timeout=_BATCH_TIMEOUT_S))
         except queue.Empty:
             return batch
-        # Subsequent messages: non-blocking.
         while len(batch) < _BATCH_MAX:
             try:
                 batch.append(self._q.get_nowait())
             except queue.Empty:
                 break
-        # Honor the deadline for the very first message: if we
-        # took most of the budget getting it, re-enqueue the
-        # tail so a later iteration can pick it up. We never
-        # silently drop a message.
-        if time.monotonic() >= deadline and len(batch) > 1:
-            for msg in batch[1:]:
-                try:
-                    self._q.put_nowait(msg)
-                except queue.Full:
-                    # The queue is full because the writer is
-                    # too slow. Log and drop; the in-memory chat
-                    # widget is the display source of truth.
-                    logger.warning(
-                        "sessions_writer_overflow dropped_id=%s role=%s",
-                        msg.id,
-                        msg.role,
-                    )
-            return batch[:1]
         return batch
 
     def _drain_closes(self) -> list[int]:

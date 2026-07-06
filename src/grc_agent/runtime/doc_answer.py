@@ -32,7 +32,6 @@ from grc_agent.runtime._embedding_config import (
     _DOCUMENT_PREFIX,
     _EMBED_MAX_WORDS,
     _EMBED_MODEL,
-    _MAX_CONTEXT_WORDS,
     _QUERY_PREFIX,
 )
 from grc_agent.runtime._vector_store_base import VectorStoreBase
@@ -190,8 +189,7 @@ class VectorDocsStore(VectorStoreBase):
             "payload TEXT)"
         )
         conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS docs_idx USING vec0("
-            f"embedding float[{dim}])"
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS docs_idx USING vec0(embedding float[{dim}])"
         )
 
     def ingest_if_needed(self, corpus_dir: Path | None = None) -> int:
@@ -212,8 +210,10 @@ class VectorDocsStore(VectorStoreBase):
 
             # Either fresh, or the stamped model differs → probe dim + (re)build.
             probe = get_embedding(
-                self.server_url, _DOCUMENT_PREFIX + "dimension probe",
-                model=self.embedding_model, api_key=self.api_key,
+                self.server_url,
+                _DOCUMENT_PREFIX + "dimension probe",
+                model=self.embedding_model,
+                api_key=self.api_key,
             )
             dim = len(probe)
 
@@ -226,11 +226,15 @@ class VectorDocsStore(VectorStoreBase):
                     embed_text = compose_chunk_text(md_path, chunk["heading"], chunk["text"])
                     try:
                         embedding = get_embedding(
-                            self.server_url, embed_text,
-                            model=self.embedding_model, api_key=self.api_key,
+                            self.server_url,
+                            embed_text,
+                            model=self.embedding_model,
+                            api_key=self.api_key,
                         )
                     except Exception as exc:
-                        logger.warning("Failed to embed %s#%s: %s", md_path.name, chunk["heading"], exc)
+                        logger.warning(
+                            "Failed to embed %s#%s: %s", md_path.name, chunk["heading"], exc
+                        )
                         continue
                     cursor = conn.cursor()
                     cursor.execute(
@@ -300,9 +304,7 @@ def initialize_vector_db_background(
 # --- Tool wrapper ------------------------------------------------------------
 
 
-def _generate_grounded_answer(
-    agent: GrcAgent, question: str, sources: list[dict[str, Any]]
-) -> str:
+def _generate_grounded_answer(agent: GrcAgent, question: str, sources: list[dict[str, Any]]) -> str:
     """Single LLM call: answer ``question`` from the full source files.
 
     Uses the same Ollama server + chat model the agent is configured with.
@@ -310,14 +312,9 @@ def _generate_grounded_answer(
     the provided documentation.
     """
     context_parts = [
-        f"# Source: {s['path']} — {s.get('heading', '')}\n{s['content']}"
-        for s in sources
+        f"# Source: {s['path']} — {s.get('heading', '')}\n{s['content']}" for s in sources
     ]
     context = "\n\n---\n\n".join(context_parts)
-    # Cap total context to fit the model's context window. Use _cap_words
-    # (explicitly flagged) — never a raw slice, per AGENTS.md "no silent
-    # transformation."
-    context = _cap_words(context, _MAX_CONTEXT_WORDS)
 
     prompt = (
         "You are answering a GNU Radio question. Use ONLY the documentation "
@@ -342,8 +339,8 @@ def ask_grc_docs(
     """Ground one GNU Radio docs question in the wiki corpus.
 
     Flow: embed question → sqlite-vec KNN → take the default chunks
-    directly (each ≤256 words, already the most relevant sections) → single
-    LLM call produces a concise, grounded answer.
+    directly (each ≤``_EMBED_MAX_WORDS`` words, already the most relevant
+    sections) → single LLM call produces a concise, grounded answer.
     """
     if not isinstance(question, str) or not question.strip():
         return agent._tool_result(
@@ -387,8 +384,8 @@ def ask_grc_docs(
             error_type=ErrorCode.RETRIEVAL_NOT_READY,
         )
 
-    # Each chunk hit carries the raw chunk text (heading + body, ≤256 words)
-    # in its "text" field — no full-file reload from disk.
+    # Each chunk hit carries the raw chunk text (heading + body, capped at
+    # _EMBED_MAX_WORDS words) in its "text" field — no full-file reload.
     sources: list[dict[str, Any]] = [
         {
             "path": h["path"],
@@ -414,8 +411,6 @@ def ask_grc_docs(
         "ok": True,
         "question": question.strip(),
         "answer": answer,
-        "sources": [
-            {"path": s["path"], "distance": s["distance"]} for s in sources
-        ],
+        "sources": [{"path": s["path"], "distance": s["distance"]} for s in sources],
     }
     return agent._payload_result("ask_grc_docs", payload)

@@ -146,6 +146,7 @@ def test_inspector_preserves_scroll_and_expansion(qtbot):
 
     # Mock scroll range and value for headless testing using a mock scrollbar
     from unittest.mock import MagicMock, patch
+
     mock_bar = MagicMock()
     mock_bar.minimum.return_value = 0
     mock_bar.maximum.return_value = 100

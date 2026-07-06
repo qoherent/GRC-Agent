@@ -437,6 +437,7 @@ class UrlCitationSurfacingTests(unittest.TestCase):
         text = "".join(c.content for c in message.content if isinstance(c, TextContent))
         self.assertNotIn("Sources:", text)
 
+
 class OpenRouterToolSurfaceTests(unittest.TestCase):
     """On OpenRouter the `web` plugin grounds the model natively, so the
     Ollama-hosted web_search/web_fetch tools are dropped from the surfaced
@@ -712,6 +713,7 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         self.assertTrue(chunks, "a chunk event should be emitted")
         self.assertIn("No response was generated", str(chunks[-1].get("text", "")))
 
+
 class SchemaShimTests(unittest.TestCase):
     """Lock down the transformation rules of the ToolAgents 0.3.0 schema shim.
 
@@ -734,12 +736,8 @@ class SchemaShimTests(unittest.TestCase):
         self.assertNotIn("description", out)
 
     def test_list_type_collapses_to_first_supported(self) -> None:
-        self.assertEqual(
-            _first_supported_schema_type(["string", "null"]), "string"
-        )
-        self.assertEqual(
-            _first_supported_schema_type(["null", "integer"]), "integer"
-        )
+        self.assertEqual(_first_supported_schema_type(["string", "null"]), "string")
+        self.assertEqual(_first_supported_schema_type(["null", "integer"]), "integer")
 
     def test_list_type_with_no_supported_member_falls_back_to_string(self) -> None:
         self.assertEqual(_first_supported_schema_type(["null", "foo"]), "string")
@@ -750,9 +748,7 @@ class SchemaShimTests(unittest.TestCase):
         self.assertEqual(_first_supported_schema_type([5]), "string")
 
     def test_array_primitive_items_become_empty_dict(self) -> None:
-        out = _compatible_property_schema(
-            {"type": "array", "items": {"type": "string"}}
-        )
+        out = _compatible_property_schema({"type": "array", "items": {"type": "string"}})
         self.assertEqual(out.get("items"), {})
 
     def test_array_no_items_becomes_empty_dict(self) -> None:
@@ -789,21 +785,15 @@ class SchemaShimTests(unittest.TestCase):
         self.assertEqual(out["properties"]["inner"]["type"], "number")
         self.assertNotIn("description", out["properties"]["inner"])
         # additionalProperties at the top level is not recursed.
-        self.assertEqual(
-            out["additionalProperties"], {"type": "string"}
-        )
+        self.assertEqual(out["additionalProperties"], {"type": "string"})
 
     def test_is_primitive_item_schema_predicate(self) -> None:
         self.assertTrue(_is_primitive_item_schema({"type": "string"}))
-        self.assertFalse(
-            _is_primitive_item_schema({"type": "object", "properties": {}})
-        )
+        self.assertFalse(_is_primitive_item_schema({"type": "object", "properties": {}}))
         self.assertFalse(_is_primitive_item_schema({}))
 
     def test_compatible_properties_filters_non_dict_values(self) -> None:
-        out = _compatible_properties(
-            {"ok": {"type": "string"}, "bad": "x"}
-        )
+        out = _compatible_properties({"ok": {"type": "string"}, "bad": "x"})
         self.assertIn("ok", out)
         self.assertNotIn("bad", out)
 
@@ -832,24 +822,16 @@ class SchemaShimTests(unittest.TestCase):
         out = _toolagents_compatible_schema(schema)
         self.assertEqual(out["function"]["name"], "change_graph")
         # additionalProperties preserved verbatim.
-        self.assertEqual(
-            out["function"]["parameters"]["additionalProperties"], False
-        )
+        self.assertEqual(out["function"]["parameters"]["additionalProperties"], False)
         # Top-level ``description`` on each property is stripped.
-        self.assertNotIn(
-            "description", out["function"]["parameters"]["properties"]["add_blocks"]
-        )
-        self.assertNotIn(
-            "description", out["function"]["parameters"]["properties"]["force"]
-        )
+        self.assertNotIn("description", out["function"]["parameters"]["properties"]["add_blocks"])
+        self.assertNotIn("description", out["function"]["parameters"]["properties"]["force"])
         # ``items`` for an array with object schema is replaced with ``{}``
         # (the function passes it through _compatible_properties which
         # iterates ``items`` as a properties dict and only the "type"
         # key survives; "type" value "object" is a string, not a dict,
         # so it's filtered out — items ends up empty).
-        self.assertEqual(
-            out["function"]["parameters"]["properties"]["add_blocks"]["items"], {}
-        )
+        self.assertEqual(out["function"]["parameters"]["properties"]["add_blocks"]["items"], {})
 
 
 if __name__ == "__main__":

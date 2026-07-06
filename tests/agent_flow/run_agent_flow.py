@@ -92,9 +92,7 @@ def _make_provider(provider: str) -> ToolAgentsLlamaProviderConfig:
         model = os.environ.get("OPENROUTER_MODEL")
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not model or not api_key:
-            raise RuntimeError(
-                "OPENROUTER_MODEL / OPENROUTER_API_KEY missing — check .env"
-            )
+            raise RuntimeError("OPENROUTER_MODEL / OPENROUTER_API_KEY missing — check .env")
         return ToolAgentsLlamaProviderConfig(
             base_url="https://openrouter.ai/api",
             model=model,
@@ -103,9 +101,8 @@ def _make_provider(provider: str) -> ToolAgentsLlamaProviderConfig:
             max_tokens=2048,
             backend="openrouter",
         )
-    raise ValueError(
-        f"unknown provider: {provider!r} (expected 'ollama' or 'openrouter')"
-    )
+    raise ValueError(f"unknown provider: {provider!r} (expected 'ollama' or 'openrouter')")
+
 
 SCENARIOS: list[dict[str, Any]] = [
     {
@@ -568,7 +565,11 @@ def _run_scenario(
         on_tool_end=None,
     ):
         ev_copy = dict(event)
-        if event.get("event") == "model_message" and event.get("role") == "tool_model" and pending_tool:
+        if (
+            event.get("event") == "model_message"
+            and event.get("role") == "tool_model"
+            and pending_tool
+        ):
             ev_copy["tool_called"] = dict(pending_tool)
             pending_tool.clear()
         events.append(ev_copy)
@@ -692,9 +693,7 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
     not scenario-specific success criteria.
     """
     events = rec["events"]
-    final = next(
-        (e.get("result", {}) for e in events if e.get("event") == "final"), {}
-    )
+    final = next((e.get("result", {}) for e in events if e.get("event") == "final"), {})
     final_text = (final.get("assistant_text") or "").strip()
     hit_ceiling = final.get("error_type") == ErrorCode.SAFETY_CEILING
 
@@ -740,10 +739,7 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(result_obj, dict):
             continue
 
-        is_inline = (
-            bool(args.get("remove_connections"))
-            and bool(args.get("add_connections"))
-        )
+        is_inline = bool(args.get("remove_connections")) and bool(args.get("add_connections"))
         if is_inline:
             n_inline_insert_batches += 1
 
@@ -786,14 +782,14 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
     else:
         if not final_text:
             fail_reasons.append("empty final text")
-        for blk in (expect.get("blocks_present") or []):
+        for blk in expect.get("blocks_present") or []:
             if isinstance(blk, (list, tuple)):
                 if not any(alt in instance_names for alt in blk):
                     fail_reasons.append(f"missing block (one of {blk})")
             else:
                 if blk not in instance_names:
                     fail_reasons.append(f"missing block {blk}")
-        for blk in (expect.get("blocks_absent") or []):
+        for blk in expect.get("blocks_absent") or []:
             if blk in instance_names:
                 fail_reasons.append(f"block {blk} still present")
         if "valid" in expect and graph_valid != bool(expect["valid"]):
@@ -907,9 +903,11 @@ def write_metrics_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = _render_summary(all_metrics)
     if pass_rates:
-        summary += "**Pass-rate (k/N):**\n" + "\n".join(
-            f"- {name}: {rate}" for name, rate in pass_rates.items()
-        ) + "\n\n"
+        summary += (
+            "**Pass-rate (k/N):**\n"
+            + "\n".join(f"- {name}: {rate}" for name, rate in pass_rates.items())
+            + "\n\n"
+        )
     (out_dir / "METRICS.md").write_text(summary, encoding="utf-8")
     (out_dir / "metrics.json").write_text(
         json.dumps(all_metrics, indent=2, default=str), encoding="utf-8"
@@ -930,7 +928,9 @@ def main(runs: int = 1, provider: str = "ollama") -> None:
     all_metrics: list[dict[str, Any]] = []
     pass_rates: dict[str, str] = {}
     scenario_filter = os.environ.get("SCENARIO_FILTER")
-    scenarios_to_run = [s for s in SCENARIOS if scenario_filter in s["name"]] if scenario_filter else SCENARIOS
+    scenarios_to_run = (
+        [s for s in SCENARIOS if scenario_filter in s["name"]] if scenario_filter else SCENARIOS
+    )
     for sc in scenarios_to_run:
         fixture_name = Path(sc.get("fixture", FIXTURE)).name
         passed = 0

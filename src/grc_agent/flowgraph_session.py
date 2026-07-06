@@ -124,11 +124,7 @@ class FlowgraphSession:
         else:
             validation_payload = {"status": "unknown", "errors": []}
 
-        user_blocks = [
-            b
-            for b in snapshot.blocks
-            if b.role != BlockRole.OPTIONS
-        ]
+        user_blocks = [b for b in snapshot.blocks if b.role != BlockRole.OPTIONS]
         all_blocks = [
             {
                 "instance_name": b.instance_name,
@@ -139,7 +135,9 @@ class FlowgraphSession:
         ]
         variable_count = sum(1 for b in user_blocks if b.role == BlockRole.VARIABLE)
         all_conns = sorted(snapshot.connections)
-        block_summaries = [f"{b['instance_name']} ({b['block_id']})" for b in all_blocks[:SUMMARY_PREVIEW_LIMIT]]
+        block_summaries = [
+            f"{b['instance_name']} ({b['block_id']})" for b in all_blocks[:SUMMARY_PREVIEW_LIMIT]
+        ]
         if len(all_blocks) > SUMMARY_PREVIEW_LIMIT:
             block_summaries.append(f"... +{len(all_blocks) - SUMMARY_PREVIEW_LIMIT} more")
         summary_text = (
@@ -227,7 +225,5 @@ class FlowgraphSession:
         try:
             return hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
-            logging.getLogger("grc_agent").debug(
-                "hash_file_failed path=%s: %s", path, exc
-            )
+            logging.getLogger("grc_agent").debug("hash_file_failed path=%s: %s", path, exc)
             return None

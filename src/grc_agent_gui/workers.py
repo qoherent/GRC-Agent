@@ -114,7 +114,10 @@ class AgentWorker(QObject):
                 if kind == "model_message":
                     role = event.get("role")
                     payload = event.get("payload")
-                    if role in (USER_MODEL_ROLE, ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE) and payload is not None:
+                    if (
+                        role in (USER_MODEL_ROLE, ASSISTANT_MODEL_ROLE, TOOL_MODEL_ROLE)
+                        and payload is not None
+                    ):
                         self.model_message_added.emit(role, json.dumps(payload, sort_keys=True))
                 elif kind == "chunk":
                     text = event.get("text", "")

@@ -262,13 +262,9 @@ class RoundTripTests(_StoreTestCase):
 
     def test_end_active_session_noop_on_none(self) -> None:
         """Passing ``None`` is a safe no-op (no exception, no row touched)."""
-        before = self.store._writer_conn.execute(
-            "SELECT count(*) FROM sessions"
-        ).fetchone()[0]
+        before = self.store._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
         self.store.end_active_session(None)
-        after = self.store._writer_conn.execute(
-            "SELECT count(*) FROM sessions"
-        ).fetchone()[0]
+        after = self.store._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
         self.assertEqual(before, after)
 
     def test_replace_active_session_closes_old_and_opens_new(self) -> None:
@@ -376,32 +372,69 @@ class AsyncWriterTests(_StoreTestCase):
         msgs = self.store.list_messages(sid)
         self.assertEqual(len(msgs), 100)
 
-    def test_backpressure_drops_oldest(self) -> None:
-        # Drive the backpressure contract by swapping the live
-        # queue for a stub that is permanently full. The first
-        # append into the stub raises queue.Full, the writer logs
-        # a warning, the second append (the new message) is
-        # then placed into the stub's buffer.
+    def test_backpressure_blocks_producer(self) -> None:
+        # Swap the queue for a bounded queue of size 1 after opening session
         sid = self._open_session()
+
+        # Stop the background writer thread so it doesn't drain the queue during the test
+        self.store._stop.set()
+        self.store._writer.join(timeout=2.0)
+
         original_q = self.store._q
-        small_q: queue.Queue = queue.Queue(maxsize=1)
-        # Pre-fill the small queue so the next put_nowait raises
-        # queue.Full.
+        small_q = queue.Queue(maxsize=1)
+        # Pre-fill the queue
         small_q.put_nowait(_make_pending(sid, "user", "first"))
         self.store._q = small_q
+
+        append_started = threading.Event()
+        append_finished = threading.Event()
+
+        def run_append():
+            append_started.set()
+            self.store.append(sid, "user", "second")
+            append_finished.set()
+
+        t = threading.Thread(target=run_append)
         try:
-            with self.assertLogs("grc_agent.sessions_store", level="WARNING") as log_ctx:
-                self.store.append(sid, "user", "second")
-            joined = "\n".join(log_ctx.output)
-            self.assertIn("sessions_queue_full", joined)
+            t.start()
+            append_started.wait(timeout=2.0)
+            # The thread should block because the queue is full
+            blocked = not append_finished.wait(timeout=0.1)
+            self.assertTrue(blocked)
+
+            # Pop the first item to unblock the thread
+            item = small_q.get_nowait()
+            self.assertEqual(item.text, "first")
+
+            # Now the thread should finish
+            self.assertTrue(append_finished.wait(timeout=2.0))
         finally:
             self.store._q = original_q
-        # Drain so the test's queue stub does not block teardown.
-        try:
-            while not small_q.empty():
-                small_q.get_nowait()
-        except queue.Empty:
-            pass
+            # Join the thread
+            t.join(timeout=2.0)
+
+    def test_drain_batch_never_defers_or_drops_a_burst(self) -> None:
+        """A multi-message burst must come back whole from one
+        ``_drain_batch`` call, with the queue left empty.
+
+        Regression guard: ``_drain_batch`` used to re-enqueue part of a
+        burst back onto ``self._q`` (via ``put_nowait``) when the first
+        message's wait had already used up the batch deadline, silently
+        dropping it on ``queue.Full``. The fix removed the deferral
+        entirely — everything already dequeued into the local ``batch``
+        list is returned, never put back.
+        """
+        sid = self._open_session()
+        self.store._stop.set()
+        self.store._writer.join(timeout=2.0)
+
+        for i in range(10):
+            self.store._q.put_nowait(_make_pending(sid, "user", f"m{i}"))
+
+        batch = self.store._drain_batch()
+
+        self.assertEqual([m.text for m in batch], [f"m{i}" for i in range(10)])
+        self.assertTrue(self.store._q.empty())
 
     def test_concurrent_sessions_share_writer(self) -> None:
         a = self._open_session(title="A")
@@ -593,4 +626,3 @@ class DefaultPathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

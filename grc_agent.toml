@@ -11,17 +11,9 @@ max_tokens = 4096
 max_tool_rounds = 8
 request_timeout_seconds = 120.0
 
-[agent]
-history_compact_budget = 100000
-max_tool_result_chars = 4000
-
 [agent.retrieval]
 search_blocks_default_k = 5
 ask_grc_docs_default_k = 5
 
 [agent.history]
 checkpoint_retention = 100
-
-[agent.guardrails]
-max_tool_output_bytes = 32768
-max_compact_list_items = 3

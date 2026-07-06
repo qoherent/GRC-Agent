@@ -5,19 +5,13 @@ need an adapter. The only model-facing concerns that live here are:
 
 1. Prepend a system message (rebuilt every turn so ``chat_session_id`` etc.
    stay current).
-2. Optionally append a "runtime reminder" message at the end as a
-   ``User``-role message. Using ``user`` (not ``system``) avoids
-   mid-stream template-safety rejections in chat templates that
-   forbid ``system`` after the first user turn; using ``user`` (not a
-   ``Custom`` role tag) avoids emitting a non-standard
-   ``role: "runtime_reminder"`` over the OpenAI-compatible wire
-   format that small local backends may reject.
-3. Format ``ToolCallResultContent`` payloads into compact model-visible
+2. Format ``ToolCallResultContent`` payloads into compact model-visible
    text (delegated to :mod:`grc_agent.runtime.tool_context`).
-4. Runtime-directive stripping: drop ``<runtime_directive>`` user messages
-   (loop-detection notes) from completed prior turns so runtime hints do
-   not pollute the model's context.  Prior tool evidence (tool calls and
-   results) is deliberately retained across user-message boundaries — see
+3. Runtime-directive stripping: drop ``<runtime_directive>`` user messages
+   (loop-detection notes, see ``toolagents_runtime._LOOP_NOTE``) from
+   completed prior turns so runtime hints do not pollute the model's
+   context.  Prior tool evidence (tool calls and results) is deliberately
+   retained across user-message boundaries — see
    ``test_prior_tool_result_is_retained_across_episodes``.
 """
 
@@ -122,9 +116,8 @@ def _prune_completed_episodes(messages: list[ChatMessage]) -> list[ChatMessage]:
     Despite the name, this function does NOT strip tool_call or
     tool_result payloads from prior turns — prior tool evidence is
     deliberately retained (see
-    ``test_prior_tool_result_is_retained_across_episodes``).  The
-    effective context-bloat control is the budget-driven
-    :func:`compact_chat_history`, not this function.
+    ``test_prior_tool_result_is_retained_across_episodes``). There is no
+    context-bloat budget: history is rendered in full every turn.
     """
     human_boundary = -1
     for i in range(len(messages) - 1, -1, -1):
@@ -185,7 +178,6 @@ def render_model_messages(
     *,
     system_prompt: str,
     semantic_search_result_preview: PreviewCallback,
-    reminder: str | None = None,
     system_salt: str | None = None,
 ) -> list[ChatMessage]:
     """Render ``chat_history`` into the message list handed to the provider."""
@@ -199,15 +191,13 @@ def render_model_messages(
     messages: list[ChatMessage] = [ChatMessage.create_system_message(sys_msg)]
     for message in pruned:
         messages.append(_ensure_serializable(message, preview=semantic_search_result_preview))
-    if reminder:
-        wrapped = f"<runtime_directive>\n{reminder}\n</runtime_directive>"
-        messages.append(ChatMessage.create_user_message(wrapped))
     return messages
 
 
 # -- system prompt (was prompt.py) --
 
 __version__ = "2026-07-02-concise-no-latex"
+
 
 def build_system_prompt(session_id: str | None = None) -> str:
     """Return the system prompt shipped to the model."""
@@ -272,5 +262,3 @@ MVP_TOOL_SURFACE = ToolSurface(
 )
 
 __all__ = ["render_model_messages"]
-
-

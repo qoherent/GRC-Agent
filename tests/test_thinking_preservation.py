@@ -33,14 +33,16 @@ class DocAnswerOllamaThinkingTests(unittest.TestCase):
         ``doc_answer.py``. This is the canonical regression guard."""
         from pathlib import Path
 
-        src = Path(__file__).resolve().parents[1] / "src" / "grc_agent" / "runtime" / "doc_answer.py"
+        src = (
+            Path(__file__).resolve().parents[1] / "src" / "grc_agent" / "runtime" / "doc_answer.py"
+        )
         text = src.read_text(encoding="utf-8")
         # The single, literal false form we want to be gone.
-        assert "think\"][\"think\"" not in text, (
+        assert 'think"]["think"' not in text, (
             f"doc_answer.py still contains a think override; see:\n{text}"
         )
         # And no inline False assignment either.
-        self.assertNotIn("think\"] = False", text)
+        self.assertNotIn('think"] = False', text)
         self.assertNotIn('"think": False', text)
         self.assertNotIn("'think': False", text)
 

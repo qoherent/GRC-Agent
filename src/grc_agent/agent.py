@@ -6,7 +6,6 @@ the native grc_native_adapter.
 """
 
 import copy
-import json
 import logging
 import os
 import uuid
@@ -35,7 +34,6 @@ from grc_agent.runtime.model_context import (
     build_system_prompt,
     render_model_messages,
 )
-from grc_agent.runtime.tool_context import compact_chat_history
 from grc_agent.runtime.tool_schemas import build_tool_schemas
 from grc_agent.runtime_tool_validation import (
     build_tool_schema_map,
@@ -50,6 +48,7 @@ ToolCallable = Callable[..., ToolResult]
 
 class GrcAgent:
     """A thin integration layer between a language model and package-level owners."""
+
     _MUTATING_TOOLS = {GRAPH_MUTATING_TOOL_NAME}
 
     def __init__(
@@ -179,7 +178,11 @@ class GrcAgent:
             self._llama_server_url = server_url
         if chat_model is not None and isinstance(chat_model, str) and chat_model.strip():
             self._llama_model = chat_model
-        if embedding_model is not None and isinstance(embedding_model, str) and embedding_model.strip():
+        if (
+            embedding_model is not None
+            and isinstance(embedding_model, str)
+            and embedding_model.strip()
+        ):
             self._embedding_model = embedding_model
 
     def reset_chat_session(self) -> None:
@@ -196,7 +199,8 @@ class GrcAgent:
             allowed_order = tuple(self._active_tool_surface.model_tool_names)
         elif isinstance(allowed_tool_names, set):
             allowed_order = tuple(
-                name for name in self._active_tool_surface.model_tool_names
+                name
+                for name in self._active_tool_surface.model_tool_names
                 if name in allowed_tool_names
             )
         else:
@@ -237,9 +241,7 @@ class GrcAgent:
         """Reject disallowed model-driven tools for the active surface profile."""
         if not model_tool_call:
             return None
-        return self._reject_outside_surface(
-            tool_name, self._active_tool_surface.model_tool_names
-        )
+        return self._reject_outside_surface(tool_name, self._active_tool_surface.model_tool_names)
 
     def execute_tool(
         self,
@@ -367,9 +369,7 @@ class GrcAgent:
                 message="Debug telemetry is not available through the model-facing tool surface.",
                 error_type=ErrorCode.INVALID_REQUEST,
             )
-        validation_error = validate_runtime_tool_call(
-            tool_name, kwargs, self._tool_schema_map
-        )
+        validation_error = validate_runtime_tool_call(tool_name, kwargs, self._tool_schema_map)
         if validation_error is None:
             return None
         return self._tool_result(tool_name=tool_name, ok=False, **validation_error)
@@ -393,36 +393,16 @@ class GrcAgent:
     def get_model_messages(
         self,
         *,
-        reminder: str | None = None,
         system_salt: str | None = None,
     ) -> list[ChatMessage]:
         return render_model_messages(
             self.chat_history,
             system_prompt=self.get_system_prompt(),
             semantic_search_result_preview=lambda *a, **_kw: [],
-            reminder=reminder,
             system_salt=system_salt,
         )
 
     # ------------------------------------------------------------------- #
-    # Compact history helpers
-    # ------------------------------------------------------------------- #
-
-    def compact_history(self) -> None:
-        """Reduce history token cost before a new multi-turn conversation turn.
-
-        The per-payload cap is sourced from
-        ``self.config.max_tool_result_chars`` so the compactor never
-        starves the model of catalog lookups (a single GNU Radio
-        block definition can easily exceed 800 chars; 4000 is the
-        default in :class:`AgentConfig`).
-        """
-        compact_chat_history(
-            self.chat_history,
-            budget_chars=self.config.history_compact_budget,
-            max_tool_result_chars=self.config.max_tool_result_chars,
-        )
-        logger.debug("compact_history history_len=%d", self.chat_history.get_message_count())
 
     # ------------------------------------------------------------------- #
     # History content formatting
@@ -561,32 +541,7 @@ class GrcAgent:
         result = dict(payload)
         if default_message is not None and "message" not in result:
             result["message"] = default_message
-        result = self._enforce_tool_output_budget(result)
         return result
-
-    def _enforce_tool_output_budget(self, payload: ToolResult) -> ToolResult:
-        """Clamp oversized wrapper payloads to a bounded JSON budget."""
-        max_bytes = self._guardrails_cfg.max_tool_output_bytes
-        max_list_items = self._guardrails_cfg.max_compact_list_items
-        try:
-            size = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
-        except Exception:
-            logger.warning("enforce_tool_output_budget json_serialization_failed, bypassing budget")
-            payload["output_truncated"] = True
-            return payload
-        if size <= max_bytes:
-            return payload
-        compact = dict(payload)
-        for key, value in list(compact.items()):
-            if isinstance(value, list) and len(value) > max_list_items:
-                original_len = len(value)
-                compact[key] = value[:max_list_items]
-                compact[f"{key}_truncated"] = (
-                    f"... [TRUNCATED: was {original_len} items, kept {max_list_items}]"
-                )
-                compact["output_truncated"] = True
-        compact["output_bytes"] = min(size, max_bytes)
-        return compact
 
     def _missing_session_result(self, tool_name: str) -> ToolResult | None:
         if self.session.flowgraph is not None:
@@ -700,7 +655,11 @@ class GrcAgent:
 
         try:
             summary = summarize_web_fetch(
-                self, url=url, title=title, content=content, context_question=self._turn_user_message
+                self,
+                url=url,
+                title=title,
+                content=content,
+                context_question=self._turn_user_message,
             )
         except Exception as exc:
             return self._tool_result(

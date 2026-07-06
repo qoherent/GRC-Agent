@@ -17,15 +17,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-pytestmark = pytest.mark.grc_native
-
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.change_graph import ChangeGraphContext
 
-GRC_FIXTURE = (
-    Path(__file__).resolve().parents[1] / "examples" / "dial_tone.grc"
-)
+pytestmark = pytest.mark.grc_native
+
+GRC_FIXTURE = Path(__file__).resolve().parents[1] / "examples" / "dial_tone.grc"
 
 
 @pytest.fixture
@@ -51,7 +48,9 @@ def test_context_precomputes_add_blocks_list(ctx_factory):
     assert ctx.new_block_names == set()
     raw = [{"block_id": "blocks_add_xx", "instance_name": "blk_x"}]
     populated = ChangeGraphContext(
-        agent=session, fg=session.flowgraph, errors=[],
+        agent=session,
+        fg=session.flowgraph,
+        errors=[],
         raw_add_blocks=raw,
     )
     assert populated.add_blocks_list == raw
@@ -84,8 +83,11 @@ def test_phase_add_blocks_applies_one_entry(ctx_factory):
 
     session, ctx = ctx_factory
     ctx.add_blocks_list = [
-        {"block_id": "analog_const_source_x", "instance_name": "dc",
-         "params": {"const": "0.0", "type": "float"}}
+        {
+            "block_id": "analog_const_source_x",
+            "instance_name": "dc",
+            "params": {"const": "0.0", "type": "float"},
+        }
     ]
     ctx.new_block_names = {"dc"}
     _phase_add_blocks(ctx)
@@ -97,9 +99,7 @@ def test_phase_add_blocks_records_duplicate_name_error(ctx_factory):
     from grc_agent.runtime.change_graph import _phase_add_blocks
 
     session, ctx = ctx_factory
-    ctx.add_blocks_list = [
-        {"block_id": "analog_const_source_x", "instance_name": "dc"}
-    ]
+    ctx.add_blocks_list = [{"block_id": "analog_const_source_x", "instance_name": "dc"}]
     ctx.new_block_names = {"dc"}
     _phase_add_blocks(ctx)
     assert ctx.ops_applied == 1
@@ -116,8 +116,7 @@ def test_phase_remove_blocks_rejects_connection_id(ctx_factory):
     ctx.remove_blocks_list = ["src:0->dst:0"]
     _phase_remove_blocks(ctx)
     assert any(
-        e["code"] == "remove_block_failed"
-        and "connection" in e["message"].lower()
+        e["code"] == "remove_block_failed" and "connection" in e["message"].lower()
         for e in ctx.errors
     )
 
@@ -138,9 +137,7 @@ def test_phase_update_states_validates_presence(ctx_factory):
     from grc_agent.runtime.change_graph import _phase_update_states
 
     _session, ctx = ctx_factory
-    ctx.update_states_list = [
-        {"instance_name": "samp_rate", "state": "disabled"}
-    ]
+    ctx.update_states_list = [{"instance_name": "samp_rate", "state": "disabled"}]
     _phase_update_states(ctx)
     assert ctx.ops_applied == 1
     assert ctx.errors == []
@@ -213,9 +210,7 @@ def test_dispatch_wire_format_ok_true_on_success():
 
     mock_agent = mock.Mock()
     mock_agent._missing_session_result.return_value = None
-    mock_agent.session.file_integrity_state.return_value = {
-        "externally_modified": False
-    }
+    mock_agent.session.file_integrity_state.return_value = {"externally_modified": False}
     mock_agent.session.path = None
 
     mock_fg = mock.Mock()
@@ -223,17 +218,21 @@ def test_dispatch_wire_format_ok_true_on_success():
     mock_fg.connections = []
     mock_agent.session.flowgraph = mock_fg
 
-    mock_agent._payload_result.side_effect = (
-        lambda tool_name, payload: payload
-    )
+    mock_agent._payload_result.side_effect = lambda tool_name, payload: payload
 
     payload = dispatch_flat_change_graph_batch(mock_agent)
     assert payload["ok"] is True
     # Wire contract is unchanged: none of these forbidden keys appear.
     for forbidden in (
-        "committed", "state_revision", "validation",
-        "rollback", "ops_applied", "native_validation_errors",
-        "rejected_phase", "graph_unchanged", "hint",
+        "committed",
+        "state_revision",
+        "validation",
+        "rollback",
+        "ops_applied",
+        "native_validation_errors",
+        "rejected_phase",
+        "graph_unchanged",
+        "hint",
     ):
         assert forbidden not in payload, (
             f"wire key {forbidden!r} must not appear in success payload"
@@ -250,12 +249,12 @@ def test_dispatch_wire_format_missing_session_has_ok_false():
 
     fake_agent = mock.Mock()
     fake_agent._missing_session_result.return_value = {
-        "ok": False, "error_type": "no_session", "errors": []
+        "ok": False,
+        "error_type": "no_session",
+        "errors": [],
     }
     payload = dispatch_flat_change_graph_batch(fake_agent, add_blocks=[])
     assert payload["ok"] is False
     assert payload["error_type"] == "no_session"
     for forbidden in ("committed", "rollback", "state_revision"):
-        assert forbidden not in payload, (
-            f"wire key {forbidden!r} must not appear on no_session"
-        )
+        assert forbidden not in payload, f"wire key {forbidden!r} must not appear on no_session"

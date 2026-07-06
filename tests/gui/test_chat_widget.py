@@ -572,18 +572,14 @@ def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
     # last text fragment of the fragments list.
     asst = widget._history[1]
     post_tool_text = next(
-        f["text"]
-        for f in reversed(asst.get("fragments", []))
-        if f.get("type") == "text"
+        f["text"] for f in reversed(asst.get("fragments", [])) if f.get("type") == "text"
     )
     assert "The current graph is simple" in post_tool_text
 
     # And the fragment list has [tool, text] in that order.
     frags = asst.get("fragments", [])
     types = [f.get("type") for f in frags]
-    assert types == ["tool", "text"], (
-        f"Fragments must be [tool, text]; got {types}"
-    )
+    assert types == ["tool", "text"], f"Fragments must be [tool, text]; got {types}"
     tool_frag = frags[0]
     assert tool_frag["name"] == "inspect_graph"
     assert tool_frag.get("result", "").startswith("{")
@@ -597,8 +593,7 @@ def test_tool_call_only_turn_keeps_agent_header_before_call(qtbot):
     assert tool_idx >= 0, "tool call must appear in rendered HTML"
     assert text_idx >= 0, "post-tool text must appear in rendered HTML"
     assert tool_idx < text_idx, (
-        f"tool call must render BEFORE the post-tool text; "
-        f"tool_idx={tool_idx} text_idx={text_idx}"
+        f"tool call must render BEFORE the post-tool text; tool_idx={tool_idx} text_idx={text_idx}"
     )
 
 
@@ -642,9 +637,7 @@ def test_tool_call_preserves_temporal_order(qtbot):
     asst = widget._history[1]
     frags = asst.get("fragments", [])
     types = [f.get("type") for f in frags]
-    assert types == ["text", "tool", "text"], (
-        f"Fragments must be [text, tool, text]; got {types}"
-    )
+    assert types == ["text", "tool", "text"], f"Fragments must be [text, tool, text]; got {types}"
     # Pre-tool text comes before the tool call.
     assert "Let me check" in frags[0]["text"]
     assert "signal source" not in frags[0]["text"]
@@ -774,11 +767,13 @@ def test_main_window_zoom_actions(qtbot, monkeypatch, tmp_path):
 
     db_path = tmp_path / "sessions.db"
     import grc_agent_gui.main_window
+
     monkeypatch.setattr(grc_agent_gui.main_window, "_default_sessions_db", lambda: db_path)
 
     mock_agent = MagicMock()
     mock_agent.session = None
     from ToolAgents.data_models.chat_history import ChatHistory
+
     mock_agent.chat_history = ChatHistory()
     mock_provider = MagicMock()
 
@@ -896,9 +891,7 @@ def test_agent_body_text_uses_high_contrast_color(qtbot):
     # The body div's color must be the high-contrast primary text
     # color, NOT the dim teal #9aabb0 that was the previous
     # default.
-    assert "color: #9aabb0" not in rendered, (
-        f"agent body still uses dim teal #9aabb0:\n{rendered}"
-    )
+    assert "color: #9aabb0" not in rendered, f"agent body still uses dim teal #9aabb0:\n{rendered}"
     assert "color: #cdd6f4" in rendered, (
         f"agent body must use the high-contrast primary text color:\n{rendered}"
     )
@@ -912,6 +905,7 @@ def test_agent_and_user_panels_are_visually_distinct():
     from grc_agent_gui import chat_widget
 
     assert chat_widget._COLOR_USER_BG != chat_widget._COLOR_AGENT_BG
+
     # And neither one is a near-identical dim tint of the other —
     # the hex pairs must be visibly different (delta >= 0x10 per
     # channel on at least one component).
@@ -931,6 +925,7 @@ def test_agent_and_user_panels_are_visually_distinct():
 # The chat renderer has no LaTeX engine. The shim turns the common
 # inline-math patterns (µ, ², ₙ, ·) into unicode, and falls back to a
 # <code> span for anything it cannot safely rewrite.
+
 
 def test_strip_inline_math_rewrites_simple_greek_and_superscripts():
     from grc_agent_gui.chat_widget import strip_inline_math
@@ -1018,11 +1013,31 @@ def test_unknown_macro_fails_closed_to_code_span(qtbot):
     assert "\\operatorname" in out
 
 
-@pytest.mark.parametrize("tag", sorted([
-    "script", "iframe", "object", "embed", "style", "link", "meta",
-    "form", "input", "button", "select", "textarea", "base",
-    "frame", "frameset", "applet", "svg", "math",
-]))
+@pytest.mark.parametrize(
+    "tag",
+    sorted(
+        [
+            "script",
+            "iframe",
+            "object",
+            "embed",
+            "style",
+            "link",
+            "meta",
+            "form",
+            "input",
+            "button",
+            "select",
+            "textarea",
+            "base",
+            "frame",
+            "frameset",
+            "applet",
+            "svg",
+            "math",
+        ]
+    ),
+)
 def test_sanitizer_strips_tag(qtbot, tag):
     from grc_agent_gui.chat_widget import sanitize_html
 
