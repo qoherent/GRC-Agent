@@ -121,7 +121,7 @@ def _cap_embed_body(parts: list[str], max_words: int) -> str:
     ``max_words`` words and a visible flag is appended:
     ``[TRUNCATED by catalog embed: was N words, kept M]``. This mirrors
     the docs pipeline's ``_EMBED_MAX_WORDS = 256`` cap and the
-    ``[TRUNCATED ...]`` convention from ``text_utils``.
+    ``[TRUNCATED ...]`` convention from ``llm_client.cap_words``.
     """
     body = "\n".join(parts)
     words = body.split()

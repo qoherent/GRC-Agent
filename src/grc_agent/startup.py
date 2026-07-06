@@ -1,4 +1,4 @@
-"""Shared runtime bootstrap for CLI and GUI.
+"""Shared runtime bootstrap for the GUI.
 
 Single entry point for retrieval initialization and LLM backend readiness
 so both products do the same startup dance without duplication.

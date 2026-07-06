@@ -92,7 +92,7 @@
 - `tool_context` rendering now emits per-error `hint:` lines and structured `error:` lines.
 - System prompt rewritten from imperative prose to declarative contract bullet lists.
 - All in-band behavioral directives removed from model-visible strings.
-- Centralized runtime helpers: `text_utils.py`, `enums.py`, `integrity.py`.
+- Centralized runtime helpers: `enums.py`.
 - 7 legacy test files, regex/dtype heuristics, hardcoded allowlists removed.
 - Mutation methods consolidated to native GRC APIs: `flow_graph.get_block()` replaces adhoc `_find_block`; `flow_graph.remove_element()` replaces manual list/set manipulation; `Block.STATE_LABELS` replaces hardcoded set.
 - Dead code deleted: `validation/` package (3,415 lines), `transaction.py` apply path (~430 lines), `flowgraph_session.py` mutation wrappers (6 methods), 15 dead tests.
@@ -100,7 +100,7 @@
 - System prompt: added "Parameter values are string expressions; a variable reference is the variable's name."
 
 ### Fixed
-- `change_graph` error payloads are minimal: `{ok, committed, ops_applied, errors, error_type}`. Validation errors surface as `errors[].code == "gnu_validation"`. Removed triplicated `state_revision`, `validation`, `native_validation_errors`, `rejected_phase`, `graph_unchanged`, `hint`, `rollback` fields.
+- `change_graph` error payloads are minimal: `{ok, errors, error_type}`. Validation errors surface as `errors[].code == "gnu_validation"`. Removed `committed`, `ops_applied`, `state_revision`, `validation`, `native_validation_errors`, `rejected_phase`, `graph_unchanged`, `hint`, `rollback` fields.
 - `vlen` connection mismatch now has explicit hint.
 - `search_blocks` false-positive `output_truncated` flag corrected.
 - `validation/rules.py` block-rules cache key reads `BlockDescription.parameters` (not `to_payload()`).
@@ -116,22 +116,22 @@
 
 ### Fixed — RAG audit (findings S1–S10)
 - Background ingestion no longer pollutes production vector DB (`warmup_vector_index()` is explicit).
-- `[llama].model` is now required (config without it silently degraded every LLM call).
+- `[llama].model` is now sourced from `.env` (was a required toml key; silently degraded every LLM call when missing).
 - `sanitize_text` denylist removed (violated no-hand-picked-heuristics rule).
 - In-band control flow in docs-synthesis prompt removed.
 - Distance thresholds calibrated (`0.35`/`0.50`/`0.65`) from live wiki corpus.
-- Embedding model configurable via `[llama].embedding_model`.
+- Embedding model configurable via `.env` (`OLLAMA_EMBEDDING_MODEL` / `OPENROUTER_EMBEDDING_MODEL`).
 - gemma-3 task prefixes applied uniformly to queries and chunks.
 - Resource safety: `try/finally` guards; `vec1.so` fallback raises clear error.
 - Chunk size reduced to 256 words / 100-word overlap with full heading hierarchy.
 
 ### Changed — Catalog search: FTS5 → vector
-- `query_knowledge(domain="catalog")` uses vec1+embeddinggemma pipeline (`.grc_agent/vectors/catalog_v1.db`).
+- `query_knowledge(domain="catalog")` uses sqlite-vec vector pipeline (per-backend `catalog_<backend>.db`).
 - `retrieval_backend` reports `"vector"`; `match_type` is uniformly `"vector"`.
 
 ### Added
 - RAG live-integration tests (`GRC_AGENT_LIVE_RAG=1`).
-- `GrcAgent.warmup_vector_index()`, `is_db_usable()`, `[llama].embedding_model`.
+- `GrcAgent.warmup_vector_index()`.
 
 ### Multi-backend LLM support
 - Ollama (probed via `/v1/models`) and OpenRouter (`OPENROUTER_API_KEY` from `.env`).

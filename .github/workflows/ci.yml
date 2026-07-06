@@ -32,6 +32,9 @@ jobs:
       - name: Run Ruff
         run: uv run ruff check
 
+      - name: Run default test gate
+        run: uv run pytest -m "not grc_native and not gui and not llama_eval" -q
+
   gnu-validated-tests:
     name: GNU-Validated Tests
     runs-on: ubuntu-24.04
@@ -64,8 +67,8 @@ jobs:
         run: |
           uv run python -c "import shutil; from gnuradio import gr; print(f'grcc={shutil.which(\"grcc\")}'); print(f'gnuradio={gr.version()}')"
 
-      - name: Run unittest suite
-        run: uv run python -m unittest
+      - name: Run grc_native test gate
+        run: uv run pytest -m grc_native -q
 
       - name: Run runtime smoke test
         run: uv run python -c "from grc_agent.flowgraph_session import FlowgraphSession; s = FlowgraphSession(); s.load('tests/data/dial_tone.grc'); assert s.flowgraph is not None; print('smoke OK')"

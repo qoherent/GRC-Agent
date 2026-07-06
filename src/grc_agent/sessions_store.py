@@ -83,7 +83,7 @@ PRAGMAS = (
 def default_sessions_db_path() -> Path:
     """Return the default on-disk path of the sessions DB.
 
-    Sibling of the existing :func:`grc_agent.config.user_state`
+    Sibling of the existing :func:`grc_agent.config.user_preferences_path`
     directory at ``~/.grc_agent/``. The directory is created on
     first open, never on import.
     """

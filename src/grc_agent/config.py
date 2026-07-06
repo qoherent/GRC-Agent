@@ -183,7 +183,7 @@ DEFAULT_HISTORY_CONFIG = HistoryConfig(checkpoint_retention=100)
 
 DEFAULT_GUARDRAILS_CONFIG = GuardrailsConfig(
     max_tool_output_bytes=32768,
-    max_compact_list_items=5,
+    max_compact_list_items=3,
 )
 
 

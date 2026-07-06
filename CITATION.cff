@@ -13,7 +13,7 @@ keywords:
   - llm
   - agent
   - code-generation
-  - llama-cpp
+  - ollama
   - retrieval-augmented-generation
 repository-code: "https://github.com/qoherent/grc-agent"
 url: "https://github.com/qoherent/grc-agent"

@@ -13,7 +13,7 @@ os.environ["GRC_AGENT_TESTING"] = "true"
 # Redirect the vector DB to a per-session tmp dir BEFORE any test module
 # imports ``grc_agent.runtime.doc_answer`` (which captures DB_PATH at
 # module load). This keeps production code paths — including the explicit
-# ``GrcAgent.warmup_vector_index()`` call wired into the CLI/GUI —
+# ``GrcAgent.warmup_vector_index()`` call wired into the GUI —
 # exercisable from tests without ever touching the real
 # ``.grc_agent/vectors/docs_v1.db``. The ``_guard_real_vector_db``
 # fixture below is the mechanical backstop that verifies the real path

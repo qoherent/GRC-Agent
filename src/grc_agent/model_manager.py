@@ -4,7 +4,7 @@ The mutating counterpart (``pull_ollama_model``) is the only model-download
 path. All models are discovered and pulled directly from Ollama's native APIs.
 
 The module also exposes a detect-only :func:`probe_ollama_backend` helper
-that the GUI and CLI both consume. The helper is strictly read-only — it
+that the GUI consumes. The helper is strictly read-only — it
 never starts, stops, or downloads anything. Per AGENTS.md, GRC Agent does
 not own the Ollama lifecycle; the user is responsible for ``ollama serve``
 and ``ollama pull <model>``.
@@ -114,7 +114,7 @@ def discover_ollama_models(
 class OllamaBackendStatus:
     """Structured result of a single reachability + availability probe.
 
-    Returned by :func:`probe_ollama_backend`. The GUI and CLI both consume
+    Returned by :func:`probe_ollama_backend`. The GUI consumes
     this object so the same hint text reaches the user regardless of the
     front-end. All fields are pure data — no Qt types, no logging side
     effects — so the same status is renderable in a stderr block, a
@@ -174,7 +174,7 @@ def probe_ollama_backend(
     Performs a single ``GET /api/tags`` and returns a frozen
     :class:`OllamaBackendStatus`. The helper never starts the daemon,
     never pulls a model, and never touches the network beyond the
-    probe itself. Both the GUI setup widget and the CLI startup
+    probe itself. The GUI setup widget
     consume the same status so the user sees identical wording in
     both entry points.
 

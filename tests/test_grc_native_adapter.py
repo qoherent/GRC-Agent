@@ -453,7 +453,7 @@ def test_set_param_rejects_variable_template_literal():
 
 def test_render_block_strips_empty_enum_value():
     """An empty-valued enum (e.g. options.realtime_scheduling='') must not leak
-    into the inspect payload (consistency with filter_live_block_params)."""
+    into the inspect payload (consistency with keep_param in param_filter.py)."""
     fg = load_flow_graph(FIXTURES / "dial_tone.grc")
     options_block = next(b for b in fg.blocks if b.key == "options")
     rendered = render_block(options_block, fg, mode=OVERVIEW, variable_names=set())
