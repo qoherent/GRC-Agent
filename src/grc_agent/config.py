@@ -479,44 +479,23 @@ def _validate_cross_field_constraints(config: AppConfig) -> None:
 
 
 def update_toml_config_file(config_path: Path, updates: dict[str, Any]) -> None:
-    """Read a TOML file, update fields in [llama] section, and write it back."""
+    """Read a TOML file, update fields in [llama] section, and write it back.
+
+    Uses ``tomlkit`` for a formatting-preserving round-trip (comments,
+    whitespace, and key order are preserved).
+    """
     if not config_path.is_file():
         return
-    lines = config_path.read_text(encoding="utf-8").splitlines()
-    new_lines: list[str] = []
-    in_llama = False
-    updated_keys: set[str] = set()
+    import tomlkit
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            if stripped == "[llama]":
-                in_llama = True
-            else:
-                if in_llama:
-                    for k, v in updates.items():
-                        if k not in updated_keys:
-                            new_lines.append(f"{k} = {json.dumps(v)}")
-                    in_llama = False
-            new_lines.append(line)
-            continue
-
-        if in_llama and "=" in line:
-            key, _ = line.split("=", 1)
-            key = key.strip()
-            if key in updates:
-                new_lines.append(f"{key} = {json.dumps(updates[key])}")
-                updated_keys.add(key)
-                continue
-
-        new_lines.append(line)
-
-    if in_llama:
-        for k, v in updates.items():
-            if k not in updated_keys:
-                new_lines.append(f"{k} = {json.dumps(v)}")
-
-    config_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+    llama = doc.get("llama")
+    if llama is None:
+        llama = tomlkit.table()
+        doc["llama"] = llama
+    for key, value in updates.items():
+        llama[key] = value
+    config_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

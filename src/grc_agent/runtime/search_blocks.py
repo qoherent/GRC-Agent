@@ -95,10 +95,7 @@ def _render_hit(raw_block: Any, distance: float) -> dict[str, Any] | None:
     rendered["distance"] = round(float(distance), 3)
     category = description.category_path
     if category:
-        cat_str = " > ".join(category)
-        if cat_str.startswith("Core > "):
-            cat_str = cat_str[7:]
-        rendered["category"] = cat_str
+        rendered["category"] = " > ".join(category)
 
     if "inputs" in rendered and not rendered["inputs"]:
         rendered.pop("inputs")

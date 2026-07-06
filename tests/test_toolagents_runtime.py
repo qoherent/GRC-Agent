@@ -262,6 +262,7 @@ class ToolAgentsProviderConfigTests(unittest.TestCase):
             cfg = ToolAgentsLlamaProviderConfig(
                 base_url="https://openrouter.ai/api",
                 model="qwen-1.5b",
+                backend="openrouter",
             )
             cfg.create_settings(mock_provider)
 

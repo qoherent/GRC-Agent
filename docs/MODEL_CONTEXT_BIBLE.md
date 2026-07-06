@@ -33,7 +33,6 @@ query_knowledge: search catalog blocks or GNU Radio documentation.
 change_graph: add/remove blocks, edit field values, add/remove connections.
 Parameter values are string expressions; a variable reference is simply the variable's name (e.g. use 'base_freq * 1.5', NOT 'vars.base_freq * 1.5').
 Connections use numeric port keys (e.g. '0', '1', '2'), not names like 'out', 'in(0)', or 'in0'. GRC error messages like 'in(0)' refer to port index '0'.
-New blocks whose id contains _xx / _ff / _cc / _ii default to type=complex; set type explicitly (e.g. type=float) when the connection requires it.
 Do not attempt to rename blocks by changing the 'id' parameter in update_params; changing a block's ID is not supported and will be ignored. To rename a block, you must remove it and add a new one.
 Variables are blocks; use block_id "variable" (not "parameter") to add one.
 Every GNU Radio fact must be grounded in query_knowledge, not memory.

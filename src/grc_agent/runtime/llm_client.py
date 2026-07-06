@@ -30,12 +30,15 @@ def cap_words(text: str, max_words: int) -> str:
 
 
 def _openai_base_url(server_url: str) -> str:
+    """Normalize a backend server URL to its OpenAI-compatible ``/v1`` endpoint.
+
+    One uniform rule for both backends: append ``/v1`` unless the URL already
+    ends with it.
+    """
     base = server_url.rstrip("/")
     if base.endswith("/v1"):
         return base
-    if "openrouter.ai" in base or "11434" in base:
-        return f"{base}/v1"
-    return base
+    return f"{base}/v1"
 
 
 def call_agent_llm(agent: GrcAgent, prompt: str) -> str:

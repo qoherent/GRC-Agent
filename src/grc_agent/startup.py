@@ -75,7 +75,7 @@ def bootstrap_runtime(
 
     # 1. Retrieval initialization
     if init_retrieval:
-        readiness = initialize_retrieval()
+        readiness = initialize_retrieval(backend=config.llama.backend)
         if readiness.get("ok"):
             result.retrieval_ok = True
             result.catalog_root = readiness.get("catalog_root")
@@ -204,20 +204,30 @@ def _build_fallback_provider(
 def _classify_launcher_error(exc: BaseException, server_url: str) -> str:
     """Map a probe exception to a stable ``ErrorCode`` value.
 
-    Connection-shaped errors (TCP refused, DNS failure, timeout) get a
-    dedicated ``backend_unreachable`` code so the GUI can render a
-    platform-agnostic hint and the user can reach the recovery path
-    (Model > Select Model) without restarting the desktop app.
+    Prefers typed exceptions from the OpenAI SDK (which wraps both Ollama's
+    ``/v1`` endpoint and OpenRouter). Falls back to httpx connection errors
+    and a terminal substring probe for unstructured exceptions.
     """
     import httpx
+    from openai import (
+        APIConnectionError,
+        AuthenticationError,
+        NotFoundError,
+    )
 
+    if isinstance(exc, NotFoundError):
+        logger.warning("Model not found at %s: %s", server_url, exc)
+        return ErrorCode.MODEL_NOT_FOUND
+    if isinstance(exc, AuthenticationError):
+        logger.warning("Authentication failed at %s", server_url)
+        return ErrorCode.BACKEND_UNREACHABLE
+    if isinstance(exc, APIConnectionError):
+        logger.warning("Backend unreachable at %s: %s", server_url, exc)
+        return ErrorCode.BACKEND_UNREACHABLE
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)):
         logger.warning("Backend unreachable at %s: %s", server_url, exc)
         return ErrorCode.BACKEND_UNREACHABLE
-    # Last-resort fallback: backend did not surface a structured error code.
-    # Substring match is the only signal left for ``model_not_found``-shaped
-    # errors. If the backend SDK grows a typed exception hierarchy, prefer
-    # that over this text probe.
+    # Last-resort: unstructured exceptions with no typed hierarchy.
     lowered = str(exc).lower()
     if "alias" in lowered and "mismatch" in lowered:
         return ErrorCode.MODEL_NOT_FOUND

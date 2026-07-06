@@ -1,12 +1,30 @@
-"""Runtime tool-call validation against the declared model-facing schemas."""
+"""Runtime tool-call validation against the declared model-facing schemas.
+
+Validation delegates to the ``jsonschema`` library (standard, well-tested
+JSON Schema implementation). The hand-rolled validator was replaced in favor
+of a library that covers the full spec correctly.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from jsonschema import Draft7Validator
+from jsonschema import ValidationError as JsonschemaValidationError
+
 from grc_agent.domain_models import ErrorCode, ToolValidationCode
 
 ToolSchemaMap = dict[str, dict[str, Any]]
+
+# Map jsonschema validator names to our stable ToolValidationCode enum.
+_VALIDATOR_CODE_MAP = {
+    "required": ToolValidationCode.MISSING_REQUIRED,
+    "type": ToolValidationCode.INVALID_TYPE,
+    "enum": ToolValidationCode.INVALID_ENUM,
+    "additionalProperties": ToolValidationCode.UNEXPECTED_ARGUMENT,
+    "minItems": ToolValidationCode.TOO_FEW_ITEMS,
+    "maxItems": ToolValidationCode.TOO_MANY_ITEMS,
+}
 
 
 def build_tool_schema_map(tool_schemas: list[dict[str, Any]]) -> ToolSchemaMap:
@@ -61,16 +79,59 @@ def validate_runtime_tool_call(
             "schema_repair_instruction": _schema_repair_instruction(tool_name, []),
         }
 
-    issues = _validate_object(arguments, schema_map[tool_name], field_path=None)
-    if not issues:
+    validator = Draft7Validator(schema_map[tool_name])
+    errors = list(validator.iter_errors(arguments))
+    if not errors:
         return None
 
+    issues = [_jsonschema_error_to_issue(e) for e in errors]
     return {
         "error_type": ErrorCode.TOOL_CALL_INVALID,
         "message": f"Rejected invalid tool call for {tool_name}: {issues[0]['message']} No tool ran.",
         "validation_errors": issues,
         "schema_repair_instruction": _schema_repair_instruction(tool_name, issues),
     }
+
+
+def _jsonschema_error_to_issue(error: JsonschemaValidationError) -> dict[str, Any]:
+    code = _VALIDATOR_CODE_MAP.get(error.validator, "schema_violation")
+    field = _compose_relative_path(error.relative_path)
+    issue: dict[str, Any] = {
+        "code": code,
+        "field": field,
+        "message": error.message,
+    }
+    # Attach extra context fields matching the original hand-rolled format.
+    if error.validator == "required":
+        issue["required_fields"] = sorted(error.validator_value)
+    elif error.validator == "type":
+        expected = error.validator_value
+        issue["expected_types"] = expected if isinstance(expected, list) else [str(expected)]
+        issue["received_type"] = _describe_value_type(error.instance)
+    elif error.validator == "enum":
+        issue["allowed_values"] = error.validator_value
+    elif error.validator == "minItems":
+        issue["min_items"] = error.validator_value
+        issue["received_items"] = len(error.instance) if isinstance(error.instance, list) else 0
+    elif error.validator == "maxItems":
+        issue["max_items"] = error.validator_value
+        issue["received_items"] = len(error.instance) if isinstance(error.instance, list) else 0
+    elif error.validator == "additionalProperties":
+        allowed = set(error.schema.get("properties", {})) if isinstance(error.schema, dict) else set()
+        extra_keys = (
+            [k for k in error.instance if k not in allowed]
+            if isinstance(error.instance, dict) else []
+        )
+        if extra_keys:
+            issue["field"] = extra_keys[0]
+        issue["allowed_fields"] = sorted(allowed)
+    return issue
+
+
+def _compose_relative_path(path: tuple) -> str | None:
+    if not path:
+        return None
+    return ".".join(str(p) for p in path)
 
 
 def _schema_repair_instruction(
@@ -95,165 +156,6 @@ def _schema_repair_instruction(
     }
 
 
-def _validate_object(
-    value: dict[str, Any],
-    schema: dict[str, Any],
-    *,
-    field_path: str | None,
-) -> list[dict[str, Any]]:
-    issues: list[dict[str, Any]] = []
-    properties = schema.get("properties")
-    defined_properties = properties if isinstance(properties, dict) else {}
-    required = schema.get("required")
-    required_fields = required if isinstance(required, list) else []
-
-    for required_field in required_fields:
-        if required_field not in value:
-            issues.append(
-                {
-                    "code": ToolValidationCode.MISSING_REQUIRED,
-                    "field": _compose_field_path(field_path, str(required_field)),
-                    "message": f"Missing required argument '{required_field}'.",
-                    "required_fields": sorted(str(item) for item in required_fields),
-                }
-            )
-
-    additional_properties = schema.get("additionalProperties", True)
-    if additional_properties is False:
-        for unexpected_field in sorted(key for key in value if key not in defined_properties):
-            issues.append(
-                {
-                    "code": ToolValidationCode.UNEXPECTED_ARGUMENT,
-                    "field": _compose_field_path(field_path, unexpected_field),
-                    "message": f"Unsupported argument '{unexpected_field}'.",
-                    "allowed_fields": sorted(defined_properties),
-                }
-            )
-
-    for property_name, property_value in value.items():
-        property_schema = defined_properties.get(property_name)
-        if not isinstance(property_schema, dict):
-            continue
-        issues.extend(
-            _validate_value(
-                property_value,
-                property_schema,
-                field_path=_compose_field_path(field_path, property_name),
-            )
-        )
-
-    return issues
-
-
-def _validate_value(
-    value: Any,
-    schema: dict[str, Any],
-    *,
-    field_path: str,
-) -> list[dict[str, Any]]:
-    issues: list[dict[str, Any]] = []
-
-    expected_types = _normalize_schema_types(schema.get("type"))
-    if expected_types:
-        matched_type = next((item for item in expected_types if _matches_type(value, item)), None)
-        if matched_type is None:
-            issues.append(
-                {
-                    "code": ToolValidationCode.INVALID_TYPE,
-                    "field": field_path,
-                    "message": (
-                        f"Argument '{field_path}' must be "
-                        f"{_render_expected_types(expected_types)}, got {_describe_value_type(value)}."
-                    ),
-                    "expected_types": expected_types,
-                    "received_type": _describe_value_type(value),
-                }
-            )
-            return issues
-
-    enum_values = schema.get("enum")
-    if isinstance(enum_values, list) and value not in enum_values:
-        issues.append(
-            {
-                "code": ToolValidationCode.INVALID_ENUM,
-                "field": field_path,
-                "message": f"Argument '{field_path}' must be one of {enum_values}.",
-                "allowed_values": enum_values,
-            }
-        )
-        return issues
-
-    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
-        issues.extend(_validate_object(value, schema, field_path=field_path))
-
-    item_schema = schema.get("items")
-    if isinstance(value, list) and isinstance(item_schema, dict):
-        min_items = schema.get("minItems")
-        if isinstance(min_items, int) and len(value) < min_items:
-            issues.append(
-                {
-                    "code": ToolValidationCode.TOO_FEW_ITEMS,
-                    "field": field_path,
-                    "message": (f"Argument '{field_path}' must contain at least {min_items} item."),
-                    "min_items": min_items,
-                    "received_items": len(value),
-                }
-            )
-        max_items = schema.get("maxItems")
-        if isinstance(max_items, int) and len(value) > max_items:
-            issues.append(
-                {
-                    "code": ToolValidationCode.TOO_MANY_ITEMS,
-                    "field": field_path,
-                    "message": (f"Argument '{field_path}' must contain at most {max_items} items."),
-                    "max_items": max_items,
-                    "received_items": len(value),
-                }
-            )
-        for index, item in enumerate(value):
-            issues.extend(
-                _validate_value(
-                    item,
-                    item_schema,
-                    field_path=f"{field_path}[{index}]",
-                )
-            )
-
-    return issues
-
-
-def _normalize_schema_types(raw_type: Any) -> list[str]:
-    if isinstance(raw_type, str):
-        return [raw_type]
-    if isinstance(raw_type, list):
-        return [item for item in raw_type if isinstance(item, str)]
-    return []
-
-
-def _matches_type(value: Any, expected_type: str) -> bool:
-    if expected_type == "object":
-        return isinstance(value, dict)
-    if expected_type == "array":
-        return isinstance(value, list)
-    if expected_type == "string":
-        return isinstance(value, str)
-    if expected_type == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected_type == "number":
-        return isinstance(value, int | float) and not isinstance(value, bool)
-    if expected_type == "boolean":
-        return isinstance(value, bool)
-    if expected_type == "null":
-        return value is None
-    return True
-
-
-def _render_expected_types(expected_types: list[str]) -> str:
-    if len(expected_types) == 1:
-        return expected_types[0]
-    return "one of " + ", ".join(expected_types)
-
-
 def _describe_value_type(value: Any) -> str:
     if value is None:
         return "null"
@@ -270,9 +172,3 @@ def _describe_value_type(value: Any) -> str:
     if isinstance(value, float):
         return "number"
     return type(value).__name__
-
-
-def _compose_field_path(prefix: str | None, field_name: str) -> str:
-    if not prefix:
-        return field_name
-    return f"{prefix}.{field_name}"

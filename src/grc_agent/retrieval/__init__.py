@@ -84,6 +84,7 @@ def initialize_retrieval(
     catalog_root: str | Path | None = None,
     warm_catalog: bool = False,
     server_url: str | None = None,
+    backend: str = "ollama",
 ) -> dict[str, Any]:
     _ = warm_catalog
     try:
@@ -102,7 +103,7 @@ def initialize_retrieval(
             "tree": len(files.tree),
             "domain": len(files.domain),
         },
-        "catalog_index_warmed": is_catalog_db_usable(catalog_db_path("ollama")),
+        "catalog_index_warmed": is_catalog_db_usable(catalog_db_path(backend)),
         "retrieval_backend": "vector",
     }
     if warm_catalog and server_url and not payload["catalog_index_warmed"]:

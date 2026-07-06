@@ -95,7 +95,6 @@ class NormalizedPort:
     multiplicity: int | str | None = None
     optional: bool | int | str | None = None
     hide: bool | str | None = None
-    color: str | None = None
 
     def to_compact_dict(self) -> dict[str, Any]:
         """Discovery shape: id/domain/dtype only — no multiplicity/optional."""
@@ -302,7 +301,6 @@ def normalize_port(payload: dict[str, Any]) -> NormalizedPort:
     """Normalize one GNU input or output payload into the public structured shape."""
     domain = optional_string(payload.get("domain"))
     dtype = optional_string(payload.get("dtype"))
-    color = _map_port_color(domain, dtype)
 
     return NormalizedPort(
         label=optional_string(payload.get("label")),
@@ -313,44 +311,7 @@ def normalize_port(payload: dict[str, Any]) -> NormalizedPort:
         multiplicity=payload.get("multiplicity"),
         optional=payload.get("optional"),
         hide=payload.get("hide"),
-        color=color,
     )
-
-
-def _map_port_color(domain: str | None, dtype: str | None) -> str | None:
-    """Map GNU Radio port domain and dtype to their canonical GUI colors."""
-    if domain == "message":
-        return "grey"
-
-    if not dtype:
-        return None
-
-    # Canonical GNU Radio port colors from tutorials and source
-    mapping = {
-        "complex": "blue",
-        "complex64": "blue",
-        "fc32": "blue",
-        "float": "orange",
-        "float32": "orange",
-        "f32": "orange",
-        "byte": "purple",
-        "char": "purple",
-        "uint8": "purple",
-        "u8": "purple",
-        "short": "yellow",
-        "int16": "yellow",
-        "s16": "yellow",
-        "int": "green",
-        "int32": "green",
-        "i32": "green",
-        "complex128": "dark blue",
-        "fc64": "dark blue",
-        "float64": "dark orange",
-        "f64": "dark orange",
-        "int64": "dark green",
-        "i64": "dark green",
-    }
-    return mapping.get(dtype.lower())
 
 
 def select_category_path(raw_block: RawCatalogBlock) -> tuple[list[str], list[str]]:

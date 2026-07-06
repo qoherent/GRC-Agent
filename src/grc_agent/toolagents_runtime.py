@@ -16,6 +16,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx as _httpx
 from openai import APIConnectionError, OpenAI
+from tenacity import (
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 from ToolAgents import FunctionTool, ToolRegistry
 from ToolAgents.agents import ChatToolAgent
 from ToolAgents.data_models.chat_history import ChatHistory
@@ -378,10 +384,6 @@ class ToolAgentsLlamaProviderConfig:
     backend: str = "ollama"
     max_tool_rounds: int = 8
 
-    def __post_init__(self) -> None:
-        if self.backend == "ollama" and "openrouter" in (self.base_url or "").lower():
-            self.backend = "openrouter"
-
     @property
     def openai_base_url(self) -> str:
         base = self.base_url.rstrip("/")
@@ -729,95 +731,88 @@ class ToolAgentsRunner:
                 system_salt = f"retry_salt: {uuid.uuid4()}"
 
             messages = agent.get_model_messages(system_salt=system_salt)
+            # Tenacity-managed connection retries with exponential backoff.
+            # Only the transient connectivity errors are retried here; the
+            # empty-content (degenerate response) retry is the outer `for
+            # attempt` loop because it must rebuild messages with a
+            # cache-busting ``system_salt`` on each attempt.
             try:
-                streamed_any_content = False
-                assistant_message = None
-                cancelled = False
-                for chunk_obj in self.chat_agent.stream_step(
-                    messages,
-                    tool_registry=registry,
-                    settings=settings,
+                for _retry_state in Retrying(
+                    retry=retry_if_exception_type(_BACKEND_CONNECTION_ERRORS),
+                    stop=stop_after_attempt(_MAX_PROVIDER_RETRIES),
+                    wait=wait_exponential(multiplier=1, min=1, max=10),
+                    reraise=True,
                 ):
-                    if cancel_event is not None and cancel_event.is_set():
-                        cancelled = True
-                        break
-                    if chunk_obj.chunk:
-                        yield {"event": "chunk", "text": chunk_obj.chunk}
-                        streamed_any_content = True
-                    if chunk_obj.get_finished():
-                        assistant_message = chunk_obj.get_finished_chat_message()
+                    with _retry_state:
+                        streamed_any_content = False
+                        assistant_message = None
+                        cancelled = False
+                        for chunk_obj in self.chat_agent.stream_step(
+                            messages,
+                            tool_registry=registry,
+                            settings=settings,
+                        ):
+                            if cancel_event is not None and cancel_event.is_set():
+                                cancelled = True
+                                break
+                            if chunk_obj.chunk:
+                                yield {"event": "chunk", "text": chunk_obj.chunk}
+                                streamed_any_content = True
+                            if chunk_obj.get_finished():
+                                assistant_message = chunk_obj.get_finished_chat_message()
 
-                if cancelled:
-                    cancel_text = "(cancelled by user)"
-                    if assistant_message is None:
-                        # Stream was abandoned before any usable content
-                        # arrived — synthesize a minimal assistant message
-                        # so the SSOT emit path matches the normal
-                        # terminal emission.
-                        now = datetime.datetime.now()
-                        assistant_message = ChatMessage(
-                            id=str(uuid.uuid4()),
-                            role=ChatMessageRole.Assistant,
-                            content=[TextContent(content=cancel_text)],
-                            created_at=now,
-                            updated_at=now,
-                        )
-                        agent.chat_history.add_message(assistant_message)
-                    else:
-                        # Partial content exists.  Append the
-                        # cancellation note to whatever was already
-                        # streamed — the SSOT now reflects what the user
-                        # saw plus the cancellation marker.  The message
-                        # is rewritten in place; ``_replace_last_assistant_text``
-                        # mutated the chat_history's last ChatMessage
-                        # object itself, so we read it back by reference.
-                        _replace_last_assistant_text(
-                            agent.chat_history,
-                            (
-                                _message_text(assistant_message).rstrip()
-                                + f"\n\n{cancel_text}"
-                            ),
-                        )
-                    yield {
-                        "event": "model_message",
-                        "role": ASSISTANT_MODEL_ROLE,
-                        "payload": chat_message_payload(assistant_message),
-                    }
-                    return None
+                        if cancelled:
+                            cancel_text = "(cancelled by user)"
+                            if assistant_message is None:
+                                now = datetime.datetime.now()
+                                assistant_message = ChatMessage(
+                                    id=str(uuid.uuid4()),
+                                    role=ChatMessageRole.Assistant,
+                                    content=[TextContent(content=cancel_text)],
+                                    created_at=now,
+                                    updated_at=now,
+                                )
+                                agent.chat_history.add_message(assistant_message)
+                            else:
+                                _replace_last_assistant_text(
+                                    agent.chat_history,
+                                    (
+                                        _message_text(assistant_message).rstrip()
+                                        + f"\n\n{cancel_text}"
+                                    ),
+                                )
+                            yield {
+                                "event": "model_message",
+                                "role": ASSISTANT_MODEL_ROLE,
+                                "payload": chat_message_payload(assistant_message),
+                            }
+                            return None
 
-                if assistant_message is None:
-                    now = datetime.datetime.now()
-                    assistant_message = ChatMessage(
-                        id=str(uuid.uuid4()),
-                        role=ChatMessageRole.Assistant,
-                        content=[],
-                        created_at=now,
-                        updated_at=now,
-                    )
+                        if assistant_message is None:
+                            now = datetime.datetime.now()
+                            assistant_message = ChatMessage(
+                                id=str(uuid.uuid4()),
+                                role=ChatMessageRole.Assistant,
+                                content=[],
+                                created_at=now,
+                                updated_at=now,
+                            )
 
-                tool_calls = assistant_message.get_tool_calls()
-                assistant_text = _message_text(assistant_message).strip()
+                        tool_calls = assistant_message.get_tool_calls()
+                        assistant_text = _message_text(assistant_message).strip()
 
-                if not tool_calls and not assistant_text:
-                    if attempt < retry_attempts - 1:
-                        logger.warning(
-                            "Degenerate empty response with no tool calls "
-                            "(attempt %d/%d). Retrying...",
-                            attempt + 1,
-                            retry_attempts,
-                        )
-                        continue
+                        if not tool_calls and not assistant_text:
+                            if attempt < retry_attempts - 1:
+                                logger.warning(
+                                    "Degenerate empty response with no tool calls "
+                                    "(attempt %d/%d). Retrying...",
+                                    attempt + 1,
+                                    retry_attempts,
+                                )
+                                break  # exit tenacity loop → next outer attempt
 
-                return (assistant_message, streamed_any_content)
+                        return (assistant_message, streamed_any_content)
             except _BACKEND_CONNECTION_ERRORS as exc:
-                if attempt < retry_attempts - 1:
-                    logger.warning(
-                        "Backend connection error (attempt %d/%d): %s. Retrying...",
-                        attempt + 1,
-                        retry_attempts,
-                        exc,
-                    )
-                    continue
                 logger.warning(
                     "Backend unreachable during turn: model=%s url=%s error=%s",
                     resolved_model,
@@ -838,6 +833,8 @@ class ToolAgentsRunner:
                         agent.chat_history.get_messages()[-1]
                     ),
                 }
+                yield {"event": "final", "result": payload}
+                return None
                 yield {"event": "final", "result": payload}
                 return None
         return None  # pragma: no cover — unreachable; the loop above always returns
