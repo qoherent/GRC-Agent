@@ -20,6 +20,8 @@ from grc_adapter import (
     change_graph,
     query_catalog,
     query_docs,
+    web_search,
+    web_fetch,
 )
 
 MODEL = "qwen3.6:35b-a3b-q4_K_M"
@@ -329,7 +331,7 @@ def grc_tools() -> list[Tool[Any]]:
     ))
     
     async def web_search_func(ctx: RunContext[Any], query: str, max_results: int = 5) -> str:
-        return json.dumps({"ok": True, "results": [], "query": query})
+        return json.dumps(web_search(query, max_results=max_results))
     tools.append(Tool.from_schema(
         function=web_search_func,
         name="web_search",
@@ -339,7 +341,7 @@ def grc_tools() -> list[Tool[Any]]:
     ))
     
     async def web_fetch_func(ctx: RunContext[Any], url: str) -> str:
-        return json.dumps({"ok": True, "title": "", "content": "", "links": []})
+        return json.dumps(web_fetch(url))
     tools.append(Tool.from_schema(
         function=web_fetch_func,
         name="web_fetch",

@@ -530,3 +530,69 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+    import httpx
+    api_key = os.getenv("OLLAMA_API_KEY")
+    if not api_key:
+        return {
+            "ok": False,
+            "message": "OLLAMA_API_KEY is not set; web search is unavailable.",
+            "error_type": "missing_api_key",
+        }
+    clamped = max(1, min(int(max_results), 10))
+    body = {"query": query, "max_results": clamped}
+    try:
+        response = httpx.post(
+            "https://ollama.com/api/web_search",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return {"ok": True, "results": payload.get("results", []), "message": ""}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": f"web_search failed: {exc}",
+            "error_type": "network_error",
+        }
+
+def web_fetch(url: str) -> dict[str, Any]:
+    import httpx
+    api_key = os.getenv("OLLAMA_API_KEY")
+    if not api_key:
+        return {
+            "ok": False,
+            "message": "OLLAMA_API_KEY is not set; web fetch is unavailable.",
+            "error_type": "missing_api_key",
+        }
+    try:
+        response = httpx.post(
+            "https://ollama.com/api/web_fetch",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"url": url},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return {
+            "ok": True,
+            "title": payload.get("title", ""),
+            "content": payload.get("content", ""),
+            "links": payload.get("links", []),
+            "message": ""
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": f"web_fetch failed: {exc}",
+            "error_type": "network_error",
+        }
