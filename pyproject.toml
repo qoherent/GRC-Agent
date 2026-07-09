@@ -43,6 +43,7 @@ dependencies = [
     "tomlkit>=0.15.0",
     "jsonschema>=4.26.0",
     "tenacity>=9.1.4",
+    "pydantic-ai>=2.7.0",
 ]
 
 [project.optional-dependencies]
