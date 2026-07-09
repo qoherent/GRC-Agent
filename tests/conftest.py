@@ -11,7 +11,7 @@ import os
 os.environ["GRC_AGENT_TESTING"] = "true"
 
 # Redirect the vector DB to a per-session tmp dir BEFORE any test module
-# imports ``grc_agent.runtime.doc_answer`` (which captures DB_PATH at
+# imports ``grc_agent.runtime.doc_answer`` (which captures DB_DIR at
 # module load). This keeps production code paths — including the explicit
 # ``GrcAgent.warmup_vector_index()`` call wired into the GUI —
 # exercisable from tests without ever touching the real

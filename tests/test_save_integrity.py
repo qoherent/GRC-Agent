@@ -39,11 +39,6 @@ def _mutate_param(session: FlowgraphSession, instance_name: str, key: str, value
     session.bump_revision()
 
 
-def _mark_session_valid(session: FlowgraphSession) -> None:
-    session.last_validation_ok = True
-    session.last_validation_revision = session.state_revision
-
-
 def _block_param_value(session: FlowgraphSession, instance_name: str, param_key: str) -> object:
     assert session.flowgraph is not None
     for block in session.flowgraph.blocks:
@@ -64,7 +59,6 @@ class SaveIntegrityTests(unittest.TestCase):
             self.assertEqual(session.file_integrity_state()["status"], "clean")
 
             _mutate_param(session, "samp_rate", "value", "48000")
-            _mark_session_valid(session)
             session.save()
 
             saved_hash = _sha256(session.path)
@@ -83,7 +77,6 @@ class SaveIntegrityTests(unittest.TestCase):
             assert session.path is not None
             original_hash = session.persisted_file_sha256
             _mutate_param(session, "samp_rate", "value", "48000")
-            _mark_session_valid(session)
             session.path.write_text(
                 session.path.read_text(encoding="utf-8") + "\n# external edit\n",
                 encoding="utf-8",
@@ -108,7 +101,6 @@ class SaveIntegrityTests(unittest.TestCase):
             session.path = symlink_target
             session._persisted_file_sha256 = _sha256(real_target)
             _mutate_param(session, "samp_rate", "value", "48000")
-            _mark_session_valid(session)
 
             with self.assertRaises(OSError) as caught:
                 session.save()
@@ -148,7 +140,6 @@ class SaveIntegrityTests(unittest.TestCase):
             original_text = session.path.read_text(encoding="utf-8")
             original_hash = session.persisted_file_sha256
             _mutate_param(session, "samp_rate", "value", "48000")
-            _mark_session_valid(session)
 
             with mock.patch(
                 "grc_agent.flowgraph_session.write_flow_graph_atomic",

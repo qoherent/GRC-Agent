@@ -24,7 +24,6 @@ def _make_session(id: int = 1, **overrides) -> SessionRecord:
         backend="ollama",
         title=f"Session {id}",
         message_count=0,
-        graph_exists=True,
     )
     base.update(overrides)
     return SessionRecord(**base)

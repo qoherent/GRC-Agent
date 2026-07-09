@@ -150,7 +150,6 @@ class Fix1CommitResultTests(unittest.TestCase):
                 agent,
                 "Set the sample rate to 48000.",
                 model=None,
-                max_tool_rounds=4,
                 on_tool_start=None,
                 on_tool_end=None,
             )

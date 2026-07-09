@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 from unittest import mock
 
@@ -24,8 +25,6 @@ class StartupTests(unittest.TestCase):
                 server_url=f"http://127.0.0.1:{port}",
                 backend=backend,
                 model="test-model",
-                max_tokens=256,
-                max_tool_rounds=8,
                 request_timeout_seconds=2.0,
             ),
             agent=AgentConfig(
@@ -56,7 +55,6 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(result.server_url, "http://127.0.0.1:11434")
         self.assertIsNotNone(result.provider_config)
         self.assertTrue(result.health_evidence["model_ready"])
-        self.assertEqual(result.health_evidence["actual_context_tokens"], 256)
 
     def test_bootstrap_runtime_openrouter_backend_failure(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -112,6 +110,40 @@ class StartupTests(unittest.TestCase):
         self.assertNotIn("service", joined)
         self.assertIn("ollama", joined)
         self.assertIn("http://127.0.0.1:11434", joined)
+        # Concrete, known-good context-size recommendation — matches this
+        # app's own default model's baked-in num_ctx, not a vague "set it
+        # higher".
+        self.assertIn("ollama_context_length", joined)
+        self.assertIn("120000", joined)
+        # Must not tell the user to manually launch a second `ollama serve`
+        # — Ollama is typically already running in the background (this is
+        # exactly the anti-pattern that caused a port conflict in practice).
+        # Word-boundary match: "...the Ollama server..." is fine, "ollama
+        # serve" as a standalone command is not.
+        self.assertIsNone(re.search(r"\bollama serve\b", joined))
+
+    def test_bootstrap_runtime_openrouter_connection_refused_has_no_ollama_hint(self) -> None:
+        """OpenRouter has no local server to start — the Ollama-specific
+        hint (OLLAMA_CONTEXT_LENGTH) must not appear."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("Connection refused")
+
+        test_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        config = self._app_config("openrouter", 8080)
+        with mock.patch("grc_agent.model_manager.httpx.Client", return_value=test_client):
+            with mock.patch("grc_agent.startup.initialize_retrieval") as mock_init_retrieval:
+                mock_init_retrieval.return_value = {
+                    "ok": True,
+                    "catalog_root": "/tmp",
+                    "catalog_files": [],
+                }
+                result = bootstrap_runtime(config, init_retrieval=True)
+
+        joined = " ".join(result.errors).lower()
+        self.assertNotIn("ollama serve", joined)
+        self.assertNotIn("ollama_context_length", joined)
 
 
 if __name__ == "__main__":

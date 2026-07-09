@@ -7,8 +7,6 @@ backend = "ollama"
 # Example: a custom Ollama Modelfile model gemma4:e4b-it-qat with
 # PARAMETER num_ctx 120000 (Ollama's /v1 endpoint ignores per-request
 # num_ctx, so a large context window must be baked into the Modelfile).
-max_tokens = 4096
-max_tool_rounds = 8
 request_timeout_seconds = 120.0
 
 [agent.retrieval]

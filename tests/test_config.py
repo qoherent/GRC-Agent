@@ -8,6 +8,9 @@ from unittest import mock
 from grc_agent.config import (
     CONFIG_ENV_VAR,
     ConfigError,
+    LlamaConfig,
+    UserPreferences,
+    apply_user_preferences_to_llama_config,
     default_app_config,
     default_chat_model,
     default_config_path,
@@ -35,8 +38,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.embedding_model, default_embedding_model("ollama"))
         self.assertTrue(config.llama.model)
         self.assertTrue(config.llama.embedding_model)
-        self.assertEqual(config.llama.max_tokens, 4096)
-        self.assertEqual(config.llama.max_tool_rounds, 8)
         self.assertEqual(config.llama.request_timeout_seconds, 120.0)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 5)
         self.assertEqual(config.agent.history.checkpoint_retention, 100)
@@ -63,8 +64,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "[llama]\n"
                     'server_url = "http://127.0.0.1:9000"\n'
                     'backend = "openrouter"\n'
-                    "max_tokens = 2048\n"
-                    "max_tool_rounds = 42\n"
                     "request_timeout_seconds = 30.0\n"
                     "\n[agent.retrieval]\n"
                     "search_blocks_default_k = 7\n"
@@ -84,7 +83,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.llama.model, "custom-model")
         self.assertEqual(config.llama.embedding_model, "custom-embed")
         self.assertEqual(config.llama.backend, "openrouter")
-        self.assertEqual(config.llama.max_tool_rounds, 42)
+        self.assertEqual(config.llama.request_timeout_seconds, 30.0)
         self.assertEqual(config.agent.retrieval.search_blocks_default_k, 7)
         self.assertEqual(config.agent.history.checkpoint_retention, 140)
 
@@ -101,8 +100,6 @@ class RuntimeConfigTests(unittest.TestCase):
                     "[llama]\n"
                     'server_url = "http://localhost:11434"\n'
                     'backend = "ollama"\n'
-                    "max_tokens = 1024\n"
-                    "max_tool_rounds = 1\n"
                     "request_timeout_seconds = 1.0\n"
                 ),
                 encoding="utf-8",
@@ -117,7 +114,7 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             env_config = Path(tmpdir) / "env.toml"
             env_config.write_text(
-                "[llama]\nserver_url='http://localhost:11434'\nmodel='m'\nmax_tokens=1\nmax_tool_rounds=1\nrequest_timeout_seconds=1.0\n",
+                "[llama]\nserver_url='http://localhost:11434'\nmodel='m'\nrequest_timeout_seconds=1.0\n",
                 encoding="utf-8",
             )
 
@@ -150,8 +147,6 @@ class RuntimeConfigTests(unittest.TestCase):
                         'server_url = "http://localhost:11434"\n'
                         f'backend = "{val}"\n'
                         'model = "m"\n'
-                        "max_tokens = 1024\n"
-                        "max_tool_rounds = 1\n"
                         "request_timeout_seconds = 1.0\n"
                     ),
                     encoding="utf-8",
@@ -166,11 +161,79 @@ class RuntimeConfigTests(unittest.TestCase):
                     'server_url = "http://localhost:11434"\n'
                     'backend = "invalid_val"\n'
                     'model = "m"\n'
-                    "max_tokens = 1024\n"
-                    "max_tool_rounds = 1\n"
                     "request_timeout_seconds = 1.0\n"
                 ),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ConfigError, "backend must be"):
                 load_app_config(invalid_path)
+
+
+class GrcAgentLlamaConfigWiringTests(unittest.TestCase):
+    """``GrcAgent`` must adopt an explicitly-passed ``LlamaConfig`` verbatim.
+
+    Regression coverage for a real wiring gap: ``app.py`` resolves the
+    backend via ``load_app_config()`` + the user's persisted provider
+    preference, but ``GrcAgent`` used to always re-derive its own LLM/
+    embedding runtime state from ``default_app_config()`` (hardcoded to
+    ``backend="ollama"``) — silently ignoring both the toml config and any
+    persisted preference until the user manually swapped backends via the
+    GUI toolbar. ``llama_config`` is now the single source of truth.
+    """
+
+    def test_default_construction_falls_back_to_builtin_defaults(self) -> None:
+        from grc_agent.agent import GrcAgent
+
+        agent = GrcAgent()
+        defaults = default_app_config().llama
+
+        self.assertEqual(agent._llama_backend, defaults.backend)
+        self.assertEqual(agent._llama_server_url, defaults.server_url)
+        self.assertEqual(agent._llama_model, defaults.model)
+        self.assertEqual(agent._embedding_model, defaults.embedding_model)
+        self.assertEqual(agent._llama_request_timeout_seconds, defaults.request_timeout_seconds)
+
+    def test_explicit_llama_config_overrides_builtin_defaults(self) -> None:
+        from grc_agent.agent import GrcAgent
+
+        custom = LlamaConfig(
+            server_url="https://openrouter.ai/api",
+            model="deepseek/deepseek-v4-flash",
+            embedding_model="perplexity/pplx-embed-v1-0.6b",
+            backend="openrouter",
+            request_timeout_seconds=45.0,
+        )
+        agent = GrcAgent(llama_config=custom)
+
+        self.assertEqual(agent._llama_backend, "openrouter")
+        self.assertEqual(agent._llama_server_url, "https://openrouter.ai/api")
+        self.assertEqual(agent._llama_model, "deepseek/deepseek-v4-flash")
+        self.assertEqual(agent._embedding_model, "perplexity/pplx-embed-v1-0.6b")
+        self.assertEqual(agent._llama_request_timeout_seconds, 45.0)
+
+    def test_preference_overlaid_config_flows_through_to_the_agent(self) -> None:
+        """The exact bug scenario: a persisted 'openrouter' preference must
+        reach the agent's runtime state, not just the GUI's display config.
+
+        Mirrors ``app.py``'s bootstrap sequence: ``load_app_config()`` then
+        ``apply_user_preferences_to_llama_config()``, with the *same*
+        resolved object passed into ``GrcAgent`` — one source of truth, no
+        second independent resolution.
+        """
+        from grc_agent.agent import GrcAgent
+
+        with mock.patch.dict(
+            "os.environ",
+            {"OPENROUTER_MODEL": "pref-model", "OPENROUTER_EMBEDDING_MODEL": "pref-embed"},
+        ):
+            base_config = load_app_config()
+            self.assertEqual(base_config.llama.backend, "ollama")  # sanity: toml default
+
+            prefs = UserPreferences(provider_chosen="openrouter")
+            resolved_llama = apply_user_preferences_to_llama_config(base_config.llama, prefs)
+
+            agent = GrcAgent(llama_config=resolved_llama)
+
+        self.assertEqual(agent._llama_backend, "openrouter")
+        self.assertEqual(agent._llama_model, "pref-model")
+        self.assertEqual(agent._embedding_model, "pref-embed")

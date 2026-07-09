@@ -14,6 +14,7 @@ are orchestrated by :class:`MainWindow` via signals.
 from __future__ import annotations
 
 from grc_agent.config import ALLOWED_BACKENDS
+from grc_agent.toolagents_runtime import OLLAMA_SERVER_HINT
 from PySide6.QtCore import Signal
 from PySide6.QtGui import Qt
 from PySide6.QtWidgets import (
@@ -231,6 +232,11 @@ class ModelToolbar(QFrame):
         self._suppress_signals = True
         self.provider_combo.setCurrentIndex(idx)
         editable = backend == _BACKEND_OLLAMA
+        # Ollama is a local server the user must have running themselves —
+        # unlike OpenRouter, which is just a cloud API key. Surface the
+        # launch/context-size reminder as a hover hint rather than a popup,
+        # so it's available without being intrusive.
+        self.provider_combo.setToolTip(OLLAMA_SERVER_HINT if editable else "")
         if editable:
             # The combo may currently hold an OpenRouter model id (from the
             # non-editable branch below) — restore the last known-good

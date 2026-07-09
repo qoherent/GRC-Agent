@@ -85,7 +85,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
     ),
     _schema(
         "web_search",
-        "Search the live web. Returns up to 10 result snippets (title, url, content). Use this for current events, recent releases, or any question that requires information not in the local catalog or docs.",
+        "Search the live web. Returns up to 10 result snippets (title, url, content).",
         {
             "query": {
                 "type": "string",
@@ -103,7 +103,7 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
     ),
     _schema(
         "web_fetch",
-        "Fetch a single web page by URL. Returns the page title, the main content as markdown, and the list of links on the page. Use this after web_search to read a specific result in full.",
+        "Fetch a single web page by URL. Returns the page title, the main content as markdown, and the list of links on the page.",
         {
             "url": {
                 "type": "string",
@@ -134,7 +134,12 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                         },
                         "params": {
                             "type": "object",
-                            "description": "Initial parameter values keyed by GNU parameter ID.",
+                            "additionalProperties": {"type": "string"},
+                            "description": (
+                                "Initial parameter values keyed by GNU parameter ID. "
+                                "Every value is a string expression, even for numeric "
+                                "or boolean parameters (e.g. '1000', not 1000)."
+                            ),
                         },
                         "state": {
                             "type": "string",
@@ -163,7 +168,13 @@ _MVP_SCHEMAS: tuple[dict[str, Any], ...] = (
                         },
                         "params": {
                             "type": "object",
-                            "description": "Param updates keyed by exact GNU param_id. Changing the 'id' parameter to rename a block is not allowed and will be ignored.",
+                            "additionalProperties": {"type": "string"},
+                            "description": (
+                                "Param updates keyed by GNU parameter ID. Every value is "
+                                "a string expression, even for numeric or boolean parameters "
+                                "(e.g. '1000', not 1000). Changing the 'id' parameter to "
+                                "rename a block is not allowed and will be ignored."
+                            ),
                         },
                     },
                     "required": ["instance_name", "params"],

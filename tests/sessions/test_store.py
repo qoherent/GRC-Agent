@@ -236,17 +236,6 @@ class RoundTripTests(_StoreTestCase):
         self.assertEqual(msgs[1].payload["role"], "tool")
         self.assertEqual(msgs[0].payload["content"][0]["tool_call_name"], "inspect_graph")
 
-    def test_close_session_updates_counts_and_ended_at(self) -> None:
-        sid = self._open_session()
-        for _ in range(3):
-            self.store.append(sid, "user", "hi")
-        self.store.close_session(sid)
-        self.store.flush(timeout=2.0)
-        rec = self.store.get_session(sid)
-        assert rec is not None
-        self.assertEqual(rec.message_count, 3)
-        self.assertIsNotNone(rec.ended_at)
-
     def test_end_active_session_synchronous_close(self) -> None:
         """``end_active_session`` is synchronous: the row is finalized
         immediately (no flush needed)."""
@@ -595,22 +584,6 @@ class SyncApiTests(_StoreTestCase):
 
     def test_get_session_sync_missing_returns_none(self) -> None:
         self.assertIsNone(get_session_sync(self.store._db_path, 99999))
-
-
-class GCTests(_StoreTestCase):
-    def test_gc_older_than_days(self) -> None:
-        _sid = self._open_session()
-        self.store.flush()
-        # This will trigger the commit bug
-        deleted = self.store.gc(older_than_days=180)
-        self.assertEqual(deleted, 0)
-
-    def test_gc_orphans(self) -> None:
-        _sid = self._open_session(graph_path="/nonexistent/path/to/some/file.grc")
-        self.store.flush()
-        # This will trigger the commit bug
-        deleted = self.store.gc(only_orphans=True)
-        self.assertEqual(deleted, 1)
 
 
 class DefaultPathTests(unittest.TestCase):

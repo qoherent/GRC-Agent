@@ -38,6 +38,7 @@ from grc_agent.domain_models import (
     BlockRole,
     GrcBlock,
     GrcFlowgraph,
+    GrcPort,
     GrcValidation,
 )
 from grc_agent.runtime.block_semantics import evaluated_param_hides
@@ -47,6 +48,8 @@ from grc_agent.runtime.param_filter import (
     OVERVIEW,
     keep_param,
     overview_rank,
+    port_count_controlling_params,
+    type_controlling_params,
 )
 
 # --------------------------------------------------------------------------- #
@@ -179,6 +182,13 @@ def _classify_role_core(
     if is_virtual_or_pad:
         return BlockRole.VIRTUAL_OR_PAD
     if key == "options":
+        # Not an app-invented heuristic: GRC's own core reserves this exact
+        # literal key for the one mandatory root block every flow graph has
+        # (``gnuradio/grc/core/FlowGraph.py``: ``self.options_block =
+        # parent_platform.make_block(self, 'options')``; the same
+        # ``key == 'options'`` check recurs in ``blocks/block.py``,
+        # ``generator/top_block.py``, ``generator/cpp_top_block.py``, and
+        # ``utils/flow_graph_complexity.py``). Mirrors upstream, not a guess.
         return BlockRole.OPTIONS
     if has_sources and not has_sinks:
         return BlockRole.SOURCE
@@ -203,7 +213,7 @@ def classify_role(block: Any) -> BlockRole:
 
 
 def classify_role_from_catalog(
-    key: str,
+    block_id: str,
     flags: list[str] | tuple[str, ...],
     *,
     has_sources: bool,
@@ -213,17 +223,84 @@ def classify_role_from_catalog(
 
     Single source of truth with :func:`classify_role` via
     :func:`_classify_role_core`. Derives native discriminators from
-    catalog metadata (``flags`` and ``key``).
+    catalog metadata (``flags`` and ``block_id``, which becomes native
+    ``key`` — see :func:`_classify_role_core`, which mirrors the real
+    ``Block.key`` attribute name and is left as-is).
     """
     flags_tuple = tuple(flags or ())
     return _classify_role_core(
-        key=key,
-        is_variable="variable" in flags_tuple or key.startswith("variable"),
-        is_import=key == "import",
-        is_snippet=key == "snippet",
-        is_virtual_or_pad=key.startswith(("virtual_", "pad_")),
+        key=block_id,
+        is_variable="variable" in flags_tuple or block_id.startswith("variable"),
+        is_import=block_id == "import",
+        is_snippet=block_id == "snippet",
+        is_virtual_or_pad=block_id in ("virtual_source", "virtual_sink", "pad_source", "pad_sink"),
         has_sources=has_sources,
         has_sinks=has_sinks,
+    )
+
+
+def resolves_to_hierarchical_class(imports_text: str | None, make_text: str | None) -> bool:
+    """Resolve a block's ``make()`` target through its ``imports`` and check
+    the MRO for ``hier_block2`` — the only reliable signal that a catalog
+    block is a generated hierarchical wrapper vs. a C++/Python leaf block.
+
+    ``platform.block_classes[id]`` returns GRC's metadata ``Block`` class,
+    not the runtime ``gnuradio.gr.hier_block2`` subclass, so the MRO check
+    only works against the actual imported Python module — hence the
+    ``importlib`` chain here rather than the platform registry. Lives in
+    this module (not ``catalog/schema.py``) because it is the only function
+    permitted to import ``gnuradio``.
+    """
+    import ast
+    import importlib
+    import inspect
+
+    if not imports_text or not make_text:
+        return False
+
+    match = re.compile(r"([A-Za-z_][\w\.]*)\s*\(").search(make_text)
+    if match is None:
+        return False
+    target_expression = match.group(1)
+
+    try:
+        tree = ast.parse(imports_text)
+        aliases: dict[str, tuple[str, str, str | None]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local_name = alias.asname or alias.name.split(".")[0]
+                    aliases[local_name] = ("import", alias.name, None)
+            if isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    aliases[local_name] = ("from", node.module, alias.name)
+
+        parts = target_expression.split(".")
+        if not parts:
+            return False
+        binding = aliases.get(parts[0])
+        if binding is None:
+            return False
+        kind, mod_name, imp_name = binding
+        if kind == "import":
+            resolved: object = importlib.import_module(mod_name)
+        else:
+            mod = importlib.import_module(mod_name)
+            if imp_name and hasattr(mod, imp_name):
+                resolved = getattr(mod, imp_name)
+            else:
+                resolved = importlib.import_module(f"{mod_name}.{imp_name}")
+        for part in parts[1:]:
+            resolved = getattr(resolved, part)
+    except Exception:
+        return False
+
+    if not inspect.isclass(resolved):
+        return False
+    return any(
+        base.__name__ == "hier_block2" and base.__module__.startswith("gnuradio")
+        for base in resolved.__mro__
     )
 
 
@@ -260,6 +337,7 @@ def render_parameter(
         mode=mode,
         variable_names=variable_names,
         param_key=param_key,
+        is_type_controlling=param_key in type_controlling_params(block.key),
     ):
         return None
     # Empty values carry no information; the bible's live path
@@ -269,6 +347,32 @@ def render_parameter(
     if not value.strip():
         return None
     return value
+
+
+def render_port(port: Any) -> GrcPort | None:
+    """One uniform port filter — the port analogue of ``render_parameter``.
+
+    Stage A (hidden ports) is already applied by the native
+    ``active_sinks``/``active_sources`` lists this is called against — GRC
+    computes those as ``[p for p in sinks/sources if not p.hidden]`` on
+    ``rewrite()``. Stage B drops a port only when it is both optional
+    (``Port.optional``) and unconnected (``Port.connections(enabled=True)``
+    empty): a required port is always structurally relevant (mirrors
+    ``hide=='none'`` always-keep for params); a connected port is always in
+    active use (mirrors ``value != default``). Every value is a native GRC
+    ``Port`` attribute — no per-block-name or per-type special-casing.
+    """
+    optional = bool(getattr(port, "optional", False))
+    connected = len(list(port.connections(enabled=True))) > 0
+    if optional and not connected:
+        return None
+    domain = str(getattr(port, "domain", "") or "")
+    return GrcPort(
+        port_id=str(port.key),
+        dtype=str(getattr(port, "dtype", "")),
+        domain=domain if domain and domain != "stream" else None,
+        connected=connected,
+    )
 
 
 def render_block(
@@ -308,12 +412,24 @@ def render_block(
     states = getattr(block, "states", {}) or {}
     raw_state = str(states.get("state", "enabled"))
     canonical_state = "bypass" if raw_state == "bypassed" else raw_state
+    inputs = [
+        rendered
+        for rendered in (render_port(p) for p in getattr(block, "active_sinks", ()) or ())
+        if rendered is not None
+    ]
+    outputs = [
+        rendered
+        for rendered in (render_port(p) for p in getattr(block, "active_sources", ()) or ())
+        if rendered is not None
+    ]
     return GrcBlock(
         instance_name=block.name,
         block_id=block.key,
         role=classify_role(block),
         state=canonical_state,
         params=parameters,
+        inputs=inputs,
+        outputs=outputs,
     )
 
 
@@ -393,16 +509,43 @@ def port_object(flow_graph: Any, block_name: str, port_key: str, *, kind: str) -
 
 
 def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) -> Any:
-    """Internal raise-on-miss wrapper preserved for callers that want an error."""
+    """Internal raise-on-miss wrapper preserved for callers that want an error.
+
+    Distinguishes a missing block from an existing block that merely lacks
+    the requested port — ``port_object`` collapses both to ``None`` for its
+    best-effort callers, but that conflation produced an actively
+    misleading message here: a connection referencing a block whose own
+    ``add_blocks`` entry had already failed earlier in the same batch (e.g.
+    a hallucinated block type) got "port '0' not on block 'x'", which reads
+    as a wrong port on an *existing* block rather than the real defect
+    (the block itself was never created).
+    """
     port = port_object(flow_graph, block_name, port_key, kind=kind)
-    if port is None:
-        raise KeyError(f"{kind} port {port_key!r} not on block {block_name!r}")
-    return port
+    if port is not None:
+        return port
+    try:
+        block = flow_graph.get_block(block_name)
+    except KeyError:
+        raise KeyError(f"block {block_name!r} does not exist") from None
+    message = f"{kind} port {port_key!r} not on block {block_name!r}"
+    # If this block's port count is itself controlled by a param (native-
+    # derived, e.g. 'num_inputs' for blocks_add_xx — never a hardcoded
+    # name), name it and its current value: a missing higher-numbered port
+    # usually means that param needs to be increased first, not that the
+    # connection itself is malformed.
+    count_params = port_count_controlling_params(block.key)
+    if count_params:
+        current = ", ".join(
+            f"{key}={block.params[key].value!r}" for key in sorted(count_params) if key in block.params
+        )
+        if current:
+            message += f". This block's port count is controlled by {current}."
+    raise KeyError(message)
 
 
 def add_block(
     flow_graph: Any,
-    block_type: str,
+    block_id: str,
     instance_name: str,
     parameters: dict[str, Any] | None = None,
     state: str | None = None,
@@ -411,9 +554,9 @@ def add_block(
     path — GRC's ``Block.name`` is a read-only property). Unknown params raise
     ``KeyError`` (uniform with :func:`set_param`/:func:`apply_mutation`
     ``update_params``)."""
-    block = flow_graph.new_block(block_type)
+    block = flow_graph.new_block(block_id)
     if block is None:
-        raise KeyError(f"Block type {block_type!r} not found in catalog")
+        raise KeyError(f"Block type {block_id!r} not found in catalog")
     block.params["id"].set_value(str(instance_name))
     flow_graph.rewrite()
     for k, v in (parameters or {}).items():

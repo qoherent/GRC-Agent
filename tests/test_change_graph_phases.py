@@ -157,9 +157,94 @@ def test_phase_auto_resolve_types_no_op_when_type_already_set(ctx_factory):
 
     _session, ctx = ctx_factory
     ctx.new_block_names = {"dc"}
-    ctx.type_already_set = {"dc"}  # batch already set the type
+    ctx.type_params_already_set = {"dc": {"type"}}  # batch already set the type
     _phase_auto_resolve_types(ctx)
     assert ctx.errors == []
+
+
+def test_phase_auto_resolve_types_generalizes_to_itype_otype(ctx_factory):
+    """A block with no literal ``type`` param (``fec_generic_encoder`` uses
+    ``itype``/``otype``) still gets auto-resolved, and each side is resolved
+    independently from the neighbor touching that specific side — not one
+    neighbor's dtype copied onto both.
+    """
+    from grc_agent.runtime.change_graph import (
+        _phase_add_blocks,
+        _phase_add_connections,
+        _phase_auto_resolve_types,
+    )
+
+    session, ctx = ctx_factory
+    ctx.add_blocks_list = [
+        {"block_id": "fec_generic_encoder", "instance_name": "enc", "params": {"encoder": "None"}},
+        {"block_id": "blocks_complex_to_float", "instance_name": "c2f"},
+    ]
+    ctx.new_block_names = {"enc", "c2f"}
+    ctx.add_connections_list = [
+        "analog_sig_source_x_0:0->enc:0",  # float source feeds itype
+        "enc:0->c2f:0",  # fixed-complex sink feeds otype
+    ]
+    ctx.type_params_already_set = {}
+    _phase_add_blocks(ctx)
+    _phase_add_connections(ctx)
+    _phase_auto_resolve_types(ctx)
+    assert ctx.errors == []
+    enc = session.flowgraph.get_block("enc")
+    assert enc.params["itype"].get_value() == "float"
+    assert enc.params["otype"].get_value() == "complex"
+
+
+def test_phase_add_blocks_strips_auto_sentinel_before_native_validation(ctx_factory):
+    """``"auto"`` on a type-controlling param is dropped, not passed to GRC's
+    native enum validation, so the block keeps GRC's own default and
+    auto-resolve is left free to assign a real value afterward.
+    """
+    from grc_agent.runtime.change_graph import _phase_add_blocks
+
+    session, ctx = ctx_factory
+    ctx.add_blocks_list = [
+        {"block_id": "blocks_multiply_xx", "instance_name": "mult", "params": {"type": "auto"}}
+    ]
+    ctx.new_block_names = {"mult"}
+    _phase_add_blocks(ctx)
+    assert ctx.errors == []
+    block = session.flowgraph.get_block("mult")
+    assert block.params["type"].get_value() != "auto"
+
+
+def test_phase_update_params_auto_resolves_from_live_connection(ctx_factory):
+    """``update_params`` with ``type: "auto"`` on an already-connected block
+    infers the value from its CURRENT live neighbors, not a same-batch
+    connection.
+    """
+    from grc_agent.runtime.change_graph import _phase_update_params
+
+    session, ctx = ctx_factory
+    ctx.update_params_list = [{"instance_name": "blocks_add_xx", "params": {"type": "auto"}}]
+    _phase_update_params(ctx)
+    assert ctx.errors == []
+    assert ctx.ops_applied == 1
+    block = session.flowgraph.get_block("blocks_add_xx")
+    assert block.params["type"].get_value() == "float"
+
+
+def test_phase_update_params_auto_unresolvable_returns_explicit_error(ctx_factory):
+    """An isolated, unconnected block cannot infer ``"auto"`` from any
+    neighbor — this must be an explicit error, never a silent guess.
+    """
+    from grc_agent.runtime.change_graph import _phase_add_blocks, _phase_update_params
+
+    session, ctx = ctx_factory
+    ctx.add_blocks_list = [{"block_id": "blocks_multiply_xx", "instance_name": "isolated_mult"}]
+    ctx.new_block_names = {"isolated_mult"}
+    _phase_add_blocks(ctx)
+    assert ctx.errors == []
+    ops_after_add = ctx.ops_applied
+
+    ctx.update_params_list = [{"instance_name": "isolated_mult", "params": {"type": "auto"}}]
+    _phase_update_params(ctx)
+    assert any(e["code"] == "type_auto_unresolvable" for e in ctx.errors)
+    assert ctx.ops_applied == ops_after_add
 
 
 # --- Task 4: phase methods 6-7 (remove_connections / add_connections) ---
@@ -199,10 +284,13 @@ def test_phase_add_connections_unparseable_records_error(ctx_factory):
 def test_dispatch_wire_format_ok_true_on_success():
     """The wire payload must remain ``{'ok': True}`` on a no-op commit.
 
-    A no-op (empty batch + no-ops) means no validation runs, no
-    rollback runs, no save runs — the dispatcher just returns ok=True.
-    Verifies the wire format on the simplest happy path so any future
-    refactor that adds new keys to the payload is caught.
+    A batch with a real (non-empty) operation that happens to achieve
+    nothing — removing a connection that doesn't exist, idempotent per
+    ``_phase_remove_connections`` — still runs no validation, no rollback,
+    no save, and returns ok=True. Verifies the wire format on this
+    happy path so any future refactor that adds new keys to the payload
+    is caught. (A batch with EVERY array empty/absent is a different,
+    now-rejected case — see test_dispatch_rejects_fully_empty_batch.)
     """
     from unittest import mock
 
@@ -220,7 +308,9 @@ def test_dispatch_wire_format_ok_true_on_success():
 
     mock_agent._payload_result.side_effect = lambda tool_name, payload: payload
 
-    payload = dispatch_flat_change_graph_batch(mock_agent)
+    payload = dispatch_flat_change_graph_batch(
+        mock_agent, remove_connections=["nonexistent:0->also_nonexistent:0"]
+    )
     assert payload["ok"] is True
     # Wire contract is unchanged: none of these forbidden keys appear.
     for forbidden in (
@@ -239,6 +329,49 @@ def test_dispatch_wire_format_ok_true_on_success():
         )
     # ``errors`` is only present on failure.
     assert "errors" not in payload
+
+
+def test_dispatch_rejects_fully_empty_batch():
+    """A batch with every operation array empty/absent must be rejected,
+    not silently accepted as a vacuous success.
+
+    The tool schema already documents "at least one array must be
+    provided"; the dispatcher previously didn't enforce it, letting a
+    call with nothing in it return ok=True with zero signal that nothing
+    happened — observed being used as a content-free stalling pattern by
+    a struggling model (scenario 21, ~50% of that run's change_graph
+    calls were exactly this).
+    """
+    from unittest import mock
+
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    mock_agent = mock.Mock()
+    mock_agent._missing_session_result.return_value = None
+    mock_agent.session.file_integrity_state.return_value = {"externally_modified": False}
+    mock_agent.session.path = None
+    mock_fg = mock.Mock()
+    mock_fg.blocks = []
+    mock_fg.connections = []
+    mock_agent.session.flowgraph = mock_fg
+    mock_agent._payload_result.side_effect = lambda tool_name, payload: payload
+
+    payload = dispatch_flat_change_graph_batch(mock_agent)
+    assert payload["ok"] is False
+    assert payload["error_type"] == "invalid_request"
+
+    # Explicit empty lists for every field are equally rejected.
+    payload = dispatch_flat_change_graph_batch(
+        mock_agent,
+        add_blocks=[],
+        remove_blocks=[],
+        update_params=[],
+        update_states=[],
+        add_connections=[],
+        remove_connections=[],
+    )
+    assert payload["ok"] is False
+    assert payload["error_type"] == "invalid_request"
 
 
 def test_dispatch_wire_format_missing_session_has_ok_false():

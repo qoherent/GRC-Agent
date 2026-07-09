@@ -16,7 +16,11 @@ import httpx
 from grc_agent.config import AppConfig
 from grc_agent.domain_models import ErrorCode
 from grc_agent.retrieval import initialize_retrieval
-from grc_agent.toolagents_runtime import ToolAgentsLlamaProviderConfig, model_name_matches
+from grc_agent.toolagents_runtime import (
+    OLLAMA_SERVER_HINT,
+    ToolAgentsLlamaProviderConfig,
+    model_name_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,31 +107,29 @@ def _probe_generic(
     api_key: str | None,
     effective_server_url: str,
     effective_model: str,
-    *,
-    client: httpx.Client | None = None,
 ) -> None:
     """Probe a generic LLM server endpoint (Ollama, OpenRouter, etc.)."""
     backend = config.llama.backend
-    own_client = client is None
-    if own_client:
-        client = httpx.Client(timeout=5.0)
     try:
         logger = logging.getLogger(__name__)
 
-        # Query /v1/models to verify the server is alive and reachable
-        openai_base_url = f"{effective_server_url.rstrip('/')}/v1"
-        url = f"{openai_base_url}/models"
-        headers = {"Accept": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        with httpx.Client(timeout=5.0) as client:
+            # Query /v1/models to verify the server is alive and reachable
+            openai_base_url = f"{effective_server_url.rstrip('/')}/v1"
+            url = f"{openai_base_url}/models"
+            headers = {"Accept": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
 
-        response = client.get(url, headers=headers)
+            response = client.get(url, headers=headers)
         if response.status_code >= 400:
             result.launch_status = "probe_failed"
             result.health_evidence = None
+            body = response.text
+            body_preview = body if len(body) <= 200 else f"{body[:200]}… ({len(body)} chars total)"
             message = (
                 f"{backend} server at {effective_server_url} returned "
-                f"HTTP {response.status_code}: {response.text[:200]}"
+                f"HTTP {response.status_code}: {body_preview}"
             )
             result.errors.append(message)
             result.error_type = ErrorCode.BACKEND_UNREACHABLE
@@ -154,7 +156,6 @@ def _probe_generic(
             "provider_type": backend,
             "model_ready": True,
             "context_verified": False,
-            "actual_context_tokens": config.llama.max_tokens,
         }
 
         # For Ollama, check if the model's template supports tool calling
@@ -177,11 +178,10 @@ def _probe_generic(
         result.launch_status = "probe_failed"
         result.health_evidence = None
         message = f"Failed to reach {backend} server at {effective_server_url}: {exc}"
+        if backend == "ollama":
+            message = f"{message} {OLLAMA_SERVER_HINT}"
         result.errors.append(message)
         result.error_type = _classify_launcher_error(exc, effective_server_url)
-    finally:
-        if own_client:
-            client.close()
 
 
 def _build_fallback_provider(
@@ -195,9 +195,7 @@ def _build_fallback_provider(
         model=effective_model,
         api_key=api_key,
         timeout_seconds=config.llama.request_timeout_seconds,
-        max_tokens=config.llama.max_tokens,
         backend=config.llama.backend,
-        max_tool_rounds=config.llama.max_tool_rounds,
     )
 
 
@@ -205,8 +203,7 @@ def _classify_launcher_error(exc: BaseException, server_url: str) -> str:
     """Map a probe exception to a stable ``ErrorCode`` value.
 
     Prefers typed exceptions from the OpenAI SDK (which wraps both Ollama's
-    ``/v1`` endpoint and OpenRouter). Falls back to httpx connection errors
-    and a terminal substring probe for unstructured exceptions.
+    ``/v1`` endpoint and OpenRouter), falling back to httpx connection errors.
     """
     import httpx
     from openai import (
@@ -227,12 +224,6 @@ def _classify_launcher_error(exc: BaseException, server_url: str) -> str:
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)):
         logger.warning("Backend unreachable at %s: %s", server_url, exc)
         return ErrorCode.BACKEND_UNREACHABLE
-    # Last-resort: unstructured exceptions with no typed hierarchy.
-    lowered = str(exc).lower()
-    if "alias" in lowered and "mismatch" in lowered:
-        return ErrorCode.MODEL_NOT_FOUND
-    if "model" in lowered and "not found" in lowered:
-        return ErrorCode.MODEL_NOT_FOUND
     return ErrorCode.INTERNAL_ERROR
 
 

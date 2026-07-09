@@ -16,6 +16,7 @@ Run::
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from grc_agent.agent import GrcAgent
+from grc_agent.config import default_app_config
 from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.runtime.model_context import build_system_prompt
@@ -43,8 +45,8 @@ FM_RX_FIXTURE = WORKSPACE / "tests" / "data" / "fm_rx.grc"
 EMPTY_FIXTURE = WORKSPACE / "tests" / "data" / "empty.grc"
 BROKEN_SINK_FIXTURE = WORKSPACE / "tests" / "data" / "broken_unconnected_sink.grc"
 # Custom Modelfile model: gemma4:e4b-it-qat-120k with PARAMETER num_ctx
-# 120000 baked in (Ollama's /v1 endpoint ignores per-request num_ctx — see
-# docs/AGENT_FLOW_FINDINGS.md).
+# 120000 baked in (Ollama's /v1 endpoint ignores per-request num_ctx, so
+# the context window must be baked into the Modelfile instead).
 MODEL = "gemma4:e4b-it-qat-120k"
 
 logger = logging.getLogger(__name__)
@@ -67,7 +69,6 @@ def _default_ollama_provider() -> ToolAgentsLlamaProviderConfig:
         base_url=default_app_config().llama.server_url,
         model=model,
         timeout_seconds=180.0,
-        max_tokens=2048,
     )
 
 
@@ -98,7 +99,6 @@ def _make_provider(provider: str) -> ToolAgentsLlamaProviderConfig:
             model=model,
             api_key=api_key,
             timeout_seconds=300.0,  # cloud can be slower than local
-            max_tokens=2048,
             backend="openrouter",
         )
     raise ValueError(f"unknown provider: {provider!r} (expected 'ollama' or 'openrouter')")
@@ -109,12 +109,12 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "01_add_throttle",
         "title": "Add a throttle block inline",
         "prompt": (
-            "Inspect the current flowgraph, then add a `blocks_throttle` block"
-            " between `analog_sig_source_x_0` and `blocks_add_xx`."
-            " Name the new block `mid_throttle`, set `type` to `float`,"
-            " and use `samp_rate` for `samples_per_second`."
-            " Re-wire the connections so the throttle sits inline."
-            " After the changes, inspect the result to confirm."
+            "Take a look at the flowgraph, then add a throttle block in the"
+            " path between the 350 Hz tone and the adder that mixes the tones"
+            " together. Call it `mid_throttle`, set its type to float, and"
+            " have it use the samp_rate variable for its rate. Make sure the"
+            " wiring is rerouted so it actually sits inline. Then inspect the"
+            " result to confirm."
         ),
         "expect": {"mode": "edit", "blocks_present": ["mid_throttle"], "valid": True},
     },
@@ -135,9 +135,9 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "03_disable_and_enable",
         "title": "Disable a block, inspect, then re-enable it",
         "prompt": (
-            "Inspect the current flowgraph. Then disable the block"
-            " `analog_noise_source_x_0` and inspect the result."
-            " Finally, re-enable it and confirm."
+            "Inspect the flowgraph, then disable the noise source that's"
+            " mixed into the audio output. Inspect again to confirm it's"
+            " off. Then turn it back on and confirm."
         ),
         "expect": {"mode": "edit", "valid": True},
     },
@@ -145,11 +145,10 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "04_add_and_remove_variable",
         "title": "Add a variable, use it, then remove it",
         "prompt": (
-            "Inspect the current flowgraph. Add a new `variable` block"
-            " named `gain_value` with `value` set to `2.0`."
-            " Then update the `analog_sig_source_x_0` block's `amp`"
-            " parameter to use `gain_value`."
-            " Finally, inspect the result to confirm both changes."
+            "Inspect the flowgraph. Add a new variable called `gain_value`"
+            " set to 2.0, then have the 350 Hz tone's amplitude use that"
+            " variable instead of its current value. Inspect to confirm"
+            " both changes landed."
         ),
         "expect": {
             "mode": "edit",
@@ -162,11 +161,11 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "05_full_rewire",
         "title": "Remove a block and rewire around it",
         "prompt": (
-            "Inspect the current flowgraph. Remove the `analog_noise_source_x_0`"
-            " block. Then add a new `analog_const_source_x` block named"
-            " `dc_offset` with `const` set to `0.0`. Connect `dc_offset`"
-            " port 0 to `blocks_add_xx` port 2 (replacing the noise path)."
-            " Inspect the final result to confirm the changes."
+            "Inspect the flowgraph. I don't want the noise source anymore —"
+            " remove it. In its place, add a constant source block, call it"
+            " `dc_offset`, with its constant value set to 0.0, and wire its"
+            " output into the same input on the adder that the noise source"
+            " used to feed. Inspect the result to confirm the change."
         ),
         "expect": {
             "mode": "edit",
@@ -179,14 +178,13 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "06_query_knowledge_multiply",
         "title": "Discover an unknown block via query_knowledge (multiply)",
         "prompt": (
-            "Inspect the current flowgraph. I want to multiply the two"
-            " sinusoid sources together instead of adding them. The exact"
-            " GNU Radio block_id for a signal multiplier is not something"
-            " to guess: use query_knowledge (domain catalog) to look it up"
-            " first, then add the block named `multiplier` with `type` set"
-            " to `float`. Connect the two existing `analog_sig_source_x`"
-            " outputs into the multiplier, remove the old `blocks_add_xx`,"
-            " and inspect the result to confirm."
+            "Inspect the flowgraph. I want to multiply the two sine wave"
+            " tones together instead of adding them. Look up the right GNU"
+            " Radio block for a signal multiplier using query_knowledge"
+            " (catalog domain) — don't guess the block id. Add it, call it"
+            " `multiplier`, set its type to float, wire both tone sources"
+            " into it, and remove the adder that's currently combining"
+            " them. Inspect the result to confirm."
         ),
         "expect": {
             "mode": "edit",
@@ -199,11 +197,10 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "07_force_disabled_connected_block",
         "title": "Disable a connected block and force-commit if invalid",
         "prompt": (
-            "Inspect the current flowgraph. Disable the block"
-            " `analog_sig_source_x_0`, which is connected into the adder."
-            " If disabling a connected block makes the graph fail"
-            " validation, use force to commit the change anyway. Then"
-            " inspect the result to confirm the block is disabled."
+            "Inspect the flowgraph, then disable the 350 Hz tone source —"
+            " it's currently wired into the adder. If disabling it while"
+            " still connected breaks validation, force the change through"
+            " anyway. Inspect again to confirm it's disabled."
         ),
         # Success = the block is actually disabled (the task's intent). Graph
         # validity is a conditional side effect (only invalid if the disable
@@ -218,13 +215,13 @@ SCENARIOS: list[dict[str, Any]] = [
         "title": "Insert a throttle on a larger FM receiver graph",
         "fixture": str(FM_RX_FIXTURE),
         "prompt": (
-            "Inspect the current flowgraph (this is an FM receiver). Add a"
-            " `blocks_throttle` block named `audio_throttle` with `type` set"
-            " to `float` and `samples_per_second` set to `audio_rate`."
-            " Insert it inline on the connection from"
-            " `pfb_arb_resampler_xxx_0` to `audio_sink_0`: remove that"
-            " connection, then route the resampler output through the"
-            " throttle into the audio sink. Inspect the result to confirm."
+            "Inspect the flowgraph — this is an FM receiver. Add a throttle"
+            " block, call it `audio_throttle`, type float, with"
+            " samples_per_second set to the audio_rate variable. Insert it"
+            " inline right before the audio output, between the resampler"
+            " and the speaker sink — remove the direct connection between"
+            " them and route the resampler's output through the new"
+            " throttle into the sink. Inspect to confirm."
         ),
         "expect": {
             "mode": "edit",
@@ -249,9 +246,9 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "10_bypass_source_block",
         "title": "Set a block to the bypass state",
         "prompt": (
-            "Inspect the flowgraph. Put the `analog_sig_source_x_0` block"
-            " into the `bypass` state (use update_states with state set to"
-            " `bypass`). Inspect again to confirm its state is now `bypass`."
+            "Inspect the flowgraph, then put the 350 Hz tone source into"
+            " bypass mode. Inspect again to confirm it actually switched"
+            " to bypass."
         ),
         # Normalized to model-friendly "bypass" in render_block.
         "expect": {"mode": "edit", "states": {"analog_sig_source_x_0": "bypass"}},
@@ -260,11 +257,11 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "11_scoped_inspect_and_update",
         "title": "Targets-scoped inspect, then a param update",
         "prompt": (
-            "This flowgraph has several blocks. Inspect ONLY the blocks"
-            " `samp_rate` and `analog_sig_source_x_0` by passing them as the"
-            " `targets` argument to `inspect_graph` (not the full overview)."
-            " Then change the `samp_rate` variable's `value` to `96000`."
-            " Inspect those same two blocks again to confirm."
+            "This flowgraph has several blocks in it. Using inspect_graph's"
+            " targets option, look at just the sample rate variable and the"
+            " 350 Hz tone source — don't pull the whole overview. Then"
+            " change the sample rate to 96000. Check just those same two"
+            " blocks again to confirm."
         ),
         "expect": {
             "mode": "edit",
@@ -276,15 +273,14 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "12_multiblock_batch_chain",
         "title": "Add two blocks in a single change_graph call",
         "prompt": (
-            "Inspect the flowgraph. In a SINGLE `change_graph` call, add two"
-            " throttle blocks: `pre_throttle` and `post_throttle` (both"
-            " `blocks_throttle`, `type`=`float`,"
-            " `samples_per_second`=`samp_rate`). Wire them inline between"
-            " `analog_sig_source_x_0` and `blocks_add_xx`: remove"
-            " `analog_sig_source_x_0:0->blocks_add_xx:0`, then add"
-            " `analog_sig_source_x_0:0->pre_throttle:0`,"
-            " `pre_throttle:0->post_throttle:0`,"
-            " `post_throttle:0->blocks_add_xx:0`. Inspect to confirm."
+            "Inspect the flowgraph. In one single change_graph call, add"
+            " two throttle blocks in series between the 350 Hz tone and the"
+            " adder — call them `pre_throttle` and `post_throttle` (both"
+            " blocks_throttle, type float, samples_per_second using"
+            " samp_rate). Rewire so the tone feeds into pre_throttle,"
+            " pre_throttle feeds post_throttle, and post_throttle feeds"
+            " into the adder where the tone used to connect directly."
+            " Inspect to confirm."
         ),
         "expect": {
             "mode": "edit",
@@ -296,10 +292,10 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "13_docs_informed_param_edit",
         "title": "Docs-informed parameter edit",
         "prompt": (
-            "Inspect the flowgraph. First use `query_knowledge` with the"
-            " **docs** domain to read how the `analog_sig_source_x` block's"
-            " `freq` parameter works. Then set `analog_sig_source_x_0`'s"
-            " `freq` to `1000`. Inspect to confirm."
+            "Inspect the flowgraph. First, use query_knowledge (docs"
+            " domain) to read up on how a signal source's freq parameter"
+            " works. Then set the 350 Hz tone's frequency to 1000. Inspect"
+            " to confirm."
         ),
         "expect": {
             "mode": "edit",
@@ -313,14 +309,14 @@ SCENARIOS: list[dict[str, Any]] = [
         "title": "Build a signal->throttle->sink chain on an empty graph",
         "fixture": str(EMPTY_FIXTURE),
         "prompt": (
-            "Inspect the current flowgraph. It's empty except for `samp_rate`."
-            " Build a minimal signal generator chain: add an"
-            " `analog_sig_source_x` named `sig` (`type`=`float`, `freq`=`1000`,"
-            " `amp`=`0.5`, `samp_rate`=`samp_rate`), a `blocks_throttle` named"
-            " `throttle` (`type`=`float`, `samples_per_second`=`samp_rate`), and"
-            " a `blocks_null_sink` named `sink` (`type`=`float`). Wire"
-            " `sig:0->throttle:0` and `throttle:0->sink:0`. Inspect to confirm"
-            " the chain is valid."
+            "Inspect the flowgraph — right now it's empty except for the"
+            " samp_rate variable. Build a minimal signal chain: a signal"
+            " source called `sig` (type float, freq 1000, amp 0.5, using"
+            " samp_rate), a throttle called `throttle` (type float,"
+            " samples_per_second using samp_rate), and a null sink called"
+            " `sink` (type float). Wire the source into the throttle, and"
+            " the throttle into the sink. Inspect to confirm the chain is"
+            " valid."
         ),
         "expect": {
             "mode": "edit",
@@ -347,12 +343,12 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "16_expand_adder_input",
         "title": "Add a 3rd tone by expanding the adder's num_inputs",
         "prompt": (
-            "Inspect the flowgraph. The `blocks_add_xx` mixer has 3 inputs and"
-            " they're all taken. Add a third musical tone: a new"
-            " `analog_sig_source_x` named `third_tone` (`type`=`float`,"
-            " `freq`=`550`, `amp`=`ampl`, `samp_rate`=`samp_rate`). Give the"
-            " adder a 4th input and connect `third_tone:0` into it. Inspect to"
-            " confirm."
+            "Inspect the flowgraph. The adder has 3 inputs and they're all"
+            " already used. I want a third musical tone: add a new signal"
+            " source called `third_tone` (type float, freq 550, amp using"
+            " the existing ampl variable, samp_rate using the existing"
+            " samp_rate variable). Give the adder a 4th input and connect"
+            " the new tone into it. Inspect to confirm."
         ),
         "expect": {
             "mode": "edit",
@@ -365,12 +361,13 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "17_expression_variables_chain",
         "title": "Variables referencing variables/math, used across blocks",
         "prompt": (
-            "Inspect the flowgraph. Make the two tones a musical interval. Add"
-            " a `variable` named `base_freq` with `value`=`220.0`, and a second"
-            " `variable` named `fifth` with `value`=`base_freq * 1.5` (a perfect"
-            " fifth). Then point `analog_sig_source_x_0`'s `freq` at `base_freq`"
-            " and `analog_sig_source_x_1`'s `freq` at `fifth`. Inspect to confirm"
-            " both sources now reference the new variables."
+            "Inspect the flowgraph. I want to turn the two tones into a"
+            " musical interval. Add a variable called `base_freq` set to"
+            " 220.0, and a second variable called `fifth` set to"
+            " `base_freq * 1.5` (a perfect fifth). Then have the 350 Hz"
+            " tone's frequency reference `base_freq`, and the 440 Hz tone's"
+            " frequency reference `fifth`. Inspect to confirm both sources"
+            " now use the new variables."
         ),
         "expect": {
             "mode": "edit",
@@ -388,14 +385,12 @@ SCENARIOS: list[dict[str, Any]] = [
         "fixture": str(FM_RX_FIXTURE),
         "prompt": (
             "Inspect this FM receiver. I want to hear the raw demodulated"
-            " signal with no de-emphasis. Remove `analog_fm_deemph_0` from the"
-            " signal path entirely and patch the chain so"
-            " `analog_quadrature_demod_cf_0:0` feeds everything the deemph block"
-            " used to feed: connect it to `pfb_arb_resampler_xxx_0:0`,"
-            " `qtgui_freq_sink_x_0:0`, and `qtgui_time_sink_x_0_0_0:0`. Remove"
-            " the old edges from `analog_fm_deemph_0` and then delete the"
-            " `analog_fm_deemph_0` block. Inspect to confirm the graph is still"
-            " valid."
+            " signal with no de-emphasis applied. Take the de-emphasis"
+            " stage completely out of the signal path, and reconnect"
+            " everything that used to come after it — the resampler and"
+            " the scope displays it was feeding — directly from the"
+            " demodulator's output instead. Then delete the de-emphasis"
+            " block. Inspect to confirm the graph is still valid."
         ),
         "expect": {
             "mode": "edit",
@@ -408,12 +403,11 @@ SCENARIOS: list[dict[str, Any]] = [
         "title": "Add a QT GUI time-sink tap to visualize a stage",
         "fixture": str(FM_RX_FIXTURE),
         "prompt": (
-            "Inspect this FM receiver. I want to watch the demodulated signal"
-            " right after the quadrature demod, before de-emphasis. Add a"
-            " `qtgui_time_sink_x` named `demod_probe` (`type`=`float`,"
-            " `srate`=`in_rate`) and tap it onto `analog_quadrature_demod_cf_0:0`"
-            " (connect `analog_quadrature_demod_cf_0:0->demod_probe:0`). Inspect"
-            " to confirm."
+            "Inspect this FM receiver. I want to watch the demodulated"
+            " signal right after the demodulator, before de-emphasis is"
+            " applied. Add a time-domain scope, call it `demod_probe`"
+            " (type float, srate using the in_rate variable), and tap it"
+            " onto the demodulator's output. Inspect to confirm."
         ),
         # A qtgui sink left unwired fails validation, so valid:true implies the
         # fan-out tap actually landed.
@@ -427,21 +421,28 @@ SCENARIOS: list[dict[str, Any]] = [
         "name": "20_multi_change_challenge",
         "title": "Complicated 10 changes test scenario",
         "prompt": (
-            "Inspect the flowgraph. I want to perform a set of complex modifications:\n"
-            "1. Add a new `variable` block named `freq_offset` with value `50`.\n"
-            "2. Add another `variable` block named `noise_amp` with value `0.015`.\n"
-            "3. Add a new `analog_sig_source_x` block named `third_tone` of type `float`. "
-            "Set its samp_rate to `samp_rate`, freq to `440 + freq_offset`, and amp to `ampl`.\n"
-            "4. Add a new `analog_noise_source_x` block named `noise_source_2` of type `float` "
-            "with noise_type `analog.GR_GAUSSIAN` and amp `noise_amp`.\n"
-            "5. Change the parameter `num_inputs` of `blocks_add_xx` to `4`.\n"
-            "6. Remove the old connection from `analog_noise_source_x_0` port 0 to `blocks_add_xx` port 2.\n"
-            "7. Disable the now unconnected `analog_noise_source_x_0` block.\n"
-            "8. Connect `noise_source_2` port 0 to `blocks_add_xx` port 2.\n"
-            "9. Connect `third_tone` port 0 to `blocks_add_xx` port 3.\n"
-            "10. Update `analog_sig_source_x_0`'s `freq` parameter to use the expression `350 - freq_offset`.\n"
-            "11. Update `analog_sig_source_x_1`'s `freq` parameter to use the expression `440 - freq_offset`.\n"
-            "Do all these changes, and then inspect the resulting graph to verify it is valid."
+            "Inspect the flowgraph. I want to make a batch of changes:\n"
+            "1. Add a new variable called `freq_offset` set to 50.\n"
+            "2. Add another variable called `noise_amp` set to 0.015.\n"
+            "3. Add a new signal source called `third_tone`, type float, with"
+            " samp_rate using the samp_rate variable, freq set to"
+            " `440 + freq_offset`, and amp using the existing ampl variable.\n"
+            "4. Add a new noise source called `noise_source_2`, type float,"
+            " Gaussian noise, with its amplitude using the new noise_amp"
+            " variable.\n"
+            "5. Give the adder a 4th input.\n"
+            "6. Disconnect the original noise source from the adder.\n"
+            "7. Disable that now-unconnected original noise source.\n"
+            "8. Connect the new noise source into the adder input that just"
+            " opened up.\n"
+            "9. Connect the new third tone into the adder's other open"
+            " input.\n"
+            "10. Update the 350 Hz tone's frequency to the expression"
+            " `350 - freq_offset`.\n"
+            "11. Update the 440 Hz tone's frequency to the expression"
+            " `440 - freq_offset`.\n"
+            "Make all these changes, then inspect the resulting graph to"
+            " verify it is valid."
         ),
         "expect": {
             "mode": "edit",
@@ -454,29 +455,34 @@ SCENARIOS: list[dict[str, Any]] = [
             },
             "valid": True,
         },
-        "max_tool_rounds": 12,
     },
     {
         "name": "21_type_conversion_and_conjugate",
         "title": "Hard type conversion and conjugate scenario",
         "fixture": str(WORKSPACE / "tests" / "data" / "resampler_demo.grc"),
         "prompt": (
-            "Inspect the flowgraph. I want to perform a complex modifications task:\n"
-            "1. First, search the catalog for a block that can convert a float stream to a complex stream "
-            "and a block that computes the complex conjugate of a complex signal.\n"
-            "2. Replace the frequency modulator (`analog_frequency_modulator_fc_0`) entirely with the "
-            "float-to-complex converter block you found. Name the converter block `float_to_complex_converter`.\n"
-            "3. Connect the float output of the `throttle` block to input 0 (real part) of the converter block.\n"
-            "4. Search for a constant source block in the catalog. Add one, name it `zero_imag`, set its type "
-            "to `float` and its constant value to `0.0`, and connect it to input 1 (imaginary part) of the "
-            "converter block to ensure it has a valid input.\n"
-            "5. Connect the output of the converter block to both the resampler (`pfb_arb_resampler_xxx_0`) "
-            "and the original spectrum analyzer (`qtgui_freq_sink_x_0`).\n"
-            "6. Add the complex conjugate block, name it `signal_conjugate`, and insert it inline right after "
-            "the resampler: remove the connection from the resampler output to the resampled spectrum analyzer "
-            "(`qtgui_freq_sink_x_0_0`), route the resampler output through the conjugate block, and connect the "
-            "conjugate block output to the resampled spectrum analyzer.\n"
-            "7. Remove the deleted frequency modulator block, ensure the resulting flowgraph is valid, and inspect it."
+            "Inspect the flowgraph. I want to make some changes:\n"
+            "1. Search the catalog for a block that converts a float stream"
+            " into a complex stream, and also for a block that computes the"
+            " complex conjugate of a complex signal.\n"
+            "2. The FM modulator in this chain isn't needed anymore —"
+            " replace it entirely with the float-to-complex converter you"
+            " found. Call the converter `float_to_complex_converter`.\n"
+            "3. Wire the throttle's output into the converter's real-part"
+            " input.\n"
+            "4. Search the catalog for a constant source block. Add one,"
+            " call it `zero_imag`, type float, constant value 0.0, and wire"
+            " it into the converter's imaginary-part input so the converter"
+            " has a valid complex input.\n"
+            "5. Connect the converter's output to both the resampler and"
+            " the original spectrum display that the FM modulator used to"
+            " feed.\n"
+            "6. Add the complex conjugate block, call it `signal_conjugate`,"
+            " and insert it right after the resampler, before the resampled"
+            " spectrum display — so the resampler's output goes through the"
+            " conjugate block before reaching that display.\n"
+            "7. Remove the old FM modulator block entirely, make sure the"
+            " flowgraph is valid, and inspect it to confirm."
         ),
         "expect": {
             "mode": "edit",
@@ -484,7 +490,6 @@ SCENARIOS: list[dict[str, Any]] = [
             "blocks_absent": ["analog_frequency_modulator_fc_0"],
             "valid": True,
         },
-        "max_tool_rounds": 12,
     },
 ]
 
@@ -504,7 +509,8 @@ def _fresh_agent(
     shutil.copy2(src, tmp_fixture)
     session = FlowgraphSession()
     session.load(str(tmp_fixture))
-    return GrcAgent(session=session, llama_model=model), tmp_fixture
+    llama_config = dataclasses.replace(default_app_config().llama, model=model)
+    return GrcAgent(session=session, llama_config=llama_config), tmp_fixture
 
 
 def _graph_state(fixture_path: Path) -> dict[str, Any]:
@@ -536,7 +542,6 @@ def _run_scenario(
     fixture: str | Path | None = None,
     expect: dict[str, Any] | None = None,
     provider_config: ToolAgentsLlamaProviderConfig | None = None,
-    max_tool_rounds: int | None = None,
 ) -> dict[str, Any]:
     # Default provider = the original local-Ollama config, so the gated live
     # test (which calls _run_scenario(**sc) with no provider) is unchanged.
@@ -557,12 +562,21 @@ def _run_scenario(
         pending_tool["name"] = tool_name
         pending_tool["args"] = dict(args)
 
+    def _on_tool_rejected(tool_name: str, args: dict[str, Any], result: Any) -> None:
+        # A call rejected before dispatch (route/schema validation) never
+        # fires ``on_tool_start`` — without this, the transcript renderer
+        # below has no ``pending_tool`` to attach and the rejected call
+        # (name, args, rejection reason) is invisible in the .md output.
+        del result
+        pending_tool["name"] = tool_name
+        pending_tool["args"] = dict(args)
+
     for event in runner.stream_turn(
         agent,
         prompt,
-        max_tool_rounds=max_tool_rounds,
         on_tool_start=_on_tool_start,
         on_tool_end=None,
+        on_tool_rejected=_on_tool_rejected,
     ):
         ev_copy = dict(event)
         if (
@@ -601,7 +615,10 @@ def _render_md(rec: dict[str, Any]) -> str:
       5. a flat numbered list of every tool call the model made, each paired
          with the exact ``tool_call_result`` string the model received — the
          raw bytes are preserved verbatim (no json roundtrip), so the file
-         shows what the model actually saw.
+         shows what the model actually saw. A ``degenerate_retry`` event
+         (the model returned no content and no tool calls; the runner
+         retried) is noted inline where it occurred — otherwise that
+         attempt would vanish with no trace in the saved transcript.
       6. the raw final result dict.
 
     grc_after is reconstructible from the tool results (the last successful
@@ -671,6 +688,13 @@ def _render_md(rec: dict[str, Any]) -> str:
                 parts.append("```")
                 parts.append("")
                 parts.append("```")
+            parts.append("")
+        elif ev.get("event") == "degenerate_retry":
+            parts.append(
+                f"### (degenerate empty response — no content, no tool calls; "
+                f"retrying, attempt {ev.get('attempt')}/{ev.get('max_attempts')}, "
+                f"finish_reason={ev.get('finish_reason')})"
+            )
             parts.append("")
         elif ev.get("event") == "final":
             final_result = ev.get("result", {}) or {}
@@ -803,7 +827,13 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
             for k, v in pv.items():
                 actual_val = str(actual.get(k, "")).replace(" ", "")
                 expected_val = str(v).replace(" ", "")
-                if actual_val != expected_val:
+                if actual_val == expected_val:
+                    continue
+                try:
+                    numeric_match = float(actual_val) == float(expected_val)
+                except ValueError:
+                    numeric_match = False
+                if not numeric_match:
                     fail_reasons.append(f"param {inst}.{k}={actual.get(k)!r} expected {v!r}")
 
     semantic_success = not fail_reasons
@@ -830,6 +860,7 @@ def _extract_metrics(rec: dict[str, Any]) -> dict[str, Any]:
         "graph_valid": graph_valid,
         "expect_reason": expect_reason,
         "semantic_success": semantic_success,
+        "final_finish_reason": final.get("finish_reason"),
     }
 
 
@@ -922,7 +953,6 @@ def main(runs: int = 1, provider: str = "ollama") -> None:
     print(f"Provider: {provider} | Model: {active_model}")
     print(f"Fixture: {FIXTURE.name}")
     print(f"Scenarios: {len(SCENARIOS)} | runs per scenario: {runs}")
-    print("Max tool rounds: system default (8)")
     print()
 
     all_metrics: list[dict[str, Any]] = []

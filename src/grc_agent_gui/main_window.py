@@ -524,11 +524,7 @@ class MainWindow(QMainWindow):
         current_backend = (
             getattr(self.llama_config, "backend", "ollama") if self.llama_config else "ollama"
         )
-        current_model = getattr(self.llama_config, "model", "") if self.llama_config else ""
-        if self.provider_config is not None:
-            pm = getattr(self.provider_config, "model", "")
-            if pm:
-                current_model = str(pm)
+        current_model = self._resolved_model_name()
         self.model_toolbar = ModelToolbar(
             backend=current_backend,
             model=current_model,
@@ -546,9 +542,8 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.model_toolbar)
         main_layout.addWidget(v_splitter)
 
-        # Aliases for backwards compatibility and automated testing
+        # Alias for backwards compatibility and automated testing
         self.chat_input = self.chat_widget.chat_input
-        self.chat_display = self.chat_widget.chat_display
         self.chat_input.returnPressed.connect(self.send_prompt)
         self.chat_input.installEventFilter(self)
         self.chat_widget.stop_clicked.connect(self._on_stop_clicked)
@@ -583,15 +578,22 @@ class MainWindow(QMainWindow):
 
         self.apply_zoom(self._zoom_factor)
 
+    def _resolved_model_name(self) -> str:
+        """Model name to display, preferring ``provider_config.model`` over ``llama_config.model``."""
+        model_name = getattr(self.llama_config, "model", "") if self.llama_config else ""
+        if self.provider_config is not None:
+            provider_model = getattr(self.provider_config, "model", "")
+            if provider_model:
+                model_name = str(provider_model)
+        return model_name
+
     def _fetch_initial_context_length(self) -> None:
         """Look up the startup model's context window in the background."""
         if self.llama_config is None:
             return
         backend = getattr(self.llama_config, "backend", "ollama")
         server_url = getattr(self.llama_config, "server_url", DEFAULT_OLLAMA_URL)
-        model_name = getattr(self.llama_config, "model", "")
-        if self.provider_config is not None:
-            model_name = getattr(self.provider_config, "model", "") or model_name
+        model_name = self._resolved_model_name()
         if not model_name:
             return
         runnable = ContextLengthRunnable(backend, server_url, model_name)
@@ -653,9 +655,12 @@ class MainWindow(QMainWindow):
         else:
             self.context_status_label.setText(f"Context: {total:,} tokens")
 
+    def _has_flowgraph_loaded(self) -> bool:
+        return self.agent.session is not None and self.agent.session.flowgraph is not None
+
     def update_ui_state(self) -> None:
         """Enable or disable chat and validation controls based on active session state."""
-        has_graph = self.agent.session is not None and self.agent.session.flowgraph is not None
+        has_graph = self._has_flowgraph_loaded()
         backend_ok = self.backend_reachable is not False
         self.chat_input.setEnabled(has_graph and backend_ok)
         self.validate_btn.setEnabled(has_graph and backend_ok)
@@ -707,7 +712,7 @@ class MainWindow(QMainWindow):
         # HTML content (which is immune to Qt stylesheets) also scales.
         # chat_pt comes from the same ui_font_metrics() used by the
         # stylesheet — one source of truth for body / mono / small / chat.
-        if hasattr(self, "chat_widget") and self.chat_widget is not None:
+        if self.chat_widget is not None:
             from PySide6.QtGui import QFont
 
             metrics = ui_font_metrics(self._zoom_factor)
@@ -723,18 +728,16 @@ class MainWindow(QMainWindow):
             self.chat_widget.set_chat_pt(chat_pt, user_text_px=metrics.user_text_px)
 
         # Apply zoom to the model toolbar
-        if hasattr(self, "model_toolbar") and self.model_toolbar is not None:
+        if self.model_toolbar is not None:
             self.model_toolbar.apply_zoom(self._zoom_factor)
 
         # Invalidate rendered chat cache and trigger re-render
-        if hasattr(self, "chat_widget") and self.chat_widget is not None:
+        if self.chat_widget is not None:
             for msg in self.chat_widget._history:
                 msg["_rendered"] = None
             self.chat_widget._render_chat()
 
     def set_backend_connected(self, connected: bool | None) -> None:
-        if not hasattr(self, "connection_status_label"):
-            return
         if connected is None:
             self.connection_status_label.setText("● checking")
             self.connection_status_label.setStyleSheet(f"color: {COLOR_YELLOW};")
@@ -867,7 +870,7 @@ class MainWindow(QMainWindow):
             return
         # Keep the agent's embedding runtime in sync; the per-backend index
         # auto-rebuilds on next access (model-stamp mismatch in the store).
-        if hasattr(self, "agent") and self.agent is not None:
+        if self.agent is not None:
             self.agent.reconfigure_llama_runtime(embedding_model=model)
         self.status_bar.showMessage(f"Embedding model set to {model}", 5000)
 
@@ -886,7 +889,7 @@ class MainWindow(QMainWindow):
         if not self._persist_embedding_model("openrouter", new_model):
             return
         self.model_toolbar.set_current_embed_model(new_model)
-        if hasattr(self, "agent") and self.agent is not None:
+        if self.agent is not None:
             self.agent.reconfigure_llama_runtime(embedding_model=new_model)
         self.status_bar.showMessage(f"Embedding model set to {new_model}", 5000)
 
@@ -987,7 +990,7 @@ class MainWindow(QMainWindow):
         self._on_stop_clicked()
         self.cleanup_thread()
         self._deactivate_active_session()
-        if hasattr(self, "sessions_store") and self.sessions_store is not None:
+        if self.sessions_store is not None:
             try:
                 self.sessions_store.close()
             except Exception as exc:
@@ -1020,10 +1023,7 @@ class MainWindow(QMainWindow):
         graph_hash = ""
         if self.agent.session and self.agent.session.path:
             graph_path = str(self.agent.session.path)
-            if (
-                hasattr(self.agent.session, "persisted_file_sha256")
-                and self.agent.session.persisted_file_sha256
-            ):
+            if self.agent.session.persisted_file_sha256:
                 graph_hash = self.agent.session.persisted_file_sha256
             elif self.agent.session.path.exists():
                 try:
@@ -1144,8 +1144,7 @@ class MainWindow(QMainWindow):
     def on_worker_started(self) -> None:
         """Lock input interface to prevent race conditions during generation."""
         self.chat_input.setEnabled(False)
-        if hasattr(self, "model_toolbar"):
-            self.model_toolbar.setEnabled(False)
+        self.model_toolbar.setEnabled(False)
         self.chat_widget.set_generating(True)
         self._set_generation_status_label(True)
         self.status_bar.showMessage("Agent is thinking...")
@@ -1203,7 +1202,7 @@ class MainWindow(QMainWindow):
             self.chat_widget.append_mutation(result)
             self.refresh_inspector()
         if self._result_is_error(result):
-            self.chat_widget.append_error(f"{name}: {result[:300]}")
+            self.chat_widget.append_error(f"{name}: {result}")
         self.status_bar.showMessage("Agent is thinking...")
         self.status_bar.setStyleSheet("")
 
@@ -1233,8 +1232,7 @@ class MainWindow(QMainWindow):
     def on_turn_finished(self, result: dict[str, Any]) -> None:
         """Unlock the interface and clear status fields."""
         self.chat_input.setEnabled(True)
-        if hasattr(self, "model_toolbar"):
-            self.model_toolbar.setEnabled(True)
+        self.model_toolbar.setEnabled(True)
         self.chat_widget.set_generating(False)
         self._set_generation_status_label(False)
         assistant_text = result.get("assistant_text", "")
@@ -1326,8 +1324,7 @@ class MainWindow(QMainWindow):
             return
         self.chat_widget.clear()
         self._deactivate_active_session()
-        if hasattr(self.agent, "reset_chat_session"):
-            self.agent.reset_chat_session()
+        self.agent.reset_chat_session()
         self.agent.session = loaded
         self.inspector_widget.set_grc_file_path(str(file_path))
         self.refresh_inspector()
@@ -1475,25 +1472,24 @@ class MainWindow(QMainWindow):
         self._context_window_max = context_length
         self._update_context_usage_label(None)
         # Sync the toolbar with the new model.
-        if hasattr(self, "model_toolbar"):
-            backend = getattr(self.llama_config, "backend", "ollama")
-            self.model_toolbar.set_backend(backend)
-            self.model_toolbar.set_current_model(model_name)
-            # Show the embedding model for the now-active backend (resolved
-            # from .env by the config accessors the toolbar uses).
-            from grc_agent.config import default_embedding_model
+        backend = getattr(self.llama_config, "backend", "ollama")
+        self.model_toolbar.set_backend(backend)
+        self.model_toolbar.set_current_model(model_name)
+        # Show the embedding model for the now-active backend (resolved
+        # from .env by the config accessors the toolbar uses).
+        from grc_agent.config import default_embedding_model
 
-            self.model_toolbar.set_current_embed_model(default_embedding_model(backend))
-            self.set_backend_connected(True)
-            if backend == "ollama":
-                # Repopulate the dropdown with the full local model list
-                # now that we're back on Ollama (mirrors the refresh button).
-                self._probe_and_populate_models()
+        self.model_toolbar.set_current_embed_model(default_embedding_model(backend))
+        self.set_backend_connected(True)
+        if backend == "ollama":
+            # Repopulate the dropdown with the full local model list
+            # now that we're back on Ollama (mirrors the refresh button).
+            self._probe_and_populate_models()
         # Keep the agent's cached LLM/embedding runtime in sync with the swap
         # so the embedding path (and docs-RAG synthesis model) follows the
         # active backend. The per-backend vector index auto-rebuilds on next
         # access via the store's model-stamp check.
-        if hasattr(self, "agent") and self.agent is not None:
+        if self.agent is not None:
             new_backend = getattr(self.llama_config, "backend", "ollama")
             from grc_agent.config import default_chat_model, default_embedding_model
 
@@ -1573,8 +1569,7 @@ class MainWindow(QMainWindow):
 
         self.chat_widget.clear()
         self._deactivate_active_session()
-        if hasattr(self.agent, "reset_chat_session"):
-            self.agent.reset_chat_session()
+        self.agent.reset_chat_session()
         self.agent.session = FlowgraphSession()
         self.inspector_widget.set_grc_file_path("")
         self.refresh_inspector()
@@ -1649,8 +1644,7 @@ class MainWindow(QMainWindow):
             return
         # Drop the in-memory chat and any resume state.
         self.chat_widget.clear()
-        if hasattr(self.agent, "reset_chat_session"):
-            self.agent.reset_chat_session()
+        self.agent.reset_chat_session()
         self._deactivate_active_session()
         self.sidebar_widget.list_widget.clear()
         self.status_bar.showMessage(f"Cleared {removed} session(s) from history.", 5000)
@@ -1700,8 +1694,7 @@ class MainWindow(QMainWindow):
 
         # 2. Reset the agent's chat session.  The new ``ChatHistory``
         #    is populated from the model rows below.
-        if hasattr(self.agent, "reset_chat_session"):
-            self.agent.reset_chat_session()
+        self.agent.reset_chat_session()
 
         # 3. Single-walk reconstruction from *_model rows.
         #    Sessions with no model rows are legacy and refused
@@ -1786,19 +1779,10 @@ class MainWindow(QMainWindow):
 
     def _set_swap_in_progress(self, busy: bool) -> None:
         """Lock or unlock the chat input / Validate button around a swap."""
-        if not hasattr(self, "chat_input"):
-            return
-        self.chat_input.setEnabled(
-            not busy
-            and (self.agent.session is not None and self.agent.session.flowgraph is not None)
-        )
-        if hasattr(self, "validate_btn"):
-            self.validate_btn.setEnabled(
-                not busy
-                and (self.agent.session is not None and self.agent.session.flowgraph is not None)
-            )
-        if hasattr(self, "model_toolbar"):
-            self.model_toolbar.setEnabled(not busy)
+        has_graph = self._has_flowgraph_loaded()
+        self.chat_input.setEnabled(not busy and has_graph)
+        self.validate_btn.setEnabled(not busy and has_graph)
+        self.model_toolbar.setEnabled(not busy)
 
     def on_validate_clicked(self) -> None:
         """Handler for 'Validate' button click."""

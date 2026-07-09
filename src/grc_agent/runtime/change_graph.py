@@ -54,7 +54,7 @@ class ChangeGraphContext:
 
     new_block_names: set[str] = field(default_factory=set)
     removed_names: set[str] = field(default_factory=set)
-    type_already_set: set[str] = field(default_factory=set)
+    type_params_already_set: dict[str, set[str]] = field(default_factory=dict)
     pre_edges: set[str] = field(default_factory=set)
     before_snapshot: Any = None
     before_serialized: str | None = None
@@ -125,13 +125,20 @@ def _phase_add_blocks(ctx: ChangeGraphContext) -> None:
             continue
         except KeyError:
             pass
+        # The "auto" sentinel means "resolve this for me" — never a real
+        # value to hand to native GRC enum validation. Dropping the key
+        # here (instead of passing "auto" through) lets the block keep
+        # GRC's own default until _phase_auto_resolve_types assigns a real
+        # one from a connected neighbor's dtype.
+        raw_params = entry.get("params") or {}
+        params = {k: v for k, v in raw_params.items() if str(v) != "auto"}
         try:
             apply_mutation(
                 ctx.fg,
                 "add_block",
-                block_type=block_id,
+                block_id=block_id,
                 instance_name=instance_name,
-                parameters=entry.get("params") or {},
+                parameters=params,
                 state=entry.get("state"),
             )
             ctx.ops_applied += 1
@@ -172,13 +179,21 @@ def _phase_remove_blocks(ctx: ChangeGraphContext) -> None:
 def _phase_update_params(ctx: ChangeGraphContext) -> None:
     """Apply each ``update_params`` entry; missing instance_name → ``invalid_update``.
 
-    Behavior is identical to the original inline block (lines 257-272).
+    The literal value ``"auto"`` on a type-controlling param triggers
+    live-neighbor-dtype inference against the block's CURRENT connections —
+    unlike ``add_blocks``, there is no same-batch bootstrap problem, since
+    the block and its neighbors already exist. Unlike ``add_blocks``'
+    silent fallback to GRC's own default when nothing can be inferred, an
+    unresolvable ``"auto"`` here is an explicit error: the model asked a
+    direct question and should get a direct answer, not a silent guess.
     """
+    from grc_agent.runtime.param_filter import ports_governed_by, type_controlling_params
+
     for entry in ctx.update_params_list:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("instance_name", "")).strip()
-        params = entry.get("params") or {}
+        params = dict(entry.get("params") or {})
         if not name:
             ctx.errors.append(
                 {
@@ -187,6 +202,46 @@ def _phase_update_params(ctx: ChangeGraphContext) -> None:
                 }
             )
             continue
+
+        auto_keys = [k for k, v in params.items() if str(v) == "auto"]
+        if auto_keys:
+            try:
+                block = ctx.fg.get_block(name)
+            except KeyError as exc:
+                ctx.errors.append({"code": "parameter_not_found", "message": str(exc)})
+                continue
+            controlling = type_controlling_params(block.key)
+            unresolved: list[str] = []
+            for key in auto_keys:
+                if key not in controlling:
+                    continue  # not type-controlling — pass "auto" through as a literal value.
+                input_ports, output_ports = ports_governed_by(block.key, key)
+                dtypes: set[str] = set()
+                if input_ports:
+                    dtypes |= _live_neighbor_dtypes_for(
+                        ctx.fg, name, own_ports=input_ports, own_direction="inputs"
+                    )
+                if output_ports:
+                    dtypes |= _live_neighbor_dtypes_for(
+                        ctx.fg, name, own_ports=output_ports, own_direction="outputs"
+                    )
+                if len(dtypes) == 1:
+                    params[key] = next(iter(dtypes))
+                else:
+                    unresolved.append(key)
+            if unresolved:
+                ctx.errors.append(
+                    {
+                        "code": "type_auto_unresolvable",
+                        "message": (
+                            f"{name}: cannot resolve 'auto' for {', '.join(unresolved)} — "
+                            "no connected neighbor, or connected neighbors disagree on "
+                            "dtype. Connect the block first, or set an explicit value."
+                        ),
+                    }
+                )
+                continue
+
         try:
             apply_mutation(ctx.fg, "update_params", instance_name=name, params=params)
             ctx.ops_applied += 1
@@ -197,32 +252,63 @@ def _phase_update_params(ctx: ChangeGraphContext) -> None:
 
 
 def _phase_auto_resolve_types(ctx: ChangeGraphContext) -> None:
-    """Set ``type`` on newly-added blocks that don't have it explicit.
+    """Set every type-controlling param on newly-added blocks that doesn't
+    already have a real, explicit value.
 
-    Uniform rule: skip if the block already has a ``type`` set (via
-    ``add_blocks`` OR ``update_params``); otherwise derive the dtype from the
-    first neighbor port in ``ctx.add_connections_list`` and assign it.
-
-    Behavior is identical to the original inline block (lines 274-298 of
-    the pre-refactor file).
+    Uniform rule: for each new block, derive its type-controlling param(s)
+    mechanically from its own native port dtype templates (see
+    :func:`grc_agent.runtime.param_filter.type_controlling_params`) — never
+    a hardcoded name like ``"type"``, so blocks that use ``itype``/``otype``
+    (e.g. ``fec_generic_encoder``) get auto-resolution too, not just
+    literally-named ``type`` blocks. A param already set to a real value
+    (via ``add_blocks`` or ``update_params`` in this batch — tracked in
+    ``ctx.type_params_already_set``, which excludes the ``"auto"`` sentinel)
+    is left untouched. Each param is resolved from the first same-batch
+    connection touching the *specific side* it governs (see
+    :func:`grc_agent.runtime.param_filter.ports_governed_by`), so
+    multi-param blocks don't get one neighbor's dtype copied onto both
+    sides.
     """
+    from grc_agent.runtime.param_filter import ports_governed_by, type_controlling_params
+
     for name in ctx.new_block_names:
-        if name in ctx.type_already_set:
-            continue
         try:
             block = ctx.fg.get_block(name)
         except KeyError:
             continue
-        if "type" not in block.params:
-            continue
-        dtype = _neighbor_dtype_for(ctx.fg, name, ctx.add_connections_list, ctx.new_block_names)
-        if not dtype:
-            continue
-        try:
-            block.params["type"].set_value(dtype)
-            ctx.fg.rewrite()
-        except Exception as exc:
-            logger.warning("Failed to auto-resolve type for block %s: %s", name, exc)
+        already_set = ctx.type_params_already_set.get(name, set())
+        for param_key in type_controlling_params(block.key):
+            if param_key in already_set or param_key not in block.params:
+                continue
+            input_ports, output_ports = ports_governed_by(block.key, param_key)
+            dtype = None
+            if input_ports:
+                dtype = _neighbor_dtype_for(
+                    ctx.fg,
+                    name,
+                    ctx.add_connections_list,
+                    ctx.new_block_names,
+                    own_ports=input_ports,
+                    own_direction="inputs",
+                )
+            if not dtype and output_ports:
+                dtype = _neighbor_dtype_for(
+                    ctx.fg,
+                    name,
+                    ctx.add_connections_list,
+                    ctx.new_block_names,
+                    own_ports=output_ports,
+                    own_direction="outputs",
+                )
+            if not dtype:
+                continue
+            try:
+                block.params[param_key].set_value(dtype)
+                ctx.fg.rewrite()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to auto-resolve %s for block %s: %s", param_key, name, exc
+                )
 
 
 def _phase_update_states(ctx: ChangeGraphContext) -> None:
@@ -271,7 +357,11 @@ def _phase_remove_connections(ctx: ChangeGraphContext) -> None:
             ctx.errors.append(
                 {
                     "code": "invalid_connection",
-                    "message": f"unparseable connection_id: {conn_id!r}.{hint}",
+                    "message": (
+                        f"unparseable connection_id: {conn_id!r}. Expected format "
+                        "'src_instance_name:port->dst_instance_name:port' "
+                        f"(e.g. 'sig_source:0->throttle:0').{hint}"
+                    ),
                 }
             )
             continue
@@ -309,7 +399,11 @@ def _phase_add_connections(ctx: ChangeGraphContext) -> None:
             ctx.errors.append(
                 {
                     "code": "invalid_connection",
-                    "message": f"unparseable connection: {entry!r}",
+                    "message": (
+                        f"unparseable connection: {entry!r}. Expected format "
+                        "'src_instance_name:port->dst_instance_name:port' "
+                        "(e.g. 'sig_source:0->throttle:0')."
+                    ),
                 }
             )
             continue
@@ -378,6 +472,32 @@ def dispatch_flat_change_graph_batch(
             },
         )
 
+    # The tool schema documents "at least one array must be provided"; a
+    # batch with every operation list empty/absent previously fell through
+    # to a trivial ok=true with nothing applied — indistinguishable from a
+    # real edit that happened to change nothing, and observed being used as
+    # a content-free stalling pattern by a struggling model.
+    if not any(
+        [add_blocks, remove_blocks, update_params, update_states, add_connections, remove_connections]
+    ):
+        return agent._payload_result(
+            "change_graph",
+            {
+                "ok": False,
+                "error_type": ErrorCode.INVALID_REQUEST,
+                "errors": [
+                    {
+                        "code": ErrorCode.INVALID_REQUEST,
+                        "message": (
+                            "change_graph requires at least one non-empty operation "
+                            "array (add_blocks, remove_blocks, update_params, "
+                            "update_states, add_connections, or remove_connections)."
+                        ),
+                    }
+                ],
+            },
+        )
+
     errors: list[dict[str, str]] = []
     ctx = ChangeGraphContext(
         agent=agent,
@@ -413,31 +533,25 @@ def dispatch_flat_change_graph_batch(
         for c in fg.connections
     }
 
-    # Track which new blocks had `type` explicitly set by the model — via
-    # EITHER add_blocks params OR an update_params entry on a new block.
-    # Auto-resolve must never clobber an explicit value, and it now runs AFTER
-    # update_params (so ports created by a same-batch `num_inputs` bump exist
-    # when the neighbor dtype is read), so it would otherwise overwrite a type
-    # set via update_params.
-    ctx.type_already_set = {
-        name
-        for name in ctx.new_block_names
-        if name
-        in {
-            *(
-                str(e.get("instance_name", "")).strip()
-                for e in ctx.add_blocks_list
-                if isinstance(e, dict) and "type" in (e.get("params") or {})
-            ),
-            *(
-                str(e.get("instance_name", "")).strip()
-                for e in ctx.update_params_list
-                if isinstance(e, dict)
-                and "type" in (e.get("params") or {})
-                and str(e.get("instance_name", "")).strip() in ctx.new_block_names
-            ),
-        }
-    }
+    # Track which type-controlling params new blocks had explicitly set by
+    # the model to a REAL value — via EITHER add_blocks params OR an
+    # update_params entry on a new block. The literal sentinel "auto" does
+    # NOT count as explicitly set (it means "resolve me"), so auto-resolve
+    # still fires for it. Auto-resolve must never clobber an explicit value,
+    # and it now runs AFTER update_params (so ports created by a same-batch
+    # `num_inputs` bump exist when the neighbor dtype is read), so it would
+    # otherwise overwrite a type set via update_params.
+    ctx.type_params_already_set = {}
+    for entry in (*ctx.add_blocks_list, *ctx.update_params_list):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("instance_name", "")).strip()
+        if name not in ctx.new_block_names:
+            continue
+        for key, value in (entry.get("params") or {}).items():
+            if str(value) == "auto":
+                continue
+            ctx.type_params_already_set.setdefault(name, set()).add(key)
 
     # --- Run the seven ordered phases ---
     _phase_add_blocks(ctx)
@@ -517,20 +631,29 @@ def _neighbor_dtype_for(
     instance_name: str,
     add_connections: list[Any],
     new_block_names: set[str] | None = None,
+    *,
+    own_ports: frozenset[str] | None = None,
+    own_direction: str | None = None,
 ) -> str | None:
     """Return the port dtype of the first neighbor block connected to
     ``instance_name`` in the batch's ``add_connections``.
 
     The neighbor block may be either an existing block in the graph or
-    another newly-added block. We prioritize existing blocks first to
-    correctly bootstrap type resolution in new block chains.
+    another newly-added block. An existing-block hit returns immediately
+    (existing blocks bootstrap type resolution in new block chains); a
+    new-block hit is recorded and returned only as a fallback if no
+    existing-block neighbor is found in the whole batch.
+
+    ``own_ports``/``own_direction`` restrict the search to connections
+    touching one of ``instance_name``'s own specific ports on one specific
+    side (``"inputs"`` or ``"outputs"``) — needed for multi-param blocks
+    like ``fec_generic_encoder`` (separate ``itype``/``otype``), where
+    resolving from "any" neighbor would mix up the two sides. ``None``
+    (the default) considers every connection, matching the original
+    single-``type``-param behavior.
     """
-    # Single pass: record the first hit from an existing block and the first
-    # hit from a newly-added block; return the existing-block hit if any,
-    # otherwise fall back to the new-block hit.
     from grc_agent.grc_native_adapter import port_object
 
-    existing_dtype: str | None = None
     new_dtype: str | None = None
     for conn_entry in add_connections:
         parsed = parse_connection_id(str(conn_entry))
@@ -538,13 +661,23 @@ def _neighbor_dtype_for(
             continue
         other: str | None = None
         port_key: str | None = None
+        own_port_key: str | None = None
+        own_kind: str | None = None
         if parsed["src_block"] == instance_name:
             other = parsed["dst_block"]
             port_key = str(parsed["dst_port"])
+            own_port_key = str(parsed["src_port"])
+            own_kind = "outputs"
         elif parsed["dst_block"] == instance_name:
             other = parsed["src_block"]
             port_key = str(parsed["src_port"])
+            own_port_key = str(parsed["dst_port"])
+            own_kind = "inputs"
         if not other or not port_key:
+            continue
+        if own_direction is not None and own_kind != own_direction:
+            continue
+        if own_ports is not None and own_port_key not in own_ports:
             continue
         kind = "sink" if parsed["src_block"] == instance_name else "source"
         port = port_object(fg, other, port_key, kind=kind)
@@ -558,32 +691,44 @@ def _neighbor_dtype_for(
                 new_dtype = str(dtype)
         else:
             return str(dtype)
-    return existing_dtype or new_dtype
+    return new_dtype
 
 
-def _neighbor_port_dtype(fg: Any, block_name: str) -> str | None:
-    """Return the resolved IO dtype of the port on the OTHER side of the first
-    connection touching ``block_name``.
+def _live_neighbor_dtypes_for(
+    fg: Any,
+    block_name: str,
+    *,
+    own_ports: frozenset[str],
+    own_direction: str,
+) -> set[str]:
+    """All distinct neighbor dtypes across ``block_name``'s CURRENT live
+    connections touching one of ``own_ports`` on ``own_direction``
+    (``"inputs"`` or ``"outputs"``).
 
-    This is the dtype the block's own ``type`` should adopt to satisfy the
-    connection. Reads live native ports (post-rewrite), so the value is the
-    actual neighbor dtype — not a token parsed from an error message.
+    Used to resolve the ``"auto"`` sentinel in ``update_params``, where
+    (unlike ``add_blocks``) the block already exists with real connections
+    to read, and returning every distinct dtype found (not just the first)
+    lets the caller detect a genuine conflict instead of picking one
+    arbitrarily.
     """
     try:
         block = fg.get_block(block_name)
     except Exception:
-        return None
+        return set()
+    dtypes: set[str] = set()
     for conn in fg.connections:
         if conn.source_block is block:
-            other_port = conn.sink_port
+            kind, own_port_key, other_port = "outputs", str(conn.source_port.key), conn.sink_port
         elif conn.sink_block is block:
-            other_port = conn.source_port
+            kind, own_port_key, other_port = "inputs", str(conn.sink_port.key), conn.source_port
         else:
+            continue
+        if kind != own_direction or own_port_key not in own_ports:
             continue
         dtype = getattr(other_port, "dtype", None)
         if dtype:
-            return str(dtype)
-    return None
+            dtypes.add(str(dtype))
+    return dtypes
 
 
 def _type_hint_for_validation(
@@ -592,8 +737,13 @@ def _type_hint_for_validation(
     new_block_names: set[str],
 ) -> str | None:
     """If a validation error is an IO type/size mismatch and the batch
-    contains a newly-added block with a ``type`` enum param, return a
-    hint naming the dtype the block should adopt (the neighbor's dtype).
+    contains a newly-added block with a type-controlling enum param
+    (native-derived via :func:`type_controlling_params` — never a
+    hardcoded ``"type"`` lookup, so ``itype``/``otype``-style blocks like
+    ``fec_generic_encoder`` get a hint too), return a hint naming the
+    dtype the block should adopt (the neighbor's dtype, resolved per side
+    via :func:`ports_governed_by` so a multi-param block's two sides are
+    never mixed up).
 
     The neighbor dtype is resolved from the live flowgraph ports, NOT by
     pattern-matching tokens out of the error message — that old approach
@@ -605,21 +755,34 @@ def _type_hint_for_validation(
         return None
     if not any("IO type" in msg or "IO size" in msg for msg in validation_errors):
         return None
+    from grc_agent.runtime.param_filter import ports_governed_by, type_controlling_params
+
     for name in new_block_names:
         try:
             block = fg.get_block(name)
         except Exception:
             continue
-        type_param = block.params.get("type")
-        if type_param is None or type_param.dtype != "enum":
-            continue
-        opts = [str(o) for o in (type_param.options or [])]
-        neighbor_dtype = _neighbor_port_dtype(fg, name)
-        if neighbor_dtype and neighbor_dtype in opts:
-            return (
-                f"'{name}' type enum includes '{neighbor_dtype}' "
-                f"(neighbor dtype is {neighbor_dtype})"
-            )
+        for param_key in type_controlling_params(block.key):
+            type_param = block.params.get(param_key)
+            if type_param is None or type_param.dtype != "enum":
+                continue
+            opts = [str(o) for o in (type_param.options or [])]
+            input_ports, output_ports = ports_governed_by(block.key, param_key)
+            neighbor_dtypes: set[str] = set()
+            if input_ports:
+                neighbor_dtypes |= _live_neighbor_dtypes_for(
+                    fg, name, own_ports=input_ports, own_direction="inputs"
+                )
+            if output_ports:
+                neighbor_dtypes |= _live_neighbor_dtypes_for(
+                    fg, name, own_ports=output_ports, own_direction="outputs"
+                )
+            for neighbor_dtype in neighbor_dtypes:
+                if neighbor_dtype in opts:
+                    return (
+                        f"'{name}' {param_key} enum includes '{neighbor_dtype}' "
+                        f"(neighbor dtype is {neighbor_dtype})"
+                    )
     return None
 
 
@@ -637,14 +800,17 @@ def _connection_dtype_hint(
     ``None`` if port resolution fails.
 
     If ``new_block_names`` is provided and one of the endpoint blocks was
-    added in the same batch, inspect its ``type`` enum param (if any) and
-    append a hint suggesting which enum value would match the neighbor's
-    dtype. This is the uniform rule: every freshly-added block whose
-    connection failed on dtype is a candidate for a ``type`` adjustment,
-    and the matching option (if any) is found mechanically from the enum.
+    added in the same batch, inspect its type-controlling enum param(s)
+    (native-derived via :func:`type_controlling_params` — never a
+    hardcoded ``"type"`` lookup) and append a hint suggesting which enum
+    value would match the neighbor's dtype. This is the uniform rule:
+    every freshly-added block whose connection failed on dtype is a
+    candidate for a type adjustment, and the matching option (if any) is
+    found mechanically from the enum.
     """
     try:
         from grc_agent.grc_native_adapter import port_object
+        from grc_agent.runtime.param_filter import type_controlling_params
 
         src_p = port_object(fg, src_block, src_port, kind="source")
         dst_p = port_object(fg, dst_block, dst_port, kind="sink")
@@ -666,12 +832,14 @@ def _connection_dtype_hint(
             if neighbor_dtype:
                 try:
                     block = fg.get_block(new_name)
-                    type_param = block.params.get("type")
-                    if type_param is not None and type_param.dtype == "enum":
+                    for param_key in type_controlling_params(block.key):
+                        type_param = block.params.get(param_key)
+                        if type_param is None or type_param.dtype != "enum":
+                            continue
                         opts = list(type_param.options or [])
                         if neighbor_dtype in opts:
                             parts.append(
-                                f"'{new_name}' type enum includes '{neighbor_dtype}' (neighbor dtype is {neighbor_dtype})"
+                                f"'{new_name}' {param_key} enum includes '{neighbor_dtype}' (neighbor dtype is {neighbor_dtype})"
                             )
                 except Exception:
                     pass

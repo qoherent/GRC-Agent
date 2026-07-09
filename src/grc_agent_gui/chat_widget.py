@@ -232,8 +232,8 @@ def _rewrite_math_segment(body: str) -> str | None:
     s = re.sub(r"\\text\{([^{}]*)\}", lambda m: m.group(1), s)
 
     # Greek letters + symbols (allow-list only — see _MATH_ALLOW_LIST).
+    # "text" is not in this loop: \text{...} is already rewritten above.
     for name, char in (
-        ("text", None),  # handled above
         ("mu", "\u00b5"),
         ("cdot", "\u00b7"),
         ("times", "\u00d7"),
@@ -248,8 +248,7 @@ def _rewrite_math_segment(body: str) -> str | None:
         ("geq", "\u2265"),
         ("deg", "\u00b0"),
     ):
-        if char is not None:
-            s = s.replace("\\" + name, char)
+        s = s.replace("\\" + name, char)
 
     # Superscript / subscript — reject any char not in the map.
     s = re.sub(r"\^([0-9A-Za-z+\-])", lambda m: _SUPER_MAP.get(m.group(1), "\x00"), s)
@@ -393,7 +392,10 @@ def _render_mutation_html() -> str:
 
 def _render_error_html(text: str) -> str:
     """Render an inline error row. ``text`` is truncated to 200 chars."""
-    return f'<div style="{_ERROR_PANEL}">&#10007; {html.escape(text[:200])}</div>'
+    body = text[:200]
+    if len(text) > 200:
+        body += f" [TRUNCATED: was {len(text)} chars]"
+    return f'<div style="{_ERROR_PANEL}">&#10007; {html.escape(body)}</div>'
 
 
 def _render_info_html(text: str) -> str:
@@ -625,7 +627,6 @@ class ChatWidget(QWidget):
             assistant = {
                 "role": "assistant",
                 "fragments": [],
-                "text": "",
                 "_rendered": None,
                 "thinking_expanded": False,
             }
@@ -670,7 +671,6 @@ class ChatWidget(QWidget):
                 {
                     "role": "assistant",
                     "fragments": [],
-                    "text": "",
                     "_rendered": None,
                     "thinking_expanded": False,
                 }

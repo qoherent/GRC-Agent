@@ -7,6 +7,7 @@ from pathlib import Path
 
 from grc_agent.agent import GrcAgent
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.grc_native_adapter import serialize_raw_data
 
 
 def _fixture_path() -> Path:
@@ -24,7 +25,7 @@ def _raw_snapshot(session: FlowgraphSession) -> tuple[int, bool, str]:
     return (
         session.state_revision,
         session.is_dirty,
-        session._serialize_raw_data(session.flowgraph.export_data()),
+        serialize_raw_data(session.flowgraph.export_data()),
     )
 
 

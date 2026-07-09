@@ -32,8 +32,12 @@ class AgentWorker(QObject):
     Emits these signals to the GUI:
 
     * ``started`` — when the turn has begun.
-    * ``tool_started(name, args_json)`` — before each tool call.
-    * ``tool_finished(name, result_json)`` — after each tool call.
+    * ``tool_started(name, args_json)`` — before each tool call, and also
+      for a call rejected before dispatch (route/schema validation failure)
+      so rejected calls are visible in the chat log instead of silently
+      vanishing.
+    * ``tool_finished(name, result_json)`` — after each tool call, and for
+      a rejected call's error result (see above).
     * ``response_chunk(text)`` — one round's model output text, emitted as
       each round completes (or a fallback emitted once, for the final-only
       error paths that never produce a round chunk).
@@ -106,6 +110,7 @@ class AgentWorker(QObject):
                 self.user_message,
                 on_tool_start=self._emit_tool_started,
                 on_tool_end=self._emit_tool_finished,
+                on_tool_rejected=self._emit_tool_rejected,
                 cancel_event=self._cancel_event,
             ):
                 if self._is_cancelled:
@@ -173,6 +178,13 @@ class AgentWorker(QObject):
         if self._is_cancelled:
             return
         self.tool_finished.emit(name, json.dumps(result, sort_keys=True, default=str))
+
+    def _emit_tool_rejected(self, name: str, args: dict[str, Any], result: Any) -> None:
+        """Route a pre-dispatch rejection through the same started/finished
+        signals a normal call uses, so it renders identically in the chat
+        log instead of vanishing silently at the agent-tool boundary."""
+        self._emit_tool_started(name, args)
+        self._emit_tool_finished(name, result)
 
     def cancel(self) -> None:
         """Cooperatively cancel the in-flight turn.

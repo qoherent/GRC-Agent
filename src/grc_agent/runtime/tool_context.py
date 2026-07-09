@@ -10,10 +10,11 @@ from collections.abc import Callable
 from typing import Any
 
 PreviewCallback = Callable[..., list[dict[str, Any]]]
-# Tools whose results go through wrapper-result compaction.
-# Kept in sync with MVP_MODEL_TOOL_NAMES in runtime/model_context.py;
-# derived at runtime in P2 to break the import cycle
-# between tool_context <-> model_context.
+# Tools whose results go through wrapper-result compaction (recursive
+# drop-empty via _drop_empty_recursive). A hand-maintained subset of the
+# 5-tool MVP_MODEL_TOOL_NAMES (runtime/model_context.py) — deliberately
+# narrower, NOT derived from it at runtime: web_search/web_fetch return
+# flatter, already-compact payloads and are not included here.
 _MODEL_WRAPPER_NAMES: frozenset[str] = frozenset(
     {
         "inspect_graph",

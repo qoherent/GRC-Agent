@@ -196,7 +196,7 @@ def render_model_messages(
 
 # -- system prompt (was prompt.py) --
 
-__version__ = "2026-07-02-concise-no-latex"
+__version__ = "2026-07-07-explicit-update-states"
 
 
 def build_system_prompt(session_id: str | None = None) -> str:
@@ -207,9 +207,14 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "inspect_graph: read topology, blocks, connections, field values, and validation status. "
         "Pass a targets list of block instance names to scope it to those blocks instead of the whole graph.\n"
         "query_knowledge: search catalog blocks or GNU Radio documentation.\n"
+        "web_search: search the live web. web_fetch: fetch a specific page by URL.\n"
         "change_graph: add/remove blocks, edit field values, add/remove connections.\n"
         "Parameter values are string expressions; a variable reference is simply the variable's name (e.g. use 'base_freq * 1.5', NOT 'vars.base_freq * 1.5').\n"
-        "Connections use numeric port keys (e.g. '0', '1', '2'), not names like 'out', 'in(0)', or 'in0'. GRC error messages like 'in(0)' refer to port index '0'.\n"
+        "Set a type-controlling parameter (e.g. 'type', 'itype', 'otype') to the literal value 'auto' "
+        "to resolve it from a connected neighbor's dtype instead of guessing a value.\n"
+        "Stream-port connections use numeric port keys (e.g. '0', '1', '2'), not names like 'out', 'in(0)', or 'in0'. "
+        "GRC error messages like 'in(0)' refer to port index '0'. Message ports are the exception: "
+        "they use their exact declared string identifier (e.g. 'pdus', 'msg') instead of a numeric index.\n"
         "Do not attempt to rename blocks by changing the 'id' parameter in update_params; "
         "changing a block's ID is not supported and will be ignored. To rename a block, you must remove it and add a new one.\n"
         'Variables are blocks; use block_id "variable" (not "parameter") to add one.\n'
@@ -218,12 +223,17 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "and verify that validation.status is 'valid'.\n"
         "A change_graph call that returns ok=false applied nothing — the batch was rolled back. "
         "Read the errors, adjust the call, and retry; do not resubmit identical arguments.\n"
+        "Describing a change_graph call in your reply text does not execute it; only an actual tool call applies changes to the graph.\n"
         "The force=True flag in change_graph commits edits but does not resolve errors; "
         "you must still fix any unconnected ports or blocks to make the graph valid.\n"
-        "Disabling a block that is part of a connection fails native validation ('Port is not connected'); "
+        "To change a block's enablement, use the update_states batch field: "
+        "{instance_name, state}, where state is enabled, disabled, or bypass.\n"
+        "'Port is not connected' means a required port has zero active connections — this includes a "
+        "newly added block that was never wired up, not only a block being disabled. "
+        "Disabling a block that is part of a connection also fails this same validation; "
         "use state=bypass to take a connected block out of service without breaking the graph, "
         "or force=true to commit the disabled state anyway.\n"
-        "When removing blocks, also remove or disable any source blocks that become unconnected.\n"
+        "When removing blocks, also update_states (disabled/bypass) or remove any source blocks that become unconnected.\n"
         "Never use hallucinated block IDs; if query_knowledge does not return a block ID, it does not exist.\n"
         "When the user asks a question, answer concisely: lead with the direct answer, then add only the context needed to act on it.\n"
         "Do not use LaTeX or TeX math notation in chat replies; write math inline in plain text (e.g. `350 microHz`, `f^2`, `x_i`).\n"
@@ -252,13 +262,11 @@ class ToolSurface:
 
     name: str
     model_tool_names: tuple[str, ...]
-    default_max_tool_rounds: int
 
 
 MVP_TOOL_SURFACE = ToolSurface(
     name="mvp",
     model_tool_names=MVP_MODEL_TOOL_NAMES,
-    default_max_tool_rounds=8,
 )
 
 __all__ = ["render_model_messages"]

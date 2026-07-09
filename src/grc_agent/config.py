@@ -147,8 +147,6 @@ class LlamaConfig:
     model: str = _DEFAULT_OLLAMA_MODEL
     embedding_model: str = _DEFAULT_OLLAMA_EMBEDDING_MODEL
     backend: str = "ollama"
-    max_tokens: int = 4096
-    max_tool_rounds: int = 8
     request_timeout_seconds: float = 120.0
 
 
@@ -300,18 +298,6 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
             model=default_chat_model(llama_backend),
             embedding_model=default_embedding_model(llama_backend),
             backend=llama_backend,
-            max_tokens=_optional_positive_int(
-                llama_table,
-                "max_tokens",
-                default=defaults.llama.max_tokens,
-                context="[llama]",
-            ),
-            max_tool_rounds=_optional_positive_int(
-                llama_table,
-                "max_tool_rounds",
-                default=defaults.llama.max_tool_rounds,
-                context="[llama]",
-            ),
             request_timeout_seconds=_optional_positive_float(
                 llama_table,
                 "request_timeout_seconds",

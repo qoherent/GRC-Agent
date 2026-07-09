@@ -120,7 +120,17 @@ def _specific(agent: GrcAgent, *, targets: list[str]) -> dict[str, Any]:
                 {
                     "code": "block_not_found",
                     "message": f"Unknown block name(s): {', '.join(missing)}",
-                    "valid_block_names": sorted(valid_set),
+                    # Paired with block_id (not a bare name list) so a
+                    # requested target that describes a block by role/kind
+                    # (e.g. "the noise source") can be matched to the right
+                    # instance_name without a second, wasted overview call.
+                    "valid_blocks": sorted(
+                        (
+                            {"instance_name": b["instance_name"], "block_id": b["block_id"]}
+                            for b in blocks
+                        ),
+                        key=lambda b: b["instance_name"],
+                    ),
                 }
             ],
         )

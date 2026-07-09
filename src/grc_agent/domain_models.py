@@ -52,6 +52,16 @@ class ValidationStatus(StrEnum):
 # --------------------------------------------------------------------------- #
 
 
+class GrcPort(BaseModel):
+    """A single port on a live GRC block, as seen by the model."""
+
+    model_config = ConfigDict(extra="forbid")
+    port_id: str
+    dtype: str
+    domain: str | None = None
+    connected: bool
+
+
 class GrcBlock(BaseModel):
     """A single GRC block as seen by the model."""
 
@@ -61,6 +71,8 @@ class GrcBlock(BaseModel):
     role: BlockRole
     state: str
     params: dict[str, str] = Field(default_factory=dict)
+    inputs: list[GrcPort] = Field(default_factory=list)
+    outputs: list[GrcPort] = Field(default_factory=list)
 
 
 class GrcValidation(BaseModel):

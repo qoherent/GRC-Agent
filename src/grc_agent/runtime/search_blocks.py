@@ -1,8 +1,7 @@
 """search_blocks wrapper — vector search over the GNU Radio catalog.
 
 sqlite-vec + embeddinggemma KNN. Each hit is rendered through
-:meth:`BlockDescription.to_payload`, so the model sees the same filtered
-param shape as :func:`describe_block` (Stage A only — hide='all', Advanced,
+:meth:`BlockDescription.to_payload` (Stage A only — hide='all', Advanced,
 Config, gui_hint are dropped via the unified :mod:`param_filter` rule).
 """
 
@@ -77,8 +76,7 @@ def _ensure_catalog_index(agent: GrcAgent) -> bool:
 def _render_hit(raw_block: Any, distance: float) -> dict[str, Any] | None:
     """One vector-store hit rendered as a model-facing block summary.
 
-    Uses :meth:`BlockDescription.to_payload` (Stage B filter) for the params,
-    so the model sees the same per-block shape as :func:`describe_block`.
+    Uses :meth:`BlockDescription.to_payload` (Stage B filter) for the params.
     The per-block ``ok`` flag is dropped — the outer payload owns that.
     """
     try:

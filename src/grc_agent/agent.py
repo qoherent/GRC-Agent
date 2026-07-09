@@ -16,7 +16,7 @@ from typing import Any
 from ToolAgents.data_models.chat_history import ChatHistory
 from ToolAgents.data_models.messages import ChatMessage
 
-from grc_agent.config import AgentConfig, default_app_config
+from grc_agent.config import AgentConfig, LlamaConfig, default_app_config
 from grc_agent.domain_models import ErrorCode
 from grc_agent.flowgraph_session import FlowgraphSession
 from grc_agent.history import (
@@ -29,7 +29,6 @@ from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
 from grc_agent.runtime.inspect_graph import inspect_graph as inspect_graph_wrapper
 from grc_agent.runtime.model_context import (
     GRAPH_MUTATING_TOOL_NAME,
-    MVP_MODEL_TOOL_NAMES,
     MVP_TOOL_SURFACE,
     build_system_prompt,
     render_model_messages,
@@ -58,41 +57,31 @@ class GrcAgent:
         catalog_root: str | None = None,
         config: AgentConfig | None = None,
         history_journal_path: str | Path | None = None,
-        llama_server_url: str | None = None,
-        llama_model: str | None = None,
-        llama_request_timeout_seconds: float | None = None,
+        llama_config: LlamaConfig | None = None,
     ) -> None:
         self.session = FlowgraphSession() if session is None else session
         self.catalog_root = str(catalog_root) if catalog_root is not None else None
         self.config = config or default_app_config().agent
         self._retrieval_cfg = self.config.retrieval
         self._guardrails_cfg = self.config.guardrails
-        llama_defaults = default_app_config().llama
-        self._llama_server_url = (
-            llama_server_url
-            if isinstance(llama_server_url, str) and llama_server_url.strip()
-            else llama_defaults.server_url
-        )
-        self._llama_model = (
-            llama_model
-            if isinstance(llama_model, str) and llama_model.strip()
-            else llama_defaults.model
-        )
-        self._llama_backend = llama_defaults.backend
-        self._embedding_model = llama_defaults.embedding_model
+        # ``llama_config`` is the one source of truth for the LLM/embedding
+        # backend: callers that already resolved it (the GUI's
+        # ``load_app_config()`` + user-preferences overlay) pass it straight
+        # through here instead of it being silently re-derived from
+        # unconditional built-in defaults. Falls back to those defaults only
+        # when the caller has no resolved config (tests, standalone scripts).
+        resolved_llama = llama_config or default_app_config().llama
+        self._llama_server_url = resolved_llama.server_url
+        self._llama_model = resolved_llama.model
+        self._llama_backend = resolved_llama.backend
+        self._embedding_model = resolved_llama.embedding_model
         # Embeddings ride the same backend as chat (Approach A): OpenRouter
         # embeddings need OPENROUTER_API_KEY; Ollama ignores the key. Resolved
         # once here and refreshable via ``reconfigure_llama_runtime`` after a
         # GUI backend swap so the embedding path always matches the active chat
         # backend.
         self._embedding_api_key = self._resolve_embedding_api_key(self._llama_backend)
-        self._llama_request_timeout_seconds = (
-            float(llama_request_timeout_seconds)
-            if isinstance(llama_request_timeout_seconds, int | float)
-            and not isinstance(llama_request_timeout_seconds, bool)
-            and float(llama_request_timeout_seconds) > 0
-            else float(llama_defaults.request_timeout_seconds)
-        )
+        self._llama_request_timeout_seconds = resolved_llama.request_timeout_seconds
         self._history_journal = GraphHistoryJournal(
             history_journal_path,
             accepted_retention=self.config.history.checkpoint_retention,
@@ -273,11 +262,7 @@ class GrcAgent:
                 before=before_snapshot,
             )
             return surface_gate
-        validation_result = self.validate_tool_call(
-            tool_name,
-            kwargs,
-            model_tool_call=model_tool_call,
-        )
+        validation_result = self.validate_tool_call(tool_name, kwargs)
         if validation_result is not None:
             logger.info(
                 "tool_call_rejected tool=%s error_type=%s",
@@ -348,8 +333,6 @@ class GrcAgent:
         self,
         tool_name: str,
         kwargs: Any,
-        *,
-        model_tool_call: bool = False,
     ) -> ToolResult | None:
         """Validate one runtime tool call against the declared public schema.
 
@@ -357,18 +340,6 @@ class GrcAgent:
         normalize kwargs and run the surface gate before calling this,
         so neither is repeated here.
         """
-        if (
-            model_tool_call
-            and tool_name in MVP_MODEL_TOOL_NAMES
-            and isinstance(kwargs, dict)
-            and "debug" in kwargs
-        ):
-            return self._tool_result(
-                tool_name=tool_name,
-                ok=False,
-                message="Debug telemetry is not available through the model-facing tool surface.",
-                error_type=ErrorCode.INVALID_REQUEST,
-            )
         validation_error = validate_runtime_tool_call(tool_name, kwargs, self._tool_schema_map)
         if validation_error is None:
             return None

@@ -151,7 +151,10 @@ def main() -> None:
                     )
                 session = loaded
 
-    agent = GrcAgent(session=session)
+    # ``config`` already reflects the user's persisted backend preference
+    # (overlaid above) — the single resolved config is passed to the agent,
+    # the backend probe, and the window, so all three agree on the backend.
+    agent = GrcAgent(session=session, llama_config=config.llama)
     agent.warmup_vector_index()
 
     # The inline model toolbar (ModelToolbar) replaces the old setup wizard

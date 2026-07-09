@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,9 +48,15 @@ class HistoryJournalTests(unittest.TestCase):
         self.assertEqual(rec["record_type"], "checkpoint")
         self.assertTrue(rec["accepted"])
 
-        # Get record
-        got = journal.get_record(rec["id"])
-        self.assertEqual(got["id"], rec["id"])
+        # Confirm the record actually persisted (no production reader exists
+        # for a single record by id, so query the journal file directly).
+        with sqlite3.connect(self.journal_path) as conn:
+            row = conn.execute(
+                "SELECT payload FROM history_records WHERE id=?", (rec["id"],)
+            ).fetchone()
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(json.loads(row[0])["id"], rec["id"])
 
     def test_journal_no_connection_leak(self) -> None:
         session = load_grc(self.fixture_path)
@@ -56,7 +64,7 @@ class HistoryJournalTests(unittest.TestCase):
         before = snapshot_session(session)
         lineage = lineage_key_for_session(session)
 
-        # Run multiple records & list queries to ensure no file handle exhaustion
+        # Run multiple records & queries to ensure no file handle exhaustion
         for i in range(20):
             rec = journal.record_checkpoint(
                 lineage_key=lineage,
@@ -66,7 +74,10 @@ class HistoryJournalTests(unittest.TestCase):
                 tool_name="change_graph",
                 operation_type="add",
             )
-            journal.get_record(rec["id"])
+            with sqlite3.connect(self.journal_path) as conn:
+                conn.execute(
+                    "SELECT payload FROM history_records WHERE id=?", (rec["id"],)
+                ).fetchone()
 
         # Unlink the database file. If a connection was leaked and left open, unlinking would fail
         # on Windows or we can check active handles.

@@ -14,29 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_EVALUATED_HIDE_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, str]] = {}
-
-
 def evaluated_param_hides(block_type: str, param_values: dict[str, Any]) -> dict[str, str]:
-    """GRC-core-evaluated 'hide' value ('none'|'part'|'all') per param key."""
-    cache_key = (
-        block_type,
-        tuple(
-            sorted(
-                (str(key), "" if value is None else str(value))
-                for key, value in param_values.items()
-            )
-        ),
-    )
-    cached = _EVALUATED_HIDE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    hides = _compute_evaluated_param_hides(block_type, param_values)
-    _EVALUATED_HIDE_CACHE[cache_key] = hides
-    return hides
-
-
-def _compute_evaluated_param_hides(block_type: str, param_values: dict[str, Any]) -> dict[str, str]:
     try:
         from grc_agent.grc_native_adapter import get_platform_or_none
 

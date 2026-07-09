@@ -29,13 +29,6 @@ class PerBackendPathTests(unittest.TestCase):
         self.assertNotEqual(catalog_db_path("ollama"), catalog_db_path("openrouter"))
         self.assertNotEqual(docs_db_path("ollama"), docs_db_path("openrouter"))
 
-    def test_legacy_constants_are_the_ollama_paths(self) -> None:
-        from grc_agent.runtime.catalog_vector import CATALOG_DB_PATH, catalog_db_path
-        from grc_agent.runtime.doc_answer import DB_PATH, docs_db_path
-
-        self.assertEqual(CATALOG_DB_PATH, catalog_db_path("ollama"))
-        self.assertEqual(DB_PATH, docs_db_path("ollama"))
-
 
 class NoHardcodedDimensionTests(unittest.TestCase):
     def test_no_embed_dim_literal_in_runtime(self) -> None:

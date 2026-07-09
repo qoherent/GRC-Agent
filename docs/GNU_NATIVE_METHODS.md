@@ -467,8 +467,8 @@ GRC provides native boolean properties to classify blocks:
 ## 3.5 Parameter Filtering (the agent's working code)
 
 The **single authority** is `grc_agent.runtime.param_filter.keep_param`.
-Every model-visible parameter payload — `inspect_graph` overview/details,
-catalog `describe_block`, and the catalog embed text — delegates its
+Every model-visible parameter payload — `inspect_graph` overview,
+catalog vector search, and the catalog embed text — delegates its
 keep/drop decision to it. The pipeline: drop `hide == 'all'` → drop
 `category in {Advanced, Config}` → drop `dtype == 'gui_hint'` →
 (prominence only) keep `dtype == 'enum'` OR `value != default` OR

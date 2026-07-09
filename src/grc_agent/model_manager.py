@@ -2,12 +2,8 @@
 
 The mutating counterpart (``pull_ollama_model``) is the only model-download
 path. All models are discovered and pulled directly from Ollama's native APIs.
-
-The module also exposes a detect-only :func:`probe_ollama_backend` helper
-that the GUI consumes. The helper is strictly read-only — it
-never starts, stops, or downloads anything. Per AGENTS.md, GRC Agent does
-not own the Ollama lifecycle; the user is responsible for ``ollama serve``
-and ``ollama pull <model>``.
+Per AGENTS.md, GRC Agent does not own the Ollama lifecycle; the user is
+responsible for running the Ollama server and pulling models themselves.
 """
 
 from __future__ import annotations
@@ -15,7 +11,6 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -110,137 +105,6 @@ def discover_ollama_models(
     return []
 
 
-@dataclass(frozen=True)
-class OllamaBackendStatus:
-    """Structured result of a single reachability + availability probe.
-
-    Returned by :func:`probe_ollama_backend`. The GUI consumes
-    this object so the same hint text reaches the user regardless of the
-    front-end. All fields are pure data — no Qt types, no logging side
-    effects — so the same status is renderable in a stderr block, a
-    QStackedWidget page, or a unit test assertion.
-    """
-
-    server_url: str
-    server_reachable: bool
-    model_alias: str
-    model_available: bool
-    available_models: list[str] = field(default_factory=list)
-    pull_command: str = ""
-    hint: str = ""
-
-
-def _fetch_ollama_tags(
-    server_url: str,
-    *,
-    client: httpx.Client | None = None,
-    timeout_seconds: float = 3.0,
-) -> list[str] | None:
-    """Return the list of model names from ``/api/tags`` or ``None`` on error.
-
-    The shared HTTP error path collapses every transport / decode failure
-    into a single ``None`` so the caller can branch on reachability
-    without re-implementing the same ``try/except`` ladder.
-    """
-    own_client = client is None
-    if own_client:
-        client = httpx.Client(timeout=timeout_seconds)
-    try:
-        response = client.get(
-            f"{server_url.rstrip('/')}/api/tags",
-            headers={"Accept": "application/json"},
-        )
-        data = response.json()
-        if isinstance(data, dict) and "models" in data:
-            return [m["name"] for m in data["models"] if isinstance(m, dict) and "name" in m]
-        return []
-    except Exception as exc:
-        logger.debug("Ollama tag probe failed on %s: %s", server_url, exc)
-        return None
-    finally:
-        if own_client:
-            client.close()
-
-
-def probe_ollama_backend(
-    server_url: str,
-    model_alias: str,
-    *,
-    client: httpx.Client | None = None,
-    timeout_seconds: float = 3.0,
-) -> OllamaBackendStatus:
-    """Detect-only probe of an Ollama server and the configured model.
-
-    Performs a single ``GET /api/tags`` and returns a frozen
-    :class:`OllamaBackendStatus`. The helper never starts the daemon,
-    never pulls a model, and never touches the network beyond the
-    probe itself. The GUI setup widget
-    consume the same status so the user sees identical wording in
-    both entry points.
-
-    The status is purely informational. A missing model is *not* an
-    error: the user is expected to pick from whatever is installed or
-    pull a new one themselves. ``model_available`` is ``False`` when
-    no alias is supplied, when the alias is not on the server, or when
-    the server is unreachable.
-    """
-    from grc_agent.toolagents_runtime import model_name_matches
-
-    server_url = (server_url or "").rstrip("/")
-    model_alias = (model_alias or "").strip()
-    pull_command = f"ollama pull {model_alias}" if model_alias else "ollama pull <model_name>"
-
-    tags = _fetch_ollama_tags(
-        server_url,
-        client=client,
-        timeout_seconds=timeout_seconds,
-    )
-
-    if tags is None:
-        hint = (
-            f"Ollama server is not reachable at {server_url}. "
-            "Run the following in a new terminal, then click Refresh:\n"
-            f"  ollama serve\n"
-            f"  {pull_command}"
-        )
-        return OllamaBackendStatus(
-            server_url=server_url,
-            server_reachable=False,
-            model_alias=model_alias,
-            model_available=False,
-            available_models=[],
-            pull_command=pull_command,
-            hint=hint,
-        )
-
-    available = list(tags)
-    model_available = bool(model_alias) and model_name_matches(model_alias, available)
-
-    if model_available:
-        hint = f"Ollama is running at {server_url} · model `{model_alias}` is ready."
-    elif model_alias:
-        hint = (
-            f"Ollama is running at {server_url} · `{model_alias}` is not installed. "
-            f"Use `ollama pull <model_name>` to download any ollama model, "
-            f"e.g. `ollama pull qwen3.5:9b-q4_K_M`."
-        )
-    else:
-        hint = (
-            f"Ollama is running at {server_url}. "
-            f"Use `ollama pull <model_name>` to download any ollama model, "
-            f"e.g. `ollama pull qwen3.5:9b-q4_K_M`."
-        )
-    return OllamaBackendStatus(
-        server_url=server_url,
-        server_reachable=True,
-        model_alias=model_alias,
-        model_available=model_available,
-        available_models=available,
-        pull_command=pull_command,
-        hint=hint,
-    )
-
-
 def check_ollama_tool_support(
     server_url: str,
     model_name: str,
@@ -320,9 +184,7 @@ def pull_ollama_model(
 
 
 __all__ = [
-    "OllamaBackendStatus",
     "check_ollama_tool_support",
     "discover_ollama_models",
-    "probe_ollama_backend",
     "pull_ollama_model",
 ]

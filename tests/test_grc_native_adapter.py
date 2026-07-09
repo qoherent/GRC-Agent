@@ -159,8 +159,11 @@ def test_render_parameter_matches_keep_param_for_every_param():
     future divergence between ``render_parameter`` and ``keep_param`` is
     caught too.
     """
+    from grc_agent.runtime.param_filter import type_controlling_params
+
     fg = load_flow_graph(FIXTURES / "qtgui_vector_sink_example.grc")
     target = next(b for b in fg.blocks if b.key.startswith("qtgui"))
+    controlling = type_controlling_params(target.key)
 
     for mode in (DETAILS, OVERVIEW):
         for k, p in target.params.items():
@@ -172,6 +175,7 @@ def test_render_parameter_matches_keep_param_for_every_param():
                 default=p.default,
                 mode=mode,
                 param_key=k,
+                is_type_controlling=k in controlling,
             )
             rendered = render_parameter(target, k, p, mode=mode)
             assert (rendered is None) == (not expected), (
@@ -187,6 +191,84 @@ def test_render_parameter_matches_keep_param_for_every_param():
     for k in rendered_block.params.keys():
         info = meta.get(k, {})
         assert info.get("category") not in EXCLUDED_PARAM_CATEGORIES
+
+
+def test_render_parameter_keeps_hide_none_param_that_matches_native_default():
+    """A ``hide: none`` param must always render, even when its value equals
+    the block's native default — live-model evidence
+    (``13_docs_informed_param_edit.md``): the model set
+    ``analog_sig_source_x_0.freq`` to ``1000``, which happens to be that
+    param's own GRC-declared default, and the param vanished from the very
+    ``inspect_graph`` call meant to confirm the edit. ``hide == 'none'``
+    means GRC's own property editor always shows it — value-vs-default must
+    not override that.
+    """
+    fixture = _temp_fixture("dial_tone.grc")
+    fg = load_flow_graph(fixture)
+    block = fg.get_block("analog_sig_source_x_0")
+    freq = block.params["freq"]
+    assert freq.hide == "none"
+    apply_mutation(fg, "update_params", instance_name="analog_sig_source_x_0", params={"freq": "1000"})
+    assert freq.value == freq.default  # the coincidence that triggered the bug
+    rendered = render_block(block, flow_graph=fg)
+    assert rendered.params["freq"] == "1000"
+
+
+def test_render_block_ports_stage_a_drops_hidden_stage_b_drops_optional_unconnected():
+    """Ports follow the same Stage A/B shape as params, in inspect_graph's
+    one mode: hidden ports never show (Stage A, already native via
+    active_sinks/active_sources); a required or connected port always
+    shows; an optional AND unconnected port is dropped (Stage B).
+
+    ``blocks_float_to_complex`` is real: input '0' (real part) is
+    required, input '1' (imaginary part) is optional, output '0' is
+    required — exercising all three cases in one block.
+    """
+    fixture = _temp_fixture("dial_tone.grc")
+    fg = load_flow_graph(fixture)
+    apply_mutation(
+        fg,
+        "add_block",
+        block_id="blocks_float_to_complex",
+        instance_name="f2c",
+    )
+    apply_mutation(
+        fg,
+        "add_connection",
+        src_block="analog_sig_source_x_0",
+        src_port="0",
+        dst_block="f2c",
+        dst_port="0",
+    )
+    fg.rewrite()
+
+    rendered = render_block(fg.get_block("f2c"), flow_graph=fg)
+    input_ids = {p.port_id: p for p in rendered.inputs}
+    assert input_ids["0"].connected is True
+    assert "1" not in input_ids, "optional + unconnected port '1' must be dropped"
+    assert len(rendered.outputs) == 1
+    assert rendered.outputs[0].connected is False
+    assert rendered.outputs[0].dtype == "complex"
+
+    # Now connect the optional port too — it must appear once it's in use.
+    apply_mutation(
+        fg,
+        "add_block",
+        block_id="analog_sig_source_x",
+        instance_name="imag_src",
+    )
+    apply_mutation(
+        fg,
+        "add_connection",
+        src_block="imag_src",
+        src_port="0",
+        dst_block="f2c",
+        dst_port="1",
+    )
+    fg.rewrite()
+    rendered = render_block(fg.get_block("f2c"), flow_graph=fg)
+    input_ids = {p.port_id: p for p in rendered.inputs}
+    assert input_ids["1"].connected is True
 
 
 # --- validate ----------------------------------------------------------------- #
@@ -274,7 +356,7 @@ def test_apply_mutation_dispatcher():
     apply_mutation(
         fg,
         "add_block",
-        block_type="analog_sig_source_x",
+        block_id="analog_sig_source_x",
         instance_name="dispatcher_src",
         parameters={"freq": "42"},
     )
@@ -351,10 +433,16 @@ def test_describe_block_payload_has_symmetry_keys():
         that ``add_blocks``/``update_params`` accept: ``block_id`` and ``params``
     (encoded ``dtype=default`` strings). Guards the consultant-approved symmetry
         contract. ``default_params`` was dropped (redundant — the default is
-        already the substring after ``=`` in each ``params`` value)."""
-    from grc_agent.catalog.loaders import describe_block
+        already the substring after ``=`` in each ``params`` value).
 
-    payload = describe_block("analog_sig_source_x")
+    Exercises the real, live path (``find_block_source`` +
+    ``_build_block_description`` + ``to_payload()``) — the same one
+    ``search_blocks.py`` uses — rather than the ``describe_block`` wrapper,
+    which has no production caller."""
+    from grc_agent.catalog.loaders import _build_block_description, find_block_source
+
+    raw_block = find_block_source("analog_sig_source_x")
+    payload = _build_block_description(raw_block).to_payload()
     assert payload.get("ok") is True
     assert payload["block_id"] == "analog_sig_source_x"
     # Encoded overview strings (dtype=default).
@@ -401,6 +489,78 @@ def test_change_graph_orphaned_port_hint_names_the_removed_block():
     # The hint must name the removed block that caused the orphan, so the
     # model can infer it must also remove/reconnect the noise source or force.
     assert "blocks_add_xx" in noise_error.get("hint", "")
+
+
+# --- scoped inspect_graph: unknown-target error names block_id too --------- #
+
+
+def test_inspect_graph_unknown_target_error_pairs_block_id_with_instance_name():
+    """A ``targets`` miss must return enough to resolve a role-based
+    description (e.g. "the noise source") to the right instance_name
+    without a second, wasted overview call — a bare instance-name list
+    alone can't distinguish two ``analog_sig_source_x`` instances from
+    each other by role.
+    """
+    from grc_agent.agent import GrcAgent
+    from grc_agent.flowgraph_session import FlowgraphSession
+
+    session = FlowgraphSession()
+    session.load(str(FIXTURES / "dial_tone.grc"))
+    agent = GrcAgent(session=session)
+
+    result = agent.execute_tool(
+        "inspect_graph", {"targets": ["sample_rate", "the noise source"]}
+    )
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "block_not_found"
+    valid_blocks = {b["instance_name"]: b["block_id"] for b in error["valid_blocks"]}
+    assert valid_blocks["samp_rate"] == "variable"
+    assert valid_blocks["analog_noise_source_x_0"] == "analog_noise_source_x"
+
+
+# --- missing-port error names the port-count-controlling param ------------- #
+
+
+def test_missing_port_error_names_port_count_controlling_param():
+    """Connecting to a port index beyond a block's current port count (e.g.
+    port '3' on a 3-input adder) must name the param that actually controls
+    the count (native-derived — 'num_inputs' for blocks_add_xx, but this
+    varies per block, e.g. 'num_streams' for pad_source) and its current
+    value, so the model knows to raise it via update_params instead of
+    treating the connection itself as malformed. Reproduces the scenario 20
+    failure signature: repeated 'sink port not on block' errors with no
+    param-level guidance.
+    """
+    from grc_agent.agent import GrcAgent
+    from grc_agent.flowgraph_session import FlowgraphSession
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    session = FlowgraphSession()
+    session.load(str(FIXTURES / "dial_tone.grc"))
+    agent = GrcAgent(session=session)
+
+    result = dispatch_flat_change_graph_batch(
+        agent,
+        add_connections=["analog_sig_source_x_0:0->blocks_add_xx:3"],
+    )
+
+    assert result["ok"] is False
+    message = result["errors"][0]["message"]
+    assert "num_inputs" in message
+    assert "3" in message  # the param's current value, before the model bumps it
+
+
+def test_port_count_controlling_params_varies_per_block():
+    """No hardcoded name: blocks_add_xx is controlled by 'num_inputs',
+    pad_source by 'num_streams', and a block with no expandable ports
+    (blocks_throttle) reports none."""
+    from grc_agent.runtime.param_filter import port_count_controlling_params
+
+    assert port_count_controlling_params("blocks_add_xx") == frozenset({"num_inputs"})
+    assert port_count_controlling_params("pad_source") == frozenset({"num_streams"})
+    assert port_count_controlling_params("blocks_throttle") == frozenset()
 
 
 # --- Phase 0: disabled vs bypass native semantics (regression anchor) -------- #
@@ -513,8 +673,8 @@ def test_catalog_stream_ports_carry_positional_keys():
     desc = _build_block_description(audio)
     compact = [p.to_compact_dict() for p in desc.inputs]
     assert compact, "audio_sink should have inputs"
-    assert "id" in compact[0], "stream port must expose positional key"
-    assert compact[0]["id"] == "0"
+    assert "port_id" in compact[0], "stream port must expose positional key"
+    assert compact[0]["port_id"] == "0"
 
 
 def test_type_hint_names_neighbor_dtype_not_source_type():
@@ -556,6 +716,66 @@ def test_type_hint_names_neighbor_dtype_not_source_type():
     # The hint must point at 'float' (the dtype to adopt), NOT 'complex'.
     assert any("'third_tone' type enum includes 'float'" in h for h in hints), hints
     assert not any("includes 'complex'" in h for h in hints), hints
+
+
+def test_type_hint_generalizes_to_itype_otype_blocks():
+    """The validation-error type hint must not hardcode the literal name
+    ``"type"`` — a block using ``itype``/``otype`` (e.g.
+    ``fec_generic_encoder``) must get a hint naming the correct param, not
+    silently get no hint at all (the bug: ``_type_hint_for_validation`` did
+    ``block.params.get("type")`` directly instead of using the existing
+    ``type_controlling_params`` helper already used elsewhere in this file)."""
+    from grc_agent.agent import GrcAgent
+    from grc_agent.flowgraph_session import FlowgraphSession
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    session = FlowgraphSession()
+    session.load(str(_temp_fixture("dial_tone.grc")))
+    agent = GrcAgent(session=session)
+    result = dispatch_flat_change_graph_batch(
+        agent,
+        add_blocks=[
+            {
+                "block_id": "fec_generic_encoder",
+                "instance_name": "enc",
+                "params": {"encoder": "None", "itype": "complex", "otype": "complex"},
+            }
+        ],
+        add_connections=["analog_sig_source_x_0:0->enc:0"],  # float -> complex mismatch
+    )
+    assert result["ok"] is False
+    hints = [
+        e.get("hint", "") for e in result.get("errors", []) if e.get("code") == "gnu_validation"
+    ]
+    assert any("'enc' itype enum includes 'float'" in h for h in hints), hints
+
+
+def test_connect_missing_block_names_the_block_not_a_wrong_port():
+    """A connection referencing a block that was never created (e.g. its own
+    ``add_blocks`` entry failed earlier in the same batch, such as a
+    hallucinated block type) must say the block doesn't exist — not "port
+    '0' not on block 'x'", which reads as a wrong port on an existing
+    block and actively misleads about the real defect. Live-trace
+    regression: ``05_full_rewire.md`` / ``04_add_and_remove_variable.md``
+    both showed this exact misleading message."""
+    from grc_agent.agent import GrcAgent
+    from grc_agent.flowgraph_session import FlowgraphSession
+    from grc_agent.runtime.change_graph import dispatch_flat_change_graph_batch
+
+    session = FlowgraphSession()
+    session.load(str(_temp_fixture("dial_tone.grc")))
+    agent = GrcAgent(session=session)
+    result = dispatch_flat_change_graph_batch(
+        agent,
+        add_blocks=[
+            {"block_id": "nonexistent_hallucinated_block", "instance_name": "dc_offset", "params": {}}
+        ],
+        add_connections=["dc_offset:0->blocks_add_xx:2"],
+    )
+    assert result["ok"] is False
+    messages = [e.get("message", "") for e in result.get("errors", [])]
+    assert any("'dc_offset' does not exist" in m for m in messages), messages
+    assert not any("port '0' not on block 'dc_offset'" in m for m in messages), messages
 
 
 def test_auto_resolve_sees_port_created_by_same_batch_num_inputs_bump():

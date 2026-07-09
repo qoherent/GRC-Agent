@@ -283,15 +283,6 @@ class GraphHistoryJournal:
         self._insert(record)
         return record
 
-    def get_record(self, record_id: str) -> dict[str, Any]:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT payload FROM history_records WHERE id=?", (record_id,)
-            ).fetchone()
-        if row is None:
-            raise KeyError(record_id)
-        return json.loads(row["payload"])
-
     def _base_record(
         self,
         *,

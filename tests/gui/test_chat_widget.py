@@ -17,6 +17,28 @@ def test_chat_widget_imports_exist():
     assert ChatWidget is not None, "ChatWidget class not implemented yet"
 
 
+def test_render_error_html_short_text_has_no_marker():
+    from grc_agent_gui.chat_widget import _render_error_html
+
+    html_out = _render_error_html("a short error")
+    assert "TRUNCATED" not in html_out
+    assert "a short error" in html_out
+
+
+def test_render_error_html_long_text_truncates_once_with_marker():
+    """Regression: main_window used to pre-clip to 300 chars before this
+    function clipped to 200 again, silently double-cutting the text with
+    no indication anything was cut. There must be exactly one truncation,
+    and it must be marked."""
+    from grc_agent_gui.chat_widget import _render_error_html
+
+    long_text = "x" * 500
+    html_out = _render_error_html(long_text)
+    assert "[TRUNCATED: was 500 chars]" in html_out
+    assert "x" * 200 in html_out
+    assert "x" * 201 not in html_out
+
+
 def test_chat_widget_uses_qtextbrowser(qtbot):
     """Verify that ChatWidget uses QTextBrowser internally and has an input field."""
     widget = ChatWidget()

@@ -14,7 +14,7 @@ shape applied to every docs chunk:
     in distance order with their source attribution. No query taxonomy,
     no answer-type classification, no catalog cross-reference.
 
-Module-level ``DB_PATH`` is the single filesystem coordinate; tests and the
+Module-level ``DB_DIR`` is the single filesystem coordinate; tests and the
 agent warmup capture it at import time (see ``conftest.py``).
 """
 
@@ -35,7 +35,7 @@ from grc_agent.runtime._embedding_config import (
     _QUERY_PREFIX,
 )
 from grc_agent.runtime._vector_store_base import VectorStoreBase
-from grc_agent.runtime.llm_client import call_agent_llm
+from grc_agent.runtime.llm_client import _openai_base_url, call_agent_llm
 from grc_agent.runtime.llm_client import cap_words as _cap_words
 
 if TYPE_CHECKING:
@@ -63,25 +63,10 @@ def docs_db_path(backend: str) -> Path:
     return DB_DIR / f"docs_{backend}.db"
 
 
-# Legacy module-level constant (ollama path) for importers that don't know the
-# active backend. The live pipeline resolves the per-backend path via the agent.
-DB_PATH = docs_db_path("ollama")
 DOCS_DIR = Path(__file__).resolve().parents[3] / "docs" / "wiki_gnuradio_org"
 
 
 # --- Embedding ---------------------------------------------------------------
-
-
-def _openai_v1_base_url(server_url: str) -> str:
-    """Normalize a backend server URL to its OpenAI-compatible ``/v1`` endpoint.
-
-    One uniform rule for both backends: Ollama (``http://localhost:11434``) and
-    OpenRouter (``https://openrouter.ai/api``) both expose ``/v1/embeddings``.
-    """
-    base = server_url.rstrip("/")
-    if base.endswith("/v1"):
-        return base
-    return f"{base}/v1"
 
 
 def get_embedding(
@@ -103,7 +88,7 @@ def get_embedding(
     from openai import OpenAI
 
     client = OpenAI(
-        base_url=_openai_v1_base_url(server_url),
+        base_url=_openai_base_url(server_url),
         api_key=api_key,
         timeout=timeout,
     )
@@ -124,29 +109,75 @@ def embed_query(
 
 # --- Chunking ---------------------------------------------------------------
 
+_HEADING_MARKERS = ("# ", "## ", "### ", "#### ")
 
-def _chunk_markdown(path: Path) -> list[dict[str, str]]:
-    """Split one markdown file on top-level ``#`` sections.
 
-    Each section becomes ``{heading, text}`` where ``text`` is the heading
-    line plus the body that follows it, word-capped to ``_EMBED_MAX_WORDS``.
-    Files with no ``#`` heading collapse into one chunk whose ``heading``
-    is the file stem.
+def _split_on_marker(lines: list[str], marker: str) -> list[tuple[str | None, list[str]]]:
+    """Split ``lines`` into ``(heading, body)`` groups on lines starting with ``marker``.
+
+    A line matches only at this exact heading level — one level deeper
+    (``marker`` prefixed with one more ``#``) is not a boundary, so a
+    ``## `` pass doesn't also break on ``### `` lines. Content before the
+    first match becomes a ``(None, ...)`` preamble group.
     """
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    heading = path.stem.replace("_", " ")
-    sections: list[tuple[str, list[str]]] = [(heading, [])]
-    for line in raw.splitlines():
-        if line.startswith("# ") and not line.startswith("## "):
-            heading = line.lstrip("# ").strip() or path.stem
-            sections.append((heading, []))
+    deeper = "#" + marker
+    sections: list[tuple[str | None, list[str]]] = [(None, [])]
+    for line in lines:
+        if line.startswith(marker) and not line.startswith(deeper):
+            sections.append((line[len(marker) :].strip(), []))
         else:
             sections[-1][1].append(line)
-    return [
-        {"heading": h, "text": _cap_words("\n".join([h] + body).strip(), _EMBED_MAX_WORDS)}
-        for h, body in sections
-        if "\n".join(body).strip()
-    ]
+    return sections
+
+
+def _split_section(
+    heading: str, body_lines: list[str], marker_index: int = 1
+) -> list[dict[str, str]]:
+    """Recursively split an oversized section on progressively deeper headings.
+
+    Splits into ``"Parent > Sub"`` sub-chunks only when this section's body
+    would otherwise be truncated (word count exceeds ``_EMBED_MAX_WORDS`` —
+    the same measurement ``cap_words`` already uses, so no new arbitrary
+    threshold is introduced) and a deeper heading marker exists in the body.
+    Falls back to ``_cap_words`` truncation, unchanged, once no deeper
+    marker is available, none is found, or a leaf is still oversized after
+    the deepest level (``#### ``). Purely word-count- and marker-driven —
+    applies identically to every file, no per-file special-casing.
+    """
+    if not "\n".join(body_lines).strip():
+        return []
+    text = "\n".join([heading, *body_lines]).strip()
+    if len(text.split()) <= _EMBED_MAX_WORDS or marker_index >= len(_HEADING_MARKERS):
+        return [{"heading": heading, "text": _cap_words(text, _EMBED_MAX_WORDS)}]
+
+    subsections = _split_on_marker(body_lines, _HEADING_MARKERS[marker_index])
+    if len(subsections) <= 1:
+        return _split_section(heading, body_lines, marker_index + 1)
+
+    chunks: list[dict[str, str]] = []
+    for sub_heading, sub_body in subsections:
+        child_heading = heading if sub_heading is None else f"{heading} > {sub_heading}"
+        chunks.extend(_split_section(child_heading, sub_body, marker_index + 1))
+    return chunks
+
+
+def _chunk_markdown(path: Path) -> list[dict[str, str]]:
+    """Split one markdown file on ``#`` sections, recursing into ``##``/``###``
+    when a section would otherwise be truncated.
+
+    Each leaf becomes ``{heading, text}``, where ``heading`` chains as
+    ``"Parent > Sub"`` for recursed sub-sections and ``text`` is the
+    heading plus body, word-capped to ``_EMBED_MAX_WORDS`` as the final
+    safety net. Files with no ``#`` heading collapse into one top-level
+    section whose heading is the file stem.
+    """
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    fallback_heading = path.stem.replace("_", " ")
+    top_sections = _split_on_marker(raw.splitlines(), _HEADING_MARKERS[0])
+    chunks: list[dict[str, str]] = []
+    for heading, body in top_sections:
+        chunks.extend(_split_section(heading or fallback_heading, body))
+    return chunks
 
 
 def compose_chunk_text(path: Path, heading: str, body: str) -> str:

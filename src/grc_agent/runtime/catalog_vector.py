@@ -27,7 +27,10 @@ from typing import Any
 
 import sqlite_vec
 from grc_agent.runtime._vector_store_base import VectorStoreBase
-from grc_agent.runtime.doc_answer import get_embedding
+from grc_agent.runtime.doc_answer import (
+    embed_query,  # noqa: F401  (re-exported for callers)
+    get_embedding,
+)
 from grc_agent.runtime.param_filter import visible_param_keys
 
 logger = logging.getLogger(__name__)
@@ -50,18 +53,13 @@ def catalog_db_path(backend: str) -> Path:
     return DB_DIR / f"catalog_{backend}.db"
 
 
-# Legacy module-level constant (ollama path) for importers that don't know the
-# active backend. The live pipeline resolves the per-backend path via the agent.
-CATALOG_DB_PATH = catalog_db_path("ollama")
-
-
 # --- Embedding constants: single source of truth in _embedding_config ---------
 from grc_agent.runtime._embedding_config import (
     _DOCUMENT_PREFIX,
     _EMBED_MAX_WORDS,
     _EMBED_MODEL,
-    _QUERY_PREFIX,
-)  # noqa: F401  (re-exported for catalog-vector callers)
+    _QUERY_PREFIX,  # noqa: F401  (re-exported for callers)
+)
 
 # --- Hybrid retrieval (consultant-approved: FTS5-porter + vector, weighted RRF)
 RRF_K = 60  # standard Reciprocal Rank Fusion constant
@@ -202,13 +200,6 @@ def embed_block_text(
     if not body.startswith(_DOCUMENT_PREFIX):
         body = _DOCUMENT_PREFIX + body
     return get_embedding(server_url, body, model=model, api_key=api_key)
-
-
-def embed_query(
-    server_url: str, query: str, *, model: str = _EMBED_MODEL, api_key: str = "not-needed"
-) -> list[float]:
-    """Embed a search query with the uniform query prefix."""
-    return get_embedding(server_url, _QUERY_PREFIX + query, model=model, api_key=api_key)
 
 
 class VectorCatalogStore(VectorStoreBase):

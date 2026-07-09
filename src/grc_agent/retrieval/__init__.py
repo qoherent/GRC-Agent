@@ -82,11 +82,11 @@ def warmup_catalog_vector_index(
 def initialize_retrieval(
     *,
     catalog_root: str | Path | None = None,
-    warm_catalog: bool = False,
-    server_url: str | None = None,
     backend: str = "ollama",
 ) -> dict[str, Any]:
-    _ = warm_catalog
+    """Check catalog readiness. Does not warm the vector index itself —
+    that's ``GrcAgent.warmup_vector_index()``'s job (it forwards the
+    embedding model/api_key this function doesn't receive)."""
     try:
         root = discover_catalog_root(catalog_root)
         files = collect_catalog_files(root)
@@ -94,7 +94,7 @@ def initialize_retrieval(
     except CatalogLoadError as exc:
         return build_error_payload(error_type=ErrorCode.RETRIEVAL_NOT_READY, message=str(exc))
 
-    payload = {
+    return {
         "ok": True,
         "message": "Retrieval ready.",
         "catalog_root": str(root),
@@ -106,14 +106,6 @@ def initialize_retrieval(
         "catalog_index_warmed": is_catalog_db_usable(catalog_db_path(backend)),
         "retrieval_backend": "vector",
     }
-    if warm_catalog and server_url and not payload["catalog_index_warmed"]:
-        try:
-            warm = warmup_catalog_vector_index(catalog_root=root, server_url=server_url)
-            payload["catalog_index_warmed"] = bool(warm.get("ok"))
-            payload["catalog_warmup"] = warm
-        except Exception as exc:
-            payload["catalog_warmup_error"] = str(exc)
-    return payload
 
 
 __all__ = [

@@ -80,9 +80,12 @@ Five model-facing wrapper tools (the entire MVP model surface):
 - **Manual execution loop:** `ToolAgentsRunner._run_turn_events` with bounded `.step()`.
 - **No result caching.** Every call hits the live backend fresh.
 - **Context window:** there is no per-request `num_ctx` — Ollama's `/v1` endpoint ignores it, so `ToolAgentsLlamaProviderConfig` deliberately sends none (regression-guarded by `tests/test_toolagents_runtime.py::test_ollama_provider_settings_has_no_per_request_num_ctx`). A large context window is baked into the Ollama Modelfile (e.g. `gemma4:e4b-it-qat-120k`).
+- **No generation-length cap either.** `create_settings()` sends no `max_tokens` — a prior hardcoded cap was confirmed by direct replay to truncate a model mid-reasoning before it could emit a tool call. The backend's own maximum output capacity is used instead (AGENTS.md "Maximizing Context & No String-Based Clipping").
 - **Context compaction:** one-pass proportional slicing with truncation flags.
 - **Wire-format role safety:** runtime directives injected as `user`-role only.
-- **`change_graph` output is minimal.** Success: `{"ok": true}`. Failure: `{"ok": false, "error_type": "...", "errors": [{"code": "...", "message": "..."}]}`. Validation errors surface as `errors[].code == "gnu_validation"`. The `force=True` flag bypasses validation but the batch is still applied; the model must read `ok` to know whether edits applied.
+- **`change_graph` output is minimal.** Success: `{"ok": true}`. Failure: `{"ok": false, "error_type": "...", "errors": [{"code": "...", "message": "..."}]}`. Validation errors surface as `errors[].code == "gnu_validation"`. The `force=True` flag bypasses validation but the batch is still applied; the model must read `ok` to know whether edits applied. A batch with every operation array empty/absent is rejected (`error_type: invalid_request`) rather than trivially returning `ok=true` with nothing applied.
+- **Stuck-loop detection, two layers:** a tight detector on byte-identical repeated failing arguments (same tool + same args, native to `_call_signature`), and a looser detector on repeated failures of the same category (same tool + same `error_type`/error code, higher threshold) that catches a model varying its arguments each time while repeating the same underlying mistake. Either tripping stops the turn with `error_type: safety_ceiling_reached` instead of burning the turn budget on a run that will never converge — there is no round-count ceiling (`max_tool_rounds` was removed as dead config once loop detection replaced it; the loop is bounded only by loop/stuck detection).
+- **Degenerate-response retries are visible, not just logged.** `_fetch_model_response` yields a `degenerate_retry` event (attempt number, `max_attempts`, `finish_reason`) whenever the model returns no content and no tool calls and the runner retries — previously this only produced a `logger.warning` with no trace in `agent.chat_history` or any yielded event, so a saved transcript couldn't show it happened. Not model-facing (dev/debug observability only, same category as the `on_tool_rejected` hook); retry behavior itself is unchanged.
 
 ---
 
@@ -99,13 +102,16 @@ Five model-facing wrapper tools (the entire MVP model surface):
 
 ## Key Conventions
 
-- **Param filtering** (one rule, in `param_filter.py`): Stage A (every mode) drops `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`. Stage B (overview mode only) keeps `hide == "none"` OR `dtype == "enum"` OR `value != default` OR `references_variable`. Details mode = Stage A only; overview mode = Stage A + Stage B. Do not reimplement filtering inline. Three narrow, documented structural exceptions precede both stages (`dtype == "id"`, `showports`, `bus_structure_*`) — see the module docstring in `param_filter.py` for why each one can't be derived from a uniform hide/category/dtype rule.
+- **Param filtering** (one rule, in `param_filter.py`): Stage A (every mode) drops `hide == "all"`, `category ∈ {Advanced, Config}`, `dtype == "gui_hint"`. Stage B (overview mode only) keeps `hide == "none"` OR `dtype == "enum"` OR `value != default` OR `references_variable` OR the param is type-controlling (native-derived via `type_controlling_params`, from each port's raw dtype template — not a hardcoded name) OR `generate_options`. Details mode = Stage A only; overview mode = Stage A + Stage B. Do not reimplement filtering inline. Four narrow, documented structural exceptions precede/extend the two stages (`dtype == "id"`, `showports`, `bus_structure_*`, `generate_options`) — see the module docstring in `param_filter.py` for why each one can't be derived from a uniform hide/category/dtype rule.
 - **State values:** `enabled`, `disabled`, `bypass` (accept `bypassed` as alias). Use `Block.STATE_LABELS` for validation, not a hardcoded set.
 - **Block lookup:** use native `flow_graph.get_block(name)`, not a manual scan.
 - **Graph identity:** file-bytes SHA-256 (cross-session) + `state_revision` counter (in-session). No deep-JSON hashing.
 - **Atomic save:** temp file → fsync → `os.replace()` → directory fsync. Lock via `fcntl.flock` on `.grc_agent/<name>.lock`. Backup saved before each save.
 - **Tool surface:** `agent.py` only registers the 5 MVP tools. No internal tools, no legacy tool registry.
 - **`change_graph` output:** `{"ok": true}` on success; `{"ok": false, "error_type": "...", "errors": [...]}` on failure. No `committed`, `ops_applied`, `state_revision`, `validation`, `hint`, `rejected_phase`, `graph_unchanged`, `native_validation_errors`, or `rollback` fields.
+- **Ports** (`inspect_graph`'s `GrcBlock.inputs`/`.outputs`): one uniform rule, same Stage A/B shape as params, no separate mode. Stage A drops hidden ports (native `Block.active_sinks`/`active_sources`, already filtered). Stage B additionally drops a port only if it is both `optional` and unconnected (native `Port.connections(enabled=True)`); required or connected ports always show. Catalog/`query_knowledge` ports get Stage A only (no live connections to check pre-instantiation).
+- **`type`/dtype auto-resolution:** `change_graph` accepts the literal string `"auto"` on any type-controlling param (native-derived per-block via `type_controlling_params`, e.g. `type`, or `itype`/`otype` for multi-type blocks) in both `add_blocks` and `update_params` — resolved from a connected neighbor's dtype. `add_blocks` falls back to GRC's own default silently if unresolvable (mirrors omitting the key); `update_params` returns an explicit `type_auto_unresolvable` error instead of guessing, since the model asked directly for an existing block. Manual override with a real value always still works.
+- **Port-count-controlling params:** `port_count_controlling_params(block_type)` in `param_filter.py` mirrors `type_controlling_params` exactly, but derives which param controls a block's *port count* (e.g. `num_inputs` for `blocks_add_xx`, `num_streams` for `pad_source` — no single conventional name) from each port's raw `_multiplicity` template, not a hardcoded name. `grc_native_adapter.py`'s `_find_port` uses it to name the controlling param and its current value when a connection targets a port index that doesn't exist yet, instead of leaving the model to guess that a param needs to change at all.
 
 ---
 
@@ -113,8 +119,8 @@ Five model-facing wrapper tools (the entire MVP model surface):
 
 | Marker | Command |
 |--------|---------|
-| default | `pytest -m "not grc_native and not gui and not llama_eval"` (388 passed, 6 skipped) |
-| `grc_native` | `pytest -m grc_native` (75 passed, 1 skipped; requires GNU Radio) |
-| `gui` | `xvfb-run pytest -m gui` (6 passed) |
+| default | `pytest -m "not grc_native and not gui and not llama_eval"` (387 passed, 6 skipped) |
+| `grc_native` | `pytest -m grc_native` (87 passed, 1 skipped; requires GNU Radio) |
+| `gui` | `xvfb-run pytest -m gui` (9 passed) |
 
 Default CI command: `pytest -m "not grc_native and not gui and not llama_eval"`. The `docs/MODEL_CONTEXT_BIBLE.md` staleness guard (`tests/test_model_context_bible.py`) runs in this default gate.

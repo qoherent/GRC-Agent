@@ -37,6 +37,31 @@ Pick one — or set up both and switch between them live in the GUI.
   ollama pull gemma4:e4b-it-qat-120k     # chat (tool-calling capable)
   ollama pull embeddinggemma:latest       # embeddings
   ```
+  A standard Ollama install already runs its server in the background for
+  you (a systemd service on Linux, a menu-bar app on macOS, a background
+  process on Windows) — you don't need to start anything yourself, and you
+  shouldn't manually run `ollama serve` in a terminal either: it's already
+  running, and a second instance just fails to start (port already in use)
+  instead of fixing anything.
+
+  **Context window:** Ollama's default context window is small and scales
+  with your GPU's VRAM (as low as 4096 tokens on modest hardware) — nowhere
+  near enough for this app's multi-turn tool-calling. This is a *server*
+  setting, so it has to be changed where Ollama is already running, once,
+  persistently — not per command:
+  - **Linux:** `sudo systemctl edit ollama`, add under `[Service]`:
+    `Environment="OLLAMA_CONTEXT_LENGTH=120000"`, then
+    `sudo systemctl daemon-reload && sudo systemctl restart ollama`.
+  - **macOS:** `launchctl setenv OLLAMA_CONTEXT_LENGTH 120000`, then quit and
+    reopen the Ollama app.
+  - **Windows:** Settings → search "environment variables" → add
+    `OLLAMA_CONTEXT_LENGTH` = `120000` (User variables) → restart Ollama.
+
+  (120000 matches the context baked into this app's default model,
+  `gemma4:e4b-it-qat-120k`.) After your first chat turn, confirm what a
+  model actually loaded with: `ollama ps`. Alternatively, bake `num_ctx`
+  into a custom Modelfile for one specific model instead of changing the
+  server default — see "Choosing a model" below.
 - **OpenRouter (cloud):** create a key at <https://openrouter.ai/> and put it
   in `.env` (see step 4). No local Ollama is required in OpenRouter mode —
   chat **and** embeddings go through OpenRouter.
@@ -127,10 +152,14 @@ Worked example — using Qwen3 27B locally:
 ollama pull qwen3:27b        # pull it yourself, then set in .env / GUI
 ```
 
-Then set `OLLAMA_MODEL=qwen3:27b` (or type it in the GUI's model field). For a
-large context window on Ollama, bake `num_ctx` into a custom Modelfile —
-Ollama's `/v1` endpoint ignores per-request `num_ctx`, so the window lives in
-the model, not the request.
+Then set `OLLAMA_MODEL=qwen3:27b` (or type it in the GUI's model field).
+Ollama's `/v1` endpoint (what this app calls) ignores per-request `num_ctx` —
+the context window has to be set where the model loads, not in the request.
+Two ways to do that: set `OLLAMA_CONTEXT_LENGTH` as a persistent server
+setting (see "LLM backend" → "Context window" above) to raise the default
+for every model at once; or bake `PARAMETER num_ctx <n>` into a custom
+Modelfile (`ollama create`) to set it for one specific model regardless of
+the server default.
 
 Embedding models are chosen the same way (`OLLAMA_EMBEDDING_MODEL` /
 `OPENROUTER_EMBEDDING_MODEL`, editable in the GUI). Switching embedding models

@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### Model reliability: prompt humanization + gemma4/laguna fixes
+
+- **Scenario prompts now describe blocks by role/position** ("the noise
+  source", "the adder") instead of quoting raw internal instance names — no
+  real user talks about `analog_sig_source_x_0`. This surfaced several real
+  bugs behind the humanization work, all fixed generally (no per-scenario
+  hacks):
+  - Catalog param values no longer leak their type-descriptor prefix
+    (`raw=X` → `[raw]=X`, matching the enum shape already parsed correctly).
+  - `param_filter.py`'s `keep_param()` now implements the `hide == 'none'`
+    branch its own docstring always claimed — a param whose value equals its
+    native default no longer silently vanishes from the overview.
+  - `inspect_graph`'s `block_not_found` error now pairs each valid name with
+    its `block_id`, so a role-based description can resolve without a
+    wasted extra call.
+  - New native-derived `port_count_controlling_params()` (mirrors
+    `type_controlling_params`) — a missing-port error now names the param
+    that controls that block's port count and its current value.
+  - `change_graph` rejects a batch with every operation array empty/absent
+    (`invalid_request`) instead of trivially returning `ok=true`.
+  - A second, more lenient stuck-loop detector catches a model varying its
+    arguments while repeating the same category of failure — cut one
+    pathological run from 135 turns to 13.
+  - A malformed tool call with corrupted arguments-in-name-field is now
+    diagnosed as "malformed call naming X" instead of "tool not available."
+  - One added declarative system-prompt fact: describing a `change_graph`
+    call in reply text does not execute it.
+  - A degenerate (no content, no tool calls) model response that gets
+    retried used to leave zero trace anywhere but a log line. Now yields a
+    `degenerate_retry` event (attempt number, `finish_reason`) so it shows
+    up in saved transcripts — dev/debug observability only, not model-facing.
+- **Deleted `max_tokens` entirely.** A hardcoded generation-length cap
+  (2048 in the test harness, smaller than production) was confirmed by
+  direct replay to truncate a model mid-reasoning before it could emit a
+  tool call. No cap is sent in any request now — the backend's own output
+  capacity is used, per AGENTS.md "no arbitrary limits."
+- **Deleted `max_tool_rounds` entirely.** Computed every turn but never
+  consumed to bound anything — the turn loop has been bounded only by
+  stuck-loop detection for some time, per its own code comment. Removed the
+  whole surface (`grc_agent.toml`, `LlamaConfig`, `ToolAgentsLlamaProviderConfig`,
+  `ToolSurface`) rather than leaving dead config accepted and validated.
+
 ### Context & session hardening audit
 
 - **Removed a real silent-drop bug in `sessions_store.py`.** The writer
@@ -44,6 +86,99 @@
   256 words (median real chunk size is 403 words); the new cap cuts that to
   28%. Verified against the live `embeddinggemma` endpoint and by rebuilding
   both vector indexes end-to-end.
+
+### Lean-code cleanup audit
+
+Seven parallel read-only subagents audited the 20 largest `.py` files (every
+dead-code claim verified via a recursive `grep -rn` across both `src/` and
+`tests/` before being reported) hunting for dead code, non-essential logic,
+and duplication. High-confidence findings implemented, verified against the
+full three-gate suite (default/`grc_native`/`gui`) after each file:
+
+- `param_filter.py`: deleted an unreachable duplicate `hide == "none"` check
+  (a check added earlier this session made a pre-existing later check
+  permanently unreachable); extracted `_throwaway_block()` to collapse the
+  duplicated platform/flow_graph/new_block dance shared by `param_metadata()`
+  and `port_metadata()`.
+- `change_graph.py`: deleted the orphaned `_neighbor_port_dtype()` (its sole
+  caller had already been rewritten to use `_live_neighbor_dtypes_for`);
+  removed an unused `existing_dtype` local from `_neighbor_dtype_for()`.
+- `grc_native_adapter.py`: `classify_role_from_catalog()`'s
+  `is_virtual_or_pad` check now matches GRC's own `Block.is_virtual_or_pad`
+  exactly (an exact 4-key match instead of a `.startswith()` heuristic);
+  `_find_port()` now reuses `port_object()` for its happy-path scan instead
+  of duplicating the lookup inline.
+- `catalog/schema.py`: deleted `compact_text()` and `build_signature()` (zero
+  production callers — only fed each other and their own unit tests);
+  `select_category_path()` simplified from a `(path, warnings)` tuple to a
+  bare `list[str]` (every caller discarded the warnings half);
+  `NormalizedParameter`/`NormalizedPort` dropped five unused fields
+  (`label`, `option_labels`, `option_attributes`, `base_key`, `vlen`,
+  `multiplicity`, `optional`, `hide` on the port side) never read outside
+  their own construction.
+- `chat_widget.py`: removed a vestigial `"text": ""` key on assistant-turn
+  dict literals (assistant entries carry text exclusively via `fragments`,
+  per the module's own documented convention); removed a no-op
+  `("text", None)` tuple entry from the math-symbol replacement loop.
+- `sessions_store.py`: dropped the unused `graph_exists` column from the
+  sessions table schema; removed a `DELETE FROM messages` in `clear_all`
+  that was redundant with the already-declared `ON DELETE CASCADE` foreign
+  key (cascade deletes still fire the FTS cleanup trigger).
+- `main_window.py`: removed ~15 `hasattr()` guards on attributes that are
+  always set unconditionally in `__init__` (kept the one legitimate
+  `hasattr(self, "_first_shown")` guard, which really is conditional);
+  simplified `hasattr(self.agent, "reset_chat_session")` × 4 to a direct
+  call (`GrcAgent` always defines it); deleted a dead `self.chat_display`
+  alias (only `self.chat_widget.chat_display` is ever read); collapsed the
+  3×-duplicated "session has a loaded flowgraph" check into
+  `_has_flowgraph_loaded()` and the 2×-duplicated "prefer
+  `provider_config.model` over `llama_config.model`" resolution into
+  `_resolved_model_name()`.
+- `toolagents_runtime.py`: deleted the orphaned `response_format` parameter
+  from `create_settings()` (confirmed via `git log -S` to be leftover
+  plumbing from a removed code path, never passed by any caller); extracted
+  `_apply_turn_counters()` to collapse the 4×-duplicated turn-result payload
+  field assembly; extracted `_model_message_event()`/`_last_message_event()`
+  to collapse the 9×-duplicated `model_message` event construction.
+- `run_agent_flow.py`: removed a stale `"Max tool rounds: system default
+  (8)"` print left over from the `max_tool_rounds` purge; fixed a dangling
+  comment citing the deleted `docs/AGENT_FLOW_FINDINGS.md`.
+
+**Deliberately left unchanged:** `hierarchy_warnings()`, `_looks_hierarchical()`
+(`catalog/schema.py`), and `resolves_to_hierarchical_class()`
+(`grc_native_adapter.py`) — all flagged dead (zero callers) by the audit, but
+kept per an earlier explicit decision this session to preserve the
+hierarchical-detection chain.
+
+### Config unification: one resolved `LlamaConfig`, no second silent resolution
+
+- **`GrcAgent.__init__` no longer re-derives its own LLM/embedding backend
+  state.** It used to always build `default_app_config().llama` internally
+  (hardcoded `backend="ollama"`) regardless of what `grc_agent.toml` or the
+  user's persisted provider preference said — so a same-process RAG
+  summarizer call (`call_agent_llm`, used by `doc_answer.py`/`web_answer.py`)
+  and the catalog/docs embedding index (`search_blocks.py`, `doc_answer.py`)
+  could silently target Ollama even when the main chat path (routed through
+  `ToolAgentsRunner`/`provider_config`) was correctly running against
+  OpenRouter. Replaced the three scattered override params
+  (`llama_server_url`, `llama_model`, `llama_request_timeout_seconds`) with
+  one `llama_config: LlamaConfig | None` parameter — the whole backend
+  identity moves as one coherent unit or not at all.
+- **`app.py` now passes its already-resolved config into the agent.**
+  `config = load_app_config()` is overlaid with the user's persisted
+  provider preference (`apply_user_preferences_to_llama_config`) exactly as
+  before; that same `config.llama` object is now threaded into
+  `GrcAgent(session=session, llama_config=config.llama)` instead of being
+  computed once for the window and never reaching the agent. One resolved
+  config, three consumers (`bootstrap_runtime`, `MainWindow`, `GrcAgent`) —
+  no second independent resolution path to drift out of sync.
+  `tests/agent_flow/run_agent_flow.py` and `tests/test_catalog_vector_live.py`
+  updated to the new parameter (the latter also drops a now-unnecessary
+  private-attribute poke of `agent._llama_server_url`).
+  `tests/test_config.py::GrcAgentLlamaConfigWiringTests` covers the fix
+  directly, including the exact regression scenario (a persisted
+  `provider_chosen="openrouter"` preference reaching the agent's runtime
+  state).
 
 ### Packaging & embedding provider
 

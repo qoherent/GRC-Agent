@@ -14,19 +14,14 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from grc_agent.domain_models import BlockRole, ErrorCode, build_error_payload
 from grc_agent.grc_native_adapter import (
     exclusive_file_lock,
     load_flow_graph,
     refuse_ambiguous_save_target,
-    render_flow_graph,
-    serialize_raw_data,
     validate,
     write_flow_graph_atomic,
     write_save_backup,
 )
-
-SUMMARY_PREVIEW_LIMIT = 3
 
 
 class FlowgraphSession:
@@ -41,10 +36,6 @@ class FlowgraphSession:
         self.path = Path(path) if path is not None else None
         self.flowgraph: Any | None = None
         self.is_dirty = False
-        # Validation snapshot (consumed by ``summary_payload`` to report
-        # status without re-running ``validate()`` on every call).
-        self.last_validation_ok: bool | None = None
-        self.last_validation_revision: int | None = None
         self._state_revision = 0
         self._persisted_file_sha256: str | None = None
 
@@ -100,82 +91,15 @@ class FlowgraphSession:
 
     # -- snapshot / validation / identity (adapter-backed) --------------------
 
-    def summary_payload(
-        self, *, block_limit: int = 8, max_blocks: int | None = None
-    ) -> dict[str, Any]:
-        if max_blocks is not None:
-            block_limit = max_blocks
-        if self.flowgraph is None:
-            return build_error_payload(
-                error_type=ErrorCode.INVALID_REQUEST,
-                message="No flowgraph loaded.",
-            )
-
-        snapshot = render_flow_graph(self.flowgraph)
-        if (
-            self.last_validation_revision is not None
-            and self.last_validation_revision == self._state_revision
-        ):
-            validation_payload = {
-                "status": "valid" if self.last_validation_ok else "invalid",
-                "returncode": 0 if self.last_validation_ok else 1,
-                "errors": [],
-            }
-        else:
-            validation_payload = {"status": "unknown", "errors": []}
-
-        user_blocks = [b for b in snapshot.blocks if b.role != BlockRole.OPTIONS]
-        all_blocks = [
-            {
-                "instance_name": b.instance_name,
-                "block_id": b.block_id,
-                "role": b.role.value,
-            }
-            for b in user_blocks
-        ]
-        variable_count = sum(1 for b in user_blocks if b.role == BlockRole.VARIABLE)
-        all_conns = sorted(snapshot.connections)
-        block_summaries = [
-            f"{b['instance_name']} ({b['block_id']})" for b in all_blocks[:SUMMARY_PREVIEW_LIMIT]
-        ]
-        if len(all_blocks) > SUMMARY_PREVIEW_LIMIT:
-            block_summaries.append(f"... +{len(all_blocks) - SUMMARY_PREVIEW_LIMIT} more")
-        summary_text = (
-            f"{Path(self.path).name if self.path else 'graph'}: "
-            f"{len(all_blocks)} blocks, {len(all_conns)} connections. " + ", ".join(block_summaries)
-        )
-        gid = self._persisted_file_sha256 or ""
-        return {
-            "ok": snapshot.ok,
-            "path": str(self.path) if self.path else None,
-            "graph_id": f"grc:{gid}" if gid else None,
-            "graph_name": snapshot.graph_name,
-            "block_count": len(all_blocks),
-            "connection_count": len(all_conns),
-            "variable_count": variable_count,
-            "dirty": self.is_dirty,
-            "blocks": all_blocks[:block_limit],
-            "connections": all_conns,
-            "validation": validation_payload,
-            "summary": summary_text,
-        }
-
     def validation_state(self) -> dict[str, Any]:
         if self.flowgraph is None:
             return {"status": "unknown", "errors": []}
 
         v = validate(self.flowgraph)
-        self.last_validation_ok = v.native_ok
-        self.last_validation_revision = self._state_revision
         return {"status": v.status, "errors": v.errors, "state_revision": self._state_revision}
 
     def graph_id(self) -> str | None:
         return self._persisted_file_sha256
-
-    @staticmethod
-    def _serialize_raw_data(raw_data: Any) -> str:
-        """Serialize a raw data dict to GRC-native YAML."""
-        return serialize_raw_data(raw_data)
 
     def validate(self) -> bool:
         """Validate the loaded flowgraph. Returns is_valid."""
@@ -183,8 +107,6 @@ class FlowgraphSession:
             return False
 
         result = validate(self.flowgraph)
-        self.last_validation_ok = result.native_ok
-        self.last_validation_revision = self._state_revision
         return bool(result.native_ok)
 
     # -- integrity ------------------------------------------------------------

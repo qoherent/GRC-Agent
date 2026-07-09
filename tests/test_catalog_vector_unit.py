@@ -253,14 +253,10 @@ def test_block_description_payload_drops_id_keeps_domain():
             NormalizedParameter(id="vlen", dtype="int", default="1"),
         ],
         inputs=[
-            NormalizedPort(id="0", domain="stream", dtype="complex"),
-            NormalizedPort(id="msg", domain="message", dtype="message"),
+            NormalizedPort(port_id="0", domain="stream", dtype="complex"),
+            NormalizedPort(port_id="msg", domain="message", dtype="message"),
         ],
-        outputs=[NormalizedPort(id="0", domain="stream", dtype="complex")],
-        asserts=[],
-        documentation=None,
-        warnings=[],
-        signature="blocks_multiply_xx()",
+        outputs=[NormalizedPort(port_id="0", domain="stream", dtype="complex")],
     )
     payload = desc.to_payload(mode=OVERVIEW)
     # id dropped (redundant with instance_name)
@@ -271,8 +267,8 @@ def test_block_description_payload_drops_id_keeps_domain():
     assert "label" not in payload
     assert "default_params" not in payload
     # domain is preserved (stream AND message) — info is not cut
-    stream_port = next(p for p in payload["inputs"] if p.get("id") == "0")
+    stream_port = next(p for p in payload["inputs"] if p.get("port_id") == "0")
     assert stream_port.get("domain", "stream") == "stream"
     assert stream_port["dtype"] == "complex"
-    msg_port = next(p for p in payload["inputs"] if p.get("id") == "msg")
+    msg_port = next(p for p in payload["inputs"] if p.get("port_id") == "msg")
     assert msg_port.get("domain") == "message"

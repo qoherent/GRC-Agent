@@ -28,8 +28,10 @@ class ProcessManager(QObject):
 
     Single-stage validator: the GRC source is compiled into a temporary
     directory; the GUI runs the compile and surfaces stdout/stderr to the
-    console. Two-phase termination (terminate, then SIGKILL after a
-    grace period) is applied to the single compile slot.
+    console. A stale compile process (re-entrant ``validate_graph`` call)
+    is reaped via two-phase termination (terminate, then SIGKILL after a
+    grace period, see ``_disconnect_and_reap``); app-exit shutdown is a
+    separate, synchronous best-effort path (``shutdown``).
     """
 
     started = Signal()
@@ -42,7 +44,6 @@ class ProcessManager(QObject):
         super().__init__(parent)
         self.compile_process: QProcess | None = None
         self._current_temp_dir: str | None = None
-        self._kill_timer: QTimer | None = None
 
     def _disconnect_and_reap(self, proc: QProcess, label: str) -> None:
         failed = 0
@@ -155,11 +156,6 @@ class ProcessManager(QObject):
 
     def on_compilation_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         """Triggered when compilation process terminates."""
-        if self._kill_timer is not None:
-            self._kill_timer.stop()
-            self._kill_timer.deleteLater()
-            self._kill_timer = None
-
         proc = self.compile_process
         if proc:
             self.compile_process = None
@@ -174,42 +170,6 @@ class ProcessManager(QObject):
         else:
             self.status_message.emit(f"Validation failed with exit code {exit_code}.")
             self.finished.emit(exit_code)
-
-    def stop(self) -> None:
-        """Initiates the two-phase termination sequence for the compile process."""
-        if self.compile_process and self.compile_process.state() == QProcess.ProcessState.Running:
-            self._terminate_with_fallback(self.compile_process, "compilation")
-
-    def _terminate_with_fallback(self, proc: QProcess, label: str) -> None:
-        """Send SIGTERM and schedule a SIGKILL fallback after ``_KILL_FALLBACK_MS``."""
-        self.status_message.emit(f"Terminating {label} process (Phase 1)...")
-        proc.terminate()
-
-        if self._kill_timer is not None:
-            self._kill_timer.stop()
-            self._kill_timer.deleteLater()
-            self._kill_timer = None
-
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.setInterval(_KILL_FALLBACK_MS)
-        timer.timeout.connect(lambda p=proc, lbl=label: self._force_kill_process(p, lbl))
-        timer.start()
-        self._kill_timer = timer
-
-    def _force_kill_process(self, proc: QProcess, label: str) -> None:
-        try:
-            if proc and proc.state() == QProcess.ProcessState.Running:
-                self.status_message.emit(
-                    f"{label.capitalize()} process failed to terminate. Forcefully killing (Phase 2)..."
-                )
-                proc.kill()
-        except RuntimeError:
-            logger.debug("proc already destroyed in _force_kill_process", exc_info=True)
-
-        if self._kill_timer is not None:
-            self._kill_timer.deleteLater()
-            self._kill_timer = None
 
     def shutdown(self) -> None:
         """Best-effort synchronous shutdown on application exit.
@@ -227,11 +187,6 @@ class ProcessManager(QObject):
                     self.compile_process.waitForFinished(_SYNC_SHUTDOWN_WAIT_MS)
             self.compile_process.deleteLater()
             self.compile_process = None
-
-        if self._kill_timer is not None:
-            self._kill_timer.stop()
-            self._kill_timer.deleteLater()
-            self._kill_timer = None
 
         self.cleanup_temp_dir()
 

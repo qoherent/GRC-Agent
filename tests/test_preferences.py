@@ -40,8 +40,6 @@ def _make_llama_config(**overrides: object) -> LlamaConfig:
         model="test-model",
         embedding_model="test-embed",
         backend="ollama",
-        max_tokens=4096,
-        max_tool_rounds=8,
         request_timeout_seconds=120.0,
     )
     base.update(overrides)
@@ -213,7 +211,9 @@ class ApplyToLlamaConfigTests(unittest.TestCase):
         self.assertEqual(out.embedding_model, "or/embed")
 
     def test_apply_preserves_non_model_fields(self) -> None:
-        cfg = _make_llama_config(backend="ollama", max_tokens=2048, server_url="http://x:1")
+        cfg = _make_llama_config(
+            backend="ollama", request_timeout_seconds=42.0, server_url="http://x:1"
+        )
         with mock.patch.dict(
             os.environ, {"OPENROUTER_MODEL": "or/chat", "OPENROUTER_EMBEDDING_MODEL": "or/embed"}
         ):
@@ -221,7 +221,7 @@ class ApplyToLlamaConfigTests(unittest.TestCase):
                 cfg, UserPreferences(provider_chosen="openrouter")
             )
         self.assertEqual(out.server_url, "http://x:1")
-        self.assertEqual(out.max_tokens, 2048)
+        self.assertEqual(out.request_timeout_seconds, 42.0)
 
     def test_invalid_provider_is_ignored(self) -> None:
         cfg = _make_llama_config(backend="ollama")

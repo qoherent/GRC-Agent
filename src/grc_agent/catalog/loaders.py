@@ -8,12 +8,10 @@ from __future__ import annotations
 import dataclasses
 from collections import defaultdict
 from collections.abc import Callable
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml
-from grc_agent.domain_models import ErrorCode, build_error_payload
 
 from .schema import (
     BlockDescription,
@@ -21,8 +19,6 @@ from .schema import (
     CatalogSnapshot,
     NormalizedPort,
     RawCatalogBlock,
-    build_signature,
-    hierarchy_warnings,
     normalize_parameter,
     normalize_port,
     optional_string,
@@ -188,9 +184,9 @@ def walk_tree_entries(
 
 
 def get_catalog_snapshot(catalog_root: str | Path | None = None) -> CatalogSnapshot:
-    """Return the cached raw GNU catalog snapshot for the resolved root."""
+    """Return the raw GNU catalog snapshot for the resolved root."""
     root = discover_catalog_root(catalog_root).resolve()
-    return _get_cached_catalog_snapshot(str(root))
+    return _build_catalog_snapshot_for_root(root)
 
 
 def find_block_source(
@@ -204,11 +200,6 @@ def find_block_source(
     if record is None:
         raise BlockNotFoundError(block_id, catalog_root=str(snapshot.root))
     return record
-
-
-@lru_cache(maxsize=4)
-def _get_cached_catalog_snapshot(root_text: str) -> CatalogSnapshot:
-    return _build_catalog_snapshot_for_root(Path(root_text))
 
 
 def _build_catalog_snapshot_for_root(root: Path) -> CatalogSnapshot:
@@ -242,51 +233,6 @@ def _build_catalog_snapshot_for_root(root: Path) -> CatalogSnapshot:
     return CatalogSnapshot(root=root, files=files, blocks=blocks)
 
 
-# -- describe --
-
-
-def describe_block(block_id: str) -> dict[str, Any]:
-    """Return structured GNU catalog truth for one block id."""
-    return _describe_block_with_root(block_id)
-
-
-def _describe_block_with_root(
-    block_id: str,
-    *,
-    catalog_root: str | Path | None = None,
-) -> dict[str, Any]:
-    normalized_block_id = _normalize_block_id(block_id)
-    if normalized_block_id is None:
-        return build_error_payload(
-            error_type=ErrorCode.TOOL_CALL_INVALID,
-            message="block_id must be a non-empty string.",
-        )
-
-    try:
-        raw_block = find_block_source(normalized_block_id, catalog_root=catalog_root)
-        description = _build_block_description(raw_block)
-    except BlockNotFoundError as exc:
-        return build_error_payload(
-            error_type=ErrorCode.BLOCK_NOT_FOUND,
-            message=str(exc),
-            details={
-                "block_id": exc.block_id,
-            },
-        )
-    except CatalogError as exc:
-        return build_error_payload(
-            error_type=ErrorCode.CATALOG_LOAD_ERROR,
-            message=str(exc),
-        )
-
-    return description.to_payload()
-
-
-def _normalize_block_id(block_id: Any) -> str | None:
-    if not isinstance(block_id, str):
-        return None
-    normalized = " ".join(block_id.split())
-    return normalized or None
 
 
 def _normalize_ports(port_payloads: list[dict[str, Any]]) -> list[NormalizedPort]:
@@ -302,8 +248,8 @@ def _normalize_ports(port_payloads: list[dict[str, Any]]) -> list[NormalizedPort
     ports: list[NormalizedPort] = []
     for index, port_payload in enumerate(port_payloads):
         port = normalize_port(port_payload)
-        if port.id is None and (port.domain or "stream") == "stream":
-            port = dataclasses.replace(port, id=str(index))
+        if port.port_id is None and (port.domain or "stream") == "stream":
+            port = dataclasses.replace(port, port_id=str(index))
         ports.append(port)
     return ports
 
@@ -318,8 +264,7 @@ def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
     input_payloads = _mapping_list_or_error(payload, "inputs", raw_block.path)
     output_payloads = _mapping_list_or_error(payload, "outputs", raw_block.path)
 
-    category_path, warnings = select_category_path(raw_block)
-    warnings.extend(hierarchy_warnings(raw_block))
+    category_path = select_category_path(raw_block)
 
     parameters = [
         normalize_parameter(parameter_payload, source_path=raw_block.path)
@@ -329,8 +274,6 @@ def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
     outputs = _normalize_ports(output_payloads)
 
     flags = preserved_string_values(payload.get("flags"))
-    asserts = preserved_string_values(payload.get("asserts"))
-    signature = build_signature(raw_block.block_id, parameters)
 
     return BlockDescription(
         block_id=raw_block.block_id,
@@ -340,10 +283,6 @@ def _build_block_description(raw_block: RawCatalogBlock) -> BlockDescription:
         parameters=parameters,
         inputs=inputs,
         outputs=outputs,
-        asserts=list(asserts),
-        documentation=optional_string(payload.get("documentation")),
-        warnings=warnings,
-        signature=signature,
     )
 
 

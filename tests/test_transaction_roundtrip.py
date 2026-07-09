@@ -78,7 +78,7 @@ def test_restore_round_trip_preserves_block_and_connection_counts():
     apply_mutation(
         session.flowgraph,
         "add_block",
-        block_type="analog_const_source_x",
+        block_id="analog_const_source_x",
         instance_name="dc_added",
         parameters={"const": "0.0"},
     )

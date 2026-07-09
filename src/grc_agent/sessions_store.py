@@ -10,7 +10,7 @@ Public surface:
 
 - :class:`SessionStore` — opens (or creates) the DB, owns the
   async writer thread, and exposes non-blocking ``open_session``,
-  ``append``, ``close_session``, and a blocking ``flush``.
+  ``append``, ``end_active_session``, and a blocking ``flush``.
 - :class:`SessionRecord`, :class:`MessageRecord` — frozen
   dataclasses returned by the read-side helpers.
 - :class:`SessionStoreTooNew`, :class:`SessionStoreCorrupt` —
@@ -114,7 +114,6 @@ class SessionRecord:
     backend: str | None
     title: str
     message_count: int
-    graph_exists: bool = True
 
 
 @dataclass(frozen=True)
@@ -175,7 +174,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     backend       TEXT,
     title         TEXT,
     message_count INTEGER NOT NULL DEFAULT 0,
-    graph_exists  INTEGER NOT NULL DEFAULT 1,
     UNIQUE (graph_path, graph_hash, started_at)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_graph_path
@@ -306,7 +304,7 @@ def _open_db(db_path: Path, validate_integrity: bool = False) -> sqlite3.Connect
 # filter builders live in one place (AGENTS.md "Simplify by removal").
 _SESSION_COLUMNS = (
     "id, graph_path, graph_hash, started_at, ended_at, "
-    "model_alias, backend, title, message_count, graph_exists"
+    "model_alias, backend, title, message_count"
 )
 _MESSAGES_COLUMNS = "id, session_id, sequence, role, text, payload, created_at"
 
@@ -352,7 +350,6 @@ def _row_to_session(row: sqlite3.Row) -> SessionRecord:
         backend=row["backend"],
         title=row["title"] or "",
         message_count=int(row["message_count"]),
-        graph_exists=bool(row["graph_exists"]),
     )
 
 
@@ -389,7 +386,7 @@ class SessionStore:
 
     Construct with a DB path. The constructor opens the DB,
     applies the schema, and starts the writer daemon thread.
-    All public mutators (open_session, append, close_session) are
+    All public mutators (open_session, append, end_active_session) are
     non-blocking — they enqueue onto the writer's queue and
     return. Use :meth:`flush` to block until the queue is
     drained.
@@ -406,7 +403,6 @@ class SessionStore:
         # bounded by _QUEUE_MAX.  Separate queue so the message-batch
         # driller doesn't have to discriminate types.
         self._lifecycle_q: queue.Queue[_LifecycleCommand] = queue.Queue(maxsize=_QUEUE_MAX)
-        self._closed_sessions: queue.Queue[int] = queue.Queue(maxsize=_QUEUE_MAX)
         # ``_drained`` is cleared on every enqueue and set by the
         # writer when it has nothing to do. ``flush()`` blocks on
         # it.
@@ -511,16 +507,6 @@ class SessionStore:
         self._q.put(rec)
         self._drained.clear()
         return msg_id
-
-    def close_session(self, session_id: int) -> None:
-        """Enqueue a session-close. Non-blocking.
-
-        The writer thread applies the close when it next picks
-        up the queue: it sets ``ended_at`` and updates
-        ``message_count`` to reflect the final tally.
-        """
-        self._closed_sessions.put(session_id)
-        self._drained.clear()
 
     def end_active_session(self, session_id: int | None) -> None:
         """Finalize a session row (``ended_at`` + ``message_count``).
@@ -684,47 +670,6 @@ class SessionStore:
             ).fetchall()
         return [_row_to_message(r) for r in rows]
 
-    def gc(
-        self,
-        *,
-        older_than_days: int = 180,
-        only_orphans: bool = False,
-    ) -> int:
-        """Delete sessions older than ``older_than_days`` (or all
-        sessions whose ``graph_path`` no longer exists on disk
-        when ``only_orphans=True``). Returns the number of
-        sessions deleted."""
-        if only_orphans:
-            sessions = self.list_sessions(limit=10_000)
-            deleted = 0
-            for s in sessions:
-                if not Path(s.graph_path).exists():
-                    with self._read_conn() as conn:
-                        conn.execute("BEGIN")
-                        try:
-                            conn.execute("DELETE FROM sessions WHERE id = ?", (s.id,))
-                            conn.execute("COMMIT")
-                        except Exception:
-                            conn.execute("ROLLBACK")
-                            raise
-                    deleted += 1
-            return deleted
-        # ``datetime('now', ??)`` is the SQLite way to compute
-        # ``now - N days``. We pass the days as a negative
-        # modifier.
-        with self._read_conn() as conn:
-            conn.execute("BEGIN")
-            try:
-                cur = conn.execute(
-                    "DELETE FROM sessions WHERE started_at < datetime('now', ?)",
-                    (f"-{int(older_than_days)} days",),
-                )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-        return int(cur.rowcount or 0)
-
     # --- internal: writer thread ---
 
     def _run(self) -> None:
@@ -742,8 +687,7 @@ class SessionStore:
             while not self._stop.is_set():
                 lifecycle = self._drain_lifecycle()
                 batch = self._drain_batch()
-                closed = self._drain_closes()
-                if not lifecycle and not batch and not closed:
+                if not lifecycle and not batch:
                     self._drained.set()
                     time.sleep(0.005)
                     continue
@@ -751,41 +695,31 @@ class SessionStore:
                 if lifecycle:
                     self._drain_lifecycle_commands(lifecycle)
                 # Then commit the message batch under its own BEGIN.
-                if batch or closed:
+                if batch:
                     try:
                         self._writer_conn.execute("BEGIN")
-                        if batch:
-                            for r in batch:
-                                row = self._writer_conn.execute(
-                                    "SELECT COALESCE(MAX(sequence), -1) + 1 "
-                                    "FROM messages WHERE session_id = ?",
-                                    (r.session_id,),
-                                ).fetchone()
-                                next_seq = int(row[0])
-                                self._writer_conn.execute(
-                                    "INSERT INTO messages "
-                                    "(id, session_id, sequence, role, text, "
-                                    "payload, created_at) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                    (
-                                        r.id,
-                                        r.session_id,
-                                        next_seq,
-                                        r.role,
-                                        r.text,
-                                        r.payload,
-                                        r.created_at,
-                                    ),
-                                )
-                        if closed:
-                            for sid in closed:
-                                self._writer_conn.execute(
-                                    "UPDATE sessions SET ended_at = ?, "
-                                    "message_count = (SELECT COUNT(*) FROM "
-                                    "messages WHERE session_id = ?) "
-                                    "WHERE id = ?",
-                                    (_utcnow_iso(), sid, sid),
-                                )
+                        for r in batch:
+                            row = self._writer_conn.execute(
+                                "SELECT COALESCE(MAX(sequence), -1) + 1 "
+                                "FROM messages WHERE session_id = ?",
+                                (r.session_id,),
+                            ).fetchone()
+                            next_seq = int(row[0])
+                            self._writer_conn.execute(
+                                "INSERT INTO messages "
+                                "(id, session_id, sequence, role, text, "
+                                "payload, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    r.id,
+                                    r.session_id,
+                                    next_seq,
+                                    r.role,
+                                    r.text,
+                                    r.payload,
+                                    r.created_at,
+                                ),
+                            )
                         self._writer_conn.execute("COMMIT")
                     except sqlite3.Error as exc:
                         logger.exception("sessions_writer_batch_failed: %s", exc)
@@ -908,7 +842,9 @@ class SessionStore:
         self._writer_conn.execute("BEGIN")
         try:
             before = self._writer_conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
-            self._writer_conn.execute("DELETE FROM messages")
+            # ``messages.session_id`` is ``ON DELETE CASCADE`` (foreign_keys
+            # pragma is ON) — deleting sessions cascades to messages and
+            # fires its AFTER DELETE trigger, keeping messages_fts in sync.
             self._writer_conn.execute("DELETE FROM sessions")
             self._writer_conn.execute("COMMIT")
         except Exception:
@@ -937,14 +873,6 @@ class SessionStore:
             except queue.Empty:
                 break
         return batch
-
-    def _drain_closes(self) -> list[int]:
-        closes: list[int] = []
-        while True:
-            try:
-                closes.append(self._closed_sessions.get_nowait())
-            except queue.Empty:
-                return closes
 
 
 # ---------------------------------------------------------------------------

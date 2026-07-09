@@ -27,9 +27,9 @@ from pathlib import Path
 LIVE = os.environ.get("GRC_AGENT_LIVE_EMBED") == "1"
 # conftest.py sets GRC_AGENT_VECTORS_DIR to a tmpdir at session start so unit
 # tests don't touch the real DB. We must point at the real DB BEFORE any
-# import of grc_agent.runtime.catalog_vector, because CATALOG_DB_PATH is
-# captured at module load. Tests in this module run only when LIVE is set,
-# so the env override is safe.
+# import of grc_agent.runtime.catalog_vector, because DB_DIR is captured at
+# module load. Tests in this module run only when LIVE is set, so the env
+# override is safe.
 _REAL_VECTORS_DIR = Path("src/grc_agent/vectors").resolve()
 if LIVE and Path(_REAL_VECTORS_DIR / "catalog_ollama.db").exists():
     os.environ["GRC_AGENT_VECTORS_DIR"] = str(_REAL_VECTORS_DIR)
@@ -42,21 +42,22 @@ class VectorCatalogLiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         from grc_agent.runtime.catalog_vector import (
-            CATALOG_DB_PATH,
             VectorCatalogStore,
+            catalog_db_path,
             embed_query,
         )
 
-        if not Path(CATALOG_DB_PATH).exists():
+        catalog_path = catalog_db_path("ollama")
+        if not catalog_path.exists():
             raise unittest.SkipTest(
-                f"catalog DB not found at {CATALOG_DB_PATH}; "
+                f"catalog DB not found at {catalog_path}; "
                 "run grc_agent.retrieval.warmup_catalog_vector_index first"
             )
 
         # Copy the live DB so the test is read-only against production.
         cls.tmpdir = tempfile.mkdtemp(prefix="cat_live_")
         cls.test_db = Path(cls.tmpdir) / "catalog_ollama.db"
-        shutil.copy(str(CATALOG_DB_PATH), str(cls.test_db))
+        shutil.copy(str(catalog_path), str(cls.test_db))
         cls.store = VectorCatalogStore(
             cls.test_db, "http://localhost:11434", "embeddinggemma:latest"
         )
@@ -115,8 +116,7 @@ class VectorCatalogLiveTests(unittest.TestCase):
         from grc_agent.runtime.search_blocks import search_blocks
 
         config = load_app_config()
-        agent = GrcAgent(config=config.agent)
-        agent._llama_server_url = "http://localhost:11434"
+        agent = GrcAgent(config=config.agent, llama_config=config.llama)
 
         queries = [
             "float stream to complex stream",
@@ -136,7 +136,8 @@ class VectorCatalogLiveTests(unittest.TestCase):
 
         for q in queries:
             with mock.patch(
-                "grc_agent.runtime.search_blocks.CATALOG_DB_PATH", str(type(self).test_db)
+                "grc_agent.runtime.search_blocks.catalog_db_path",
+                return_value=type(self).test_db,
             ):
                 result = search_blocks(agent, q)
 

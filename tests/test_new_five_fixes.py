@@ -1,11 +1,10 @@
-"""Unit and integration tests for the five key codebase fixes.
+"""Unit and integration tests for a set of codebase fixes.
 
 Tests verify:
 1. Type resolution loop in change_graph.py prioritizing existing blocks and calling rewrite()
 2. System-prompt retry salt generation to bypass context caching
-3. Safety ceiling for max_tool_rounds in ToolAgentsRunner
-4. ID parameter protection in set_param to prevent name divergence
-5. State mapping between GRC's internal 'bypassed' and domain-level 'bypass'
+3. ID parameter protection in set_param to prevent name divergence
+4. State mapping between GRC's internal 'bypassed' and domain-level 'bypass'
 """
 
 from __future__ import annotations

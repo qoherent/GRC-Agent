@@ -29,6 +29,16 @@ import unittest
 from pathlib import Path
 
 LIVE = os.environ.get("GRC_AGENT_LIVE_MODEL") == "1"
+# conftest.py redirects GRC_AGENT_VECTORS_DIR to an empty per-session tmpdir
+# for every test module by default. Without restoring the real path here,
+# query_knowledge(domain="docs") always fails with "no such table: docs_idx"
+# in every scenario, regardless of how good the real docs index is — this
+# must happen before any lazy import of grc_agent.runtime.catalog_vector /
+# doc_answer below, since those modules capture the DB directory at import
+# time. Mirrors tests/test_catalog_vector_live.py's identical override.
+_REAL_VECTORS_DIR = Path("src/grc_agent/vectors").resolve()
+if LIVE and Path(_REAL_VECTORS_DIR / "catalog_ollama.db").exists():
+    os.environ["GRC_AGENT_VECTORS_DIR"] = str(_REAL_VECTORS_DIR)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)

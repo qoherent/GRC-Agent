@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import re
 import unittest
 import uuid
 from typing import Any
@@ -134,6 +135,35 @@ class ToolAgentsDelegateTests(unittest.TestCase):
         self.assertFalse(result.result["ok"])
         self.assertIn("error_type", result.result)
         execute_tool.assert_not_called()
+
+    def test_delegate_fires_on_tool_rejected_for_schema_validation_failure(self) -> None:
+        """A call rejected pre-dispatch never fires ``on_tool_start``/
+        ``on_tool_end`` — without ``on_tool_rejected`` it is completely
+        invisible to any observer, silently dropped at the agent-tool
+        boundary."""
+        agent = GrcAgent()
+        started: list[Any] = []
+        rejected: list[tuple[str, dict[str, Any], Any]] = []
+        delegate = ToolAgentsToolDelegate(
+            agent,
+            "inspect_graph",
+            on_tool_start=lambda *a: started.append(a),
+            on_tool_rejected=lambda name, args, result: rejected.append((name, args, result)),
+        )
+
+        with mock.patch.object(agent, "execute_tool") as execute_tool:
+            result = delegate.invoke(
+                {"bogus": True},
+                allowed_tool_names=set(MVP_TOOL_SURFACE.model_tool_names),
+            )
+
+        execute_tool.assert_not_called()
+        self.assertEqual(started, [], "a rejected call must not fire on_tool_start")
+        self.assertEqual(len(rejected), 1)
+        name, args, rejection_result = rejected[0]
+        self.assertEqual(name, "inspect_graph")
+        self.assertEqual(args, {"bogus": True})
+        self.assertIs(rejection_result, result.result)
 
     def test_delegate_rejects_internal_tool_without_execution(self) -> None:
         agent = GrcAgent()
@@ -575,6 +605,50 @@ class ToolAgentsRunnerBackendUnreachableTests(unittest.TestCase):
             result.get("details", {}).get("server_url"),
             "http://127.0.0.1:11434",
         )
+        # Ollama-specific hint: default provider config's backend is
+        # "ollama" — the model can't start itself, so the recommended
+        # context number is spelled out concretely (matches this app's
+        # own default model's baked-in num_ctx), not left as a vague
+        # "set it higher". Must not tell the user to manually launch a
+        # second `ollama serve` — Ollama is typically already running in
+        # the background, and a duplicate instance just conflicts with it.
+        # Word-boundary match: "...the Ollama server..." is fine, "ollama
+        # serve" as a standalone command is not.
+        self.assertIsNone(re.search(r"\bollama serve\b", text.lower()))
+        self.assertIn("OLLAMA_CONTEXT_LENGTH", text)
+        self.assertIn("120000", text)
+
+    def test_openrouter_backend_unreachable_has_no_ollama_hint(self) -> None:
+        """OpenRouter has no local server to start — the Ollama-specific
+        hint (OLLAMA_CONTEXT_LENGTH) must not appear."""
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+        from ToolAgents.agents import ChatToolAgent
+
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="https://openrouter.ai/api",
+            model="deepseek/deepseek-v4-flash",
+            timeout_seconds=1.0,
+            backend="openrouter",
+        )
+        chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
+
+        def _raise_connection_error(*args, **kwargs):
+            import openai
+
+            raise openai.APIConnectionError(request=mock.MagicMock())
+
+        chat_agent.stream_step = _raise_connection_error  # type: ignore[method-assign]
+        runner = ToolAgentsRunner(cfg, chat_agent=chat_agent)
+
+        result = runner.run_turn(GrcAgent(), "hi")
+
+        text = str(result.get("assistant_text", ""))
+        self.assertIn("Connection refused", text)
+        self.assertNotIn("ollama serve", text)
+        self.assertNotIn("OLLAMA_CONTEXT_LENGTH", text)
 
     def test_stream_turn_emits_backend_unreachable_final(self) -> None:
         agent = GrcAgent()
@@ -652,12 +726,172 @@ class ToolAgentsRunnerLoopDetectionTests(unittest.TestCase):
         result = finals[0].get("result", {})
         self.assertFalse(result.get("ok"))
         self.assertEqual(result.get("error_type"), "safety_ceiling_reached")
-        self.assertIn("identically", result.get("assistant_text", ""))
+        self.assertIn("repeated multiple times", result.get("assistant_text", ""))
         # The factual note was injected (user_model model_message) on the 2nd.
         user_notes = [
             e for e in events if e.get("event") == "model_message" and e.get("role") == "user_model"
         ]
         self.assertTrue(user_notes, "loop note should be injected on 2nd failure")
+
+    def test_varying_calls_with_same_failure_category_eventually_stop(self) -> None:
+        """A model varying its arguments each time (different nonexistent
+        block name) while hitting the SAME failure category every attempt
+        evades the exact-argument detector (no two calls are byte-identical)
+        but must still trip the broader same-category detector — this is
+        exactly the pattern that let a real run balloon to 134 steps before
+        stopping (see docs/BACKLOG.md)."""
+        from pathlib import Path
+
+        from grc_agent.flowgraph_session import FlowgraphSession
+
+        session = FlowgraphSession()
+        session.load(str(Path(__file__).resolve().parent / "data" / "dial_tone.grc"))
+        agent = GrcAgent(session=session)
+        # Each call removes a DIFFERENT nonexistent block (distinct exact-
+        # argument signature every time) but all fail with the same
+        # error_type ('tool_call_invalid') — never identical, always the
+        # same category.
+        calls = [
+            self._change_graph_call({"remove_blocks": [f"does_not_exist_{i}"]}) for i in range(8)
+        ]
+        runner = self._runner_with_scripted_step(agent, calls)
+
+        events = list(runner.stream_turn(agent, "remove several nonexistent blocks"))
+        finals = [e for e in events if e.get("event") == "final"]
+        self.assertEqual(len(finals), 1)
+        result = finals[0].get("result", {})
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_type"), "safety_ceiling_reached")
+        # Stopped well before exhausting all 8 scripted distinct-argument calls.
+        self.assertLess(result.get("tool_calls_executed", 99), 8)
+
+
+class ToolAgentsRunnerRejectedCallTests(unittest.TestCase):
+    """A tool call outside the turn's allowed surface is rejected inside
+    ``_dispatch_tools`` before a delegate ever exists for it — a second,
+    distinct rejection path from schema validation (see
+    ``ToolAgentsDelegateTests``). Both must reach ``on_tool_rejected``."""
+
+    def _disallowed_tool_call(self) -> ChatMessage:
+        import datetime
+        import uuid
+
+        from ToolAgents.data_models.messages import ToolCallContent
+
+        tc = ToolCallContent(
+            tool_call_id=str(uuid.uuid4()),
+            tool_call_name="legacy_internal_tool",
+            tool_call_arguments={"transaction": {}},
+        )
+        now = datetime.datetime.now()
+        return ChatMessage(
+            id=str(uuid.uuid4()),
+            role=ChatMessageRole.Assistant,
+            content=[tc],
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_on_tool_rejected_fires_for_call_outside_turn_surface(self) -> None:
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+
+        agent = GrcAgent()
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="m",
+            timeout_seconds=1.0,
+        )
+        chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
+        call_iter = iter([self._disallowed_tool_call()])
+        chat_agent.stream_step = lambda *_a, **_kw: _stream_finished(  # type: ignore[method-assign]
+            next(call_iter, _assistant_text("done"))
+        )
+        runner = ToolAgentsRunner(cfg, chat_agent=chat_agent)
+
+        rejected: list[tuple[str, dict[str, Any], Any]] = []
+        list(
+            runner.stream_turn(
+                agent,
+                "try a disallowed tool",
+                on_tool_rejected=lambda name, args, result: rejected.append(
+                    (name, args, result)
+                ),
+            )
+        )
+
+        self.assertEqual(len(rejected), 1)
+        name, args, result = rejected[0]
+        self.assertEqual(name, "legacy_internal_tool")
+        self.assertEqual(args, {"transaction": {}})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "tool_not_allowed_for_surface")
+
+    def _garbled_tool_call(self) -> ChatMessage:
+        """A malformed emission with argument fragments leaked into the
+        tool NAME itself (observed live: a 'ToolAgents' provider-side
+        parsing corruption on scenario 21), args arriving empty."""
+        import datetime
+        import uuid
+
+        from ToolAgents.data_models.messages import ToolCallContent
+
+        tc = ToolCallContent(
+            tool_call_id=str(uuid.uuid4()),
+            tool_call_name="change_graph\n<arg_key>add_blocks</arg_key><arg_value>[]</arg_value>",
+            tool_call_arguments={},
+        )
+        now = datetime.datetime.now()
+        return ChatMessage(
+            id=str(uuid.uuid4()),
+            role=ChatMessageRole.Assistant,
+            content=[tc],
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_garbled_tool_name_reports_malformed_call_not_unknown_tool(self) -> None:
+        """A corrupted tool name that starts with a real tool name (structural
+        detection, not a hardcoded string match) must be diagnosed as a
+        malformed call naming the real tool — not the misleading 'tool is
+        not available' message a genuinely unknown tool name gets."""
+        from grc_agent.toolagents_runtime import (
+            ToolAgentsLlamaProviderConfig,
+            ToolAgentsRunner,
+        )
+
+        agent = GrcAgent()
+        cfg = ToolAgentsLlamaProviderConfig(
+            base_url="http://127.0.0.1:11434",
+            model="m",
+            timeout_seconds=1.0,
+        )
+        chat_agent = ChatToolAgent(chat_api=cfg.create_provider())
+        call_iter = iter([self._garbled_tool_call()])
+        chat_agent.stream_step = lambda *_a, **_kw: _stream_finished(  # type: ignore[method-assign]
+            next(call_iter, _assistant_text("done"))
+        )
+        runner = ToolAgentsRunner(cfg, chat_agent=chat_agent)
+
+        rejected: list[tuple[str, dict[str, Any], Any]] = []
+        list(
+            runner.stream_turn(
+                agent,
+                "try a garbled tool call",
+                on_tool_rejected=lambda name, args, result: rejected.append(
+                    (name, args, result)
+                ),
+            )
+        )
+
+        self.assertEqual(len(rejected), 1)
+        _name, _args, result = rejected[0]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "tool_call_invalid")
+        self.assertIn("change_graph", result["message"])
+        self.assertIn("Malformed", result["message"])
 
 
 class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
@@ -703,6 +937,26 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         self.assertTrue(text, "assistant_text must be non-empty")
         self.assertIn("No response was generated", text)
 
+    def test_degenerate_retry_is_yielded_for_each_retried_attempt(self) -> None:
+        """A degenerate (no content, no tool calls) attempt used to vanish
+        with only a log line — no trace in ``agent.chat_history`` or any
+        yielded event, so a saved transcript couldn't show it happened.
+        Every retried attempt (all but the last) must now yield a
+        ``degenerate_retry`` event naming the attempt number and
+        finish_reason."""
+        agent = GrcAgent()
+        calls = [_assistant_text("") for _ in range(5)]
+        runner = self._runner_with_scripted_step(agent, calls)
+
+        events = list(runner.stream_turn(agent, "hi"))
+        retries = [e for e in events if e.get("event") == "degenerate_retry"]
+
+        # _MAX_PROVIDER_RETRIES == 3: attempts 1 and 2 retry, attempt 3 is
+        # terminal (returns the empty message instead of retrying further).
+        self.assertEqual(len(retries), 2)
+        self.assertEqual([r["attempt"] for r in retries], [1, 2])
+        self.assertEqual([r["max_attempts"] for r in retries], [3, 3])
+
     def test_empty_terminal_chunk_carries_synthesized_text(self) -> None:
         agent = GrcAgent()
         calls = [_assistant_text("") for _ in range(5)]
@@ -712,6 +966,28 @@ class ToolAgentsRunnerEmptyResponseTests(unittest.TestCase):
         chunks = [e for e in events if e.get("event") == "chunk"]
         self.assertTrue(chunks, "a chunk event should be emitted")
         self.assertIn("No response was generated", str(chunks[-1].get("text", "")))
+
+    def test_empty_terminal_with_finish_reason_length_names_the_real_cause(self) -> None:
+        """When the wire response says finish_reason=length, the synthesized
+        text must say so — this is a context/output-limit fact from the
+        provider, not a guess, and it's misleading to blame the model with
+        no explanation (AGENTS.md 'No Assumed Reasoning Failures')."""
+        agent = GrcAgent()
+        truncated = _assistant_text("")
+        truncated.additional_information["finish_reason"] = "length"
+        calls = [truncated for _ in range(5)]
+        runner = self._runner_with_scripted_step(agent, calls)
+
+        events = list(runner.stream_turn(agent, "hi"))
+        finals = [e for e in events if e.get("event") == "final"]
+        result = finals[0].get("result", {})
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_type"), "empty_model_response")
+        self.assertEqual(result.get("finish_reason"), "length")
+        text = str(result.get("assistant_text", ""))
+        self.assertIn("finish_reason=length", text)
+        self.assertIn("context window", text)
 
 
 class SchemaShimTests(unittest.TestCase):

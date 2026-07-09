@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from grc_agent.flowgraph_session import FlowgraphSession
+from grc_agent.grc_native_adapter import serialize_raw_data
 
 
 class GraphIdRoundTripTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class GraphIdRoundTripTests(unittest.TestCase):
         session = FlowgraphSession()
         session.load(self._fixture_path())
         original_graph_id = session.graph_id()
-        serialized = FlowgraphSession._serialize_raw_data(session.flowgraph.export_data())
+        serialized = serialize_raw_data(session.flowgraph.export_data())
 
         with tempfile.TemporaryDirectory() as tmpdir:
             roundtrip_path = Path(tmpdir) / "roundtrip.grc"
@@ -28,7 +29,7 @@ class GraphIdRoundTripTests(unittest.TestCase):
 
         self.assertEqual(reloaded.graph_id(), original_graph_id)
         self.assertEqual(
-            FlowgraphSession._serialize_raw_data(reloaded.flowgraph.export_data()),
+            serialize_raw_data(reloaded.flowgraph.export_data()),
             serialized,
         )
 
