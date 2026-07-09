@@ -532,29 +532,18 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
         conn.close()
 
 def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
-    import httpx
-    api_key = os.getenv("OLLAMA_API_KEY")
-    if not api_key:
-        return {
-            "ok": False,
-            "message": "OLLAMA_API_KEY is not set; web search is unavailable.",
-            "error_type": "missing_api_key",
-        }
+    from duckduckgo_search import DDGS
     clamped = max(1, min(int(max_results), 10))
-    body = {"query": query, "max_results": clamped}
     try:
-        response = httpx.post(
-            "https://ollama.com/api/web_search",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=30.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return {"ok": True, "results": payload.get("results", []), "message": ""}
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=clamped):
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "content": r.get("body", "")
+                })
+        return {"ok": True, "results": results, "message": ""}
     except Exception as exc:
         return {
             "ok": False,
@@ -564,30 +553,45 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
 
 def web_fetch(url: str) -> dict[str, Any]:
     import httpx
-    api_key = os.getenv("OLLAMA_API_KEY")
-    if not api_key:
-        return {
-            "ok": False,
-            "message": "OLLAMA_API_KEY is not set; web fetch is unavailable.",
-            "error_type": "missing_api_key",
-        }
+    from bs4 import BeautifulSoup
     try:
-        response = httpx.post(
-            "https://ollama.com/api/web_fetch",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={"url": url},
-            timeout=30.0,
-        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/91.0.4472.124 Safari/537.36"
+            )
+        }
+        response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
         response.raise_for_status()
-        payload = response.json()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        title = soup.title.string.strip() if soup.title else ""
+        
+        # Decompose script and style tags
+        for script in soup(["script", "style"]):
+            script.decompose()
+            
+        content = soup.get_text(separator="\n")
+        lines = (line.strip() for line in content.splitlines())
+        chunks = (phrase for line in lines for phrase in line.split("  "))
+        clean_text = "\n".join(chunk for chunk in chunks if chunk)
+        
+        # Extract links
+        links = []
+        for a in soup.find_all("a", href=True):
+            links.append({
+                "title": a.get_text().strip(),
+                "url": a["href"]
+            })
+            if len(links) >= 50:
+                break
+                
         return {
             "ok": True,
-            "title": payload.get("title", ""),
-            "content": payload.get("content", ""),
-            "links": payload.get("links", []),
+            "title": title,
+            "content": clean_text[:50000],
+            "links": links,
             "message": ""
         }
     except Exception as exc:

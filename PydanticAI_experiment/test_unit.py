@@ -177,18 +177,17 @@ def test_query_docs_rag():
 # Web Tools Unit Tests (2 tests)
 # ==========================================
 
-def test_web_search_fail_soft():
-    res = web_search("test query")
-    if not os.getenv("OLLAMA_API_KEY"):
-        assert res["ok"] is False
-        assert res["error_type"] == "missing_api_key"
-    else:
-        assert "ok" in res
+def test_web_search_success():
+    res = web_search("python")
+    assert res["ok"] is True
+    assert "results" in res
+    assert isinstance(res["results"], list)
+    if len(res["results"]) > 0:
+        assert "title" in res["results"][0]
 
-def test_web_fetch_fail_soft():
+def test_web_fetch_success():
     res = web_fetch("https://example.com")
-    if not os.getenv("OLLAMA_API_KEY"):
-        assert res["ok"] is False
-        assert res["error_type"] == "missing_api_key"
-    else:
-        assert "ok" in res
+    assert res["ok"] is True
+    assert "Example Domain" in res["title"]
+    assert "content" in res
+    assert len(res["content"]) > 0
