@@ -215,13 +215,13 @@ metadata:
 **args (model sent):**
 
 ```json
-"{\"view\":\"overview\"}"
+"{\"targets\":[\"sample_rate\",\"sig_source_0\"]}"
 ```
 
 **result (model saw this exact string):**
 
 ```json
-{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "dial_tone", "block_id": "options", "role": "options", "state": "enabled", "params": {"title": "Dial Tone", "author": "Example", "copyright": "", "description": "example flow graph", "output_language": "python", "generate_options": "qt_gui", "run": "True", "max_nouts": "0", "realtime_scheduling": "", "qt_qss_theme": ""}, "inputs": [], "outputs": []}, {"instance_name": "ampl", "block_id": "variable_qtgui_range", "role": "variable", "state": "enabled", "params": {"label": "Volume", "rangeType": "float", "value": ".4", "start": "0", "stop": ".5", "step": ".001", "widget": "counter_slider", "min_len": "200"}, "inputs": [], "outputs": []}, {"instance_name": "noise", "block_id": "variable_qtgui_range", "role": "variable", "state": "enabled", "params": {"label": "Noise Amplitude", "rangeType": "float", "value": "0.005", "start": "0", "stop": ".2", "step": ".001", "widget": "counter_slider", "min_len": "200"}, "inputs": [], "outputs": []}, {"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "32000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_noise_source_x_0", "block_id": "analog_noise_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "noise_type": "analog.GR_GAUSSIAN", "amp": "noise", "seed": "-42"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}, {"instance_name": "analog_sig_source_x_1", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "440", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}, {"instance_name": "audio_sink", "block_id": "audio_sink", "role": "sink", "state": "enabled", "params": {"samp_rate": "32000", "device_name": "", "ok_to_block": "True", "num_inputs": "1"}, "inputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}], "outputs": []}, {"instance_name": "blocks_add_xx", "block_id": "blocks_add_xx", "role": "transform", "state": "enabled", "params": {"type": "float", "num_inputs": "3", "vlen": "1"}, "inputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}, {"port_id": "1", "dtype": "float", "domain": "stream"}, {"port_id": "2", "dtype": "float", "domain": "stream"}], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0", "analog_noise_source_x_0:0->blocks_add_xx:2", "analog_sig_source_x_1:0->blocks_add_xx:1", "blocks_add_xx:0->audio_sink:0"], "validation": {"status": "valid", "errors": []}}}
+{"ok": false, "errors": [{"code": "block_not_found", "message": "Unknown block name(s): sample_rate, sig_source_0", "valid_blocks": [{"instance_name": "dial_tone", "block_id": "options"}, {"instance_name": "ampl", "block_id": "variable_qtgui_range"}, {"instance_name": "noise", "block_id": "variable_qtgui_range"}, {"instance_name": "samp_rate", "block_id": "variable"}, {"instance_name": "analog_noise_source_x_0", "block_id": "analog_noise_source_x"}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x"}, {"instance_name": "analog_sig_source_x_1", "block_id": "analog_sig_source_x"}, {"instance_name": "audio_sink", "block_id": "audio_sink"}, {"instance_name": "blocks_add_xx", "block_id": "blocks_add_xx"}]}]}
 ```
 
 ### call 2 — `inspect_graph`
@@ -229,13 +229,13 @@ metadata:
 **args (model sent):**
 
 ```json
-"{\"view\":\"overview\",\"targets\":[\"samp_rate\",\"analog_sig_source_x_0\"]}"
+"{\"targets\":[\"samp_rate\",\"analog_sig_source_x_0\"]}"
 ```
 
 **result (model saw this exact string):**
 
 ```json
-{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "32000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"], "validation": {"status": "valid", "errors": []}}}
+{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "32000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"], "validation": {"status": "valid", "errors": []}}}
 ```
 
 ### call 3 — `change_graph`
@@ -257,13 +257,13 @@ metadata:
 **args (model sent):**
 
 ```json
-"{\"view\":\"overview\",\"targets\":[\"samp_rate\",\"analog_sig_source_x_0\"]}"
+"{\"targets\":[\"samp_rate\",\"analog_sig_source_x_0\"]}"
 ```
 
 **result (model saw this exact string):**
 
 ```json
-{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "96000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"], "validation": {"status": "valid", "errors": []}}}
+{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "96000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"], "validation": {"status": "valid", "errors": []}}}
 ```
 
 ## Final result (raw)
@@ -271,7 +271,7 @@ metadata:
 ```json
 {
   "ok": true,
-  "assistant_text": "Done! Here's what happened:\n\n**Before update:**\n- `samp_rate`: value = \"32000\"\n- `analog_sig_source_x_0` (350 Hz tone): freq = \"350\", samp_rate = \"samp_rate\"\n\n**After change:**\n- `samp_rate`: value = **\"96000\"** \u2728\n- `analog_sig_source_x_0`: unchanged \u2014 still generates a 350 Hz cosine wave at the (now updated) sample rate\n\nThe change was confirmed by re-inspecting just those two blocks.",
+  "assistant_text": "I located the blocks using their instance names: `samp_rate` (the sample rate variable) and `analog_sig_source_x_0` (the 350 Hz tone source). \n\nHere's what was done:\n1. **Initial Inspection**: Confirmed `samp_rate` had a value of `\"32000\"` and the tone source was set to `\"freq\": \"350\"`.\n2. **Update**: Changed the `value` parameter on `samp_rate` from `\"32000\"` to `\"96000\"`.\n3. **Confirmation**: Re-inspected both blocks, confirming that `samp_rate` now correctly holds `\"value\": \"96000\"` while the tone frequency remains at 350 Hz.\n\nThe flowgraph validation status is still **valid**. Let me know if you need any other changes!",
   "expect_reason": "ok"
 }
 ```
