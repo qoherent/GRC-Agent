@@ -13,7 +13,13 @@ from grc_adapter import load_flow_graph
 from run import grc_tools, build_system_prompt, prune_history, MODEL, OLLAMA_V1
 
 # 1. Load active GRC flowgraph fixture
-fixture_path = os.environ.get("GRC_FIXTURE_PATH", "tests/data/dial_tone.grc")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+default_fixture = str(PROJECT_ROOT / "tests" / "data" / "dial_tone.grc")
+fixture_path = os.environ.get("GRC_FIXTURE_PATH", default_fixture)
+
+if not Path(fixture_path).is_absolute():
+    fixture_path = str(PROJECT_ROOT / fixture_path)
+
 print(f"==================================================")
 print(f"Starting GRC Web GUI Session")
 print(f"Loading GRC flowgraph fixture: {fixture_path}")
