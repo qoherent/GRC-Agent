@@ -42,6 +42,9 @@ agent = Agent(
     model_settings=ModelSettings(extra_body={"think": True})
 )
 
+# Set base URL for Ollama provider discovery
+os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
+
 # 3. Expose the agent via the built-in web chat Starlette application
 # Exposes the tool calling, streaming responses, and real-time validations.
-app = agent.to_web(models=[MODEL], deps=fg)
+app = agent.to_web(models=[f"ollama:{MODEL}"], deps=fg)
