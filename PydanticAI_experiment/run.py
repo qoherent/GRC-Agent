@@ -42,17 +42,55 @@ SCENARIOS = [
         "expect": {"blocks_present": ["mid_throttle"], "valid": True},
     },
     {
-        "name": "11_scoped_inspect_and_update",
+        "name": "02_update_sample_rate",
         "fixture": "tests/data/dial_tone.grc",
         "prompt": (
-            "This flowgraph has several blocks in it. Using inspect_graph's"
-            " targets option, look at just the sample rate variable and the"
-            " 350 Hz tone source — don't pull the whole overview. Then"
-            " change the sample rate to 96000. Check just those same two"
-            " blocks again to confirm."
+            "Inspect the current flowgraph. Then update the `samp_rate`"
+            " variable to `48000`. Confirm the change by inspecting again."
         ),
         "expect": {
-            "params": {"samp_rate": {"value": "96000"}},
+            "params": {"samp_rate": {"value": "48000"}},
+            "valid": True,
+        },
+    },
+    {
+        "name": "03_disable_and_enable",
+        "fixture": "tests/data/dial_tone.grc",
+        "prompt": (
+            "Inspect the flowgraph, then disable the noise source that's"
+            " mixed into the audio output. Inspect again to confirm it's"
+            " off. Then turn it back on and confirm."
+        ),
+        "expect": {"valid": True},
+    },
+    {
+        "name": "04_add_and_remove_variable",
+        "fixture": "tests/data/dial_tone.grc",
+        "prompt": (
+            "Inspect the flowgraph. Add a new variable called `gain_value`"
+            " set to 2.0, then have the 350 Hz tone's amplitude use that"
+            " variable instead of its current value. Inspect to confirm"
+            " both changes landed."
+        ),
+        "expect": {
+            "blocks_present": ["gain_value"],
+            "params": {"analog_sig_source_x_0": {"amp": "gain_value"}},
+            "valid": True,
+        },
+    },
+    {
+        "name": "05_full_rewire",
+        "fixture": "tests/data/dial_tone.grc",
+        "prompt": (
+            "Inspect the flowgraph. I don't want the noise source anymore —"
+            " remove it. In its place, add a constant source block, call it"
+            " `dc_offset`, with its constant value set to 0.0, and wire its"
+            " output into the same input on the adder that the noise source"
+            " used to feed. Inspect the result to confirm the change."
+        ),
+        "expect": {
+            "blocks_absent": ["analog_noise_source_x_0"],
+            "blocks_present": ["dc_offset"],
             "valid": True,
         },
     },
@@ -84,6 +122,31 @@ SCENARIOS = [
             " Don't change the graph."
         ),
         "expect": {"mode": "read"},
+    },
+    {
+        "name": "10_bypass_source_block",
+        "fixture": "tests/data/dial_tone.grc",
+        "prompt": (
+            "Inspect the flowgraph, then put the 350 Hz tone source into"
+            " bypass mode. Inspect again to confirm it actually switched"
+            " to bypass."
+        ),
+        "expect": {"states": {"analog_sig_source_x_0": "bypass"}},
+    },
+    {
+        "name": "11_scoped_inspect_and_update",
+        "fixture": "tests/data/dial_tone.grc",
+        "prompt": (
+            "This flowgraph has several blocks in it. Using inspect_graph's"
+            " targets option, look at just the sample rate variable and the"
+            " 350 Hz tone source — don't pull the whole overview. Then"
+            " change the sample rate to 96000. Check just those same two"
+            " blocks again to confirm."
+        ),
+        "expect": {
+            "params": {"samp_rate": {"value": "96000"}},
+            "valid": True,
+        },
     },
     {
         "name": "14_build_chain_from_scratch",
