@@ -1,6 +1,6 @@
-# 11 Scoped Inspect And Update
+# 09 Docs Stream Tags Concept
 
-**Scenario:** `11_scoped_inspect_and_update` | **Fixture:** `dial_tone.grc` | **Model:** `qwen3.6:35b-a3b-q4_K_M`
+**Scenario:** `09_docs_stream_tags_concept` | **Fixture:** `dial_tone.grc` | **Model:** `qwen3.6:35b-a3b-q4_K_M`
 
 ## System Prompt
 
@@ -33,7 +33,7 @@ Do not use LaTeX or TeX math notation in chat replies; write math inline in plai
 ## User Prompt
 
 ```text
-This flowgraph has several blocks in it. Using inspect_graph's targets option, look at just the sample rate variable and the 350 Hz tone source — don't pull the whole overview. Then change the sample rate to 96000. Check just those same two blocks again to confirm.
+I'm learning GNU Radio. Use `query_knowledge` with the **docs** domain to explain what a 'stream tag' is and how tags move through a flowgraph. Summarize what the documentation says. Don't change the graph.
 ```
 
 ## Flowgraph: BEFORE
@@ -210,60 +210,18 @@ metadata:
 
 ## Tool calls (raw inputs + outputs the model saw)
 
-### call 1 — `inspect_graph`
+### call 1 — `query_knowledge`
 
 **args (model sent):**
 
 ```json
-"{\"view\":\"overview\"}"
+"{\"query\":\"what is a stream tag and how does it move through a flowgraph\",\"domain\":\"docs\"}"
 ```
 
 **result (model saw this exact string):**
 
 ```json
-{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "dial_tone", "block_id": "options", "role": "options", "state": "enabled", "params": {"title": "Dial Tone", "author": "Example", "copyright": "", "description": "example flow graph", "output_language": "python", "generate_options": "qt_gui", "run": "True", "max_nouts": "0", "realtime_scheduling": "", "qt_qss_theme": ""}, "inputs": [], "outputs": []}, {"instance_name": "ampl", "block_id": "variable_qtgui_range", "role": "variable", "state": "enabled", "params": {"label": "Volume", "rangeType": "float", "value": ".4", "start": "0", "stop": ".5", "step": ".001", "widget": "counter_slider", "min_len": "200"}, "inputs": [], "outputs": []}, {"instance_name": "noise", "block_id": "variable_qtgui_range", "role": "variable", "state": "enabled", "params": {"label": "Noise Amplitude", "rangeType": "float", "value": "0.005", "start": "0", "stop": ".2", "step": ".001", "widget": "counter_slider", "min_len": "200"}, "inputs": [], "outputs": []}, {"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "32000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_noise_source_x_0", "block_id": "analog_noise_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "noise_type": "analog.GR_GAUSSIAN", "amp": "noise", "seed": "-42"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}, {"instance_name": "analog_sig_source_x_1", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "440", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}, {"instance_name": "audio_sink", "block_id": "audio_sink", "role": "sink", "state": "enabled", "params": {"samp_rate": "32000", "device_name": "", "ok_to_block": "True", "num_inputs": "1"}, "inputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}], "outputs": []}, {"instance_name": "blocks_add_xx", "block_id": "blocks_add_xx", "role": "transform", "state": "enabled", "params": {"type": "float", "num_inputs": "3", "vlen": "1"}, "inputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}, {"port_id": "1", "dtype": "float", "domain": "stream"}, {"port_id": "2", "dtype": "float", "domain": "stream"}], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0", "analog_noise_source_x_0:0->blocks_add_xx:2", "analog_sig_source_x_1:0->blocks_add_xx:1", "blocks_add_xx:0->audio_sink:0"], "validation": {"status": "valid", "errors": []}}}
-```
-
-### call 2 — `inspect_graph`
-
-**args (model sent):**
-
-```json
-"{\"view\":\"overview\",\"targets\":[\"samp_rate\",\"analog_sig_source_x_0\"]}"
-```
-
-**result (model saw this exact string):**
-
-```json
-{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "32000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"], "validation": {"status": "valid", "errors": []}}}
-```
-
-### call 3 — `change_graph`
-
-**args (model sent):**
-
-```json
-"{\"update_params\":[{\"instance_name\":\"samp_rate\",\"params\":{\"value\":\"96000\"}}]}"
-```
-
-**result (model saw this exact string):**
-
-```json
-{"ok": true}
-```
-
-### call 4 — `inspect_graph`
-
-**args (model sent):**
-
-```json
-"{\"view\":\"overview\",\"targets\":[\"samp_rate\",\"analog_sig_source_x_0\"]}"
-```
-
-**result (model saw this exact string):**
-
-```json
-{"ok": true, "graph": {"graph_name": "dial_tone", "blocks": [{"instance_name": "samp_rate", "block_id": "variable", "role": "variable", "state": "enabled", "params": {"value": "96000"}, "inputs": [], "outputs": []}, {"instance_name": "analog_sig_source_x_0", "block_id": "analog_sig_source_x", "role": "source", "state": "enabled", "params": {"type": "float", "samp_rate": "samp_rate", "waveform": "analog.GR_COS_WAVE", "freq": "350", "amp": "ampl", "offset": "0", "phase": "0"}, "inputs": [], "outputs": [{"port_id": "0", "dtype": "float", "domain": "stream"}]}], "connections": ["analog_sig_source_x_0:0->blocks_add_xx:0"], "validation": {"status": "valid", "errors": []}}}
+{"ok": true, "question": "what is a stream tag and how does it move through a flowgraph", "answer": "**What is a stream tag?**\nA stream tag is an isosynchronous data stream that runs parallel to the main data stream, used to attach metadata to specific items (`Stream_Tags.md`). Each tag is linked to a particular item via an absolute count and consists of:\n- `offset`: The unique absolute item count in the stream (`BlocksCodingGuide.md`)\n- `key`: A PMT symbol identifying the tag's type (`Stream_Tags.md`, `BlocksCodingGuide.md`)\n- `value`: A PMT holding the actual metadata data (`Stream_Tags.md`, `BlocksCodingGuide.md`)\n- `srcid` (optional): A PMT symbol identifying the block that created the tag (`Stream_Tags.md`, `BlocksCodingGuide.md`)\n\n**How does it move through a flowgraph?**\n- Tags are generated by a block's work function and flow downstream alongside a specific sample until they reach a sink or are explicitly stopped by another block (`Stream_Tags.md`).\n- They remain attached to their original absolute item position as they pass through processing blocks (e.g., tags stay at the same positions even after data is combined or processed) (`Stream_Tags.md` Example Flowgraph).\n- Downstream blocks interact with them using `get_tags_in_range()` to read and `add_item_tag()` to write within their work functions (`BlocksCodingGuide.md`).\n\n*Coverage note:* The documentation explains basic downstream propagation and absolute-position attachment but does not detail advanced routing mechanics, tag merging at multi-input blocks, or specific conditions under which tags are dropped beyond reaching a sink or being forced to stop.", "sources": [{"path": "Stream_Tags.md", "distance": 0.833}, {"path": "Stream_Tags.md", "distance": 0.897}, {"path": "Stream_Tags.md", "distance": 0.912}, {"path": "BlocksCodingGuide.md", "distance": 0.929}, {"path": "Stream_Tags.md", "distance": 0.936}]}
 ```
 
 ## Final result (raw)
@@ -271,7 +229,7 @@ metadata:
 ```json
 {
   "ok": true,
-  "assistant_text": "Done! Here's what happened:\n\n**Before update:**\n- `samp_rate`: value = \"32000\"\n- `analog_sig_source_x_0` (350 Hz tone): freq = \"350\", samp_rate = \"samp_rate\"\n\n**After change:**\n- `samp_rate`: value = **\"96000\"** \u2728\n- `analog_sig_source_x_0`: unchanged \u2014 still generates a 350 Hz cosine wave at the (now updated) sample rate\n\nThe change was confirmed by re-inspecting just those two blocks.",
+  "assistant_text": "Based on the documentation, here is a summary of **stream tags** and how they work:\n\n### What is a Stream Tag?\nA stream tag is essentially metadata attached to a specific item in the data stream (like a sample). It runs parallel to your actual data but carries extra information about that specific point.\n\nEvery tag consists of four components:\n*   **Offset:** The absolute count (item number) of where the tag occurs in the stream.\n*   **Key:** A unique identifier (a symbol) describing what kind of tag it is.\n*   **Value:** The actual data associated with that tag (usually stored as a PMT).\n*   **Source ID (srcid):** Optional metadata identifying which block created the tag.\n\n### How Do They Move?\n*   **Downstream Flow:** Once a block \"writes\" a tag, it flows downstream towards the sink (your output device or file).\n*   **Absolute Positioning:** Tags stay attached to their specific `offset` as they pass through other blocks. Even if data is processed or combined, the offset relative to the stream remains constant.\n*   **Lifecycle:** Tags naturally stop when they reach a sink. If you want to stop a tag earlier, another block in the middle of the flow would explicitly handle it.\n\n### Interacting with Them\nBlocks use two main methods to interact with tags within their work functions:\n1.  `get_tags_in_range()`: Used to read existing tags currently affecting the data being processed.\n2.  `add_item_tag()`: Used to write or create new tags that will flow downstream.",
   "expect_reason": "ok"
 }
 ```
