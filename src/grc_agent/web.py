@@ -154,6 +154,32 @@ async def grc_inspect(request: Request) -> JSONResponse:
     return JSONResponse(inspect_graph(active))
 
 
+def ensure_broadway() -> None:
+    import socket
+    import time
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.connect(("127.0.0.1", 8085))
+        s.close()
+    except Exception:
+        # Not running, start it
+        try:
+            subprocess.run(["killall", "broadwayd"], capture_output=True)
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(
+                ["broadwayd", "-p", "8085", ":5"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid
+            )
+            print("[grc-agent] Started broadwayd daemon on port 8085 display :5 (lazy startup)")
+            time.sleep(1.0) # give it a second to bind
+        except Exception as e:
+            print("[grc-agent] Failed to start broadwayd daemon lazily:", e)
+
+
 async def grc_open(request: Request) -> JSONResponse:
     global active_path, canvas_proc
     body = await request.json()
@@ -168,6 +194,9 @@ async def grc_open(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
     active.swap(new_fg)
     active_path = path
+
+    # Ensure broadwayd is running
+    ensure_broadway()
 
     # Terminate any previously running canvas process
     if canvas_proc:

@@ -223,9 +223,9 @@
 
   /* ---- Chat: sidebar right column ---- */
   #chat-pane {
-    flex: 0 1 420px;
-    min-width: 340px;
-    max-width: 480px;
+    flex: 0 1 680px;
+    min-width: 580px;
+    max-width: 720px;
     height: 100%;
     display: flex;
     flex-direction: column;
@@ -571,6 +571,24 @@ function integrateSettings() {
     const overlay = document.getElementById("left-sidebar-overlay");
     if (!doc || !overlay) return;
 
+    // Inject spacing and display rules to force the sidebar to be visible inside the iframe
+    if (!doc.getElementById("parent-injected-padding")) {
+      const styleSheet = doc.createElement("style");
+      styleSheet.id = "parent-injected-padding";
+      styleSheet.textContent = `
+        aside, .sidebar, [role="navigation"] {
+          display: flex !important;
+          visibility: visible !important;
+          width: 240px !important;
+          min-width: 240px !important;
+          max-width: 240px !important;
+          position: relative !important;
+          padding-bottom: 240px !important;
+        }
+      `;
+      doc.head.appendChild(styleSheet);
+    }
+
     // Find the sidebar container.
     let sidebar = doc.querySelector("aside") || doc.querySelector(".sidebar") || doc.querySelector("[role='navigation']");
 
@@ -633,18 +651,6 @@ function integrateSettings() {
         // Show overlay and match dimensions dynamically
         overlay.style.display = "flex";
         overlay.style.width = `${rect.width}px`;
-
-        // Inject spacing padding at the bottom of the iframe sidebar to prevent items scrolling behind overlay
-        if (!doc.getElementById("parent-injected-padding")) {
-          const styleSheet = doc.createElement("style");
-          styleSheet.id = "parent-injected-padding";
-          styleSheet.textContent = `
-            aside, .sidebar, [role="navigation"] {
-              padding-bottom: 240px !important;
-            }
-          `;
-          doc.head.appendChild(styleSheet);
-        }
       } else {
         overlay.style.display = "none";
       }
