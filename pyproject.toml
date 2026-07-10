@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "grc-agent"
 version = "0.1.0"
-description = "Local GNU Radio Companion .grc assistant."
+description = "Local GNU Radio Companion .grc assistant, built on PydanticAI."
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "MIT"}
 authors = [{name = "Qoherent"}]
@@ -33,51 +33,48 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "ToolAgents>=0.3.0,<0.4.0",
     "openai>=1.50",
-    "python-dotenv>=1.0",
     "httpx>=0.27",
     "pydantic>=2.0",
-    "pyyaml>=6.0.3",
     "sqlite-vec>=0.1.9",
-    "tomlkit>=0.15.0",
-    "jsonschema>=4.26.0",
+    "starlette>=0.40",
     "tenacity>=9.1.4",
-    "pydantic-ai>=2.7.0",
-    "duckduckgo-search>=8.1.1",
+    "pydantic-ai[web-fetch]>=2.7.0",
+    "beautifulsoup4>=4.12",
+    "uvicorn>=0.30",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-gui = [
-    "PySide6>=6.5.0",
-    "Pygments>=2.17.0",
-]
 dev = [
     "ruff>=0.15.9",
-    "ruamel-yaml>=0.19.1",
     "pytest>=8.0.0",
-    "pytest-qt>=4.4.0",
 ]
+
+[project.scripts]
+grc-agent-web = "grc_agent.web:main"
 
 [project.urls]
 Homepage = "https://github.com/qoherent/grc-agent"
 Repository = "https://github.com/qoherent/grc-agent"
 Issues = "https://github.com/qoherent/grc-agent/issues"
-Changelog = "https://github.com/qoherent/grc-agent/releases"
 
-[project.gui-scripts]
-grc-agent-gui = "grc_agent_gui.app:main"
+[tool.hatch.build.targets.sdist]
+packages = ["src/grc_agent"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"docs/wiki_gnuradio_org" = "docs/wiki_gnuradio_org"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/grc_agent", "src/grc_agent_gui"]
+packages = ["src/grc_agent"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"docs/wiki_gnuradio_org" = "grc_agent/wiki_gnuradio_org"
+"docs/wiki_gnuradio_org" = "grc_agent/docs/wiki_gnuradio_org"
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["grc_agent", "grc_agent_gui", "tests"]
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
@@ -85,17 +82,6 @@ ignore = [
     "E501",  # line-too-long (handled by formatter)
 ]
 
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011"]  # asserts are fine in tests
-"src/**" = ["E402"]  # module-level imports after logger are intentional
-"tests/conftest.py" = ["E402"]  # env-var setup must precede imports
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-qt_api = "pyside6"
-markers = [
-    "gui: tests that require a PySide6 QApplication",
-    "live_rag: tests that touch the real vector DB / live ollama (only run under GRC_AGENT_LIVE_RAG=1)",
-    "grc_native: tests that require the GNU Radio native GRC platform (apt install gnuradio)",
-]

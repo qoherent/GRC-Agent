@@ -1,5 +1,6 @@
 
 .antigravitycli/
+.claude/
 # Backups
 *.bak
 benchmark_outputs/
@@ -47,6 +48,8 @@ wheels/
 
 vec1.so
 
-# Generated vector indexes (per-backend, rebuilt at boot via
-# GrcAgent.warmup_vector_index when the stamped embedding model changes)
+# Generated vector indexes (per-backend, built on first use — see grc_agent.ingest)
 src/grc_agent/vectors/
+
+# Per-user model/provider preference (see grc_agent.settings)
+src/grc_agent/settings.json

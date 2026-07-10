@@ -1,0 +1,993 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Qoherent GRC Agent</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --surface: #141a21;
+    --surface-2: #1c232c;
+    --border: #262f39;
+    --text: #e4e7ea;
+    --text-dim: #8b96a3;
+    --accent: #e0a63a;
+    --accent-dim: #7a5a26;
+    --ok: #3ddc84;
+    --ok-bg: #123420;
+    --danger: #ff6b6b;
+    --danger-bg: #3a1418;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+  }
+  a { color: var(--accent); }
+  button:focus-visible, input:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* ---- Right panel: everything GNU Radio, one contiguous surface ---- */
+  #grc-pane {
+    flex: 0 1 420px;
+    min-width: 340px;
+    max-width: 480px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  #file-block { flex: 0 0 auto; padding: 14px 16px 12px; border-top: 1px solid var(--border); }
+  #current-path {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    word-break: break-all;
+    display: block;
+    margin-bottom: 8px;
+  }
+  #current-path .value { color: var(--text); }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 9px;
+    border-radius: 100px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+  .pill.valid { background: var(--ok-bg); color: var(--ok); }
+  .pill.invalid { background: var(--danger-bg); color: var(--danger); }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  #load-controls { flex: 0 0 auto; padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-family: var(--sans);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent-dim); }
+  button svg { flex: 0 0 auto; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button:disabled:hover { border-color: var(--border); }
+
+  #empty-state { padding: 16px 0; font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+
+  #msg {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 0 16px;
+    height: 0;
+    overflow: hidden;
+    transition: height 120ms ease;
+  }
+  #msg.visible { height: 28px; padding-top: 6px; }
+  #msg.error { color: var(--danger); }
+  #msg.ok { color: var(--ok); }
+
+  /* ---- Instrumentation: stacked, scrolls within the remaining height ---- */
+  #instrumentation { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 12px; }
+  .col + .col { margin-top: 16px; }
+  .col h2 {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    margin: 12px 0 8px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
+  td { text-align: left; padding: 4px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .role-group { margin-bottom: 10px; }
+  .role-group h3 {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin: 8px 0 4px;
+    font-weight: 600;
+  }
+  .block-name { font-family: var(--sans); font-weight: 600; color: var(--text); }
+  .block-id { color: var(--text-dim); font-size: 11px; }
+  .params { color: var(--text-dim); font-size: 11px; font-family: var(--mono); word-break: break-word; }
+  .state-bypass, .state-disabled { opacity: .45; font-style: italic; }
+  ul.conns { list-style: none; padding: 0; margin: 0; font-size: 12px; font-family: var(--mono); }
+  ul.conns li { padding: 3px 0; border-bottom: 1px solid var(--border); color: var(--text-dim); word-break: break-all; }
+  .errors { color: var(--danger); font-size: 12px; font-family: var(--mono); margin-top: 6px; }
+
+  /* ---- Model settings & History Overlay ---- */
+  #left-sidebar-overlay {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 260px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    z-index: 10;
+    display: none;
+    flex-direction: column;
+  }
+  #history-block {
+    padding: 10px 16px 6px;
+    border-top: 1px solid var(--border);
+  }
+  #settings-block {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+  }
+  #history-block button {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--danger);
+    border-radius: 6px;
+    font-family: var(--sans);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #history-block button:hover { border-color: var(--danger-bg); background: var(--danger-bg); }
+  #history-block button svg { flex: 0 0 auto; }
+  
+  #settings-block h2 {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin: 0 0 8px;
+  }
+  #settings-block select, #settings-block input {
+    width: 100%;
+    padding: 6px 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    margin-bottom: 6px;
+  }
+  #settings-hint { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.5; }
+  #settings-hint code { color: var(--accent); }
+  #settings-hint.warn { color: var(--danger); }
+  #settings-msg { font-family: var(--mono); font-size: 11px; min-height: 14px; margin-top: 6px; }
+  #settings-msg.ok { color: var(--ok); }
+  #settings-msg.error { color: var(--danger); }
+
+  /* ---- Credit ---- */
+  #credit {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+  }
+  #credit a { display: inline-flex; align-items: center; color: var(--text-dim); }
+  #credit a:hover { color: var(--accent); }
+
+  /* ---- Chat: narrow left column ---- */
+  #chat-pane {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    position: relative;
+  }
+  #chat-pane iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
+
+  /* ---- Browse dialog ---- */
+  #browse-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 6, 9, .6);
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  #browse-overlay.open { display: flex; }
+  #browse-dialog {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 480px;
+    max-width: 90vw;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  #browse-header {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #browse-dir {
+    flex: 1;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #browse-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+  .browse-entry {
+    padding: 8px 14px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+  }
+  .browse-entry:hover { background: var(--surface-2); }
+  .browse-entry svg { flex: 0 0 auto; color: var(--text-dim); }
+  .browse-entry.dir svg { color: var(--accent); }
+  .browse-footer { padding: 10px 14px; border-top: 1px solid var(--border); text-align: right; }
+</style>
+</head>
+<body>
+<div id="chat-pane">
+  <iframe id="chat-frame" title="Chat" onload="integrateSettings()"></iframe>
+  <div id="left-sidebar-overlay">
+    <div id="history-block">
+      <button id="clear-history-btn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16z"/></svg>
+        Clear History
+      </button>
+    </div>
+    <div id="settings-block">
+      <h2>Model</h2>
+      <select id="settings-provider" onchange="onProviderChange()">
+        <option value="ollama">Ollama (local)</option>
+        <option value="openrouter">OpenRouter (cloud)</option>
+      </select>
+      <input id="settings-model" type="text" placeholder="model name">
+      <div id="settings-hint"></div>
+      <button id="settings-save">Save</button>
+      <div id="settings-msg"></div>
+    </div>
+  </div>
+</div>
+
+<div id="grc-pane">
+  <div id="load-controls">
+    <button id="browse-btn" onclick="openBrowse()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+      Browse&hellip;
+    </button>
+  </div>
+
+  <div id="msg"></div>
+
+  <div id="instrumentation">
+    <div id="canvas-col" class="col" style="display: none;">
+      <h2>Flowgraph Canvas</h2>
+      <div id="canvas-container" style="border: 1px solid var(--border); border-radius: 6px; overflow: auto; background: #fff; padding: 12px; max-height: 400px; display: flex; justify-content: center; align-items: center; box-shadow: inset 0 1px 3px rgba(0,0,0,0.05);">
+        <img id="canvas-img" src="" alt="GRC Flowgraph Canvas" style="max-width: 100%; height: auto; border-radius: 4px; display: block;" />
+      </div>
+    </div>
+    <div class="col">
+      <h2>Variables</h2>
+      <table id="variables"><tbody></tbody></table>
+    </div>
+    <div class="col">
+      <h2>Blocks</h2>
+      <div id="blocks"></div>
+    </div>
+    <div class="col">
+      <h2>Connections</h2>
+      <ul class="conns" id="connections"></ul>
+    </div>
+  </div>
+
+  <div id="file-block">
+    <span id="current-path">File: <span class="value">-</span></span>
+    <span id="validation"></span>
+  </div>
+
+  <div id="credit">
+    <span>Developed by Mahmoud Sallam</span>
+    <a href="https://www.linkedin.com/in/mahmoudsallam7/" target="_blank" rel="noopener" title="LinkedIn">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 1 1 0-4.124 2.062 2.062 0 0 1 0 4.124zM7.119 20.452H3.554V9h3.565v11.452z"/></svg>
+    </a>
+  </div>
+</div>
+
+<div id="browse-overlay">
+  <div id="browse-dialog">
+    <div id="browse-header">
+      <button id="browse-up-btn" class="secondary" onclick="browseUp()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        Up
+      </button>
+      <span id="browse-dir">-</span>
+    </div>
+    <div id="browse-list"></div>
+    <div class="browse-footer"><button onclick="closeBrowse()">Cancel</button></div>
+  </div>
+</div>
+
+<script>
+const ICON_DIR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>';
+const ICON_FILE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+
+// Each conversation is locked to exactly one flowgraph (mirrors the old
+// desktop GUI's open_file(), which cleared the chat and reset the agent
+// session on every load) — a chat history should never span two different
+// underlying .grc files. The vendor widget hardcodes pathname === "/" as
+// its own "fresh conversation" sentinel (confirmed via direct inspection —
+// any other path silently renders nothing), so the iframe must point at
+// the literal root, not a subpath; the query param just forces a reload
+// instead of a no-op same-src assignment.
+function startNewConversation() {
+  localStorage.removeItem("grc_active_conv_id");
+  document.getElementById("chat-frame").src = `/?r=${crypto.randomUUID()}`;
+}
+
+function restoreSession() {
+  const activeConvId = localStorage.getItem("grc_active_conv_id");
+  if (activeConvId && activeConvId !== "/") {
+    document.getElementById("chat-frame").src = activeConvId;
+  } else {
+    startNewConversation();
+  }
+}
+restoreSession();
+
+// The chat widget has no server-side conversation store (confirmed by
+// reading pydantic_ai's own to_web() source — its /api/chat route is
+// stateless); it persists every conversation client-side in a same-origin
+// IndexedDB database named "chat-storage" (confirmed by inspecting the
+// vendor bundle directly). Since this page and the iframe share that origin,
+// deleting it here clears history for good — then start a fresh conversation
+// so the UI doesn't keep pointing at now-gone data.
+function clearHistory() {
+  if (!confirm("Delete all conversations? This cannot be undone.")) return;
+
+  // 1. Clear parent storage
+  try {
+    localStorage.clear();
+    sessionStorage.clear();
+  } catch (e) {}
+
+  // 2. Clear iframe storage directly to bypass iframe session memory
+  const iframe = document.getElementById("chat-frame");
+  if (iframe) {
+    try {
+      const iframeWin = iframe.contentWindow;
+      if (iframeWin) {
+        iframeWin.localStorage.clear();
+        iframeWin.sessionStorage.clear();
+        if (iframeWin.indexedDB) {
+          iframeWin.indexedDB.deleteDatabase("chat-storage");
+          if (iframeWin.indexedDB.databases) {
+            iframeWin.indexedDB.databases().then(dbs => {
+              for (const db of dbs) {
+                if (db.name) {
+                  iframeWin.indexedDB.deleteDatabase(db.name);
+                }
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 3. Delete parent IndexedDB databases
+  try {
+    indexedDB.deleteDatabase("chat-storage");
+    if (indexedDB.databases) {
+      indexedDB.databases().then(dbs => {
+        for (const db of dbs) {
+          if (db.name) {
+            indexedDB.deleteDatabase(db.name);
+          }
+        }
+      });
+    }
+  } catch (e) {}
+
+  // 4. Force reload/navigate the iframe
+  startNewConversation();
+  unloadGrc();
+
+  // 5. Clear again after 150ms to wipe out any state written by React during the unload event
+  setTimeout(() => {
+    try {
+      localStorage.clear();
+      sessionStorage.clear();
+      if (iframe && iframe.contentWindow) {
+        iframe.contentWindow.localStorage.clear();
+        iframe.contentWindow.sessionStorage.clear();
+      }
+    } catch (e) {}
+  }, 150);
+}
+
+// The vendor widget uses pathname "/" as its own "fresh conversation"
+// sentinel (confirmed via direct inspection) — it flips away from "/" as
+// soon as a real conversation exists. Same-origin iframe, so the parent
+// can read it directly: poll it to gate Browse, since a conversation in
+// progress must not have its flowgraph swapped out from under it — only
+// starting a new conversation (this page's own load, or the widget's own
+// "New conversation" button) should re-enable loading a different file.
+let lastPath = "/";
+
+function getSessionGrcPath(convId) {
+  try {
+    const mapping = JSON.parse(localStorage.getItem("grc_session_mapping") || "{}");
+    return mapping[convId] || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveSessionGrcPath(convId, grcPath) {
+  try {
+    const mapping = JSON.parse(localStorage.getItem("grc_session_mapping") || "{}");
+    mapping[convId] = grcPath;
+    localStorage.setItem("grc_session_mapping", JSON.stringify(mapping));
+  } catch (e) {}
+}
+
+async function pollConversationState() {
+  const btn = document.getElementById("browse-btn");
+  let fresh = true;
+  let currentPath;
+  try {
+    const frame = document.getElementById("chat-frame");
+    if (!frame) return;
+    const win = frame.contentWindow;
+    if (!win) return;
+    const loc = win.location;
+    if (!loc || loc.href === "about:blank") return;
+    currentPath = loc.pathname;
+    fresh = currentPath === "/";
+  } catch (e) {
+    // Transitional or loading states must exit early to prevent fake "/" transitions and premature unloads
+    return;
+  }
+
+  btn.disabled = !fresh;
+  btn.title = fresh ? "" : "Start a new conversation to load a different file";
+
+  // Check version changes on backend to auto-refresh if agent changed params!
+  try {
+    const statusRes = await fetch("/grc/status").then(r => r.json());
+    if (statusRes.version !== undefined && statusRes.version !== lastGrcVersion) {
+      lastGrcVersion = statusRes.version;
+      await refresh();
+    }
+  } catch (e) {}
+
+  if (currentPath !== lastPath) {
+    if (currentPath === "/") {
+      localStorage.removeItem("grc_active_conv_id");
+      unloadGrc();
+    } else {
+      localStorage.setItem('grc_active_conv_id', currentPath);
+      
+      const mappedGrc = getSessionGrcPath(currentPath);
+      if (mappedGrc) {
+        try {
+          const res = await fetch("/grc/open", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({path: mappedGrc})
+          });
+          const data = await res.json();
+          if (data.ok) {
+            isGrcLoaded = true;
+            await refresh();
+          }
+        } catch (e) {
+          console.error("Auto-open GRC failed:", e);
+        }
+      } else {
+        try {
+          const statusRes = await fetch("/grc/status").then(r => r.json());
+          if (statusRes.path) {
+            saveSessionGrcPath(currentPath, statusRes.path);
+          } else {
+            isGrcLoaded = false;
+            await refresh();
+          }
+        } catch (e) {}
+      }
+    }
+    lastPath = currentPath;
+  }
+}
+
+async function unloadGrc() {
+  try {
+    await fetch("/grc/close", { method: "POST" });
+    await refresh();
+  } catch (e) {
+    console.error("Failed to unload GRC:", e);
+  }
+}
+
+setInterval(pollConversationState, 750);
+
+function integrateSettings() {
+  try {
+    const iframe = document.getElementById("chat-frame");
+    if (!iframe) return;
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    const overlay = document.getElementById("left-sidebar-overlay");
+    if (!doc || !overlay) return;
+
+    // Find the sidebar container.
+    let sidebar = doc.querySelector("aside") || doc.querySelector(".sidebar") || doc.querySelector("[role='navigation']");
+
+    if (!sidebar) {
+      // Fallback 1: search for logo or text indicators
+      const elements = doc.querySelectorAll("a, button, div, span");
+      let indicator = null;
+      for (const el of elements) {
+        const txt = (el.textContent || "").trim().toLowerCase();
+        if (txt === "qoherent grc agent" || txt === "pydantic ai" || txt === "new conversation" || txt === "+ new conversation") {
+          indicator = el;
+          break;
+        }
+      }
+      if (indicator) {
+        let parent = indicator.parentElement;
+        while (parent && parent !== doc.body) {
+          const className = parent.className || "";
+          if (
+            parent.tagName === "ASIDE" ||
+            parent.classList.contains("sidebar") ||
+            className.includes("sidebar") ||
+            className.includes("border-r") ||
+            className.includes("w-64") ||
+            className.includes("w-60")
+          ) {
+            sidebar = parent;
+            break;
+          }
+          parent = parent.parentElement;
+        }
+        if (!sidebar) {
+          sidebar = indicator.parentElement?.parentElement;
+        }
+      }
+    }
+
+    if (!sidebar) {
+      // Fallback 2: Look for the first child of the first flex/grid container under root
+      const root = doc.getElementById("root") || doc.body;
+      const flexContainer = Array.from(root.querySelectorAll("*")).find(el => {
+        try {
+          const display = iframe.contentWindow.getComputedStyle(el).display;
+          return display === "flex" || display === "grid";
+        } catch (e) {
+          return false;
+        }
+      });
+      if (flexContainer && flexContainer.firstElementChild) {
+        sidebar = flexContainer.firstElementChild;
+      }
+    }
+
+    if (sidebar) {
+      const rect = sidebar.getBoundingClientRect();
+      const style = iframe.contentWindow.getComputedStyle(sidebar);
+      const isVisible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+
+      if (isVisible) {
+        // Show overlay and match dimensions dynamically
+        overlay.style.display = "flex";
+        overlay.style.width = `${rect.width}px`;
+
+        // Inject spacing padding at the bottom of the iframe sidebar to prevent items scrolling behind overlay
+        if (!doc.getElementById("parent-injected-padding")) {
+          const styleSheet = doc.createElement("style");
+          styleSheet.id = "parent-injected-padding";
+          styleSheet.textContent = `
+            aside, .sidebar, [role="navigation"] {
+              padding-bottom: 240px !important;
+            }
+          `;
+          doc.head.appendChild(styleSheet);
+        }
+      } else {
+        overlay.style.display = "none";
+      }
+    } else {
+      overlay.style.display = "none";
+    }
+  } catch (err) {
+    console.error("integrateSettings failed:", err);
+  }
+
+  // Keep chat input disabled if no GRC file is loaded
+  try {
+    updateChatInputState();
+  } catch (e) {}
+}
+
+function updateChatInputState() {
+  const iframe = document.getElementById("chat-frame");
+  if (!iframe) return;
+  const doc = iframe.contentDocument || iframe.contentWindow?.document;
+  if (!doc) return;
+
+  const textarea = doc.querySelector("textarea");
+  const sendBtn = doc.querySelector("form button") || doc.querySelector("textarea ~ button") || doc.querySelector("button[type='submit']");
+
+  if (!textarea) return;
+
+  if (!isGrcLoaded) {
+    textarea.disabled = true;
+    textarea.placeholder = "Please load a GRC file using the Browse button to start chatting.";
+    textarea.style.opacity = "0.5";
+    textarea.style.cursor = "not-allowed";
+    if (sendBtn) {
+      sendBtn.disabled = true;
+      sendBtn.style.opacity = "0.3";
+      sendBtn.style.cursor = "not-allowed";
+    }
+  } else {
+    if (textarea.disabled) {
+      textarea.disabled = false;
+      textarea.placeholder = "What would you like to know?";
+      textarea.style.opacity = "1";
+      textarea.style.cursor = "text";
+      if (sendBtn) {
+        sendBtn.disabled = false;
+        sendBtn.style.opacity = "1";
+        sendBtn.style.cursor = "pointer";
+      }
+    }
+  }
+}
+
+setInterval(integrateSettings, 300);
+
+function setMsg(text, cls) {
+  const el = document.getElementById("msg");
+  el.textContent = text || "";
+  el.className = text ? `visible ${cls || ""}` : "";
+}
+
+async function openGraph(path) {
+  if (!path) return;
+  setMsg("Loading...");
+  try {
+    const res = await fetch("/grc/open", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path})
+    });
+    const data = await res.json();
+    if (!data.ok) { setMsg(data.message || "Failed to load file.", "error"); return; }
+    setMsg(`Loaded ${data.path}`, "ok");
+    startNewConversation();
+    await refresh();
+    setTimeout(() => setMsg(""), 2500);
+  } catch (e) {
+    setMsg(String(e), "error");
+  }
+}
+
+// ---- Server-side directory browser (the web analog of the old GUI's
+// native QFileDialog: a browser can never hand back a real filesystem
+// path from its own picker, but this server runs on the same machine as
+// the files, so browsing server-side and loading by the real path it
+// already knows reproduces the same "click a .grc file, it loads" flow.
+let browseDir = null;
+
+async function openBrowse() {
+  document.getElementById("browse-overlay").classList.add("open");
+  await browseTo();
+}
+
+function closeBrowse() {
+  document.getElementById("browse-overlay").classList.remove("open");
+}
+
+async function browseUp() {
+  const res = await fetch(`/grc/browse?dir=${encodeURIComponent(browseDir)}`).then(r => r.json());
+  if (res.ok && res.parent) await browseTo(res.parent);
+}
+
+async function browseTo(dir) {
+  const url = dir ? `/grc/browse?dir=${encodeURIComponent(dir)}` : "/grc/browse";
+  const res = await fetch(url).then(r => r.json());
+  if (!res.ok) { setMsg(res.message || "Browse failed.", "error"); return; }
+  browseDir = res.dir;
+  document.getElementById("browse-dir").textContent = res.dir;
+  document.getElementById("browse-up-btn").disabled = !res.parent;
+  const list = document.getElementById("browse-list");
+  list.innerHTML = "";
+  for (const entry of res.entries) {
+    const row = document.createElement("div");
+    row.className = "browse-entry" + (entry.is_dir ? " dir" : "");
+    row.innerHTML = `${entry.is_dir ? ICON_DIR : ICON_FILE}<span>${entry.name}</span>`;
+    row.onclick = entry.is_dir
+      ? () => browseTo(entry.path)
+      : async () => { closeBrowse(); await openGraph(entry.path); };
+    list.appendChild(row);
+  }
+}
+
+function renderParams(params) {
+  const entries = Object.entries(params || {});
+  if (!entries.length) return "";
+  return entries.map(([k, v]) => `${k}=${v}`).join(", ");
+}
+
+function render(graph) {
+  const varsBody = document.querySelector("#variables tbody");
+  varsBody.innerHTML = "";
+  const blocksByRole = {};
+  for (const b of graph.blocks) {
+    if (b.role === "variable") {
+      const val = b.params.value !== undefined ? b.params.value : renderParams(b.params);
+      varsBody.insertAdjacentHTML("beforeend", `<tr><td>${b.instance_name}</td><td>${val}</td></tr>`);
+      continue;
+    }
+    (blocksByRole[b.role] ||= []).push(b);
+  }
+
+  const blocksDiv = document.getElementById("blocks");
+  blocksDiv.innerHTML = "";
+  const roleOrder = ["options", "source", "transform", "sink", "import", "snippet", "virtual_or_pad", "other"];
+  for (const role of roleOrder) {
+    const blocks = blocksByRole[role];
+    if (!blocks || !blocks.length) continue;
+    const group = document.createElement("div");
+    group.className = "role-group";
+    group.innerHTML = `<h3>${role} (${blocks.length})</h3>`;
+    const table = document.createElement("table");
+    const tbody = document.createElement("tbody");
+    for (const b of blocks) {
+      const stateCls = b.state !== "enabled" ? `state-${b.state}` : "";
+      tbody.insertAdjacentHTML("beforeend", `
+        <tr class="${stateCls}">
+          <td><span class="block-name">${b.instance_name}</span><br><span class="block-id">${b.block_id}</span><br><span class="params">${renderParams(b.params)}</span></td>
+        </tr>`);
+    }
+    table.appendChild(tbody);
+    group.appendChild(table);
+    blocksDiv.appendChild(group);
+  }
+
+  const connsList = document.getElementById("connections");
+  connsList.innerHTML = "";
+  for (const c of graph.connections) {
+    connsList.insertAdjacentHTML("beforeend", `<li>${c}</li>`);
+  }
+
+  const validation = document.getElementById("validation");
+  const valid = graph.validation.status === "valid";
+  validation.innerHTML = `<span class="pill ${valid ? "valid" : "invalid"}"><span class="dot"></span>${graph.validation.status}</span>`;
+  if (!valid && graph.validation.errors.length) {
+    setMsg(graph.validation.errors.join(" | "), "error");
+  } else {
+    const msgEl = document.getElementById("msg");
+    if (msgEl.classList.contains("error")) {
+      setMsg("");
+    }
+  }
+}
+
+function renderEmptyState() {
+  document.querySelector("#variables tbody").innerHTML = "";
+  document.getElementById("connections").innerHTML = "";
+  document.getElementById("blocks").innerHTML =
+    '<div id="empty-state">No .grc file loaded. Click Browse to choose one.</div>';
+  document.getElementById("validation").innerHTML = "";
+  const canvasCol = document.getElementById("canvas-col");
+  const canvasImg = document.getElementById("canvas-img");
+  if (canvasCol && canvasImg) {
+    canvasCol.style.display = "none";
+    canvasImg.src = "";
+  }
+}
+
+let isGrcLoaded = false;
+let lastGrcVersion = -1;
+
+async function refresh() {
+  try {
+    const [statusRes, inspectRes] = await Promise.all([
+      fetch("/grc/status").then(r => r.json()),
+      fetch("/grc/inspect").then(r => r.json())
+    ]);
+    document.querySelector("#current-path .value").textContent = statusRes.path || "-";
+    if (statusRes.version !== undefined) {
+      lastGrcVersion = statusRes.version;
+    }
+    if (inspectRes.not_loaded) {
+      isGrcLoaded = false;
+      renderEmptyState();
+      return;
+    }
+    if (!inspectRes.ok) {
+      isGrcLoaded = false;
+      setMsg("Inspect failed.", "error");
+      return;
+    }
+    isGrcLoaded = true;
+    render(inspectRes.graph);
+    const canvasCol = document.getElementById("canvas-col");
+    const canvasImg = document.getElementById("canvas-img");
+    if (canvasCol && canvasImg) {
+      canvasCol.style.display = "block";
+      canvasImg.src = "/grc/render?t=" + new Date().getTime();
+    }
+  } catch (e) {
+    isGrcLoaded = false;
+    setMsg(String(e), "error");
+  }
+}
+
+refresh();
+
+// ---- Model/provider preference (see grc_agent.settings) ----
+let openrouterKeySet = false;
+let ollamaModel = "qwen3.6:35b-a3b-q4_K_M";
+let openrouterModel = "openai/gpt-4o-mini";
+
+function renderSettingsHint() {
+  const provider = document.getElementById("settings-provider").value;
+  const hint = document.getElementById("settings-hint");
+  if (provider === "ollama") {
+    hint.className = "";
+    hint.innerHTML = 'Pull a model first: <code>ollama pull &lt;name&gt;</code> &mdash; browse names at ' +
+      '<a href="https://ollama.com/search" target="_blank" rel="noopener">ollama.com/search</a> ' +
+      '(e.g. <code>ollama pull gemma4:e4b-it-qat</code>).';
+  } else {
+    hint.className = openrouterKeySet ? "" : "warn";
+    hint.innerHTML = 'Browse models at <a href="https://openrouter.ai/models" target="_blank" rel="noopener">openrouter.ai/models</a>.' +
+      (openrouterKeySet ? "" : " OPENROUTER_API_KEY is not set in .env — requests will fail until it is.");
+  }
+}
+
+function onProviderChange() {
+  const provider = document.getElementById("settings-provider").value;
+  const modelInput = document.getElementById("settings-model");
+  if (provider === "ollama") {
+    modelInput.value = ollamaModel;
+  } else if (provider === "openrouter") {
+    modelInput.value = openrouterModel;
+  }
+  renderSettingsHint();
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch("/grc/settings").then(r => r.json());
+    if (!res.ok) return;
+    openrouterKeySet = !!res.openrouter_api_key_set;
+    document.getElementById("settings-provider").value = res.provider;
+    if (res.ollama_model) ollamaModel = res.ollama_model;
+    if (res.openrouter_model) openrouterModel = res.openrouter_model;
+    document.getElementById("settings-model").value = res.model;
+    renderSettingsHint();
+  } catch (e) { /* leave defaults */ }
+}
+
+async function saveSettings() {
+  const provider = document.getElementById("settings-provider").value;
+  const model = document.getElementById("settings-model").value;
+  const msg = document.getElementById("settings-msg");
+  msg.className = "";
+  msg.textContent = "Saving...";
+  try {
+    const res = await fetch("/grc/settings", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({provider, model})
+    });
+    const data = await res.json();
+    msg.className = data.ok ? "ok" : "error";
+    msg.textContent = data.message || (data.ok ? "Saved." : "Failed to save.");
+    if (data.ok) {
+      if (provider === "ollama") {
+        ollamaModel = model;
+      } else if (provider === "openrouter") {
+        openrouterModel = model;
+      }
+      setTimeout(() => {
+        if (msg.textContent.startsWith("Saved")) {
+          msg.className = "";
+          msg.textContent = "";
+        }
+      }, 4000);
+    }
+  } catch (e) {
+    msg.className = "error";
+    msg.textContent = String(e);
+  }
+}
+
+document.getElementById("clear-history-btn").onclick = clearHistory;
+document.getElementById("settings-save").onclick = saveSettings;
+loadSettings();
+
+// Close browse overlay when clicking outside the dialog content
+document.getElementById("browse-overlay").addEventListener("click", function(e) {
+  if (e.target === this) {
+    closeBrowse();
+  }
+});
+
+// Close browse overlay when pressing the Escape key
+window.addEventListener("keydown", function(e) {
+  if (e.key === "Escape") {
+    closeBrowse();
+  }
+});
+</script>
+</body>
+</html>

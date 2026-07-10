@@ -52,7 +52,7 @@ blocks:
     id: variable
     parameters:
         comment: ''
-        value: 75e3
+        value: 74.5e3
     states:
         bus_sink: false
         bus_source: false
@@ -80,7 +80,7 @@ blocks:
     id: variable
     parameters:
         comment: ''
-        value: '32'
+        value: '64'
     states:
         bus_sink: false
         bus_source: false

@@ -1,184 +1,126 @@
-# GRC Agent
+# Qoherent GRC Agent
 
-Local companion for GNU Radio Companion (`.grc`) flowgraphs. GRC Agent helps
-you inspect, document, and edit your graphs using a local or cloud LLM, with
-vector search over the full GNU Radio block catalog and docs wiki.
+A local companion for GNU Radio Companion (`.grc`) flowgraphs. It inspects,
+edits, and documents your graphs through a chat agent, with vector search
+over the full GNU Radio block catalog and docs wiki, and a browser-based GUI
+alongside the chat.
 
-Runs as a sidekick window alongside GRC (GUI).
+See [`AGENTS.md`](AGENTS.md) for the architecture, engineering rules, and design decisions. This file covers install + run.
+
+---
+
+## Architecture at a glance
+
+Everything lives in the installable `grc_agent` package (`src/grc_agent/`):
+
+| File | Role |
+|------|------|
+| `adapter.py` | The **only** module that imports `gnuradio`. Flow-graph load/save, parameter/port filtering, block role classification, the `change_graph` mutation engine, catalog/docs vector RAG, `lite_web_search` (lite.duckduckgo.com scrape, the local fallback of pydantic-ai's `WebSearch` capability). |
+| `agent.py` | Wires `adapter.py`'s functions into PydanticAI `Tool`s, defines the `WebSearch`/`WebFetch` capabilities, defines the system prompt, hosts the scenario harness used by integration tests. |
+| `web.py` | Starlette app: proxies/rebrands `agent.to_web()`'s chat widget, serves the GNU Radio dashboard (`panel.html`) and its `/grc/*` JSON API, builds the chat `Agent`'s model from the saved provider/model preference. |
+| `panel.html` | The dashboard page — plain HTML/CSS/vanilla JS, no build step. |
+| `ingest.py` | Builds the catalog/docs vector databases from scratch on first use. |
+| `settings.py` | Persisted provider/model preference (`settings.json`, gitignored). |
+
+Data flow: `.grc` file → `adapter.load_flow_graph()` → live
+`gnuradio.grc.core.FlowGraph` → `inspect_graph()` → JSON tool result.
 
 ---
 
 ## Installation
 
-GRC Agent needs three things on your machine: **GNU Radio**, an **LLM backend**
-(Ollama and/or OpenRouter), and **Python + uv** for the app itself.
-
-### 1. GNU Radio
-
-Install GNU Radio 3.10+ (with `grcc` on `PATH`) by following the official
-guide: <https://wiki.gnuradio.org/index.php?title=InstallingGR>.
-
-On Debian/Ubuntu a system install is enough:
-
-```bash
-sudo apt install gnuradio gnuradio-dev
-```
-
-The app imports `gnuradio` from the system, so the virtualenv below is created
-with `--system-site-packages`.
-
-### 2. LLM backend (Ollama and/or OpenRouter)
-
-Pick one — or set up both and switch between them live in the GUI.
-
-- **Ollama (local, default):** install from <https://ollama.com/>, then pull a
-  chat model and an embedding model:
+### 1. Prerequisites
+- **GNU Radio 3.10+** (with python bindings installed):
   ```bash
-  ollama pull gemma4:e4b-it-qat-120k     # chat (tool-calling capable)
-  ollama pull embeddinggemma:latest       # embeddings
+  sudo apt install gnuradio gnuradio-dev  # Ubuntu/Debian
   ```
-  A standard Ollama install already runs its server in the background for
-  you (a systemd service on Linux, a menu-bar app on macOS, a background
-  process on Windows) — you don't need to start anything yourself, and you
-  shouldn't manually run `ollama serve` in a terminal either: it's already
-  running, and a second instance just fails to start (port already in use)
-  instead of fixing anything.
+- **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/)**.
 
-  **Context window:** Ollama's default context window is small and scales
-  with your GPU's VRAM (as low as 4096 tokens on modest hardware) — nowhere
-  near enough for this app's multi-turn tool-calling. This is a *server*
-  setting, so it has to be changed where Ollama is already running, once,
-  persistently — not per command:
-  - **Linux:** `sudo systemctl edit ollama`, add under `[Service]`:
-    `Environment="OLLAMA_CONTEXT_LENGTH=120000"`, then
-    `sudo systemctl daemon-reload && sudo systemctl restart ollama`.
-  - **macOS:** `launchctl setenv OLLAMA_CONTEXT_LENGTH 120000`, then quit and
-    reopen the Ollama app.
-  - **Windows:** Settings → search "environment variables" → add
-    `OLLAMA_CONTEXT_LENGTH` = `120000` (User variables) → restart Ollama.
-
-  (120000 matches the context baked into this app's default model,
-  `gemma4:e4b-it-qat-120k`.) After your first chat turn, confirm what a
-  model actually loaded with: `ollama ps`. Alternatively, bake `num_ctx`
-  into a custom Modelfile for one specific model instead of changing the
-  server default — see "Choosing a model" below.
-- **OpenRouter (cloud):** create a key at <https://openrouter.ai/> and put it
-  in `.env` (see step 4). No local Ollama is required in OpenRouter mode —
-  chat **and** embeddings go through OpenRouter.
-
-### 3. Python + uv
-
-Requires **Python ≥ 3.12** and [uv](https://docs.astral.sh/uv/) (install with
-`curl -LsSf https://astral.sh/uv/install.sh | sh`).
-
+### 2. Clone & Setup
+Clone the repository and sync the environment:
 ```bash
 git clone https://github.com/qoherent/grc-agent.git
 cd grc-agent
 uv venv --system-site-packages --python 3.12
-uv sync --extra gui --locked --python .venv/bin/python
+uv sync --extra dev --python .venv/bin/python
 ```
+*(The `--system-site-packages` flag bridges your virtualenv directly to the system-installed GNU Radio).*
 
-`--system-site-packages` is what makes the system-installed `gnuradio` visible
-inside the isolated venv.
+### 3. Setup LLM Backend
+The agent supports Ollama (local) and OpenRouter (cloud). You can toggle them in the dashboard GUI at any time.
 
-### 4. Configure models + keys
+#### Option A: Ollama (Local & Free)
+1. Install [Ollama](https://ollama.com/).
+2. Pull the default models:
+   ```bash
+   ollama pull qwen3.6:35b-a3b-q4_K_M   # Chat model
+   ollama pull embeddinggemma:latest    # Embedding model
+   ```
 
-Copy the template and edit it (or just launch the GUI and use the toolbar):
+<details>
+<summary>⚙️ Required: Increase Ollama Context Window (Click to expand)</summary>
 
-```bash
-cp .env.example .env
-$EDITOR .env
-```
+Ollama's default context window is too small for multi-turn agent tool-calling. Increase it to `120000`:
+- **Linux:** Run `sudo systemctl edit ollama`, add:
+  ```ini
+  [Service]
+  Environment="OLLAMA_CONTEXT_LENGTH=120000"
+  ```
+  Then reload and restart:
+  `sudo systemctl daemon-reload && sudo systemctl restart ollama`
+- **macOS:** Run `launchctl setenv OLLAMA_CONTEXT_LENGTH 120000`, then quit and restart the Ollama app.
+- **Windows:** Add `OLLAMA_CONTEXT_LENGTH` = `120000` to User Environment Variables, then restart Ollama.
+</details>
 
-`.env` is the **single source of truth for model names and API keys** for both
-backends:
-
-| Variable | Backend | Default |
-|---|---|---|
-| `OPENROUTER_API_KEY` | OpenRouter | _(required on OpenRouter)_ |
-| `OPENROUTER_MODEL` | OpenRouter | `deepseek/deepseek-v4-flash` |
-| `OPENROUTER_EMBEDDING_MODEL` | OpenRouter | `perplexity/pplx-embed-v1-0.6b` |
-| `OLLAMA_API_KEY` | Ollama | _(only for hosted web tools)_ |
-| `OLLAMA_MODEL` | Ollama | `gemma4:e4b-it-qat-120k` |
-| `OLLAMA_EMBEDDING_MODEL` | Ollama | `embeddinggemma:latest` |
-
-The active backend is set in `grc_agent.toml` (`[llama].backend`) or picked in
-the GUI; chat and embeddings always ride the same backend. The GUI writes model
-changes back to `.env`, so hand-edits and GUI-edits stay in sync (hand-edits
-apply on the next launch).
-
-A starter `grc_agent.toml` lives in the repo root; user overrides go to
-`~/.config/grc_agent/config.toml`.
+#### Option B: OpenRouter (Cloud)
+1. Get an API key at [OpenRouter](https://openrouter.ai/).
+2. Copy `.env.example` to `.env` and add your key:
+   ```bash
+   cp .env.example .env
+   ```
 
 ---
 
 ## Usage
 
-### GUI — Desktop Panel
-
-Launch the sidekick panel alongside GRC:
+### Launch the web GUI
 
 ```bash
-uv run grc-agent-gui path/to/your_copy.grc
+uv run grc-agent-web
 ```
 
-Features include:
+The script will automatically print the dashboard panel URL (**http://127.0.0.1:7932/grc/panel**) and open it in your default web browser. (Note: do not open the bare `/`, which is reserved for the chat widget's API and internal router). 
 
-- Chat interface for graph modifications
-- Live flowgraph inspector (variables, blocks, connections)
-- Compile, run, and stop controls for testing on the fly
-- **Inline model toolbar:** pick Ollama (local) or OpenRouter (cloud), select a
-  chat model and an embedding model, and live-swap the backend without
-  restarting. Selections persist across sessions.
-- Local chat-session history (`File > Recent Sessions...`)
+You can override host/port with the `GRC_AGENT_HOST`/`GRC_AGENT_PORT` env vars.
 
-If the backend is unreachable on launch, the GUI opens in **degraded mode**
-(chat disabled; status bar reports the failure) instead of exiting — recover
-via the inline model toolbar.
+The app starts with no `.grc` file loaded — click **Browse** to pick one from
+disk (the browser opens to your current working directory by default). Once
+a conversation has a message in it, Browse locks until you start a new
+conversation, so a single chat is never split across two flowgraphs.
 
-### Choosing a model
+**First run:** the catalog/docs vector databases don't ship with the
+package — they're built automatically the first time `query_knowledge` runs,
+which takes a few minutes (enumerating ~570 GNU Radio blocks and embedding
+~100 docs pages). Subsequent runs read the cached `.db` files under
+`src/grc_agent/vectors/` instantly. Switching embedding backends
+(Ollama ↔ OpenRouter) builds a separate `.db` per backend automatically; if
+you change `OLLAMA_EMBEDDING_MODEL`/`OPENROUTER_EMBEDDING_MODEL` for a backend
+that already has a cached `.db`, delete that `.db` file manually to force a
+rebuild.
 
-A chat model works with GRC Agent only if it meets **three criteria**:
+**Model settings:** the dashboard's "Model" section lets you switch between
+Ollama and OpenRouter and set the model name at any time — saved to a small
+config file, with a restart required to take effect.
 
-1. **Tool/function calling** — the agent surfaces 5 tools; a model without
-   function-calling is unusable here.
-2. **Served by your backend** — any model Ollama exposes (`ollama list`) works,
-   or any tool-calling model on OpenRouter.
-3. **Adequate context window** for the graphs you edit.
-
-Worked example — using Qwen3 27B locally:
+### Run the tests
 
 ```bash
-ollama pull qwen3:27b        # pull it yourself, then set in .env / GUI
+uv run pytest tests/test_unit.py        # fast, no LLM
+uv run pytest tests/test_web_app.py     # web endpoints, no LLM
+uv run pytest tests/test_integration.py # live model, ~15-20 min
 ```
 
-Then set `OLLAMA_MODEL=qwen3:27b` (or type it in the GUI's model field).
-Ollama's `/v1` endpoint (what this app calls) ignores per-request `num_ctx` —
-the context window has to be set where the model loads, not in the request.
-Two ways to do that: set `OLLAMA_CONTEXT_LENGTH` as a persistent server
-setting (see "LLM backend" → "Context window" above) to raise the default
-for every model at once; or bake `PARAMETER num_ctx <n>` into a custom
-Modelfile (`ollama create`) to set it for one specific model regardless of
-the server default.
-
-Embedding models are chosen the same way (`OLLAMA_EMBEDDING_MODEL` /
-`OPENROUTER_EMBEDDING_MODEL`, editable in the GUI). Switching embedding models
-is safe: the per-backend vector index rebuilds automatically on first use.
-
----
-
-## Exploratory experiments
-
-The autonomous agent-flow experiment harness lives at
-`tests/agent_flow/run_agent_flow.py`. It runs the scenario suite against a live
-model and writes Markdown transcripts + a metrics summary to the gitignored
-`tests/output/agent_flow/` (regenerated each run). Engine correctness is anchored
-deterministically by `tests/test_agent_flow_engine_core.py` (`grc_native`
-marker). Run the live model smoke with `GRC_AGENT_LIVE_MODEL=1` and the live
-embedding tests with `GRC_AGENT_LIVE_EMBED=1`.
----
-
-## Example prompts
+### Example prompts
 
 - `Summarize this graph.`
 - `Show parameters for analog_sig_source_x_0.`
