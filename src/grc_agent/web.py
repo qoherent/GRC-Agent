@@ -1,5 +1,7 @@
 import mimetypes
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +89,7 @@ class FlowgraphProxy:
 # 1. No flowgraph is loaded at startup — the user must Browse and choose one.
 active = FlowgraphProxy(None)
 active_path: str | None = None
+canvas_proc: subprocess.Popen | None = None
 
 
 # Ollama connection errors get pydantic_ai's own sanctioned retry-with-backoff
@@ -152,7 +155,7 @@ async def grc_inspect(request: Request) -> JSONResponse:
 
 
 async def grc_open(request: Request) -> JSONResponse:
-    global active_path
+    global active_path, canvas_proc
     body = await request.json()
     path = str(body.get("path", "")).strip()
     if not path:
@@ -165,6 +168,34 @@ async def grc_open(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
     active.swap(new_fg)
     active_path = path
+
+    # Terminate any previously running canvas process
+    if canvas_proc:
+        try:
+            canvas_proc.terminate()
+            canvas_proc.wait(timeout=2)
+        except Exception:
+            try:
+                canvas_proc.kill()
+            except Exception:
+                pass
+
+    # Launch new canvas process under Broadway
+    env = os.environ.copy()
+    env["GDK_BACKEND"] = "broadway"
+    env["BROADWAY_DISPLAY"] = ":5"
+    try:
+        canvas_proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).parent / "canvas_app.py"), path],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid
+        )
+        print(f"[grc-agent] Started GRC Broadway canvas app for: {path}")
+    except Exception as e:
+        print(f"[grc-agent] Failed to start GRC Broadway canvas app: {e}")
+
     return JSONResponse({"ok": True, "path": path})
 
 
@@ -173,9 +204,15 @@ async def grc_status(request: Request) -> JSONResponse:
 
 
 async def grc_close(request: Request) -> JSONResponse:
-    global active_path
+    global active_path, canvas_proc
     active.swap(None)
     active_path = None
+    if canvas_proc:
+        try:
+            canvas_proc.terminate()
+        except Exception:
+            pass
+        canvas_proc = None
     return JSONResponse({"ok": True})
 
 
@@ -217,67 +254,86 @@ async def grc_render(request: Request) -> Response:
     if not active_path:
         return Response("No .grc file loaded", status_code=400)
 
+    cmd = [
+        sys.executable,
+        "-c",
+        """
+import sys
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('PangoCairo', '1.0')
+from gi.repository import Gtk
+import cairo
+from gnuradio import gr
+from gnuradio.grc.gui.Platform import Platform
+from gnuradio.grc.gui.Application import Application
+
+p = Platform(
+    version=gr.version(),
+    version_parts=(gr.major_version(), gr.api_version(), gr.minor_version()),
+    prefs=gr.prefs(),
+    install_prefix=gr.prefix()
+)
+p.build_library()
+app = Application([], p)
+app.register(None)
+app.activate()
+
+fg = p.make_flow_graph(sys.argv[1])
+fg.update_elements_to_draw()
+
+temp_surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+temp_cr = cairo.Context(temp_surf)
+fg.create_labels(temp_cr)
+fg.create_shapes()
+
+x1, y1, x2, y2 = fg.get_extents()
+padding = 30
+width = int(x2 - x1 + 2 * padding)
+height = int(y2 - y1 + 2 * padding)
+
+width = max(10, min(width, 5000))
+height = max(10, min(height, 5000))
+
+surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+cr = cairo.Context(surf)
+cr.set_source_rgb(1.0, 1.0, 1.0)
+cr.rectangle(0, 0, width, height)
+cr.fill()
+
+cr.translate(-x1 + padding, -y1 + padding)
+fg.create_labels(cr)
+fg.create_shapes()
+fg.draw(cr)
+
+surf.write_to_png(sys.stdout.buffer)
+""",
+        active_path,
+    ]
+
     try:
-        import gi
-        gi.require_version('Gtk', '3.0')
-        gi.require_version('PangoCairo', '1.0')
-        import io
-
-        import cairo
-        from gnuradio import gr
-        from gnuradio.grc.gui.Application import Application
-        from gnuradio.grc.gui.Platform import Platform
-
-        p = Platform(
-            version=gr.version(),
-            version_parts=(gr.major_version(), gr.api_version(), gr.minor_version()),
-            prefs=gr.prefs(),
-            install_prefix=gr.prefix()
-        )
-        p.build_library()
-        app = Application([], p)
-        app.register(None)
-        app.activate()
-
-        fg = p.make_flow_graph(active_path)
-        fg.update_elements_to_draw()
-
-        temp_surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-        temp_cr = cairo.Context(temp_surf)
-        fg.create_labels(temp_cr)
-        fg.create_shapes()
-
-        x1, y1, x2, y2 = fg.get_extents()
-        padding = 30
-        width = int(x2 - x1 + 2 * padding)
-        height = int(y2 - y1 + 2 * padding)
-
-        # Bounds checks
-        width = max(10, min(width, 5000))
-        height = max(10, min(height, 5000))
-
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-        cr = cairo.Context(surf)
-
-        cr.set_source_rgb(1.0, 1.0, 1.0)
-        cr.rectangle(0, 0, width, height)
-        cr.fill()
-
-        cr.translate(-x1 + padding, -y1 + padding)
-        fg.create_labels(cr)
-        fg.create_shapes()
-        fg.draw(cr)
-
-        buf = io.BytesIO()
-        surf.write_to_png(buf)
-        return Response(buf.getvalue(), media_type="image/png")
+        proc = subprocess.run(cmd, capture_output=True, check=True)
+        return Response(proc.stdout, media_type="image/png")
     except Exception as e:
-        return Response(f"Rendering failed: {e}", status_code=500)
+        stderr_msg = proc.stderr.decode() if 'proc' in locals() and proc.stderr else str(e)
+        return Response(f"Rendering failed: {stderr_msg}", status_code=500)
 
 
 async def grc_panel(request: Request) -> HTMLResponse:
     panel_html = (Path(__file__).parent / "panel.html").read_text(encoding="utf-8")
     return HTMLResponse(panel_html)
+
+
+async def grc_reload(request: Request) -> JSONResponse:
+    global active_path
+    if not active_path:
+        return JSONResponse({"ok": False, "message": "No active path"}, status_code=400)
+    try:
+        new_fg = load_flow_graph(active_path)
+        active.swap(new_fg)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
 
 
 async def grc_settings_get(request: Request) -> JSONResponse:
@@ -364,6 +420,7 @@ app.router.routes[0:0] = [
     Route("/grc/close", grc_close, methods=["POST"]),
     Route("/grc/browse", grc_browse, methods=["GET"]),
     Route("/grc/render", grc_render, methods=["GET"]),
+    Route("/grc/reload", grc_reload, methods=["GET", "POST"]),
     Route("/grc/panel", grc_panel, methods=["GET"]),
     Route("/grc/settings", grc_settings_get, methods=["GET"]),
     Route("/grc/settings", grc_settings_post, methods=["POST"]),
@@ -376,6 +433,22 @@ def main() -> None:
     import webbrowser
 
     import uvicorn
+
+    # Clean up and start broadwayd
+    try:
+        subprocess.run(["killall", "broadwayd"], capture_output=True)
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(
+            ["broadwayd", "-p", "8085", ":5"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid
+        )
+        print("[grc-agent] Started broadwayd daemon on port 8085 display :5")
+    except Exception as e:
+        print("[grc-agent] Failed to start broadwayd daemon:", e)
 
     host = os.environ.get("GRC_AGENT_HOST", "127.0.0.1")
     port = int(os.environ.get("GRC_AGENT_PORT", "7932"))

@@ -35,16 +35,14 @@
     outline-offset: 1px;
   }
 
-  /* ---- Right panel: everything GNU Radio, one contiguous surface ---- */
+  /* ---- Center panel: GRC Broadway interactive canvas ---- */
   #grc-pane {
-    flex: 0 1 420px;
-    min-width: 340px;
-    max-width: 480px;
+    flex: 1;
+    min-width: 0;
     height: 100%;
     display: flex;
     flex-direction: column;
     background: var(--surface);
-    border-left: 1px solid var(--border);
     overflow: hidden;
   }
 
@@ -223,14 +221,16 @@
   #credit a { display: inline-flex; align-items: center; color: var(--text-dim); }
   #credit a:hover { color: var(--accent); }
 
-  /* ---- Chat: narrow left column ---- */
+  /* ---- Chat: sidebar right column ---- */
   #chat-pane {
-    flex: 1;
-    min-width: 0;
+    flex: 0 1 420px;
+    min-width: 340px;
+    max-width: 480px;
     height: 100%;
     display: flex;
     flex-direction: column;
     background: var(--surface);
+    border-left: 1px solid var(--border);
     position: relative;
   }
   #chat-pane iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
@@ -291,6 +291,37 @@
 </style>
 </head>
 <body>
+<div id="grc-pane">
+  <div id="load-controls">
+    <button id="browse-btn" onclick="openBrowse()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+      Browse&hellip;
+    </button>
+  </div>
+
+  <div id="msg"></div>
+
+  <div id="canvas-container" style="flex: 1; min-height: 0; width: 100%; border: 0; position: relative; background: #fff;">
+    <iframe id="canvas-iframe" src="" style="width: 100%; height: 100%; border: 0; display: none;"></iframe>
+    <div id="canvas-placeholder" style="width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: var(--text-dim); font-family: var(--mono); font-size: 13px; text-align: center; padding: 20px;">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 12px; color: var(--accent);"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+      No flowgraph loaded. Click Browse to choose one.
+    </div>
+  </div>
+
+  <div id="file-block">
+    <span id="current-path">File: <span class="value">-</span></span>
+    <span id="validation"></span>
+  </div>
+
+  <div id="credit">
+    <span>Developed by Mahmoud Sallam</span>
+    <a href="https://www.linkedin.com/in/mahmoudsallam7/" target="_blank" rel="noopener" title="LinkedIn">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 1 1 0-4.124 2.062 2.062 0 0 1 0 4.124zM7.119 20.452H3.554V9h3.565v11.452z"/></svg>
+    </a>
+  </div>
+</div>
+
 <div id="chat-pane">
   <iframe id="chat-frame" title="Chat" onload="integrateSettings()"></iframe>
   <div id="left-sidebar-overlay">
@@ -311,50 +342,6 @@
       <button id="settings-save">Save</button>
       <div id="settings-msg"></div>
     </div>
-  </div>
-</div>
-
-<div id="grc-pane">
-  <div id="load-controls">
-    <button id="browse-btn" onclick="openBrowse()">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
-      Browse&hellip;
-    </button>
-  </div>
-
-  <div id="msg"></div>
-
-  <div id="instrumentation">
-    <div id="canvas-col" class="col" style="display: none;">
-      <h2>Flowgraph Canvas</h2>
-      <div id="canvas-container" style="border: 1px solid var(--border); border-radius: 6px; overflow: auto; background: #fff; padding: 12px; max-height: 400px; display: flex; justify-content: center; align-items: center; box-shadow: inset 0 1px 3px rgba(0,0,0,0.05);">
-        <img id="canvas-img" src="" alt="GRC Flowgraph Canvas" style="max-width: 100%; height: auto; border-radius: 4px; display: block;" />
-      </div>
-    </div>
-    <div class="col">
-      <h2>Variables</h2>
-      <table id="variables"><tbody></tbody></table>
-    </div>
-    <div class="col">
-      <h2>Blocks</h2>
-      <div id="blocks"></div>
-    </div>
-    <div class="col">
-      <h2>Connections</h2>
-      <ul class="conns" id="connections"></ul>
-    </div>
-  </div>
-
-  <div id="file-block">
-    <span id="current-path">File: <span class="value">-</span></span>
-    <span id="validation"></span>
-  </div>
-
-  <div id="credit">
-    <span>Developed by Mahmoud Sallam</span>
-    <a href="https://www.linkedin.com/in/mahmoudsallam7/" target="_blank" rel="noopener" title="LinkedIn">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 1 1 0-4.124 2.062 2.062 0 0 1 0 4.124zM7.119 20.452H3.554V9h3.565v11.452z"/></svg>
-    </a>
   </div>
 </div>
 
@@ -777,8 +764,6 @@ async function browseTo(dir) {
       : async () => { closeBrowse(); await openGraph(entry.path); };
     list.appendChild(row);
   }
-}
-
 function renderParams(params) {
   const entries = Object.entries(params || {});
   if (!entries.length) return "";
@@ -786,47 +771,6 @@ function renderParams(params) {
 }
 
 function render(graph) {
-  const varsBody = document.querySelector("#variables tbody");
-  varsBody.innerHTML = "";
-  const blocksByRole = {};
-  for (const b of graph.blocks) {
-    if (b.role === "variable") {
-      const val = b.params.value !== undefined ? b.params.value : renderParams(b.params);
-      varsBody.insertAdjacentHTML("beforeend", `<tr><td>${b.instance_name}</td><td>${val}</td></tr>`);
-      continue;
-    }
-    (blocksByRole[b.role] ||= []).push(b);
-  }
-
-  const blocksDiv = document.getElementById("blocks");
-  blocksDiv.innerHTML = "";
-  const roleOrder = ["options", "source", "transform", "sink", "import", "snippet", "virtual_or_pad", "other"];
-  for (const role of roleOrder) {
-    const blocks = blocksByRole[role];
-    if (!blocks || !blocks.length) continue;
-    const group = document.createElement("div");
-    group.className = "role-group";
-    group.innerHTML = `<h3>${role} (${blocks.length})</h3>`;
-    const table = document.createElement("table");
-    const tbody = document.createElement("tbody");
-    for (const b of blocks) {
-      const stateCls = b.state !== "enabled" ? `state-${b.state}` : "";
-      tbody.insertAdjacentHTML("beforeend", `
-        <tr class="${stateCls}">
-          <td><span class="block-name">${b.instance_name}</span><br><span class="block-id">${b.block_id}</span><br><span class="params">${renderParams(b.params)}</span></td>
-        </tr>`);
-    }
-    table.appendChild(tbody);
-    group.appendChild(table);
-    blocksDiv.appendChild(group);
-  }
-
-  const connsList = document.getElementById("connections");
-  connsList.innerHTML = "";
-  for (const c of graph.connections) {
-    connsList.insertAdjacentHTML("beforeend", `<li>${c}</li>`);
-  }
-
   const validation = document.getElementById("validation");
   const valid = graph.validation.status === "valid";
   validation.innerHTML = `<span class="pill ${valid ? "valid" : "invalid"}"><span class="dot"></span>${graph.validation.status}</span>`;
@@ -834,23 +778,20 @@ function render(graph) {
     setMsg(graph.validation.errors.join(" | "), "error");
   } else {
     const msgEl = document.getElementById("msg");
-    if (msgEl.classList.contains("error")) {
-      setMsg("");
+    if (msgEl && msgEl.classList.contains("error")) {
+      setMsg("", "ok");
     }
   }
 }
 
 function renderEmptyState() {
-  document.querySelector("#variables tbody").innerHTML = "";
-  document.getElementById("connections").innerHTML = "";
-  document.getElementById("blocks").innerHTML =
-    '<div id="empty-state">No .grc file loaded. Click Browse to choose one.</div>';
   document.getElementById("validation").innerHTML = "";
-  const canvasCol = document.getElementById("canvas-col");
-  const canvasImg = document.getElementById("canvas-img");
-  if (canvasCol && canvasImg) {
-    canvasCol.style.display = "none";
-    canvasImg.src = "";
+  const canvasIframe = document.getElementById("canvas-iframe");
+  const canvasPlaceholder = document.getElementById("canvas-placeholder");
+  if (canvasIframe && canvasPlaceholder) {
+    canvasIframe.style.display = "none";
+    canvasIframe.src = "about:blank";
+    canvasPlaceholder.style.display = "flex";
   }
 }
 
@@ -879,11 +820,14 @@ async function refresh() {
     }
     isGrcLoaded = true;
     render(inspectRes.graph);
-    const canvasCol = document.getElementById("canvas-col");
-    const canvasImg = document.getElementById("canvas-img");
-    if (canvasCol && canvasImg) {
-      canvasCol.style.display = "block";
-      canvasImg.src = "/grc/render?t=" + new Date().getTime();
+    const canvasIframe = document.getElementById("canvas-iframe");
+    const canvasPlaceholder = document.getElementById("canvas-placeholder");
+    if (canvasIframe && canvasPlaceholder) {
+      canvasPlaceholder.style.display = "none";
+      canvasIframe.style.display = "block";
+      if (!canvasIframe.src || canvasIframe.src === "about:blank") {
+        canvasIframe.src = "http://localhost:8085/";
+      }
     }
   } catch (e) {
     isGrcLoaded = false;

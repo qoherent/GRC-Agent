@@ -60,7 +60,6 @@ Repository = "https://github.com/qoherent/grc-agent"
 Issues = "https://github.com/qoherent/grc-agent/issues"
 
 [tool.hatch.build.targets.sdist]
-packages = ["src/grc_agent"]
 
 [tool.hatch.build.targets.sdist.force-include]
 "docs/wiki_gnuradio_org" = "docs/wiki_gnuradio_org"
