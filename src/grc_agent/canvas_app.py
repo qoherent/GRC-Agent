@@ -9,9 +9,9 @@ gi.require_version('Gtk', '3.0')
 gi.require_version('PangoCairo', '1.0')
 from gi.repository import Gtk
 from gnuradio import gr
-from gnuradio.grc.gui.Application import Application
-from gnuradio.grc.gui.DrawingArea import DrawingArea
 from gnuradio.grc.gui.Platform import Platform
+from gnuradio.grc.gui.DrawingArea import DrawingArea
+from gnuradio.grc.gui.Application import Application
 
 
 def main():
