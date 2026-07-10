@@ -764,6 +764,8 @@ async function browseTo(dir) {
       : async () => { closeBrowse(); await openGraph(entry.path); };
     list.appendChild(row);
   }
+}
+
 function renderParams(params) {
   const entries = Object.entries(params || {});
   if (!entries.length) return "";
