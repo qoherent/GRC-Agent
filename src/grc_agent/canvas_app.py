@@ -31,69 +31,76 @@ def main():
     )
     p.build_library()
 
-    app = Application([], p)
+    # Pass the flowgraph path directly to the native Application to load it inside the MainWindow
+    app = Application([grc_file_path], p)
     app.register(None)
     app.activate()
 
-    # Load flowgraph
-    fg = p.make_flow_graph(grc_file_path)
-    fg.update_elements_to_draw()
+    # Get the active MainWindow created by the application
+    window = Gtk.Application.get_default().get_active_window()
+    if not window:
+        print("Failed to get GRC active MainWindow")
+        sys.exit(1)
 
-    # Create Main Window to contain Scrolled DrawingArea
-    window = Gtk.Window()
-    window.set_title("GRC Canvas")
-    window.set_default_size(1000, 800)
+    # Set window properties to occupy full screen/viewport
+    window.set_default_size(1200, 900)
     window.connect("destroy", Gtk.main_quit)
 
-    # Scrolled Window
-    scrolled_window = Gtk.ScrolledWindow()
-    scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-
-    # Instantiate the GRC DrawingArea widget
-    drawing_area = DrawingArea(fg)
-    fg.drawing_area = drawing_area
-
-    # Hook into labels and shapes generation
+    # Hide MenuBar, Toolbar, and Block Library right sidebar to show only the canvas
     try:
-        import cairo
-        temp_surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-        temp_cr = cairo.Context(temp_surf)
-        fg.create_labels(temp_cr)
-        fg.create_shapes()
+        vbox = window.get_children()[0]
+        vbox.get_children()[0].hide()  # Hide MenuBar
+        vbox.get_children()[1].hide()  # Hide Toolbar
+
+        hpaned = vbox.get_children()[2]
+        hpaned.get_children()[1].hide()  # Hide Block Library right sidebar
     except Exception as e:
-        print("Failed to initialize canvas shapes:", e)
+        print("Failed to hide GRC window components:", e)
 
-    scrolled_window.add(drawing_area)
-    window.add(scrolled_window)
+    # Recursively find the DrawingArea widget to attach auto-save triggers
+    def find_drawing_area(widget):
+        if widget.__class__.__name__ == 'DrawingArea':
+            return widget
+        if hasattr(widget, 'get_children'):
+            for child in widget.get_children():
+                res = find_drawing_area(child)
+                if res:
+                    return res
+        return None
 
-    # Auto-save triggers
+    drawing_area = find_drawing_area(window)
+
     def trigger_reload():
         print("Auto-saving and reloading flowgraph...")
         try:
-            p.save_flow_graph(fg, grc_file_path)
+            if drawing_area and hasattr(drawing_area, "_flow_graph"):
+                p.save_flow_graph(drawing_area._flow_graph, grc_file_path)
             urllib.request.urlopen("http://localhost:7932/grc/reload")
         except Exception as e:
             print("Failed to trigger reload:", e)
 
-    # 1. Trigger save/reload on mouse button release (moves/drags)
+    # 1. Save/reload when dragging/moving blocks (button release)
     def on_button_release(widget, event):
         trigger_reload()
         return False
 
-    drawing_area.connect("button-release-event", on_button_release)
+    if drawing_area:
+        drawing_area.connect("button-release-event", on_button_release)
 
-    # 2. Trigger save/reload on dialog windows close (parameter edits)
+    # 2. Save/reload when properties dialogs are closed (parameter edits)
     def on_window_added(application, win):
-        print(f"Window added to GTK App context: {win}")
-        def on_window_destroy(w, event=None):
-            trigger_reload()
-            return False
-        win.connect("destroy", on_window_destroy)
+        # We only want to listen to properties dialog windows (not the main window itself)
+        if win != window:
+            print(f"Properties dialog added to context: {win}")
+            def on_window_destroy(w, event=None):
+                trigger_reload()
+                return False
+            win.connect("destroy", on_window_destroy)
 
     app.connect("window-added", on_window_added)
 
-    window.show_all()
     Gtk.main()
+
 
 if __name__ == "__main__":
     main()
