@@ -1,3 +1,4 @@
+import asyncio
 import mimetypes
 import os
 import subprocess
@@ -39,6 +40,27 @@ load_dotenv()
 
 BRAND_NAME = "Qoherent GRC Agent"
 
+# The canvas_app.py subprocess (spawned per /grc/open, see below) runs a
+# small local HTTP control server on this port for resize (dashboard pane
+# size changes) and reload (an agent-driven edit changed the file on disk
+# and the live GTK canvas needs to catch up) — see canvas_app.py's
+# start_control_server.
+CANVAS_RESIZE_PORT = 7933
+
+
+def _notify_canvas_reload() -> None:
+    """Ping the running canvas_app.py to reload the flowgraph from disk.
+    Without this, an agent tool call that edits the flowgraph (change_graph)
+    only updates this process's in-memory copy — the live GTK canvas has no
+    way to learn about it and silently keeps showing stale content, even
+    though the chat just told the user the edit succeeded. Best effort: if
+    no canvas process is listening (none started yet, or the file was
+    closed), this is a harmless no-op."""
+    try:
+        httpx.post(f"http://127.0.0.1:{CANVAS_RESIZE_PORT}/reload", timeout=0.5)
+    except Exception:
+        pass
+
 
 class FlowgraphProxy:
     """Transparent stand-in for the active flowgraph so it can be swapped
@@ -49,9 +71,10 @@ class FlowgraphProxy:
     empty: the session always begins with no file loaded, and any tool
     call before one is chosen gets a clear error instead of a crash."""
 
-    def __init__(self, flowgraph: Any = None) -> None:
+    def __init__(self, flowgraph: Any = None, on_bump: Any = None) -> None:
         object.__setattr__(self, "_target", flowgraph)
         object.__setattr__(self, "_version", 0)
+        object.__setattr__(self, "_on_bump", on_bump)
 
     def __getattr__(self, name: str) -> Any:
         target = object.__getattribute__(self, "_target")
@@ -78,6 +101,9 @@ class FlowgraphProxy:
     def bump_version(self) -> None:
         v = object.__getattribute__(self, "_version")
         object.__setattr__(self, "_version", v + 1)
+        on_bump = object.__getattribute__(self, "_on_bump")
+        if on_bump:
+            on_bump()
 
     def get_version(self) -> int:
         return object.__getattribute__(self, "_version")
@@ -87,9 +113,16 @@ class FlowgraphProxy:
 
 
 # 1. No flowgraph is loaded at startup — the user must Browse and choose one.
-active = FlowgraphProxy(None)
+active = FlowgraphProxy(None, on_bump=_notify_canvas_reload)
 active_path: str | None = None
 canvas_proc: subprocess.Popen | None = None
+# Guards every mutation of active/active_path/canvas_proc — without it,
+# two concurrent /grc/open (or an open racing a close) calls interleave
+# their terminate-old/spawn-new sequences non-deterministically; each
+# still reports {"ok": true} to its own caller, but only one's file
+# actually ends up loaded. Serializing makes the outcome deterministic
+# (last request in wins) instead of a silent race.
+_flowgraph_state_lock = asyncio.Lock()
 
 
 # Ollama connection errors get pydantic_ai's own sanctioned retry-with-backoff
@@ -154,13 +187,22 @@ async def grc_inspect(request: Request) -> JSONResponse:
     return JSONResponse(inspect_graph(active))
 
 
-def ensure_broadway() -> None:
-    import socket
-    import time
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+async def ensure_broadway() -> None:
+    # A blocking socket connect + time.sleep(1.0) here used to stall the
+    # entire server on every in-flight request (this app runs a single
+    # uvicorn worker / single event loop) for a full second any time
+    # broadwayd needed a cold start — e.g. after it crashed or was killed
+    # mid-session. Non-blocking equivalents so a broadway cold-start only
+    # delays this one request, not every concurrent one.
     try:
-        s.connect(("127.0.0.1", 8085))
-        s.close()
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", 8085), timeout=0.5
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
     except Exception:
         # Not running, start it
         try:
@@ -175,9 +217,32 @@ def ensure_broadway() -> None:
                 preexec_fn=os.setsid
             )
             print("[grc-agent] Started broadwayd daemon on port 8085 display :5 (lazy startup)")
-            time.sleep(1.0) # give it a second to bind
+            await asyncio.sleep(1.0)  # give it a second to bind
         except Exception as e:
             print("[grc-agent] Failed to start broadwayd daemon lazily:", e)
+
+
+def _terminate_canvas_proc() -> None:
+    """Best-effort teardown of both the tracked subprocess and any stray
+    canvas_app.py this process doesn't know about (e.g. orphaned by a
+    crashed previous server instance, or left behind by the test suite) —
+    a stray one still holding the control-server port would otherwise
+    crash the next canvas_app.py's startup outright."""
+    global canvas_proc
+    if canvas_proc:
+        try:
+            canvas_proc.terminate()
+            canvas_proc.wait(timeout=2)
+        except Exception:
+            try:
+                canvas_proc.kill()
+            except Exception:
+                pass
+        canvas_proc = None
+    try:
+        subprocess.run(["pkill", "-f", "canvas_app.py"], capture_output=True)
+    except Exception:
+        pass
 
 
 async def grc_open(request: Request) -> JSONResponse:
@@ -188,42 +253,47 @@ async def grc_open(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "path is required"}, status_code=400)
     if not Path(path).is_absolute():
         path = str(Path.cwd() / path)
-    try:
-        new_fg = load_flow_graph(path)
-    except Exception as e:
-        return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
-    active.swap(new_fg)
-    active_path = path
 
-    # Ensure broadwayd is running
-    ensure_broadway()
-
-    # Terminate any previously running canvas process
-    if canvas_proc:
+    # Serializes against concurrent /grc/open and /grc/close calls — see
+    # _flowgraph_state_lock's own comment for why this matters.
+    async with _flowgraph_state_lock:
         try:
-            canvas_proc.terminate()
-            canvas_proc.wait(timeout=2)
-        except Exception:
-            try:
-                canvas_proc.kill()
-            except Exception:
-                pass
+            new_fg = load_flow_graph(path)
+        except Exception as e:
+            return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
+        active.swap(new_fg)
+        active_path = path
 
-    # Launch new canvas process under Broadway
-    env = os.environ.copy()
-    env["GDK_BACKEND"] = "broadway"
-    env["BROADWAY_DISPLAY"] = ":5"
-    try:
-        canvas_proc = subprocess.Popen(
-            [sys.executable, str(Path(__file__).parent / "canvas_app.py"), path],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid
-        )
-        print(f"[grc-agent] Started GRC Broadway canvas app for: {path}")
-    except Exception as e:
-        print(f"[grc-agent] Failed to start GRC Broadway canvas app: {e}")
+        # Ensure broadwayd is running
+        await ensure_broadway()
+
+        # Terminate any previously running canvas process (tracked or stray)
+        _terminate_canvas_proc()
+
+        # Launch new canvas process under Broadway
+        env = os.environ.copy()
+        env["GDK_BACKEND"] = "broadway"
+        env["BROADWAY_DISPLAY"] = ":5"
+        try:
+            # Silently swallowing this process's output makes a silent GTK/Broadway
+            # crash indistinguishable from a slow load — route it to a log file
+            # next to the flowgraph (same .grc_agent convention as backups/locks)
+            # so it's inspectable after the fact. Truncated (not appended) on
+            # every launch — this is a debug log for the current run, not a
+            # permanent record, and appending forever grows it unbounded.
+            log_dir = Path(path).parent / ".grc_agent"
+            log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(log_dir / "canvas.log", "wb") as canvas_log:
+                canvas_proc = subprocess.Popen(
+                    [sys.executable, "-u", str(Path(__file__).parent / "canvas_app.py"), path],
+                    env=env,
+                    stdout=canvas_log,
+                    stderr=canvas_log,
+                    preexec_fn=os.setsid
+                )
+            print(f"[grc-agent] Started GRC Broadway canvas app for: {path}")
+        except Exception as e:
+            print(f"[grc-agent] Failed to start GRC Broadway canvas app: {e}")
 
     return JSONResponse({"ok": True, "path": path})
 
@@ -233,15 +303,11 @@ async def grc_status(request: Request) -> JSONResponse:
 
 
 async def grc_close(request: Request) -> JSONResponse:
-    global active_path, canvas_proc
-    active.swap(None)
-    active_path = None
-    if canvas_proc:
-        try:
-            canvas_proc.terminate()
-        except Exception:
-            pass
-        canvas_proc = None
+    global active_path
+    async with _flowgraph_state_lock:
+        active.swap(None)
+        active_path = None
+        _terminate_canvas_proc()
     return JSONResponse({"ok": True})
 
 
@@ -365,6 +431,35 @@ async def grc_reload(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
 
 
+async def grc_canvas_resize(request: Request) -> JSONResponse:
+    """Forward the dashboard's actual canvas-pane size to the running
+    canvas_app.py process so its GTK window matches it exactly instead of a
+    fixed guess — see canvas_app.py's start_resize_server for why a size
+    mismatch there both clips the flowgraph and pushes its scrollbars
+    outside the visible iframe viewport."""
+    try:
+        body = await request.json()
+        width = int(body.get("width", 0))
+        height = int(body.get("height", 0))
+    except Exception:
+        return JSONResponse({"ok": False, "message": "invalid body"}, status_code=400)
+    if width <= 0 or height <= 0:
+        return JSONResponse(
+            {"ok": False, "message": "width/height must be positive"}, status_code=400
+        )
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            await client.post(
+                f"http://127.0.0.1:{CANVAS_RESIZE_PORT}/resize",
+                json={"width": width, "height": height},
+            )
+    except Exception:
+        # No canvas process listening (not started yet, or closed) —
+        # not an error; the next resize once one is running will catch up.
+        pass
+    return JSONResponse({"ok": True})
+
+
 async def grc_settings_get(request: Request) -> JSONResponse:
     cfg = load_settings()
     return JSONResponse(
@@ -450,6 +545,7 @@ app.router.routes[0:0] = [
     Route("/grc/browse", grc_browse, methods=["GET"]),
     Route("/grc/render", grc_render, methods=["GET"]),
     Route("/grc/reload", grc_reload, methods=["GET", "POST"]),
+    Route("/grc/canvas/resize", grc_canvas_resize, methods=["POST"]),
     Route("/grc/panel", grc_panel, methods=["GET"]),
     Route("/grc/settings", grc_settings_get, methods=["GET"]),
     Route("/grc/settings", grc_settings_post, methods=["POST"]),
@@ -463,7 +559,16 @@ def main() -> None:
 
     import uvicorn
 
-    # Clean up and start broadwayd
+    # Clean up any canvas_app.py / broadwayd left running from a previous
+    # server process (e.g. a crashed or force-killed run) — an orphaned
+    # canvas_app.py surviving a restart would keep its own connection to
+    # the new broadwayd instance, and a second GTK app connected to the
+    # same Broadway display shows up as extra top-level windows in the
+    # client, i.e. the "dual window" bug back again.
+    try:
+        subprocess.run(["pkill", "-f", "canvas_app.py"], capture_output=True)
+    except Exception:
+        pass
     try:
         subprocess.run(["killall", "broadwayd"], capture_output=True)
     except Exception:

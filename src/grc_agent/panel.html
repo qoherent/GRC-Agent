@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Qoherent GRC Agent</title>
 <style>
   :root {
@@ -30,7 +31,8 @@
     display: flex;
   }
   a { color: var(--accent); }
-  button:focus-visible, input:focus-visible, a:focus-visible {
+  button:focus-visible, input:focus-visible, a:focus-visible,
+  select:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
@@ -46,14 +48,20 @@
     overflow: hidden;
   }
 
-  #file-block { flex: 0 0 auto; padding: 14px 16px 12px; border-top: 1px solid var(--border); }
+  #file-block {
+    flex: 0 0 auto;
+    padding: 14px 16px 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
   #current-path {
     font-family: var(--mono);
     font-size: 12px;
     color: var(--text-dim);
     word-break: break-all;
-    display: block;
-    margin-bottom: 8px;
+    min-width: 0;
   }
   #current-path .value { color: var(--text); }
 
@@ -72,8 +80,6 @@
   .pill.valid { background: var(--ok-bg); color: var(--ok); }
   .pill.invalid { background: var(--danger-bg); color: var(--danger); }
   .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-
-  #load-controls { flex: 0 0 auto; padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
 
   button {
     display: inline-flex;
@@ -94,8 +100,6 @@
   button:disabled { opacity: .4; cursor: not-allowed; }
   button:disabled:hover { border-color: var(--border); }
 
-  #empty-state { padding: 16px 0; font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
-
   #msg {
     flex: 0 0 auto;
     font-family: var(--mono);
@@ -109,40 +113,7 @@
   #msg.error { color: var(--danger); }
   #msg.ok { color: var(--ok); }
 
-  /* ---- Instrumentation: stacked, scrolls within the remaining height ---- */
-  #instrumentation { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 12px; }
-  .col + .col { margin-top: 16px; }
-  .col h2 {
-    font-family: var(--mono);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 6px;
-    margin: 12px 0 8px;
-  }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
-  td { text-align: left; padding: 4px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
-  .role-group { margin-bottom: 10px; }
-  .role-group h3 {
-    font-family: var(--mono);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--accent);
-    margin: 8px 0 4px;
-    font-weight: 600;
-  }
-  .block-name { font-family: var(--sans); font-weight: 600; color: var(--text); }
-  .block-id { color: var(--text-dim); font-size: 11px; }
-  .params { color: var(--text-dim); font-size: 11px; font-family: var(--mono); word-break: break-word; }
-  .state-bypass, .state-disabled { opacity: .45; font-style: italic; }
-  ul.conns { list-style: none; padding: 0; margin: 0; font-size: 12px; font-family: var(--mono); }
-  ul.conns li { padding: 3px 0; border-bottom: 1px solid var(--border); color: var(--text-dim); word-break: break-all; }
-  .errors { color: var(--danger); font-size: 12px; font-family: var(--mono); margin-top: 6px; }
-
-  /* ---- Model settings & History Overlay ---- */
+  /* ---- History overlay (over the chat widget's own left sidebar) ---- */
   #left-sidebar-overlay {
     position: absolute;
     left: 0;
@@ -155,11 +126,7 @@
     flex-direction: column;
   }
   #history-block {
-    padding: 10px 16px 6px;
-    border-top: 1px solid var(--border);
-  }
-  #settings-block {
-    padding: 12px 16px;
+    padding: 8px 12px;
     border-top: 1px solid var(--border);
   }
   #history-block button {
@@ -168,43 +135,103 @@
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 8px 12px;
+    padding: 6px 10px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--danger);
     border-radius: 6px;
     font-family: var(--sans);
-    font-size: 13px;
+    font-size: 12px;
     cursor: pointer;
   }
   #history-block button:hover { border-color: var(--danger-bg); background: var(--danger-bg); }
   #history-block button svg { flex: 0 0 auto; }
-  
-  #settings-block h2 {
-    font-family: var(--mono);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-dim);
-    margin: 0 0 8px;
+
+  /* ---- Model provider/name picker, overlaid on the chat's own (inert)
+     model dropdown so it sits directly in the chat toolbar. ---- */
+  #model-selector-overlay {
+    position: fixed;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    z-index: 20;
   }
-  #settings-block select, #settings-block input {
-    width: 100%;
-    padding: 6px 8px;
+  #model-selector-overlay select,
+  #model-selector-overlay input {
+    height: 28px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 6px;
     font-family: var(--mono);
     font-size: 12px;
-    margin-bottom: 6px;
+    padding: 4px 6px;
   }
-  #settings-hint { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.5; }
-  #settings-hint code { color: var(--accent); }
-  #settings-hint.warn { color: var(--danger); }
-  #settings-msg { font-family: var(--mono); font-size: 11px; min-height: 14px; margin-top: 6px; }
-  #settings-msg.ok { color: var(--ok); }
-  #settings-msg.error { color: var(--danger); }
+  #model-selector-overlay select { flex: 0 0 auto; max-width: 84px; }
+  #model-selector-overlay input { flex: 1 1 auto; min-width: 220px; }
+  #model-selector-overlay.saved select,
+  #model-selector-overlay.saved input { border-color: var(--ok); }
+  #model-selector-overlay.error select,
+  #model-selector-overlay.error input { border-color: var(--danger); }
+
+  /* ---- New-conversation button, overlaid just left of the chat's send
+     button ---- */
+  #new-conversation-btn {
+    position: fixed;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 50%;
+    z-index: 20;
+  }
+  #new-conversation-btn:disabled { opacity: .35; cursor: not-allowed; }
+
+  /* ---- Session history list, shown above the chat input until a
+     conversation is active ---- */
+  #session-history-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    display: none;
+    max-height: 45%;
+    overflow-y: auto;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    z-index: 6;
+  }
+  #session-history-header {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    padding: 8px 16px 4px;
+  }
+  .session-history-entry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-top: 1px solid var(--border);
+  }
+  .session-history-entry:hover { background: var(--surface-2); }
+  .she-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .she-time {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    flex: 0 0 auto;
+  }
 
   /* ---- Credit ---- */
   #credit {
@@ -234,6 +261,24 @@
     position: relative;
   }
   #chat-pane iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
+
+  /* ---- Always-available escape hatch: unlike every other chat-pane
+     control, this one does NOT depend on finding anything inside the
+     iframe's own DOM, so it still works even when the chat widget itself
+     is broken (e.g. a stale/garbage conversation id) and every overlay
+     that DOES depend on iframe introspection has hidden itself. ---- */
+  #reset-conversation-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 6px;
+    opacity: .5;
+    z-index: 30;
+  }
+  #reset-conversation-btn:hover { opacity: 1; }
 
   /* ---- Browse dialog ---- */
   #browse-overlay {
@@ -288,17 +333,30 @@
   .browse-entry svg { flex: 0 0 auto; color: var(--text-dim); }
   .browse-entry.dir svg { color: var(--accent); }
   .browse-footer { padding: 10px 14px; border-top: 1px solid var(--border); text-align: right; }
+
+  /* ---- Narrow viewports: without this, #chat-pane's 580px min-width
+     forces real horizontal page overflow (confirmed at 375px — the page
+     rendered at a virtual 980px layout width, the classic missing-
+     viewport-meta symptom, compounded by the hard min-width on top of
+     that). Stack the two panes instead of a side-by-side layout that
+     simply doesn't fit — not a full mobile redesign, just a usable
+     degraded state instead of forced pan/zoom. ---- */
+  @media (max-width: 900px) {
+    body { flex-direction: column; }
+    #grc-pane { flex: 1 1 42%; min-height: 220px; }
+    #chat-pane {
+      flex: 1 1 58%;
+      width: 100%;
+      min-width: 0;
+      max-width: none;
+      border-left: none;
+      border-top: 1px solid var(--border);
+    }
+  }
 </style>
 </head>
 <body>
 <div id="grc-pane">
-  <div id="load-controls">
-    <button id="browse-btn" onclick="openBrowse()">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
-      Browse&hellip;
-    </button>
-  </div>
-
   <div id="msg"></div>
 
   <div id="canvas-container" style="flex: 1; min-height: 0; width: 100%; border: 0; position: relative; background: #fff;">
@@ -306,12 +364,16 @@
     <div id="canvas-placeholder" style="width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: var(--text-dim); font-family: var(--mono); font-size: 13px; text-align: center; padding: 20px;">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 12px; color: var(--accent);"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
       No flowgraph loaded. Click Browse to choose one.
+      <button id="browse-btn" onclick="openBrowse()" style="margin-top: 14px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+        Browse&hellip;
+      </button>
     </div>
   </div>
 
   <div id="file-block">
-    <span id="current-path">File: <span class="value">-</span></span>
     <span id="validation"></span>
+    <span id="current-path">File: <span class="value">-</span></span>
   </div>
 
   <div id="credit">
@@ -323,6 +385,9 @@
 </div>
 
 <div id="chat-pane">
+  <button id="reset-conversation-btn" title="Chat looks stuck or blank? Click to reset." onclick="resetConversation()">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
+  </button>
   <iframe id="chat-frame" title="Chat" onload="integrateSettings()"></iframe>
   <div id="left-sidebar-overlay">
     <div id="history-block">
@@ -331,19 +396,25 @@
         Clear History
       </button>
     </div>
-    <div id="settings-block">
-      <h2>Model</h2>
-      <select id="settings-provider" onchange="onProviderChange()">
-        <option value="ollama">Ollama (local)</option>
-        <option value="openrouter">OpenRouter (cloud)</option>
-      </select>
-      <input id="settings-model" type="text" placeholder="model name">
-      <div id="settings-hint"></div>
-      <button id="settings-save">Save</button>
-      <div id="settings-msg"></div>
-    </div>
+  </div>
+  <div id="session-history-panel">
+    <div id="session-history-header">Recent Sessions</div>
+    <div id="session-history-list"></div>
   </div>
 </div>
+
+<div id="model-selector-overlay" title="Restart the app after saving to use a newly picked model.">
+  <select id="model-provider-select">
+    <option value="ollama">Ollama</option>
+    <option value="openrouter">OpenRouter</option>
+  </select>
+  <input id="model-name-input" type="text" list="model-name-suggestions" placeholder="model name">
+  <datalist id="model-name-suggestions"></datalist>
+</div>
+
+<button id="new-conversation-btn" title="Start a new conversation / load a different file" onclick="startNewConversation()">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+</button>
 
 <div id="browse-overlay">
   <div id="browse-dialog">
@@ -363,6 +434,17 @@
 const ICON_DIR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>';
 const ICON_FILE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
 
+// Must be declared before restoreSession() runs below — it can call
+// startNewConversation(), which reads isGrcLoaded, and a `let` binding is
+// in its temporal dead zone until this line executes. Declaring it here
+// (rather than down near refresh(), where it's mostly used) previously
+// meant restoreSession()'s synchronous startNewConversation() call threw
+// an uncaught ReferenceError on any fresh page load with no stored
+// conversation id — which aborts the *entire* inline script, silently
+// breaking every single feature on the page, not just this one.
+let isGrcLoaded = false;
+let lastGrcVersion = -1;
+
 // Each conversation is locked to exactly one flowgraph (mirrors the old
 // desktop GUI's open_file(), which cleared the chat and reset the agent
 // session on every load) — a chat history should never span two different
@@ -374,6 +456,31 @@ const ICON_FILE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" s
 function startNewConversation() {
   localStorage.removeItem("grc_active_conv_id");
   document.getElementById("chat-frame").src = `/?r=${crypto.randomUUID()}`;
+  // If a file was loaded but the user never sent a message yet, the
+  // iframe's pathname is already "/" and never changes here — so
+  // pollConversationState's own path-transition check (which is what
+  // normally unloads the flowgraph and brings the Browse button back)
+  // never fires. Without this, loading a file then wanting to load a
+  // different one before chatting had no way back: Browse lives inside
+  // the now-hidden empty-state placeholder, and there'd be nothing left
+  // to click.
+  if (isGrcLoaded) {
+    unloadGrc();
+  }
+}
+
+// A conversation id that no longer resolves to anything (its IndexedDB
+// entry was cleared some other way, or the URL was hand-edited) leaves
+// the vendor widget rendering nothing — no textarea, no sidebar, no send
+// button — which makes every OTHER recovery control hide itself too,
+// since they all work by finding something inside that now-empty iframe.
+// This one deliberately doesn't depend on iframe content at all, so it's
+// always clickable no matter how broken the chat pane looks, and a
+// reload persists into the exact same broken state via
+// grc_active_conv_id — so clear that too, not just start a new src.
+function resetConversation() {
+  brokenIframePolls = 0;
+  startNewConversation();
 }
 
 function restoreSession() {
@@ -465,6 +572,7 @@ function clearHistory() {
 // starting a new conversation (this page's own load, or the widget's own
 // "New conversation" button) should re-enable loading a different file.
 let lastPath = "/";
+let brokenIframePolls = 0;
 
 function getSessionGrcPath(convId) {
   try {
@@ -475,10 +583,21 @@ function getSessionGrcPath(convId) {
   }
 }
 
+// Unlike grc_session_history (capped at 20, see addSessionHistory), this
+// map grew forever — every conversation ever created left a permanent
+// entry with no pruning at all.
+const MAX_SESSION_MAPPINGS = 50;
+
 function saveSessionGrcPath(convId, grcPath) {
   try {
     const mapping = JSON.parse(localStorage.getItem("grc_session_mapping") || "{}");
     mapping[convId] = grcPath;
+    const keys = Object.keys(mapping);
+    if (keys.length > MAX_SESSION_MAPPINGS) {
+      for (const staleKey of keys.slice(0, keys.length - MAX_SESSION_MAPPINGS)) {
+        delete mapping[staleKey];
+      }
+    }
     localStorage.setItem("grc_session_mapping", JSON.stringify(mapping));
   } catch (e) {}
 }
@@ -503,6 +622,34 @@ async function pollConversationState() {
 
   btn.disabled = !fresh;
   btn.title = fresh ? "" : "Start a new conversation to load a different file";
+
+  // Self-heal from a conversation id that no longer resolves to anything
+  // (its IndexedDB entry got cleared some other way, or the URL was
+  // hand-edited): the vendor widget renders nothing for it — no textarea,
+  // no sidebar, no send button — which then persists across a page reload
+  // via grc_active_conv_id, and every OTHER recovery control (the "+"
+  // new-conversation button, the model selector) hides itself too, since
+  // they all depend on finding something inside that now-empty iframe. A
+  // few consecutive empty polls during ordinary page-transition/mount
+  // timing is normal, so only treat it as truly stuck after enough of
+  // them in a row (~4.5s at this 750ms interval).
+  if (!fresh) {
+    let hasContent = false;
+    try {
+      hasContent = !!document.getElementById("chat-frame")
+        .contentWindow.document.querySelector("textarea");
+    } catch (e) {}
+    if (hasContent) {
+      brokenIframePolls = 0;
+    } else if (++brokenIframePolls >= 6) {
+      console.warn("Conversation appears unrecoverable — resetting.");
+      brokenIframePolls = 0;
+      resetConversation();
+      return;
+    }
+  } else {
+    brokenIframePolls = 0;
+  }
 
   // Check version changes on backend to auto-refresh if agent changed params!
   try {
@@ -531,6 +678,7 @@ async function pollConversationState() {
           const data = await res.json();
           if (data.ok) {
             isGrcLoaded = true;
+            addSessionHistory(currentPath, mappedGrc);
             await refresh();
           }
         } catch (e) {
@@ -541,6 +689,7 @@ async function pollConversationState() {
           const statusRes = await fetch("/grc/status").then(r => r.json());
           if (statusRes.path) {
             saveSessionGrcPath(currentPath, statusRes.path);
+            addSessionHistory(currentPath, statusRes.path);
           } else {
             isGrcLoaded = false;
             await refresh();
@@ -584,7 +733,7 @@ function integrateSettings() {
           min-width: 240px !important;
           max-width: 240px !important;
           position: relative !important;
-          padding-bottom: 240px !important;
+          padding-bottom: 90px !important;
         }
       `;
       doc.head.appendChild(styleSheet);
@@ -643,7 +792,12 @@ function integrateSettings() {
       }
     }
 
-    if (sidebar) {
+    // Clear History only makes sense before a conversation has started —
+    // once one is active, this overlay's fixed bottom-left position starts
+    // colliding with the model-selector/new-conversation controls in the
+    // toolbar above it, so hide it the same way Browse and Recent Sessions
+    // already hide once lastPath moves off "/".
+    if (sidebar && lastPath === "/") {
       const rect = sidebar.getBoundingClientRect();
       const style = iframe.contentWindow.getComputedStyle(sidebar);
       const isVisible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
@@ -666,6 +820,10 @@ function integrateSettings() {
   try {
     updateChatInputState();
   } catch (e) {}
+
+  integrateModelSelector();
+  integrateNewConversationButton();
+  renderSessionHistory();
 }
 
 function updateChatInputState() {
@@ -724,6 +882,13 @@ async function openGraph(path) {
     const data = await res.json();
     if (!data.ok) { setMsg(data.message || "Failed to load file.", "error"); return; }
     setMsg(`Loaded ${data.path}`, "ok");
+    // Record a session-history entry right away — a real conversation id
+    // doesn't exist yet (the vendor chat widget only mints one once the
+    // first message is sent), so this is a "pending" entry (no convId).
+    // It's upgraded to the real conversation once the user actually
+    // chats (see pollConversationState) — without this, a file load that
+    // never turns into a chat message would never show up anywhere.
+    addSessionHistory(null, data.path);
     startNewConversation();
     await refresh();
     setTimeout(() => setMsg(""), 2500);
@@ -738,19 +903,71 @@ async function openGraph(path) {
 // the files, so browsing server-side and loading by the real path it
 // already knows reproduces the same "click a .grc file, it loads" flow.
 let browseDir = null;
+let browseFocusReturnEl = null;
+let browseTrapHandler = null;
 
 async function openBrowse() {
+  browseFocusReturnEl = document.activeElement;
   document.getElementById("browse-overlay").classList.add("open");
   await browseTo();
+
+  // The dialog is visually modal (click-outside and Escape both close it,
+  // see the listeners at the bottom of this script) but nothing stopped
+  // Tab from cycling through the page behind it — trap it within the
+  // dialog's own focusable elements while open.
+  const dialog = document.getElementById("browse-dialog");
+  browseTrapHandler = (e) => {
+    if (e.key !== "Tab") return;
+    const focusable = Array.from(dialog.querySelectorAll("button, [tabindex]"))
+      .filter(el => !el.disabled);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+  dialog.addEventListener("keydown", browseTrapHandler);
 }
 
 function closeBrowse() {
   document.getElementById("browse-overlay").classList.remove("open");
+  const dialog = document.getElementById("browse-dialog");
+  if (browseTrapHandler) {
+    dialog.removeEventListener("keydown", browseTrapHandler);
+    browseTrapHandler = null;
+  }
+  if (browseFocusReturnEl && typeof browseFocusReturnEl.focus === "function") {
+    browseFocusReturnEl.focus();
+  }
+  browseFocusReturnEl = null;
 }
 
 async function browseUp() {
   const res = await fetch(`/grc/browse?dir=${encodeURIComponent(browseDir)}`).then(r => r.json());
   if (res.ok && res.parent) await browseTo(res.parent);
+}
+
+// Both the Browse dialog's file/folder rows and the Recent Sessions rows
+// are built as plain divs (needed for the icon + text layout `<button>`
+// makes awkward to style consistently with the rest of the dashboard) —
+// without this, they were mouse-only: no tabindex, no role, no keydown
+// handling, so a keyboard-only user could open the dialog but never
+// select anything inside it, or ever resume a past session.
+function makeRowFocusable(row, activate) {
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.onclick = activate;
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      activate();
+    }
+  });
 }
 
 async function browseTo(dir) {
@@ -766,17 +983,15 @@ async function browseTo(dir) {
     const row = document.createElement("div");
     row.className = "browse-entry" + (entry.is_dir ? " dir" : "");
     row.innerHTML = `${entry.is_dir ? ICON_DIR : ICON_FILE}<span>${entry.name}</span>`;
-    row.onclick = entry.is_dir
+    makeRowFocusable(row, entry.is_dir
       ? () => browseTo(entry.path)
-      : async () => { closeBrowse(); await openGraph(entry.path); };
+      : async () => { closeBrowse(); await openGraph(entry.path); });
     list.appendChild(row);
   }
-}
-
-function renderParams(params) {
-  const entries = Object.entries(params || {});
-  if (!entries.length) return "";
-  return entries.map(([k, v]) => `${k}=${v}`).join(", ");
+  // First row is the natural place for focus to land after navigating
+  // into a directory (mirrors what a native file dialog does).
+  const firstRow = list.firstElementChild;
+  if (firstRow) firstRow.focus();
 }
 
 function render(graph) {
@@ -803,9 +1018,6 @@ function renderEmptyState() {
     canvasPlaceholder.style.display = "flex";
   }
 }
-
-let isGrcLoaded = false;
-let lastGrcVersion = -1;
 
 async function refresh() {
   try {
@@ -834,9 +1046,27 @@ async function refresh() {
     if (canvasIframe && canvasPlaceholder) {
       canvasPlaceholder.style.display = "none";
       canvasIframe.style.display = "block";
-      if (!canvasIframe.src || canvasIframe.src === "about:blank") {
+      // Compare the literal attribute, not the `.src` IDL property: an
+      // empty src="" attribute resolves through the property getter to
+      // the *parent page's own URL* (per the URL spec, empty-string
+      // resolution against the document base yields the base itself) —
+      // never empty and never "about:blank" — so that check silently
+      // never fires on a page load where a flowgraph is already active
+      // server-side (e.g. refreshing the dashboard, or opening it in a
+      // second tab), leaving the canvas permanently blank despite a
+      // valid loaded graph.
+      if (canvasIframe.getAttribute("src") !== "http://localhost:8085/") {
         canvasIframe.src = "http://localhost:8085/";
       }
+      // Force a size sync (bypassing the "did it change" dedup below) —
+      // a freshly spawned canvas_app.py process needs to be told the
+      // pane's real size at least once, and its own resize listener
+      // takes a moment to come up, so retry a couple of times to survive
+      // that startup race rather than leaving the window at its default
+      // guessed size.
+      syncCanvasSize(true);
+      setTimeout(() => syncCanvasSize(true), 800);
+      setTimeout(() => syncCanvasSize(true), 2000);
     }
   } catch (e) {
     isGrcLoaded = false;
@@ -844,58 +1074,80 @@ async function refresh() {
   }
 }
 
+// Keep the GTK canvas window matched to the actual pane size — a mismatch
+// clips the flowgraph AND pushes GRC's own scrollbars outside the visible
+// iframe viewport, making it both cropped and unpannable (see
+// canvas_app.py's start_resize_server for the receiving end).
+let lastSentCanvasSize = null;
+function syncCanvasSize(force) {
+  const container = document.getElementById("canvas-container");
+  if (!container) return;
+  const rect = container.getBoundingClientRect();
+  const width = Math.round(rect.width);
+  const height = Math.round(rect.height);
+  if (width <= 0 || height <= 0) return;
+  const key = `${width}x${height}`;
+  if (!force && key === lastSentCanvasSize) return;
+  lastSentCanvasSize = key;
+  fetch("/grc/canvas/resize", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({width, height})
+  }).catch(() => {});
+}
+
+new ResizeObserver(() => syncCanvasSize(false)).observe(document.getElementById("canvas-container"));
+
 refresh();
 
-// ---- Model/provider preference (see grc_agent.settings) ----
+// ---- Model/provider preference (see grc_agent.settings), picked from a
+// dropdown pinned directly over the chat widget's own (inert) model
+// selector — that one just reflects the static `models=[...]` list to_web()
+// was constructed with, it isn't wired to actually switch models, hence
+// replacing it rather than leaving both visible side by side.
 let openrouterKeySet = false;
 let ollamaModel = "qwen3.6:35b-a3b-q4_K_M";
 let openrouterModel = "openai/gpt-4o-mini";
 
-function renderSettingsHint() {
-  const provider = document.getElementById("settings-provider").value;
-  const hint = document.getElementById("settings-hint");
-  if (provider === "ollama") {
-    hint.className = "";
-    hint.innerHTML = 'Pull a model first: <code>ollama pull &lt;name&gt;</code> &mdash; browse names at ' +
-      '<a href="https://ollama.com/search" target="_blank" rel="noopener">ollama.com/search</a> ' +
-      '(e.g. <code>ollama pull gemma4:e4b-it-qat</code>).';
-  } else {
-    hint.className = openrouterKeySet ? "" : "warn";
-    hint.innerHTML = 'Browse models at <a href="https://openrouter.ai/models" target="_blank" rel="noopener">openrouter.ai/models</a>.' +
-      (openrouterKeySet ? "" : " OPENROUTER_API_KEY is not set in .env — requests will fail until it is.");
-  }
+function renderModelSuggestions() {
+  const provider = document.getElementById("model-provider-select").value;
+  const list = document.getElementById("model-name-suggestions");
+  const suggestion = provider === "ollama" ? ollamaModel : openrouterModel;
+  list.innerHTML = `<option value="${suggestion}"></option>`;
+  const overlay = document.getElementById("model-selector-overlay");
+  overlay.title = provider === "ollama"
+    ? "Pull a model first: ollama pull <name>. Restart the app after saving to use it."
+    : "Browse models at openrouter.ai/models." +
+      (openrouterKeySet ? "" : " OPENROUTER_API_KEY is not set in .env.") +
+      " Restart the app after saving to use it.";
 }
 
-function onProviderChange() {
-  const provider = document.getElementById("settings-provider").value;
-  const modelInput = document.getElementById("settings-model");
-  if (provider === "ollama") {
-    modelInput.value = ollamaModel;
-  } else if (provider === "openrouter") {
-    modelInput.value = openrouterModel;
-  }
-  renderSettingsHint();
+function onModelProviderChange() {
+  const provider = document.getElementById("model-provider-select").value;
+  document.getElementById("model-name-input").value =
+    provider === "ollama" ? ollamaModel : openrouterModel;
+  renderModelSuggestions();
+  saveModelSettings();
 }
 
-async function loadSettings() {
+async function loadModelSettings() {
   try {
     const res = await fetch("/grc/settings").then(r => r.json());
     if (!res.ok) return;
     openrouterKeySet = !!res.openrouter_api_key_set;
-    document.getElementById("settings-provider").value = res.provider;
     if (res.ollama_model) ollamaModel = res.ollama_model;
     if (res.openrouter_model) openrouterModel = res.openrouter_model;
-    document.getElementById("settings-model").value = res.model;
-    renderSettingsHint();
+    document.getElementById("model-provider-select").value = res.provider;
+    document.getElementById("model-name-input").value = res.model;
+    renderModelSuggestions();
   } catch (e) { /* leave defaults */ }
 }
 
-async function saveSettings() {
-  const provider = document.getElementById("settings-provider").value;
-  const model = document.getElementById("settings-model").value;
-  const msg = document.getElementById("settings-msg");
-  msg.className = "";
-  msg.textContent = "Saving...";
+async function saveModelSettings() {
+  const provider = document.getElementById("model-provider-select").value;
+  const model = document.getElementById("model-name-input").value;
+  const overlay = document.getElementById("model-selector-overlay");
+  overlay.classList.remove("saved", "error");
   try {
     const res = await fetch("/grc/settings", {
       method: "POST",
@@ -903,30 +1155,160 @@ async function saveSettings() {
       body: JSON.stringify({provider, model})
     });
     const data = await res.json();
-    msg.className = data.ok ? "ok" : "error";
-    msg.textContent = data.message || (data.ok ? "Saved." : "Failed to save.");
+    overlay.classList.add(data.ok ? "saved" : "error");
     if (data.ok) {
-      if (provider === "ollama") {
-        ollamaModel = model;
-      } else if (provider === "openrouter") {
-        openrouterModel = model;
-      }
-      setTimeout(() => {
-        if (msg.textContent.startsWith("Saved")) {
-          msg.className = "";
-          msg.textContent = "";
-        }
-      }, 4000);
+      if (provider === "ollama") ollamaModel = model;
+      else openrouterModel = model;
+      renderModelSuggestions();
     }
   } catch (e) {
-    msg.className = "error";
-    msg.textContent = String(e);
+    overlay.classList.add("error");
+  }
+  setTimeout(() => overlay.classList.remove("saved", "error"), 2500);
+}
+
+// Position our own provider/model controls directly over the chat
+// widget's model combobox button so they read as one native toolbar
+// control instead of a bolted-on side panel.
+function integrateModelSelector() {
+  try {
+    const iframe = document.getElementById("chat-frame");
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    const overlay = document.getElementById("model-selector-overlay");
+    if (!doc || !overlay) return;
+
+    const combobox = doc.querySelector('[role="combobox"]');
+    if (!combobox) { overlay.style.display = "none"; return; }
+
+    if (!doc.getElementById("parent-injected-combobox-hide")) {
+      const style = doc.createElement("style");
+      style.id = "parent-injected-combobox-hide";
+      // visibility (not display) so the toolbar's layout doesn't reflow
+      style.textContent = `[role="combobox"] { visibility: hidden !important; }`;
+      doc.head.appendChild(style);
+    }
+
+    const boxRect = combobox.getBoundingClientRect();
+    const iframeRect = iframe.getBoundingClientRect();
+    overlay.style.display = "flex";
+    overlay.style.left = `${iframeRect.left + boxRect.left}px`;
+    overlay.style.top = `${iframeRect.top + boxRect.top}px`;
+    overlay.style.height = `${boxRect.height}px`;
+    overlay.style.width = `${Math.max(boxRect.width, 340)}px`;
+  } catch (err) {
+    console.error("integrateModelSelector failed:", err);
+  }
+}
+
+// Position a "+" new-conversation button just left of the chat's own send
+// button, so it reads as part of the same toolbar.
+function integrateNewConversationButton() {
+  try {
+    const iframe = document.getElementById("chat-frame");
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    const btn = document.getElementById("new-conversation-btn");
+    if (!doc || !btn) return;
+
+    const sendBtn = doc.querySelector('form button[type="submit"]') || doc.querySelector("form button");
+    if (!sendBtn) { btn.style.display = "none"; return; }
+
+    const sendRect = sendBtn.getBoundingClientRect();
+    const iframeRect = iframe.getBoundingClientRect();
+    const size = sendRect.height || 36;
+    btn.style.display = "flex";
+    btn.style.width = `${size}px`;
+    btn.style.height = `${size}px`;
+    btn.style.left = `${iframeRect.left + sendRect.left - size - 8}px`;
+    btn.style.top = `${iframeRect.top + sendRect.top}px`;
+    // Always enabled — even while already on a fresh conversation, a file
+    // can be loaded with no message sent yet, and this is the only way
+    // back to Browse in that state (see startNewConversation).
+    btn.disabled = false;
+  } catch (err) {
+    console.error("integrateNewConversationButton failed:", err);
+  }
+}
+
+// ---- Session history: previous conversations, each locked to the .grc
+// file it was opened with (see saveSessionGrcPath). Shown above the chat
+// input only while no conversation is active, so picking one — or simply
+// starting a new one by sending a message — hides it.
+function loadSessionHistory() {
+  try {
+    return JSON.parse(localStorage.getItem("grc_session_history") || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function addSessionHistory(convId, path) {
+  try {
+    // Drop any exact duplicate of this conversation, and — when upgrading
+    // a pending entry (convId === null) to a real one now that the user
+    // has chatted — drop the stale pending copy for the same file so it
+    // doesn't show up twice.
+    const list = loadSessionHistory().filter(e =>
+      e.convId !== convId && !(e.path === path && !e.convId)
+    );
+    list.unshift({convId: convId || null, path, ts: Date.now()});
+    localStorage.setItem("grc_session_history", JSON.stringify(list.slice(0, 20)));
+  } catch (e) { /* ignore */ }
+}
+
+function timeAgo(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function renderSessionHistory() {
+  const panel = document.getElementById("session-history-panel");
+  if (!panel) return;
+  const entries = loadSessionHistory();
+  if (!entries.length || lastPath !== "/") {
+    panel.style.display = "none";
+    return;
+  }
+
+  const iframe = document.getElementById("chat-frame");
+  let bottomOffset = 96;
+  try {
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    const toolbar = doc && doc.querySelector(".sticky.bottom-0");
+    if (toolbar) bottomOffset = toolbar.getBoundingClientRect().height;
+  } catch (e) { /* keep fallback */ }
+  panel.style.bottom = `${bottomOffset}px`;
+  panel.style.display = "block";
+
+  const key = JSON.stringify(entries);
+  if (panel.dataset.key === key) return;
+  panel.dataset.key = key;
+
+  const list = document.getElementById("session-history-list");
+  list.innerHTML = "";
+  for (const entry of entries) {
+    const row = document.createElement("div");
+    row.className = "session-history-entry";
+    const name = (entry.path || "").split("/").pop() || entry.path || "untitled";
+    row.innerHTML = `<span class="she-name">${name}</span><span class="she-time">${timeAgo(entry.ts)}</span>`;
+    // A pending entry (file loaded but never chatted in) has no real
+    // conversation id to resume — reopen the file fresh instead.
+    makeRowFocusable(row, () => {
+      if (entry.convId) document.getElementById("chat-frame").src = entry.convId;
+      else openGraph(entry.path);
+    });
+    list.appendChild(row);
   }
 }
 
 document.getElementById("clear-history-btn").onclick = clearHistory;
-document.getElementById("settings-save").onclick = saveSettings;
-loadSettings();
+document.getElementById("model-provider-select").onchange = onModelProviderChange;
+document.getElementById("model-name-input").addEventListener("change", saveModelSettings);
+loadModelSettings();
 
 // Close browse overlay when clicking outside the dialog content
 document.getElementById("browse-overlay").addEventListener("click", function(e) {

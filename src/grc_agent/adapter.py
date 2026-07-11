@@ -574,6 +574,24 @@ def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
         raise
 
 
+MAX_BACKUPS_PER_DIR = 50
+
+
+def _prune_old_backups(backup_dir: Path) -> None:
+    """Every save snapshots the previous file into backup_dir with no
+    pruning at all — left alone, this grows without bound over the life of
+    a project. Backup filenames encode a timestamp
+    (`{timestamp}-{hash}{suffix}`), so the oldest N beyond the cap are the
+    ones to go; best-effort, a failure here shouldn't fail the save itself."""
+    try:
+        backups = sorted(backup_dir.iterdir(), key=lambda p: p.name)
+        excess = len(backups) - MAX_BACKUPS_PER_DIR
+        for old in backups[:max(0, excess)]:
+            old.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def set_param(block: Any, param_key: str, value: str) -> None:
     if param_key not in block.params:
         raise KeyError(f"Param {param_key!r} not in block {block.name!r}")
@@ -890,6 +908,7 @@ def change_graph(
             timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
             shutil.copy2(target_path, backup_path)
+            _prune_old_backups(backup_dir)
 
         lock_path = target_path.parent / ".grc_agent" / (target_path.name + ".lock")
         lock_path.parent.mkdir(mode=0o700, exist_ok=True)

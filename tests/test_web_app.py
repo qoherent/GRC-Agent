@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,12 +13,25 @@ client = TestClient(web_app.app)
 def reset_active():
     """web_app's active flowgraph is a module-level singleton (mirrors the
     real single-session server) — reset it around each test so they don't
-    depend on execution order."""
+    depend on execution order. Tests that hit /grc/open (e.g.
+    test_open_valid_path_then_inspect, test_grc_render_endpoint) spawn a
+    genuine canvas_app.py + broadwayd subprocess — TestClient runs the real
+    app, not a mock. Left running after the test process exits, the next
+    canvas_app.py to start (the next test run, or the real app) crashes
+    trying to bind the control-server port an orphan is still holding."""
     web_app.active.swap(None)
     web_app.active_path = None
     yield
     web_app.active.swap(None)
     web_app.active_path = None
+    web_app._terminate_canvas_proc()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_stray_processes_at_session_end():
+    yield
+    subprocess.run(["pkill", "-f", "canvas_app.py"], capture_output=True)
+    subprocess.run(["killall", "broadwayd"], capture_output=True)
 
 
 def test_status_and_inspect_when_not_loaded():
