@@ -1,4 +1,3 @@
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,9 +15,9 @@ def reset_active():
     depend on execution order. Tests that hit /grc/open (e.g.
     test_open_valid_path_then_inspect, test_grc_render_endpoint) spawn a
     genuine canvas_app.py + broadwayd subprocess — TestClient runs the real
-    app, not a mock. Left running after the test process exits, the next
-    canvas_app.py to start (the next test run, or the real app) crashes
-    trying to bind the control-server port an orphan is still holding."""
+    app, not a mock. Teardown terminates only the processes this test run
+    spawned (tracked PIDs), never a global `pkill`/`killall` that would
+    kill a concurrent dev session on the default ports."""
     web_app.active.swap(None)
     web_app.active_path = None
     yield
@@ -28,10 +27,12 @@ def reset_active():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def cleanup_stray_processes_at_session_end():
+def cleanup_tracked_processes_at_session_end():
     yield
-    subprocess.run(["pkill", "-f", "canvas_app.py"], capture_output=True)
-    subprocess.run(["killall", "broadwayd"], capture_output=True)
+    # Scoped: only the broadwayd daemons this test session spawned (on the
+    # test-isolated port set in conftest.py). The canvas subprocess is
+    # already terminated per-test by reset_active above.
+    web_app._terminate_broadway()
 
 
 def test_status_and_inspect_when_not_loaded():
@@ -73,6 +74,19 @@ def test_panel_serves_dashboard():
     assert res.status_code == 200
     assert "grc-pane" in res.text
     assert "chat-frame" in res.text
+    # The dashboard logic is extracted into panel.js (no inline script) —
+    # the HTML must reference it rather than ship the logic inline.
+    assert "/grc/panel.js" in res.text
+    assert "const state" not in res.text
+
+
+def test_panel_js_served():
+    res = client.get("/grc/panel.js")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/javascript")
+    # Sanity: the consolidated state object + a known function are present.
+    assert "const state = {" in res.text
+    assert "function refresh(" in res.text
 
 
 def test_root_serves_chat_widget_not_dashboard():

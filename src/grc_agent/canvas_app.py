@@ -1,5 +1,6 @@
 # ruff: noqa: E402
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -15,10 +16,10 @@ gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
 gi.require_version('PangoCairo', '1.0')
 from gi.repository import Gdk, GLib, Gtk
-from gnuradio import gr
-from gnuradio.grc.gui.Platform import Platform
-from gnuradio.grc.gui.DrawingArea import DrawingArea
-from gnuradio.grc.gui.Application import Application
+
+# adapter is the sole importer of gnuradio (core *and* gui); this subprocess
+# only needs gi/GTK directly. Lazy accessors keep the import side-effect-free.
+from grc_agent.adapter import get_gui_platform, gui_application_cls, write_flow_graph_atomic
 
 # The canvas must show only the flowgraph's scrollable drawing area — no
 # menu bar, toolbar, block-library tree, or console/variable-editor pane.
@@ -41,6 +42,14 @@ CANVAS_MIN_HEIGHT = 300
 CANVAS_CONTROL_PORT = 7933
 
 
+def _sha256_file(path):
+    """Best-effort hash of a file's current bytes (None if unreadable)."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 class CanvasControlContext:
     """Shared, mutable state for the control HTTP server. The server binds
     immediately at startup — before GRC's own Platform.build_library() call,
@@ -56,6 +65,17 @@ class CanvasControlContext:
         self.drawing_area = None
         self.platform = None
         self.pending_size = None
+        # Flipped to True once Gtk.main() is pumping and the GTK client has
+        # connected to the Broadway display — grc_open polls GET /ready so it
+        # doesn't point the dashboard iframe at Broadway during the multi-
+        # second platform build, which would otherwise make broadway.js fire
+        # an unrecoverable alert("disconnected").
+        self.ready = False
+        # SHA-256 of the on-disk file as this process last saw it. A drag-save
+        # compares the current disk content to this: if they differ, the agent
+        # (or another writer) changed the file since this canvas last reloaded,
+        # so writing our now-stale in-memory graph would clobber that edit.
+        self.last_disk_hash = None
 
     def apply_resize(self, width, height):
         if self.window:
@@ -92,13 +112,14 @@ class CanvasControlContext:
             # context ourselves outside of a real draw callback.
             self.drawing_area._update_after_zoom = True
             self.drawing_area.queue_draw()
+            self.last_disk_hash = _sha256_file(self.grc_file_path)
             print("Reloaded flowgraph from disk after an external edit")
         except Exception as e:
             print("Failed to reload flowgraph from disk:", e)
         return False
 
 
-def start_control_server(ctx):
+def start_control_server(ctx, port):
     """Background HTTP listener so the dashboard page (resize) and the web
     server (reload, after an agent-driven edit) can act on this canvas
     process. GTK calls must happen on the main thread, so handlers only
@@ -111,6 +132,16 @@ def start_control_server(ctx):
         def _read_json(self):
             length = int(self.headers.get("Content-Length", 0))
             return json.loads(self.rfile.read(length)) if length else {}
+
+        def do_GET(self):
+            # Readiness probe: 200 once Gtk.main() is pumping (so Broadway has
+            # a GTK client connected), 503 while still building the platform.
+            if self.path == "/ready":
+                self.send_response(200 if ctx.ready else 503)
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
 
         def do_POST(self):
             try:
@@ -138,7 +169,7 @@ def start_control_server(ctx):
     server = None
     for attempt in range(10):
         try:
-            server = HTTPServer(("127.0.0.1", CANVAS_CONTROL_PORT), ControlHandler)
+            server = HTTPServer(("127.0.0.1", port), ControlHandler)
             break
         except OSError as e:
             print(f"Control server bind attempt {attempt + 1}/10 failed: {e}")
@@ -155,10 +186,15 @@ def start_control_server(ctx):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python canvas_app.py <path_to_grc>")
+        print("Usage: python canvas_app.py <path_to_grc> [control_port] [web_port]")
         sys.exit(1)
 
     grc_file_path = os.path.abspath(sys.argv[1])
+    control_port = int(sys.argv[2]) if len(sys.argv) > 2 else CANVAS_CONTROL_PORT
+    # The web server's port, so the canvas autosave can ping /grc/reload and
+    # the web process picks up the new in-memory copy. Passed explicitly by
+    # web.py (no hardcoded port coupling).
+    web_port = int(sys.argv[3]) if len(sys.argv) > 3 else 7932
     print(f"Starting canvas app for: {grc_file_path}")
 
     # Bind the control server immediately — before GRC's own
@@ -167,18 +203,14 @@ def main():
     # loading its block catalog is buffered (see CanvasControlContext)
     # instead of simply being missed.
     ctx = CanvasControlContext(grc_file_path)
-    start_control_server(ctx)
+    start_control_server(ctx, control_port)
 
-    # Set up GRC Platform & Application Context
-    p = Platform(
-        version=gr.version(),
-        version_parts=(gr.major_version(), gr.api_version(), gr.minor_version()),
-        prefs=gr.prefs(),
-        install_prefix=gr.prefix()
-    )
-    p.build_library()
+    # Set up GRC Platform & Application Context (via adapter — the sole
+    # gnuradio importer).
+    p = get_gui_platform()
 
     # Pass the flowgraph path directly to the native Application to load it inside the MainWindow
+    Application = gui_application_cls()
     app = Application([grc_file_path], p)
     app.register(None)
     app.activate()
@@ -281,11 +313,48 @@ def main():
                 with lock_path.open("a", encoding="utf-8") as lock_file:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                     try:
-                        # save_flow_graph(filename, flow_graph) — filename first.
-                        p.save_flow_graph(grc_file_path, drawing_area._flow_graph)
+                        # Lost-update guard: if the on-disk file changed since
+                        # this canvas last reloaded it (an agent change_graph
+                        # wrote in between), our in-memory graph is stale and
+                        # writing it would silently clobber that edit. Drop the
+                        # drag-save; the queued apply_reload from the agent's
+                        # notify will bring this canvas current instead.
+                        current_hash = _sha256_file(grc_file_path)
+                        if (
+                            ctx.last_disk_hash is not None
+                            and current_hash is not None
+                            and current_hash != ctx.last_disk_hash
+                        ):
+                            print(
+                                "Disk changed since last reload (agent edit?) — "
+                                "skipping drag-save to avoid clobbering it."
+                            )
+                            return False
+                        # Atomic write (temp + fsync + os.replace), the same
+                        # path adapter.change_graph uses — GRC's native
+                        # save_flow_graph is a plain truncate+write, which a
+                        # concurrent reader (load_flow_graph) could observe
+                        # torn mid-write.
+                        write_flow_graph_atomic(
+                            drawing_area._flow_graph, Path(grc_file_path)
+                        )
+                        ctx.last_disk_hash = _sha256_file(grc_file_path)
                     finally:
                         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            urllib.request.urlopen("http://localhost:7932/grc/reload")
+            # Bounded retry: a single failed /grc/reload ping would otherwise
+            # leave the web server's in-memory graph stale indefinitely. The
+            # web reload is the only thing keeping inspect_graph in sync with
+            # manual edits, so a transient hiccup shouldn't silently break it.
+            url = f"http://localhost:{web_port}/grc/reload"
+            for attempt in range(3):
+                try:
+                    urllib.request.urlopen(url, timeout=2)
+                    break
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(0.5)
+                    else:
+                        raise
         except Exception as e:
             print("Failed to trigger reload:", e)
         return False
@@ -330,6 +399,19 @@ def main():
 
     app.connect("window-added", on_window_added)
 
+    # Record the initial on-disk hash so the first drag-save's lost-update
+    # guard has a correct baseline, then signal readiness. The readiness flag
+    # is set on the first idle of Gtk.main()'s loop — i.e. once the GTK
+    # client has actually connected to the Broadway display — so grc_open's
+    # /ready probe doesn't release the dashboard iframe to Broadway during
+    # the platform-build window that would trigger alert("disconnected").
+    ctx.last_disk_hash = _sha256_file(grc_file_path)
+
+    def _mark_ready():
+        ctx.ready = True
+        return False
+
+    GLib.idle_add(_mark_ready)
     Gtk.main()
 
 

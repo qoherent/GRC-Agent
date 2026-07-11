@@ -447,6 +447,12 @@ async def change_graph_func(
         )
     if hasattr(ctx.deps, "bump_version"):
         ctx.deps.bump_version()
+    # Tell the live GTK canvas (if any) to reload from disk — the in-memory
+    # graph and the on-disk file are now ahead of what's visually rendered.
+    # The outcome is surfaced so a desync isn't silent; on a raw flowgraph
+    # deps (scenario harness) notify_edit is absent and this is skipped.
+    if hasattr(ctx.deps, "notify_edit"):
+        res["canvas_synced"] = (await ctx.deps.notify_edit()).get("ok", False)
     return json.dumps(res)
 
 

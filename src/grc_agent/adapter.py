@@ -34,6 +34,44 @@ def get_platform() -> Any:
     return _PLATFORM
 
 
+def get_gui_platform() -> Any:
+    """GUI Platform (gnuradio.grc.gui) for the canvas subprocess. Kept lazy
+    and separate from the headless get_platform() so importing adapter never
+    pulls GTK/gi — adapter stays the sole importer of gnuradio (core *and*
+    gui), and headless paths (unit tests, scenario harness) stay GTK-free.
+
+    gnuradio.grc.gui transitively imports Gtk at module load, which requires
+    gi.require_version first — we set that up here so the accessor is
+    self-contained (idempotent if the caller already did it)."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("PangoCairo", "1.0")
+    from gnuradio import gr
+    from gnuradio.grc.gui.Platform import Platform
+
+    platform = Platform(
+        version=gr.version(),
+        version_parts=(gr.major_version(), gr.api_version(), gr.minor_version()),
+        prefs=gr.prefs(),
+        install_prefix=gr.prefix(),
+    )
+    platform.build_library()
+    return platform
+
+
+def gui_application_cls() -> Any:
+    """Lazy accessor for the GRC GUI Application class (canvas subprocess).
+    Same self-contained gi setup as get_gui_platform."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("PangoCairo", "1.0")
+    from gnuradio.grc.gui.Application import Application
+
+    return Application
+
+
 def load_flow_graph(file_path: str) -> Any:
     platform = get_platform()
     flow_graph = platform.make_flow_graph()
@@ -893,10 +931,14 @@ def change_graph(
 
     # Write atomically with lock and backup
     try:
-        target_path = Path(flow_graph.grc_file_path).resolve()
+        original = Path(flow_graph.grc_file_path)
+        # resolve() follows symlinks, so the symlink check must run on the
+        # unresolved path — checking it after resolve() is always False and
+        # silently defeats the guard.
+        if original.is_symlink():
+            raise OSError(f"Refusing to save through symlink: {original}")
+        target_path = original.resolve()
         if target_path.exists():
-            if target_path.is_symlink():
-                raise OSError(f"Refusing to save through symlink: {target_path}")
             if target_path.stat().st_nlink > 1:
                 raise OSError(f"Refusing to save hard-linked graph file: {target_path}")
 
