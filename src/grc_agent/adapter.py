@@ -1,5 +1,7 @@
+import fcntl
 import functools
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -70,6 +72,33 @@ def gui_application_cls() -> Any:
     from gnuradio.grc.gui.Application import Application
 
     return Application
+
+
+def disable_native_undo_redo() -> None:
+    """GRC's own GUI ships a complete, working undo/redo (gnuradio.grc.gui's
+    StateCache + Actions.FLOW_GRAPH_UNDO/REDO on Ctrl+Z/Ctrl+Y) that stays
+    reachable even with canvas_app.py's chrome hidden — live-confirmed: it
+    visibly moves things back on the canvas, but never touches disk, so it
+    silently diverges from the shared undo/redo stack in this module (which
+    IS disk-synced across both the agent and manual-edit paths). Disabling
+    the native one keeps exactly one undo/redo history reachable, avoiding
+    that divergence. canvas_app.py calls this once at startup rather than
+    importing gnuradio.grc.gui.Actions itself, keeping this module the sole
+    gnuradio importer."""
+    from gnuradio.grc.gui import Actions
+
+    Actions.FLOW_GRAPH_UNDO.set_enabled(False)
+    Actions.FLOW_GRAPH_REDO.set_enabled(False)
+
+
+def flow_graph_content_hash(flow_graph: Any) -> str:
+    """Hash of what write_flow_graph_atomic would currently write for this
+    flow_graph — directly comparable to a hash of the on-disk file's raw
+    bytes (e.g. canvas_app.py's `_sha256_file`/`last_disk_hash`), since it's
+    the exact same serialization. Used to detect in-memory edits that
+    haven't reached disk yet (a safety net for GTK-native interactions that
+    don't go through a specific, hooked signal — see canvas_app.py)."""
+    return hashlib.sha256(_serialize_flow_graph(flow_graph).encode()).hexdigest()
 
 
 def load_flow_graph(file_path: str) -> Any:
@@ -532,6 +561,12 @@ def inspect_graph(
             }
         )
 
+    # is_valid()/iter_error_messages() only ever read _error_messages, which
+    # validate() populates and rewrite() (called after every load/mutation)
+    # clears without refilling — without this call they report "valid" with
+    # zero errors regardless of the graph's actual state (confirmed live:
+    # an unconnected required port went undetected until this was added).
+    flow_graph.validate()
     valid = bool(flow_graph.is_valid())
     errors = []
     if not valid:
@@ -585,10 +620,18 @@ def inspect_graph(
     }
 
 
-def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
+def _serialize_flow_graph(flow_graph: Any) -> str:
     from gnuradio.grc.core.io import yaml as _grc_yaml
 
-    payload = _grc_yaml.dump(flow_graph.export_data())
+    return _grc_yaml.dump(flow_graph.export_data())
+
+
+def _atomic_write_text(payload: str, path: Path) -> None:
+    """Shared by write_flow_graph_atomic and the undo/redo snapshot-restore
+    path (undo_flowgraph/redo_flowgraph) — both need to atomically replace a
+    file's content with an already-fully-serialized YAML string; the only
+    difference is where that string came from (a live flow_graph object vs.
+    an already-serialized undo snapshot read back off disk)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
@@ -612,6 +655,10 @@ def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
         raise
 
 
+def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
+    _atomic_write_text(_serialize_flow_graph(flow_graph), Path(path))
+
+
 MAX_BACKUPS_PER_DIR = 50
 
 
@@ -628,6 +675,176 @@ def _prune_old_backups(backup_dir: Path) -> None:
             old.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+# ---- Undo/redo: a shared, disk-based snapshot stack ----
+#
+# Both change_graph() (this process) and canvas_app.py's manual drag-save
+# path write to the SAME target .grc file, from two separate processes —
+# so the undo/redo history has to live on disk too, not as an in-memory
+# stack in either process. Mirrors GRC's own native undo (gnuradio.grc.gui's
+# StateCache), which is also just export_data()/import_data() snapshots —
+# independent confirmation this is the right shape, not just a plausible
+# analogy. Each snapshot is a plain numbered .grc file (same serialization
+# as a real save), so restoring one is exactly write_flow_graph_atomic's
+# own atomic-replace, and reading one back is exactly load_flow_graph.
+UNDO_MAX_DEPTH = 50
+
+
+def _undo_dir(target_path: Path) -> Path:
+    # Per-filename (not per-directory, unlike backups/) since this needs a
+    # stateful cursor, not just a pile of independently-timestamped files.
+    return target_path.parent / ".grc_agent" / (target_path.name + ".undo")
+
+
+def _read_undo_cursor(undo_dir: Path) -> dict:
+    try:
+        return json.loads((undo_dir / "cursor.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"index": -1, "count": 0, "hash": None}
+
+
+def _write_undo_cursor(undo_dir: Path, cursor: dict) -> None:
+    (undo_dir / "cursor.json").write_text(json.dumps(cursor), encoding="utf-8")
+
+
+def _prune_undo_stack(undo_dir: Path, cursor: dict) -> None:
+    """Bound depth like _prune_old_backups — but snapshots are addressed by
+    contiguous 0-based index (not an independently-sortable timestamp), so
+    the oldest ones must be deleted AND everything else renumbered down, or
+    the index<->filename mapping breaks. Mutates `cursor` in place."""
+    excess = cursor["count"] - UNDO_MAX_DEPTH
+    if excess <= 0:
+        return
+    for i in range(excess):
+        (undo_dir / f"{i:05d}.grc").unlink(missing_ok=True)
+    for old_index in range(excess, cursor["count"]):
+        old_path = undo_dir / f"{old_index:05d}.grc"
+        if old_path.exists():
+            old_path.rename(undo_dir / f"{old_index - excess:05d}.grc")
+    cursor["index"] -= excess
+    cursor["count"] -= excess
+
+
+def push_undo_snapshot(flow_graph: Any, target_path: Path, initial_data: dict = None) -> None:
+    """Push the CURRENT (post-edit) state of flow_graph onto target_path's
+    undo stack. Called from both change_graph's own success path and
+    canvas_app.py's manual drag-save path, so both mutation sources share
+    one history. Deduplicates against a genuinely-unchanged state (e.g. a
+    selection click that didn't move anything) via content hash. A new push
+    after an undo discards the redo branch — standard undo/redo semantics.
+    Best-effort: a failure here must never fail the caller's own
+    already-committed save, so exceptions are logged, not raised.
+
+    `initial_data` — change_graph's own pre-mutation
+    flow_graph.export_data(), taken before any phase runs — seeds a
+    baseline entry the first time this is ever called for a file, so undo
+    can return all the way to "before the first tracked edit," not just
+    between edits. Manual canvas saves have no pre-edit snapshot of their
+    own to offer (the in-memory graph is already post-edit by the time
+    _do_trigger_reload runs); they rely on a prior change_graph call (or an
+    earlier canvas save) having already seeded the baseline.
+    """
+    try:
+        target_path = Path(target_path)
+        undo_dir = _undo_dir(target_path)
+        undo_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cursor = _read_undo_cursor(undo_dir)
+
+        current_payload = _serialize_flow_graph(flow_graph)
+        current_hash = hashlib.sha256(current_payload.encode()).hexdigest()
+
+        if cursor["count"] == 0 and initial_data is not None:
+            from gnuradio.grc.core.io import yaml as _grc_yaml
+
+            baseline_payload = _grc_yaml.dump(initial_data)
+            baseline_hash = hashlib.sha256(baseline_payload.encode()).hexdigest()
+            (undo_dir / "00000.grc").write_text(baseline_payload, encoding="utf-8")
+            cursor = {"index": 0, "count": 1, "hash": baseline_hash}
+
+        if current_hash == cursor["hash"]:
+            return  # nothing actually changed since the last tracked state
+
+        for stale in undo_dir.glob("*.grc"):
+            try:
+                if int(stale.stem) > cursor["index"]:
+                    stale.unlink()
+            except ValueError:
+                continue
+
+        new_index = cursor["index"] + 1
+        (undo_dir / f"{new_index:05d}.grc").write_text(current_payload, encoding="utf-8")
+        cursor = {"index": new_index, "count": new_index + 1, "hash": current_hash}
+        _prune_undo_stack(undo_dir, cursor)
+        _write_undo_cursor(undo_dir, cursor)
+    except Exception as e:
+        print(f"[grc-agent] Failed to push undo snapshot for {target_path}: {e}")
+
+
+def _apply_undo_redo_snapshot(
+    target_path: Path, undo_dir: Path, cursor: dict, new_index: int
+) -> dict:
+    snapshot_path = undo_dir / f"{new_index:05d}.grc"
+    if not snapshot_path.exists():
+        return {"ok": False, "message": "Undo history is corrupted or incomplete."}
+    payload = snapshot_path.read_text(encoding="utf-8")
+
+    # Same lock file + atomic-replace convention as change_graph's own save
+    # and canvas_app.py's drag-save — a reader can never observe a torn file
+    # regardless of which of the three writers is active.
+    lock_path = target_path.parent / ".grc_agent" / (target_path.name + ".lock")
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            _atomic_write_text(payload, target_path)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    cursor["index"] = new_index
+    cursor["hash"] = hashlib.sha256(payload.encode()).hexdigest()
+    _write_undo_cursor(undo_dir, cursor)
+    return {
+        "ok": True,
+        "can_undo": cursor["index"] > 0,
+        "can_redo": cursor["index"] < cursor["count"] - 1,
+    }
+
+
+def undo_flowgraph(target_path: Path) -> dict:
+    """Move target_path's undo cursor back one step and write that
+    snapshot to disk. Does NOT touch any in-memory flow_graph object —
+    callers (web.py's /grc/undo) reload from disk afterward, the same way
+    grc_reload already does for a canvas-triggered disk change."""
+    target_path = Path(target_path)
+    undo_dir = _undo_dir(target_path)
+    cursor = _read_undo_cursor(undo_dir)
+    if cursor["index"] <= 0:
+        return {"ok": False, "message": "Nothing to undo."}
+    return _apply_undo_redo_snapshot(target_path, undo_dir, cursor, cursor["index"] - 1)
+
+
+def redo_flowgraph(target_path: Path) -> dict:
+    target_path = Path(target_path)
+    undo_dir = _undo_dir(target_path)
+    cursor = _read_undo_cursor(undo_dir)
+    if cursor["index"] >= cursor["count"] - 1:
+        return {"ok": False, "message": "Nothing to redo."}
+    return _apply_undo_redo_snapshot(target_path, undo_dir, cursor, cursor["index"] + 1)
+
+
+def undo_status(target_path: Path) -> dict:
+    """Cheap read for /grc/status — no lock needed, just reflects the
+    cursor file as it currently stands."""
+    target_path = Path(target_path)
+    undo_dir = _undo_dir(target_path)
+    if not undo_dir.exists():
+        return {"can_undo": False, "can_redo": False}
+    cursor = _read_undo_cursor(undo_dir)
+    return {
+        "can_undo": cursor["index"] > 0,
+        "can_redo": cursor["index"] < cursor["count"] - 1,
+    }
 
 
 def set_param(block: Any, param_key: str, value: str) -> None:
@@ -661,6 +878,19 @@ def set_param(block: Any, param_key: str, value: str) -> None:
                 f"options {options}. Use one of those exact tokens."
             )
     param.set_value(raw_value)
+
+
+# Conservative estimate of a block's on-canvas footprint, used only to place
+# newly-added blocks without overlap — see change_graph's add_blocks phase
+# for why this can't be the block's real rendered size (that's GUI-only and
+# unavailable to this headless code path).
+BLOCK_FOOTPRINT_W = 250
+BLOCK_FOOTPRINT_H = 100
+BLOCK_COLUMN_MARGIN = 50
+
+
+def _footprints_overlap(a: tuple, b: tuple) -> bool:
+    return abs(a[0] - b[0]) < BLOCK_FOOTPRINT_W and abs(a[1] - b[1]) < BLOCK_FOOTPRINT_H
 
 
 def change_graph(
@@ -753,6 +983,47 @@ def change_graph(
 
         # Phase 3: add_blocks
         if add_blocks:
+            # GNU Radio's own headless block-creation API never sets a
+            # coordinate (that's a GUI-layer-only default, applied only once
+            # the file is next opened in a canvas) — added blocks otherwise
+            # all land on top of each other at (0, 0) (confirmed live: 3
+            # blocks added in one batch were indistinguishable in the
+            # canvas).
+            #
+            # GRC's own GUI placement isn't reusable here: its "add block"
+            # action (gui/canvas/flowgraph.py add_new_block) just drops the
+            # block at a random point inside the current scroll viewport
+            # with no collision check at all, and its one genuine anti-
+            # overlap logic (paste_from_clipboard's grid-aligned nudge loop)
+            # depends on gui.Constants.CANVAS_GRID_SIZE, which pulls in
+            # gi.repository — a GTK dependency this headless, no-canvas code
+            # path must not take on. A real block's pixel size is likewise
+            # GUI-only (computed from Pango text metrics at draw time in
+            # gui/canvas/block.py); core.Block carries no width/height at
+            # all, so no code path — native or otherwise — can know a
+            # block's true footprint headlessly.
+            #
+            # This keeps GRC's own shape of fix (nudge until clear of
+            # everything already placed) but against a conservative fixed
+            # footprint estimate instead of an unavailable real size, and
+            # confined to one column right of the whole graph's bounding box
+            # so a batch of new blocks reads as a tidy list. This must never
+            # need agent or user input: the agent's own context has block
+            # coordinates filtered out entirely, so positioning has to be
+            # fully self-contained here.
+            occupied = [
+                tuple(b.states["coordinate"])
+                for b in flow_graph.blocks
+                if isinstance(b.states.get("coordinate"), (list, tuple))
+                and len(b.states["coordinate"]) == 2
+            ]
+            next_x = (
+                (max(c[0] for c in occupied) + BLOCK_FOOTPRINT_W + BLOCK_COLUMN_MARGIN)
+                if occupied
+                else 200
+            )
+            next_y = min(c[1] for c in occupied) if occupied else 12
+
             for item in add_blocks:
                 block_id = item["block_id"]
                 instance_name = item["instance_name"]
@@ -775,6 +1046,11 @@ def change_graph(
                         }
                     )
                     continue
+                candidate = (next_x, next_y)
+                while any(_footprints_overlap(candidate, other) for other in occupied):
+                    candidate = (candidate[0], candidate[1] + BLOCK_FOOTPRINT_H)
+                occupied.append(candidate)
+                block.states["coordinate"] = list(candidate)
                 block.params["id"].set_value(str(instance_name))
                 flow_graph.rewrite()
 
@@ -908,6 +1184,11 @@ def change_graph(
         flow_graph.rewrite()
         return {"ok": False, "errors": errors}
 
+    # See inspect_graph's identical call for why this is required: without
+    # it, is_valid() reports "valid" regardless of actual state (confirmed
+    # live: removing a required connection without force=True was silently
+    # accepted, leaving a genuinely broken graph persisted to disk).
+    flow_graph.validate()
     valid = bool(flow_graph.is_valid())
     if not valid and not force:
         validation_errors = []
@@ -956,11 +1237,10 @@ def change_graph(
         lock_path.parent.mkdir(mode=0o700, exist_ok=True)
 
         with lock_path.open("a", encoding="utf-8") as lock_file:
-            import fcntl
-
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 write_flow_graph_atomic(flow_graph, target_path)
+                push_undo_snapshot(flow_graph, target_path, initial_data)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception as exc:

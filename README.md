@@ -17,8 +17,9 @@ Everything lives in the installable `grc_agent` package (`src/grc_agent/`):
 |------|------|
 | `adapter.py` | The **only** module that imports `gnuradio`. Flow-graph load/save, parameter/port filtering, block role classification, the `change_graph` mutation engine, catalog/docs vector RAG, `lite_web_search` (lite.duckduckgo.com scrape, the local fallback of pydantic-ai's `WebSearch` capability). |
 | `agent.py` | Wires `adapter.py`'s functions into PydanticAI `Tool`s, defines the `WebSearch`/`WebFetch` capabilities, defines the system prompt, hosts the scenario harness used by integration tests. |
-| `web.py` | Starlette app: proxies/rebrands `agent.to_web()`'s chat widget, serves the GNU Radio dashboard (`panel.html`) and its `/grc/*` JSON API, builds the chat `Agent`'s model from the saved provider/model preference. |
-| `panel.html` | The dashboard page — plain HTML/CSS/vanilla JS, no build step. |
+| `web.py` | Starlette app: proxies/rebrands `agent.to_web()`'s chat widget, serves the GNU Radio dashboard (`panel.html`) and its `/grc/*` JSON API, builds the chat `Agent`'s model from the saved provider/model preference. Also owns the broadwayd/`canvas_app.py` subprocess lifecycle. |
+| `panel.html` / `panel.js` | The dashboard page and its logic — plain HTML/CSS/vanilla JS, no build step. |
+| `canvas_app.py` | The live GTK canvas subprocess embedded in the dashboard via Broadway (GTK's HTML5 backend). |
 | `ingest.py` | Builds the catalog/docs vector databases from scratch on first use. |
 | `settings.py` | Persisted provider/model preference (`settings.json`, gitignored). |
 
@@ -32,8 +33,12 @@ Data flow: `.grc` file → `adapter.load_flow_graph()` → live
 ### 1. Prerequisites
 - **GNU Radio 3.10+** (with python bindings installed):
   ```bash
-  sudo apt install gnuradio gnuradio-dev  # Ubuntu/Debian
+  sudo apt install gnuradio gnuradio-dev libgtk-3-bin  # Ubuntu/Debian
   ```
+  `libgtk-3-bin` provides `broadwayd`, the GTK3 HTML5 backend the dashboard's
+  live canvas embeds — a default `apt install` of `gnuradio` already pulls it
+  in as a `Recommends`, but it's listed explicitly here since a
+  `--no-install-recommends`/minimal setup would silently miss it.
 - **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/)**.
 
 ### 2. Clone & Setup
@@ -51,7 +56,7 @@ The agent supports Ollama (local) and OpenRouter (cloud). You can toggle them in
 
 #### Option A: Ollama (Local & Free)
 1. Install [Ollama](https://ollama.com/).
-2. Pull the default models:
+2. Pull the models you want to use:
    ```bash
    ollama pull qwen3.6:35b-a3b-q4_K_M   # Chat model
    ollama pull embeddinggemma:latest    # Embedding model
@@ -109,8 +114,29 @@ that already has a cached `.db`, delete that `.db` file manually to force a
 rebuild.
 
 **Model settings:** the dashboard's "Model" section lets you switch between
-Ollama and OpenRouter and set the model name at any time — saved to a small
-config file, with a restart required to take effect.
+Ollama and OpenRouter at any time. The model name itself is click-to-edit —
+click the current name to reveal an editable field, then confirm with the
+checkmark (or cancel with the ✕) — and is otherwise plain, non-editable text
+so it can't be changed by an accidental keystroke. A saved change is written
+to a small config file immediately, but only takes effect after restarting
+the app; a badge next to the model name stays visible whenever the saved
+setting differs from what the running session actually loaded, so a pending
+restart is never silently invisible.
+
+**Undo/redo and validation:** the toolbar above the canvas has Undo/Redo
+buttons and a Validate button. Undo/redo covers edits from either source —
+the chat agent's `change_graph` tool calls and manual edits made directly in
+the canvas (drag, properties dialog, context menu) — sharing one history, so
+either side can undo the other's last change. Validate re-runs GNU Radio's
+own native validation and refreshes the status pill on demand.
+
+**Canvas behavior:** the canvas *is* directly editable — you can drag
+blocks, double-click to open a block's properties, and use the right-click
+context menu, same as native GNU Radio Companion. Every edit, from either
+side, is written straight to the `.grc` file on disk (no unsaved/dirty
+state to lose). Blocks the agent adds are positioned automatically, spaced
+to avoid landing on top of existing ones — you never need to reposition
+them yourself just to make them visible.
 
 ### Run the tests
 

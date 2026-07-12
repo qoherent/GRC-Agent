@@ -1,11 +1,11 @@
 // Qoherent GRC Agent — dashboard logic. Extracted from panel.html (still
-// vanilla, no build step). All functions stay top-level/global because the
-// HTML wires some via inline onclick="..." handlers. The previously
-// scattered `let` globals are consolidated into one `state` object: declared
-// once at the very top, so every read/write goes through it and there is no
-// temporal-dead-zone ordering hazard (an earlier bare `let isGrcLoaded`
-// declared too low once threw a ReferenceError that silently killed the whole
-// inline script).
+// vanilla, no build step). All functions stay top-level/global because every
+// handler is bound via addEventListener in the wiring block at the bottom of
+// this file (see there for why). The previously scattered `let` globals are
+// consolidated into one `state` object: declared once at the very top, so
+// every read/write goes through it and there is no temporal-dead-zone
+// ordering hazard (an earlier bare `let isGrcLoaded` declared too low once
+// threw a ReferenceError that silently killed the whole inline script).
 
 const ICON_DIR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>';
 const ICON_FILE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
@@ -24,6 +24,14 @@ const state = {
   openrouterKeySet: false,
   ollamaModel: "qwen3.6:35b-a3b-q4_K_M",
   openrouterModel: "openai/gpt-4o-mini",
+  // What the running chat Agent's model ACTUALLY is right now (from
+  // /grc/settings' active_provider/active_model) — distinct from
+  // provider/model above (the saved-to-disk preference, reflected in the
+  // provider select + model name label) since a saved change never takes
+  // effect without an app restart. Used only to decide whether the
+  // restart-required badge should show; see updateRestartBadge().
+  activeProvider: null,
+  activeModel: null,
 };
 
 const MAX_SESSION_MAPPINGS = 50;
@@ -36,9 +44,21 @@ const MAX_SESSION_MAPPINGS = 50;
 // any other path silently renders nothing), so the iframe must point at
 // the literal root, not a subpath; the query param just forces a reload
 // instead of a no-op same-src assignment.
-function startNewConversation() {
+function resetChatFrame() {
   localStorage.removeItem("grc_active_conv_id");
   document.getElementById("chat-frame").src = `/?r=${crypto.randomUUID()}`;
+}
+
+// For callers that are ABANDONING whatever's currently loaded to start
+// fresh (the "+" button, Clear History, a stuck-chat reset) — NOT for
+// openGraph, which calls resetChatFrame() directly instead: openGraph just
+// successfully loaded a file, and by the time its own await resolves the
+// always-running 750ms pollConversationState has often already noticed the
+// version bump and flipped state.isGrcLoaded true, so routing through this
+// unload guard here would immediately close the file openGraph just opened
+// (live-reproduced: /grc/close fired ~2.6s after /grc/open on every run).
+function startNewConversation() {
+  resetChatFrame();
   // If a file was loaded but the user never sent a message yet, the
   // iframe's pathname is already "/" and never changes here — so
   // pollConversationState's own path-transition check (which is what
@@ -256,9 +276,15 @@ async function pollConversationState() {
           });
           const data = await res.json();
           if (data.ok) {
-            state.isGrcLoaded = true;
             addSessionHistory(currentPath, mappedGrc);
-            await refresh();
+            if (data.canvas_ready === false) {
+              // refresh() first — see openGraph's identical ordering note:
+              // its own render() would otherwise clear this error message.
+              await refresh(false, false);
+              setMsg(data.canvas_error || "Flowgraph loaded, but the canvas failed to connect.", "error");
+            } else {
+              await refresh();
+            }
           }
         } catch (e) {
           console.error("Auto-open GRC failed:", e);
@@ -288,6 +314,38 @@ async function unloadGrc() {
   } catch (e) {
     console.error("Failed to unload GRC:", e);
   }
+}
+
+// ---- Undo/redo: a shared, disk-based snapshot stack (adapter.py) covering
+// both agent (change_graph) and manual-canvas edits — see AGENTS.md. Button
+// enabled/disabled state is synced from /grc/status's can_undo/can_redo in
+// refresh() itself, not tracked separately here.
+async function doUndo() {
+  try {
+    const res = await fetch("/grc/undo", { method: "POST" }).then(r => r.json());
+    if (!res.ok) { setMsg(res.message || "Nothing to undo.", "error"); return; }
+    await refresh();
+  } catch (e) {
+    setMsg(String(e), "error");
+  }
+}
+
+async function doRedo() {
+  try {
+    const res = await fetch("/grc/redo", { method: "POST" }).then(r => r.json());
+    if (!res.ok) { setMsg(res.message || "Nothing to redo.", "error"); return; }
+    await refresh();
+  } catch (e) {
+    setMsg(String(e), "error");
+  }
+}
+
+// /grc/inspect's validation field is otherwise only re-checked when
+// pollConversationState notices /grc/status's version counter change —
+// this button forces that same check (and the same render()-driven
+// pill/message update) on demand.
+async function doValidate() {
+  await refresh();
 }
 
 setInterval(pollConversationState, 750);
@@ -455,7 +513,6 @@ async function openGraph(path) {
     });
     const data = await res.json();
     if (!data.ok) { setMsg(data.message || "Failed to load file.", "error"); return; }
-    setMsg(`Loaded ${data.path}`, "ok");
     // Record a session-history entry right away — a real conversation id
     // doesn't exist yet (the vendor chat widget only mints one once the
     // first message is sent), so this is a "pending" entry (no convId).
@@ -463,12 +520,28 @@ async function openGraph(path) {
     // chats (see pollConversationState) — without this, a file load that
     // never turns into a chat message would never show up anywhere.
     addSessionHistory(null, data.path);
-    startNewConversation();
-    // forceCanvasReload: a brand-new canvas_app.py just connected to Broadway;
-    // force the iframe to re-init broadway.js so it doesn't sit on a stale /
-    // disconnected WebSocket from the prior canvas.
-    await refresh(true);
-    setTimeout(() => setMsg(""), 2500);
+    // resetChatFrame(), NOT startNewConversation() — the latter's
+    // unload-if-loaded guard would immediately close the file this call
+    // just opened (see startNewConversation's own comment).
+    resetChatFrame();
+    if (data.canvas_ready === false) {
+      // The flowgraph itself DID load (chat/inspect work) — only the
+      // canvas subprocess failed/timed out. refresh() first (its own
+      // render() clears a STALE error message once the graph is valid
+      // again — setting ours before that call would just get wiped), then
+      // say so instead of "Loaded", and don't point the iframe at a
+      // display with no live GTK client (broadway.js's own reconnect-free
+      // alert("disconnected") otherwise).
+      await refresh(false, false);
+      setMsg(data.canvas_error || "Flowgraph loaded, but the canvas failed to connect.", "error");
+    } else {
+      setMsg(`Loaded ${data.path}`, "ok");
+      // forceCanvasReload: a brand-new canvas_app.py just connected to
+      // Broadway; force the iframe to re-init broadway.js so it doesn't
+      // sit on a stale/disconnected WebSocket from the prior canvas.
+      await refresh(true);
+      setTimeout(() => setMsg(""), 2500);
+    }
   } catch (e) {
     setMsg(String(e), "error");
   }
@@ -592,7 +665,7 @@ function renderEmptyState() {
   }
 }
 
-async function refresh(forceCanvasReload = false) {
+async function refresh(forceCanvasReload = false, canvasReady = true) {
   try {
     const [statusRes, inspectRes] = await Promise.all([
       fetch("/grc/status").then(r => r.json()),
@@ -602,6 +675,11 @@ async function refresh(forceCanvasReload = false) {
     if (statusRes.version !== undefined) {
       state.lastGrcVersion = statusRes.version;
     }
+    // Ahead of the not_loaded/inspect-failure branches below so both
+    // buttons are correctly disabled in either case too (no file loaded ->
+    // nothing to undo/redo).
+    document.getElementById("undo-btn").disabled = !statusRes.can_undo;
+    document.getElementById("redo-btn").disabled = !statusRes.can_redo;
     if (inspectRes.not_loaded) {
       state.isGrcLoaded = false;
       renderEmptyState();
@@ -614,11 +692,22 @@ async function refresh(forceCanvasReload = false) {
     }
     state.isGrcLoaded = true;
     render(inspectRes.graph);
+    const canvasIframe = document.getElementById("canvas-iframe");
+    const canvasPlaceholder = document.getElementById("canvas-placeholder");
+    if (!canvasReady) {
+      // The canvas subprocess is known dead for this open (its readiness
+      // wait already timed out) — pointing the iframe at it would just
+      // trigger broadway.js's own reconnect-free alert("disconnected").
+      // The flowgraph IS loaded (chat/inspect above still work); only the
+      // visual canvas is unavailable, so leave the placeholder showing
+      // instead of a doomed connection attempt.
+      if (canvasIframe) canvasIframe.style.display = "none";
+      if (canvasPlaceholder) canvasPlaceholder.style.display = "flex";
+      return;
+    }
     // Broadway URL comes from the server (env-overridable port) so this
     // isn't hardcoded to 8085 — falls back only if the server didn't send it.
     const broadwayUrl = statusRes.broadway_url || "http://localhost:8085/";
-    const canvasIframe = document.getElementById("canvas-iframe");
-    const canvasPlaceholder = document.getElementById("canvas-placeholder");
     if (canvasIframe && canvasPlaceholder) {
       canvasPlaceholder.style.display = "none";
       canvasIframe.style.display = "block";
@@ -698,20 +787,49 @@ refresh();
 // selector — that one just reflects the static `models=[...]` list to_web()
 // was constructed with, it isn't wired to actually switch models, hence
 // replacing it rather than leaving both visible side by side.
+//
+// The model NAME is click-to-edit (see enterModelNameEditMode/
+// confirmModelNameEdit/cancelModelNameEdit below): a plain, non-editable
+// label by default so an accidental keystroke or stray blur can't silently
+// change something this consequential — it only becomes an editable field
+// (with explicit confirm/cancel) once the user deliberately clicks it. The
+// provider dropdown stays auto-save-on-change: picking an option is already
+// one deliberate action, unlike typing free text.
 function renderModelSuggestions() {
   const provider = document.getElementById("model-provider-select").value;
   const list = document.getElementById("model-name-suggestions");
   const suggestion = provider === "ollama" ? state.ollamaModel : state.openrouterModel;
   list.innerHTML = `<option value="${suggestion}"></option>`;
+  document.getElementById("model-name-label").textContent = suggestion;
   const overlay = document.getElementById("model-selector-overlay");
   overlay.title = provider === "ollama"
-    ? "Pull a model first: ollama pull <name>. Restart the app after saving to use it."
+    ? "Pull a model first: ollama pull <name>."
     : "Browse models at openrouter.ai/models." +
-      (state.openrouterKeySet ? "" : " OPENROUTER_API_KEY is not set in .env.") +
-      " Restart the app after saving to use it.";
+      (state.openrouterKeySet ? "" : " OPENROUTER_API_KEY is not set in .env.");
+  updateRestartBadge();
+}
+
+// Derived fresh from server state every time it's checked (not a one-shot
+// flag set right after a save), so it's correct even after a page reload or
+// in a second tab — a saved change never takes effect without an app
+// restart (AGENTS.md), so "saved" and "actually running" can diverge for an
+// arbitrarily long time and the badge needs to reflect that the whole time,
+// not just in the few seconds right after clicking confirm.
+function updateRestartBadge() {
+  const badge = document.getElementById("model-restart-badge");
+  const provider = document.getElementById("model-provider-select").value;
+  const model = document.getElementById("model-name-label").textContent;
+  const stale = state.activeProvider !== null &&
+    (provider !== state.activeProvider || model !== state.activeModel);
+  badge.classList.toggle("visible", stale);
+  if (stale) {
+    badge.title = `Currently running ${state.activeProvider}/${state.activeModel} — ` +
+      `restart the app to switch to ${provider}/${model}.`;
+  }
 }
 
 function onModelProviderChange() {
+  cancelModelNameEdit();
   const provider = document.getElementById("model-provider-select").value;
   document.getElementById("model-name-input").value =
     provider === "ollama" ? state.ollamaModel : state.openrouterModel;
@@ -726,6 +844,8 @@ async function loadModelSettings() {
     state.openrouterKeySet = !!res.openrouter_api_key_set;
     if (res.ollama_model) state.ollamaModel = res.ollama_model;
     if (res.openrouter_model) state.openrouterModel = res.openrouter_model;
+    state.activeProvider = res.active_provider ?? null;
+    state.activeModel = res.active_model ?? null;
     document.getElementById("model-provider-select").value = res.provider;
     document.getElementById("model-name-input").value = res.model;
     renderModelSuggestions();
@@ -754,6 +874,36 @@ async function saveModelSettings() {
     overlay.classList.add("error");
   }
   setTimeout(() => overlay.classList.remove("saved", "error"), 2500);
+}
+
+// ---- Click-to-edit model name — see #model-name-label's own styling
+// comment in panel.html for why this isn't just an always-editable input.
+function enterModelNameEditMode() {
+  const label = document.getElementById("model-name-label");
+  const input = document.getElementById("model-name-input");
+  input.value = label.textContent;
+  label.style.display = "none";
+  input.style.display = "";
+  document.getElementById("model-name-confirm-btn").style.display = "";
+  document.getElementById("model-name-cancel-btn").style.display = "";
+  input.focus();
+  input.select();
+}
+
+function cancelModelNameEdit() {
+  const input = document.getElementById("model-name-input");
+  if (input.style.display === "none") return; // not editing — no-op
+  input.style.display = "none";
+  document.getElementById("model-name-confirm-btn").style.display = "none";
+  document.getElementById("model-name-cancel-btn").style.display = "none";
+  document.getElementById("model-name-label").style.display = "";
+}
+
+async function confirmModelNameEdit() {
+  const model = document.getElementById("model-name-input").value.trim();
+  if (!model) { cancelModelNameEdit(); return; } // empty — treat as cancel, not a save of ""
+  cancelModelNameEdit();
+  await saveModelSettings();
 }
 
 // Position our own provider/model controls directly over the chat
@@ -904,13 +1054,25 @@ function renderSessionHistory() {
 // handler fires.
 document.getElementById("clear-history-btn").addEventListener("click", clearHistory);
 document.getElementById("browse-btn").addEventListener("click", openBrowse);
+document.getElementById("undo-btn").addEventListener("click", doUndo);
+document.getElementById("redo-btn").addEventListener("click", doRedo);
+document.getElementById("validate-btn").addEventListener("click", doValidate);
 document.getElementById("reset-conversation-btn").addEventListener("click", resetConversation);
 document.getElementById("new-conversation-btn").addEventListener("click", startNewConversation);
 document.getElementById("browse-up-btn").addEventListener("click", browseUp);
 document.getElementById("browse-cancel-btn").addEventListener("click", closeBrowse);
 document.getElementById("chat-frame").addEventListener("load", integrateSettings);
 document.getElementById("model-provider-select").addEventListener("change", onModelProviderChange);
-document.getElementById("model-name-input").addEventListener("change", saveModelSettings);
+document.getElementById("model-name-label").addEventListener("click", enterModelNameEditMode);
+document.getElementById("model-name-label").addEventListener("keydown", function(e) {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); enterModelNameEditMode(); }
+});
+document.getElementById("model-name-confirm-btn").addEventListener("click", confirmModelNameEdit);
+document.getElementById("model-name-cancel-btn").addEventListener("click", cancelModelNameEdit);
+document.getElementById("model-name-input").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") { e.preventDefault(); confirmModelNameEdit(); }
+  else if (e.key === "Escape") { e.preventDefault(); cancelModelNameEdit(); }
+});
 loadModelSettings();
 
 // Close browse overlay when clicking outside the dialog content

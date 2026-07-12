@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -9,12 +8,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import (
-    Agent,
     ModelMessage,
     ModelRequest,
     ModelRequestNode,
     ModelRetry,
-    ModelSettings,
     RunContext,
     Tool,
 )
@@ -22,16 +19,13 @@ from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
     NodeResult,
-    ProcessHistory,
     WebFetch,
     WebSearch,
     WrapNodeRunHandler,
 )
 from pydantic_ai.messages import UserPromptPart
-from pydantic_ai.models.ollama import OllamaModel
-from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.result import FinalResult
-from pydantic_graph import End, GraphBuilder, StepContext
+from pydantic_graph import End
 
 # Local imports
 from grc_agent.adapter import (
@@ -345,10 +339,31 @@ def fresh_agent(fixture):
     return fg, tmp, tmp_dir
 
 
+async def _with_state_lock(ctx: RunContext[Any], fn):
+    """Run the zero-arg callable `fn` under ctx.deps's state lock if it
+    exposes one (a real FlowgraphProxy from web.py) — a no-op passthrough
+    otherwise (e.g. the scenario harness passes a raw flowgraph as deps,
+    which has no lock to acquire), exactly like the existing
+    hasattr(ctx.deps, "notify_edit")/"bump_version" guards below. Without
+    this, FlowgraphProxy's __getattr__/__setattr__ doing a fresh `_target`
+    lookup on every attribute access means a concurrent /grc/open or
+    /grc/close swap mid-call could make a single change_graph/inspect_graph
+    call silently straddle two different flowgraphs."""
+    if hasattr(ctx.deps, "get_state_lock"):
+        lock = ctx.deps.get_state_lock()
+        if lock is not None:
+            async with lock:
+                return fn()
+    return fn()
+
+
 # Module-level tool functions
 async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = None) -> str:
     """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status."""
-    return json.dumps(inspect_graph(ctx.deps, targets=targets, view="overview"))
+    result = await _with_state_lock(
+        ctx, lambda: inspect_graph(ctx.deps, targets=targets, view="overview")
+    )
+    return json.dumps(result)
 
 
 async def query_knowledge_func(
@@ -430,15 +445,18 @@ async def change_graph_func(
     )
     update_states_dict = [s.model_dump() for s in update_states] if update_states else None
 
-    res = change_graph(
-        ctx.deps,
-        add_blocks=add_blocks_dict,
-        remove_blocks=remove_blocks,
-        update_params=update_params_dict,
-        update_states=update_states_dict,
-        add_connections=add_connections,
-        remove_connections=remove_connections,
-        force=force,
+    res = await _with_state_lock(
+        ctx,
+        lambda: change_graph(
+            ctx.deps,
+            add_blocks=add_blocks_dict,
+            remove_blocks=remove_blocks,
+            update_params=update_params_dict,
+            update_states=update_states_dict,
+            add_connections=add_connections,
+            remove_connections=remove_connections,
+            force=force,
+        ),
     )
     if not res.get("ok"):
         raise ModelRetry(
@@ -545,6 +563,11 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
                     break
     if has_mutated:
         fg = ctx.deps
+        # is_valid()/iter_error_messages() only read _error_messages, which
+        # only validate() populates (rewrite() clears it without refilling)
+        # — call it explicitly rather than assuming some earlier tool call
+        # in this turn happened to leave it fresh.
+        fg.validate()
         if not fg.is_valid():
             validation_errors = []
             for elem, msg in fg.iter_error_messages():
@@ -646,14 +669,12 @@ def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:
                     if part.tool_call_id in tool_calls:
                         tool_calls[part.tool_call_id]["result"] = part.content
 
-    call_idx = 0
     for msg in messages:
         if isinstance(msg, ModelResponse):
             for part in msg.parts:
                 if isinstance(part, ToolCallPart):
                     t_info = tool_calls.get(part.tool_call_id)
                     if t_info:
-                        call_idx += 1
                         events.append(
                             {
                                 "event": "model_message",
@@ -751,170 +772,15 @@ def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:
     return "\n".join(parts)
 
 
-# Scenario State Machine workflow using pydantic-graph
-@dataclass
-class ScenarioState:
-    sc: dict
-    grc_before: str
-    fg: Any = None
-    fixture_path: Path | None = None
-    tmp_dir: str | None = None
-    res: Any = None
-    verdict: dict | None = None
-
-
-g = GraphBuilder(state_type=ScenarioState)
-
-
-@g.step
-async def init_scenario_node(ctx: StepContext[ScenarioState, None, None]) -> "run_agent_node":
-    sc = ctx.state.sc
-    tmp_dir = tempfile.mkdtemp()
-    tmp = Path(tmp_dir) / Path(sc["fixture"]).name
-    shutil.copy2(sc["fixture"], tmp)
-    ctx.state.tmp_dir = tmp_dir
-    ctx.state.fixture_path = tmp
-    ctx.state.fg = load_flow_graph(str(tmp))
-    return run_agent_node
-
-
-@g.step
-async def run_agent_node(ctx: StepContext[ScenarioState, None, None]) -> "verify_expectations_node":
-    sc = ctx.state.sc
-    agent = Agent(
-        OllamaModel(MODEL, provider=OllamaProvider(base_url=OLLAMA_V1)),
-        deps_type=Any,
-        output_type=[GrcAgentResponse, str],
-        name="grc_scenario_agent",
-        instructions=build_system_prompt("pai-experiment"),
-        tools=grc_tools(),
-        capabilities=[
-            ProcessHistory(prune_history),
-            StopGracefully(),
-            web_search_cap,
-            web_fetch_cap,
-        ],
-        model_settings=ModelSettings(extra_body={"think": True}),
-    )
-    agent.output_validator(validate_flowgraph_state)
-
-    print("Invoking agent run...")
-    ctx.state.res = await agent.run(sc["prompt"], deps=ctx.state.fg)
-    return verify_expectations_node
-
-
-@g.step
-async def verify_expectations_node(
-    ctx: StepContext[ScenarioState, None, None],
-) -> "report_and_clean_node":
-    ctx.state.verdict = check_expect(
-        ctx.state.fixture_path, ctx.state.sc["expect"], run_result=ctx.state.res
-    )
-    return report_and_clean_node
-
-
-@g.step
-async def report_and_clean_node(ctx: StepContext[ScenarioState, None, None]) -> End[dict]:
-    sc = ctx.state.sc
-    res = ctx.state.res
-    verdict = ctx.state.verdict
-
-    output_dir = Path("tests/output")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    md_log = render_scenario_markdown(sc, ctx.state.grc_before, res, verdict)
-    log_path = output_dir / f"{sc['name']}.md"
-    log_path.write_text(md_log, encoding="utf-8")
-    print(f"Saved scenario log to {log_path}")
-
-    # Count turns and tool calls
-    tool_calls_count = 0
-    tool_counts = {}
-    from pydantic_ai.messages import ToolCallPart
-
-    if res:
-        for msg in res.all_messages():
-            if hasattr(msg, "parts"):
-                for p in msg.parts:
-                    if isinstance(p, ToolCallPart):
-                        tool_calls_count += 1
-                        tool_counts[p.tool_name] = tool_counts.get(p.tool_name, 0) + 1
-
-    # Teardown temporary resources
-    if ctx.state.tmp_dir:
-        shutil.rmtree(ctx.state.tmp_dir)
-
-    return End(
-        {
-            "name": sc["name"],
-            "pass": verdict["pass"],
-            "reasons": verdict["reasons"],
-            "turns": len(res.all_messages()) if res else 0,
-            "tool_calls": tool_calls_count,
-            "tool_counts": tool_counts,
-        }
-    )
-
-
-def main():
-    sc_filter = os.environ.get("GRC_AGENT_PAI_SCENARIOS", "01,11")
-    indices = [s.strip() for s in sc_filter.split(",")]
-    run_scenarios = [s for s in SCENARIOS if any(ind in s["name"] for ind in indices)]
-
-    print(
-        f"Starting experiment sweep on {len(run_scenarios)} scenarios using {MODEL} via {OLLAMA_V1}..."
-    )
-    metrics = []
-
-    import asyncio
-
-    runner_graph = g.build()
-
-    for sc in run_scenarios:
-        print("\n==================================================")
-        print(f"Running scenario: {sc['name']}")
-        print("==================================================")
-
-        grc_before = Path(sc["fixture"]).read_text(encoding="utf-8")
-        state = ScenarioState(sc=sc, grc_before=grc_before)
-
-        try:
-            scenario_metric = asyncio.run(runner_graph.run(state=state))
-            metrics.append(scenario_metric)
-            print(
-                f"Verdict for {sc['name']}: pass={scenario_metric['pass']}, reasons={scenario_metric['reasons']}"
-            )
-        except Exception as e:
-            print(f"Scenario {sc['name']} failed with error: {e}")
-            metrics.append(
-                {
-                    "name": sc["name"],
-                    "pass": False,
-                    "reasons": [str(e)],
-                    "turns": 0,
-                    "tool_calls": 0,
-                    "tool_counts": {},
-                }
-            )
-
-    # Write METRICS.md
-    metrics_path = Path("tests/output/METRICS.md")
-    print(f"\nWriting execution metrics to {metrics_path}...")
-
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        f.write("# PydanticAI Experiment Metrics\n\n")
-        f.write("| Scenario | Verdict | Turns | Tool Calls | Breakdowns | Reasons |\n")
-        f.write("|----------|---------|-------|------------|------------|---------|\n")
-        for m in metrics:
-            status_emoji = "✅ PASS" if m["pass"] else "❌ FAIL"
-            breakdown_str = ", ".join(f"{k}:{v}" for k, v in m["tool_counts"].items())
-            reasons_str = "; ".join(m["reasons"]) if m["reasons"] else "None"
-            f.write(
-                f"| {m['name']} | {status_emoji} | {m['turns']} | {m['tool_calls']} | `{breakdown_str}` | {reasons_str} |\n"
-            )
-
-    print("Done.")
-
-
-if __name__ == "__main__":
-    main()
+# NOTE: this module has no `__main__`/CLI entry point of its own — the
+# scenario-running building blocks below (SCENARIOS, fresh_agent,
+# check_expect, render_scenario_markdown, build_system_prompt, grc_tools)
+# are consumed directly by tests/test_integration.py's own pytest-parametrized
+# loop (agent.run_sync(...) per scenario), which is the actual, live scenario
+# harness. A prior pydantic-graph-based runner (GraphBuilder/@g.step nodes +
+# a main()) lived here but was dead: its graph's step return-type hints were
+# bare forward-referenced function names, which pydantic-graph does not
+# resolve into edges, so g.build() raised GraphValidationError("no edges
+# from the start node") on the only two ways to reach it (running this file
+# directly, or `python -m grc_agent.agent` — neither is a registered
+# entry point; pyproject.toml's only console script is grc-agent-web).

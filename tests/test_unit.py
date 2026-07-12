@@ -7,12 +7,16 @@ from pathlib import Path
 import pytest
 
 from grc_agent.adapter import (
+    _footprints_overlap,
     change_graph,
     inspect_graph,
     lite_web_search,
     load_flow_graph,
     query_catalog,
     query_docs,
+    redo_flowgraph,
+    undo_flowgraph,
+    undo_status,
 )
 
 FIXTURES_DIR = Path("tests/data")
@@ -67,12 +71,16 @@ def test_inspect_graph_scoped(temp_dial_tone):
 
 
 # ==========================================
-# change_graph Unit Tests (8 tests)
+# change_graph Unit Tests (11 tests)
 # ==========================================
 
 
 def test_change_graph_add_block(temp_dial_tone):
     fg = load_flow_graph(str(temp_dial_tone))
+    # force=True: this test is only checking add_blocks' own mechanics, not
+    # overall graph validity — an unwired throttle leaves its ports
+    # unconnected, which is correctly rejected without force (see
+    # test_change_graph_force_bypasses_validation).
     res = change_graph(
         fg,
         add_blocks=[
@@ -82,6 +90,7 @@ def test_change_graph_add_block(temp_dial_tone):
                 "params": {"type": "float"},
             }
         ],
+        force=True,
     )
     assert res["ok"] is True
     snap = inspect_graph(fg)
@@ -89,9 +98,79 @@ def test_change_graph_add_block(temp_dial_tone):
     assert "my_throttle" in block_names
 
 
+def test_change_graph_add_block_no_overlap_with_existing(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    existing_coords = [
+        tuple(b.states["coordinate"])
+        for b in fg.blocks
+        if isinstance(b.states.get("coordinate"), (list, tuple))
+    ]
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "blocks_throttle2",
+                "instance_name": "my_throttle",
+                "params": {"type": "float"},
+            }
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    new_coord = tuple(fg.get_block("my_throttle").states["coordinate"])
+    assert not any(_footprints_overlap(new_coord, other) for other in existing_coords)
+
+
+def test_change_graph_add_blocks_batch_no_overlap(temp_empty):
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "blocks_null_sink", "instance_name": f"sink_{i}", "params": {"type": "float"}}
+            for i in range(5)
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    coords = [tuple(fg.get_block(f"sink_{i}").states["coordinate"]) for i in range(5)]
+    for i, a in enumerate(coords):
+        for b in coords[i + 1 :]:
+            assert not _footprints_overlap(a, b)
+
+
+def test_change_graph_add_block_across_calls_no_overlap(temp_empty):
+    # Regression test: the agent adds blocks one at a time across separate
+    # tool calls far more often than in one batch, and each call only sees
+    # the graph state on disk — not any in-flight positioning decision from
+    # a prior call — so this is the scenario that actually triggered the
+    # reported "added on top of another block" bug.
+    fg = load_flow_graph(str(temp_empty))
+    for i in range(4):
+        res = change_graph(
+            fg,
+            add_blocks=[
+                {
+                    "block_id": "blocks_null_sink",
+                    "instance_name": f"call_sink_{i}",
+                    "params": {"type": "float"},
+                }
+            ],
+            force=True,
+        )
+        assert res["ok"] is True
+    coords = [tuple(fg.get_block(f"call_sink_{i}").states["coordinate"]) for i in range(4)]
+    for i, a in enumerate(coords):
+        for b in coords[i + 1 :]:
+            assert not _footprints_overlap(a, b)
+
+
 def test_change_graph_remove_block(temp_dial_tone):
     fg = load_flow_graph(str(temp_dial_tone))
-    res = change_graph(fg, remove_blocks=["analog_noise_source_x_0"])
+    # force=True: removing this source leaves blocks_add_xx with one fewer
+    # connected input than its num_inputs param expects (remove_element
+    # cascades the connection removal but not the param) — a genuine
+    # validation error this test isn't concerned with checking.
+    res = change_graph(fg, remove_blocks=["analog_noise_source_x_0"], force=True)
     assert res["ok"] is True
     snap = inspect_graph(fg)
     block_names = {b["instance_name"] for b in snap["graph"]["blocks"]}
@@ -120,7 +199,9 @@ def test_change_graph_update_states(temp_dial_tone):
 
 def test_change_graph_add_connection(temp_empty):
     fg = load_flow_graph(str(temp_empty))
-    # Add two blocks first
+    # Add two blocks first — force=True since they're deliberately left
+    # unconnected between this call and the next (a genuine validation
+    # error this test isn't concerned with checking).
     change_graph(
         fg,
         add_blocks=[
@@ -131,6 +212,7 @@ def test_change_graph_add_connection(temp_empty):
             },
             {"block_id": "blocks_null_sink", "instance_name": "sink", "params": {"type": "float"}},
         ],
+        force=True,
     )
     res = change_graph(fg, add_connections=["sig:0->sink:0"])
     assert res["ok"] is True
@@ -141,7 +223,11 @@ def test_change_graph_add_connection(temp_empty):
 
 def test_change_graph_remove_connection(temp_dial_tone):
     fg = load_flow_graph(str(temp_dial_tone))
-    res = change_graph(fg, remove_connections=["analog_sig_source_x_0:0->blocks_add_xx:0"])
+    # force=True: leaves blocks_add_xx's in0 port unconnected — a genuine
+    # validation error this test isn't concerned with checking.
+    res = change_graph(
+        fg, remove_connections=["analog_sig_source_x_0:0->blocks_add_xx:0"], force=True
+    )
     assert res["ok"] is True
     snap = inspect_graph(fg)
     conns = snap["graph"]["connections"]
@@ -212,6 +298,88 @@ def test_change_graph_force_bypasses_validation(temp_dial_tone):
     assert res["ok"] is True
     snap = inspect_graph(fg)
     assert snap["graph"]["validation"]["status"] == "invalid"
+
+
+# ==========================================
+# Undo/Redo Unit Tests (6 tests)
+# ==========================================
+
+
+def test_undo_status_no_history(temp_dial_tone):
+    # No edit has been made yet, so no undo dir exists at all.
+    status = undo_status(temp_dial_tone)
+    assert status == {"can_undo": False, "can_redo": False}
+
+
+def test_undo_redo_round_trip(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}]
+    )
+    assert res["ok"] is True
+
+    status = undo_status(temp_dial_tone)
+    assert status == {"can_undo": True, "can_redo": False}
+
+    undo_res = undo_flowgraph(temp_dial_tone)
+    assert undo_res["ok"] is True
+    reverted = load_flow_graph(str(temp_dial_tone))
+    assert reverted.get_block("samp_rate").params["value"].get_value() == "32000"
+    status = undo_status(temp_dial_tone)
+    assert status == {"can_undo": False, "can_redo": True}
+
+    redo_res = redo_flowgraph(temp_dial_tone)
+    assert redo_res["ok"] is True
+    reapplied = load_flow_graph(str(temp_dial_tone))
+    assert reapplied.get_block("samp_rate").params["value"].get_value() == "48000"
+    status = undo_status(temp_dial_tone)
+    assert status == {"can_undo": True, "can_redo": False}
+
+
+def test_undo_with_nothing_to_undo(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}])
+    undo_flowgraph(temp_dial_tone)  # back to the baseline (index 0)
+
+    res = undo_flowgraph(temp_dial_tone)
+    assert res["ok"] is False
+
+
+def test_redo_with_nothing_to_redo(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}])
+
+    res = redo_flowgraph(temp_dial_tone)
+    assert res["ok"] is False
+
+
+def test_new_edit_discards_redo_branch(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}])
+    undo_flowgraph(temp_dial_tone)  # back to baseline; a redo branch to 48000 now exists
+    assert undo_status(temp_dial_tone) == {"can_undo": False, "can_redo": True}
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "64000"}}])
+
+    status = undo_status(temp_dial_tone)
+    assert status["can_undo"] is True
+    assert status["can_redo"] is False  # the 48000 branch was discarded, not just hidden
+
+    undo_flowgraph(temp_dial_tone)
+    reverted = load_flow_graph(str(temp_dial_tone))
+    assert reverted.get_block("samp_rate").params["value"].get_value() == "32000"
+
+
+def test_no_op_edit_is_not_pushed(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    # Re-setting a param to its current value produces identical exported
+    # content, so push_undo_snapshot's content-hash dedup should skip it.
+    res = change_graph(
+        fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "32000"}}]
+    )
+    assert res["ok"] is True
+    assert undo_status(temp_dial_tone) == {"can_undo": False, "can_redo": False}
 
 
 # ==========================================

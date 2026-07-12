@@ -22,6 +22,10 @@ def settings_path() -> Path:
     return Path.home() / ".config" / "grc_agent" / "settings.json"
 
 
+def default_settings() -> dict:
+    return dict(_DEFAULTS)
+
+
 def load_settings() -> dict:
     path = settings_path()
     if not path.exists():

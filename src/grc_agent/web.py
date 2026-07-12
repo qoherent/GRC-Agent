@@ -6,6 +6,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,13 @@ from starlette.routing import Route
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 # Local imports
-from grc_agent.adapter import inspect_graph, load_flow_graph
+from grc_agent.adapter import (
+    inspect_graph,
+    load_flow_graph,
+    redo_flowgraph,
+    undo_flowgraph,
+    undo_status,
+)
 from grc_agent.agent import (
     OLLAMA_V1,
     GrcAgentResponse,
@@ -37,7 +45,7 @@ from grc_agent.agent import (
     web_fetch_cap,
     web_search_cap,
 )
-from grc_agent.settings import load_settings, save_settings
+from grc_agent.settings import default_settings, load_settings, save_settings
 
 load_dotenv()
 
@@ -69,6 +77,10 @@ async def _notify_canvas_reload() -> dict:
             await client.post(f"http://127.0.0.1:{CANVAS_CONTROL_PORT}/reload")
         return {"ok": True}
     except Exception as e:
+        # Without a log line here, an agent-edit-desync-from-canvas is
+        # completely invisible in server logs — change_graph_func folds the
+        # outcome into its JSON result, but nothing else ever prints it.
+        print(f"[grc-agent] Canvas reload notification failed: {e}")
         return {"ok": False, "error": str(e)}
 
 
@@ -86,10 +98,11 @@ class FlowgraphProxy:
     canvas to reload. Decoupled from the version counter so loading/closing
     a file doesn't waste a reload ping on a canvas that doesn't exist yet."""
 
-    def __init__(self, flowgraph: Any = None, on_edit: Any = None) -> None:
+    def __init__(self, flowgraph: Any = None, on_edit: Any = None, state_lock: Any = None) -> None:
         object.__setattr__(self, "_target", flowgraph)
         object.__setattr__(self, "_version", 0)
         object.__setattr__(self, "_on_edit", on_edit)
+        object.__setattr__(self, "_state_lock", state_lock)
 
     def __getattr__(self, name: str) -> Any:
         target = object.__getattribute__(self, "_target")
@@ -136,22 +149,35 @@ class FlowgraphProxy:
     def is_loaded(self) -> bool:
         return object.__getattribute__(self, "_target") is not None
 
+    def get_state_lock(self) -> Any:
+        """Expose the lock that guards open/close/reload swaps of `_target`
+        (bypasses __getattr__'s forwarding, same as get_version/is_loaded)
+        so agent.py's tool functions can serialize their multi-step reads/
+        mutations against a concurrent swap. Returns None when constructed
+        without one (no caller currently does this, but keeps the pattern
+        symmetric with `on_edit`)."""
+        return object.__getattribute__(self, "_state_lock")
+
+
+# Guards every mutation of active/active_path/canvas_proc — without it,
+# two concurrent /grc/open (or an open racing a close) calls interleave
+# their terminate-old/spawn-new sequences non-deterministically; each
+# still reports {"ok": true} to its own caller, but only one's file
+# actually ends up loaded. Serializing makes the outcome deterministic
+# (last request in wins) instead of a silent race. Also exposed to
+# agent.py's tool functions (via FlowgraphProxy.get_state_lock()) so a
+# change_graph/inspect_graph call can't have its target identity swap out
+# from under it mid-call.
+_flowgraph_state_lock = asyncio.Lock()
 
 # 1. No flowgraph is loaded at startup — the user must Browse and choose one.
-active = FlowgraphProxy(None, on_edit=_notify_canvas_reload)
+active = FlowgraphProxy(None, on_edit=_notify_canvas_reload, state_lock=_flowgraph_state_lock)
 active_path: str | None = None
 canvas_proc: subprocess.Popen | None = None
 # broadwayd daemons this process spawned (eagerly in main(), lazily in
 # ensure_broadway) — tracked so teardown terminates only OUR daemons, never
 # another instance's (which a global `killall broadwayd` would stomp).
 broadway_procs: list[subprocess.Popen] = []
-# Guards every mutation of active/active_path/canvas_proc — without it,
-# two concurrent /grc/open (or an open racing a close) calls interleave
-# their terminate-old/spawn-new sequences non-deterministically; each
-# still reports {"ok": true} to its own caller, but only one's file
-# actually ends up loaded. Serializing makes the outcome deterministic
-# (last request in wins) instead of a silent race.
-_flowgraph_state_lock = asyncio.Lock()
 
 
 def _broadway_pidfile() -> Path:
@@ -159,6 +185,13 @@ def _broadway_pidfile() -> Path:
     broadwayd without a global killall (multi-instance safe: each port gets
     its own file)."""
     return Path(tempfile.gettempdir()) / f"grc_agent_broadway_{BROADWAY_PORT}.pid"
+
+
+def _canvas_pidfile() -> Path:
+    """Control-port-scoped PID file so a restart can reclaim THIS instance's
+    stale canvas_app.py without a global pkill (multi-instance safe, mirrors
+    _broadway_pidfile)."""
+    return Path(tempfile.gettempdir()) / f"grc_agent_canvas_{CANVAS_CONTROL_PORT}.pid"
 
 
 def _proc_comm(pid: int) -> str | None:
@@ -170,13 +203,71 @@ def _proc_comm(pid: int) -> str | None:
         return None
 
 
+def _proc_cmdline(pid: int) -> str | None:
+    """Like _proc_comm but for canvas_app.py: it runs as a generic `python3`
+    process, so /proc/<pid>/comm alone can't distinguish it from any other
+    Python process that might reuse the PID — check the NUL-separated
+    argv in /proc/<pid>/cmdline for the script name instead."""
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode(errors="replace")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _killpg_with_fallback(pid: int, wait_s: float = 2.0, poll_interval: float = 0.1) -> None:
+    """Signal a (possibly no-longer-tracked) process's whole group with
+    SIGTERM, then SIGKILL if it's still alive after a brief wait. Works from
+    a bare PID read out of a pidfile — os.getpgid() operates on any live PID,
+    not just ones we hold a Popen object for. Used by the orphan-reclaim
+    functions, which never had a Popen handle for these PIDs to begin with
+    (they belong to a previous run of this process)."""
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        return
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return
+        time.sleep(poll_interval)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 def _reclaim_broadway_orphan() -> None:
     """Kill a *previous* run's broadwayd still holding our port. Without this,
     a restart reuses the orphan broadwayd while spawning a fresh canvas ->
     two GTK windows on the same Broadway display (the 'dual window' bug).
     Skips PIDs this process spawned (tracked in broadway_procs) and any PID
     whose comm no longer looks like broadwayd (i.e. reused by an unrelated
-    process), so it never kills the wrong thing."""
+    process), so it never kills the wrong thing.
+
+    Waits for confirmed death (via _killpg_with_fallback, same as
+    _reclaim_canvas_orphan) rather than firing a bare SIGTERM and returning
+    immediately — a live-reproduced bug found post-fix: ensure_broadway()'s
+    port connect-check runs right after this call, and a broadwayd that's
+    still mid-shutdown (SIGTERM sent but not yet exited) still accepts that
+    connection, so ensure_broadway() concluded "already running" and skipped
+    spawning a fresh one — leaving the canvas subprocess pointed at a display
+    whose broadwayd was dying moments later, crashing GTK's style-provider
+    setup with 'Argument 0 does not allow None as a value'. The caller
+    (ensure_broadway) now runs this via asyncio.to_thread precisely so this
+    wait doesn't block the event loop."""
     try:
         old_pid = int(_broadway_pidfile().read_text().strip())
     except (OSError, ValueError):
@@ -186,47 +277,112 @@ def _reclaim_broadway_orphan() -> None:
     comm = _proc_comm(old_pid)
     if not comm or "broadway" not in comm:
         return  # process is gone, or PID reused by something unrelated
+    print(f"[grc-agent] Reclaiming stale broadwayd (pid {old_pid}) on port {BROADWAY_PORT}")
+    _killpg_with_fallback(old_pid)
+
+
+def _reclaim_canvas_orphan() -> None:
+    """Kill a *previous* run's canvas_app.py still holding our control port
+    (e.g. orphaned by a SIGKILL crash, or — before the SIGTERM handler below
+    existed — a SIGTERM that killed this process before cleanup ran).
+    Without this, a restart leaves the orphan running (a stray GTK window /
+    dead control-port squatter) while a fresh canvas is spawned alongside it.
+    Skips the PID this process still tracks in `canvas_proc` (still alive
+    this session — keep it) and any PID whose cmdline no longer looks like
+    canvas_app.py (reused by an unrelated process), so it never kills the
+    wrong thing."""
     try:
-        os.kill(old_pid, signal.SIGTERM)
-        print(f"[grc-agent] Reclaimed stale broadwayd (pid {old_pid}) on port {BROADWAY_PORT}")
-    except OSError:
-        pass
+        old_pid = int(_canvas_pidfile().read_text().strip())
+    except (OSError, ValueError):
+        return
+    if canvas_proc is not None and old_pid == canvas_proc.pid:
+        return  # ours, still alive this session — keep it
+    cmdline = _proc_cmdline(old_pid)
+    if not cmdline or "canvas_app.py" not in cmdline:
+        return  # process is gone, or PID reused by something unrelated
+    print(
+        f"[grc-agent] Reclaiming stale canvas process (pid {old_pid}) on "
+        f"control port {CANVAS_CONTROL_PORT}"
+    )
+    _killpg_with_fallback(old_pid)
 
 
 def _spawn_broadway() -> None:
     """Start broadwayd on BROADWAY_PORT, track it for scoped teardown, and
-    record its PID so the next launch can reclaim it if this run crashes."""
+    record its PID so the next launch can reclaim it if this run crashes.
+    Verifies the process is still running a moment after spawn before
+    committing its PID to the pidfile — if it exited immediately (e.g. the
+    TCP port is already held by something unrelated), the previous pidfile
+    entry is left as-is instead of being overwritten with a dead PID."""
     _reclaim_broadway_orphan()
     try:
-        proc = subprocess.Popen(
-            ["broadwayd", "-p", str(BROADWAY_PORT), ":5"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
-        )
+        # broadwayd isn't tied to any flowgraph's directory, so its log lives
+        # alongside its pidfile in tempdir. Truncated (not appended) on every
+        # launch, matching canvas.log's own "debug log for the current run"
+        # rationale — a bind failure (the main reason this log exists) used
+        # to leave zero diagnostic trail with stdout/stderr routed to DEVNULL.
+        log_path = Path(tempfile.gettempdir()) / f"grc_agent_broadwayd_{BROADWAY_PORT}.log"
+        with open(log_path, "wb") as broadway_log:
+            proc = subprocess.Popen(
+                ["broadwayd", "-p", str(BROADWAY_PORT), f":{BROADWAY_PORT}"],
+                stdout=broadway_log,
+                stderr=broadway_log,
+                preexec_fn=os.setsid,
+            )
+        time.sleep(0.3)
+        if proc.poll() is not None:
+            print(
+                f"[grc-agent] broadwayd failed to start (exited immediately, "
+                f"code {proc.returncode}) — see {log_path}"
+            )
+            return
         broadway_procs.append(proc)
         _broadway_pidfile().write_text(str(proc.pid))
-        print(f"[grc-agent] Started broadwayd daemon on port {BROADWAY_PORT} display :5")
+        print(
+            f"[grc-agent] Started broadwayd daemon on port {BROADWAY_PORT} "
+            f"display :{BROADWAY_PORT}"
+        )
     except Exception as e:
         print("[grc-agent] Failed to start broadwayd daemon:", e)
 
 
 def _terminate_broadway() -> None:
-    """Terminate only the broadwayd daemons this process spawned."""
+    """Terminate only the broadwayd daemons this process spawned. Signals
+    the whole process group (not just the leader PID) since broadwayd is
+    spawned with preexec_fn=os.setsid — any child it spawned would otherwise
+    survive a plain terminate()/kill() on the leader alone."""
+    had_tracked = bool(broadway_procs)
     for proc in broadway_procs:
         try:
-            proc.terminate()
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
             proc.wait(timeout=2)
         except Exception:
             try:
-                proc.kill()
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                proc.wait(timeout=2)
             except Exception:
                 pass
     broadway_procs.clear()
-    try:
-        _broadway_pidfile().unlink(missing_ok=True)
-    except OSError:
-        pass
+    if had_tracked:
+        # Only unlink what THIS instance actually owned and just terminated.
+        # If we never tracked anything here (e.g. startup found an
+        # already-live broadwayd and deferred to it without spawning our
+        # own), the pidfile may be the only remaining record of an EARLIER,
+        # still-orphaned instance's PID — unlinking it unconditionally on
+        # every uninvolved shutdown erased that trail and permanently
+        # defeated _reclaim_broadway_orphan() for that earlier orphan
+        # (live-reproduced: crash -> no-op restart -> clean shutdown left
+        # the original orphan unreclaimable by any future launch).
+        try:
+            _broadway_pidfile().unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _cleanup_procs() -> None:
@@ -236,11 +392,26 @@ def _cleanup_procs() -> None:
     _terminate_broadway()
 
 
-# Registered at import so it covers every entry path (main()'s uvicorn and a
-# direct `uvicorn grc_agent.web:app`). Runs on normal interpreter shutdown
-# (Ctrl+C / SIGTERM caught by uvicorn); a SIGKILL crash is recovered by the
-# pidfile reclaim on the next launch.
-atexit.register(_cleanup_procs)
+def _handle_sigterm(signum: int, frame: Any) -> None:
+    """Explicit SIGTERM handler — required because atexit alone does NOT run
+    on SIGTERM. uvicorn's capture_signals()/handle_exit() does its own
+    graceful HTTP shutdown, then RESTORES whatever signal disposition was
+    active when it started and re-raises the captured signal via
+    signal.raise_signal(). For SIGINT, Python's own built-in default handler
+    turns that re-raise into a KeyboardInterrupt — a normal exception unwind
+    that reaches atexit. SIGTERM has no such built-in Python handler, so
+    without this, the restored disposition is the raw OS default (SIG_DFL,
+    immediate kernel-level termination), killing the process before atexit
+    ever runs and orphaning canvas+broadwayd. Registering this at module
+    level (before uvicorn.run() is ever called, in both the console-script
+    and a bare `uvicorn grc_agent.web:app` entry path) makes THIS the
+    handler uvicorn treats as "the original" and restores before its
+    re-raise, so it fires instead of SIG_DFL. Does not touch SIGINT, which
+    already works correctly via the path described above."""
+    _cleanup_procs()
+    sys.exit(0)
+
+
 
 
 # Ollama connection errors get pydantic_ai's own sanctioned retry-with-backoff
@@ -273,7 +444,24 @@ def _build_model():
     )
 
 
-model = _build_model()
+try:
+    model = _build_model()
+except Exception as e:
+    # A saved provider/model config that fails at construction time (e.g.
+    # OpenRouter selected with no OPENROUTER_API_KEY set — the settings
+    # panel lets a user save that combination with no validation, and its
+    # own success message invites an app restart) must not crash the whole
+    # process at import — the dashboard and /grc/* API have nothing to do
+    # with the chat model and should still come up. Fall back to the
+    # documented Ollama defaults; /grc/settings still reports what's
+    # actually saved (it re-reads load_settings() fresh), so the user can
+    # see and fix the misconfiguration from the GUI, and the chat itself
+    # will surface the real error on first use instead of the app never
+    # starting at all.
+    print(f"[grc-agent] Failed to build chat model from saved settings: {e}")
+    print("[grc-agent] Falling back to Ollama defaults so the app can still start.")
+    _cfg = default_settings()
+    model = _build_model()
 agent = Agent(
     model=model,
     deps_type=Any,
@@ -311,7 +499,11 @@ async def ensure_broadway() -> None:
     # silently reuse it, spawning a fresh canvas onto a display an orphan
     # canvas is still connected to (the "dual window" bug). Safe to call on
     # every open: it no-ops once our own broadwayd owns the pidfile.
-    _reclaim_broadway_orphan()
+    # Off the event loop: _reclaim_broadway_orphan() now waits for the old
+    # process's confirmed death (see its own docstring for why a bare,
+    # unwaited SIGTERM here let the port-connect check below race against a
+    # dying-but-still-listening orphan and skip spawning a fresh one).
+    await asyncio.to_thread(_reclaim_broadway_orphan)
     # A blocking socket connect + time.sleep(1.0) here used to stall the
     # entire server on every in-flight request (this app runs a single
     # uvicorn worker / single event loop) for a full second any time
@@ -332,7 +524,11 @@ async def ensure_broadway() -> None:
         # that would stomp another instance's broadwayd (e.g. a concurrent dev
         # session or the test suite on a different port). If our port is held
         # by a stale half-dead process, the start simply fails and is logged.
-        _spawn_broadway()
+        # Off the event loop: _spawn_broadway's post-Popen bind-verification
+        # (a brief sleep + poll, so a failed spawn doesn't overwrite the
+        # pidfile with a dead PID) would otherwise block every concurrent
+        # request for that long.
+        await asyncio.to_thread(_spawn_broadway)
         await asyncio.sleep(1.0)  # give it a second to bind
 
 
@@ -340,19 +536,69 @@ def _terminate_canvas_proc() -> None:
     """Teardown of the tracked canvas subprocess only. Deliberately does NOT
     do a global `pkill -f canvas_app.py` — that would kill another instance's
     canvas (e.g. a concurrent dev session or the test suite). A stray
-    orphan holding the control port is handled by canvas_app.py's own
-    bind-retry instead of a destructive sweep."""
+    orphan holding the control port is handled by _reclaim_canvas_orphan
+    (called from grc_open) instead of a destructive sweep. Signals the whole
+    process group (not just the leader PID) since canvas is spawned with
+    preexec_fn=os.setsid."""
     global canvas_proc
+    had_tracked = canvas_proc is not None
     if canvas_proc:
         try:
-            canvas_proc.terminate()
+            os.killpg(os.getpgid(canvas_proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
             canvas_proc.wait(timeout=2)
         except Exception:
             try:
-                canvas_proc.kill()
+                os.killpg(os.getpgid(canvas_proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                canvas_proc.wait(timeout=2)
             except Exception:
                 pass
         canvas_proc = None
+    if had_tracked:
+        # Same reasoning as _terminate_broadway's unlink guard: only erase
+        # the pidfile if this instance actually owned/killed what it refers
+        # to — otherwise a normal shutdown of an instance that never called
+        # /grc/open (so never tracked or reclaimed anything here) would
+        # destroy the only record of an earlier, still-orphaned canvas,
+        # permanently defeating _reclaim_canvas_orphan() for it.
+        try:
+            _canvas_pidfile().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# Registered here — after every function _cleanup_procs transitively calls
+# is already defined — rather than right below _handle_sigterm's own
+# definition: if something later in this module's import (e.g. building the
+# chat Agent's model from a bad saved config) were to raise, atexit would
+# still fire during interpreter shutdown, but only against fully-defined
+# dependencies — registering earlier once left a window where a partial
+# import failure made _cleanup_procs's own call to a not-yet-defined
+# _terminate_canvas_proc raise a second, unrelated NameError on top of the
+# real error, obscuring it (live-reproduced).
+#
+# signal.signal() only works from the main thread of the main interpreter —
+# guard it (mirroring uvicorn's own capture_signals) so importing this
+# module from a worker thread (e.g. an embedding harness) doesn't crash at
+# import time. Both real entry paths (the grc-agent-web console script and
+# a bare `uvicorn grc_agent.web:app`) import on the main thread, so this is
+# a no-op there and only prevents the non-main-thread case.
+if threading.current_thread() is threading.main_thread():
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+# Covers every entry path (main()'s uvicorn and a direct
+# `uvicorn grc_agent.web:app`). Runs on normal interpreter shutdown —
+# Ctrl+C (SIGINT), via Python's built-in default handler raising
+# KeyboardInterrupt — and on SIGTERM, via the explicit handler registered
+# just above (which calls _cleanup_procs itself and then exits; _cleanup_procs
+# is idempotent, so atexit invoking it again here too is harmless). A SIGKILL
+# crash is recovered by the pidfile reclaim on the next launch.
+atexit.register(_cleanup_procs)
 
 
 async def grc_open(request: Request) -> JSONResponse:
@@ -364,8 +610,19 @@ async def grc_open(request: Request) -> JSONResponse:
     if not Path(path).is_absolute():
         path = str(Path.cwd() / path)
 
+    canvas_ready = False
+    canvas_error: str | None = None
+    canvas_launched = False
+
     # Serializes against concurrent /grc/open and /grc/close calls — see
-    # _flowgraph_state_lock's own comment for why this matters.
+    # _flowgraph_state_lock's own comment for why this matters. Released
+    # before the (up to 20s) canvas-readiness wait below: that poll only
+    # talks to a separate process over a fixed control port and touches no
+    # shared in-process state, so holding the lock across it would stall
+    # every other operation that serializes on this same lock (agent tool
+    # calls via FlowgraphProxy.get_state_lock(), /grc/close, /grc/reload,
+    # /grc/render) for the full timeout whenever a single canvas is
+    # slow/crashed — live-reproduced pre-fix.
     async with _flowgraph_state_lock:
         try:
             new_fg = load_flow_graph(path)
@@ -377,6 +634,14 @@ async def grc_open(request: Request) -> JSONResponse:
         # Ensure broadwayd is running
         await ensure_broadway()
 
+        # Reclaim an orphan from a crashed/killed prior run of this process
+        # (nothing tracked in canvas_proc this session, but a stale one may
+        # still hold our control port) BEFORE terminating/unlinking below —
+        # _terminate_canvas_proc unconditionally unlinks the pidfile at its
+        # end (mirroring _terminate_broadway), so calling it first would
+        # destroy the only record of a stale orphan's PID before this
+        # function ever got to read it.
+        await asyncio.to_thread(_reclaim_canvas_orphan)
         # Terminate any previously running canvas process (tracked or stray).
         # Off the event loop: canvas_proc.wait() can block up to its timeout.
         await asyncio.to_thread(_terminate_canvas_proc)
@@ -384,7 +649,10 @@ async def grc_open(request: Request) -> JSONResponse:
         # Launch new canvas process under Broadway
         env = os.environ.copy()
         env["GDK_BACKEND"] = "broadway"
-        env["BROADWAY_DISPLAY"] = ":5"
+        # Must match the display number _spawn_broadway() started broadwayd
+        # on (derived from BROADWAY_PORT, not a hardcoded number) — otherwise
+        # this canvas would connect to a different broadwayd's socket.
+        env["BROADWAY_DISPLAY"] = f":{BROADWAY_PORT}"
         try:
             # Silently swallowing this process's output makes a silent GTK/Broadway
             # crash indistinguishable from a slow load — route it to a log file
@@ -408,25 +676,60 @@ async def grc_open(request: Request) -> JSONResponse:
                     stderr=canvas_log,
                     preexec_fn=os.setsid
                 )
+            canvas_launched = True
             print(f"[grc-agent] Started GRC Broadway canvas app for: {path}")
-            # Wait for the canvas to signal readiness (GTK client connected to
-            # the Broadway display) before returning — otherwise the dashboard
-            # points the Broadway iframe at a display with no GTK client yet,
-            # and broadway.js fires an unrecoverable alert("disconnected").
-            # The control server binds before the heavy platform build, so the
-            # probe gets 503 (not connection-refused) until /ready flips to 200.
-            await _wait_for_canvas_ready()
+            # Record the PID immediately so a subsequent launch (after a
+            # crash/SIGKILL orphans this one) can reclaim it — mirrors
+            # _spawn_broadway's own pidfile write. Isolated in its own
+            # try/except: a write failure here (e.g. tempdir full) shouldn't
+            # be conflated with a canvas-launch failure in canvas_error (the
+            # canvas is still up and usable this session), just logged
+            # distinctly — cross-session reclaimability is what's lost.
+            try:
+                _canvas_pidfile().write_text(str(canvas_proc.pid))
+            except OSError as e:
+                print(
+                    f"[grc-agent] Failed to write canvas pidfile for pid "
+                    f"{canvas_proc.pid} (won't be reclaimable if this process "
+                    f"crashes before a clean shutdown): {e}"
+                )
         except Exception as e:
+            canvas_error = str(e)
             print(f"[grc-agent] Failed to start GRC Broadway canvas app: {e}")
 
-    return JSONResponse({"ok": True, "path": path})
+    if canvas_launched:
+        # Wait for the canvas to signal readiness (GTK client connected to
+        # the Broadway display) before returning — otherwise the dashboard
+        # points the Broadway iframe at a display with no GTK client yet,
+        # and broadway.js fires an unrecoverable alert("disconnected"). The
+        # control server binds before the heavy platform build, so the
+        # probe gets 503 (not connection-refused) until /ready flips to 200.
+        # Outside the lock (see above) — a concurrent /grc/open racing this
+        # wait could terminate/replace this canvas mid-poll; that's
+        # acceptable last-writer-wins behavior (the poll would then just
+        # reflect whichever canvas currently holds the control port).
+        canvas_ready = await _wait_for_canvas_ready()
+        if not canvas_ready:
+            canvas_error = "Timed out waiting for canvas to become ready"
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "path": path,
+            # The flowgraph itself did load (hence ok=true above) even when
+            # the canvas failed/timed out — these two fields give the caller
+            # something to act on instead of silent success either way.
+            "canvas_ready": canvas_ready,
+            "canvas_error": canvas_error,
+        }
+    )
 
 
-async def _wait_for_canvas_ready(deadline_s: float = 20.0) -> None:
+async def _wait_for_canvas_ready(deadline_s: float = 20.0) -> bool:
     """Poll the canvas control server's /ready endpoint until it reports 200
-    (Gtk.main pumping) or the deadline expires. Best-effort: a timeout only
-    means the dashboard may show the Broadway client connecting slightly
-    before the canvas draws — it does not fail the open."""
+    (Gtk.main pumping) or the deadline expires. Returns whether it became
+    ready in time so the caller (grc_open) can surface a dead/slow canvas
+    instead of reporting success regardless of the outcome."""
     loop = asyncio.get_event_loop()
     end = loop.time() + deadline_s
     url = f"http://127.0.0.1:{CANVAS_CONTROL_PORT}/ready"
@@ -434,13 +737,15 @@ async def _wait_for_canvas_ready(deadline_s: float = 20.0) -> None:
         while loop.time() < end:
             try:
                 if (await client.get(url)).status_code == 200:
-                    return
+                    return True
             except Exception:
                 pass
             await asyncio.sleep(0.2)
+    return False
 
 
 async def grc_status(request: Request) -> JSONResponse:
+    undo_state = undo_status(active_path) if active_path else {"can_undo": False, "can_redo": False}
     return JSONResponse(
         {
             "ok": True,
@@ -449,6 +754,8 @@ async def grc_status(request: Request) -> JSONResponse:
             # Surfaced so the dashboard doesn't hardcode the Broadway URL —
             # the port is env-overridable for multi-instance coexistence.
             "broadway_url": f"http://localhost:{BROADWAY_PORT}/",
+            "can_undo": undo_state["can_undo"],
+            "can_redo": undo_state["can_redo"],
         }
     )
 
@@ -496,8 +803,13 @@ async def grc_browse(request: Request) -> JSONResponse:
 
 
 async def grc_render(request: Request) -> Response:
-    global active_path
-    if not active_path:
+    # Snapshot the path while holding the same lock open/close/reload use —
+    # without it, a concurrent close/open could change the target file out
+    # from under an in-flight render. The slow subprocess render itself runs
+    # outside the lock so it doesn't block other requests.
+    async with _flowgraph_state_lock:
+        path = active_path
+    if not path:
         return Response("No .grc file loaded", status_code=400)
 
     cmd = [
@@ -505,23 +817,16 @@ async def grc_render(request: Request) -> Response:
         "-c",
         """
 import sys
-import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('PangoCairo', '1.0')
-from gi.repository import Gtk
 import cairo
-from gnuradio import gr
-from gnuradio.grc.gui.Platform import Platform
-from gnuradio.grc.gui.Application import Application
+from grc_agent.adapter import get_gui_platform, gui_application_cls
 
-p = Platform(
-    version=gr.version(),
-    version_parts=(gr.major_version(), gr.api_version(), gr.minor_version()),
-    prefs=gr.prefs(),
-    install_prefix=gr.prefix()
-)
-p.build_library()
-app = Application([], p)
+# Reuse the adapter's own GUI Platform/Application accessors instead of
+# hand-duplicating what they already do (build_library(), version/prefix
+# wiring) — this subprocess is still the sole importer of gnuradio here,
+# just via adapter.py rather than re-deriving it inline.
+p = get_gui_platform()
+app_cls = gui_application_cls()
+app = app_cls([], p)
 app.register(None)
 app.activate()
 
@@ -554,7 +859,7 @@ fg.draw(cr)
 
 surf.write_to_png(sys.stdout.buffer)
 """,
-        active_path,
+        path,
     ]
 
     try:
@@ -563,9 +868,16 @@ surf.write_to_png(sys.stdout.buffer)
         # that would freeze every concurrent request on the single worker.
         proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, check=True)
         return Response(proc.stdout, media_type="image/png")
-    except Exception as e:
-        stderr_msg = proc.stderr.decode() if 'proc' in locals() and proc.stderr else str(e)
+    except subprocess.CalledProcessError as e:
+        # check=True raises before `proc =` above ever binds, so the failing
+        # process's own captured stderr has to come from the exception object
+        # itself, not a local `proc` (a bare "if 'proc' in locals()" guard
+        # here was always False on this exact path and always fell through
+        # to the less useful str(e)).
+        stderr_msg = e.stderr.decode() if e.stderr else str(e)
         return Response(f"Rendering failed: {stderr_msg}", status_code=500)
+    except Exception as e:
+        return Response(f"Rendering failed: {e}", status_code=500)
 
 
 async def grc_panel(request: Request) -> HTMLResponse:
@@ -593,9 +905,54 @@ async def grc_reload(request: Request) -> JSONResponse:
         try:
             new_fg = load_flow_graph(active_path)
             active.swap(new_fg)
-            return JSONResponse({"ok": True})
+            # Tell the live GTK canvas to reload too — otherwise a disk-reload
+            # here leaves it stale relative to the freshly-reloaded in-memory
+            # graph, the same desync change_graph already guards against.
+            # notify_edit() never raises (its own try/except folds a failure
+            # into the returned dict), so this can't turn a reload into a
+            # failure response — best-effort, surfaced but non-fatal.
+            canvas_synced = (await active.notify_edit()).get("ok", False)
+            return JSONResponse({"ok": True, "canvas_synced": canvas_synced})
         except Exception as e:
             return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
+
+
+async def _grc_undo_redo(op) -> JSONResponse:
+    """Shared body for /grc/undo and /grc/redo — op is adapter.undo_flowgraph
+    or adapter.redo_flowgraph. Neither touches any in-memory flow_graph
+    object (they're pure disk operations, see their own docstrings), so
+    this reloads from disk afterward exactly like grc_reload already does
+    for a canvas-triggered disk change."""
+    global active_path
+    if not active_path:
+        return JSONResponse({"ok": False, "message": "No active path"}, status_code=400)
+    async with _flowgraph_state_lock:
+        # Off the event loop: op() does blocking file I/O under fcntl.flock.
+        result = await asyncio.to_thread(op, active_path)
+        if not result.get("ok"):
+            return JSONResponse(result, status_code=400)
+        try:
+            new_fg = load_flow_graph(active_path)
+            active.swap(new_fg)
+            canvas_synced = (await active.notify_edit()).get("ok", False)
+        except Exception as e:
+            return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
+        return JSONResponse(
+            {
+                "ok": True,
+                "can_undo": result["can_undo"],
+                "can_redo": result["can_redo"],
+                "canvas_synced": canvas_synced,
+            }
+        )
+
+
+async def grc_undo(request: Request) -> JSONResponse:
+    return await _grc_undo_redo(undo_flowgraph)
+
+
+async def grc_redo(request: Request) -> JSONResponse:
+    return await _grc_undo_redo(redo_flowgraph)
 
 
 async def grc_canvas_resize(request: Request) -> JSONResponse:
@@ -639,6 +996,15 @@ async def grc_settings_get(request: Request) -> JSONResponse:
             "ollama_model": cfg.get("ollama_model"),
             "openrouter_model": cfg.get("openrouter_model"),
             "openrouter_api_key_set": bool(os.getenv("OPENROUTER_API_KEY")),
+            # What the running chat Agent's model ACTUALLY is right now — built
+            # once from _cfg at import (see _build_model()'s fallback comment)
+            # and never live-swapped. Distinct from provider/model above (the
+            # saved-to-disk preference) so the dashboard can tell a saved
+            # change apart from one that's actually taken effect, rather than
+            # a save just silently appearing to do nothing until the user
+            # happens to restart and notice.
+            "active_provider": _cfg["provider"],
+            "active_model": _cfg["model"],
         }
     )
 
@@ -714,6 +1080,8 @@ app.router.routes[0:0] = [
     Route("/grc/browse", grc_browse, methods=["GET"]),
     Route("/grc/render", grc_render, methods=["GET"]),
     Route("/grc/reload", grc_reload, methods=["GET", "POST"]),
+    Route("/grc/undo", grc_undo, methods=["POST"]),
+    Route("/grc/redo", grc_redo, methods=["POST"]),
     Route("/grc/canvas/resize", grc_canvas_resize, methods=["POST"]),
     Route("/grc/panel", grc_panel, methods=["GET"]),
     Route("/grc/panel.js", grc_panel_js, methods=["GET"]),
@@ -723,8 +1091,7 @@ app.router.routes[0:0] = [
 
 
 def main() -> None:
-    import threading
-    import time
+    import socket
     import webbrowser
 
     import uvicorn
@@ -735,7 +1102,20 @@ def main() -> None:
     # stomp another instance's processes (e.g. a concurrent dev session or
     # the test suite on different ports). Tracked termination + canvas_app's
     # control-port bind-retry handle orphans from a crashed previous run.
-    _spawn_broadway()
+    # ensure_broadway() (used by /grc/open) checks whether one is already
+    # listening before spawning — do the same connect-first check here
+    # (blocking is fine: the event loop hasn't started yet) so a broadwayd
+    # already healthily serving the port isn't wastefully (and riskily —
+    # a second spawn attempt on an already-served display would just fail
+    # to bind) replaced by a second one.
+    broadway_already_running = False
+    try:
+        with socket.create_connection(("127.0.0.1", BROADWAY_PORT), timeout=0.5):
+            broadway_already_running = True
+    except OSError:
+        pass
+    if not broadway_already_running:
+        _spawn_broadway()
 
     host = os.environ.get("GRC_AGENT_HOST", "127.0.0.1")
     url = f"http://{host}:{GRC_AGENT_PORT}/grc/panel"

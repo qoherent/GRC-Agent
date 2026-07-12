@@ -19,7 +19,14 @@ from gi.repository import Gdk, GLib, Gtk
 
 # adapter is the sole importer of gnuradio (core *and* gui); this subprocess
 # only needs gi/GTK directly. Lazy accessors keep the import side-effect-free.
-from grc_agent.adapter import get_gui_platform, gui_application_cls, write_flow_graph_atomic
+from grc_agent.adapter import (
+    disable_native_undo_redo,
+    flow_graph_content_hash,
+    get_gui_platform,
+    gui_application_cls,
+    push_undo_snapshot,
+    write_flow_graph_atomic,
+)
 
 # The canvas must show only the flowgraph's scrollable drawing area — no
 # menu bar, toolbar, block-library tree, or console/variable-editor pane.
@@ -76,6 +83,19 @@ class CanvasControlContext:
         # (or another writer) changed the file since this canvas last reloaded,
         # so writing our now-stale in-memory graph would clobber that edit.
         self.last_disk_hash = None
+        # Hash of flow_graph_content_hash(the in-memory graph) as of the last
+        # time it was known to match disk (startup, or a successful
+        # reload/drag-save) — deliberately a SEPARATE value from
+        # last_disk_hash (which hashes raw file bytes): GRC's own
+        # parse->import_data->update() round-trip can fill in a default
+        # field that wasn't explicitly present before (live-confirmed: a
+        # freshly-added block gained an explicit `rotation: 0` after a
+        # reload it didn't have right after creation), so comparing a
+        # re-exported in-memory hash against a raw-bytes hash produces
+        # false-positive "unsynced edit" hits on every such reload. Using
+        # the SAME serialization on both sides of this comparison (see
+        # _check_for_unsynced_edit below) avoids that.
+        self.last_synced_export_hash = None
 
     def apply_resize(self, width, height):
         if self.window:
@@ -113,6 +133,7 @@ class CanvasControlContext:
             self.drawing_area._update_after_zoom = True
             self.drawing_area.queue_draw()
             self.last_disk_hash = _sha256_file(self.grc_file_path)
+            self.last_synced_export_hash = flow_graph_content_hash(flow_graph)
             print("Reloaded flowgraph from disk after an external edit")
         except Exception as e:
             print("Failed to reload flowgraph from disk:", e)
@@ -283,6 +304,16 @@ def main():
         except Exception as e:
             print("Failed to isolate GRC canvas:", e)
 
+    # GRC's native Ctrl+Z/Ctrl+Y stays reachable even with the chrome hidden
+    # (its accelerators are wired at the Gtk.Application level, live-
+    # confirmed) but never touches disk — disable it so there's exactly one
+    # undo/redo history (the shared, disk-synced one in adapter.py), not two
+    # silently-diverging ones. See disable_native_undo_redo's own docstring.
+    try:
+        disable_native_undo_redo()
+    except Exception as e:
+        print("Failed to disable native undo/redo:", e)
+
     # Broadway sometimes only honors window placement once the client has
     # actually connected, which happens after Gtk.main() starts pumping the
     # loop — re-assert position/size on the first idle iteration as a
@@ -319,12 +350,30 @@ def main():
                         # writing it would silently clobber that edit. Drop the
                         # drag-save; the queued apply_reload from the agent's
                         # notify will bring this canvas current instead.
+                        #
+                        # Fail CLOSED: only proceed when we can positively
+                        # confirm the disk still matches our last-known state.
+                        # Any case where that can't be confirmed (no baseline
+                        # yet, or a transient read failure) is treated the same
+                        # as a confirmed mismatch — skip this save attempt.
+                        # This is a one-shot skip, not a deadlock: the next
+                        # drag or the next successful reload will get a fresh
+                        # hash pair and can proceed normally.
                         current_hash = _sha256_file(grc_file_path)
-                        if (
-                            ctx.last_disk_hash is not None
-                            and current_hash is not None
-                            and current_hash != ctx.last_disk_hash
-                        ):
+                        if ctx.last_disk_hash is None:
+                            print(
+                                "No baseline disk hash recorded yet — "
+                                "skipping drag-save until a reload establishes one."
+                            )
+                            return False
+                        if current_hash is None:
+                            print(
+                                "Could not read current disk state (transient I/O "
+                                "error?) — skipping drag-save rather than risk a "
+                                "blind clobber."
+                            )
+                            return False
+                        if current_hash != ctx.last_disk_hash:
                             print(
                                 "Disk changed since last reload (agent edit?) — "
                                 "skipping drag-save to avoid clobbering it."
@@ -339,6 +388,15 @@ def main():
                             drawing_area._flow_graph, Path(grc_file_path)
                         )
                         ctx.last_disk_hash = _sha256_file(grc_file_path)
+                        ctx.last_synced_export_hash = flow_graph_content_hash(
+                            drawing_area._flow_graph
+                        )
+                        # Shares one undo/redo history with change_graph —
+                        # no initial_data here (unlike change_graph's own
+                        # call): a manual save relies on change_graph (or an
+                        # earlier manual save) having already seeded the
+                        # baseline snapshot.
+                        push_undo_snapshot(drawing_area._flow_graph, Path(grc_file_path))
                     finally:
                         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             # Bounded retry: a single failed /grc/reload ping would otherwise
@@ -365,6 +423,37 @@ def main():
         # re-parse) doesn't freeze the GTK main loop before the
         # selection/move the user just made has had a chance to redraw.
         GLib.idle_add(_do_trigger_reload)
+
+    # 0. Safety net for edits that don't go through hooks #1/#2 below.
+    # Live-confirmed gap: a param edit via the properties dialog (double-
+    # click a block) never fires GTK's "window-added" signal at all — GRC's
+    # PropsDialog is a plain Gtk.Dialog, never registered with the
+    # Gtk.Application (transient_for=parent is not the same as
+    # add_window()) — so hook #2 silently never sees it, regardless of
+    # OK/Apply/Cancel. The same is likely true of context-menu actions
+    # (Delete/Cut/Paste/Rotate/Enable/Disable/Bypass), which activate
+    # directly rather than via a button-release on the DrawingArea. Rather
+    # than enumerating more individual GTK signals (fragile, "hand-picked"),
+    # periodically compare what the in-memory graph would currently
+    # serialize to against last_disk_hash — the exact same comparison
+    # _do_trigger_reload's own lost-update guard already makes — and let
+    # trigger_reload() run through that existing guard: if disk has ALSO
+    # changed since (e.g. a concurrent agent edit), it correctly skips the
+    # write rather than clobber it, same as it does for a normal drag.
+    def _check_for_unsynced_edit():
+        if drawing_area and hasattr(drawing_area, "_flow_graph"):
+            try:
+                current_hash = flow_graph_content_hash(drawing_area._flow_graph)
+                if (
+                    ctx.last_synced_export_hash is not None
+                    and current_hash != ctx.last_synced_export_hash
+                ):
+                    trigger_reload()
+            except Exception:
+                pass
+        return True  # keep firing
+
+    GLib.timeout_add(1500, _check_for_unsynced_edit)
 
     # 1. Save/reload when dragging/moving blocks (button release)
     def on_button_release(widget, event):
@@ -401,13 +490,25 @@ def main():
 
     # Record the initial on-disk hash so the first drag-save's lost-update
     # guard has a correct baseline, then signal readiness. The readiness flag
-    # is set on the first idle of Gtk.main()'s loop — i.e. once the GTK
-    # client has actually connected to the Broadway display — so grc_open's
-    # /ready probe doesn't release the dashboard iframe to Broadway during
-    # the platform-build window that would trigger alert("disconnected").
+    # is set after a few idle iterations of Gtk.main()'s loop — i.e. once the
+    # GTK client has (probably) connected to the Broadway display — so
+    # grc_open's /ready probe doesn't release the dashboard iframe to
+    # Broadway during the platform-build window that would trigger
+    # alert("disconnected").
     ctx.last_disk_hash = _sha256_file(grc_file_path)
+    if drawing_area and hasattr(drawing_area, "_flow_graph"):
+        ctx.last_synced_export_hash = flow_graph_content_hash(drawing_area._flow_graph)
 
-    def _mark_ready():
+    def _mark_ready(remaining_idles=2):
+        # Best-effort only: waiting a few extra idle-loop round-trips (instead
+        # of just the first one) gives more of the GTK/Broadway connection
+        # handshake a chance to complete before external callers see /ready
+        # return 200. This is NOT a verified signal — pure Python has no
+        # hook into Broadway's actual client-connect event — it's just a
+        # smaller race window than a single iteration, not a guarantee.
+        if remaining_idles > 0:
+            GLib.idle_add(_mark_ready, remaining_idles - 1)
+            return False
         ctx.ready = True
         return False
 

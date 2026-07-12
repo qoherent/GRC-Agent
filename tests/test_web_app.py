@@ -1,9 +1,11 @@
+import shutil
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
 from grc_agent import web as web_app
+from grc_agent.adapter import change_graph
 
 client = TestClient(web_app.app)
 
@@ -93,8 +95,9 @@ def test_root_serves_chat_widget_not_dashboard():
     """Regression guard: '/' must stay the chat widget's own route, not the
     dashboard — the vendor bundle hardcodes pathname === '/' as its own
     "fresh conversation" sentinel and silently renders blank at any other
-    path (see IMPLEMENTATION_REPORT.md). Swapping this back would
-    reintroduce that bug."""
+    path (confirmed by inspecting the vendor JS directly — see web.py's own
+    comment on the route-swap below). Swapping this back would reintroduce
+    that bug."""
     res = client.get("/")
     assert res.status_code == 200
     assert web_app.BRAND_NAME in res.text
@@ -138,6 +141,58 @@ def test_settings_endpoints(tmp_path, monkeypatch):
     assert updated2["model"] == "gemma2"
     assert updated2["ollama_model"] == "gemma2"
     assert updated2["openrouter_model"] == "google/gemini-2.5-flash"
+
+
+def test_undo_redo_endpoints(tmp_path):
+    src = Path(__file__).parent / "data" / "dial_tone.grc"
+    dst = tmp_path / "dial_tone.grc"
+    shutil.copy2(src, dst)
+
+    res = client.post("/grc/open", json={"path": str(dst)})
+    assert res.status_code == 200
+
+    status = client.get("/grc/status").json()
+    assert status["can_undo"] is False
+    assert status["can_redo"] is False
+
+    # Mutate the same way agent.py's change_graph tool does: through the
+    # active FlowgraphProxy, not a raw flow_graph object.
+    result = change_graph(
+        web_app.active, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}]
+    )
+    assert result["ok"] is True
+
+    status = client.get("/grc/status").json()
+    assert status["can_undo"] is True
+    assert status["can_redo"] is False
+
+    undo_res = client.post("/grc/undo").json()
+    assert undo_res["ok"] is True
+    assert undo_res["can_undo"] is False
+    assert undo_res["can_redo"] is True
+
+    inspect = client.get("/grc/inspect").json()
+    samp_rate = next(
+        b for b in inspect["graph"]["blocks"] if b["instance_name"] == "samp_rate"
+    )
+    assert samp_rate["params"]["value"] == "32000"
+
+    redo_res = client.post("/grc/redo").json()
+    assert redo_res["ok"] is True
+    assert redo_res["can_undo"] is True
+    assert redo_res["can_redo"] is False
+
+    inspect = client.get("/grc/inspect").json()
+    samp_rate = next(
+        b for b in inspect["graph"]["blocks"] if b["instance_name"] == "samp_rate"
+    )
+    assert samp_rate["params"]["value"] == "48000"
+
+
+def test_undo_with_no_active_path_fails():
+    res = client.post("/grc/undo")
+    assert res.status_code == 400
+    assert res.json()["ok"] is False
 
 
 def test_grc_render_endpoint():

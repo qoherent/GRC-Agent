@@ -40,6 +40,7 @@ dependencies = [
     "starlette>=0.40",
     "tenacity>=9.1.4",
     "pydantic-ai[web-fetch]>=2.7.0",
+    "pydantic-graph>=2.7.0",
     "beautifulsoup4>=4.12",
     "uvicorn>=0.30",
     "python-dotenv>=1.0",
