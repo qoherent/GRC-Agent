@@ -24,6 +24,7 @@ from grc_agent.adapter import (
     flow_graph_content_hash,
     get_gui_platform,
     gui_application_cls,
+    hide_panels_by_default,
     push_undo_snapshot,
     write_flow_graph_atomic,
 )
@@ -338,6 +339,9 @@ def main():
     app.register(None)
     app.activate()
 
+    # Hide the GRC panels (block library, console, variable editor) by default
+    hide_panels_by_default(app)
+
     # Get the active MainWindow created by the application
     window = Gtk.Application.get_default().get_active_window()
     if not window:
@@ -347,6 +351,12 @@ def main():
     # Strip the native title bar/min/max/close controls — this is meant to
     # render as a canvas embedded in an iframe, not a desktop window.
     window.set_decorated(False)
+
+    # Hide the top menu bar and toolbar/icon bar
+    if hasattr(window, "menu_bar") and window.menu_bar:
+        window.menu_bar.hide()
+    if hasattr(window, "tool_bar") and window.tool_bar:
+        window.tool_bar.hide()
 
     # Only a MIN_SIZE floor — no MAX_SIZE. A hard max would fight the
     # dynamic resize-to-pane-size below just as much as no constraint at
@@ -389,31 +399,7 @@ def main():
     # notebook tabs bar, ...) so only the flowgraph's scrolled canvas shows,
     # no matter how GRC's MainWindow happens to be laid out.
     def isolate_drawing_area(root_window, target):
-        node = target
-        parent = node.get_parent()
-        while parent is not None and parent is not root_window:
-            if isinstance(parent, Gtk.Notebook):
-                parent.set_show_tabs(False)
-                parent.set_show_border(False)
-                parent.set_size_request(1, 1)
-            if isinstance(parent, Gtk.ScrolledWindow):
-                # A ScrolledWindow's own scroll/hscrollbar are genuine
-                # children (GTK3's get_children() includes them) — not
-                # extraneous chrome like everything else this loop hides on
-                # the way up to the window. The blanket sibling-hiding below
-                # used to hide these too, silently breaking the only native
-                # way to pan the canvas: GRC's DrawingArea only handles
-                # Ctrl+scroll itself (zoom, confirmed in
-                # gui/DrawingArea.py's _handle_mouse_scroll) — every other
-                # scroll/drag is meant to fall through to these scrollbars.
-                node = parent
-                parent = node.get_parent()
-                continue
-            for sibling in parent.get_children():
-                if sibling is not node:
-                    sibling.hide()
-            node = parent
-            parent = node.get_parent()
+        pass
 
     if drawing_area:
         try:

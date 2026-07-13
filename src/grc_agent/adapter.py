@@ -91,6 +91,21 @@ def disable_native_undo_redo() -> None:
     Actions.FLOW_GRAPH_REDO.set_enabled(False)
 
 
+def hide_panels_by_default(app: Any) -> None:
+    """Hide GRC's panels (block library, console, and variable editor) by default."""
+    from gnuradio.grc.gui import Actions
+    for action in (
+        Actions.TOGGLE_BLOCKS_WINDOW,
+        Actions.TOGGLE_CONSOLE_WINDOW,
+        Actions.TOGGLE_FLOW_GRAPH_VAR_EDITOR,
+    ):
+        try:
+            if action.get_active():
+                app._handle_action(action)
+        except Exception as e:
+            print(f"Failed to hide GRC panel via action {action}: {e}")
+
+
 def flow_graph_content_hash(flow_graph: Any) -> str:
     """Hash of what write_flow_graph_atomic would currently write for this
     flow_graph — directly comparable to a hash of the on-disk file's raw
@@ -398,7 +413,6 @@ def keep_param(
     variable_names: set[str] | None = None,
 ) -> bool:
     hide = getattr(param, "hide", "none") or "none"
-    category = getattr(param, "category", "") or ""
     dtype = getattr(param, "dtype", "") or ""
     value = str(param.value)
     default = str(getattr(param, "default", ""))
@@ -406,8 +420,6 @@ def keep_param(
     if dtype == "id" or param_key == "showports" or param_key.startswith("bus_structure_"):
         return False
     if hide == "all":
-        return False
-    if category in ("Advanced", "Config"):
         return False
     if dtype == "gui_hint":
         return False
@@ -420,9 +432,9 @@ def keep_param(
         return True
 
     is_type_controlling = param_key in type_controlling_params(block.key)
-    # Port-count-controlling params are deliberately excluded here: legacy
-    # (param_filter.py) only treats type-controlling params and
-    # generate_options as structural for the Stage B keep rule.
+    # Port-count-controlling params are deliberately excluded here: only
+    # type-controlling params and generate_options count as structural for
+    # the Stage B keep rule.
     is_structural_enum = is_type_controlling or param_key == "generate_options"
 
     if hide == "part" and not is_structural_enum:
@@ -982,14 +994,14 @@ def _find_block_placement(
         target_x = 200.0
         target_y = 12.0
 
-    # 3. Snap to grid
-    gx = round(target_x / grid_w) * grid_w
-    gy = round(target_y / grid_h) * grid_h
+    # 3. Snap to grid, clamping to non-negative boundaries
+    gx = max(0.0, round(target_x / grid_w) * grid_w)
+    gy = max(0.0, round(target_y / grid_h) * grid_h)
 
     # 4. Spiral search: ring 0 is just the target, ring N is the perimeter
     #    of cells at Chebyshev distance N. Expands outward until it finds
     #    a non-overlapping slot.
-    if not any(_rects_overlap(gx, gy, ox, oy) for ox, oy in occupied):
+    if gx >= 0 and gy >= 0 and not any(_rects_overlap(gx, gy, ox, oy) for ox, oy in occupied):
         return (gx, gy)
 
     for ring in range(1, 60):
@@ -999,12 +1011,14 @@ def _find_block_placement(
                     continue
                 cx = gx + dx * grid_w
                 cy = gy + dy * grid_h
+                if cx < 0 or cy < 0:
+                    continue
                 if not any(_rects_overlap(cx, cy, ox, oy) for ox, oy in occupied):
                     return (cx, cy)
 
-    # 5. Fallback: place to the right of everything
+    # 5. Fallback: place to the right of everything, ensuring non-negative coordinates
     fallback_x = max(o[0] for o in occupied) + grid_w if occupied else 200.0
-    return (fallback_x, gy)
+    return (max(0.0, fallback_x), max(0.0, gy))
 
 
 def change_graph(
@@ -1259,6 +1273,15 @@ def change_graph(
                 # all and must not be routed through dtype resolution.
                 if k in controlling and str(p.value) == "auto":
                     is_add = b.name in new_block_names
+                    if is_add:
+                        is_connected = False
+                        for conn_str in (add_connections or []):
+                            parsed = parse_conn(conn_str)
+                            if parsed and (parsed["src_block"] == b.name or parsed["dst_block"] == b.name):
+                                is_connected = True
+                                break
+                        if not is_connected:
+                            continue
                     try:
                         resolved = resolve_auto(
                             flow_graph,

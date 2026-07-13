@@ -659,7 +659,7 @@ def check_expect(fixture_path, expect, run_result=None):
 
 def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:
     events = []
-    from pydantic_ai import ModelRequest, ModelResponse
+    from pydantic_ai import ModelResponse
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 
     messages = run_result.all_messages() if run_result else []

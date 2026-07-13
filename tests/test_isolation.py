@@ -1,8 +1,8 @@
-
+import pytest
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
-from grc_agent.adapter import _embed_endpoint, _rag_building, get_db_and_model
+from grc_agent.adapter import _embed_endpoint, get_db_and_model
 from grc_agent.agent import build_scenario_model
 from grc_agent.settings import (
     env_path,
@@ -11,7 +11,7 @@ from grc_agent.settings import (
     save_settings,
     upsert_env_key,
 )
-from grc_agent.web import _build_model, _model_build_error
+from grc_agent.web import _build_model
 
 
 def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
@@ -247,7 +247,6 @@ def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
 
     # Reload web module to trigger _build_model with the bad config
     # (we can't re-import, so test the fallback logic directly)
-    original_cfg = dict(grc_agent.web._cfg)
     grc_agent.web._cfg["provider"] = "openrouter"
     grc_agent.web._cfg["model"] = "openai/gpt-4o-mini"
     grc_agent.web._model_build_error = None
@@ -314,15 +313,15 @@ def test_ollama_cloud_model_builds_and_runs():
     non-mocked integration test that exercises the exact same code path
     web._build_model() uses for the ollama_cloud provider."""
     import os
+
     from dotenv import load_dotenv
     from pydantic_ai import Agent
     from pydantic_ai.models.ollama import OllamaModel
     from pydantic_ai.providers.ollama import OllamaProvider
 
-    from grc_agent.settings import env_path, load_settings
+    from grc_agent.settings import env_path
 
     load_dotenv(env_path())
-    cfg = load_settings()
     api_key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
     if not api_key:
         pytest.skip("OLLAMA_CLOUD_API_KEY not set — cannot test Ollama Cloud")

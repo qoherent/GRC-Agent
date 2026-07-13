@@ -27,7 +27,7 @@ from grc_agent.adapter import (
 )
 
 
-def _open_db(db_path: str, dim: int) -> sqlite3.Connection:
+def _open_db(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
@@ -65,7 +65,7 @@ def ingest_catalog(db_path: str, model: str) -> int:
         )
 
     dim = len(rows[0][2])
-    conn = _open_db(db_path, dim)
+    conn = _open_db(db_path)
     try:
         conn.execute(
             "CREATE TABLE catalog_chunks (rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT)"
@@ -145,7 +145,7 @@ def ingest_docs(db_path: str, model: str) -> int:
         )
 
     dim = len(rows[0][3])
-    conn = _open_db(db_path, dim)
+    conn = _open_db(db_path)
     try:
         conn.execute(
             "CREATE TABLE docs_chunks (rowid INTEGER PRIMARY KEY, path TEXT, heading TEXT, payload TEXT)"

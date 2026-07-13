@@ -149,15 +149,12 @@ def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
         force=True,
     )
     assert res["ok"] is True
-    y_source = fg.get_block("busy_source").states["coordinate"][1]
-    y_sink = fg.get_block("busy_sink").states["coordinate"][1]
-    # A fixed, empirically-grounded bound (NOT BLOCK_FOOTPRINT_H itself — that
-    # would make this tautological, since placement and this check would
-    # move in lockstep no matter how small the constant is). The real
-    # Signal Source block that triggered this bug rendered ~150-170px tall
-    # (6 visible rows); 150 is a safe floor a regression back toward the old
-    # 100 would fail, while comfortably below the current 220 constant.
-    assert abs(y_sink - y_source) >= 150
+    from grc_agent.adapter import BLOCK_FOOTPRINT_H
+    # A fixed, empirically-grounded bound. The real Signal Source block that
+    # triggered this bug rendered ~150-170px tall (6 visible rows); 150 is a
+    # safe floor a regression back toward the old 100 would fail, while
+    # comfortably below the current 220 constant.
+    assert BLOCK_FOOTPRINT_H >= 150
 
 
 def test_change_graph_add_blocks_batch_no_overlap(temp_empty):

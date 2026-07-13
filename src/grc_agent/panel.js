@@ -636,10 +636,11 @@ async function openGraph(path) {
   if (!path) return;
   setMsg("Loading...");
   try {
+    const pixelRatio = window.devicePixelRatio || 1;
     const res = await fetch("/grc/open", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({path})
+      body: JSON.stringify({path, pixel_ratio: pixelRatio})
     });
     const data = await res.json();
     if (!data.ok) { setMsg(data.message || "Failed to load file.", "error"); return; }
@@ -937,6 +938,14 @@ async function refresh(forceCanvasReload = false, canvasReady, canvasError) {
 // clips the flowgraph AND pushes GRC's own scrollbars outside the visible
 // iframe viewport, making it both cropped and unpannable (see
 // canvas_app.py's start_resize_server for the receiving end).
+let resizeTimeout = null;
+function debouncedSyncCanvasSize() {
+  if (resizeTimeout) clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {
+    syncCanvasSize(false);
+  }, 150);
+}
+
 function syncCanvasSize(force) {
   const container = document.getElementById("canvas-container");
   if (!container) return;
@@ -959,7 +968,7 @@ function syncCanvasSize(force) {
 // integrateSettings 300ms poll drove this; that iframe-sidebar-sniffing
 // heuristic is gone with the iframe.)
 function startLayoutDependentWork() {
-  new ResizeObserver(() => syncCanvasSize(false)).observe(document.getElementById("canvas-container"));
+  new ResizeObserver(() => debouncedSyncCanvasSize()).observe(document.getElementById("canvas-container"));
   setInterval(renderSessionHistory, 300);
 }
 if (document.readyState === "complete") startLayoutDependentWork();

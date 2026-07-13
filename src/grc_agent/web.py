@@ -19,6 +19,7 @@ from pydantic_ai.capabilities import (
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -467,13 +468,18 @@ _model_build_error: str | None = None
 
 def _build_model():
     if _cfg["provider"] == "openrouter":
-        return OpenRouterModel(_cfg["model"])
+        key = get_env_value("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+        return OpenRouterModel(
+            _cfg["model"],
+            provider=OpenRouterProvider(api_key=key),
+        )
     if _cfg["provider"] == "ollama_cloud":
+        key = get_env_value("OLLAMA_CLOUD_API_KEY") or os.environ.get("OLLAMA_CLOUD_API_KEY", "")
         return OllamaModel(
             _cfg["model"],
             provider=OllamaProvider(
                 base_url="https://ollama.com/v1",
-                api_key=os.environ.get("OLLAMA_CLOUD_API_KEY", ""),
+                api_key=key,
             ),
         )
     return OllamaModel(
@@ -658,6 +664,7 @@ async def grc_open(request: Request) -> JSONResponse:
     except Exception as e:
         return JSONResponse({"ok": False, "message": f"Invalid JSON body: {e}"}, status_code=400)
     path = str(body.get("path", "")).strip()
+    pixel_ratio = float(body.get("pixel_ratio", 1.0))
     if not path:
         return JSONResponse({"ok": False, "message": "path is required"}, status_code=400)
     if not Path(path).is_absolute():
@@ -702,6 +709,7 @@ async def grc_open(request: Request) -> JSONResponse:
         # Launch new canvas process under Broadway
         env = os.environ.copy()
         env["GDK_BACKEND"] = "broadway"
+        env["GDK_SCALE"] = "2" if pixel_ratio > 1.2 else "1"
         # Must match the display number _spawn_broadway() started broadwayd
         # on (derived from BROADWAY_PORT, not a hardcoded number) — otherwise
         # this canvas would connect to a different broadwayd's socket.
@@ -1036,6 +1044,19 @@ async def grc_settings_get(request: Request) -> JSONResponse:
     )
 
 
+def apply_settings() -> None:
+    global _cfg, model, _model_build_error
+    _cfg = load_settings()
+    try:
+        new_model = _build_model()
+        agent.model = new_model
+        model = new_model
+        _model_build_error = None
+    except Exception as e:
+        _model_build_error = str(e)
+        raise e
+
+
 async def grc_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -1043,9 +1064,10 @@ async def grc_settings_post(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": f"Invalid JSON body: {e}"}, status_code=400)
     try:
         save_settings(str(body.get("provider", "")), str(body.get("model", "")))
-    except ValueError as e:
+        apply_settings()
+    except Exception as e:
         return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
-    return JSONResponse({"ok": True, "message": "Saved. Restart the app to use this model."})
+    return JSONResponse({"ok": True, "message": "Settings saved and applied dynamically."})
 
 
 async def grc_health(request: Request) -> JSONResponse:
@@ -1160,9 +1182,13 @@ async def grc_apikey_post(request: Request) -> JSONResponse:
 
     env_key = "OLLAMA_CLOUD_API_KEY" if provider == "ollama_cloud" else "OPENROUTER_API_KEY"
     upsert_env_key(env_key, api_key)
+    try:
+        apply_settings()
+    except Exception as e:
+        return JSONResponse({"ok": False, "message": f"Saved API key, but failed to reinitialize model: {e}"}, status_code=400)
 
     return JSONResponse(
-        {"ok": True, "message": f"{env_key} saved. Restart the app for it to take effect."}
+        {"ok": True, "message": f"{env_key} saved and applied dynamically."}
     )
 
 
