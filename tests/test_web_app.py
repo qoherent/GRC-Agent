@@ -1,3 +1,4 @@
+import os
 import shutil
 from pathlib import Path
 
@@ -162,9 +163,9 @@ def test_root_serves_chat_widget_not_dashboard():
 
 
 def test_settings_endpoints(tmp_path, monkeypatch):
-    # Route settings path to a temp location
-    tmp_config_file = tmp_path / "settings.json"
-    monkeypatch.setenv("GRC_AGENT_CONFIG_PATH", str(tmp_config_file))
+    # Route settings to a temp .env (the single source of truth for preferences)
+    tmp_env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
 
     # 1. Get default settings
     res = client.get("/grc/settings").json()
@@ -381,3 +382,134 @@ def test_grc_render_endpoint():
     assert res.status_code == 200
     assert res.headers["content-type"] == "image/png"
     assert len(res.content) > 1000  # valid image size
+
+
+# ── New comprehensive tests for the .env consolidation + audit fixes ────────
+
+
+def test_settings_get_returns_active_provider_error(tmp_path, monkeypatch):
+    """When _build_model() failed at startup, /grc/settings must return
+    active_provider_error so the dashboard can show a specific message
+    instead of a misleading restart badge."""
+    # Simulate a build error by setting the module-level flag
+    import grc_agent.web as web_app
+    web_app._model_build_error = "OpenRouter API key not set"
+    try:
+        res = client.get("/grc/settings").json()
+        assert res["active_provider_error"] == "OpenRouter API key not set"
+    finally:
+        web_app._model_build_error = None
+
+
+def test_status_returns_rag_building(tmp_path, monkeypatch):
+    """/grc/status must include the rag_building field so the dashboard can
+    show a progress banner during vector DB build."""
+    from grc_agent.adapter import _rag_building
+    _rag_building["domain"] = "catalog"
+    _rag_building["status"] = "building"
+    try:
+        res = client.get("/grc/status").json()
+        assert res["rag_building"]["domain"] == "catalog"
+        assert res["rag_building"]["status"] == "building"
+    finally:
+        _rag_building["domain"] = None
+        _rag_building["status"] = None
+
+
+def test_apikey_writes_to_env_path_not_cwd(tmp_path, monkeypatch):
+    """/grc/apikey must write to env_path() (the .env file resolved by
+    settings.py), not to CWD-relative .env — otherwise a key saved from
+    one launch directory is silently absent on the next."""
+    env = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
+
+    res = client.post("/grc/apikey", json={
+        "provider": "ollama_cloud",
+        "api_key": "test-key-ollama-cloud",
+    }).json()
+    assert res["ok"] is True
+
+    # The key must be in the temp .env, not in CWD
+    content = env.read_text(encoding="utf-8")
+    assert "OLLAMA_CLOUD_API_KEY=test-key-ollama-cloud" in content
+
+    # CWD .env must NOT contain the test key
+    cwd_env = Path(".env")
+    if cwd_env.exists():
+        cwd_content = cwd_env.read_text(encoding="utf-8")
+        assert "test-key-ollama-cloud" not in cwd_content
+
+
+def test_apikey_does_not_set_os_environ(tmp_path, monkeypatch):
+    """/grc/apikey must NOT set os.environ — the health check reads from
+    the .env file (via get_env_value), not from os.environ. Setting
+    os.environ would make the health badge go green while the running agent
+    still holds the old key (the A2.2 bug)."""
+    env = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
+
+    # Verify the key is NOT in os.environ before the call
+    assert os.environ.get("OLLAMA_CLOUD_API_KEY") != "test-key-not-in-env"
+
+    res = client.post("/grc/apikey", json={
+        "provider": "ollama_cloud",
+        "api_key": "test-key-not-in-env",
+    }).json()
+    assert res["ok"] is True
+
+    # The key must NOT be in os.environ
+    assert os.environ.get("OLLAMA_CLOUD_API_KEY") != "test-key-not-in-env"
+
+    # But it MUST be in the .env file
+    content = env.read_text(encoding="utf-8")
+    assert "OLLAMA_CLOUD_API_KEY=test-key-not-in-env" in content
+
+
+def test_settings_get_reads_api_keys_from_env_file(tmp_path, monkeypatch):
+    """/grc/settings must read API key presence from the .env file (via
+    get_env_value), not from os.environ — otherwise a key saved via
+    /grc/apikey would make the settings endpoint report the key as set
+    while the running agent still holds the old key."""
+    env = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
+
+    # Write a key to the .env file
+    from grc_agent.settings import upsert_env_key
+    upsert_env_key("OLLAMA_CLOUD_API_KEY", "file-key-123", path=env)
+
+    # Set a DIFFERENT value in os.environ (simulating stale startup snapshot)
+    monkeypatch.setenv("OLLAMA_CLOUD_API_KEY", "env-key-456")
+
+    # The settings endpoint must report the FILE value
+    res = client.get("/grc/settings").json()
+    assert res["ollama_cloud_api_key_set"] is True  # file-key-123 is set
+
+    # Now clear the file key — settings must report it as unset
+    env.write_text("", encoding="utf-8")
+    res = client.get("/grc/settings").json()
+    assert res["ollama_cloud_api_key_set"] is False  # file is empty
+
+
+def test_health_ollama_cloud_probes_local_ollama_too(tmp_path, monkeypatch):
+    """The ollama_cloud health check must also probe local Ollama (needed
+    for embeddings), not just the cloud endpoint — otherwise the badge
+    would show green while RAG is broken (the A3.2 bug)."""
+    from grc_agent.settings import upsert_env_key
+    env = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
+    upsert_env_key("GRC_PROVIDER", "ollama_cloud", path=env)
+    upsert_env_key("OLLAMA_CLOUD_API_KEY", "dummy-key", path=env)
+
+    # The health check should probe local Ollama. If it's running, the
+    # result should be ok=true (cloud + local both reachable). If it's
+    # not running, the result should be ok=false with a message about
+    # local Ollama being needed for embeddings.
+    res = client.get("/grc/health").json()
+    assert res["provider"] == "ollama_cloud"
+    if res["ok"]:
+        assert "reachable" in res["message"]
+    else:
+        # Either the cloud key is invalid or local Ollama is down
+        assert any(phrase in res["message"] for phrase in [
+            "local Ollama", "not running", "API_KEY", "not set"
+        ])

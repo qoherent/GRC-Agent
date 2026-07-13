@@ -1484,6 +1484,13 @@ def embed_document(text: str, model: str) -> list[float]:
 _EMBEDDING_DIM_CACHE: dict[str, int] = {}
 
 
+# Exposed to the dashboard via /grc/status so the UI can show a "Building
+# knowledge database..." banner instead of an indefinite hang during the
+# first query_knowledge call (or after a provider switch that changes the
+# embedding model). Set by _ensure_db_built, read by web.py's grc_status.
+_rag_building: dict[str, str | None] = {"domain": None, "status": None}
+
+
 def _get_embedding_dim(model: str) -> int:
     """Cache the embedding dimension for a model so we don't pay for a real
     embedding API call on every single vector query just to verify the cached
@@ -1494,6 +1501,7 @@ def _get_embedding_dim(model: str) -> int:
 
 
 def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
+    global _rag_building
     if os.path.exists(db_path):
         # Check both embedding model name (stored in _db_meta) and vector
         # dimension. A model-name change triggers a rebuild even if dimensions
@@ -1546,17 +1554,26 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
             except Exception:
                 pass
 
-    print(
-        f"[grc-agent] {domain} vector DB not found or model changed — building it now "
-        f"(first run only, may take a few minutes)..."
-    )
-    from grc_agent import ingest
+    _rag_building["domain"] = domain
+    _rag_building["status"] = "building"
+    try:
+        print(
+            f"[grc-agent] {domain} vector DB not found or model changed — building it now "
+            f"(first run only, may take a few minutes)..."
+        )
+        from grc_agent import ingest
 
-    if domain == "catalog":
-        ingest.ingest_catalog(db_path, model)
-    else:
-        ingest.ingest_docs(db_path, model)
-    print(f"[grc-agent] {domain} vector DB build complete: {db_path}")
+        if domain == "catalog":
+            ingest.ingest_catalog(db_path, model)
+        else:
+            ingest.ingest_docs(db_path, model)
+        print(f"[grc-agent] {domain} vector DB build complete: {db_path}")
+        _rag_building["domain"] = domain
+        _rag_building["status"] = "ready"
+    except Exception:
+        _rag_building["domain"] = domain
+        _rag_building["status"] = "failed"
+        raise
 
 
 def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:

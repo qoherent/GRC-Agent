@@ -1,0 +1,131 @@
+name: lifecycle-gui-packaging
+description: >
+  Audit and improve the application lifecycle logic (process spawn/teardown,
+  SIGTERM handling, pidfiles, canvas readiness, undo stack), GUI state management
+  (panel.js state machine, open/close guards, iframe lifecycle, undo/redo buttons,
+  pollConversationState), and packaging/installation setup (pyproject.toml,
+  README install instructions, --system-site-packages dependency model, wheel
+  build targets). Find and fix concrete bugs and code quality issues across all
+  three areas.
+
+metric:
+  primary:
+    type: judge
+    name: code_quality_score
+    direction: maximize
+    target: 4.5
+
+  degenerate_gates:
+    - name: ruff_violations
+      check: "<= 0"
+      description: "No ruff lint errors in web.py or canvas_app.py"
+    - name: test_collection_errors
+      check: "<= 0"
+      description: "test_unit.py must collect cleanly (no import errors)"
+    - name: concrete_antipatterns
+      check: "<= 0"
+      description: "No confirmed blocking-sleep-in-main or similar antipatterns"
+
+  diagnostics:
+    - name: loc_web_py
+    - name: loc_canvas_app_py
+    - name: loc_panel_js
+    - name: regions_written
+
+  judge:
+    model: sonnet
+    sample_size: 9
+    batch_size: 3
+    minimum_improvement: 0.2
+    max_total_cost_usd: 10
+    stratification:
+      - bucket: lifecycle
+        count: 4
+      - bucket: gui_state
+        count: 3
+      - bucket: packaging
+        count: 2
+    rubric: |
+      You are reviewing a code region from a GNU Radio Companion AI agent application.
+      The region is identified by its area (lifecycle, gui_state, or packaging) and
+      function name. Score the code quality 1-5 based on:
+
+      **For lifecycle regions** (web.py process management, canvas_app.py):
+      - 5: Correct signal handling, no race conditions, proper error propagation, clear
+           resource ownership, idiomatic async/sync separation
+      - 4: Mostly correct with minor clarity issues or one missed edge case
+      - 3: Functional but has a notable bug or design smell (e.g., blocking sleep in
+           wrong context, missing SIGTERM coverage, unclear ownership)
+      - 2: Has a real correctness issue that could cause orphaned processes, data loss,
+           or hard-to-reproduce crashes
+      - 1: Clearly broken — race condition, unhandled signal, or resource leak
+
+      **For gui_state regions** (panel.js):
+      - 5: State transitions are correct, no race with pollConversationState, iframe
+           lifecycle is properly guarded, undo/redo state is accurate
+      - 4: Mostly correct with minor edge case or clarity issue
+      - 3: Has a known race condition area or a guard that could be bypassed
+      - 2: Contains a real bug (e.g., close-immediately-after-open, stale state flag)
+      - 1: Clearly broken — always wrong in a specific scenario
+
+      **For packaging regions** (pyproject.toml, README):
+      - 5: All dependencies correct, build targets accurate, install instructions
+           complete and correct, no missing runtime dependencies
+      - 4: Minor issue (e.g., missing optional dep, slightly unclear instruction)
+      - 3: Notable gap (e.g., system dep not mentioned, missing platform constraint)
+      - 2: Real packaging bug (e.g., missing runtime dep, wrong wheel include path)
+      - 1: Clearly broken — package won't install or won't run after install
+
+      Also report:
+      - issues_found: integer count of distinct issues identified
+      - most_critical_issue: string describing the most important thing to fix (or "none")
+
+      Return JSON: {"score": <1-5>, "issues_found": <integer>, "most_critical_issue": "<string>"}
+
+measurement:
+  command: "uv run python evaluate_lifecycle_gui_packaging.py"
+  timeout_seconds: 120
+  working_directory: "."
+  stability:
+    mode: stable
+
+scope:
+  mutable:
+    - "src/grc_agent/web.py"
+    - "src/grc_agent/canvas_app.py"
+    - "src/grc_agent/panel.js"
+    - "src/grc_agent/panel.html"
+    - "pyproject.toml"
+    - "README.md"
+    - "tests/test_unit.py"
+    - "tests/test_web_app.py"
+  immutable:
+    - "evaluate_lifecycle_gui_packaging.py"
+    - "src/grc_agent/adapter.py"
+    - "src/grc_agent/agent.py"
+    - "src/grc_agent/ingest.py"
+    - "src/grc_agent/settings.py"
+    - "src/grc_agent/_paths.py"
+    - "tests/test_integration.py"
+    - "tests/test_isolation.py"
+    - "tests/data/"
+
+execution:
+  mode: serial
+  backend: worktree
+  max_concurrent: 1
+
+stopping:
+  max_iterations: 12
+  max_hours: 2
+  plateau_iterations: 4
+  target_reached: true
+
+constraints:
+  - "Do not change the public API surface of any module (function signatures, endpoint paths)"
+  - "Do not add new Python package dependencies without user approval"
+  - "Do not change AGENTS.md"
+  - "All fixes must be grounded in a verifiable observation — no speculative changes"
+  - "Prefer removal over addition: if code can be simplified, simplify it"
+  - "test_unit.py: only fix the BLOCK_COLUMN_MAX_ROWS stale import — do not rewrite the test"
+  - "Do not change how the undo stack works or the FlowgraphProxy swap protocol"

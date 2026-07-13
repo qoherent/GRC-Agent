@@ -1,0 +1,6 @@
+{
+  "area": "gui_state",
+  "file": "panel.js",
+  "function": "startNewConversation",
+  "code": "function startNewConversation() {\n  resetChatFrame();\n  // If a file was loaded but the user never sent a message yet, the\n  // iframe's pathname is already \"/\" and never changes here \u2014 so\n  // pollConversationState's own path-transition check (which is what\n  // normally unloads the flowgraph and brings the Browse button back)\n  // never fires. Without this, loading a file then wanting to load a\n  // different one before chatting had no way back: Browse lives inside\n  // the now-hidden empty-state placeholder, and there'd be nothing left\n  // to click.\n  if (state.isGrcLoaded) {\n    unloadGrc();\n  }\n}"
+}

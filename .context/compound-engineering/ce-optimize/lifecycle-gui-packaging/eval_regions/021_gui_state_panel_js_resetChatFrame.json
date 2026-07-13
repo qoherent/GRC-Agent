@@ -1,0 +1,6 @@
+{
+  "area": "gui_state",
+  "file": "panel.js",
+  "function": "resetChatFrame",
+  "code": "function resetChatFrame(preserveGraph = false) {\n  localStorage.removeItem(\"grc_active_conv_id\");\n  setUrlConvId(null);\n  if (preserveGraph) state.preserveGrcOnReset = true;\n  document.getElementById(\"chat-frame\").src = `/?r=${crypto.randomUUID()}`;\n}"
+}

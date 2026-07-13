@@ -531,7 +531,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     tmp_vectors = tmp_path / "vectors"
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
-    monkeypatch.setenv("GRC_AGENT_CONFIG_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
     from grc_agent.settings import save_settings
 
