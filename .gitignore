@@ -1,53 +1,44 @@
-
-.antigravitycli/
-.claude/
-# Backups
-*.bak
-benchmark_outputs/
-build/
-.cache/
-.context/
-# Cache / eval artifacts
-demo/remotion/dist/
-demo/remotion/out/
-demo/video_outputs/
-dist/
+# ---- Python ----
+__pycache__/
+*.py[oc]
 *.egg-info
+build/
+dist/
+.venv
+.ruff_cache/
+.pytest_cache/
+
+# Keep the package root clean — source lives under src/
+/*.py
+
+# ---- Environment / secrets ----
 .env
-# Frozen governed retrieval baseline artifact (tracked)
-# Generated eval/report artifacts (not tracked)
-.grc_agent/
-# grcc output artifacts
-.llama_eval/
-# Local copied/smoke graph artifacts
-node_modules/
-# Node/Remotion generated artifacts
-.opencode/
-scratch/
-# Playground / generated artifacts (not tracked)
-.DS_Store
-Thumbs.db
+
+# ---- Editor / OS ----
 *.swp
 *.swo
 *~
-.pytest_cache/
-tests/output/
-/*.py
-__pycache__/
-*.py[oc]
-# Python-generated files
-reports/
-*.restored.grc
-.ruff_cache/
+.DS_Store
+Thumbs.db
+
+# ---- GRC agent runtime artifacts ----
+# Backups, locks, and undo snapshots written next to loaded .grc files
+.grc_agent/
+# GRC save/restore scratch variants
 *.saved.grc
-
-tmp/
+*.restored.grc
 *.tmp.grc
-.venv
-# Virtual environments
-wheels/
-
-vec1.so
+*.bak
 
 # Generated vector indexes (per-backend, built on first use — see grc_agent.ingest)
 src/grc_agent/vectors/
+
+# Test / scratch output
+tests/output/
+tmp/
+
+# ---- Local agent/tool working dirs (not shared) ----
+.claude/
+.opencode/
+.cache/
+.context/

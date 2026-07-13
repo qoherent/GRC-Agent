@@ -22,12 +22,6 @@ const CANVAS_PLACEHOLDER_CANVAS_FAILED = "Flowgraph loaded, but the canvas faile
 // here is the only way these flags ever change — nothing else holds a copy.
 const state = {
   isGrcLoaded: false,
-  // Last-known canvas outcome, mirrored from whichever of /grc/open's or
-  // /grc/status's canvas_ready field was freshest at the time — see
-  // refresh()'s own effectiveCanvasReady note. Only read/written by
-  // refresh() itself today; kept on state (rather than a local variable)
-  // so it survives across calls the same way isGrcLoaded does.
-  canvasReady: true,
   lastGrcVersion: -1,
   lastPath: "/",
   brokenIframePolls: 0,
@@ -70,23 +64,257 @@ const state = {
   // it ever reaches /ready, a self-inflicted livelock that manufactures
   // its own "Timed out waiting for canvas to become ready".
   autoOpenInFlight: false,
+  // Native chat widget: the active conversation id (null = fresh, no
+  // messages yet). Replaces the iframe's pathname-as-conversation-id model.
+  chatConvId: null,
+  chatBusy: false,
 };
 
 const MAX_SESSION_MAPPINGS = 50;
 
-// Each conversation is locked to exactly one flowgraph (mirrors the old
-// desktop GUI's open_file(), which cleared the chat and reset the agent
-// session on every load) — a chat history should never span two different
-// underlying .grc files. The vendor widget hardcodes pathname === "/" as
-// its own "fresh conversation" sentinel (confirmed via direct inspection —
-// any other path silently renders nothing), so the iframe must point at
-// the literal root, not a subpath; the query param just forces a reload
-// instead of a no-op same-src assignment.
+// ===================== Native chat widget =====================
+// Replaces the @pydantic/ai-chat-ui iframe. Talks directly to pydantic-ai's
+// to_web() backend at POST /api/chat, which speaks the Vercel AI SDK UI
+// Message Stream protocol (text/event-stream, `data: {json}\n\n` frames).
+// The server is stateless — the client owns the full message history and
+// sends it on every request. These `let`s live here (above restoreSession()'s
+// load-time call to clearChatWidget) so there is no temporal-dead-zone risk.
+let chatMessages = [];      // [{id, role, parts: [{type:'text', text}]}]
+let chatAbort = null;       // AbortController for the in-flight request
+
+function _chatId() {
+  return crypto.randomUUID ? crypto.randomUUID()
+    : "m-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+}
+
+function _scrollChatToBottom() {
+  const box = document.getElementById("chat-messages");
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+function _appendChatMsg(role) {
+  const box = document.getElementById("chat-messages");
+  const empty = document.getElementById("chat-empty");
+  if (empty) empty.remove();
+  const msg = document.createElement("div");
+  msg.className = `chat-msg ${role}`;
+  const roleEl = document.createElement("div");
+  roleEl.className = "chat-msg-role";
+  roleEl.textContent = role;
+  const bodyEl = document.createElement("div");
+  bodyEl.className = "chat-msg-body";
+  msg.append(roleEl, bodyEl);
+  box.appendChild(msg);
+  _scrollChatToBottom();
+  return bodyEl;
+}
+
+function clearChatWidget() {
+  if (chatAbort) { try { chatAbort.abort(); } catch (e) {} chatAbort = null; }
+  chatMessages = [];
+  state.chatConvId = null;
+  state.chatBusy = false;
+  const box = document.getElementById("chat-messages");
+  if (box) {
+    box.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.id = "chat-empty";
+    empty.textContent = state.isGrcLoaded
+      ? "Start a conversation about your flowgraph."
+      : "Load a flowgraph (Browse) to start chatting.";
+    box.appendChild(empty);
+  }
+  updateChatInputState();
+}
+
+// Minimal SSE reader: splits a text/event-stream body into `data: ...`
+// frames and parses each as JSON. Calls onData(parsedObj) per frame; a
+// false return stops reading. The literal `[DONE]` marker is treated as
+// {type:"done"}. The reader is always released.
+async function _consumeSSEStream(body, onData) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    let keepGoing = true;
+    while (keepGoing) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) !== -1) {
+        const rawFrame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const dataLines = rawFrame.split("\n")
+          .filter(l => l.startsWith("data:"))
+          .map(l => l.slice(5).trimStart());
+        if (!dataLines.length) continue;
+        const payload = dataLines.join("\n");
+        if (payload === "[DONE]") { keepGoing = false; break; }
+        try {
+          const obj = JSON.parse(payload);
+          if (onData(obj) === false) { keepGoing = false; break; }
+        } catch (e) { /* ignore non-JSON keep-alive frames */ }
+      }
+    }
+  } finally {
+    try { reader.cancel(); } catch (e) {}
+  }
+}
+
+// Minimal, dependency-free Markdown renderer for the subset LLM replies
+// commonly use: fenced code blocks, inline code, bold, italic, headings, and
+// line breaks. HTML is escaped BEFORE any markup is applied, and fenced code
+// blocks are extracted first so their content is never touched by the inline
+// rules — so agent output can never inject raw HTML/script into the page.
+function _escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function renderMarkdown(text) {
+  const blocks = [];
+  // 1. Pull out fenced code blocks (```lang\n...\n```).
+  let work = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, _lang, code) => {
+    blocks.push(`<pre><code>${_escapeHtml(code.replace(/\n$/, ""))}</code></pre>`);
+    return `\u0000B${blocks.length - 1}\u0000`;
+  });
+  // 2. Escape everything else.
+  work = _escapeHtml(work);
+  // 3. Headings (longest marker first so ## isn't eaten by #).
+  work = work.replace(/^######\s+(.*)$/gm, "<h6>$1</h6>")
+            .replace(/^#####\s+(.*)$/gm, "<h5>$1</h5>")
+            .replace(/^####\s+(.*)$/gm, "<h4>$1</h4>")
+            .replace(/^###\s+(.*)$/gm, "<h3>$1</h3>")
+            .replace(/^##\s+(.*)$/gm, "<h2>$1</h2>")
+            .replace(/^#\s+(.*)$/gm, "<h1>$1</h1>");
+  // 4. Bold then italic (bold first so ** wins over *).
+  work = work.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  work = work.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  // 5. Inline code.
+  work = work.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  // 6. Line breaks (code-block placeholders have no \n, so they're untouched).
+  work = work.replace(/\n/g, "<br>");
+  // 7. Restore code blocks (<pre> preserves their internal newlines).
+  work = work.replace(/\u0000B(\d+)\u0000/g, (_m, i) => blocks[+i]);
+  return work;
+}
+
+async function sendChatMessage(text) {
+  if (state.chatBusy || !text.trim()) return;
+  if (!state.chatConvId) state.chatConvId = _chatId();
+
+  chatMessages.push({ id: _chatId(), role: "user", parts: [{ type: "text", text }] });
+  _appendChatMsg("user").textContent = text;
+
+  const asstBody = _appendChatMsg("assistant");
+  const toolBox = document.createElement("div");
+  toolBox.className = "chat-msg-tools";
+  asstBody.parentElement.insertBefore(toolBox, asstBody);
+  const toolCalls = {};   // toolCallId -> status element
+  let acc = "";
+
+  state.chatBusy = true;
+  updateChatInputState();
+  chatAbort = new AbortController();
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: chatAbort.signal,
+      body: JSON.stringify({
+        trigger: "submit-message",
+        id: state.chatConvId,
+        messages: chatMessages,
+      }),
+    });
+    if (!res.ok || !res.body) {
+      const errText = await res.text().catch(() => res.statusText);
+      throw new Error(`Chat request failed (${res.status}): ${errText}`);
+    }
+    await _consumeSSEStream(res.body, (data) => {
+      switch (data.type) {
+        case "text-delta":
+          if (typeof data.delta === "string") {
+            acc += data.delta;
+            asstBody.innerHTML = renderMarkdown(acc);
+            _scrollChatToBottom();
+          }
+          break;
+        case "tool-input-start":
+          if (data.toolName) {
+            const el = document.createElement("div");
+            el.className = "chat-tool pending";
+            el.dataset.name = data.toolName;
+            el.textContent = "\u25B8 " + data.toolName;
+            toolBox.appendChild(el);
+            toolCalls[data.toolCallId] = el;
+            _scrollChatToBottom();
+          }
+          break;
+        case "tool-output-available":
+          { const el = toolCalls[data.toolCallId];
+            if (el) { el.className = "chat-tool done"; el.textContent = "\u2713 " + el.dataset.name; } }
+          break;
+        case "tool-output-error":
+        case "tool-output-denied":
+          { const el = toolCalls[data.toolCallId];
+            if (el) { el.className = "chat-tool error"; el.textContent = "\u2717 " + el.dataset.name; } }
+          break;
+        case "error":
+          throw new Error(data.error?.message || data.errorText || "stream error");
+        case "done":
+          return false;
+      }
+      return true;
+    });
+    chatMessages.push({ id: _chatId(), role: "assistant", parts: [{ type: "text", text: acc }] });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      asstBody.textContent = acc ? acc + "\n\n[aborted]" : "[aborted]";
+    } else {
+      asstBody.classList.add("error");
+      asstBody.textContent = "Error: " + (e.message || String(e));
+      console.error("Chat stream failed:", e);
+    }
+  } finally {
+    chatAbort = null;
+    state.chatBusy = false;
+    updateChatInputState();
+  }
+}
+
+function initChatWidget() {
+  const form = document.getElementById("chat-form");
+  const input = document.getElementById("chat-input");
+  if (!form || !input) return;
+  clearChatWidget();
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || state.chatBusy) return;
+    input.value = "";
+    input.style.height = "auto";
+    sendChatMessage(text);
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 140) + "px";
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
+}
+
+// Reset the chat widget to a fresh empty conversation. Each conversation is
+// locked to exactly one flowgraph (mirrors the old desktop GUI's open_file(),
+// which cleared the chat and reset the agent session on every load) — a chat
+// history should never span two different underlying .grc files.
 function resetChatFrame(preserveGraph = false) {
   localStorage.removeItem("grc_active_conv_id");
   setUrlConvId(null);
   if (preserveGraph) state.preserveGrcOnReset = true;
-  document.getElementById("chat-frame").src = `/?r=${crypto.randomUUID()}`;
+  state.chatConvId = null;
+  clearChatWidget();
 }
 
 // For callers that are ABANDONING whatever's currently loaded to start
@@ -136,21 +364,12 @@ function resetConversation() {
   resetChatFrame(true);
 }
 
-// Reads the chat iframe's OWN current pathname directly and fresh — never
-// through state.lastPath, which is only written by pollConversationState's
-// 750ms tick and can lag the iframe's real location by up to that long (plus
-// whatever async work runs before it writes). Used by any decision that must
-// be correct within a tick or two of a real navigation (e.g. hiding Clear
-// History the instant a message is sent), not just eventually-consistent.
+// Native widget: the active-conversation "path" is derived from the widget's
+// own conversation id ("/" = fresh, "/{id}" = active) — preserves the
+// pathname contract the rest of the state machine keys off of, without an
+// iframe contentWindow to read.
 function getChatFramePath() {
-  try {
-    const win = document.getElementById("chat-frame")?.contentWindow;
-    const loc = win?.location;
-    if (!loc || loc.href === "about:blank") return undefined;
-    return loc.pathname;
-  } catch (e) {
-    return undefined; // cross-origin/transitional — same as pollConversationState's own guard
-  }
+  return state.chatConvId ? "/" + state.chatConvId : "/";
 }
 
 // The dashboard's own URL (as opposed to the chat iframe's internal one,
@@ -173,14 +392,9 @@ function setUrlConvId(convId) {
 }
 
 function restoreSession() {
-  const url = new URL(window.location);
-  const urlConv = url.searchParams.get("conv");
-  const activeConvId = urlConv ? "/" + urlConv : localStorage.getItem("grc_active_conv_id");
-  if (activeConvId && activeConvId !== "/") {
-    document.getElementById("chat-frame").src = activeConvId;
-  } else {
-    startNewConversation();
-  }
+  // Native widget: full client-side conversation restore (persisting
+  // messages[] to localStorage + rehydrating) is Phase 2. Start fresh.
+  clearChatWidget();
 }
 restoreSession();
 
@@ -277,52 +491,12 @@ async function pollConversationState() {
   // transition and firing a duplicate open.
   if (state.autoOpenInFlight) return;
   const btn = document.getElementById("browse-btn");
-  let fresh = true;
-  let currentPath;
-  try {
-    const frame = document.getElementById("chat-frame");
-    if (!frame) return;
-    const win = frame.contentWindow;
-    if (!win) return;
-    const loc = win.location;
-    if (!loc || loc.href === "about:blank") return;
-    currentPath = loc.pathname;
-    fresh = currentPath === "/";
-  } catch (e) {
-    // Transitional or loading states must exit early to prevent fake "/" transitions and premature unloads
-    return;
-  }
+  let currentPath = getChatFramePath();
+  if (currentPath === undefined) return;
+  const fresh = currentPath === "/";
 
   btn.disabled = !fresh;
   btn.title = fresh ? "" : "Start a new conversation to load a different file";
-
-  // Self-heal from a conversation id that no longer resolves to anything
-  // (its IndexedDB entry got cleared some other way, or the URL was
-  // hand-edited): the vendor widget renders nothing for it — no textarea,
-  // no sidebar, no send button — which then persists across a page reload
-  // via grc_active_conv_id, and every OTHER recovery control (the "+"
-  // new-conversation button, the model selector) hides itself too, since
-  // they all depend on finding something inside that now-empty iframe. A
-  // few consecutive empty polls during ordinary page-transition/mount
-  // timing is normal, so only treat it as truly stuck after enough of
-  // them in a row (~4.5s at this 750ms interval).
-  if (!fresh) {
-    let hasContent = false;
-    try {
-      hasContent = !!document.getElementById("chat-frame")
-        .contentWindow.document.querySelector("textarea");
-    } catch (e) {}
-    if (hasContent) {
-      state.brokenIframePolls = 0;
-    } else if (++state.brokenIframePolls >= 6) {
-      console.warn("Conversation appears unrecoverable — resetting.");
-      state.brokenIframePolls = 0;
-      resetConversation();
-      return;
-    }
-  } else {
-    state.brokenIframePolls = 0;
-  }
 
   // Check version changes on backend to auto-refresh if agent changed params!
   try {
@@ -333,64 +507,13 @@ async function pollConversationState() {
     }
   } catch (e) {}
 
-  if (currentPath !== state.lastPath) {
-    setUrlConvId(currentPath);
-    if (currentPath === "/") {
-      localStorage.removeItem("grc_active_conv_id");
-      // Suppressed for a resetChatFrame(true) repair (chat-widget-only —
-      // see resetConversation) — consumed once so it can't swallow a later,
-      // genuine abandon (e.g. the vendor widget's own internal "New
-      // conversation" click, which this transition check is the only way
-      // this page ever learns about).
-      if (state.preserveGrcOnReset) {
-        state.preserveGrcOnReset = false;
-      } else {
-        unloadGrc();
-      }
-    } else {
-      localStorage.setItem('grc_active_conv_id', currentPath);
-
-      const mappedGrc = getSessionGrcPath(currentPath);
-      if (mappedGrc) {
-        state.autoOpenInFlight = true;
-        try {
-          const res = await fetch("/grc/open", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({path: mappedGrc})
-          });
-          const data = await res.json();
-          if (data.ok) {
-            addSessionHistory(currentPath, mappedGrc);
-            if (data.canvas_ready === false) {
-              // refresh() itself now sets the error message — see its own
-              // ordering note (openGraph's identical case).
-              await refresh(false, false, data.canvas_error);
-            } else {
-              await refresh();
-            }
-          }
-        } catch (e) {
-          console.error("Auto-open GRC failed:", e);
-        } finally {
-          state.autoOpenInFlight = false;
-        }
-      } else {
-        try {
-          const statusRes = await fetch("/grc/status").then(r => r.json());
-          if (statusRes.path) {
-            saveSessionGrcPath(currentPath, statusRes.path);
-            addSessionHistory(currentPath, statusRes.path);
-          } else {
-            state.isGrcLoaded = false;
-            await refresh();
-          }
-        } catch (e) {}
-      }
-    }
-    state.lastPath = currentPath;
-  }
-  integrateSettings();
+  // Version polling above handles agent-driven auto-refresh. The iframe-era
+  // pathname→file auto-open/session-mapping is gone (the file is loaded
+  // explicitly via Browse/openGraph; new-conversation unload is driven
+  // directly by startNewConversation()->unloadGrc). Full widget history
+  // persistence is Phase 2.
+  state.lastPath = currentPath;
+  updateChatInputState();
 }
 
 async function unloadGrc() {
@@ -436,158 +559,16 @@ async function doValidate() {
 
 setInterval(pollConversationState, 750);
 
-function integrateSettings() {
-  try {
-    const iframe = document.getElementById("chat-frame");
-    if (!iframe) return;
-    const doc = iframe.contentDocument || iframe.contentWindow?.document;
-    const overlay = document.getElementById("left-sidebar-overlay");
-    if (!doc || !overlay) return;
-
-    // Inject spacing and display rules to force the sidebar to be visible inside the iframe
-    if (!doc.getElementById("parent-injected-padding")) {
-      const styleSheet = doc.createElement("style");
-      styleSheet.id = "parent-injected-padding";
-      styleSheet.textContent = `
-        aside, .sidebar, [role="navigation"] {
-          display: flex !important;
-          visibility: visible !important;
-          width: 240px !important;
-          min-width: 240px !important;
-          max-width: 240px !important;
-          position: relative !important;
-          padding-bottom: 90px !important;
-        }
-      `;
-      doc.head.appendChild(styleSheet);
-    }
-
-    // Find the sidebar container.
-    let sidebar = doc.querySelector("aside") || doc.querySelector(".sidebar") || doc.querySelector("[role='navigation']");
-
-    if (!sidebar) {
-      // Fallback 1: search for logo or text indicators
-      const elements = doc.querySelectorAll("a, button, div, span");
-      let indicator = null;
-      for (const el of elements) {
-        const txt = (el.textContent || "").trim().toLowerCase();
-        if (txt === "qoherent grc agent" || txt === "pydantic ai" || txt === "new conversation" || txt === "+ new conversation") {
-          indicator = el;
-          break;
-        }
-      }
-      if (indicator) {
-        let parent = indicator.parentElement;
-        while (parent && parent !== doc.body) {
-          const className = parent.className || "";
-          if (
-            parent.tagName === "ASIDE" ||
-            parent.classList.contains("sidebar") ||
-            className.includes("sidebar") ||
-            className.includes("border-r") ||
-            className.includes("w-64") ||
-            className.includes("w-60")
-          ) {
-            sidebar = parent;
-            break;
-          }
-          parent = parent.parentElement;
-        }
-        if (!sidebar) {
-          sidebar = indicator.parentElement?.parentElement;
-        }
-      }
-    }
-
-    if (!sidebar) {
-      // Fallback 2: Look for the first child of the first flex/grid container under root
-      const root = doc.getElementById("root") || doc.body;
-      const flexContainer = Array.from(root.querySelectorAll("*")).find(el => {
-        try {
-          const display = iframe.contentWindow.getComputedStyle(el).display;
-          return display === "flex" || display === "grid";
-        } catch (e) {
-          return false;
-        }
-      });
-      if (flexContainer && flexContainer.firstElementChild) {
-        sidebar = flexContainer.firstElementChild;
-      }
-    }
-
-    // Clear History (this overlay) must NEVER appear during an active
-    // conversation. Hide is the default, applied BEFORE the sidebar
-    // detection below — so a transient throw mid-detection (e.g. the iframe
-    // momentarily inaccessible during navigation) can't leave it stuck
-    // visible mid-session. It's only (re)shown when on the fresh screen AND
-    // a visible sidebar is actually found.
-    //
-    // Reads the iframe's live path directly (getChatFramePath()), NOT
-    // state.lastPath: this poll runs every 300ms but state.lastPath is only
-    // written by pollConversationState's separate 750ms tick, so trusting it
-    // here left a live-measured ~734ms window, after every single message
-    // sent, where this overlay showed on top of an already-active
-    // conversation — a real, cited-elsewhere-as-"sometimes" bug, not
-    // theoretical.
-    overlay.style.display = "none";
-    if (getChatFramePath() === "/" && sidebar) {
-      const rect = sidebar.getBoundingClientRect();
-      const style = iframe.contentWindow.getComputedStyle(sidebar);
-      const isVisible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-      if (isVisible) {
-        // Show overlay and match dimensions dynamically
-        overlay.style.display = "flex";
-        overlay.style.width = `${rect.width}px`;
-      }
-    }
-  } catch (err) {
-    console.error("integrateSettings failed:", err);
-  }
-
-  // Keep chat input disabled if no GRC file is loaded
-  try {
-    updateChatInputState();
-  } catch (e) {}
-
-  integrateModelSelector();
-  integrateNewConversationButton();
-  renderSessionHistory();
-}
-
 function updateChatInputState() {
-  const iframe = document.getElementById("chat-frame");
-  if (!iframe) return;
-  const doc = iframe.contentDocument || iframe.contentWindow?.document;
-  if (!doc) return;
-
-  const textarea = doc.querySelector("textarea");
-  const sendBtn = doc.querySelector("form button") || doc.querySelector("textarea ~ button") || doc.querySelector("button[type='submit']");
-
-  if (!textarea) return;
-
-  if (!state.isGrcLoaded) {
-    textarea.disabled = true;
-    textarea.placeholder = "Please load a GRC file using the Browse button to start chatting.";
-    textarea.style.opacity = "0.5";
-    textarea.style.cursor = "not-allowed";
-    if (sendBtn) {
-      sendBtn.disabled = true;
-      sendBtn.style.opacity = "0.3";
-      sendBtn.style.cursor = "not-allowed";
-    }
-  } else {
-    if (textarea.disabled) {
-      textarea.disabled = false;
-      textarea.placeholder = "What would you like to know?";
-      textarea.style.opacity = "1";
-      textarea.style.cursor = "text";
-      if (sendBtn) {
-        sendBtn.disabled = false;
-        sendBtn.style.opacity = "1";
-        sendBtn.style.cursor = "pointer";
-      }
-    }
-  }
+  const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("chat-send-btn");
+  if (!input || !sendBtn) return;
+  const enable = state.isGrcLoaded && !state.chatBusy;
+  input.disabled = !enable;
+  sendBtn.disabled = !enable;
+  input.placeholder = state.isGrcLoaded
+    ? "Ask about your flowgraph…"
+    : "Load a flowgraph (Browse) to start chatting.";
 }
 
 function setMsg(text, cls) {
@@ -820,7 +801,6 @@ async function refresh(forceCanvasReload = false, canvasReady, canvasError) {
     // re-point the iframe at a canvas already known to be dead.
     const effectiveCanvasReady =
       canvasReady !== undefined ? canvasReady : statusRes.canvas_ready !== false;
-    state.canvasReady = effectiveCanvasReady;
     const canvasIframe = document.getElementById("canvas-iframe");
     const canvasPlaceholder = document.getElementById("canvas-placeholder");
     if (!effectiveCanvasReady) {
@@ -893,6 +873,8 @@ async function refresh(forceCanvasReload = false, canvasReady, canvasError) {
     // isGrcLoaded). Leave the prior value as the best guess; the next
     // successful refresh() call will correct any stale state.
     setMsg(String(e), "error");
+  } finally {
+    updateChatInputState();
   }
 }
 
@@ -917,13 +899,13 @@ function syncCanvasSize(force) {
   }).catch(() => {});
 }
 
-// Layout-forcing work (ResizeObserver's initial callback + integrateSettings
-// reading getBoundingClientRect) used to run during parse, before all
-// subresources (chat iframe) had loaded -> "Layout was forced before the page
-// was fully loaded" / flash of unstyled content. Defer both behind `load`.
+// The session-history panel needs a periodic refresh to reflect localStorage
+// changes and hide itself once a conversation is active. (The old
+// integrateSettings 300ms poll drove this; that iframe-sidebar-sniffing
+// heuristic is gone with the iframe.)
 function startLayoutDependentWork() {
   new ResizeObserver(() => syncCanvasSize(false)).observe(document.getElementById("canvas-container"));
-  setInterval(integrateSettings, 300);
+  setInterval(renderSessionHistory, 300);
 }
 if (document.readyState === "complete") startLayoutDependentWork();
 else window.addEventListener("load", startLayoutDependentWork, { once: true });
@@ -951,7 +933,7 @@ function renderModelSuggestions() {
     : state.openrouterModel;
   list.innerHTML = `<option value="${suggestion}"></option>`;
   document.getElementById("model-name-label").textContent = suggestion;
-  const overlay = document.getElementById("model-selector-overlay");
+  const overlay = document.getElementById("chat-toolbar");
   overlay.title = provider === "ollama"
     ? "Pull a model first: ollama pull <name>."
     : provider === "ollama_cloud"
@@ -977,7 +959,7 @@ function updateRestartBadge() {
   // badge and show the error in the overlay title instead.
   if (state.activeProviderError) {
     badge.classList.remove("visible");
-    document.getElementById("model-selector-overlay").title =
+    document.getElementById("chat-toolbar").title =
       `Saved config failed to build: ${state.activeProviderError}`;
     return;
   }
@@ -1035,7 +1017,7 @@ async function loadModelSettings() {
 async function saveModelSettings() {
   const provider = document.getElementById("model-provider-select").value;
   const model = document.getElementById("model-name-input").value;
-  const overlay = document.getElementById("model-selector-overlay");
+  const overlay = document.getElementById("chat-toolbar");
   overlay.classList.remove("saved", "error");
   try {
     const res = await fetch("/grc/settings", {
@@ -1085,68 +1067,6 @@ async function confirmModelNameEdit() {
   if (!model) { cancelModelNameEdit(); return; } // empty — treat as cancel, not a save of ""
   cancelModelNameEdit();
   await saveModelSettings();
-}
-
-// Position our own provider/model controls directly over the chat
-// widget's model combobox button so they read as one native toolbar
-// control instead of a bolted-on side panel.
-function integrateModelSelector() {
-  try {
-    const iframe = document.getElementById("chat-frame");
-    const doc = iframe.contentDocument || iframe.contentWindow?.document;
-    const overlay = document.getElementById("model-selector-overlay");
-    if (!doc || !overlay) return;
-
-    const combobox = doc.querySelector('[role="combobox"]');
-    if (!combobox) { overlay.style.display = "none"; return; }
-
-    if (!doc.getElementById("parent-injected-combobox-hide")) {
-      const style = doc.createElement("style");
-      style.id = "parent-injected-combobox-hide";
-      // visibility (not display) so the toolbar's layout doesn't reflow
-      style.textContent = `[role="combobox"] { visibility: hidden !important; }`;
-      doc.head.appendChild(style);
-    }
-
-    const boxRect = combobox.getBoundingClientRect();
-    const iframeRect = iframe.getBoundingClientRect();
-    overlay.style.display = "flex";
-    overlay.style.left = `${iframeRect.left + boxRect.left}px`;
-    overlay.style.top = `${iframeRect.top + boxRect.top}px`;
-    overlay.style.height = `${boxRect.height}px`;
-    overlay.style.width = `${Math.max(boxRect.width, 340)}px`;
-  } catch (err) {
-    console.error("integrateModelSelector failed:", err);
-  }
-}
-
-// Position a "+" new-conversation button just left of the chat's own send
-// button, so it reads as part of the same toolbar.
-function integrateNewConversationButton() {
-  try {
-    const iframe = document.getElementById("chat-frame");
-    const doc = iframe.contentDocument || iframe.contentWindow?.document;
-    const btn = document.getElementById("new-conversation-btn");
-    if (!doc || !btn) return;
-
-    const sendBtn = doc.querySelector('form button[type="submit"]') || doc.querySelector("form button");
-    if (!sendBtn) { btn.style.display = "none"; return; }
-
-    const sendRect = sendBtn.getBoundingClientRect();
-    const iframeRect = iframe.getBoundingClientRect();
-    const size = sendRect.height || 36;
-    btn.style.display = "flex";
-    btn.style.width = `${size}px`;
-    btn.style.height = `${size}px`;
-    btn.style.left = `${iframeRect.left + sendRect.left - size - 8}px`;
-    btn.style.top = `${iframeRect.top + sendRect.top}px`;
-    // Always enabled — even while already on a fresh conversation, a file
-    // can be loaded with no message sent yet, and this is the only way
-    // back to Browse in that state (see startNewConversation).
-    btn.disabled = false;
-  } catch (err) {
-    console.error("integrateNewConversationButton failed:", err);
-  }
 }
 
 // ---- Session history: previous conversations, each locked to the .grc
@@ -1201,7 +1121,7 @@ function renderSessionHistory() {
   const iframe = document.getElementById("chat-frame");
   let bottomOffset = 96;
   try {
-    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
     const toolbar = doc && doc.querySelector(".sticky.bottom-0");
     if (toolbar) bottomOffset = toolbar.getBoundingClientRect().height;
   } catch (e) { /* keep fallback */ }
@@ -1219,11 +1139,10 @@ function renderSessionHistory() {
     row.className = "session-history-entry";
     const name = (entry.path || "").split("/").pop() || entry.path || "untitled";
     row.innerHTML = `<span class="she-name">${name}</span><span class="she-time">${timeAgo(entry.ts)}</span>`;
-    // A pending entry (file loaded but never chatted in) has no real
-    // conversation id to resume — reopen the file fresh instead.
+    // No iframe to resume into — reopen the file fresh. Phase 2 will restore
+    // the widget's saved messages[] for the conversation.
     makeRowFocusable(row, () => {
-      if (entry.convId) document.getElementById("chat-frame").src = entry.convId;
-      else openGraph(entry.path);
+      openGraph(entry.path);
     });
     list.appendChild(row);
   }
@@ -1237,17 +1156,17 @@ async function checkProviderHealth() {
   const apikeyBtn = document.getElementById("apikey-btn");
   if (!badge) return;
   badge.className = "checking";
-  badge.textContent = "checking...";
+  badge.textContent = "";
   try {
     const res = await fetch("/grc/health").then(r => r.json());
     if (res.ok) {
       badge.className = "healthy";
-      badge.textContent = "connected";
+      badge.textContent = "";
       badge.title = res.message;
       apikeyBtn.style.display = "none";
     } else {
       badge.className = "unhealthy";
-      badge.textContent = "disconnected";
+      badge.textContent = "";
       badge.title = res.message;
       // Show the API key button for cloud providers that need a key
       if (res.provider === "ollama_cloud" || res.provider === "openrouter") {
@@ -1304,6 +1223,62 @@ async function saveApiKey() {
     setMsg(String(e), "error");
   }
 }
+
+function initResize() {
+  const handle = document.getElementById("resize-handle");
+  const chatPane = document.getElementById("chat-pane");
+  if (!handle || !chatPane) return;
+
+  let dragging = false;
+
+  const applyWidth = (clientX) => {
+    const containerWidth = window.innerWidth;
+    const newWidth = containerWidth - clientX;
+    // Floor 360px for the chat pane, leave >=300px for the GRC pane.
+    const w = Math.max(360, Math.min(newWidth, containerWidth - 300));
+    // Inline min-width:0 lets the drag go below the CSS 580px desktop floor.
+    // These inline values are cleared on pointerup / window-resize below
+    // 900px (see respectResponsive) so the @media stacking rule stays in
+    // charge on narrow viewports — inline beats stylesheet, so without that
+    // clear the responsive fallback would silently die after the first drag.
+    chatPane.style.minWidth = "0px";
+    chatPane.style.flex = `0 0 ${w}px`;
+    chatPane.style.width = `${w}px`;
+  };
+
+  const respectResponsive = () => {
+    if (window.innerWidth <= 900) {
+      chatPane.style.flex = "";
+      chatPane.style.width = "";
+      chatPane.style.minWidth = "";
+    }
+  };
+  window.addEventListener("resize", respectResponsive);
+
+  handle.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    // setPointerCapture routes all subsequent pointer events to the handle
+    // regardless of where the pointer is — including a pointerup outside the
+    // window — so the drag always ends cleanly. No "stuck resizing" state, and
+    // no need for the old body.resizing iframe pointer-events hack.
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add("active");
+    e.preventDefault();
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    applyWidth(e.clientX);
+  });
+  const endDrag = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("active");
+    try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
+    respectResponsive();
+  };
+  handle.addEventListener("pointerup", endDrag);
+  handle.addEventListener("pointercancel", endDrag);
+}
 // All handlers are bound HERE (after every function above is defined) rather
 // than via inline onclick=/onload= attributes in the HTML. An inline
 // onload="integrateSettings()" on the chat iframe used to fire BEFORE this
@@ -1320,7 +1295,7 @@ document.getElementById("reset-conversation-btn").addEventListener("click", rese
 document.getElementById("new-conversation-btn").addEventListener("click", startNewConversation);
 document.getElementById("browse-up-btn").addEventListener("click", browseUp);
 document.getElementById("browse-cancel-btn").addEventListener("click", closeBrowse);
-document.getElementById("chat-frame").addEventListener("load", integrateSettings);
+initChatWidget();
 document.getElementById("model-provider-select").addEventListener("change", onModelProviderChange);
 document.getElementById("model-name-label").addEventListener("click", enterModelNameEditMode);
 document.getElementById("model-name-label").addEventListener("keydown", function(e) {
@@ -1333,6 +1308,7 @@ document.getElementById("model-name-input").addEventListener("keydown", function
   else if (e.key === "Escape") { e.preventDefault(); cancelModelNameEdit(); }
 });
 loadModelSettings();
+initResize();
 
 // ---- API key dialog wiring ----
 document.getElementById("apikey-btn").addEventListener("click", openApiKeyDialog);

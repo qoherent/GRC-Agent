@@ -48,6 +48,111 @@
     overflow: hidden;
   }
 
+  #canvas-container {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: 0;
+    position: relative;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+  }
+  #canvas-iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: none;
+    background: #fff;
+  }
+  #canvas-placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 30px;
+    z-index: 5;
+    background-image: radial-gradient(var(--border) 1px, transparent 1px);
+    background-size: 24px 24px;
+    background-position: center;
+  }
+  .placeholder-glow-container {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 20px;
+  }
+  .placeholder-glow {
+    position: absolute;
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(224, 166, 58, 0.15) 0%, rgba(224, 166, 58, 0) 70%);
+    animation: placeholderPulse 3s infinite ease-in-out;
+  }
+  @keyframes placeholderPulse {
+    0%, 100% { transform: scale(0.95); opacity: 0.5; }
+    50% { transform: scale(1.15); opacity: 1; }
+  }
+  .placeholder-icon {
+    position: relative;
+    color: var(--accent);
+    filter: drop-shadow(0 0 8px rgba(224, 166, 58, 0.25));
+    transition: transform 0.3s ease;
+  }
+  #canvas-placeholder:hover .placeholder-icon {
+    transform: scale(1.08);
+  }
+  .placeholder-title {
+    font-family: var(--sans);
+    font-size: 16px;
+    color: var(--text);
+    font-weight: 600;
+    margin-bottom: 8px;
+    letter-spacing: 0.02em;
+  }
+  #canvas-placeholder-text {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    max-width: 380px;
+    margin-bottom: 22px;
+  }
+  #browse-btn {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 18px;
+    background: linear-gradient(135deg, var(--accent) 0%, #c4902d 100%);
+    border: 1px solid var(--accent);
+    color: #0b0f14;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 4px 12px rgba(224, 166, 58, 0.2);
+  }
+  #browse-btn:hover:not(:disabled) {
+    background: linear-gradient(135deg, #f0b548 0%, var(--accent) 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(224, 166, 58, 0.3);
+  }
+  #browse-btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  #browse-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    background: var(--surface-2);
+    border-color: var(--border);
+    color: var(--text-dim);
+    box-shadow: none;
+  }
+
   #file-block {
     flex: 0 0 auto;
     padding: 14px 16px 12px;
@@ -115,57 +220,21 @@
   #msg.ok { color: var(--ok); }
   #msg.info { color: var(--accent); }
 
-  /* ---- History overlay (over the chat widget's own left sidebar) ---- */
-  #left-sidebar-overlay {
-    position: absolute;
-    left: 0;
-    bottom: 0;
-    width: 260px;
+  /* ---- Chat toolbar: provider/model picker + health badge + session
+     controls, as a native always-visible bar at the top of the chat pane
+     (no longer an overlay positioned over an iframe combobox). ---- */
+  #chat-toolbar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
     background: var(--surface);
-    border-right: 1px solid var(--border);
-    z-index: 10;
-    display: none;
-    flex-direction: column;
+    min-height: 44px;
   }
-  #history-block {
-    padding: 8px 12px;
-    border-top: 1px solid var(--border);
-  }
-  #history-block button {
-    width: 100%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 6px 10px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    color: var(--danger);
-    border-radius: 6px;
-    font-family: var(--sans);
-    font-size: 12px;
-    cursor: pointer;
-  }
-  #history-block button:hover { border-color: var(--danger-bg); background: var(--danger-bg); }
-  #history-block button svg { flex: 0 0 auto; }
-
-  /* ---- Model provider/name picker, overlaid on the chat's own (inert)
-     model dropdown so it sits directly in the chat toolbar. The model NAME
-     is read-only text (#model-name-label) until clicked — swapping in an
-     always-editable input risked an accidental keystroke/blur silently
-     saving a change the user didn't mean to make. Clicking swaps in
-     #model-name-input plus explicit confirm/cancel buttons; nothing saves
-     until confirm is clicked (or Enter pressed) — see integrateModelSelector
-     in panel.js. ---- */
-  #model-selector-overlay {
-    position: fixed;
-    display: none;
-    align-items: center;
-    gap: 6px;
-    z-index: 20;
-  }
-  #model-selector-overlay select,
-  #model-selector-overlay input {
+  #chat-toolbar select,
+  #chat-toolbar input {
     height: 28px;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -175,11 +244,33 @@
     font-size: 12px;
     padding: 4px 6px;
   }
-  #model-selector-overlay select { flex: 0 0 auto; max-width: 84px; }
-  #model-selector-overlay input { flex: 1 1 auto; min-width: 220px; }
+  #chat-toolbar select { flex: 0 0 auto; max-width: 120px; }
+  #chat-toolbar input { flex: 1 1 auto; min-width: 120px; }
+  .chat-toolbar-spacer { flex: 1 1 auto; }
+  /* The model NAME is read-only text (#model-name-label) until clicked —
+     swapping in an always-editable input risked an accidental keystroke/blur
+     silently saving a change the user didn't mean to make. Clicking swaps in
+     #model-name-input plus explicit confirm/cancel; nothing saves until
+     confirm (or Enter) — see panel.js. */
+  #chat-toolbar #clear-history-btn,
+  #chat-toolbar #new-conversation-btn,
+  #chat-toolbar #reset-conversation-btn {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+  }
+  #chat-toolbar #clear-history-btn:hover { color: var(--danger); border-color: var(--danger); }
+  #chat-toolbar #new-conversation-btn:hover,
+  #chat-toolbar #reset-conversation-btn:hover { color: var(--accent); border-color: var(--accent); }
   #model-name-label {
     flex: 1 1 auto;
-    min-width: 140px;
+    min-width: 130px;
     height: 28px;
     display: inline-flex;
     align-items: center;
@@ -204,11 +295,11 @@
   #model-name-confirm-btn { color: var(--ok); border-color: var(--ok); }
   #model-name-confirm-btn:hover { background: var(--ok-bg); }
   #model-name-cancel-btn:hover { border-color: var(--danger); color: var(--danger); }
-  #model-selector-overlay.error #model-name-input { border-color: var(--danger); }
+  #chat-toolbar.error #model-name-input { border-color: var(--danger); }
   /* Persistent (no timeout) — unlike the transient .saved/.error flash,
      this stays up as long as the running Agent's active model differs from
      what's saved to disk, since a saved change never takes effect without
-     an app restart (see AGENTS.md). integrateModelSelector re-derives this
+     an app restart (see AGENTS.md). updateRestartBadge re-derives this
      from /grc/settings' active_provider/active_model vs provider/model on
      every poll, so it's correct even right after a page reload — not a
      one-shot flag that only shows up immediately after clicking confirm. */
@@ -234,28 +325,16 @@
   /* ---- Provider health indicator ---- */
   #provider-health {
     flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 100px;
-    font-family: var(--mono);
-    font-size: 10px;
-    font-weight: 600;
-    white-space: nowrap;
-    cursor: help;
-  }
-  #provider-health.healthy { background: var(--ok-bg); color: var(--ok); }
-  #provider-health.unhealthy { background: var(--danger-bg); color: var(--danger); }
-  #provider-health.checking { background: var(--surface-2); color: var(--text-dim); }
-  #provider-health::before {
-    content: "";
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    background: currentColor;
-    flex: 0 0 auto;
+    display: inline-block;
+    cursor: help;
+    box-shadow: 0 0 3px rgba(0, 0, 0, 0.4);
   }
+  #provider-health.healthy { background: var(--ok); }
+  #provider-health.unhealthy { background: var(--danger); }
+  #provider-health.checking { background: var(--text-dim); }
 
   /* ---- API key button ---- */
   #apikey-btn {
@@ -276,7 +355,7 @@
     background: rgba(4, 6, 9, .6);
     align-items: center;
     justify-content: center;
-    z-index: 50;
+    z-index: 100;
   }
   #apikey-dialog-overlay.open { display: flex; }
   #apikey-dialog {
@@ -317,21 +396,8 @@
   #apikey-save-btn { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
   #apikey-save-btn:hover { background: var(--accent); color: var(--bg); }
 
-  /* ---- New-conversation button, overlaid just left of the chat's send
-     button ---- */
-  #new-conversation-btn {
-    position: fixed;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    border-radius: 50%;
-    z-index: 20;
-  }
-  #new-conversation-btn:disabled { opacity: .35; cursor: not-allowed; }
-
   /* ---- Session history list, shown above the chat input until a
-     conversation is active ---- */
+      conversation is active ---- */
   #session-history-panel {
     position: absolute;
     left: 0;
@@ -400,28 +466,129 @@
     display: flex;
     flex-direction: column;
     background: var(--surface);
-    border-left: 1px solid var(--border);
     position: relative;
   }
-  #chat-pane iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
-
-  /* ---- Always-available escape hatch: unlike every other chat-pane
-     control, this one does NOT depend on finding anything inside the
-     iframe's own DOM, so it still works even when the chat widget itself
-     is broken (e.g. a stale/garbage conversation id) and every overlay
-     that DOES depend on iframe introspection has hidden itself. ---- */
-  #reset-conversation-btn {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    width: 26px;
-    height: 26px;
-    padding: 0;
-    border-radius: 6px;
-    opacity: .5;
-    z-index: 30;
+  #chat-messages {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
-  #reset-conversation-btn:hover { opacity: 1; }
+  .chat-msg { max-width: 88%; }
+  .chat-msg.user { align-self: flex-end; }
+  .chat-msg .chat-msg-role {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 3px;
+  }
+  .chat-msg .chat-msg-body {
+    padding: 8px 11px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .chat-msg .chat-msg-body p { margin: 0 0 6px; }
+  .chat-msg .chat-msg-body p:last-child { margin-bottom: 0; }
+  .chat-msg .chat-msg-body code {
+    font-family: var(--mono);
+    background: rgba(127,127,127,0.18);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+  .chat-msg .chat-msg-body pre {
+    background: rgba(0,0,0,0.32);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    margin: 6px 0;
+  }
+  .chat-msg .chat-msg-body pre code { background: none; padding: 0; font-size: 12px; }
+  .chat-msg .chat-msg-body h1,.chat-msg .chat-msg-body h2,.chat-msg .chat-msg-body h3,
+  .chat-msg .chat-msg-body h4 { margin: 8px 0 4px; line-height: 1.3; }
+  .chat-msg .chat-msg-body h1 { font-size: 16px; }
+  .chat-msg .chat-msg-body h2 { font-size: 15px; }
+  .chat-msg .chat-msg-body h3 { font-size: 14px; }
+  .chat-msg .chat-msg-body ul,.chat-msg .chat-msg-body ol { margin: 4px 0; padding-left: 20px; }
+  .chat-msg.user .chat-msg-body { background: var(--accent-dim); color: var(--text); white-space: pre-wrap; }
+  .chat-msg-tools { display: flex; flex-direction: column; gap: 3px; margin-bottom: 4px; }
+  .chat-tool {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 2px 8px;
+    border-left: 2px solid var(--border);
+    line-height: 1.4;
+  }
+  .chat-tool.pending { color: var(--accent); border-left-color: var(--accent); }
+  .chat-tool.done { color: var(--ok); border-left-color: var(--ok); }
+  .chat-tool.error { color: var(--danger); border-left-color: var(--danger); }
+  .chat-msg.assistant .chat-msg-body { background: var(--surface-2); border: 1px solid var(--border); }
+  .chat-msg .chat-msg-body.error { border-color: var(--danger); color: var(--danger); }
+  #chat-form {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  #chat-input {
+    flex: 1 1 auto;
+    resize: none;
+    min-height: 38px;
+    max-height: 140px;
+    padding: 8px 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  #chat-input:focus { outline: none; border-color: var(--accent); }
+  #chat-input:disabled { opacity: 0.5; }
+  #chat-send-btn {
+    flex: 0 0 auto;
+    padding: 0 18px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  #chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #chat-empty {
+    margin: auto;
+    text-align: center;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  /* ---- Resizable handle ---- */
+  #resize-handle {
+    flex: 0 0 6px;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    background: transparent;
+    border-left: 1px solid var(--border);
+    z-index: 30;
+    position: relative;
+    transition: border-color 0.15s ease;
+  }
+  #resize-handle:hover, #resize-handle.active {
+    border-left-color: var(--accent);
+  }
 
   /* ---- Browse dialog ---- */
   #browse-overlay {
@@ -431,7 +598,7 @@
     background: rgba(4, 6, 9, .6);
     align-items: center;
     justify-content: center;
-    z-index: 10;
+    z-index: 100;
   }
   #browse-overlay.open { display: flex; }
   #browse-dialog {
@@ -509,14 +676,20 @@
 <div id="grc-pane">
   <div id="msg"></div>
 
-  <div id="canvas-container" style="flex: 1; min-height: 0; width: 100%; border: 0; position: relative; background: #fff;">
-    <iframe id="canvas-iframe" src="" style="width: 100%; height: 100%; border: 0; display: none;"></iframe>
-    <div id="canvas-placeholder" style="width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: var(--text-dim); font-family: var(--mono); font-size: 13px; text-align: center; padding: 20px;">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 12px; color: var(--accent);"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+  <div id="canvas-container">
+    <iframe id="canvas-iframe" src=""></iframe>
+    <div id="canvas-placeholder">
+      <div class="placeholder-glow-container">
+        <div class="placeholder-glow"></div>
+        <svg class="placeholder-icon" width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
+        </svg>
+      </div>
+      <div class="placeholder-title">GRC Companion Workspace</div>
       <span id="canvas-placeholder-text">No flowgraph loaded. Click Browse to choose one.</span>
-      <button id="browse-btn" style="margin-top: 14px;">
+      <button id="browse-btn">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
-        Browse&hellip;
+        Browse Flowgraph&hellip;
       </button>
     </div>
   </div>
@@ -543,46 +716,50 @@
     </a>
   </div>
 </div>
-
+<div id="resize-handle"></div>
 <div id="chat-pane">
-  <button id="reset-conversation-btn" title="Chat looks stuck or blank? Click to reset.">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
-  </button>
-  <iframe id="chat-frame" title="Chat"></iframe>
-  <div id="left-sidebar-overlay">
-    <div id="history-block">
-      <button id="clear-history-btn">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16z"/></svg>
-        Clear History
-      </button>
-    </div>
+  <div id="chat-toolbar">
+    <span id="provider-health" title="Provider connectivity status"></span>
+    <select id="model-provider-select" title="Chat model provider">
+      <option value="ollama">Ollama</option>
+      <option value="ollama_cloud">Ollama Cloud</option>
+      <option value="openrouter">OpenRouter</option>
+    </select>
+    <span id="model-name-label" tabindex="0" role="button" title="Click to change the model name"></span>
+    <input id="model-name-input" type="text" list="model-name-suggestions" placeholder="model name" style="display:none;">
+    <datalist id="model-name-suggestions"></datalist>
+    <button id="model-name-confirm-btn" title="Confirm" style="display:none;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+    </button>
+    <button id="model-name-cancel-btn" title="Cancel" style="display:none;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <span id="model-restart-badge" title="A saved model change only takes effect after restarting the app.">restart to apply</span>
+    <button id="apikey-btn" title="Set API key for this provider" style="display:none;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+    </button>
+    <span class="chat-toolbar-spacer"></span>
+    <button id="clear-history-btn" title="Clear the chat history">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16z"/></svg>
+    </button>
+    <button id="new-conversation-btn" title="Start a new conversation / load a different file">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button id="reset-conversation-btn" title="Chat looks stuck or blank? Click to reset.">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
+    </button>
   </div>
+  <div id="chat-messages" aria-live="polite">
+    <div id="chat-empty">Load a flowgraph to start chatting.</div>
+  </div>
+  <form id="chat-form">
+    <textarea id="chat-input" placeholder="Ask about your flowgraph…" rows="1" disabled></textarea>
+    <button id="chat-send-btn" type="submit" disabled>Send</button>
+  </form>
   <div id="session-history-panel">
     <div id="session-history-header">Recent Sessions</div>
     <div id="session-history-list"></div>
   </div>
-</div>
-
-<div id="model-selector-overlay">
-  <select id="model-provider-select" title="Chat model provider">
-    <option value="ollama">Ollama</option>
-    <option value="ollama_cloud">Ollama Cloud</option>
-    <option value="openrouter">OpenRouter</option>
-  </select>
-  <span id="model-name-label" tabindex="0" role="button" title="Click to change the model name"></span>
-  <input id="model-name-input" type="text" list="model-name-suggestions" placeholder="model name" style="display:none;">
-  <datalist id="model-name-suggestions"></datalist>
-  <button id="model-name-confirm-btn" title="Confirm" style="display:none;">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
-  </button>
-  <button id="model-name-cancel-btn" title="Cancel" style="display:none;">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
-  </button>
-  <span id="model-restart-badge" title="A saved model change only takes effect after restarting the app.">restart to apply</span>
-  <span id="provider-health" title="Provider connectivity status"></span>
-  <button id="apikey-btn" title="Set API key for this provider" style="display:none;">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-  </button>
 </div>
 
 <div id="apikey-dialog-overlay">
@@ -596,10 +773,6 @@
     </div>
   </div>
 </div>
-
-<button id="new-conversation-btn" title="Start a new conversation / load a different file">
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-</button>
 
 <div id="browse-overlay">
   <div id="browse-dialog">

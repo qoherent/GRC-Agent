@@ -16,7 +16,7 @@ def reset_active():
     """web_app's active flowgraph is a module-level singleton (mirrors the
     real single-session server) — reset it around each test so they don't
     depend on execution order. Tests that hit /grc/open (e.g.
-    test_open_valid_path_then_inspect, test_grc_render_endpoint) spawn a
+    test_open_valid_path_then_inspect) spawn a
     genuine canvas_app.py + broadwayd subprocess — TestClient runs the real
     app, not a mock. Teardown terminates only the processes this test run
     spawned (tracked PIDs), never a global `pkill`/`killall` that would
@@ -133,7 +133,7 @@ def test_panel_serves_dashboard():
     res = client.get("/grc/panel")
     assert res.status_code == 200
     assert "grc-pane" in res.text
-    assert "chat-frame" in res.text
+    assert "chat-messages" in res.text
     # The dashboard logic is extracted into panel.js (no inline script) —
     # the HTML must reference it rather than ship the logic inline.
     assert "/grc/panel.js" in res.text
@@ -149,17 +149,16 @@ def test_panel_js_served():
     assert "function refresh(" in res.text
 
 
-def test_root_serves_chat_widget_not_dashboard():
-    """Regression guard: '/' must stay the chat widget's own route, not the
-    dashboard — the vendor bundle hardcodes pathname === '/' as its own
-    "fresh conversation" sentinel and silently renders blank at any other
-    path (confirmed by inspecting the vendor JS directly — see web.py's own
-    comment on the route-swap below). Swapping this back would reintroduce
-    that bug."""
+def test_root_redirects_to_dashboard():
+    """'/' redirects to the dashboard at /grc/panel. The chat UI is now a
+    native widget embedded in the dashboard itself — no separate vendor
+    iframe at root — so the old "preserve '/' for the chat widget" contract
+    is gone (it existed only because the vendor bundle hardcoded pathname
+    '/' as its fresh-conversation sentinel)."""
     res = client.get("/")
     assert res.status_code == 200
-    assert web_app.BRAND_NAME in res.text
-    assert "grc-pane" not in res.text
+    assert "grc-pane" in res.text
+    assert "chat-messages" in res.text
 
 
 def test_settings_endpoints(tmp_path, monkeypatch):
@@ -365,23 +364,6 @@ def test_canvas_app_reload_uses_loopback_address():
     assert 'url = f"http://localhost:{web_port}/grc/reload"' not in source, (
         "canvas_app.py must not rely on localhost resolution for the reload ping"
     )
-
-
-def test_grc_render_endpoint():
-    # Try calling render when no file is loaded (should fail with 400)
-    res = client.get("/grc/render")
-    assert res.status_code == 400
-
-    # Load a file first
-    path = str((Path(__file__).parent / "data" / "dial_tone.grc").resolve())
-    res = client.post("/grc/open", json={"path": path})
-    assert res.status_code == 200
-
-    # Call render (should succeed with 200 and return a png image)
-    res = client.get("/grc/render")
-    assert res.status_code == 200
-    assert res.headers["content-type"] == "image/png"
-    assert len(res.content) > 1000  # valid image size
 
 
 # ── New comprehensive tests for the .env consolidation + audit fixes ────────

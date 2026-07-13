@@ -164,11 +164,10 @@ def grc_file(tmp_path):
 
 
 def _simulate_conversation_start(page, conv_id="/fake-conv-1"):
+    # Native widget: a conversation is "active" once state.chatConvId is set
+    # (getChatFramePath() then returns "/{id}"). No iframe pathname to spoof.
     page.evaluate(
-        """(convId) => {
-            const win = document.getElementById('chat-frame').contentWindow;
-            win.history.pushState({}, '', convId);
-        }""",
+        """(convId) => { state.chatConvId = convId.replace(/^\\//, ''); }""",
         conv_id,
     )
 
@@ -206,10 +205,8 @@ def test_reset_conversation_preserves_loaded_flowgraph(live_server, grc_file, pa
     assert status["path"] == str(grc_file), (
         "resetting the chat widget must never close the loaded flowgraph"
     )
-    iframe_path = page.evaluate(
-        "document.getElementById('chat-frame').contentWindow.location.pathname"
-    )
-    assert iframe_path == "/", "the reset button must still actually reset the chat"
+    conv = page.evaluate("() => state.chatConvId")
+    assert conv is None, "the reset button must still actually reset the chat widget"
 
 
 def test_new_conversation_button_still_unloads_flowgraph(live_server, grc_file, page):
@@ -226,62 +223,56 @@ def test_new_conversation_button_still_unloads_flowgraph(live_server, grc_file, 
     assert status["path"] is None
 
 
-def test_clear_history_overlay_hides_promptly_after_conversation_starts(live_server, page):
-    # Regression test for the audit's ~734ms-measured race: integrateSettings
-    # (300ms poll) used to trust state.lastPath (written only by the slower,
-    # independently-scheduled 750ms pollConversationState), so the overlay
-    # could show over an already-active conversation until that other timer
-    # next happened to fire. Racing the two real setInterval timers against
-    # a wall-clock wait is inherently non-deterministic (their relative phase
-    # depends on exact page-load timing, not just the interval lengths) — so
-    # this instead calls pushState and integrateSettings() back to back in
-    # one synchronous evaluate(), guaranteeing no timer can slip in between,
-    # to test the actual logic distinction (fresh read vs. stale cache)
-    # rather than hoping to win a race against it.
-    page.goto(f"{BASE_URL}/grc/panel")
-    page.wait_for_timeout(1200)  # let integrateSettings' sidebar probe find real vendor content
-
-    overlay_before = page.eval_on_selector(
-        "#left-sidebar-overlay", "el => getComputedStyle(el).display"
-    )
-    assert overlay_before == "flex", (
-        "expected Clear History to show on a genuinely fresh load — "
-        "otherwise this test would pass for the wrong reason"
-    )
-
-    overlay_after = page.evaluate(
-        """() => {
-            const win = document.getElementById('chat-frame').contentWindow;
-            win.history.pushState({}, '', '/fake-conv-race-test');
-            integrateSettings();
-            return getComputedStyle(document.getElementById('left-sidebar-overlay')).display;
-        }"""
-    )
-    assert overlay_after == "none"
-
-
-def test_url_reflects_active_conversation_and_restores_on_reload(live_server, page):
-    # Regression test for the audit's finding that the dashboard's own URL
-    # never changed at all, so a reload or shared link could only ever fall
-    # back to localStorage. Confirms the URL is now genuinely authoritative
-    # by clearing localStorage before reloading.
+def test_session_history_hides_once_conversation_starts(live_server, page):
+    # The session-history panel only shows on a fresh conversation
+    # (getChatFramePath() === "/"). Once a conversation is active
+    # (state.chatConvId set), it must hide. The old iframe version of this
+    # was a live-measured ~734ms race between two independent timers
+    # (integrateSettings vs pollConversationState); the native widget has a
+    # single source of truth (state.chatConvId), so the distinction is checked
+    # synchronously in one evaluate — no timer race to win or lose.
     page.goto(f"{BASE_URL}/grc/panel")
     page.wait_for_timeout(500)
-
-    _simulate_conversation_start(page, "/fake-conv-url-test")
-    page.wait_for_timeout(1000)  # a poll tick to sync the parent URL
-
-    assert "conv=fake-conv-url-test" in page.url
-
-    page.evaluate("localStorage.removeItem('grc_active_conv_id')")
-    reload_url = page.url
-    page.goto(reload_url)
-    page.wait_for_timeout(800)
-
-    iframe_path = page.evaluate(
-        "document.getElementById('chat-frame').contentWindow.location.pathname"
+    display = page.evaluate(
+        """() => {
+            localStorage.setItem('grc_session_history',
+              JSON.stringify([{convId: null, path: 'x.grc', ts: Date.now()}]));
+            state.chatConvId = null;
+            renderSessionHistory();
+            const before = getComputedStyle(document.getElementById('session-history-panel')).display;
+            state.chatConvId = 'fake-conv';
+            renderSessionHistory();
+            const after = getComputedStyle(document.getElementById('session-history-panel')).display;
+            return [before, after];
+        }"""
     )
-    assert iframe_path == "/fake-conv-url-test"
+    assert display[0] == "block", "session history should show on a fresh conversation"
+    assert display[1] == "none", "session history must hide once a conversation starts"
+
+
+def test_clear_chat_widget_resets_conversation_state(live_server, page):
+    # The native widget owns conversation state in memory (chatMessages +
+    # state.chatConvId), not in an iframe pathname. clearChatWidget() must
+    # drop both, leaving a fresh empty conversation — the equivalent of the
+    # old "URL reflects active conversation" guarantee, now checked directly
+    # against the widget's own state rather than a browser URL/iframe path.
+    page.goto(f"{BASE_URL}/grc/panel")
+    page.wait_for_timeout(500)
+    result = page.evaluate(
+        """() => {
+            state.chatConvId = 'pre-existing';
+            chatMessages.push({id: 'x', role: 'user', parts: [{type: 'text', text: 'hi'}]});
+            clearChatWidget();
+            return {
+                convId: state.chatConvId,
+                msgCount: chatMessages.length,
+                emptyShown: !!document.getElementById('chat-empty'),
+            };
+        }"""
+    )
+    assert result["convId"] is None, "clearChatWidget must clear chatConvId"
+    assert result["msgCount"] == 0, "clearChatWidget must clear the message history"
+    assert result["emptyShown"], "clearChatWidget must show the empty placeholder"
 
 
 def test_canvas_timeout_leaves_chat_enabled_and_clears_banner_on_close(
@@ -318,13 +309,7 @@ def test_canvas_timeout_leaves_chat_enabled_and_clears_banner_on_close(
     placeholder_text = page.eval_on_selector("#canvas-placeholder-text", "el => el.textContent")
     assert "Flowgraph loaded, but the canvas failed to connect" in placeholder_text
 
-    is_disabled = page.evaluate(
-        """() => {
-            const doc = document.getElementById('chat-frame').contentDocument;
-            const textarea = doc && doc.querySelector('textarea');
-            return textarea ? textarea.disabled : null;
-        }"""
-    )
+    is_disabled = page.evaluate("() => document.getElementById('chat-input').disabled")
     assert is_disabled is False, "chat must stay enabled — the flowgraph itself did load"
 
     _http_json("POST", "/grc/close", base_url=canvas_failure_server)
@@ -379,56 +364,27 @@ def test_canvas_ready_state_recovers_after_successful_reload_ping(
     assert status["canvas_error"] is None
 
 
-def test_poll_conversation_state_guards_against_duplicate_open(live_server, grc_file, page):
-    # Regression test: pollConversationState only wrote state.lastPath AFTER
-    # its own await fetch("/grc/open", ...) resolved, and that call can
-    # legitimately take up to the ~20s canvas-ready deadline — so a later
-    # 750ms tick firing while an earlier call was still pending used to see
-    # the same "path changed" condition and fire ANOTHER /grc/open for the
-    # same path, each one killing whatever canvas the previous call had just
-    # spawned before it could ever become ready (web.py's own
-    # "last-writer-wins" semantics for a concurrent /grc/open). Fires a
-    # second call directly, after giving the first just enough time to reach
-    # its own slow /grc/open await, rather than waiting on the real
-    # setInterval — a synchronous race is deterministic in a way a
-    # wall-clock one against a real timer isn't (see this file's own
-    # docstring/other tests for the same preference).
-    open_requests = []
-    page.on(
-        "request",
-        lambda req: open_requests.append(req)
-        if req.url.endswith("/grc/open") and req.method == "POST"
-        else None,
-    )
-
+def test_native_chat_toolbar_renders_and_input_gates_on_file(live_server, grc_file, page):
+    # The chat UI is now a native widget (no iframe). On a cold load with no
+    # flowgraph, the toolbar controls must render and the chat input must be
+    # disabled; after opening a file, the input enables (updateChatInputState
+    # gates on state.isGrcLoaded, driven from refresh()'s finally).
     page.goto(f"{BASE_URL}/grc/panel")
-    page.wait_for_timeout(500)
-
-    conv_id = "/fake-conv-reentrancy-test"
-    page.evaluate(
-        """([convId, path]) => {
-            const mapping = JSON.parse(localStorage.getItem('grc_session_mapping') || '{}');
-            mapping[convId] = path;
-            localStorage.setItem('grc_session_mapping', JSON.stringify(mapping));
-            const win = document.getElementById('chat-frame').contentWindow;
-            win.history.pushState({}, '', convId);
-        }""",
-        [conv_id, str(grc_file)],
+    page.wait_for_timeout(800)
+    ui = page.evaluate(
+        """() => ({
+            toolbar: !!document.getElementById('chat-toolbar'),
+            provider: !!document.getElementById('model-provider-select'),
+            label: !!document.getElementById('model-name-label'),
+            input: !!document.getElementById('chat-input'),
+            send: !!document.getElementById('chat-send-btn'),
+            inputDisabledNoFile: document.getElementById('chat-input').disabled,
+        })"""
     )
+    assert ui["toolbar"] and ui["provider"] and ui["label"] and ui["input"] and ui["send"]
+    assert ui["inputDisabledNoFile"] is True, "input must be disabled with no flowgraph loaded"
 
-    # Kick off the first tick without awaiting its completion — it should
-    # reach the mapped-path branch, notice the transition, and start its own
-    # (slow) /grc/open call.
-    page.evaluate("() => { window.__firstPoll = pollConversationState(); }")
-    page.wait_for_timeout(300)  # let it reach and start the slow /grc/open
-
-    assert len(open_requests) == 1, "expected the first tick's own /grc/open to have started"
-
-    # A second tick, as if the next 750ms interval had fired while the first
-    # is still pending.
-    page.evaluate("() => pollConversationState()")
-    page.wait_for_timeout(300)
-
-    assert len(open_requests) == 1, (
-        "a second tick firing while the first /grc/open is still pending must not start a duplicate"
-    )
+    _http_json("POST", "/grc/open", {"path": str(grc_file)})
+    page.wait_for_timeout(1200)  # poll tick's version-bump refresh() settles
+    input_disabled_after = page.evaluate("() => document.getElementById('chat-input').disabled")
+    assert input_disabled_after is False, "input must enable once a flowgraph loads"

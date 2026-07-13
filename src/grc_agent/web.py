@@ -1,6 +1,5 @@
 import asyncio
 import atexit
-import mimetypes
 import os
 import signal
 import subprocess
@@ -22,7 +21,7 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -62,8 +61,6 @@ from grc_agent.settings import (
 # saved from a launch in one directory was silently absent on the next launch
 # from another directory).
 load_dotenv(env_path())
-
-BRAND_NAME = "Qoherent GRC Agent"
 
 # The canvas_app.py subprocess (spawned per /grc/open, see below) runs a
 # small local HTTP control server on this port for resize (dashboard pane
@@ -535,8 +532,9 @@ app = agent.to_web(models=[model], deps=active)
 
 
 # 4. GNU Radio side panel: load a .grc file, inspect blocks/params/connections.
-# Routes live under /grc/* (two path segments) so they can't collide with
-# to_web()'s own '/' and '/{id}' chat routes.
+# Routes live under /grc/* (two path segments). to_web() still mounts the
+# streaming backend at /api/* and its own '/' and '/{id}' HTML routes, but our
+# index_redirect is inserted ahead of '/' so the dashboard owns the root.
 async def grc_inspect(request: Request) -> JSONResponse:
     if not active.is_loaded():
         return JSONResponse(
@@ -675,8 +673,8 @@ async def grc_open(request: Request) -> JSONResponse:
     # talks to a separate process over a fixed control port and touches no
     # shared in-process state, so holding the lock across it would stall
     # every other operation that serializes on this same lock (agent tool
-    # calls via FlowgraphProxy.get_state_lock(), /grc/close, /grc/reload,
-    # /grc/render) for the full timeout whenever a single canvas is
+    # calls via FlowgraphProxy.get_state_lock(), /grc/close, /grc/reload)
+    # for the full timeout whenever a single canvas is
     # slow/crashed — live-reproduced pre-fix.
     async with _flowgraph_state_lock:
         try:
@@ -887,84 +885,6 @@ async def grc_browse(request: Request) -> JSONResponse:
 
     parent = str(directory.parent) if directory.parent != directory else None
     return JSONResponse({"ok": True, "dir": str(directory), "parent": parent, "entries": entries})
-
-
-async def grc_render(request: Request) -> Response:
-    # Snapshot the path while holding the same lock open/close/reload use —
-    # without it, a concurrent close/open could change the target file out
-    # from under an in-flight render. The slow subprocess render itself runs
-    # outside the lock so it doesn't block other requests.
-    async with _flowgraph_state_lock:
-        path = active_path
-    if not path:
-        return Response("No .grc file loaded", status_code=400)
-
-    cmd = [
-        sys.executable,
-        "-c",
-        """
-import sys
-import cairo
-from grc_agent.adapter import get_gui_platform, gui_application_cls
-
-# Reuse the adapter's own GUI Platform/Application accessors instead of
-# hand-duplicating what they already do (build_library(), version/prefix
-# wiring) — this subprocess is still the sole importer of gnuradio here,
-# just via adapter.py rather than re-deriving it inline.
-p = get_gui_platform()
-app_cls = gui_application_cls()
-app = app_cls([], p)
-app.register(None)
-app.activate()
-
-fg = p.make_flow_graph(sys.argv[1])
-fg.update_elements_to_draw()
-
-temp_surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-temp_cr = cairo.Context(temp_surf)
-fg.create_labels(temp_cr)
-fg.create_shapes()
-
-x1, y1, x2, y2 = fg.get_extents()
-padding = 30
-width = int(x2 - x1 + 2 * padding)
-height = int(y2 - y1 + 2 * padding)
-
-width = max(10, min(width, 5000))
-height = max(10, min(height, 5000))
-
-surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-cr = cairo.Context(surf)
-cr.set_source_rgb(1.0, 1.0, 1.0)
-cr.rectangle(0, 0, width, height)
-cr.fill()
-
-cr.translate(-x1 + padding, -y1 + padding)
-fg.create_labels(cr)
-fg.create_shapes()
-fg.draw(cr)
-
-surf.write_to_png(sys.stdout.buffer)
-""",
-        path,
-    ]
-
-    try:
-        # Off the event loop: this spawns a fresh Python that imports gnuradio
-        # and builds the whole GUI platform + cairo render — multi-second work
-        # that would freeze every concurrent request on the single worker.
-        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, check=True)
-        return Response(proc.stdout, media_type="image/png")
-    except subprocess.CalledProcessError as e:
-        # check=True raises before `proc =` above ever binds, so the failing
-        # process's own captured stderr has to come from the exception object
-        # itself, not a local `proc` (a bare "if 'proc' in locals()" guard
-        # here was always False on this exact path and always fell through
-        # to the less useful str(e)).
-        stderr_msg = e.stderr.decode() if e.stderr else str(e)
-        return Response(f"Rendering failed: {stderr_msg}", status_code=500)
-    except Exception as e:
-        return Response(f"Rendering failed: {e}", status_code=500)
 
 
 async def grc_panel(request: Request) -> HTMLResponse:
@@ -1246,74 +1166,23 @@ async def grc_apikey_post(request: Request) -> JSONResponse:
     )
 
 
-# to_web() registered its own chat UI at '/' (and '/{id}'), fetched at runtime
-# from the @pydantic/ai-chat-ui CDN bundle, which hardcodes "Pydantic AI" as
-# its page title and sidebar label. There's no source to fork (only the
-# minified build is published), so relabeling it means proxying the CDN
-# assets ourselves and patching that one string in transit.
-#
-# The bundle also hardcodes an assumption that it owns the site root: it
-# reads window.location.pathname itself and treats exactly "/" as its
-# "show a fresh conversation" sentinel (confirmed by inspecting the vendor
-# JS directly — any other pathname makes it look up a nonexistent
-# conversation and silently render nothing, no error). So '/' must stay
-# the chat widget's own route — the GNU Radio dashboard lives at
-# /grc/panel instead, and the iframe in panel.html points at '/'.
-_original_index_route = next(r for r in app.router.routes if getattr(r, "path", None) == "/")
-_original_catchall_route = next(r for r in app.router.routes if getattr(r, "path", None) == "/{id}")
-_original_index_endpoint = _original_index_route.endpoint
-app.router.routes.remove(_original_index_route)
-app.router.routes.remove(_original_catchall_route)
-
-CHAT_UI_CDN_BASE = "https://cdn.jsdelivr.net/npm/@pydantic/ai-chat-ui/dist"
-_asset_cache: dict[str, bytes] = {}
-
-
-async def chat_ui_index(request: Request) -> HTMLResponse:
-    original = await _original_index_endpoint(request)
-    html = original.body.decode("utf-8")
-    html = html.replace(CHAT_UI_CDN_BASE + "/", "/chat-ui-assets/")
-    html = html.replace("Pydantic AI", BRAND_NAME)
-    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
-
-
-async def chat_ui_asset(request: Request) -> Response:
-    rel_path = request.path_params["path"]
-    url = f"{CHAT_UI_CDN_BASE}/{rel_path}"
-    if url not in _asset_cache:
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                content = resp.content
-        except httpx.HTTPError as e:
-            return Response(
-                f"// Failed to load {rel_path} from CDN: {e}",
-                media_type="application/javascript",
-                status_code=502,
-            )
-        if rel_path.endswith((".js", ".css")):
-            content = content.replace(b"Pydantic AI", BRAND_NAME.encode())
-        _asset_cache[url] = content
-    media_type = mimetypes.guess_type(rel_path)[0] or "application/octet-stream"
-    # These filenames are content-hashed by the upstream build, but our own
-    # patch can change their bytes across deploys without the name changing
-    # — never let the browser treat them as long-lived/immutable.
-    return Response(_asset_cache[url], media_type=media_type, headers={"Cache-Control": "no-cache"})
+# The chat UI is a native widget served on the dashboard at /grc/panel — no
+# CDN, no iframe. to_web() still mounts the streaming backend at /api/* (the
+# widget POSTs to /api/chat and consumes the SSE stream); root '/' just
+# redirects to the dashboard.
+async def index_redirect(request: Request) -> RedirectResponse:
+    return RedirectResponse("/grc/panel")
 
 
 # Inserted at the front (not appended) so these are matched before any
-# remaining to_web() routes.
+# remaining to_web() routes (to_web still mounts /api/*).
 app.router.routes[0:0] = [
-    Route("/", chat_ui_index, methods=["GET"]),
-    Route("/{conv_id}", chat_ui_index, methods=["GET"]),
-    Route("/chat-ui-assets/{path:path}", chat_ui_asset, methods=["GET"]),
+    Route("/", index_redirect, methods=["GET"]),
     Route("/grc/inspect", grc_inspect, methods=["GET"]),
     Route("/grc/open", grc_open, methods=["POST"]),
     Route("/grc/status", grc_status, methods=["GET"]),
     Route("/grc/close", grc_close, methods=["POST"]),
     Route("/grc/browse", grc_browse, methods=["GET"]),
-    Route("/grc/render", grc_render, methods=["GET"]),
     Route("/grc/reload", grc_reload, methods=["GET", "POST"]),
     Route("/grc/undo", grc_undo, methods=["POST"]),
     Route("/grc/redo", grc_redo, methods=["POST"]),

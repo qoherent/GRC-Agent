@@ -532,6 +532,11 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    # Isolate the module-level embedding-dimension cache so a prior test's
+    # real 768-dim entry doesn't cause a false dimension mismatch (768 != 3)
+    # that triggers a full DB rebuild instead of the cached dimension check
+    # this test is measuring.
+    monkeypatch.setattr("grc_agent.adapter._EMBEDDING_DIM_CACHE", {})
 
     from grc_agent.settings import save_settings
 
@@ -551,6 +556,11 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     conn.execute(
         "CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[3]);"
     )
+    # _db_meta must exist with the correct model name, otherwise
+    # _ensure_db_built deletes and rebuilds the DB (calling embed_document
+    # many times during ingestion, not just once for the dimension check).
+    conn.execute("CREATE TABLE _db_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,))
     conn.commit()
     conn.close()
 
@@ -573,6 +583,14 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     assert call_count == first_count, (
         "second query must not repeat the dimension check"
     )
+
+    # Clean up: the monkeypatched embed_document populated the module-level
+    # _EMBEDDING_DIM_CACHE with a 3-dim entry for this model. Without this
+    # cleanup, subsequent tests that use the real embed_document (768-dim)
+    # would see a dimension mismatch, delete the real DB, and rebuild it
+    # unnecessarily — or worse, leave a stale 3-dim DB behind.
+    from grc_agent.adapter import _EMBEDDING_DIM_CACHE
+    _EMBEDDING_DIM_CACHE.pop(model, None)
 
 
 # ==========================================

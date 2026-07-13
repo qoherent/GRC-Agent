@@ -101,6 +101,11 @@ class CanvasControlContext:
         # the SAME serialization on both sides of this comparison (see
         # _check_for_unsynced_edit below) avoids that.
         self.last_synced_export_hash = None
+        self.panning = False
+        self.pan_start_x = 0.0
+        self.pan_start_y = 0.0
+        self.pan_start_hadj = 0.0
+        self.pan_start_vadj = 0.0
 
     def apply_resize(self, width, height):
         if self.window:
@@ -475,9 +480,22 @@ def main():
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def _do_trigger_reload():
-        print("Auto-saving and reloading flowgraph...")
         try:
             if drawing_area and hasattr(drawing_area, "_flow_graph"):
+                # No-op guard: on_button_release fires trigger_reload() for
+                # EVERY non-middle-click release (including a plain select-
+                # click that changed nothing). Skip the disk write + reload
+                # ping entirely when the in-memory graph is unchanged since
+                # the last sync — the exact same gate _check_for_unsynced_edit
+                # (the 1.5s safety-net poll) already uses. Without this, every
+                # left-click on the canvas wrote the file and bumped the
+                # version, forcing a web-side reload + canvas refresh.
+                if (
+                    ctx.last_synced_export_hash is not None
+                    and flow_graph_content_hash(drawing_area._flow_graph)
+                    == ctx.last_synced_export_hash
+                ):
+                    return False
                 with lock_path.open("a", encoding="utf-8") as lock_file:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                     try:
@@ -592,13 +610,63 @@ def main():
 
     GLib.timeout_add(1500, _check_for_unsynced_edit)
 
-    # 1. Save/reload when dragging/moving blocks (button release)
+    def get_scrolled_window():
+        if not drawing_area:
+            return None
+        parent = drawing_area.get_parent()
+        while parent is not None and not isinstance(parent, Gtk.ScrolledWindow):
+            parent = parent.get_parent()
+        return parent
+
+    def on_button_press(widget, event):
+        if event.button == 2:  # Middle mouse click
+            scrolled_window = get_scrolled_window()
+            if scrolled_window:
+                ctx.panning = True
+                ctx.pan_start_x = event.x_root
+                ctx.pan_start_y = event.y_root
+                ctx.pan_start_hadj = scrolled_window.get_hadjustment().get_value()
+                ctx.pan_start_vadj = scrolled_window.get_vadjustment().get_value()
+                return True
+        return False
+
+    def on_motion_notify(widget, event):
+        if ctx.panning:
+            if event.state & Gdk.ModifierType.BUTTON2_MASK:
+                scrolled_window = get_scrolled_window()
+                if scrolled_window:
+                    dx = event.x_root - ctx.pan_start_x
+                    dy = event.y_root - ctx.pan_start_y
+                    hadj = scrolled_window.get_hadjustment()
+                    vadj = scrolled_window.get_vadjustment()
+
+                    new_h = ctx.pan_start_hadj - dx
+                    new_v = ctx.pan_start_vadj - dy
+
+                    new_h = max(hadj.get_lower(), min(new_h, hadj.get_upper() - hadj.get_page_size()))
+                    new_v = max(vadj.get_lower(), min(new_v, vadj.get_upper() - vadj.get_page_size()))
+
+                    hadj.set_value(new_h)
+                    vadj.set_value(new_v)
+                    return True
+            else:
+                ctx.panning = False
+        return False
+
     def on_button_release(widget, event):
-        trigger_reload()
+        if event.button == 2:
+            if ctx.panning:
+                ctx.panning = False
+                return True
+        else:
+            trigger_reload()
         return False
 
     if drawing_area:
+        drawing_area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
+        drawing_area.connect("button-press-event", on_button_press)
         drawing_area.connect("button-release-event", on_button_release)
+        drawing_area.connect("motion-notify-event", on_motion_notify)
 
     # 2. Save/reload when properties dialogs are closed (parameter edits)
     def on_window_added(application, win):
