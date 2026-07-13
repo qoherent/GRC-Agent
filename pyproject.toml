@@ -76,6 +76,9 @@ packages = ["src/grc_agent"]
 line-length = 100
 target-version = "py312"
 src = ["src"]
+# GNU-Radio-generated flowgraph companion scripts, not hand-authored source —
+# linting/rewriting them would make them diverge from GRC's own codegen output.
+extend-exclude = ["tests/data/*.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

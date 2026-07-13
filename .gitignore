@@ -37,10 +37,10 @@ src/grc_agent/vectors/
 tests/output/
 tmp/
 
-# inspect_graph eval experiment — generated artifacts only, scripts stay tracked
-experiments/inspect_eval/raw_outputs/
-experiments/inspect_eval/reports/
-experiments/inspect_eval/final_findings_and_causes.md
+# experiments/*/ eval pipelines — generated artifacts only, scripts stay tracked
+experiments/*/raw_outputs/
+experiments/*/reports/
+experiments/*/final_findings_and_causes.md
 
 # ---- Local agent/tool working dirs (not shared) ----
 .claude/

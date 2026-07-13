@@ -4,8 +4,8 @@ outputs. This module only owns the looping/IO — bring your own prompt-building
 functions to reuse it for any "review N things, then synthesize" task.
 """
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .ollama_client import chat_completion
 
