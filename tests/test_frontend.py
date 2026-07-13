@@ -403,3 +403,103 @@ def test_native_chat_toolbar_renders_and_input_gates_on_file(live_server, grc_fi
     page.wait_for_timeout(1200)  # poll tick's version-bump refresh() settles
     input_disabled_after = page.evaluate("() => document.getElementById('chat-input').disabled")
     assert input_disabled_after is False, "input must enable once a flowgraph loads"
+
+
+def test_chat_message_parts_render_in_chronological_order(live_server, page):
+    # Regression test: sendChatMessage used to keep one shared accumulator per
+    # event type (a single reasoning box, a single tool-call container, one
+    # text buffer) instead of one DOM element per part in arrival order — so a
+    # second "thinking" segment kept appending to the FIRST reasoning box
+    # (stuck ahead of every tool call), and text segments before/after a tool
+    # call collapsed into one bubble. It also rendered pydantic-ai's
+    # structured final-answer tool call (the "final_result" output tool,
+    # DEFAULT_OUTPUT_TOOL_NAME) as a raw Args/Result dump instead of the
+    # actual reply. This simulates the exact interleaved SSE sequence
+    # (reasoning -> tool -> text -> reasoning -> tool -> text -> final_result)
+    # via a mocked /api/chat response and asserts the resulting DOM order.
+    page.goto(f"{BASE_URL}/grc/panel")
+    page.wait_for_timeout(500)
+
+    frames = [
+        {"type": "reasoning-start"},
+        {"type": "reasoning-delta", "delta": "First thought. "},
+        {"type": "reasoning-end"},
+        {"type": "tool-input-start", "toolCallId": "call_1", "toolName": "inspect_graph"},
+        {"type": "tool-input-available", "toolCallId": "call_1", "input": {}},
+        {"type": "tool-output-available", "toolCallId": "call_1", "output": {"ok": True}},
+        {"type": "text-delta", "delta": "Here is what I found. "},
+        {"type": "reasoning-start"},
+        {"type": "reasoning-delta", "delta": "Second thought. "},
+        {"type": "reasoning-end"},
+        {"type": "tool-input-start", "toolCallId": "call_2", "toolName": "query_knowledge"},
+        {"type": "tool-input-available", "toolCallId": "call_2", "input": {"query": "noise"}},
+        {"type": "tool-output-available", "toolCallId": "call_2", "output": {"ok": True}},
+        {"type": "text-delta", "delta": "I added a noise source."},
+        {"type": "tool-input-start", "toolCallId": "call_3", "toolName": "final_result"},
+        {
+            "type": "tool-input-available",
+            "toolCallId": "call_3",
+            "input": {"actions_taken": ["Added noise_source"], "explanation": "Final summary."},
+        },
+        {
+            "type": "tool-output-available",
+            "toolCallId": "call_3",
+            "output": "Final result processed.",
+        },
+    ]
+    body = "".join(f"data: {json.dumps(f)}\n\n" for f in frames) + "data: [DONE]\n\n"
+
+    page.route(
+        "**/api/chat",
+        lambda route: route.fulfill(status=200, content_type="text/event-stream", body=body),
+    )
+
+    page.evaluate("() => sendChatMessage('test message')")
+    page.wait_for_timeout(1000)
+
+    result = page.evaluate(
+        """() => {
+            const asstMsg = document.querySelector('.chat-msg.assistant');
+            const parts = [...asstMsg.children].slice(1).map(el => ({
+                cls: el.className,
+                text: el.textContent,
+            }));
+            const toolNames = [...asstMsg.querySelectorAll('.chat-tool')].map(el => el.dataset.name);
+            return { parts, toolNames };
+        }"""
+    )
+
+    part_classes = [p["cls"] for p in result["parts"]]
+    reasoning_indices = [i for i, c in enumerate(part_classes) if c == "chat-msg-reasoning"]
+    tool_group_indices = [i for i, c in enumerate(part_classes) if c == "chat-msg-tools"]
+    text_indices = [i for i, c in enumerate(part_classes) if c == "chat-msg-body"]
+
+    assert len(reasoning_indices) == 2, (
+        f"expected two separate reasoning blocks, got parts: {part_classes}"
+    )
+    assert len(tool_group_indices) == 2, (
+        f"expected two separate tool-call groups, got parts: {part_classes}"
+    )
+    assert len(text_indices) >= 3, (
+        f"expected separate text bubbles split by intervening tool calls, got: {part_classes}"
+    )
+    assert (
+        reasoning_indices[0]
+        < tool_group_indices[0]
+        < text_indices[0]
+        < reasoning_indices[1]
+        < tool_group_indices[1]
+        < text_indices[1]
+    ), f"parts out of chronological order: {part_classes}"
+
+    assert "final_result" not in result["toolNames"], (
+        "the structured final-answer tool must not render as a generic tool call"
+    )
+    assert result["toolNames"] == ["inspect_graph", "query_knowledge"]
+
+    full_text = " ".join(p["text"] for p in result["parts"] if p["cls"] == "chat-msg-body")
+    assert "Final summary." in full_text, "final_result's explanation must render as reply text"
+
+    actions_parts = [p for p in result["parts"] if p["cls"] == "chat-msg-actions"]
+    assert len(actions_parts) == 1, "actions_taken must render as its own list"
+    assert "Added noise_source" in actions_parts[0]["text"]

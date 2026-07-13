@@ -198,6 +198,16 @@ function renderMarkdown(text) {
   return work;
 }
 
+// pydantic-ai's default structured-output tool name (DEFAULT_OUTPUT_TOOL_NAME
+// in pydantic_ai/_output.py) — used whenever an Agent's output_type includes
+// exactly one non-str structured type with no custom ToolOutput(name=...).
+// Both pydantic-ai's own Vercel AI SDK adapter and its reference chat UI
+// (@pydantic/ai-chat-ui) treat this identically to any other tool call on
+// the wire — there is no distinct frame type for it — so recognizing it here
+// is the intended way for a consumer to render it as the actual reply
+// instead of a raw Args/Result tool dump.
+const FINAL_RESULT_TOOL_NAME = "final_result";
+
 async function sendChatMessage(text) {
   if (state.chatBusy || !text.trim()) return;
   if (!state.chatConvId) state.chatConvId = _chatId();
@@ -205,19 +215,103 @@ async function sendChatMessage(text) {
   chatMessages.push({ id: _chatId(), role: "user", parts: [{ type: "text", text }] });
   _appendChatMsg("user").textContent = text;
 
-  const asstBody = _appendChatMsg("assistant");
-  const asstMsg = asstBody.parentElement;
+  const box = document.getElementById("chat-messages");
+  const empty = document.getElementById("chat-empty");
+  if (empty) empty.remove();
+  const asstMsg = document.createElement("div");
+  asstMsg.className = "chat-msg assistant";
+  const roleEl = document.createElement("div");
+  roleEl.className = "chat-msg-role";
+  roleEl.textContent = "assistant";
+  asstMsg.appendChild(roleEl);
+  box.appendChild(asstMsg);
+  _scrollChatToBottom();
 
-  // Reasoning (thinking) — collapsible <details> above tools.
-  let reasoningEl = null;
-  let reasoningAcc = "";
+  // Ordered parts: each text/reasoning/tool-call run is its own DOM element,
+  // appended to asstMsg in strict arrival order — matching the Vercel AI
+  // SDK's UIMessage.parts array (what @pydantic/ai-chat-ui itself renders
+  // from). A single shared accumulator per event type — one reasoning box,
+  // one tool box, one text buffer, as this used to be — collapses every
+  // "thinking" segment into one stale block positioned ahead of all tool
+  // calls, and every text segment into one block after them, regardless of
+  // when each actually streamed in relative to the tool calls between them.
+  let currentText = null;      // { el, acc } | null
+  let currentReasoning = null; // { el, acc } | null
+  let currentToolGroup = null; // the open .chat-msg-tools container | null
+  const toolCalls = {};        // toolCallId -> { el, outEl, argsAcc }
+  const finalResultCallIds = new Set();
+  const textSegments = [];     // every closed text run's content, in order
 
-  // Tool calls — each gets a status line + expandable output div.
-  const toolBox = document.createElement("div");
-  toolBox.className = "chat-msg-tools";
-  asstMsg.insertBefore(toolBox, asstBody);
-  const toolCalls = {};   // toolCallId -> { el, outEl, argsAcc }
-  let acc = "";
+  function endText() {
+    if (currentText) { textSegments.push(currentText.acc); currentText = null; }
+  }
+  function endReasoning() {
+    if (currentReasoning) {
+      const summary = currentReasoning.el.querySelector("summary");
+      if (summary) summary.textContent = "Thinking";
+      currentReasoning = null;
+    }
+  }
+  function endToolGroup() {
+    currentToolGroup = null;
+  }
+  function startText() {
+    endReasoning();
+    endToolGroup();
+    const el = document.createElement("div");
+    el.className = "chat-msg-body";
+    asstMsg.appendChild(el);
+    currentText = { el, acc: "" };
+  }
+  function appendText(delta) {
+    if (!delta) return;
+    if (!currentText) startText();
+    currentText.acc += delta;
+    currentText.el.innerHTML = renderMarkdown(currentText.acc);
+    _scrollChatToBottom();
+  }
+  function startReasoning() {
+    endText();
+    endToolGroup();
+    const el = document.createElement("details");
+    el.className = "chat-msg-reasoning";
+    el.innerHTML = "<summary>Thinking…</summary><div class='reasoning-body'></div>";
+    asstMsg.appendChild(el);
+    currentReasoning = { el, acc: "" };
+  }
+  function openToolGroup() {
+    endText();
+    endReasoning();
+    if (!currentToolGroup) {
+      currentToolGroup = document.createElement("div");
+      currentToolGroup.className = "chat-msg-tools";
+      asstMsg.appendChild(currentToolGroup);
+    }
+    return currentToolGroup;
+  }
+  function renderFinalResult(input) {
+    if (!input || typeof input !== "object") return;
+    // Always its own fresh bubble — never merged into whatever incidental
+    // narration text preceded it, since this is a semantically distinct
+    // "final answer", not a continuation of it.
+    endText();
+    endReasoning();
+    endToolGroup();
+    if (typeof input.explanation === "string" && input.explanation) {
+      appendText(input.explanation);
+    }
+    if (Array.isArray(input.actions_taken) && input.actions_taken.length) {
+      endText();
+      const ul = document.createElement("ul");
+      ul.className = "chat-msg-actions";
+      for (const action of input.actions_taken) {
+        const li = document.createElement("li");
+        li.textContent = String(action);
+        ul.appendChild(li);
+      }
+      asstMsg.appendChild(ul);
+    }
+  }
 
   state.chatBusy = true;
   updateChatInputState();
@@ -241,64 +335,64 @@ async function sendChatMessage(text) {
     await _consumeSSEStream(res.body, (data) => {
       switch (data.type) {
         case "text-delta":
-          if (typeof data.delta === "string") {
-            acc += data.delta;
-            asstBody.innerHTML = renderMarkdown(acc);
-            _scrollChatToBottom();
-          }
+          if (typeof data.delta === "string") appendText(data.delta);
           break;
         case "reasoning-start":
-          if (!reasoningEl) {
-            reasoningEl = document.createElement("details");
-            reasoningEl.className = "chat-msg-reasoning";
-            reasoningEl.innerHTML = "<summary>Thinking\u2026</summary><div class='reasoning-body'></div>";
-            asstMsg.insertBefore(reasoningEl, toolBox);
-          }
+          startReasoning();
           break;
         case "reasoning-delta":
-          if (reasoningEl && typeof data.delta === "string") {
-            reasoningAcc += data.delta;
-            const body = reasoningEl.querySelector(".reasoning-body");
-            if (body) body.textContent = reasoningAcc;
+          if (currentReasoning && typeof data.delta === "string") {
+            currentReasoning.acc += data.delta;
+            const body = currentReasoning.el.querySelector(".reasoning-body");
+            if (body) body.textContent = currentReasoning.acc;
             _scrollChatToBottom();
           }
           break;
         case "reasoning-end":
-          if (reasoningEl) {
-            reasoningEl.querySelector("summary").textContent = "Thinking";
-          }
+          endReasoning();
           break;
         case "tool-input-start":
+          if (data.toolName === FINAL_RESULT_TOOL_NAME) {
+            finalResultCallIds.add(data.toolCallId);
+            break;
+          }
           if (data.toolName) {
+            const group = openToolGroup();
             const el = document.createElement("div");
             el.className = "chat-tool pending";
             el.dataset.name = data.toolName;
-            el.textContent = "\u25B8 " + data.toolName;
+            el.textContent = "▸ " + data.toolName;
             const outEl = document.createElement("div");
             outEl.className = "chat-tool-output";
-            toolBox.appendChild(el);
-            toolBox.appendChild(outEl);
+            group.appendChild(el);
+            group.appendChild(outEl);
             toolCalls[data.toolCallId] = { el, outEl, argsAcc: "" };
             _scrollChatToBottom();
           }
           break;
         case "tool-input-delta":
+          if (finalResultCallIds.has(data.toolCallId)) break;
           { const tc = toolCalls[data.toolCallId];
             if (tc && typeof data.inputTextDelta === "string") {
               tc.argsAcc += data.inputTextDelta;
             } }
           break;
         case "tool-input-available":
+          if (finalResultCallIds.has(data.toolCallId)) {
+            renderFinalResult(data.input);
+            break;
+          }
           { const tc = toolCalls[data.toolCallId];
             if (tc && data.input !== undefined) {
               tc.argsAcc = typeof data.input === "string" ? data.input : JSON.stringify(data.input, null, 2);
             } }
           break;
         case "tool-output-available":
+          if (finalResultCallIds.has(data.toolCallId)) break;
           { const tc = toolCalls[data.toolCallId];
             if (tc) {
               tc.el.className = "chat-tool done";
-              tc.el.textContent = "\u2713 " + tc.el.dataset.name;
+              tc.el.textContent = "✓ " + tc.el.dataset.name;
               const out = data.output;
               tc.outEl.textContent = (tc.argsAcc ? "Args:\n" + tc.argsAcc + "\n\nResult:\n" : "Result:\n")
                 + (typeof out === "string" ? out : JSON.stringify(out, null, 2) || "(empty)");
@@ -307,10 +401,11 @@ async function sendChatMessage(text) {
           break;
         case "tool-output-error":
         case "tool-output-denied":
+          if (finalResultCallIds.has(data.toolCallId)) break;
           { const tc = toolCalls[data.toolCallId];
             if (tc) {
               tc.el.className = "chat-tool error";
-              tc.el.textContent = "\u2717 " + tc.el.dataset.name;
+              tc.el.textContent = "✗ " + tc.el.dataset.name;
               tc.outEl.textContent = data.errorText || data.error?.message || "error";
               tc.el.addEventListener("click", () => tc.outEl.classList.toggle("open"));
             } }
@@ -322,13 +417,24 @@ async function sendChatMessage(text) {
       }
       return true;
     });
-    chatMessages.push({ id: _chatId(), role: "assistant", parts: [{ type: "text", text: acc }] });
+    endText();
+    chatMessages.push({
+      id: _chatId(),
+      role: "assistant",
+      parts: [{ type: "text", text: textSegments.join("\n\n") }],
+    });
   } catch (e) {
+    endText();
     if (e.name === "AbortError") {
-      asstBody.textContent = acc ? acc + "\n\n[aborted]" : "[aborted]";
+      const el = document.createElement("div");
+      el.className = "chat-msg-body";
+      el.textContent = textSegments.length ? textSegments.join("\n\n") + "\n\n[aborted]" : "[aborted]";
+      asstMsg.appendChild(el);
     } else {
-      asstBody.classList.add("error");
-      asstBody.textContent = "Error: " + (e.message || String(e));
+      const el = document.createElement("div");
+      el.className = "chat-msg-body error";
+      el.textContent = "Error: " + (e.message || String(e));
+      asstMsg.appendChild(el);
       console.error("Chat stream failed:", e);
     }
   } finally {

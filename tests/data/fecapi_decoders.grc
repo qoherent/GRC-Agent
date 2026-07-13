@@ -165,6 +165,19 @@ blocks:
         - 562
         rotation: 0
         state: enabled
+-   name: noise_amp
+    id: variable
+    parameters:
+        comment: ''
+        value: '0.3'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 1080
+        - 840
+        state: enabled
 -   name: polys
     id: variable
     parameters:
@@ -206,6 +219,63 @@ blocks:
         - 10
         - 74
         rotation: 0
+        state: enabled
+-   name: add_cc
+    id: blocks_add_xx
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        num_inputs: '2'
+        type: float
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 1440
+        - 840
+        state: enabled
+-   name: add_dummy
+    id: blocks_add_xx
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        num_inputs: '2'
+        type: float
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 1800
+        - 280
+        state: enabled
+-   name: add_rep
+    id: blocks_add_xx
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        num_inputs: '2'
+        type: float
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 1800
+        - 0
         state: enabled
 -   name: analog_random_source_x_0
     id: analog_random_source_x
@@ -637,6 +707,26 @@ blocks:
         - 10
         rotation: 0
         state: enabled
+-   name: noise_source
+    id: analog_noise_source_x
+    parameters:
+        affinity: ''
+        alias: ''
+        amp: noise_amp
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        noise_type: analog.GR_GAUSSIAN
+        seed: '0'
+        type: float
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 1440
+        - 560
+        state: enabled
 -   name: puncpat
     id: parameter
     parameters:
@@ -756,13 +846,25 @@ blocks:
         rotation: 0
         state: enabled
 connections:
+-   - add_cc
+    - '0'
+    - fec_extended_decoder_0
+    - '0'
+-   - add_dummy
+    - '0'
+    - fec_extended_decoder_0_1_0
+    - '0'
+-   - add_rep
+    - '0'
+    - fec_extended_decoder_0_1
+    - '0'
 -   - analog_random_source_x_0
     - '0'
     - blocks_throttle_0
     - '0'
 -   - blocks_char_to_float_0
     - '0'
-    - fec_extended_decoder_0
+    - add_cc
     - '0'
 -   - blocks_char_to_float_0_0
     - '0'
@@ -782,11 +884,11 @@ connections:
     - '0'
 -   - blocks_char_to_float_0_2
     - '0'
-    - fec_extended_decoder_0_1
+    - add_rep
     - '0'
 -   - blocks_char_to_float_0_2_0
     - '0'
-    - fec_extended_decoder_0_1_0
+    - add_dummy
     - '0'
 -   - blocks_throttle_0
     - '0'
@@ -848,6 +950,18 @@ connections:
     - '0'
     - digital_map_bb_0_0_0_0
     - '0'
+-   - noise_source
+    - '0'
+    - add_cc
+    - '1'
+-   - noise_source
+    - '0'
+    - add_dummy
+    - '1'
+-   - noise_source
+    - '0'
+    - add_rep
+    - '1'
 metadata:
     file_format: 1
     grc_version: 3.10.9.2
