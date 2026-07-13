@@ -22,4 +22,3 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "a validation error if invalid.\n"
         "Answer concisely. Do not use LaTeX or TeX math notation; write math inline in plain text.\n"
     )
-

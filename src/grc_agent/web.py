@@ -366,8 +366,7 @@ def _spawn_broadway() -> None:
         broadway_procs.append(proc)
         _broadway_pidfile().write_text(str(proc.pid))
         print(
-            f"[grc-agent] Started broadwayd daemon on port {BROADWAY_PORT} "
-            f"display :{BROADWAY_PORT}"
+            f"[grc-agent] Started broadwayd daemon on port {BROADWAY_PORT} display :{BROADWAY_PORT}"
         )
     except Exception as e:
         print("[grc-agent] Failed to start broadwayd daemon:", e)
@@ -437,8 +436,6 @@ def _handle_sigterm(signum: int, frame: Any) -> None:
     already works correctly via the path described above."""
     _cleanup_procs()
     sys.exit(0)
-
-
 
 
 # Ollama connection errors get pydantic_ai's own sanctioned retry-with-backoff
@@ -522,7 +519,7 @@ agent = Agent(
     tools=grc_tools(),
     capabilities=[ProcessHistory(prune_history), StopGracefully(), web_search_cap, web_fetch_cap],
     model_settings=ModelSettings(extra_body={"think": True}),
-    retries={'tools': 3, 'output': 3},
+    retries={"tools": 3, "output": 3},
 )
 agent.output_validator(validate_flowgraph_state)
 
@@ -726,7 +723,8 @@ async def grc_open(request: Request) -> JSONResponse:
             with open(log_dir / "canvas.log", "wb") as canvas_log:
                 canvas_proc = subprocess.Popen(
                     [
-                        sys.executable, "-u",
+                        sys.executable,
+                        "-u",
                         str(Path(__file__).parent / "canvas_app.py"),
                         path,
                         str(CANVAS_CONTROL_PORT),
@@ -735,7 +733,7 @@ async def grc_open(request: Request) -> JSONResponse:
                     env=env,
                     stdout=canvas_log,
                     stderr=canvas_log,
-                    preexec_fn=os.setsid
+                    preexec_fn=os.setsid,
                 )
             canvas_launched = True
             print(f"[grc-agent] Started GRC Broadway canvas app for: {path}")
@@ -905,9 +903,7 @@ async def grc_panel_js(request: Request) -> Response:
     # no-cache: the file is patched across deploys without a content hash in
     # its name, so a stale browser cache would silently run an old version.
     panel_js = (Path(__file__).parent / "panel.js").read_text(encoding="utf-8")
-    return Response(
-        panel_js, media_type="text/javascript", headers={"Cache-Control": "no-cache"}
-    )
+    return Response(panel_js, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
 async def grc_reload(request: Request) -> JSONResponse:
@@ -1185,11 +1181,12 @@ async def grc_apikey_post(request: Request) -> JSONResponse:
     try:
         apply_settings()
     except Exception as e:
-        return JSONResponse({"ok": False, "message": f"Saved API key, but failed to reinitialize model: {e}"}, status_code=400)
+        return JSONResponse(
+            {"ok": False, "message": f"Saved API key, but failed to reinitialize model: {e}"},
+            status_code=400,
+        )
 
-    return JSONResponse(
-        {"ok": True, "message": f"{env_key} saved and applied dynamically."}
-    )
+    return JSONResponse({"ok": True, "message": f"{env_key} saved and applied dynamically."})
 
 
 # The chat UI is a native widget served on the dashboard at /grc/panel — no

@@ -54,7 +54,9 @@ CANVAS_FAILURE_BASE_URL = f"http://{HOST}:{CANVAS_FAILURE_PORT}"
 def _http_json(method: str, path: str, body: dict = None, base_url: str = BASE_URL) -> dict:
     data = json.dumps(body).encode() if body is not None else None
     req = Request(
-        f"{base_url}{path}", data=data, method=method,
+        f"{base_url}{path}",
+        data=data,
+        method=method,
         headers={"Content-Type": "application/json"} if data else {},
     )
     with urlopen(req, timeout=10) as resp:
@@ -84,7 +86,9 @@ def live_server(tmp_path_factory):
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "grc_agent.web:app", "--host", HOST, "--port", str(PORT)],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         assert _wait_for_server(), "server did not start in time"
@@ -133,8 +137,19 @@ def canvas_failure_server(tmp_path_factory):
         "GRC_CANVAS_READY_TIMEOUT": "0.01",
     }
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "grc_agent.web:app", "--host", HOST, "--port", str(CANVAS_FAILURE_PORT)],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "grc_agent.web:app",
+            "--host",
+            HOST,
+            "--port",
+            str(CANVAS_FAILURE_PORT),
+        ],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         assert _wait_for_server(CANVAS_FAILURE_PORT), "server did not start in time"

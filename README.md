@@ -117,12 +117,17 @@ conversation, so a single chat is never split across two flowgraphs.
 **First run:** the catalog/docs vector databases don't ship with the
 package — they're built automatically the first time `query_knowledge` runs,
 which takes a few minutes (enumerating ~570 GNU Radio blocks and embedding
-~100 docs pages). Subsequent runs read the cached `.db` files under
-`src/grc_agent/vectors/` instantly. Switching embedding backends
-(Ollama ↔ OpenRouter) builds a separate `.db` per backend automatically; if
-you change `OLLAMA_EMBEDDING_MODEL`/`OPENROUTER_EMBEDDING_MODEL` for a backend
-that already has a cached `.db`, delete that `.db` file manually to force a
-rebuild.
+~100 docs pages). This needs a reachable embeddings backend: for the default
+`ollama`/`ollama_cloud` providers that's your **local** `ollama serve` with
+`embeddinggemma:latest` pulled (see Option A above), regardless of which
+provider serves chat. If it's unreachable, `query_knowledge` returns a clear
+message telling you what to check rather than a bare connection error.
+Subsequent runs read the cached `.db` files under `src/grc_agent/vectors/`
+instantly. Switching embedding backends (Ollama ↔ OpenRouter) builds a
+separate `.db` per backend automatically, and each `.db` also rebuilds itself
+automatically — no manual deletion needed — whenever its recorded embedding
+model changes, or its source data does (a GNU Radio upgrade for the catalog,
+an updated docs corpus for docs).
 
 **Model settings:** the dashboard's "Model" section lets you switch between
 Ollama (local), Ollama Cloud, and OpenRouter at any time — pick a provider to

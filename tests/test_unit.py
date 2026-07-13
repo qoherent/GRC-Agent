@@ -144,12 +144,17 @@ def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
                     "waveform": "analog.GR_SIN_WAVE",
                 },
             },
-            {"block_id": "qtgui_time_sink_x", "instance_name": "busy_sink", "params": {"type": "float"}},
+            {
+                "block_id": "qtgui_time_sink_x",
+                "instance_name": "busy_sink",
+                "params": {"type": "float"},
+            },
         ],
         force=True,
     )
     assert res["ok"] is True
     from grc_agent.adapter import BLOCK_FOOTPRINT_H
+
     # A fixed, empirically-grounded bound. The real Signal Source block that
     # triggered this bug rendered ~150-170px tall (6 visible rows); 150 is a
     # safe floor a regression back toward the old 100 would fail, while
@@ -162,7 +167,11 @@ def test_change_graph_add_blocks_batch_no_overlap(temp_empty):
     res = change_graph(
         fg,
         add_blocks=[
-            {"block_id": "blocks_null_sink", "instance_name": f"sink_{i}", "params": {"type": "float"}}
+            {
+                "block_id": "blocks_null_sink",
+                "instance_name": f"sink_{i}",
+                "params": {"type": "float"},
+            }
             for i in range(5)
         ],
         force=True,
@@ -184,7 +193,11 @@ def test_change_graph_add_blocks_batch_no_overlap_large(temp_empty):
     res = change_graph(
         fg,
         add_blocks=[
-            {"block_id": "blocks_null_sink", "instance_name": f"wrap_{i}", "params": {"type": "float"}}
+            {
+                "block_id": "blocks_null_sink",
+                "instance_name": f"wrap_{i}",
+                "params": {"type": "float"},
+            }
             for i in range(count)
         ],
         force=True,
@@ -364,7 +377,11 @@ def test_change_graph_auto_resolve_same_batch_explicit_propagates(temp_empty):
     res = change_graph(
         fg,
         add_blocks=[
-            {"block_id": "analog_sig_source_x", "instance_name": "src", "params": {"type": "float"}},
+            {
+                "block_id": "analog_sig_source_x",
+                "instance_name": "src",
+                "params": {"type": "float"},
+            },
             {"block_id": "qtgui_time_sink_x", "instance_name": "sink", "params": {"type": "auto"}},
         ],
         add_connections=["src:0->sink:0"],
@@ -380,7 +397,11 @@ def test_change_graph_auto_resolve_existing_neighbor_propagates(temp_dial_tone):
     res = change_graph(
         fg,
         add_blocks=[
-            {"block_id": "qtgui_time_sink_x", "instance_name": "new_sink", "params": {"type": "auto"}}
+            {
+                "block_id": "qtgui_time_sink_x",
+                "instance_name": "new_sink",
+                "params": {"type": "auto"},
+            }
         ],
         add_connections=["analog_sig_source_x_0:0->new_sink:0"],
     )
@@ -550,14 +571,19 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.execute("CREATE TABLE catalog_chunks(block_id TEXT);")
-    conn.execute(
-        "CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[3]);"
-    )
-    # _db_meta must exist with the correct model name, otherwise
-    # _ensure_db_built deletes and rebuilds the DB (calling embed_document
-    # many times during ingestion, not just once for the dimension check).
+    conn.execute("CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[3]);")
+    # _db_meta must exist with the correct model name and corpus_version,
+    # otherwise _ensure_db_built deletes and rebuilds the DB (calling
+    # embed_document many times during ingestion, not just once for the
+    # dimension check).
+    from grc_agent.adapter import _corpus_version
+
     conn.execute("CREATE TABLE _db_meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("INSERT INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,))
+    conn.execute(
+        "INSERT INTO _db_meta (key, value) VALUES ('corpus_version', ?)",
+        (_corpus_version("catalog"),),
+    )
     conn.commit()
     conn.close()
 
@@ -568,18 +594,14 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
         call_count += 1
         return [0.0, 0.0, 0.0]
 
-    monkeypatch.setattr(
-        "grc_agent.adapter.embed_document", counting_embed_document
-    )
+    monkeypatch.setattr("grc_agent.adapter.embed_document", counting_embed_document)
 
     _ensure_db_built("catalog", db_path, model)
     first_count = call_count
     assert first_count == 1, "first query should perform the dimension check"
 
     _ensure_db_built("catalog", db_path, model)
-    assert call_count == first_count, (
-        "second query must not repeat the dimension check"
-    )
+    assert call_count == first_count, "second query must not repeat the dimension check"
 
     # Clean up: the monkeypatched embed_document populated the module-level
     # _EMBEDDING_DIM_CACHE with a 3-dim entry for this model. Without this
@@ -587,6 +609,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     # would see a dimension mismatch, delete the real DB, and rebuild it
     # unnecessarily — or worse, leave a stale 3-dim DB behind.
     from grc_agent.adapter import _EMBEDDING_DIM_CACHE
+
     _EMBEDDING_DIM_CACHE.pop(model, None)
 
 

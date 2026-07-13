@@ -62,10 +62,14 @@ def test_open_valid_path_then_inspect():
 def test_open_second_file_replaces_first():
     """Lifecycle edge case: opening a different file without an explicit close
     must replace the active flowgraph and terminate the old canvas."""
-    res1 = client.post("/grc/open", json={"path": str(Path.cwd() / "tests" / "data" / "dial_tone.grc")}).json()
+    res1 = client.post(
+        "/grc/open", json={"path": str(Path.cwd() / "tests" / "data" / "dial_tone.grc")}
+    ).json()
     assert res1["ok"] is True
 
-    res2 = client.post("/grc/open", json={"path": str(Path.cwd() / "tests" / "data" / "resampler_demo.grc")}).json()
+    res2 = client.post(
+        "/grc/open", json={"path": str(Path.cwd() / "tests" / "data" / "resampler_demo.grc")}
+    ).json()
     assert res2["ok"] is True
 
     status = client.get("/grc/status").json()
@@ -81,11 +85,11 @@ def test_inspect_during_open_is_serialized():
     inspect = client.get("/grc/inspect").json()
     assert inspect["ok"] is True
 
-
-
     res = client.post("/grc/open", json={"path": "tests/data/does_not_exist.grc"})
     assert res.status_code == 400
     assert res.json()["ok"] is False
+
+
 def test_open_invalid_path():
     res = client.post("/grc/open", json={"path": "tests/data/does_not_exist.grc"})
     assert res.status_code == 400
@@ -230,9 +234,7 @@ def test_undo_redo_endpoints(tmp_path):
     assert undo_res["can_redo"] is True
 
     inspect = client.get("/grc/inspect").json()
-    samp_rate = next(
-        b for b in inspect["graph"]["blocks"] if b["instance_name"] == "samp_rate"
-    )
+    samp_rate = next(b for b in inspect["graph"]["blocks"] if b["instance_name"] == "samp_rate")
     assert samp_rate["params"]["value"] == "32000"
 
     redo_res = client.post("/grc/redo").json()
@@ -241,9 +243,7 @@ def test_undo_redo_endpoints(tmp_path):
     assert redo_res["can_redo"] is False
 
     inspect = client.get("/grc/inspect").json()
-    samp_rate = next(
-        b for b in inspect["graph"]["blocks"] if b["instance_name"] == "samp_rate"
-    )
+    samp_rate = next(b for b in inspect["graph"]["blocks"] if b["instance_name"] == "samp_rate")
     assert samp_rate["params"]["value"] == "48000"
 
 
@@ -375,6 +375,7 @@ def test_settings_get_returns_active_provider_error(tmp_path, monkeypatch):
     instead of a misleading restart badge."""
     # Simulate a build error by setting the module-level flag
     import grc_agent.web as web_app
+
     web_app._model_build_error = "OpenRouter API key not set"
     try:
         res = client.get("/grc/settings").json()
@@ -387,6 +388,7 @@ def test_status_returns_rag_building(tmp_path, monkeypatch):
     """/grc/status must include the rag_building field so the dashboard can
     show a progress banner during vector DB build."""
     from grc_agent.adapter import _rag_building
+
     _rag_building["domain"] = "catalog"
     _rag_building["status"] = "building"
     try:
@@ -405,10 +407,13 @@ def test_apikey_writes_to_env_path_not_cwd(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
 
-    res = client.post("/grc/apikey", json={
-        "provider": "ollama_cloud",
-        "api_key": "test-key-ollama-cloud",
-    }).json()
+    res = client.post(
+        "/grc/apikey",
+        json={
+            "provider": "ollama_cloud",
+            "api_key": "test-key-ollama-cloud",
+        },
+    ).json()
     assert res["ok"] is True
 
     # The key must be in the temp .env, not in CWD
@@ -433,10 +438,13 @@ def test_apikey_does_not_set_os_environ(tmp_path, monkeypatch):
     # Verify the key is NOT in os.environ before the call
     assert os.environ.get("OLLAMA_CLOUD_API_KEY") != "test-key-not-in-env"
 
-    res = client.post("/grc/apikey", json={
-        "provider": "ollama_cloud",
-        "api_key": "test-key-not-in-env",
-    }).json()
+    res = client.post(
+        "/grc/apikey",
+        json={
+            "provider": "ollama_cloud",
+            "api_key": "test-key-not-in-env",
+        },
+    ).json()
     assert res["ok"] is True
 
     # The key must NOT be in os.environ
@@ -457,6 +465,7 @@ def test_settings_get_reads_api_keys_from_env_file(tmp_path, monkeypatch):
 
     # Write a key to the .env file
     from grc_agent.settings import upsert_env_key
+
     upsert_env_key("OLLAMA_CLOUD_API_KEY", "file-key-123", path=env)
 
     # Set a DIFFERENT value in os.environ (simulating stale startup snapshot)
@@ -477,6 +486,7 @@ def test_health_ollama_cloud_probes_local_ollama_too(tmp_path, monkeypatch):
     for embeddings), not just the cloud endpoint — otherwise the badge
     would show green while RAG is broken (the A3.2 bug)."""
     from grc_agent.settings import upsert_env_key
+
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
     upsert_env_key("GRC_PROVIDER", "ollama_cloud", path=env)
@@ -492,6 +502,7 @@ def test_health_ollama_cloud_probes_local_ollama_too(tmp_path, monkeypatch):
         assert "reachable" in res["message"]
     else:
         # Either the cloud key is invalid or local Ollama is down
-        assert any(phrase in res["message"] for phrase in [
-            "local Ollama", "not running", "API_KEY", "not set"
-        ])
+        assert any(
+            phrase in res["message"]
+            for phrase in ["local Ollama", "not running", "API_KEY", "not set"]
+        )

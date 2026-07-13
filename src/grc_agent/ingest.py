@@ -21,6 +21,7 @@ from grc_agent._paths import docs_dir
 from grc_agent.adapter import (
     EMBED_MAX_WORDS,
     _cap_words,
+    _corpus_version,
     embed_document,
     get_platform,
     render_catalog_block,
@@ -35,9 +36,15 @@ def _open_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def _write_meta(conn: sqlite3.Connection, model: str) -> None:
+def _write_meta(conn: sqlite3.Connection, model: str, domain: str) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS _db_meta (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("INSERT OR REPLACE INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,))
+    conn.execute(
+        "INSERT OR REPLACE INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,)
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO _db_meta (key, value) VALUES ('corpus_version', ?)",
+        (_corpus_version(domain),),
+    )
 
 
 def ingest_catalog(db_path: str, model: str) -> int:
@@ -79,7 +86,7 @@ def ingest_catalog(db_path: str, model: str) -> int:
                 "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
                 (cur.lastrowid, sqlite_vec.serialize_float32(embedding)),
             )
-        _write_meta(conn, model)
+        _write_meta(conn, model, "catalog")
         conn.commit()
     finally:
         conn.close()
@@ -160,7 +167,7 @@ def ingest_docs(db_path: str, model: str) -> int:
                 "INSERT INTO docs_idx(rowid, embedding) VALUES(?, ?)",
                 (cur.lastrowid, sqlite_vec.serialize_float32(embedding)),
             )
-        _write_meta(conn, model)
+        _write_meta(conn, model, "docs")
         conn.commit()
     finally:
         conn.close()

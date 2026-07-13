@@ -253,6 +253,7 @@ def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
 
     # _build_model for openrouter without OPENROUTER_API_KEY should raise
     import os
+
     had_key = os.environ.pop("OPENROUTER_API_KEY", None)
     try:
         # The model construction itself may or may not raise depending on
@@ -260,6 +261,7 @@ def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
         # web.py's try/except handles it correctly. Test the fallback logic
         # directly by simulating what the except block does.
         from grc_agent.settings import default_settings
+
         saved_cfg = grc_agent.web._cfg
         grc_agent.web._cfg = default_settings()
         fallback_model = grc_agent.web._build_model()
@@ -372,4 +374,3 @@ def test_health_check_reads_from_env_file_not_os_environ(tmp_path, monkeypatch):
 
     # For a key not in the file, must return None
     assert get_env_value("NONEXISTENT_KEY") is None
-

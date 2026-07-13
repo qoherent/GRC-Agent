@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import sqlite_vec
-from openai import OpenAI
+from openai import APIConnectionError, OpenAI
 
 from grc_agent._paths import vectors_dir
 
@@ -94,6 +94,7 @@ def disable_native_undo_redo() -> None:
 def hide_panels_by_default(app: Any) -> None:
     """Hide GRC's panels (block library, console, and variable editor) by default."""
     from gnuradio.grc.gui import Actions
+
     for action in (
         Actions.TOGGLE_BLOCKS_WINDOW,
         Actions.TOGGLE_CONSOLE_WINDOW,
@@ -702,7 +703,7 @@ def _prune_old_backups(backup_dir: Path) -> None:
     try:
         backups = sorted(backup_dir.iterdir(), key=lambda p: p.name)
         excess = len(backups) - MAX_BACKUPS_PER_DIR
-        for old in backups[:max(0, excess)]:
+        for old in backups[: max(0, excess)]:
             old.unlink(missing_ok=True)
     except Exception:
         pass
@@ -1157,12 +1158,8 @@ def change_graph(
                 for conn_str in add_connections:
                     p = parse_conn(conn_str)
                     if p:
-                        neighbor_map.setdefault(p["src_block"], set()).add(
-                            p["dst_block"]
-                        )
-                        neighbor_map.setdefault(p["dst_block"], set()).add(
-                            p["src_block"]
-                        )
+                        neighbor_map.setdefault(p["src_block"], set()).add(p["dst_block"])
+                        neighbor_map.setdefault(p["dst_block"], set()).add(p["src_block"])
 
             # Compute graph bounding box for centroid fallback
             if occupied:
@@ -1275,9 +1272,11 @@ def change_graph(
                     is_add = b.name in new_block_names
                     if is_add:
                         is_connected = False
-                        for conn_str in (add_connections or []):
+                        for conn_str in add_connections or []:
                             parsed = parse_conn(conn_str)
-                            if parsed and (parsed["src_block"] == b.name or parsed["dst_block"] == b.name):
+                            if parsed and (
+                                parsed["src_block"] == b.name or parsed["dst_block"] == b.name
+                            ):
                                 is_connected = True
                                 break
                         if not is_connected:
@@ -1429,6 +1428,7 @@ def change_graph(
 
 def get_db_and_model(domain: str) -> tuple[str, str]:
     from grc_agent.settings import load_settings
+
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
@@ -1449,6 +1449,7 @@ def _embed_endpoint() -> tuple[str, str]:
     """Shared base_url/api_key selection for both query- and document-side
     embedding calls."""
     from grc_agent.settings import load_settings
+
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
@@ -1458,21 +1459,35 @@ def _embed_endpoint() -> tuple[str, str]:
     return "http://localhost:11434/v1", "not-needed"
 
 
+def _embed(model: str, input_text: str) -> list[float]:
+    """Shared embeddings.create() call for both query- and document-side
+    embedding. Raises a clear, actionable error on connection failure — the
+    bare "Connection error." from openai's client gives no hint that a local
+    Ollama server (not necessarily the active chat provider) is what's
+    actually being reached for embeddings."""
+    base_url, api_key = _embed_endpoint()
+    client = OpenAI(base_url=base_url, api_key=api_key)
+    try:
+        response = client.embeddings.create(model=model, input=input_text)
+    except APIConnectionError as exc:
+        hint = (
+            f"Is `ollama serve` running locally, with `ollama pull {model}` done?"
+            if "localhost" in base_url
+            else "Check OPENROUTER_API_KEY and network connectivity."
+        )
+        raise RuntimeError(f"Cannot reach the embeddings endpoint at {base_url}. {hint}") from exc
+    return response.data[0].embedding
+
+
 def embed_query(query: str) -> list[float]:
     from grc_agent.settings import load_settings
+
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
     use_prefix = provider != "openrouter"
 
     _, model = get_db_and_model("catalog")
-    base_url, api_key = _embed_endpoint()
-
-    client = OpenAI(base_url=base_url, api_key=api_key)
-    response = client.embeddings.create(
-        model=model,
-        input=("task: search result | query: " + query) if use_prefix else query,
-    )
-    return response.data[0].embedding
+    return _embed(model, ("task: search result | query: " + query) if use_prefix else query)
 
 
 _DOCUMENT_PREFIX = "task: search result | document: "
@@ -1492,19 +1507,17 @@ def embed_document(text: str, model: str) -> list[float]:
     """Document-side counterpart to embed_query() — same backend-conditional
     prefix convention, used only at ingestion time."""
     from grc_agent.settings import load_settings
+
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
     use_prefix = provider != "openrouter"
 
-    base_url, api_key = _embed_endpoint()
     body = text if not use_prefix else _DOCUMENT_PREFIX + text
-
-    client = OpenAI(base_url=base_url, api_key=api_key)
-    response = client.embeddings.create(model=model, input=body)
-    return response.data[0].embedding
+    return _embed(model, body)
 
 
 _EMBEDDING_DIM_CACHE: dict[str, int] = {}
+_CORPUS_VERSION_CACHE: dict[str, str] = {}
 
 
 # Exposed to the dashboard via /grc/status so the UI can show a "Building
@@ -1523,12 +1536,43 @@ def _get_embedding_dim(model: str) -> int:
     return _EMBEDDING_DIM_CACHE[model]
 
 
+def _corpus_version(domain: str) -> str:
+    """A cheap identity for the domain's underlying source data, independent
+    of the embedding model — GNU Radio's own version string for the catalog
+    (its block library changes across GNU Radio versions), a content hash of
+    the docs corpus for docs (its files change across grc-agent releases).
+    Without this, a cached DB that still matches on embedding_model alone
+    would silently keep serving stale results forever after a GNU Radio
+    upgrade or a docs-corpus update, with no error or indication anything's
+    wrong. Cached per-process: neither changes during a single run, and
+    re-hashing ~100 markdown files on every query would be wasteful."""
+    if domain in _CORPUS_VERSION_CACHE:
+        return _CORPUS_VERSION_CACHE[domain]
+
+    if domain == "catalog":
+        from gnuradio import gr
+
+        version = gr.version()
+    else:
+        from grc_agent._paths import docs_dir
+
+        h = hashlib.sha256()
+        for p in sorted(docs_dir().glob("*.md")):
+            h.update(p.name.encode())
+            h.update(p.read_bytes())
+        version = h.hexdigest()[:16]
+
+    _CORPUS_VERSION_CACHE[domain] = version
+    return version
+
+
 def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
     global _rag_building
     if os.path.exists(db_path):
-        # Check both embedding model name (stored in _db_meta) and vector
-        # dimension. A model-name change triggers a rebuild even if dimensions
-        # happen to match — different models produce different embedding spaces.
+        # Check vector dimension, embedding model name, and corpus version
+        # (all stored in _db_meta). Any mismatch triggers a rebuild —
+        # different models produce different embedding spaces, and a changed
+        # corpus/block-library would otherwise go stale silently forever.
         try:
             conn = sqlite3.connect(db_path)
             conn.enable_load_extension(True)
@@ -1536,11 +1580,10 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
             sql_row = conn.execute(
                 f"SELECT sql FROM sqlite_master WHERE name = '{domain}_idx'"
             ).fetchone()
-            meta_row = None
+            meta: dict[str, str] = {}
             try:
-                meta_row = conn.execute(
-                    "SELECT value FROM _db_meta WHERE key = 'embedding_model'"
-                ).fetchone()
+                for key, value in conn.execute("SELECT key, value FROM _db_meta"):
+                    meta[key] = value
             except sqlite3.OperationalError:
                 pass
             conn.close()
@@ -1550,20 +1593,21 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
                 if match:
                     db_dim = int(match.group(1))
                     model_dim = _get_embedding_dim(model)
+                    reason = None
                     if model_dim != db_dim:
-                        print(
-                            f"[grc-agent] Vector DB dimension mismatch: DB has {db_dim}, model has {model_dim}. Rebuilding..."
+                        reason = f"dimension mismatch (DB has {db_dim}, model has {model_dim})"
+                    elif not meta:
+                        reason = "no metadata recorded"
+                    elif meta.get("embedding_model") != model:
+                        reason = (
+                            f"embedding model changed (was '{meta.get('embedding_model')}', "
+                            f"now '{model}')"
                         )
-                        os.remove(db_path)
-                    elif meta_row and meta_row[0] != model:
-                        print(
-                            f"[grc-agent] Embedding model changed: DB was '{meta_row[0]}', now '{model}'. Rebuilding..."
-                        )
-                        os.remove(db_path)
-                    elif not meta_row:
-                        print(
-                            f"[grc-agent] Vector DB has no model metadata — rebuilding to record '{model}'..."
-                        )
+                    elif meta.get("corpus_version") != _corpus_version(domain):
+                        reason = "source data changed since this DB was built"
+
+                    if reason:
+                        print(f"[grc-agent] {domain} vector DB stale: {reason}. Rebuilding...")
                         os.remove(db_path)
                     else:
                         return
@@ -1581,7 +1625,7 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
     _rag_building["status"] = "building"
     try:
         print(
-            f"[grc-agent] {domain} vector DB not found or model changed — building it now "
+            f"[grc-agent] {domain} vector DB not found or stale — building it now "
             f"(first run only, may take a few minutes)..."
         )
         from grc_agent import ingest

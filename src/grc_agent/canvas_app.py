@@ -12,9 +12,9 @@ from pathlib import Path
 
 import gi
 
-gi.require_version('Gtk', '3.0')
-gi.require_version('Gdk', '3.0')
-gi.require_version('PangoCairo', '1.0')
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gdk, GLib, Gtk
 
 # adapter is the sole importer of gnuradio (core *and* gui); this subprocess
@@ -189,8 +189,7 @@ class CanvasControlContext:
             new_coords = [
                 tuple(b.states["coordinate"])
                 for b in flow_graph.blocks
-                if b.name not in old_names
-                and isinstance(b.states.get("coordinate"), (list, tuple))
+                if b.name not in old_names and isinstance(b.states.get("coordinate"), (list, tuple))
             ]
             if not new_coords:
                 return
@@ -373,9 +372,9 @@ def main():
 
     # Recursively find the DrawingArea widget to attach auto-save triggers
     def find_drawing_area(widget):
-        if widget.__class__.__name__ == 'DrawingArea':
+        if widget.__class__.__name__ == "DrawingArea":
             return widget
-        if hasattr(widget, 'get_children'):
+        if hasattr(widget, "get_children"):
             for child in widget.get_children():
                 res = find_drawing_area(child)
                 if res:
@@ -525,9 +524,7 @@ def main():
                         # save_flow_graph is a plain truncate+write, which a
                         # concurrent reader (load_flow_graph) could observe
                         # torn mid-write.
-                        write_flow_graph_atomic(
-                            drawing_area._flow_graph, Path(grc_file_path)
-                        )
+                        write_flow_graph_atomic(drawing_area._flow_graph, Path(grc_file_path))
                         ctx.last_disk_hash = _sha256_file(grc_file_path)
                         ctx.last_synced_export_hash = flow_graph_content_hash(
                             drawing_area._flow_graph
@@ -629,8 +626,12 @@ def main():
                     new_h = ctx.pan_start_hadj - dx
                     new_v = ctx.pan_start_vadj - dy
 
-                    new_h = max(hadj.get_lower(), min(new_h, hadj.get_upper() - hadj.get_page_size()))
-                    new_v = max(vadj.get_lower(), min(new_v, vadj.get_upper() - vadj.get_page_size()))
+                    new_h = max(
+                        hadj.get_lower(), min(new_h, hadj.get_upper() - hadj.get_page_size())
+                    )
+                    new_v = max(
+                        vadj.get_lower(), min(new_v, vadj.get_upper() - vadj.get_page_size())
+                    )
 
                     hadj.set_value(new_h)
                     vadj.set_value(new_v)
@@ -649,7 +650,11 @@ def main():
         return False
 
     if drawing_area:
-        drawing_area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
+        drawing_area.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+        )
         drawing_area.connect("button-press-event", on_button_press)
         drawing_area.connect("button-release-event", on_button_release)
         drawing_area.connect("motion-notify-event", on_motion_notify)
@@ -659,6 +664,7 @@ def main():
         # We only want to listen to properties dialog windows (not the main window itself)
         if win != window:
             print(f"Properties dialog added to context: {win}")
+
             # GTK positions new dialogs (e.g. PropsDialog) somewhere within
             # the full CANVAS_WIDTH x CANVAS_HEIGHT coordinate space —
             # which can land outside the narrow visible iframe pane in the
@@ -669,12 +675,14 @@ def main():
             def _position_dialog():
                 win.move(20, 20)
                 return False
+
             win.move(20, 20)
             GLib.idle_add(_position_dialog)
 
             def on_window_destroy(w, event=None):
                 trigger_reload()
                 return False
+
             win.connect("destroy", on_window_destroy)
 
     app.connect("window-added", on_window_added)

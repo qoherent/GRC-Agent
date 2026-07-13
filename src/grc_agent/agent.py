@@ -55,8 +55,11 @@ def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
     the environment.
     """
     if provider == "openrouter":
-        return OpenRouterModel(model_name or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"))
+        return OpenRouterModel(
+            model_name or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+        )
     return OllamaModel(model_name or MODEL, provider=OllamaProvider(base_url=OLLAMA_V1))
+
 
 SCENARIOS = [
     {
@@ -542,6 +545,7 @@ def grc_tools() -> list[Tool[Any]]:
     change_tool.max_retries = 3
 
     return [inspect_tool, query_tool, change_tool]
+
 
 def prune_history(messages: list[ModelMessage]) -> list[ModelMessage]:
     if len(messages) <= 12:

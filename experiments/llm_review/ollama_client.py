@@ -21,9 +21,7 @@ def chat_completion(prompt: str, timeout: float = 300.0) -> str:
     env = dotenv_values(env_path())
     api_key = env.get("OLLAMA_CLOUD_API_KEY") or os.environ.get("OLLAMA_CLOUD_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            f"OLLAMA_CLOUD_API_KEY not found in {env_path()} or the environment"
-        )
+        raise RuntimeError(f"OLLAMA_CLOUD_API_KEY not found in {env_path()} or the environment")
     model = env.get("OLLAMA_CLOUD_MODEL") or os.environ.get("OLLAMA_CLOUD_MODEL", DEFAULT_MODEL)
 
     response = httpx.post(

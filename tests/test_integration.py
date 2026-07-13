@@ -119,7 +119,7 @@ def test_scenario_execution(sc_name, backend):
                 web_fetch_cap,
             ],
             model_settings=ModelSettings(extra_body={"think": True}),
-            retries={'tools': 3, 'output': 3},
+            retries={"tools": 3, "output": 3},
         )
         agent.output_validator(validate_flowgraph_state)
 

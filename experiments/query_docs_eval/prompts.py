@@ -9,9 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_MD = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
 DOCS_DIR = REPO_ROOT / "docs" / "wiki_gnuradio_org"
-CORPUS_TITLES = "\n".join(
-    f"- {p.stem}" for p in sorted(DOCS_DIR.glob("*.md"))
-)
+CORPUS_TITLES = "\n".join(f"- {p.stem}" for p in sorted(DOCS_DIR.glob("*.md")))
 
 REVIEWER_TEMPLATE = """You are reviewing the output of `query_docs`, a vector-RAG search tool \
 over a fixed corpus of GNU Radio wiki documentation. An LLM coding agent uses it to answer \
