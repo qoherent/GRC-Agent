@@ -1,0 +1,6 @@
+{
+  "area": "gui_state",
+  "file": "panel.js",
+  "function": "unloadGrc",
+  "code": "async function unloadGrc() {\n  try {\n    await fetch(\"/grc/close\", { method: \"POST\" });\n    await refresh();\n  } catch (e) {\n    console.error(\"Failed to unload GRC:\", e);\n  }\n}"
+}

@@ -36,6 +36,7 @@ const state = {
   browseTrapHandler: null,
   lastSentCanvasSize: null,
   openrouterKeySet: false,
+  ollamaCloudKeySet: false,
   ollamaModel: "qwen3.6:35b-a3b-q4_K_M",
   openrouterModel: "deepseek/deepseek-v4-flash",
   ollamaCloudModel: "deepseek-v4-flash:cloud",
@@ -47,6 +48,10 @@ const state = {
   // restart-required badge should show; see updateRestartBadge().
   activeProvider: null,
   activeModel: null,
+  // When the saved config failed to build at startup (e.g. OpenRouter with
+  // no API key), this carries the error string so the dashboard can show a
+  // specific message instead of a misleading "restart to apply" badge.
+  activeProviderError: null,
   // Set right before resetChatFrame(true) (a chat-widget-only repair, e.g.
   // the auto-heal or "chat looks stuck" button) so pollConversationState's
   // own transition-to-"/" handler knows this particular reset must not
@@ -778,6 +783,15 @@ async function refresh(forceCanvasReload = false, canvasReady, canvasError) {
     if (statusRes.version !== undefined) {
       state.lastGrcVersion = statusRes.version;
     }
+    // Show a "Building knowledge database..." banner while the vector DB is
+    // being built on first query_knowledge (or after a provider switch that
+    // changes the embedding model). The banner clears itself once the build
+    // finishes (status flips to "ready" or "failed").
+    if (statusRes.rag_building?.status === "building") {
+      setMsg("Building knowledge database (first use may take a few minutes)...", "info");
+    } else if (statusRes.rag_building?.status === "failed") {
+      setMsg("Knowledge database build failed. Try again later.", "error");
+    }
     // Ahead of the not_loaded/inspect-failure branches below so both
     // buttons are correctly disabled in either case too (no file loaded ->
     // nothing to undo/redo).
@@ -873,7 +887,11 @@ async function refresh(forceCanvasReload = false, canvasReady, canvasError) {
       setTimeout(() => syncCanvasSize(true), 2000);
     }
   } catch (e) {
-    state.isGrcLoaded = false;
+    // A transient fetch failure (network blip, /grc/inspect mid-swap) must
+    // NOT set isGrcLoaded = false — that would disable the chat input until
+    // the user manually clicks Validate (updateChatInputState gates on
+    // isGrcLoaded). Leave the prior value as the best guess; the next
+    // successful refresh() call will correct any stale state.
     setMsg(String(e), "error");
   }
 }
@@ -953,6 +971,16 @@ function updateRestartBadge() {
   const badge = document.getElementById("model-restart-badge");
   const provider = document.getElementById("model-provider-select").value;
   const model = document.getElementById("model-name-label").textContent;
+  // When the saved config failed to build at startup (e.g. OpenRouter with
+  // no API key), the restart badge would mislead: it would say "restart to
+  // apply" for a config that can never succeed on restart. Suppress the
+  // badge and show the error in the overlay title instead.
+  if (state.activeProviderError) {
+    badge.classList.remove("visible");
+    document.getElementById("model-selector-overlay").title =
+      `Saved config failed to build: ${state.activeProviderError}`;
+    return;
+  }
   const stale = state.activeProvider !== null &&
     (provider !== state.activeProvider || model !== state.activeModel);
   badge.classList.toggle("visible", stale);
@@ -970,6 +998,16 @@ function onModelProviderChange() {
     : provider === "ollama_cloud" ? state.ollamaCloudModel
     : state.openrouterModel;
   renderModelSuggestions();
+  // Cloud providers need an API key — if none is saved, show the key dialog
+  // instead of saving a config that will fail on restart (the app would fall
+  // back to Ollama silently, and the restart badge would mislead the user
+  // into a restart loop). The user can set the key and the provider will be
+  // saved together.
+  if ((provider === "ollama_cloud" && !state.ollamaCloudKeySet) ||
+      (provider === "openrouter" && !state.openrouterKeySet)) {
+    openApiKeyDialog();
+    return;
+  }
   saveModelSettings();
   checkProviderHealth();
 }
@@ -979,11 +1017,13 @@ async function loadModelSettings() {
     const res = await fetch("/grc/settings").then(r => r.json());
     if (!res.ok) return;
     state.openrouterKeySet = !!res.openrouter_api_key_set;
+    state.ollamaCloudKeySet = !!res.ollama_cloud_api_key_set;
     if (res.ollama_model) state.ollamaModel = res.ollama_model;
     if (res.openrouter_model) state.openrouterModel = res.openrouter_model;
     if (res.ollama_cloud_model) state.ollamaCloudModel = res.ollama_cloud_model;
     state.activeProvider = res.active_provider ?? null;
     state.activeModel = res.active_model ?? null;
+    state.activeProviderError = res.active_provider_error ?? null;
     document.getElementById("model-provider-select").value = res.provider;
     document.getElementById("model-name-input").value = res.model;
     renderModelSuggestions();

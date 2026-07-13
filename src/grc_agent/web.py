@@ -2,7 +2,6 @@ import asyncio
 import atexit
 import mimetypes
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -29,6 +28,7 @@ from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponenti
 
 # Local imports
 from grc_agent.adapter import (
+    _rag_building,
     inspect_graph,
     load_flow_graph,
     redo_flowgraph,
@@ -46,9 +46,22 @@ from grc_agent.agent import (
     web_search_cap,
 )
 from grc_agent.prompts import build_system_prompt
-from grc_agent.settings import default_settings, load_settings, save_settings
+from grc_agent.settings import (
+    default_settings,
+    env_path,
+    get_env_value,
+    load_settings,
+    save_settings,
+    upsert_env_key,
+)
 
-load_dotenv()
+# Load the same `.env` file the GUI writes preferences and API keys to (the
+# single source of truth — see grc_agent.settings). Pinned to env_path() rather
+# than the default CWD-relative lookup, so an installed `grc-agent-web` launched
+# from any directory reads the same file it will later write to (otherwise a key
+# saved from a launch in one directory was silently absent on the next launch
+# from another directory).
+load_dotenv(env_path())
 
 BRAND_NAME = "Qoherent GRC Agent"
 
@@ -449,6 +462,10 @@ _retrying_http_client = httpx.AsyncClient(
 # (see grc_agent.settings) — defaults to a local Ollama model, switchable to
 # OpenRouter from the GUI settings panel. Changes take effect on next restart.
 _cfg = load_settings()
+# If _build_model() fails (e.g. OpenRouter selected with no API key), the
+# error is captured here and surfaced via /grc/settings so the dashboard can
+# show a specific message instead of a misleading "restart to apply" badge.
+_model_build_error: str | None = None
 
 
 def _build_model():
@@ -484,8 +501,15 @@ except Exception as e:
     # starting at all.
     print(f"[grc-agent] Failed to build chat model from saved settings: {e}")
     print("[grc-agent] Falling back to Ollama defaults so the app can still start.")
+    _model_build_error = str(e)
+    # Build the fallback model WITHOUT mutating _cfg — mutating it would
+    # make active_provider/active_model diverge from the saved preference,
+    # and the dashboard's restart badge would show "restart to apply" for a
+    # config that can never succeed on restart (a restart loop).
+    saved_cfg = _cfg
     _cfg = default_settings()
     model = _build_model()
+    _cfg = saved_cfg
 agent = Agent(
     model=model,
     deps_type=Any,
@@ -813,6 +837,10 @@ async def grc_status(request: Request) -> JSONResponse:
             # one-shot field on /grc/open's response.
             "canvas_ready": canvas_ready_state,
             "canvas_error": canvas_error_state,
+            # Exposed so the dashboard can show a "Building knowledge
+            # database..." banner instead of an indefinite hang during the
+            # first query_knowledge call (or after a provider switch).
+            "rag_building": _rag_building,
         }
     )
 
@@ -1069,8 +1097,8 @@ async def grc_settings_get(request: Request) -> JSONResponse:
             "ollama_model": cfg.get("ollama_model"),
             "openrouter_model": cfg.get("openrouter_model"),
             "ollama_cloud_model": cfg.get("ollama_cloud_model"),
-            "openrouter_api_key_set": bool(os.getenv("OPENROUTER_API_KEY")),
-            "ollama_cloud_api_key_set": bool(os.getenv("OLLAMA_CLOUD_API_KEY")),
+            "openrouter_api_key_set": bool(get_env_value("OPENROUTER_API_KEY")),
+            "ollama_cloud_api_key_set": bool(get_env_value("OLLAMA_CLOUD_API_KEY")),
             # What the running chat Agent's model ACTUALLY is right now — built
             # once from _cfg at import (see _build_model()'s fallback comment)
             # and never live-swapped. Distinct from provider/model above (the
@@ -1080,6 +1108,10 @@ async def grc_settings_get(request: Request) -> JSONResponse:
             # happens to restart and notice.
             "active_provider": _cfg["provider"],
             "active_model": _cfg["model"],
+            # When the saved config failed to build at startup (e.g. OpenRouter
+            # with no API key), this carries the error string so the dashboard
+            # can show a specific message instead of a misleading restart badge.
+            "active_provider_error": _model_build_error,
         }
     )
 
@@ -1118,7 +1150,7 @@ async def grc_health(request: Request) -> JSONResponse:
         except Exception as e:
             result["message"] = f"Ollama check failed: {e}"
     elif provider == "ollama_cloud":
-        key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
+        key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
         if not key:
             result["message"] = "OLLAMA_CLOUD_API_KEY is not set. Click the key button to set it."
         else:
@@ -1137,8 +1169,30 @@ async def grc_health(request: Request) -> JSONResponse:
                 result["message"] = "Cannot reach Ollama Cloud (https://ollama.com)"
             except Exception as e:
                 result["message"] = f"Ollama Cloud check failed: {e}"
+        # ollama_cloud uses local Ollama for embeddings (Ollama Cloud's API
+        # doesn't expose /v1/embeddings) — probe it too so the health badge
+        # reflects whether the full pipeline works, not just the cloud endpoint.
+        if result["ok"]:
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    r = await client.get("http://localhost:11434/api/tags")
+                    if r.status_code != 200:
+                        result["ok"] = False
+                        result["message"] = (
+                            "Ollama Cloud reachable, but local Ollama (needed for "
+                            "embeddings) is not running. Start it with: ollama serve"
+                        )
+            except httpx.ConnectError:
+                result["ok"] = False
+                result["message"] = (
+                    "Ollama Cloud reachable, but local Ollama (needed for "
+                    "embeddings) is not running. Start it with: ollama serve"
+                )
+            except Exception as e:
+                result["ok"] = False
+                result["message"] = f"Ollama Cloud reachable, but local embedding check failed: {e}"
     elif provider == "openrouter":
-        key = os.environ.get("OPENROUTER_API_KEY", "")
+        key = get_env_value("OPENROUTER_API_KEY") or ""
         if not key:
             result["message"] = "OPENROUTER_API_KEY is not set. Click the key button to set it."
         else:
@@ -1162,8 +1216,13 @@ async def grc_health(request: Request) -> JSONResponse:
 
 
 async def grc_apikey_post(request: Request) -> JSONResponse:
-    """Write an API key to .env for the given provider. The .env file is
-    read at startup, so a restart is required for the new key to take effect."""
+    """Write an API key for the given provider into the same `.env` file that
+    holds all other GUI preferences (the single source of truth — see
+    grc_agent.settings.env_path). The `.env` is read at startup, so a restart
+    is required for the new key to take effect on the chat agent itself. The
+    health check reads from the `.env` file too, so it stays honest (red until
+    the real restart) rather than showing green while the running agent still
+    holds the old key."""
     try:
         body = await request.json()
     except Exception as e:
@@ -1172,28 +1231,19 @@ async def grc_apikey_post(request: Request) -> JSONResponse:
     provider = str(body.get("provider", ""))
     api_key = str(body.get("api_key", "")).strip()
     if provider not in ("ollama_cloud", "openrouter"):
-        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider!r}"}, status_code=400)
+        return JSONResponse(
+            {"ok": False, "message": f"Unknown provider: {provider!r}"},
+            status_code=400,
+        )
     if not api_key:
         return JSONResponse({"ok": False, "message": "API key must be non-empty"}, status_code=400)
 
     env_key = "OLLAMA_CLOUD_API_KEY" if provider == "ollama_cloud" else "OPENROUTER_API_KEY"
-    env_path = Path(".env")
-    if not env_path.exists():
-        env_path.write_text(f"{env_key}={api_key}\n", encoding="utf-8")
-    else:
-        content = env_path.read_text(encoding="utf-8")
-        if re.search(rf"^{re.escape(env_key)}=.*", content, re.MULTILINE):
-            content = re.sub(
-                rf"^{re.escape(env_key)}=.*", f"{env_key}={api_key}", content, flags=re.MULTILINE
-            )
-        else:
-            content += f"\n{env_key}={api_key}\n"
-        env_path.write_text(content, encoding="utf-8")
+    upsert_env_key(env_key, api_key)
 
-    # Also set in the current process so the health check can see it immediately
-    os.environ[env_key] = api_key
-
-    return JSONResponse({"ok": True, "message": f"{env_key} saved. Restart the app for it to take effect."})
+    return JSONResponse(
+        {"ok": True, "message": f"{env_key} saved. Restart the app for it to take effect."}
+    )
 
 
 # to_web() registered its own chat UI at '/' (and '/{id}'), fetched at runtime

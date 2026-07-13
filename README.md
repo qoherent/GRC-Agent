@@ -21,7 +21,7 @@ Everything lives in the installable `grc_agent` package (`src/grc_agent/`):
 | `panel.html` / `panel.js` | The dashboard page and its logic — plain HTML/CSS/vanilla JS, no build step. |
 | `canvas_app.py` | The live GTK canvas subprocess embedded in the dashboard via Broadway (GTK's HTML5 backend). |
 | `ingest.py` | Builds the catalog/docs vector databases from scratch on first use. |
-| `settings.py` | Persisted provider/model preference (`settings.json`, gitignored). |
+| `settings.py` | Persisted chat-agent preferences — provider, per-provider model names, and cloud API keys — all in `.env` (the single source of truth, editable from the GUI). |
 
 Data flow: `.grc` file → `adapter.load_flow_graph()` → live
 `gnuradio.grc.core.FlowGraph` → `inspect_graph()` → JSON tool result.
@@ -52,7 +52,7 @@ uv sync --extra dev --python .venv/bin/python
 *(The `--system-site-packages` flag bridges your virtualenv directly to the system-installed GNU Radio).*
 
 ### 3. Setup LLM Backend
-The agent supports Ollama (local) and OpenRouter (cloud). You can toggle them in the dashboard GUI at any time.
+The agent supports three chat providers, switchable from the dashboard GUI at any time. The active provider and the per-provider chat model names are persisted in `.env` (the single source of truth — editing the GUI and editing `.env` are two views of the same state; restart the app for a change to take effect).
 
 #### Option A: Ollama (Local & Free)
 1. Install [Ollama](https://ollama.com/).
@@ -83,6 +83,17 @@ Ollama's default context window is too small for multi-turn agent tool-calling. 
    ```bash
    cp .env.example .env
    ```
+   (Or set it from the dashboard: pick "OpenRouter" in the model selector, then click the key button.)
+
+#### Option C: Ollama Cloud (Cloud)
+1. Get an API key at [Ollama Cloud](https://ollama.cloud).
+2. Copy `.env.example` to `.env`, set `OLLAMA_CLOUD_API_KEY`, and (optionally) `OLLAMA_CLOUD_MODEL` — the default is `deepseek-v4-flash:cloud`.
+   ```bash
+   cp .env.example .env
+   ```
+   (Or set the key from the dashboard: pick "Ollama Cloud" in the model selector, then click the key button.)
+
+> **Note:** even under Ollama Cloud, the `query_knowledge` tool's catalog/docs vector search uses your **local** Ollama server for embeddings (Ollama Cloud exposes no embeddings endpoint), so keep a local `ollama serve` running with `embeddinggemma:latest` pulled.
 
 ---
 
@@ -114,14 +125,16 @@ that already has a cached `.db`, delete that `.db` file manually to force a
 rebuild.
 
 **Model settings:** the dashboard's "Model" section lets you switch between
-Ollama and OpenRouter at any time. The model name itself is click-to-edit —
-click the current name to reveal an editable field, then confirm with the
-checkmark (or cancel with the ✕) — and is otherwise plain, non-editable text
-so it can't be changed by an accidental keystroke. A saved change is written
-to a small config file immediately, but only takes effect after restarting
-the app; a badge next to the model name stays visible whenever the saved
-setting differs from what the running session actually loaded, so a pending
-restart is never silently invisible.
+Ollama (local), Ollama Cloud, and OpenRouter at any time — pick a provider to
+make it active, then click the model name to edit it (click-to-reveal an
+editable field, confirm with the checkmark or cancel with the ✕). Both the
+provider and the model name are written straight to `.env` (the single source
+of truth — see `Option A/B/C` above), so editing the GUI and editing `.env`
+are interchangeable. A saved change only takes effect after restarting the app;
+a badge next to the model name stays visible whenever the saved setting differs
+from what the running session actually loaded, so a pending restart is never
+silently invisible. Default models: Ollama `qwen3.6:35b-a3b-q4_K_M`, Ollama
+Cloud `deepseek-v4-flash:cloud`, OpenRouter `deepseek/deepseek-v4-flash`.
 
 **Undo/redo and validation:** the toolbar above the canvas has Undo/Redo
 buttons and a Validate button. Undo/redo covers edits from either source —

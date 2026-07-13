@@ -50,6 +50,3 @@ vec1.so
 
 # Generated vector indexes (per-backend, built on first use — see grc_agent.ingest)
 src/grc_agent/vectors/
-
-# Per-user model/provider preference (see grc_agent.settings)
-src/grc_agent/settings.json

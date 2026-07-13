@@ -74,13 +74,13 @@ def _wait_for_server(port: int = PORT, timeout: float = 20.0) -> bool:
 
 @pytest.fixture(scope="module")
 def live_server(tmp_path_factory):
-    config_path = tmp_path_factory.mktemp("frontend_server") / "settings.json"
+    config_path = tmp_path_factory.mktemp("frontend_server") / ".env"
     env = {
         **os.environ,
         "GRC_BROADWAY_PORT": str(BROADWAY_PORT),
         "GRC_CANVAS_CONTROL_PORT": str(CANVAS_CONTROL_PORT),
         "GRC_AGENT_PORT": str(PORT),
-        "GRC_AGENT_CONFIG_PATH": str(config_path),
+        "GRC_AGENT_ENV": str(config_path),
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "grc_agent.web:app", "--host", HOST, "--port", str(PORT)],
@@ -123,13 +123,13 @@ def canvas_failure_server(tmp_path_factory):
     # canvas_ready=false response (the "Timed out waiting for canvas to
     # become ready" path) without needing to actually break canvas_app.py or
     # wait out a real 20s deadline.
-    config_path = tmp_path_factory.mktemp("frontend_server_canvas_failure") / "settings.json"
+    config_path = tmp_path_factory.mktemp("frontend_server_canvas_failure") / ".env"
     env = {
         **os.environ,
         "GRC_BROADWAY_PORT": str(CANVAS_FAILURE_BROADWAY_PORT),
         "GRC_CANVAS_CONTROL_PORT": str(CANVAS_FAILURE_CANVAS_CONTROL_PORT),
         "GRC_AGENT_PORT": str(CANVAS_FAILURE_PORT),
-        "GRC_AGENT_CONFIG_PATH": str(config_path),
+        "GRC_AGENT_ENV": str(config_path),
         "GRC_CANVAS_READY_TIMEOUT": "0.01",
     }
     proc = subprocess.Popen(

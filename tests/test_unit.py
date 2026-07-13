@@ -7,8 +7,7 @@ from pathlib import Path
 import pytest
 
 from grc_agent.adapter import (
-    BLOCK_COLUMN_MAX_ROWS,
-    _footprints_overlap,
+    _rects_overlap,
     change_graph,
     inspect_graph,
     lite_web_search,
@@ -120,7 +119,7 @@ def test_change_graph_add_block_no_overlap_with_existing(temp_dial_tone):
     )
     assert res["ok"] is True
     new_coord = tuple(fg.get_block("my_throttle").states["coordinate"])
-    assert not any(_footprints_overlap(new_coord, other) for other in existing_coords)
+    assert not any(_rects_overlap(*new_coord, *other) for other in existing_coords)
 
 
 def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
@@ -175,17 +174,16 @@ def test_change_graph_add_blocks_batch_no_overlap(temp_empty):
     coords = [tuple(fg.get_block(f"sink_{i}").states["coordinate"]) for i in range(5)]
     for i, a in enumerate(coords):
         for b in coords[i + 1 :]:
-            assert not _footprints_overlap(a, b)
+            assert not _rects_overlap(*a, *b)
 
 
-def test_change_graph_add_blocks_batch_wraps_column(temp_empty):
-    # Regression test: a batch bigger than BLOCK_COLUMN_MAX_ROWS used to
-    # stack every block in one endlessly-tall column. Confirms it now wraps
-    # into a second column instead — first BLOCK_COLUMN_MAX_ROWS blocks
-    # share the same x, the next one starts a new column at a different x,
-    # and nothing overlaps regardless.
+def test_change_graph_add_blocks_batch_no_overlap_large(temp_empty):
+    # Regression test: adding a large batch of blocks used to stack them all in
+    # one endlessly-tall column (old column-layout) or place later ones on top
+    # of earlier ones (pre-AABB-check). The spiral placement now guarantees that
+    # no two blocks in a batch overlap, regardless of batch size.
     fg = load_flow_graph(str(temp_empty))
-    count = BLOCK_COLUMN_MAX_ROWS + 2
+    count = 12  # deliberately large enough to force multi-row and multi-column placement
     res = change_graph(
         fg,
         add_blocks=[
@@ -197,13 +195,13 @@ def test_change_graph_add_blocks_batch_wraps_column(temp_empty):
     assert res["ok"] is True
     coords = [tuple(fg.get_block(f"wrap_{i}").states["coordinate"]) for i in range(count)]
 
-    first_column_x = coords[0][0]
-    assert all(c[0] == first_column_x for c in coords[:BLOCK_COLUMN_MAX_ROWS])
-    assert coords[BLOCK_COLUMN_MAX_ROWS][0] != first_column_x
+    # All coordinates must be unique — blocks may not land on the same spot.
+    assert len(set(coords)) == count, "Spiral placement produced duplicate coordinates"
 
+    # No two blocks may overlap (the AABB collision guarantee).
     for i, a in enumerate(coords):
         for b in coords[i + 1 :]:
-            assert not _footprints_overlap(a, b)
+            assert not _rects_overlap(*a, *b), f"Blocks at {a} and {b} overlap"
 
 
 def test_change_graph_add_block_across_calls_no_overlap(temp_empty):
@@ -229,7 +227,7 @@ def test_change_graph_add_block_across_calls_no_overlap(temp_empty):
     coords = [tuple(fg.get_block(f"call_sink_{i}").states["coordinate"]) for i in range(4)]
     for i, a in enumerate(coords):
         for b in coords[i + 1 :]:
-            assert not _footprints_overlap(a, b)
+            assert not _rects_overlap(*a, *b)
 
 
 def test_change_graph_remove_block(temp_dial_tone):
@@ -533,7 +531,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     tmp_vectors = tmp_path / "vectors"
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
-    monkeypatch.setenv("GRC_AGENT_CONFIG_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
     from grc_agent.settings import save_settings
 
