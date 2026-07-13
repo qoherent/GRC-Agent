@@ -240,7 +240,9 @@ def resolve_auto(
         block = flow_graph.get_block(block_name)
         block_type = block.key
     except KeyError:
-        return "float"
+        raise ValueError(
+            f"Cannot auto-resolve param {param_key!r}: block {block_name!r} not found."
+        ) from None
 
     in_ports, out_ports = ports_governed_by(block_type, param_key)
 
@@ -339,7 +341,23 @@ def resolve_auto(
                             new_dtype = dtype_str
                     else:
                         return dtype_str
-                else:
+                elif not (new_block_names and other in new_block_names):
+                    # `other` is an existing, pre-existing block with no
+                    # explicit value set on it THIS batch — its current live
+                    # port dtype is a real, already-in-effect value (whatever
+                    # a prior save left it at), so propagating it is a
+                    # legitimate resolution. If `other` is ALSO brand-new
+                    # with no explicit value anywhere, its "live" port dtype
+                    # is just its own untouched schema default — reading
+                    # that here would silently pair two arbitrary,
+                    # independently-defaulted blocks and call it resolved
+                    # (confirmed live: analog_sig_source_x + qtgui_time_sink_x
+                    # both default to 'complex', so this looked like a
+                    # working resolution purely by coincidence; a pair with
+                    # different defaults produced a genuinely mismatched,
+                    # silently-broken connection). Deliberately not treated
+                    # as a candidate at all in that case — see the final
+                    # ValueError below.
                     ports = (
                         other_block.active_sources
                         if own_direction == "inputs"
@@ -349,18 +367,19 @@ def resolve_auto(
                         if str(prt.key) == str(port_key):
                             dtype = getattr(prt, "dtype", None)
                             if dtype:
-                                dtype_str = str(dtype)
-                                if new_block_names and other in new_block_names:
-                                    if new_dtype is None:
-                                        new_dtype = dtype_str
-                                else:
-                                    return dtype_str
+                                return str(dtype)
             except KeyError:
                 continue
 
     if new_dtype:
         return new_dtype
-    return "float"
+    raise ValueError(
+        f"Cannot auto-resolve param {param_key!r} on block {block_name!r}: no "
+        f"explicit (non-'auto') type value found on this block, any connected "
+        f"neighbor in this batch, or any pre-existing connected neighbor. Set "
+        f"an explicit type value on at least one side of this connection "
+        f"instead of 'auto' on both."
+    )
 
 
 def set_block_state(block: Any, state: str) -> None:
@@ -849,7 +868,11 @@ def undo_status(target_path: Path) -> dict:
 
 def set_param(block: Any, param_key: str, value: str) -> None:
     if param_key not in block.params:
-        raise KeyError(f"Param {param_key!r} not in block {block.name!r}")
+        valid_keys = sorted(block.params.keys())
+        raise KeyError(
+            f"Param {param_key!r} not in block {block.name!r}. "
+            f"Valid param names for this block: {valid_keys}"
+        )
     if param_key == "id":
         if str(value) != str(block.params["id"].value):
             value = str(block.params["id"].value)
@@ -884,13 +907,104 @@ def set_param(block: Any, param_key: str, value: str) -> None:
 # newly-added blocks without overlap — see change_graph's add_blocks phase
 # for why this can't be the block's real rendered size (that's GUI-only and
 # unavailable to this headless code path).
-BLOCK_FOOTPRINT_W = 250
-BLOCK_FOOTPRINT_H = 100
-BLOCK_COLUMN_MARGIN = 50
+#
+# A per-block estimate derived from counting each param's native `hide`
+# attribute (`hide not in ('all', 'part')` is exactly the rule GRC's own
+# canvas rendering uses to decide whether a param gets a row — see
+# gui/canvas/block.py) was tried and rejected: it's accurate for simple
+# blocks, but multi-channel sink/source blocks (e.g. qtgui_time_sink_x) carry
+# ~10 near-duplicate per-channel param groups (label1..label10, color1..10,
+# etc.) that GRC's canvas dynamically collapses down to however many
+# channels are actually connected — a raw hide-attribute count sees all ~60+
+# of them as visible regardless. Replicating that collapsing correctly would
+# mean hardcoding which params group together and how, per block family —
+# exactly the "no hand-picked heuristics" this codebase avoids elsewhere. A
+# single, generously-sized constant is the more honest fix: it costs some
+# wasted canvas space for simple blocks, in exchange for not silently
+# overlapping busier ones (live-reproduced: a Signal Source with 6 visible
+# rows — samp_rate/waveform/freq/amp/offset/phase — placed exactly
+# BLOCK_FOOTPRINT_H=100 above a newly-added sink rendered tall enough to
+# visibly overlap it, since 100 was sized for a near-empty block).
+BLOCK_FOOTPRINT_W = 300
+BLOCK_FOOTPRINT_H = 220
+BLOCK_SPACING = 60
 
 
-def _footprints_overlap(a: tuple, b: tuple) -> bool:
-    return abs(a[0] - b[0]) < BLOCK_FOOTPRINT_W and abs(a[1] - b[1]) < BLOCK_FOOTPRINT_H
+def _rects_overlap(ax: float, ay: float, bx: float, by: float) -> bool:
+    """AABB collision check with spacing gap. Coordinates are top-left
+    corners; both blocks share the same conservative footprint estimate."""
+    gap = BLOCK_SPACING
+    return (
+        ax < bx + BLOCK_FOOTPRINT_W + gap
+        and ax + BLOCK_FOOTPRINT_W + gap > bx
+        and ay < by + BLOCK_FOOTPRINT_H + gap
+        and ay + BLOCK_FOOTPRINT_H + gap > by
+    )
+
+
+def _find_block_placement(
+    new_block_name: str,
+    occupied: list[tuple[float, float]],
+    neighbor_map: dict[str, set[str]],
+    block_coords: dict[str, tuple[float, float]],
+    bbox: tuple[float, float, float, float],
+) -> tuple[float, float]:
+    """Find a non-overlapping position for a new block.
+
+    Prioritizes placement near connected neighbors (from the same batch's
+    add_connections), falling back to the graph's centroid. Uses a spiral
+    grid search to find the nearest empty slot — fills empty space rather
+    than always extending to the right.
+    """
+    grid_w = BLOCK_FOOTPRINT_W + BLOCK_SPACING
+    grid_h = BLOCK_FOOTPRINT_H + BLOCK_SPACING
+
+    # 1. Find connected neighbors' coordinates (existing blocks or
+    #    already-placed new blocks from the same batch)
+    neighbor_coords = []
+    for other in neighbor_map.get(new_block_name, ()):
+        if other in block_coords:
+            neighbor_coords.append(block_coords[other])
+
+    # 2. Compute target point
+    if neighbor_coords:
+        # Place to the right of the average neighbor position, matching
+        # the typical left-to-right signal flow direction
+        avg_x = sum(c[0] for c in neighbor_coords) / len(neighbor_coords)
+        avg_y = sum(c[1] for c in neighbor_coords) / len(neighbor_coords)
+        target_x = avg_x + grid_w
+        target_y = avg_y
+    elif bbox:
+        # No connections — place at graph centroid to fill empty space
+        target_x = (bbox[0] + bbox[2]) / 2
+        target_y = (bbox[1] + bbox[3]) / 2
+    else:
+        target_x = 200.0
+        target_y = 12.0
+
+    # 3. Snap to grid
+    gx = round(target_x / grid_w) * grid_w
+    gy = round(target_y / grid_h) * grid_h
+
+    # 4. Spiral search: ring 0 is just the target, ring N is the perimeter
+    #    of cells at Chebyshev distance N. Expands outward until it finds
+    #    a non-overlapping slot.
+    if not any(_rects_overlap(gx, gy, ox, oy) for ox, oy in occupied):
+        return (gx, gy)
+
+    for ring in range(1, 60):
+        for dx in range(-ring, ring + 1):
+            for dy in range(-ring, ring + 1):
+                if max(abs(dx), abs(dy)) != ring:
+                    continue
+                cx = gx + dx * grid_w
+                cy = gy + dy * grid_h
+                if not any(_rects_overlap(cx, cy, ox, oy) for ox, oy in occupied):
+                    return (cx, cy)
+
+    # 5. Fallback: place to the right of everything
+    fallback_x = max(o[0] for o in occupied) + grid_w if occupied else 200.0
+    return (fallback_x, gy)
 
 
 def change_graph(
@@ -1003,26 +1117,49 @@ def change_graph(
             # all, so no code path — native or otherwise — can know a
             # block's true footprint headlessly.
             #
-            # This keeps GRC's own shape of fix (nudge until clear of
-            # everything already placed) but against a conservative fixed
-            # footprint estimate instead of an unavailable real size, and
-            # confined to one column right of the whole graph's bounding box
-            # so a batch of new blocks reads as a tidy list. This must never
-            # need agent or user input: the agent's own context has block
-            # coordinates filtered out entirely, so positioning has to be
-            # fully self-contained here.
-            occupied = [
-                tuple(b.states["coordinate"])
-                for b in flow_graph.blocks
-                if isinstance(b.states.get("coordinate"), (list, tuple))
-                and len(b.states["coordinate"]) == 2
-            ]
-            next_x = (
-                (max(c[0] for c in occupied) + BLOCK_FOOTPRINT_W + BLOCK_COLUMN_MARGIN)
-                if occupied
-                else 200
-            )
-            next_y = min(c[1] for c in occupied) if occupied else 12
+            # Placement strategy: for each new block, find a target point
+            # near its connected neighbors (from add_connections in the same
+            # batch), or the graph's centroid if it has no connections.
+            # Then spiral-search outward on a grid to find the nearest
+            # non-overlapping slot. This fills empty space instead of always
+            # extending to the right, and keeps connected blocks near each
+            # other so wires stay short. Must never need agent or user
+            # input: the agent's own context has block coordinates filtered
+            # out entirely, so positioning has to be fully self-contained.
+            occupied: list[tuple[float, float]] = []
+            block_coords: dict[str, tuple[float, float]] = {}
+            for b in flow_graph.blocks:
+                coord = b.states.get("coordinate")
+                if isinstance(coord, (list, tuple)) and len(coord) == 2:
+                    c = (float(coord[0]), float(coord[1]))
+                    occupied.append(c)
+                    block_coords[b.name] = c
+
+            # Pre-parse add_connections to build a neighbor map so blocks
+            # connecting to each other (or to existing blocks) get placed
+            # near their neighbors.
+            neighbor_map: dict[str, set[str]] = {}
+            if add_connections:
+                for conn_str in add_connections:
+                    p = parse_conn(conn_str)
+                    if p:
+                        neighbor_map.setdefault(p["src_block"], set()).add(
+                            p["dst_block"]
+                        )
+                        neighbor_map.setdefault(p["dst_block"], set()).add(
+                            p["src_block"]
+                        )
+
+            # Compute graph bounding box for centroid fallback
+            if occupied:
+                bbox = (
+                    min(c[0] for c in occupied),
+                    min(c[1] for c in occupied),
+                    max(c[0] for c in occupied),
+                    max(c[1] for c in occupied),
+                )
+            else:
+                bbox = ()
 
             for item in add_blocks:
                 block_id = item["block_id"]
@@ -1046,11 +1183,13 @@ def change_graph(
                         }
                     )
                     continue
-                candidate = (next_x, next_y)
-                while any(_footprints_overlap(candidate, other) for other in occupied):
-                    candidate = (candidate[0], candidate[1] + BLOCK_FOOTPRINT_H)
-                occupied.append(candidate)
-                block.states["coordinate"] = list(candidate)
+
+                placement = _find_block_placement(
+                    instance_name, occupied, neighbor_map, block_coords, bbox
+                )
+                occupied.append(placement)
+                block_coords[instance_name] = placement
+                block.states["coordinate"] = list(placement)
                 block.params["id"].set_value(str(instance_name))
                 flow_graph.rewrite()
 
@@ -1109,8 +1248,16 @@ def change_graph(
 
         # Phase 5: auto_resolve_types
         for b in flow_graph.blocks:
+            controlling = type_controlling_params(b.key)
             for k, p in b.params.items():
-                if str(p.value) == "auto":
+                # Restricted to actual type-controlling params (native-
+                # derived: dtype == "enum" AND textually referenced in a
+                # port's dtype template) — some blocks have unrelated,
+                # non-type params whose own schema default happens to be the
+                # literal string "auto" too (e.g. blocks_throttle2's numeric
+                # "limit"), which have no connected ports to resolve from at
+                # all and must not be routed through dtype resolution.
+                if k in controlling and str(p.value) == "auto":
                     is_add = b.name in new_block_names
                     try:
                         resolved = resolve_auto(
@@ -1260,12 +1407,14 @@ def change_graph(
 def get_db_and_model(domain: str) -> tuple[str, str]:
     from grc_agent.settings import load_settings
     cfg = load_settings()
-    is_openrouter = (cfg.get("provider") == "openrouter")
+    provider = cfg.get("provider", "ollama")
 
-    if is_openrouter:
-        model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "text-embedding-3-small")
+    if provider == "openrouter":
+        model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "perplexity/pplx-embed-v1-0.6b")
         db_name = f"{domain}_openrouter.db"
     else:
+        # ollama and ollama_cloud both use local Ollama for embeddings
+        # (Ollama Cloud's API doesn't expose /v1/embeddings)
         model = os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest")
         db_name = f"{domain}_ollama.db"
 
@@ -1278,24 +1427,27 @@ def _embed_endpoint() -> tuple[str, str]:
     embedding calls."""
     from grc_agent.settings import load_settings
     cfg = load_settings()
-    is_openrouter = (cfg.get("provider") == "openrouter")
+    provider = cfg.get("provider", "ollama")
 
-    if is_openrouter:
+    if provider == "openrouter":
         return "https://openrouter.ai/api/v1", os.getenv("OPENROUTER_API_KEY", "")
+    # ollama and ollama_cloud both use local Ollama for embeddings
     return "http://localhost:11434/v1", "not-needed"
 
 
 def embed_query(query: str) -> list[float]:
     from grc_agent.settings import load_settings
     cfg = load_settings()
-    is_openrouter = (cfg.get("provider") == "openrouter")
+    provider = cfg.get("provider", "ollama")
+    use_prefix = provider != "openrouter"
 
     _, model = get_db_and_model("catalog")
     base_url, api_key = _embed_endpoint()
 
     client = OpenAI(base_url=base_url, api_key=api_key)
     response = client.embeddings.create(
-        model=model, input="task: search result | query: " + query if not is_openrouter else query
+        model=model,
+        input=("task: search result | query: " + query) if use_prefix else query,
     )
     return response.data[0].embedding
 
@@ -1318,19 +1470,34 @@ def embed_document(text: str, model: str) -> list[float]:
     prefix convention, used only at ingestion time."""
     from grc_agent.settings import load_settings
     cfg = load_settings()
-    is_openrouter = (cfg.get("provider") == "openrouter")
+    provider = cfg.get("provider", "ollama")
+    use_prefix = provider != "openrouter"
 
     base_url, api_key = _embed_endpoint()
-    body = text if is_openrouter else _DOCUMENT_PREFIX + text
+    body = text if not use_prefix else _DOCUMENT_PREFIX + text
 
     client = OpenAI(base_url=base_url, api_key=api_key)
     response = client.embeddings.create(model=model, input=body)
     return response.data[0].embedding
 
 
+_EMBEDDING_DIM_CACHE: dict[str, int] = {}
+
+
+def _get_embedding_dim(model: str) -> int:
+    """Cache the embedding dimension for a model so we don't pay for a real
+    embedding API call on every single vector query just to verify the cached
+    DB still matches the current model."""
+    if model not in _EMBEDDING_DIM_CACHE:
+        _EMBEDDING_DIM_CACHE[model] = len(embed_document("test", model))
+    return _EMBEDDING_DIM_CACHE[model]
+
+
 def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
     if os.path.exists(db_path):
-        # Verify schema dimension matches model embedding dimension to handle model/backend swaps
+        # Check both embedding model name (stored in _db_meta) and vector
+        # dimension. A model-name change triggers a rebuild even if dimensions
+        # happen to match — different models produce different embedding spaces.
         try:
             conn = sqlite3.connect(db_path)
             conn.enable_load_extension(True)
@@ -1338,15 +1505,33 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
             sql_row = conn.execute(
                 f"SELECT sql FROM sqlite_master WHERE name = '{domain}_idx'"
             ).fetchone()
+            meta_row = None
+            try:
+                meta_row = conn.execute(
+                    "SELECT value FROM _db_meta WHERE key = 'embedding_model'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                pass
             conn.close()
+
             if sql_row and sql_row[0]:
                 match = re.search(r"float\[(\d+)\]", sql_row[0])
                 if match:
                     db_dim = int(match.group(1))
-                    dummy_emb = embed_document("test", model)
-                    if len(dummy_emb) != db_dim:
+                    model_dim = _get_embedding_dim(model)
+                    if model_dim != db_dim:
                         print(
-                            f"[grc-agent] Vector DB dimension mismatch: DB has {db_dim}, model has {len(dummy_emb)}. Rebuilding..."
+                            f"[grc-agent] Vector DB dimension mismatch: DB has {db_dim}, model has {model_dim}. Rebuilding..."
+                        )
+                        os.remove(db_path)
+                    elif meta_row and meta_row[0] != model:
+                        print(
+                            f"[grc-agent] Embedding model changed: DB was '{meta_row[0]}', now '{model}'. Rebuilding..."
+                        )
+                        os.remove(db_path)
+                    elif not meta_row:
+                        print(
+                            f"[grc-agent] Vector DB has no model metadata — rebuilding to record '{model}'..."
                         )
                         os.remove(db_path)
                     else:
@@ -1362,7 +1547,7 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
                 pass
 
     print(
-        f"[grc-agent] {domain} vector DB not found or dimension mismatch — building it now "
+        f"[grc-agent] {domain} vector DB not found or model changed — building it now "
         f"(first run only, may take a few minutes)..."
     )
     from grc_agent import ingest

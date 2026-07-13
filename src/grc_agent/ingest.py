@@ -35,6 +35,11 @@ def _open_db(db_path: str, dim: int) -> sqlite3.Connection:
     return conn
 
 
+def _write_meta(conn: sqlite3.Connection, model: str) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS _db_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT OR REPLACE INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,))
+
+
 def ingest_catalog(db_path: str, model: str) -> int:
     platform = get_platform()
     block_ids = sorted(b for b in platform.blocks if not b.startswith("_"))
@@ -74,6 +79,7 @@ def ingest_catalog(db_path: str, model: str) -> int:
                 "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
                 (cur.lastrowid, sqlite_vec.serialize_float32(embedding)),
             )
+        _write_meta(conn, model)
         conn.commit()
     finally:
         conn.close()
@@ -154,6 +160,7 @@ def ingest_docs(db_path: str, model: str) -> int:
                 "INSERT INTO docs_idx(rowid, embedding) VALUES(?, ?)",
                 (cur.lastrowid, sqlite_vec.serialize_float32(embedding)),
             )
+        _write_meta(conn, model)
         conn.commit()
     finally:
         conn.close()

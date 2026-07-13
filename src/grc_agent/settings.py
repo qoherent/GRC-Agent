@@ -10,9 +10,10 @@ _DEFAULTS = {
     "provider": "ollama",
     "model": "qwen3.6:35b-a3b-q4_K_M",
     "ollama_model": "qwen3.6:35b-a3b-q4_K_M",
-    "openrouter_model": "openai/gpt-4o-mini",
+    "openrouter_model": os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"),
+    "ollama_cloud_model": "deepseek-v4-flash:cloud",
 }
-_VALID_PROVIDERS = ("ollama", "openrouter")
+_VALID_PROVIDERS = ("ollama", "openrouter", "ollama_cloud")
 
 
 def settings_path() -> Path:
@@ -36,7 +37,7 @@ def load_settings() -> dict:
         return dict(_DEFAULTS)
 
     res = dict(_DEFAULTS)
-    for k in ("provider", "model", "ollama_model", "openrouter_model"):
+    for k in ("provider", "model", "ollama_model", "openrouter_model", "ollama_cloud_model"):
         if k in data:
             res[k] = data[k]
 
@@ -46,6 +47,8 @@ def load_settings() -> dict:
         res["ollama_model"] = res["model"]
     if "openrouter_model" not in data and res["provider"] == "openrouter":
         res["openrouter_model"] = res["model"]
+    if "ollama_cloud_model" not in data and res["provider"] == "ollama_cloud":
+        res["ollama_cloud_model"] = res["model"]
 
     return res
 
@@ -63,6 +66,8 @@ def save_settings(provider: str, model: str) -> None:
         current["ollama_model"] = model.strip()
     elif provider == "openrouter":
         current["openrouter_model"] = model.strip()
+    elif provider == "ollama_cloud":
+        current["ollama_cloud_model"] = model.strip()
 
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,10 +10,24 @@
 const ICON_DIR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>';
 const ICON_FILE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
 
+// Two distinct canvas-placeholder messages: genuinely nothing loaded (the
+// static HTML default) vs. a flowgraph that IS loaded (chat/inspect/undo
+// all work) but whose visual canvas failed/timed out. Reusing one message
+// for both — the bug this pair fixes — told a user with a fully working
+// chat session that "no flowgraph" was loaded.
+const CANVAS_PLACEHOLDER_EMPTY = "No flowgraph loaded. Click Browse to choose one.";
+const CANVAS_PLACEHOLDER_CANVAS_FAILED = "Flowgraph loaded, but the canvas failed to connect. Browse to load a different file, or open this one again to retry.";
+
 // Single source of truth for all mutable page-level state. Replacing a field
 // here is the only way these flags ever change — nothing else holds a copy.
 const state = {
   isGrcLoaded: false,
+  // Last-known canvas outcome, mirrored from whichever of /grc/open's or
+  // /grc/status's canvas_ready field was freshest at the time — see
+  // refresh()'s own effectiveCanvasReady note. Only read/written by
+  // refresh() itself today; kept on state (rather than a local variable)
+  // so it survives across calls the same way isGrcLoaded does.
+  canvasReady: true,
   lastGrcVersion: -1,
   lastPath: "/",
   brokenIframePolls: 0,
@@ -23,7 +37,8 @@ const state = {
   lastSentCanvasSize: null,
   openrouterKeySet: false,
   ollamaModel: "qwen3.6:35b-a3b-q4_K_M",
-  openrouterModel: "openai/gpt-4o-mini",
+  openrouterModel: "deepseek/deepseek-v4-flash",
+  ollamaCloudModel: "deepseek-v4-flash:cloud",
   // What the running chat Agent's model ACTUALLY is right now (from
   // /grc/settings' active_provider/active_model) — distinct from
   // provider/model above (the saved-to-disk preference, reflected in the
@@ -32,6 +47,24 @@ const state = {
   // restart-required badge should show; see updateRestartBadge().
   activeProvider: null,
   activeModel: null,
+  // Set right before resetChatFrame(true) (a chat-widget-only repair, e.g.
+  // the auto-heal or "chat looks stuck" button) so pollConversationState's
+  // own transition-to-"/" handler knows this particular reset must not
+  // unload the flowgraph — the chat glitching is unrelated to whether a
+  // file is loaded. Consumed (reset to false) the first time that handler
+  // sees it, so it never suppresses a later, genuine abandon.
+  preserveGrcOnReset: false,
+  // True for the duration of the auto-reopen branch's /grc/open call
+  // (pollConversationState), which can take up to the ~20s canvas-ready
+  // deadline. state.lastPath is only written once that call settles, so
+  // without this guard every 750ms tick in between re-reads the same
+  // currentPath !== state.lastPath and fires ANOTHER /grc/open for the
+  // same path — and each call unconditionally kills whatever canvas is
+  // currently starting up (web.py's own "last-writer-wins" contract), so
+  // overlapping calls can repeatedly kill a freshly spawned canvas before
+  // it ever reaches /ready, a self-inflicted livelock that manufactures
+  // its own "Timed out waiting for canvas to become ready".
+  autoOpenInFlight: false,
 };
 
 const MAX_SESSION_MAPPINGS = 50;
@@ -44,8 +77,10 @@ const MAX_SESSION_MAPPINGS = 50;
 // any other path silently renders nothing), so the iframe must point at
 // the literal root, not a subpath; the query param just forces a reload
 // instead of a no-op same-src assignment.
-function resetChatFrame() {
+function resetChatFrame(preserveGraph = false) {
   localStorage.removeItem("grc_active_conv_id");
+  setUrlConvId(null);
+  if (preserveGraph) state.preserveGrcOnReset = true;
   document.getElementById("chat-frame").src = `/?r=${crypto.randomUUID()}`;
 }
 
@@ -81,13 +116,61 @@ function startNewConversation() {
 // always clickable no matter how broken the chat pane looks, and a
 // reload persists into the exact same broken state via
 // grc_active_conv_id — so clear that too, not just start a new src.
+//
+// Deliberately calls resetChatFrame(true) directly, NOT startNewConversation()
+// — the chat widget looking broken has nothing to do with whether a
+// flowgraph is loaded. This used to go through startNewConversation(),
+// which unconditionally closes any loaded file and kills its live canvas
+// process — meaning the auto-heal below (and the "chat looks stuck?"
+// button) silently destroyed unrelated, perfectly-working work every time
+// the chat widget merely glitched (live-reproduced: a corrupted
+// localStorage entry, or simply this button, closed the loaded file with
+// zero relation between the two and no confirmation, unlike Clear History).
 function resetConversation() {
   state.brokenIframePolls = 0;
-  startNewConversation();
+  resetChatFrame(true);
+}
+
+// Reads the chat iframe's OWN current pathname directly and fresh — never
+// through state.lastPath, which is only written by pollConversationState's
+// 750ms tick and can lag the iframe's real location by up to that long (plus
+// whatever async work runs before it writes). Used by any decision that must
+// be correct within a tick or two of a real navigation (e.g. hiding Clear
+// History the instant a message is sent), not just eventually-consistent.
+function getChatFramePath() {
+  try {
+    const win = document.getElementById("chat-frame")?.contentWindow;
+    const loc = win?.location;
+    if (!loc || loc.href === "about:blank") return undefined;
+    return loc.pathname;
+  } catch (e) {
+    return undefined; // cross-origin/transitional — same as pollConversationState's own guard
+  }
+}
+
+// The dashboard's own URL (as opposed to the chat iframe's internal one,
+// invisible to the browser's address bar) previously never changed at all —
+// always exactly /grc/panel regardless of which conversation was active, so
+// a reload or a shared link could only ever fall back to whatever
+// localStorage happened to hold. Mirrors that value into a `conv` query
+// param via replaceState (not pushState — this tracks "what's currently
+// shown," it isn't meant to grow browser history per conversation) so the
+// visible URL actually reflects the active session, and restoreSession() can
+// honor it on load.
+function setUrlConvId(convId) {
+  const url = new URL(window.location);
+  if (convId && convId !== "/") {
+    url.searchParams.set("conv", convId.replace(/^\//, ""));
+  } else {
+    url.searchParams.delete("conv");
+  }
+  history.replaceState(null, "", url);
 }
 
 function restoreSession() {
-  const activeConvId = localStorage.getItem("grc_active_conv_id");
+  const url = new URL(window.location);
+  const urlConv = url.searchParams.get("conv");
+  const activeConvId = urlConv ? "/" + urlConv : localStorage.getItem("grc_active_conv_id");
   if (activeConvId && activeConvId !== "/") {
     document.getElementById("chat-frame").src = activeConvId;
   } else {
@@ -120,34 +203,15 @@ function clearHistory() {
       if (iframeWin) {
         iframeWin.localStorage.clear();
         iframeWin.sessionStorage.clear();
-        if (iframeWin.indexedDB) {
-          iframeWin.indexedDB.deleteDatabase("chat-storage");
-          if (iframeWin.indexedDB.databases) {
-            iframeWin.indexedDB.databases().then(dbs => {
-              for (const db of dbs) {
-                if (db.name) {
-                  iframeWin.indexedDB.deleteDatabase(db.name);
-                }
-              }
-            });
-          }
-        }
       }
     } catch (e) {}
   }
 
-  // 3. Delete parent IndexedDB databases
+  // 3. Delete parent IndexedDB chat database only — clearing every DB on
+  // the origin is overly destructive and could wipe unrelated same-origin
+  // application data. The targeted delete is enough to reset the vendor widget.
   try {
     indexedDB.deleteDatabase("chat-storage");
-    if (indexedDB.databases) {
-      indexedDB.databases().then(dbs => {
-        for (const db of dbs) {
-          if (db.name) {
-            indexedDB.deleteDatabase(db.name);
-          }
-        }
-      });
-    }
   } catch (e) {}
 
   // 4. Force reload/navigate the iframe
@@ -202,6 +266,11 @@ function saveSessionGrcPath(convId, grcPath) {
 }
 
 async function pollConversationState() {
+  // A previous tick's auto-reopen /grc/open is still awaiting its (up to
+  // ~20s) canvas-ready outcome — see autoOpenInFlight's own comment. Skip
+  // this whole tick rather than re-detecting the same still-pending
+  // transition and firing a duplicate open.
+  if (state.autoOpenInFlight) return;
   const btn = document.getElementById("browse-btn");
   let fresh = true;
   let currentPath;
@@ -260,14 +329,25 @@ async function pollConversationState() {
   } catch (e) {}
 
   if (currentPath !== state.lastPath) {
+    setUrlConvId(currentPath);
     if (currentPath === "/") {
       localStorage.removeItem("grc_active_conv_id");
-      unloadGrc();
+      // Suppressed for a resetChatFrame(true) repair (chat-widget-only —
+      // see resetConversation) — consumed once so it can't swallow a later,
+      // genuine abandon (e.g. the vendor widget's own internal "New
+      // conversation" click, which this transition check is the only way
+      // this page ever learns about).
+      if (state.preserveGrcOnReset) {
+        state.preserveGrcOnReset = false;
+      } else {
+        unloadGrc();
+      }
     } else {
       localStorage.setItem('grc_active_conv_id', currentPath);
 
       const mappedGrc = getSessionGrcPath(currentPath);
       if (mappedGrc) {
+        state.autoOpenInFlight = true;
         try {
           const res = await fetch("/grc/open", {
             method: "POST",
@@ -278,16 +358,17 @@ async function pollConversationState() {
           if (data.ok) {
             addSessionHistory(currentPath, mappedGrc);
             if (data.canvas_ready === false) {
-              // refresh() first — see openGraph's identical ordering note:
-              // its own render() would otherwise clear this error message.
-              await refresh(false, false);
-              setMsg(data.canvas_error || "Flowgraph loaded, but the canvas failed to connect.", "error");
+              // refresh() itself now sets the error message — see its own
+              // ordering note (openGraph's identical case).
+              await refresh(false, false, data.canvas_error);
             } else {
               await refresh();
             }
           }
         } catch (e) {
           console.error("Auto-open GRC failed:", e);
+        } finally {
+          state.autoOpenInFlight = false;
         }
       } else {
         try {
@@ -435,8 +516,16 @@ function integrateSettings() {
     // momentarily inaccessible during navigation) can't leave it stuck
     // visible mid-session. It's only (re)shown when on the fresh screen AND
     // a visible sidebar is actually found.
+    //
+    // Reads the iframe's live path directly (getChatFramePath()), NOT
+    // state.lastPath: this poll runs every 300ms but state.lastPath is only
+    // written by pollConversationState's separate 750ms tick, so trusting it
+    // here left a live-measured ~734ms window, after every single message
+    // sent, where this overlay showed on top of an already-active
+    // conversation — a real, cited-elsewhere-as-"sometimes" bug, not
+    // theoretical.
     overlay.style.display = "none";
-    if (state.lastPath === "/" && sidebar) {
+    if (getChatFramePath() === "/" && sidebar) {
       const rect = sidebar.getBoundingClientRect();
       const style = iframe.contentWindow.getComputedStyle(sidebar);
       const isVisible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
@@ -526,14 +615,12 @@ async function openGraph(path) {
     resetChatFrame();
     if (data.canvas_ready === false) {
       // The flowgraph itself DID load (chat/inspect work) — only the
-      // canvas subprocess failed/timed out. refresh() first (its own
-      // render() clears a STALE error message once the graph is valid
-      // again — setting ours before that call would just get wiped), then
-      // say so instead of "Loaded", and don't point the iframe at a
-      // display with no live GTK client (broadway.js's own reconnect-free
-      // alert("disconnected") otherwise).
-      await refresh(false, false);
-      setMsg(data.canvas_error || "Flowgraph loaded, but the canvas failed to connect.", "error");
+      // canvas subprocess failed/timed out. refresh() itself now sets the
+      // error message (in the right order relative to its own render(),
+      // which would otherwise clear a stale one) and doesn't point the
+      // iframe at a display with no live GTK client (broadway.js's own
+      // reconnect-free alert("disconnected") otherwise).
+      await refresh(false, false, data.canvas_error);
     } else {
       setMsg(`Loaded ${data.path}`, "ok");
       // forceCanvasReload: a brand-new canvas_app.py just connected to
@@ -637,7 +724,14 @@ async function browseTo(dir) {
   // First row is the natural place for focus to land after navigating
   // into a directory (mirrors what a native file dialog does).
   const firstRow = list.firstElementChild;
-  if (firstRow) firstRow.focus();
+  if (firstRow) {
+    firstRow.focus();
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "browse-empty";
+    empty.textContent = "No .grc files here.";
+    list.appendChild(empty);
+  }
 }
 
 function render(graph) {
@@ -656,8 +750,17 @@ function render(graph) {
 
 function renderEmptyState() {
   document.getElementById("validation").innerHTML = "";
+  // A canvas_error from a previous, unrelated open attempt (e.g. "Timed out
+  // waiting for canvas to become ready") otherwise survives indefinitely
+  // through the transition back to "nothing loaded" — nothing else ever
+  // clears #msg on this path (render() only clears it on a valid, loaded
+  // graph), so a stale error can sit on screen next to "No flowgraph
+  // loaded" long after the attempt it described is over.
+  setMsg("", "");
   const canvasIframe = document.getElementById("canvas-iframe");
   const canvasPlaceholder = document.getElementById("canvas-placeholder");
+  const placeholderText = document.getElementById("canvas-placeholder-text");
+  if (placeholderText) placeholderText.textContent = CANVAS_PLACEHOLDER_EMPTY;
   if (canvasIframe && canvasPlaceholder) {
     canvasIframe.style.display = "none";
     canvasIframe.src = "about:blank";
@@ -665,7 +768,7 @@ function renderEmptyState() {
   }
 }
 
-async function refresh(forceCanvasReload = false, canvasReady = true) {
+async function refresh(forceCanvasReload = false, canvasReady, canvasError) {
   try {
     const [statusRes, inspectRes] = await Promise.all([
       fetch("/grc/status").then(r => r.json()),
@@ -692,17 +795,44 @@ async function refresh(forceCanvasReload = false, canvasReady = true) {
     }
     state.isGrcLoaded = true;
     render(inspectRes.graph);
+    // Prefer an explicitly-passed, just-obtained value — openGraph and the
+    // auto-reopen path already have the freshest possible signal from their
+    // own /grc/open call, no need to wait on this same function's own
+    // /grc/status round-trip. Otherwise fall back to /grc/status's
+    // canvas_ready (persisted server-side, see web.py's canvas_ready_state),
+    // not a hardcoded true — without this, a bare refresh() call made well
+    // after a real canvas failure (doUndo, doRedo, doValidate, the
+    // version-bump poll in pollConversationState) would blindly try to
+    // re-point the iframe at a canvas already known to be dead.
+    const effectiveCanvasReady =
+      canvasReady !== undefined ? canvasReady : statusRes.canvas_ready !== false;
+    state.canvasReady = effectiveCanvasReady;
     const canvasIframe = document.getElementById("canvas-iframe");
     const canvasPlaceholder = document.getElementById("canvas-placeholder");
-    if (!canvasReady) {
+    if (!effectiveCanvasReady) {
       // The canvas subprocess is known dead for this open (its readiness
       // wait already timed out) — pointing the iframe at it would just
       // trigger broadway.js's own reconnect-free alert("disconnected").
       // The flowgraph IS loaded (chat/inspect above still work); only the
       // visual canvas is unavailable, so leave the placeholder showing
       // instead of a doomed connection attempt.
+      const placeholderText = document.getElementById("canvas-placeholder-text");
+      if (placeholderText) placeholderText.textContent = CANVAS_PLACEHOLDER_CANVAS_FAILED;
       if (canvasIframe) canvasIframe.style.display = "none";
       if (canvasPlaceholder) canvasPlaceholder.style.display = "flex";
+      // Set here (after render() above, which is the only thing that would
+      // otherwise clear a stale error-class #msg) rather than leaving each
+      // caller responsible for it — otherwise a canvas failure discovered
+      // through a bare refresh() call (doUndo, doRedo, doValidate, the
+      // version-bump poll, or simply a fresh page load re-fetching
+      // /grc/status) never shows the banner at all, only the placeholder
+      // text above, even though the same real condition holds.
+      const effectiveCanvasError =
+        canvasError !== undefined ? canvasError : statusRes.canvas_error;
+      setMsg(
+        effectiveCanvasError || "Flowgraph loaded, but the canvas failed to connect.",
+        "error"
+      );
       return;
     }
     // Broadway URL comes from the server (env-overridable port) so this
@@ -798,14 +928,18 @@ refresh();
 function renderModelSuggestions() {
   const provider = document.getElementById("model-provider-select").value;
   const list = document.getElementById("model-name-suggestions");
-  const suggestion = provider === "ollama" ? state.ollamaModel : state.openrouterModel;
+  const suggestion = provider === "ollama" ? state.ollamaModel
+    : provider === "ollama_cloud" ? state.ollamaCloudModel
+    : state.openrouterModel;
   list.innerHTML = `<option value="${suggestion}"></option>`;
   document.getElementById("model-name-label").textContent = suggestion;
   const overlay = document.getElementById("model-selector-overlay");
   overlay.title = provider === "ollama"
     ? "Pull a model first: ollama pull <name>."
-    : "Browse models at openrouter.ai/models." +
-      (state.openrouterKeySet ? "" : " OPENROUTER_API_KEY is not set in .env.");
+    : provider === "ollama_cloud"
+      ? "Enter any model name available on Ollama Cloud."
+      : "Browse models at openrouter.ai/models." +
+        (state.openrouterKeySet ? "" : " OPENROUTER_API_KEY is not set in .env.");
   updateRestartBadge();
 }
 
@@ -832,9 +966,12 @@ function onModelProviderChange() {
   cancelModelNameEdit();
   const provider = document.getElementById("model-provider-select").value;
   document.getElementById("model-name-input").value =
-    provider === "ollama" ? state.ollamaModel : state.openrouterModel;
+    provider === "ollama" ? state.ollamaModel
+    : provider === "ollama_cloud" ? state.ollamaCloudModel
+    : state.openrouterModel;
   renderModelSuggestions();
   saveModelSettings();
+  checkProviderHealth();
 }
 
 async function loadModelSettings() {
@@ -844,11 +981,14 @@ async function loadModelSettings() {
     state.openrouterKeySet = !!res.openrouter_api_key_set;
     if (res.ollama_model) state.ollamaModel = res.ollama_model;
     if (res.openrouter_model) state.openrouterModel = res.openrouter_model;
+    if (res.ollama_cloud_model) state.ollamaCloudModel = res.ollama_cloud_model;
     state.activeProvider = res.active_provider ?? null;
     state.activeModel = res.active_model ?? null;
     document.getElementById("model-provider-select").value = res.provider;
     document.getElementById("model-name-input").value = res.model;
     renderModelSuggestions();
+    // Trigger health check after loading settings
+    checkProviderHealth();
   } catch (e) { /* leave defaults */ }
 }
 
@@ -867,6 +1007,7 @@ async function saveModelSettings() {
     overlay.classList.add(data.ok ? "saved" : "error");
     if (data.ok) {
       if (provider === "ollama") state.ollamaModel = model;
+      else if (provider === "ollama_cloud") state.ollamaCloudModel = model;
       else state.openrouterModel = model;
       renderModelSuggestions();
     }
@@ -1008,7 +1149,11 @@ function renderSessionHistory() {
   const panel = document.getElementById("session-history-panel");
   if (!panel) return;
   const entries = loadSessionHistory();
-  if (!entries.length || state.lastPath !== "/") {
+  // Same staleness bug as the Clear History overlay (see integrateSettings)
+  // — read the iframe's live path directly rather than the slower-cadence
+  // state.lastPath, so this panel can't linger visible after a message has
+  // already started a real conversation.
+  if (!entries.length || getChatFramePath() !== "/") {
     panel.style.display = "none";
     return;
   }
@@ -1044,7 +1189,81 @@ function renderSessionHistory() {
   }
 }
 
-// ---- Event wiring ----
+// ---- Provider health check — async, never blocks the UI. Called on page
+// load and whenever the provider dropdown changes. Updates a small badge
+// next to the model selector with live connectivity status.
+async function checkProviderHealth() {
+  const badge = document.getElementById("provider-health");
+  const apikeyBtn = document.getElementById("apikey-btn");
+  if (!badge) return;
+  badge.className = "checking";
+  badge.textContent = "checking...";
+  try {
+    const res = await fetch("/grc/health").then(r => r.json());
+    if (res.ok) {
+      badge.className = "healthy";
+      badge.textContent = "connected";
+      badge.title = res.message;
+      apikeyBtn.style.display = "none";
+    } else {
+      badge.className = "unhealthy";
+      badge.textContent = "disconnected";
+      badge.title = res.message;
+      // Show the API key button for cloud providers that need a key
+      if (res.provider === "ollama_cloud" || res.provider === "openrouter") {
+        apikeyBtn.style.display = "";
+        apikeyBtn.title = res.message;
+      } else {
+        apikeyBtn.style.display = "none";
+      }
+    }
+  } catch (e) {
+    badge.className = "unhealthy";
+    badge.textContent = "error";
+    badge.title = String(e);
+    apikeyBtn.style.display = "none";
+  }
+}
+
+// ---- API key dialog — lets the user set their API key for Ollama Cloud or
+// OpenRouter directly from the GUI. Writes to .env on the server.
+function openApiKeyDialog() {
+  const provider = document.getElementById("model-provider-select").value;
+  if (provider !== "ollama_cloud" && provider !== "openrouter") return;
+  const nameEl = document.getElementById("apikey-provider-name");
+  nameEl.textContent = provider === "ollama_cloud" ? "Ollama Cloud" : "OpenRouter";
+  document.getElementById("apikey-input").value = "";
+  document.getElementById("apikey-dialog-overlay").classList.add("open");
+  setTimeout(() => document.getElementById("apikey-input").focus(), 100);
+}
+
+function closeApiKeyDialog() {
+  document.getElementById("apikey-dialog-overlay").classList.remove("open");
+}
+
+async function saveApiKey() {
+  const provider = document.getElementById("model-provider-select").value;
+  const apiKey = document.getElementById("apikey-input").value.trim();
+  if (!apiKey) { setMsg("API key cannot be empty.", "error"); return; }
+  try {
+    const res = await fetch("/grc/apikey", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({provider, api_key: apiKey})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      setMsg(data.message, "ok");
+      closeApiKeyDialog();
+      // Re-check health now that the key is set in the current process
+      checkProviderHealth();
+    } else {
+      setMsg(data.message || "Failed to save API key.", "error");
+    }
+  } catch (e) {
+    setMsg(String(e), "error");
+  }
+}
 // All handlers are bound HERE (after every function above is defined) rather
 // than via inline onclick=/onload= attributes in the HTML. An inline
 // onload="integrateSettings()" on the chat iframe used to fire BEFORE this
@@ -1075,6 +1294,18 @@ document.getElementById("model-name-input").addEventListener("keydown", function
 });
 loadModelSettings();
 
+// ---- API key dialog wiring ----
+document.getElementById("apikey-btn").addEventListener("click", openApiKeyDialog);
+document.getElementById("apikey-cancel-btn").addEventListener("click", closeApiKeyDialog);
+document.getElementById("apikey-save-btn").addEventListener("click", saveApiKey);
+document.getElementById("apikey-input").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") { e.preventDefault(); saveApiKey(); }
+  else if (e.key === "Escape") { e.preventDefault(); closeApiKeyDialog(); }
+});
+document.getElementById("apikey-dialog-overlay").addEventListener("click", function(e) {
+  if (e.target === this) closeApiKeyDialog();
+});
+
 // Close browse overlay when clicking outside the dialog content
 document.getElementById("browse-overlay").addEventListener("click", function(e) {
   if (e.target === this) {
@@ -1082,9 +1313,13 @@ document.getElementById("browse-overlay").addEventListener("click", function(e) 
   }
 });
 
-// Close browse overlay when pressing the Escape key
+// Close browse overlay or API key dialog when pressing the Escape key
 window.addEventListener("keydown", function(e) {
   if (e.key === "Escape") {
-    closeBrowse();
+    if (document.getElementById("apikey-dialog-overlay").classList.contains("open")) {
+      closeApiKeyDialog();
+    } else {
+      closeBrowse();
+    }
   }
 });

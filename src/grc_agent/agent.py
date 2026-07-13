@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from pydantic_ai.capabilities import (
     WrapNodeRunHandler,
 )
 from pydantic_ai.messages import UserPromptPart
+from pydantic_ai.models.ollama import OllamaModel
+from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.result import FinalResult
 from pydantic_graph import End
 
@@ -36,9 +40,23 @@ from grc_agent.adapter import (
     query_catalog,
     query_docs,
 )
+from grc_agent.prompts import build_system_prompt
 
 MODEL = "qwen3.6:35b-a3b-q4_K_M"
 OLLAMA_V1 = "http://localhost:11434/v1"
+
+
+def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
+    """Build a model instance for the scenario/integration harness.
+
+    The web app has its own _build_model() that respects user settings; this
+    helper is for the reproducible scenario harness and tests, which may run
+    against either a local Ollama model or an OpenRouter model depending on
+    the environment.
+    """
+    if provider == "openrouter":
+        return OpenRouterModel(model_name or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"))
+    return OllamaModel(model_name or MODEL, provider=OllamaProvider(base_url=OLLAMA_V1))
 
 SCENARIOS = [
     {
@@ -433,11 +451,28 @@ async def change_graph_func(
     remove_connections: list[str] | None = None,
     force: bool = False,
 ) -> str:
-    """Apply a batch of structural graph edits.
+    """Apply a batch of structural graph edits in a single transaction.
 
-    Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction.
+    Runs in a fixed phase order regardless of argument order: remove_connections,
+    remove_blocks, add_blocks, update_params, update_states, add_connections. A
+    type-controlling param (e.g. 'type') set to the literal string 'auto' is
+    resolved from an explicit, non-'auto' value on a connected neighbor —
+    including one added and connected in this same call — but only if at
+    least one side of the connection has such a value; set an explicit type
+    on at least one side rather than 'auto' on both, or the call fails with
+    an actionable error instead of guessing.
 
-    Connection strings (in add_connections and remove_connections) must strictly use the format 'src_block:src_port->dst_block:dst_port' (e.g. 'source_0:0->sink_0:0').
+    Args:
+        add_blocks: New blocks to create.
+        remove_blocks: Instance names of blocks to delete.
+        update_params: Parameter updates for existing (or just-added) blocks.
+        update_states: enabled/disabled/bypass updates for existing (or just-added) blocks.
+        add_connections: New connections, each formatted
+            'src_block:src_port->dst_block:dst_port' (e.g. 'source_0:0->sink_0:0').
+        remove_connections: Connections to remove, same format as add_connections.
+        force: Bypass GNU Radio's own validation failures (e.g. an
+            intentionally unconnected port mid-edit). Does not bypass this
+            tool's own argument errors (unknown param, missing block).
     """
     add_blocks_dict = [b.model_dump(exclude_none=True) for b in add_blocks] if add_blocks else None
     update_params_dict = (
@@ -490,54 +525,23 @@ def grc_tools() -> list[Tool[Any]]:
     change_tool = Tool(
         change_graph_func,
         name="change_graph",
-        description="Apply a batch of structural graph edits. Can add/remove blocks, update parameters/states, and add/remove connections in a single transaction.",
+        # No explicit description= here (unlike inspect_tool/query_tool above,
+        # which just duplicate their own docstring verbatim): an explicit
+        # description replaces the function's docstring rather than
+        # supplementing it, and this tool's hand-written copy had already
+        # drifted from change_graph_func's real docstring (no mention of
+        # `force`, no phase-order/auto-resolution notes). docstring_format
+        # + require_parameter_descriptions is PydanticAI's own sanctioned
+        # idiom for deriving both the tool description and each top-level
+        # arg's schema description straight from the docstring — one source
+        # of truth instead of two that can silently disagree.
+        docstring_format="google",
+        require_parameter_descriptions=True,
         args_validator=validate_change_graph_args,
     )
     change_tool.max_retries = 3
 
     return [inspect_tool, query_tool, change_tool]
-
-
-def build_system_prompt(session_id: str | None = None) -> str:
-    prefix = f"Session ID: {session_id}\n" if session_id else ""
-    return prefix + (
-        "Role: GNU Radio graph editing assistant.\n"
-        "inspect_graph: read topology, blocks, connections, field values, and validation status. "
-        "Pass a targets list of block instance names to scope it to those blocks instead of the whole graph.\n"
-        "query_knowledge: search catalog blocks or GNU Radio documentation.\n"
-        "change_graph: add/remove blocks, edit field values, add/remove connections.\n"
-        "Parameter values are string expressions; a variable reference is simply the variable's name (e.g. use 'base_freq * 1.5', NOT 'vars.base_freq * 1.5').\n"
-        "Set a type-controlling parameter (e.g. 'type', 'itype', 'otype') to the literal value 'auto' "
-        "to resolve it from a connected neighbor's dtype instead of guessing a value.\n"
-        "Stream-port connections use numeric port keys (e.g. '0', '1', '2'), not names like 'out', 'in(0)', or 'in0'. "
-        "GRC error messages like 'in(0)' refer to port index '0'. Message ports are the exception: "
-        "they use their exact declared string identifier (e.g. 'pdus', 'msg') instead of a numeric index.\n"
-        "Connection strings must use the exact format 'src_block:src_port->dst_block:dst_port' (e.g. 'source_0:0->sink_0:0').\n"
-        "Do not attempt to rename blocks by changing the 'id' parameter in update_params; "
-        "changing a block's ID is not supported and will be ignored. To rename a block, you must remove it and add a new one.\n"
-        'Variables are blocks; use block_id "variable" (not "parameter") to add one.\n'
-        "Every GNU Radio fact must be grounded in query_knowledge, not memory.\n"
-        "Ensure the final state of the flowgraph is valid. The environment automatically "
-        "validates the graph state when you complete a turn and will raise a validation error "
-        "if invalid.\n"
-        "A change_graph call that returns ok=false applied nothing — the batch was rolled back. "
-        "Read the errors, adjust the call, and retry; do not resubmit identical arguments.\n"
-        "Describing a change_graph call in your reply text does not execute it; only an actual tool call applies changes to the graph.\n"
-        "The force=True flag in change_graph commits edits but does not resolve errors; "
-        "you must still fix any unconnected ports or blocks to make the graph valid.\n"
-        "To change a block's enablement, use the update_states batch field: "
-        "{instance_name, state}, where state is enabled, disabled, or bypass.\n"
-        "'Port is not connected' means a required port has zero active connections — this includes a "
-        "newly added block that was never wired up, not only a block being disabled. "
-        "Disabling a block that is part of a connection also fails this same validation; "
-        "use state=bypass to take a connected block out of service without breaking the graph, "
-        "or force=true to commit the disabled state anyway.\n"
-        "When removing blocks, also update_states (disabled/bypass) or remove any source blocks that become unconnected.\n"
-        "Never use hallucinated block IDs; if query_knowledge does not return a block ID, it does not exist.\n"
-        "When the user asks a question, answer concisely: lead with the direct answer, then add only the context needed to act on it.\n"
-        "Do not use LaTeX or TeX math notation in chat replies; write math inline in plain text (e.g. `350 microHz`, `f^2`, `x_i`).\n"
-    )
-
 
 def prune_history(messages: list[ModelMessage]) -> list[ModelMessage]:
     if len(messages) <= 12:
@@ -562,24 +566,33 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
                     has_mutated = True
                     break
     if has_mutated:
-        fg = ctx.deps
-        # is_valid()/iter_error_messages() only read _error_messages, which
-        # only validate() populates (rewrite() clears it without refilling)
-        # — call it explicitly rather than assuming some earlier tool call
-        # in this turn happened to leave it fresh.
-        fg.validate()
-        if not fg.is_valid():
-            validation_errors = []
-            for elem, msg in fg.iter_error_messages():
-                parent = getattr(elem, "parent_block", None)
-                if parent is not None and parent is not elem:
-                    validation_errors.append(f"{parent.name}: {elem}: {msg}")
-                else:
-                    validation_errors.append(f"{elem}: {msg}")
-            raise ModelRetry(
-                f"The flowgraph has validation errors after mutation: {validation_errors}. "
-                "You must run change_graph to correct these errors (or set force=True if they are unresolvable) before completing the response."
-            )
+        # Hold the same state lock as the tool functions so this final
+        # validation read can't race a concurrent /grc/open or /grc/close swap
+        # that would change which flowgraph object is being validated mid-read.
+        # The body is synchronous, but mirroring the tool pattern keeps the
+        # harness consistent and safe if this validator ever gains an await.
+        def _do_validate():
+            fg = ctx.deps
+            # is_valid()/iter_error_messages() only read _error_messages, which
+            # only validate() populates (rewrite() clears it without refilling)
+            # — call it explicitly rather than assuming some earlier tool call
+            # in this turn happened to leave it fresh.
+            fg.validate()
+            if not fg.is_valid():
+                validation_errors = []
+                for elem, msg in fg.iter_error_messages():
+                    parent = getattr(elem, "parent_block", None)
+                    if parent is not None and parent is not elem:
+                        validation_errors.append(f"{parent.name}: {elem}: {msg}")
+                    else:
+                        validation_errors.append(f"{elem}: {msg}")
+                raise ModelRetry(
+                    f"The flowgraph has validation errors after mutation: {validation_errors}. "
+                    "You must run change_graph to correct these errors (or set force=True if they are unresolvable) before completing the response."
+                )
+            return output
+
+        return await _with_state_lock(ctx, _do_validate)
     return output
 
 

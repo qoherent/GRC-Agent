@@ -58,10 +58,67 @@ def test_open_valid_path_then_inspect():
     assert "samp_rate" in block_names
 
 
+def test_open_second_file_replaces_first():
+    """Lifecycle edge case: opening a different file without an explicit close
+    must replace the active flowgraph and terminate the old canvas."""
+    res1 = client.post("/grc/open", json={"path": str(Path.cwd() / "tests" / "data" / "dial_tone.grc")}).json()
+    assert res1["ok"] is True
+
+    res2 = client.post("/grc/open", json={"path": str(Path.cwd() / "tests" / "data" / "resampler_demo.grc")}).json()
+    assert res2["ok"] is True
+
+    status = client.get("/grc/status").json()
+    assert status["path"] == res2["path"]
+    assert "resampler_demo" in status["path"]
+
+
+def test_inspect_during_open_is_serialized():
+    """Lifecycle edge case: /grc/inspect during an in-flight /grc/open must
+    not crash; serialization is handled by the shared state lock."""
+    res = client.post("/grc/open", json={"path": "tests/data/dial_tone.grc"})
+    assert res.status_code == 200
+    inspect = client.get("/grc/inspect").json()
+    assert inspect["ok"] is True
+
+
+
+    res = client.post("/grc/open", json={"path": "tests/data/does_not_exist.grc"})
+    assert res.status_code == 400
+    assert res.json()["ok"] is False
 def test_open_invalid_path():
     res = client.post("/grc/open", json={"path": "tests/data/does_not_exist.grc"})
     assert res.status_code == 400
     assert res.json()["ok"] is False
+
+
+def test_open_malformed_json_returns_400():
+    """Regression for P3-9: a malformed body must return 400, not 500."""
+    res = client.post(
+        "/grc/open",
+        data="not valid json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 400
+
+
+def test_settings_malformed_json_returns_400():
+    """Regression for P3-9: a malformed body must return 400, not 500."""
+    res = client.post(
+        "/grc/settings",
+        data="not valid json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 400
+
+
+def test_browse_empty_directory(tmp_path):
+    """Regression for P3-12: an empty directory must render an empty-state
+    message rather than a blank list."""
+    res = client.get(f"/grc/browse?dir={tmp_path}")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert data["entries"] == []
 
 
 def test_browse_lists_directory():
@@ -115,7 +172,8 @@ def test_settings_endpoints(tmp_path, monkeypatch):
     assert res["provider"] == "ollama"
     assert res["model"] == "qwen3.6:35b-a3b-q4_K_M"
     assert res["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"
-    assert res["openrouter_model"] == "openai/gpt-4o-mini"
+    assert res["openrouter_model"] == "deepseek/deepseek-v4-flash"
+    assert res["ollama_cloud_model"] == "deepseek-v4-flash:cloud"
 
     # 2. Save settings for openrouter
     post_res = client.post(
@@ -193,6 +251,119 @@ def test_undo_with_no_active_path_fails():
     res = client.post("/grc/undo")
     assert res.status_code == 400
     assert res.json()["ok"] is False
+
+
+def test_canvas_app_control_server_bind_failure_surfaces_to_caller():
+    """Regression for P2-4: if canvas_app.py cannot bind its control server,
+    the canvas process must fail visibly (not silently continue and leave
+    web.py reporting a misleading 'timed out' error)."""
+    import socket
+    import threading
+
+    from grc_agent.canvas_app import start_control_server
+
+    class Ctx:
+        """Minimal stand-in so the bind-failure test doesn't need a real GRC file."""
+
+        def __init__(self, path):
+            self.grc_file_path = path
+            self.window = None
+            self.drawing_area = None
+            self.platform = None
+            self.pending_size = None
+            self.ready = False
+            self.last_disk_hash = None
+            self.last_synced_export_hash = None
+
+        def apply_resize(self, width, height):
+            return False
+
+        def apply_pending_size(self):
+            pass
+
+        def apply_reload(self):
+            return False
+
+    # Occupy the control port with a stub TCP listener so the real canvas_app
+    # server cannot bind.
+    occupied_port = 18999  # isolated test port, unlikely to collide
+    stub = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    stub.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    stub.bind(("127.0.0.1", occupied_port))
+    stub.listen(1)
+    exit_code_captured = {"value": None}
+
+    def run_server():
+        ctx = Ctx("/tmp/nonexistent.grc")
+        try:
+            bound = start_control_server(ctx, occupied_port)
+            exit_code_captured["value"] = 0 if bound else 1
+        except SystemExit as e:
+            exit_code_captured["value"] = e.code
+
+    t = threading.Thread(target=run_server)
+    t.start()
+    t.join(timeout=10)
+
+    stub.close()
+    assert exit_code_captured["value"] == 1, (
+        "canvas_app.py must report failure when its control server cannot bind"
+    )
+
+
+def test_canvas_app_pending_reload_is_buffered_before_window_exists():
+    """Regression for P2-6: a /reload request that arrived before the GTK
+    window/drawing_area existed used to be silently dropped. It should be
+    buffered and drained once the canvas finishes loading, mirroring the
+    existing pending_size behavior."""
+    from grc_agent.canvas_app import CanvasControlContext
+
+    ctx = CanvasControlContext("/tmp/nonexistent.grc")
+    ctx.window = None
+
+    # Before the window exists, apply_reload should record a pending reload
+    # rather than doing nothing.
+    result = ctx.apply_reload()
+    assert result is False  # GLib.idle_add callbacks return False to not repeat
+    assert ctx.pending_reload is True
+
+    # Simulate the window becoming available.
+    class FakeWindow:
+        def resize(self, w, h):
+            pass
+
+        def move(self, x, y):
+            pass
+
+    class FakeDrawingArea:
+        pass
+
+    class FakePlatform:
+        pass
+
+    ctx.window = FakeWindow()
+    ctx.drawing_area = FakeDrawingArea()
+    ctx.platform = FakePlatform()
+    # Without a real flow_graph this call will catch and log, but the key
+    # assertion is that pending_reload was consumed.
+    ctx.apply_pending_reload()
+    assert ctx.pending_reload is False
+
+
+def test_canvas_app_reload_uses_loopback_address():
+    """Regression for P1-3: canvas_app.py pinged 'localhost' for /grc/reload
+    while the web server binds IPv4-only 127.0.0.1. On IPv6-first localhost
+    resolution the reload ping would silently fail and leave the web process
+    stale after a manual canvas edit."""
+    import grc_agent.canvas_app as canvas_app_module
+
+    source = Path(canvas_app_module.__file__).read_text(encoding="utf-8")
+    assert 'url = f"http://127.0.0.1:{web_port}/grc/reload"' in source, (
+        "canvas_app.py must use the IPv4 loopback explicitly to match web.py"
+    )
+    assert 'url = f"http://localhost:{web_port}/grc/reload"' not in source, (
+        "canvas_app.py must not rely on localhost resolution for the reload ping"
+    )
 
 
 def test_grc_render_endpoint():

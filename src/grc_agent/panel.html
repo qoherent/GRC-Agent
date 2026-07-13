@@ -230,6 +230,92 @@
   }
   #model-restart-badge.visible { display: inline-flex; }
 
+  /* ---- Provider health indicator ---- */
+  #provider-health {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: help;
+  }
+  #provider-health.healthy { background: var(--ok-bg); color: var(--ok); }
+  #provider-health.unhealthy { background: var(--danger-bg); color: var(--danger); }
+  #provider-health.checking { background: var(--surface-2); color: var(--text-dim); }
+  #provider-health::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: 0 0 auto;
+  }
+
+  /* ---- API key button ---- */
+  #apikey-btn {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 6px;
+    color: var(--text-dim);
+  }
+  #apikey-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+  /* ---- API key dialog ---- */
+  #apikey-dialog-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 6, 9, .6);
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+  }
+  #apikey-dialog-overlay.open { display: flex; }
+  #apikey-dialog {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 400px;
+    max-width: 90vw;
+    padding: 20px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  #apikey-dialog-header {
+    font-family: var(--sans);
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+  #apikey-dialog-desc {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+  #apikey-dialog-desc span { color: var(--accent); font-weight: 600; }
+  #apikey-input {
+    width: 100%;
+    height: 36px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 4px 10px;
+    margin-bottom: 16px;
+  }
+  #apikey-dialog-footer { display: flex; justify-content: flex-end; gap: 8px; }
+  #apikey-save-btn { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+  #apikey-save-btn:hover { background: var(--accent); color: var(--bg); }
+
   /* ---- New-conversation button, overlaid just left of the chat's send
      button ---- */
   #new-conversation-btn {
@@ -388,6 +474,13 @@
   .browse-entry:hover { background: var(--surface-2); }
   .browse-entry svg { flex: 0 0 auto; color: var(--text-dim); }
   .browse-entry.dir svg { color: var(--accent); }
+  .browse-empty {
+    padding: 14px;
+    text-align: center;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
   .browse-footer { padding: 10px 14px; border-top: 1px solid var(--border); text-align: right; }
 
   /* ---- Narrow viewports: without this, #chat-pane's 580px min-width
@@ -419,7 +512,7 @@
     <iframe id="canvas-iframe" src="" style="width: 100%; height: 100%; border: 0; display: none;"></iframe>
     <div id="canvas-placeholder" style="width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: var(--text-dim); font-family: var(--mono); font-size: 13px; text-align: center; padding: 20px;">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 12px; color: var(--accent);"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
-      No flowgraph loaded. Click Browse to choose one.
+      <span id="canvas-placeholder-text">No flowgraph loaded. Click Browse to choose one.</span>
       <button id="browse-btn" style="margin-top: 14px;">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
         Browse&hellip;
@@ -472,6 +565,7 @@
 <div id="model-selector-overlay">
   <select id="model-provider-select" title="Chat model provider">
     <option value="ollama">Ollama</option>
+    <option value="ollama_cloud">Ollama Cloud</option>
     <option value="openrouter">OpenRouter</option>
   </select>
   <span id="model-name-label" tabindex="0" role="button" title="Click to change the model name"></span>
@@ -484,6 +578,22 @@
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
   </button>
   <span id="model-restart-badge" title="A saved model change only takes effect after restarting the app.">restart to apply</span>
+  <span id="provider-health" title="Provider connectivity status"></span>
+  <button id="apikey-btn" title="Set API key for this provider" style="display:none;">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+  </button>
+</div>
+
+<div id="apikey-dialog-overlay">
+  <div id="apikey-dialog">
+    <div id="apikey-dialog-header">Set API Key</div>
+    <p id="apikey-dialog-desc">Enter your API key for <span id="apikey-provider-name"></span>:</p>
+    <input id="apikey-input" type="password" placeholder="API key">
+    <div id="apikey-dialog-footer">
+      <button id="apikey-cancel-btn">Cancel</button>
+      <button id="apikey-save-btn">Save</button>
+    </div>
+  </div>
 </div>
 
 <button id="new-conversation-btn" title="Start a new conversation / load a different file">

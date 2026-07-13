@@ -1,7 +1,9 @@
+
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
 from grc_agent.adapter import _embed_endpoint, get_db_and_model
+from grc_agent.agent import build_scenario_model
 from grc_agent.settings import load_settings, save_settings
 from grc_agent.web import _build_model
 
@@ -18,7 +20,8 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     cfg = load_settings()
     assert cfg["provider"] == "ollama"
     assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"
-    assert cfg["openrouter_model"] == "openai/gpt-4o-mini"
+    assert cfg["openrouter_model"] == "deepseek/deepseek-v4-flash"
+    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:cloud"
 
     # 2. Switch provider to openrouter and change model
     save_settings("openrouter", "google/gemini-2.5-flash")
@@ -27,6 +30,7 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     assert cfg["model"] == "google/gemini-2.5-flash"
     assert cfg["openrouter_model"] == "google/gemini-2.5-flash"
     assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"  # preserved!
+    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:cloud"  # preserved!
 
     # 3. Switch back to ollama and change model
     save_settings("ollama", "mistral-large")
@@ -34,6 +38,15 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     assert cfg["provider"] == "ollama"
     assert cfg["model"] == "mistral-large"
     assert cfg["ollama_model"] == "mistral-large"
+    assert cfg["openrouter_model"] == "google/gemini-2.5-flash"  # preserved!
+
+    # 4. Switch to ollama_cloud and verify independence
+    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
+    cfg = load_settings()
+    assert cfg["provider"] == "ollama_cloud"
+    assert cfg["model"] == "deepseek-v4-flash:cloud"
+    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:cloud"
+    assert cfg["ollama_model"] == "mistral-large"  # preserved!
     assert cfg["openrouter_model"] == "google/gemini-2.5-flash"  # preserved!
 
 
@@ -102,3 +115,22 @@ def test_web_build_model_isolation(tmp_path, monkeypatch):
     m = _build_model()
     assert isinstance(m, OpenRouterModel)
     assert m.model_name == "openai/gpt-4o-mini"
+
+    # Setup provider: ollama_cloud
+    monkeypatch.setitem(grc_agent.web._cfg, "provider", "ollama_cloud")
+    monkeypatch.setitem(grc_agent.web._cfg, "model", "deepseek-v4-flash:cloud")
+    m = _build_model()
+    assert isinstance(m, OllamaModel)
+    assert m.model_name == "deepseek-v4-flash:cloud"
+
+
+def test_scenario_model_builder_uses_provider():
+    """Regression for P2-7: the scenario harness must be able to build a model
+    for either backend so integration tests can run against Ollama or OpenRouter."""
+    ollama = build_scenario_model("ollama")
+    assert isinstance(ollama, OllamaModel)
+
+    openrouter = build_scenario_model("openrouter", "google/gemini-2.5-flash")
+    assert isinstance(openrouter, OpenRouterModel)
+    assert openrouter.model_name == "google/gemini-2.5-flash"
+

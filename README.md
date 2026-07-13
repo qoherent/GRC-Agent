@@ -141,8 +141,10 @@ them yourself just to make them visible.
 ### Run the tests
 
 ```bash
+uv run playwright install chromium      # one-time, for test_frontend.py
 uv run pytest tests/test_unit.py        # fast, no LLM
 uv run pytest tests/test_web_app.py     # web endpoints, no LLM
+uv run pytest tests/test_frontend.py    # dashboard UI, real Chromium, no LLM
 uv run pytest tests/test_integration.py # live model, ~15-20 min
 ```
 

@@ -72,6 +72,11 @@ class CanvasControlContext:
         self.drawing_area = None
         self.platform = None
         self.pending_size = None
+        # A /reload request can arrive via the control server before the GTK
+        # window/drawing_area have finished building (the server binds before
+        # GRC's Platform.build_library() call). Buffer it here and drain once
+        # the window exists, so an early agent edit doesn't get silently lost.
+        self.pending_reload = False
         # Flipped to True once Gtk.main() is pumping and the GTK client has
         # connected to the Broadway display — grc_open polls GET /ready so it
         # doesn't point the dashboard iframe at Broadway during the multi-
@@ -118,11 +123,24 @@ class CanvasControlContext:
         doesn't silently drift out of sync with what the chat just told
         the user changed."""
         if not (self.window and self.drawing_area and self.platform):
-            print("Reload requested before the canvas finished loading — ignoring.")
+            self.pending_reload = True
             return False
+        return self._perform_reload()
+
+    def _perform_reload(self):
+        """The actual reload work, separate from the buffering guard above."""
         try:
-            new_data = self.platform.parse_flow_graph(self.grc_file_path)
             flow_graph = self.drawing_area._flow_graph
+            # Captured BEFORE import_data overwrites the graph — diffed
+            # against the post-reload block set below to find newly-added
+            # blocks (most commonly from an agent's change_graph call) and
+            # scroll them into view. change_graph's own positioning (see
+            # adapter.py's add_blocks phase) places new blocks in a column
+            # that grows further right with each edit, so without this
+            # there's no cue anything changed until the user happens to
+            # notice or scroll there themselves.
+            old_names = {b.name for b in flow_graph.blocks}
+            new_data = self.platform.parse_flow_graph(self.grc_file_path)
             flow_graph.import_data(new_data)
             flow_graph.update()
             # Mirrors what a zoom change does (DrawingArea.draw() only
@@ -134,17 +152,82 @@ class CanvasControlContext:
             self.drawing_area.queue_draw()
             self.last_disk_hash = _sha256_file(self.grc_file_path)
             self.last_synced_export_hash = flow_graph_content_hash(flow_graph)
+            self._scroll_to_new_blocks(flow_graph, old_names)
             print("Reloaded flowgraph from disk after an external edit")
         except Exception as e:
             print("Failed to reload flowgraph from disk:", e)
         return False
 
+    def apply_pending_reload(self):
+        if self.window and self.pending_reload:
+            self.pending_reload = False
+            self._perform_reload()
 
-def start_control_server(ctx, port):
+    def _scroll_to_new_blocks(self, flow_graph, old_names):
+        """Best-effort: pan the ScrolledWindow so a block added by this
+        reload is actually visible, rather than requiring the user to
+        notice something changed and scroll/zoom-out to find it themselves.
+
+        Computes the flowgraph's own extent directly (the same formula
+        DrawingArea._update_size uses) and sets the ScrolledWindow's
+        adjustment bounds from it explicitly, rather than calling
+        _update_size() and waiting for GTK to propagate that size request
+        into the adjustment through a real size-allocate cycle — confirmed
+        live that this does NOT happen synchronously (nor within a couple
+        of idle_add hops afterward): _update_size() correctly computed a
+        wider size request, but the adjustment's own `upper` was still
+        stuck at the pre-edit value when read immediately after, in both
+        cases. Setting the bound directly sidesteps that timing entirely.
+        """
+        try:
+            new_coords = [
+                tuple(b.states["coordinate"])
+                for b in flow_graph.blocks
+                if b.name not in old_names
+                and isinstance(b.states.get("coordinate"), (list, tuple))
+            ]
+            if not new_coords:
+                return
+            # DrawingArea -> Viewport -> ScrolledWindow (gui/Notebook.py's
+            # own construction) — not assumed, walked defensively in case a
+            # future GRC version changes this nesting.
+            scrolled_window = self.drawing_area.get_parent()
+            while scrolled_window is not None and not isinstance(
+                scrolled_window, Gtk.ScrolledWindow
+            ):
+                scrolled_window = scrolled_window.get_parent()
+            if scrolled_window is None:
+                return
+            zoom = self.drawing_area.zoom_factor
+            content_w, content_h = flow_graph.get_extents()[2:]
+            min_x = min(c[0] for c in new_coords)
+            min_y = min(c[1] for c in new_coords)
+            for adjustment, content_extent, target in (
+                (scrolled_window.get_hadjustment(), content_w * zoom + 100, min_x),
+                (scrolled_window.get_vadjustment(), content_h * zoom + 100, min_y),
+            ):
+                if adjustment is None:
+                    continue
+                adjustment.set_upper(max(adjustment.get_upper(), content_extent))
+                upper_bound = max(
+                    adjustment.get_lower(), adjustment.get_upper() - adjustment.get_page_size()
+                )
+                adjustment.set_value(max(adjustment.get_lower(), min(target, upper_bound)))
+        except Exception as e:
+            print("Failed to scroll to newly-added blocks:", e)
+
+
+def start_control_server(ctx, port) -> bool:
     """Background HTTP listener so the dashboard page (resize) and the web
     server (reload, after an agent-driven edit) can act on this canvas
     process. GTK calls must happen on the main thread, so handlers only
-    schedule work via GLib.idle_add."""
+    schedule work via GLib.idle_add.
+
+    Returns True if the server bound and started, False if the port remained
+    unavailable after all retries. The caller (main()) is responsible for
+    deciding whether to continue without a control server or exit so web.py
+    can report a real error instead of a misleading "timed out" message.
+    """
 
     class ControlHandler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -187,22 +270,35 @@ def start_control_server(ctx, port):
     # here used to crash this whole process before Gtk.main() ever ran,
     # leaving the dashboard's canvas permanently blank with zero indication
     # why. Retry briefly instead of taking the whole app down with it.
+    #
+    # Budget sized to comfortably exceed web.py's own worst-case teardown of
+    # a prior canvas: _terminate_canvas_proc waits up to 2s for a SIGTERM
+    # exit plus up to another 2s for a SIGKILL exit (web.py's
+    # _terminate_canvas_proc/_killpg_with_fallback), and a stale orphan from
+    # an earlier crashed run goes through a similar wait first
+    # (_reclaim_canvas_orphan) — both can precede this process's own spawn.
+    # A too-short budget here doesn't just delay the canvas: if it's
+    # exhausted, /ready becomes permanently unreachable for this process's
+    # entire life, so _wait_for_canvas_ready's 20s poll (web.py) is
+    # guaranteed to time out even if the canvas itself renders fine.
     server = None
-    for attempt in range(10):
+    attempts = 25
+    for attempt in range(attempts):
         try:
             server = HTTPServer(("127.0.0.1", port), ControlHandler)
             break
         except OSError as e:
-            print(f"Control server bind attempt {attempt + 1}/10 failed: {e}")
+            print(f"Control server bind attempt {attempt + 1}/{attempts} failed: {e}")
             time.sleep(0.3)
     if server is None:
         print(
-            "Could not bind the canvas control server after retries — "
-            "live resize and chat-driven reload won't work this session, "
-            "but the canvas itself will still render."
+            "FATAL: Could not bind the canvas control server after retries — "
+            "live resize and chat-driven reload are unavailable. Exiting so the "
+            "dashboard can report a real error instead of a generic timeout."
         )
-        return
+        return False
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    return True
 
 
 def main():
@@ -224,7 +320,8 @@ def main():
     # loading its block catalog is buffered (see CanvasControlContext)
     # instead of simply being missed.
     ctx = CanvasControlContext(grc_file_path)
-    start_control_server(ctx, control_port)
+    if not start_control_server(ctx, control_port):
+        sys.exit(1)
 
     # Set up GRC Platform & Application Context (via adapter — the sole
     # gnuradio importer).
@@ -280,6 +377,7 @@ def main():
     ctx.drawing_area = drawing_area
     ctx.platform = p
     ctx.apply_pending_size()
+    ctx.apply_pending_reload()
 
     # Hide every sibling on the path from the DrawingArea up to the window
     # (menu bar, toolbar, block-library tree, console/variable-editor pane,
@@ -292,6 +390,20 @@ def main():
             if isinstance(parent, Gtk.Notebook):
                 parent.set_show_tabs(False)
                 parent.set_show_border(False)
+                parent.set_size_request(1, 1)
+            if isinstance(parent, Gtk.ScrolledWindow):
+                # A ScrolledWindow's own scroll/hscrollbar are genuine
+                # children (GTK3's get_children() includes them) — not
+                # extraneous chrome like everything else this loop hides on
+                # the way up to the window. The blanket sibling-hiding below
+                # used to hide these too, silently breaking the only native
+                # way to pan the canvas: GRC's DrawingArea only handles
+                # Ctrl+scroll itself (zoom, confirmed in
+                # gui/DrawingArea.py's _handle_mouse_scroll) — every other
+                # scroll/drag is meant to fall through to these scrollbars.
+                node = parent
+                parent = node.get_parent()
+                continue
             for sibling in parent.get_children():
                 if sibling is not node:
                     sibling.hide()
@@ -303,6 +415,31 @@ def main():
             isolate_drawing_area(window, drawing_area)
         except Exception as e:
             print("Failed to isolate GRC canvas:", e)
+
+        # GRC's own Notebook.py hardcodes the ScrolledWindow wrapping the
+        # canvas to a 600x400 minimum size request — a real GTK container
+        # can never be resized smaller than its child's requested minimum,
+        # so apply_resize()'s window.resize() calls below were silently
+        # clamped to at least 600x400 regardless of what the dashboard's
+        # actual (often narrower) pane asked for. The canvas then always
+        # rendered wider/taller than the visible iframe, cropping content
+        # — and the scrollbar fixed above — off past its right/bottom edge
+        # (live-confirmed: a 260x350 resize request had no visible effect;
+        # the graph's own content, known to span to x=1320, showed no
+        # scrollbar at that pane size because the real rendered canvas was
+        # still 600+ px wide, wider than the 260px-visible crop). Relaxing
+        # the requested minimum to (1, 1) lets the window actually shrink
+        # to match whatever size is requested.
+        try:
+            scrolled_window = drawing_area.get_parent()
+            while scrolled_window is not None and not isinstance(
+                scrolled_window, Gtk.ScrolledWindow
+            ):
+                scrolled_window = scrolled_window.get_parent()
+            if scrolled_window is not None:
+                scrolled_window.set_size_request(1, 1)
+        except Exception as e:
+            print("Failed to relax canvas ScrolledWindow's minimum size:", e)
 
     # GRC's native Ctrl+Z/Ctrl+Y stays reachable even with the chrome hidden
     # (its accelerators are wired at the Gtk.Application level, live-
@@ -403,7 +540,7 @@ def main():
             # leave the web server's in-memory graph stale indefinitely. The
             # web reload is the only thing keeping inspect_graph in sync with
             # manual edits, so a transient hiccup shouldn't silently break it.
-            url = f"http://localhost:{web_port}/grc/reload"
+            url = f"http://127.0.0.1:{web_port}/grc/reload"
             for attempt in range(3):
                 try:
                     urllib.request.urlopen(url, timeout=2)

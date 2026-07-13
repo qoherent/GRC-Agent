@@ -1,21 +1,19 @@
+import os
 import shutil
+import socket
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.capabilities import ProcessHistory
-from pydantic_ai.models.ollama import OllamaModel
-from pydantic_ai.providers.ollama import OllamaProvider
 
 # Import components from grc_agent.agent
 from grc_agent.agent import (
-    MODEL,
-    OLLAMA_V1,
     SCENARIOS,
     GrcAgentResponse,
     StopGracefully,
-    build_system_prompt,
+    build_scenario_model,
     check_expect,
     fresh_agent,
     grc_tools,
@@ -25,6 +23,56 @@ from grc_agent.agent import (
     web_fetch_cap,
     web_search_cap,
 )
+from grc_agent.prompts import build_system_prompt
+
+
+def _ollama_available() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 11434), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _openrouter_available() -> bool:
+    return bool(os.getenv("OPENROUTER_API_KEY"))
+
+
+_BACKEND_AVAILABILITY = {
+    "ollama": _ollama_available,
+    "openrouter": _openrouter_available,
+}
+
+
+def _selected_backends():
+    """Backends the scenario suite can run against. Override via
+    GRC_TEST_BACKEND=ollama|openrouter to force one."""
+    forced = os.getenv("GRC_TEST_BACKEND")
+    if forced:
+        return [forced]
+    return [name for name, check in _BACKEND_AVAILABILITY.items() if check()]
+
+
+_AVAILABLE_BACKENDS = _selected_backends()
+if not _AVAILABLE_BACKENDS:
+    pytest.skip(
+        "No LLM backend available. Set OPENROUTER_API_KEY or start Ollama on "
+        "127.0.0.1:11434, or force one with GRC_TEST_BACKEND=ollama|openrouter.",
+        allow_module_level=True,
+    )
+
+
+# Default chat model for OpenRouter scenarios. The agent.py harness keeps its
+# own fixed MODEL constant for Ollama; OpenRouter uses whatever the caller
+# points at.
+_OPENROUTER_DEFAULT_MODEL = os.getenv("GRC_OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+
+def _build_model_for_backend(backend: str):
+    if backend == "openrouter":
+        return build_scenario_model("openrouter", _OPENROUTER_DEFAULT_MODEL)
+    return build_scenario_model("ollama")
+
 
 SELECTED_SCENARIOS = [
     "01_add_throttle",
@@ -42,7 +90,8 @@ SELECTED_SCENARIOS = [
 
 
 @pytest.mark.parametrize("sc_name", SELECTED_SCENARIOS)
-def test_scenario_execution(sc_name):
+@pytest.mark.parametrize("backend", _AVAILABLE_BACKENDS)
+def test_scenario_execution(sc_name, backend):
     # Find the target scenario by name
     sc = next((s for s in SCENARIOS if s["name"] == sc_name), None)
     assert sc is not None, f"Scenario {sc_name} not found in SCENARIOS list."
@@ -52,12 +101,15 @@ def test_scenario_execution(sc_name):
     fg, fixture_path, tmp_dir = fresh_agent(sc["fixture"])
 
     try:
-        # Initialize Ollama model agent with clean-room capability bundle
+        # Initialize the model for the selected backend. Ollama keeps the
+        # fixed MODEL constant for reproducibility; OpenRouter uses the
+        # configured model name.
+        model = _build_model_for_backend(backend)
         agent = Agent(
-            OllamaModel(MODEL, provider=OllamaProvider(base_url=OLLAMA_V1)),
+            model,
             deps_type=Any,
             output_type=[GrcAgentResponse, str],
-            name="grc_scenario_test_agent",
+            name=f"grc_scenario_test_agent_{backend}",
             instructions=build_system_prompt("pai-experiment-test"),
             tools=grc_tools(),
             capabilities=[
@@ -67,6 +119,7 @@ def test_scenario_execution(sc_name):
                 web_fetch_cap,
             ],
             model_settings=ModelSettings(extra_body={"think": True}),
+            retries={'tools': 3, 'output': 3},
         )
         agent.output_validator(validate_flowgraph_state)
 
@@ -80,10 +133,10 @@ def test_scenario_execution(sc_name):
         output_dir = Path("tests/output")
         output_dir.mkdir(parents=True, exist_ok=True)
         md_log = render_scenario_markdown(sc, grc_before, res, verdict)
-        (output_dir / f"{sc['name']}.md").write_text(md_log, encoding="utf-8")
+        (output_dir / f"{sc['name']}_{backend}.md").write_text(md_log, encoding="utf-8")
 
         assert verdict["pass"] is True, (
-            f"Scenario expectation check failed. Reasons: {verdict['reasons']}"
+            f"Scenario expectation check failed ({backend}). Reasons: {verdict['reasons']}"
         )
 
     finally:

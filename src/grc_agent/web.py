@@ -2,6 +2,7 @@ import asyncio
 import atexit
 import mimetypes
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -38,13 +39,13 @@ from grc_agent.agent import (
     OLLAMA_V1,
     GrcAgentResponse,
     StopGracefully,
-    build_system_prompt,
     grc_tools,
     prune_history,
     validate_flowgraph_state,
     web_fetch_cap,
     web_search_cap,
 )
+from grc_agent.prompts import build_system_prompt
 from grc_agent.settings import default_settings, load_settings, save_settings
 
 load_dotenv()
@@ -60,6 +61,11 @@ BRAND_NAME = "Qoherent GRC Agent"
 BROADWAY_PORT = int(os.environ.get("GRC_BROADWAY_PORT", "8085"))
 CANVAS_CONTROL_PORT = int(os.environ.get("GRC_CANVAS_CONTROL_PORT", "7933"))
 GRC_AGENT_PORT = int(os.environ.get("GRC_AGENT_PORT", "7932"))
+# How long /grc/open's _wait_for_canvas_ready waits for the canvas subprocess
+# before giving up and reporting canvas_error instead of blocking the
+# response forever. Env-overridable (mirroring the ports above) so tests can
+# force a fast, deterministic timeout instead of waiting out a real 20s.
+CANVAS_READY_TIMEOUT = float(os.environ.get("GRC_CANVAS_READY_TIMEOUT", "20.0"))
 
 
 async def _notify_canvas_reload() -> dict:
@@ -174,6 +180,16 @@ _flowgraph_state_lock = asyncio.Lock()
 active = FlowgraphProxy(None, on_edit=_notify_canvas_reload, state_lock=_flowgraph_state_lock)
 active_path: str | None = None
 canvas_proc: subprocess.Popen | None = None
+# Last-known canvas outcome for the currently active flowgraph, mirrored into
+# /grc/status so any poll — not just the one-shot /grc/open response that
+# produced it — can learn the canvas is unavailable. Without this, a bare
+# refresh() call made well after a real canvas failure (doUndo, doRedo,
+# doValidate, the version-bump-triggered refresh in pollConversationState)
+# has no way to know not to re-point the dashboard's iframe at a canvas
+# already known to be dead — refresh()'s own canvasReady param defaults to
+# true, since those call sites never had this signal available before.
+canvas_ready_state: bool = True
+canvas_error_state: str | None = None
 # broadwayd daemons this process spawned (eagerly in main(), lazily in
 # ensure_broadway) — tracked so teardown terminates only OUR daemons, never
 # another instance's (which a global `killall broadwayd` would stomp).
@@ -438,6 +454,14 @@ _cfg = load_settings()
 def _build_model():
     if _cfg["provider"] == "openrouter":
         return OpenRouterModel(_cfg["model"])
+    if _cfg["provider"] == "ollama_cloud":
+        return OllamaModel(
+            _cfg["model"],
+            provider=OllamaProvider(
+                base_url="https://ollama.com/v1",
+                api_key=os.environ.get("OLLAMA_CLOUD_API_KEY", ""),
+            ),
+        )
     return OllamaModel(
         _cfg["model"],
         provider=OllamaProvider(base_url=OLLAMA_V1, http_client=_retrying_http_client),
@@ -471,6 +495,7 @@ agent = Agent(
     tools=grc_tools(),
     capabilities=[ProcessHistory(prune_history), StopGracefully(), web_search_cap, web_fetch_cap],
     model_settings=ModelSettings(extra_body={"think": True}),
+    retries={'tools': 3, 'output': 3},
 )
 agent.output_validator(validate_flowgraph_state)
 
@@ -479,7 +504,10 @@ os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
 
 # 3. Expose the agent via the built-in web chat Starlette application
 # Exposes the tool calling, streaming responses, and real-time validations.
-app = agent.to_web(models=[f"{_cfg['provider']}:{_cfg['model']}"], deps=active)
+# Pass the already-built model object directly (not a "<provider>:<model>"
+# string) because pydantic_ai's infer_provider doesn't know custom providers
+# like ollama_cloud — the model object already has the right provider wired in.
+app = agent.to_web(models=[model], deps=active)
 
 
 # 4. GNU Radio side panel: load a .grc file, inspect blocks/params/connections.
@@ -602,8 +630,11 @@ atexit.register(_cleanup_procs)
 
 
 async def grc_open(request: Request) -> JSONResponse:
-    global active_path, canvas_proc
-    body = await request.json()
+    global active_path, canvas_proc, canvas_ready_state, canvas_error_state
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"ok": False, "message": f"Invalid JSON body: {e}"}, status_code=400)
     path = str(body.get("path", "")).strip()
     if not path:
         return JSONResponse({"ok": False, "message": "path is required"}, status_code=400)
@@ -708,9 +739,20 @@ async def grc_open(request: Request) -> JSONResponse:
         # wait could terminate/replace this canvas mid-poll; that's
         # acceptable last-writer-wins behavior (the poll would then just
         # reflect whichever canvas currently holds the control port).
-        canvas_ready = await _wait_for_canvas_ready()
+        canvas_ready, canvas_crashed = await _wait_for_canvas_ready(canvas_proc)
         if not canvas_ready:
-            canvas_error = "Timed out waiting for canvas to become ready"
+            canvas_error = (
+                "Canvas process exited unexpectedly — see canvas.log"
+                if canvas_crashed
+                else "Timed out waiting for canvas to become ready"
+            )
+
+    # Mirrored into module state (not just this response) so a later /grc/status
+    # poll can still learn the canvas is unavailable — see canvas_ready_state's
+    # own comment. Covers all three outcomes above: launch failed outright,
+    # launched but crashed/timed out, or launched and became ready.
+    canvas_ready_state = canvas_ready
+    canvas_error_state = canvas_error
 
     return JSONResponse(
         {
@@ -725,23 +767,33 @@ async def grc_open(request: Request) -> JSONResponse:
     )
 
 
-async def _wait_for_canvas_ready(deadline_s: float = 20.0) -> bool:
+async def _wait_for_canvas_ready(
+    proc: subprocess.Popen | None, deadline_s: float = CANVAS_READY_TIMEOUT
+) -> tuple[bool, bool]:
     """Poll the canvas control server's /ready endpoint until it reports 200
-    (Gtk.main pumping) or the deadline expires. Returns whether it became
-    ready in time so the caller (grc_open) can surface a dead/slow canvas
+    (Gtk.main pumping) or the deadline expires. Also checks the subprocess's
+    own exit status each iteration — an uncaught exception during GRC's
+    platform build (canvas_app.py's get_gui_platform()/Application(...) calls
+    have no try/except around them) or its own sys.exit(1) when it can't find
+    a MainWindow would otherwise still cost the caller the full deadline
+    before reporting the same generic timeout as a merely-slow canvas.
+    Returns (ready, crashed) so the caller (grc_open) can distinguish a
+    dead-on-arrival process from one that simply never became ready in time,
     instead of reporting success regardless of the outcome."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     end = loop.time() + deadline_s
     url = f"http://127.0.0.1:{CANVAS_CONTROL_PORT}/ready"
     async with httpx.AsyncClient(timeout=0.5) as client:
         while loop.time() < end:
+            if proc is not None and proc.poll() is not None:
+                return False, True
             try:
                 if (await client.get(url)).status_code == 200:
-                    return True
+                    return True, False
             except Exception:
                 pass
             await asyncio.sleep(0.2)
-    return False
+    return False, False
 
 
 async def grc_status(request: Request) -> JSONResponse:
@@ -756,15 +808,22 @@ async def grc_status(request: Request) -> JSONResponse:
             "broadway_url": f"http://localhost:{BROADWAY_PORT}/",
             "can_undo": undo_state["can_undo"],
             "can_redo": undo_state["can_redo"],
+            # The last-known outcome for the active canvas — see
+            # canvas_ready_state's own comment for why this can't just be a
+            # one-shot field on /grc/open's response.
+            "canvas_ready": canvas_ready_state,
+            "canvas_error": canvas_error_state,
         }
     )
 
 
 async def grc_close(request: Request) -> JSONResponse:
-    global active_path
+    global active_path, canvas_ready_state, canvas_error_state
     async with _flowgraph_state_lock:
         active.swap(None)
         active_path = None
+        canvas_ready_state = True
+        canvas_error_state = None
         await asyncio.to_thread(_terminate_canvas_proc)
     return JSONResponse({"ok": True})
 
@@ -896,7 +955,7 @@ async def grc_panel_js(request: Request) -> Response:
 
 
 async def grc_reload(request: Request) -> JSONResponse:
-    global active_path
+    global active_path, canvas_ready_state, canvas_error_state
     if not active_path:
         return JSONResponse({"ok": False, "message": "No active path"}, status_code=400)
     # Same shared state as open/close — serialize against them so a reload
@@ -912,6 +971,14 @@ async def grc_reload(request: Request) -> JSONResponse:
             # into the returned dict), so this can't turn a reload into a
             # failure response — best-effort, surfaced but non-fatal.
             canvas_synced = (await active.notify_edit()).get("ok", False)
+            # A successful reload ping proves the canvas control server is
+            # alive and responding. If a prior open had timed out, this means
+            # the canvas recovered (or was slow, not dead), so mirror that
+            # into /grc/status instead of leaving a stale "canvas failed" error
+            # permanently stuck.
+            if canvas_synced:
+                canvas_ready_state = True
+                canvas_error_state = None
             return JSONResponse({"ok": True, "canvas_synced": canvas_synced})
         except Exception as e:
             return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
@@ -923,7 +990,7 @@ async def _grc_undo_redo(op) -> JSONResponse:
     object (they're pure disk operations, see their own docstrings), so
     this reloads from disk afterward exactly like grc_reload already does
     for a canvas-triggered disk change."""
-    global active_path
+    global active_path, canvas_ready_state, canvas_error_state
     if not active_path:
         return JSONResponse({"ok": False, "message": "No active path"}, status_code=400)
     async with _flowgraph_state_lock:
@@ -935,6 +1002,12 @@ async def _grc_undo_redo(op) -> JSONResponse:
             new_fg = load_flow_graph(active_path)
             active.swap(new_fg)
             canvas_synced = (await active.notify_edit()).get("ok", False)
+            # See grc_reload's matching block: a successful reload ping means
+            # the canvas process recovered from an earlier timeout/crash and
+            # should no longer be reported as permanently failed.
+            if canvas_synced:
+                canvas_ready_state = True
+                canvas_error_state = None
         except Exception as e:
             return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
         return JSONResponse(
@@ -995,7 +1068,9 @@ async def grc_settings_get(request: Request) -> JSONResponse:
             "model": cfg["model"],
             "ollama_model": cfg.get("ollama_model"),
             "openrouter_model": cfg.get("openrouter_model"),
+            "ollama_cloud_model": cfg.get("ollama_cloud_model"),
             "openrouter_api_key_set": bool(os.getenv("OPENROUTER_API_KEY")),
+            "ollama_cloud_api_key_set": bool(os.getenv("OLLAMA_CLOUD_API_KEY")),
             # What the running chat Agent's model ACTUALLY is right now — built
             # once from _cfg at import (see _build_model()'s fallback comment)
             # and never live-swapped. Distinct from provider/model above (the
@@ -1010,12 +1085,115 @@ async def grc_settings_get(request: Request) -> JSONResponse:
 
 
 async def grc_settings_post(request: Request) -> JSONResponse:
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"ok": False, "message": f"Invalid JSON body: {e}"}, status_code=400)
     try:
         save_settings(str(body.get("provider", "")), str(body.get("model", "")))
     except ValueError as e:
         return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
     return JSONResponse({"ok": True, "message": "Saved. Restart the app to use this model."})
+
+
+async def grc_health(request: Request) -> JSONResponse:
+    """Check connectivity for the currently selected provider. Async so it
+    never blocks the event loop — the dashboard calls this on load and on
+    provider switch to show a live status indicator."""
+    cfg = load_settings()
+    provider = cfg["provider"]
+    result: dict[str, Any] = {"provider": provider, "ok": False, "message": ""}
+
+    if provider == "ollama":
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get("http://localhost:11434/api/tags")
+                if r.status_code == 200:
+                    result["ok"] = True
+                    result["message"] = "Ollama server is running"
+                else:
+                    result["message"] = f"Ollama returned status {r.status_code}"
+        except httpx.ConnectError:
+            result["message"] = "Ollama server is not running. Start it with: ollama serve"
+        except Exception as e:
+            result["message"] = f"Ollama check failed: {e}"
+    elif provider == "ollama_cloud":
+        key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
+        if not key:
+            result["message"] = "OLLAMA_CLOUD_API_KEY is not set. Click the key button to set it."
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    r = await client.get(
+                        "https://ollama.com/v1/models",
+                        headers={"Authorization": f"Bearer {key}"},
+                    )
+                    if r.status_code == 200:
+                        result["ok"] = True
+                        result["message"] = "Ollama Cloud is reachable"
+                    else:
+                        result["message"] = f"Ollama Cloud returned status {r.status_code}"
+            except httpx.ConnectError:
+                result["message"] = "Cannot reach Ollama Cloud (https://ollama.com)"
+            except Exception as e:
+                result["message"] = f"Ollama Cloud check failed: {e}"
+    elif provider == "openrouter":
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not key:
+            result["message"] = "OPENROUTER_API_KEY is not set. Click the key button to set it."
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    r = await client.get(
+                        "https://openrouter.ai/api/v1/models",
+                        headers={"Authorization": f"Bearer {key}"},
+                    )
+                    if r.status_code == 200:
+                        result["ok"] = True
+                        result["message"] = "OpenRouter is reachable"
+                    else:
+                        result["message"] = f"OpenRouter returned status {r.status_code}"
+            except httpx.ConnectError:
+                result["message"] = "Cannot reach OpenRouter (https://openrouter.ai)"
+            except Exception as e:
+                result["message"] = f"OpenRouter check failed: {e}"
+
+    return JSONResponse(result)
+
+
+async def grc_apikey_post(request: Request) -> JSONResponse:
+    """Write an API key to .env for the given provider. The .env file is
+    read at startup, so a restart is required for the new key to take effect."""
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"ok": False, "message": f"Invalid JSON body: {e}"}, status_code=400)
+
+    provider = str(body.get("provider", ""))
+    api_key = str(body.get("api_key", "")).strip()
+    if provider not in ("ollama_cloud", "openrouter"):
+        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider!r}"}, status_code=400)
+    if not api_key:
+        return JSONResponse({"ok": False, "message": "API key must be non-empty"}, status_code=400)
+
+    env_key = "OLLAMA_CLOUD_API_KEY" if provider == "ollama_cloud" else "OPENROUTER_API_KEY"
+    env_path = Path(".env")
+    if not env_path.exists():
+        env_path.write_text(f"{env_key}={api_key}\n", encoding="utf-8")
+    else:
+        content = env_path.read_text(encoding="utf-8")
+        if re.search(rf"^{re.escape(env_key)}=.*", content, re.MULTILINE):
+            content = re.sub(
+                rf"^{re.escape(env_key)}=.*", f"{env_key}={api_key}", content, flags=re.MULTILINE
+            )
+        else:
+            content += f"\n{env_key}={api_key}\n"
+        env_path.write_text(content, encoding="utf-8")
+
+    # Also set in the current process so the health check can see it immediately
+    os.environ[env_key] = api_key
+
+    return JSONResponse({"ok": True, "message": f"{env_key} saved. Restart the app for it to take effect."})
 
 
 # to_web() registered its own chat UI at '/' (and '/{id}'), fetched at runtime
@@ -1053,10 +1231,17 @@ async def chat_ui_asset(request: Request) -> Response:
     rel_path = request.path_params["path"]
     url = f"{CHAT_UI_CDN_BASE}/{rel_path}"
     if url not in _asset_cache:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            content = resp.content
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                content = resp.content
+        except httpx.HTTPError as e:
+            return Response(
+                f"// Failed to load {rel_path} from CDN: {e}",
+                media_type="application/javascript",
+                status_code=502,
+            )
         if rel_path.endswith((".js", ".css")):
             content = content.replace(b"Pydantic AI", BRAND_NAME.encode())
         _asset_cache[url] = content
@@ -1087,6 +1272,8 @@ app.router.routes[0:0] = [
     Route("/grc/panel.js", grc_panel_js, methods=["GET"]),
     Route("/grc/settings", grc_settings_get, methods=["GET"]),
     Route("/grc/settings", grc_settings_post, methods=["POST"]),
+    Route("/grc/health", grc_health, methods=["GET"]),
+    Route("/grc/apikey", grc_apikey_post, methods=["POST"]),
 ]
 
 

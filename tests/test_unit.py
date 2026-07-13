@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from grc_agent.adapter import (
+    BLOCK_COLUMN_MAX_ROWS,
     _footprints_overlap,
     change_graph,
     inspect_graph,
@@ -15,6 +16,7 @@ from grc_agent.adapter import (
     query_catalog,
     query_docs,
     redo_flowgraph,
+    set_param,
     undo_flowgraph,
     undo_status,
 )
@@ -71,7 +73,7 @@ def test_inspect_graph_scoped(temp_dial_tone):
 
 
 # ==========================================
-# change_graph Unit Tests (11 tests)
+# change_graph Unit Tests (17 tests)
 # ==========================================
 
 
@@ -121,6 +123,44 @@ def test_change_graph_add_block_no_overlap_with_existing(temp_dial_tone):
     assert not any(_footprints_overlap(new_coord, other) for other in existing_coords)
 
 
+def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
+    # Regression test for a live-reported bug: a param-heavy block (Signal
+    # Source shows 6 visible rows: samp_rate/waveform/freq/amp/offset/phase)
+    # rendered taller than the OLD BLOCK_FOOTPRINT_H=100 estimate, so a sink
+    # placed exactly 100 below it visibly overlapped despite passing the
+    # point-based check. Asserts the actual vertical gap, not just "no
+    # exact-point collision" — a regression that only shrinks the constant
+    # back down would pass a same-point check but fail this.
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "analog_sig_source_x",
+                "instance_name": "busy_source",
+                "params": {
+                    "amp": "1.0",
+                    "freq": "16000.0",
+                    "type": "float",
+                    "waveform": "analog.GR_SIN_WAVE",
+                },
+            },
+            {"block_id": "qtgui_time_sink_x", "instance_name": "busy_sink", "params": {"type": "float"}},
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    y_source = fg.get_block("busy_source").states["coordinate"][1]
+    y_sink = fg.get_block("busy_sink").states["coordinate"][1]
+    # A fixed, empirically-grounded bound (NOT BLOCK_FOOTPRINT_H itself — that
+    # would make this tautological, since placement and this check would
+    # move in lockstep no matter how small the constant is). The real
+    # Signal Source block that triggered this bug rendered ~150-170px tall
+    # (6 visible rows); 150 is a safe floor a regression back toward the old
+    # 100 would fail, while comfortably below the current 220 constant.
+    assert abs(y_sink - y_source) >= 150
+
+
 def test_change_graph_add_blocks_batch_no_overlap(temp_empty):
     fg = load_flow_graph(str(temp_empty))
     res = change_graph(
@@ -133,6 +173,34 @@ def test_change_graph_add_blocks_batch_no_overlap(temp_empty):
     )
     assert res["ok"] is True
     coords = [tuple(fg.get_block(f"sink_{i}").states["coordinate"]) for i in range(5)]
+    for i, a in enumerate(coords):
+        for b in coords[i + 1 :]:
+            assert not _footprints_overlap(a, b)
+
+
+def test_change_graph_add_blocks_batch_wraps_column(temp_empty):
+    # Regression test: a batch bigger than BLOCK_COLUMN_MAX_ROWS used to
+    # stack every block in one endlessly-tall column. Confirms it now wraps
+    # into a second column instead — first BLOCK_COLUMN_MAX_ROWS blocks
+    # share the same x, the next one starts a new column at a different x,
+    # and nothing overlaps regardless.
+    fg = load_flow_graph(str(temp_empty))
+    count = BLOCK_COLUMN_MAX_ROWS + 2
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "blocks_null_sink", "instance_name": f"wrap_{i}", "params": {"type": "float"}}
+            for i in range(count)
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    coords = [tuple(fg.get_block(f"wrap_{i}").states["coordinate"]) for i in range(count)]
+
+    first_column_x = coords[0][0]
+    assert all(c[0] == first_column_x for c in coords[:BLOCK_COLUMN_MAX_ROWS])
+    assert coords[BLOCK_COLUMN_MAX_ROWS][0] != first_column_x
+
     for i, a in enumerate(coords):
         for b in coords[i + 1 :]:
             assert not _footprints_overlap(a, b)
@@ -186,6 +254,22 @@ def test_change_graph_update_params(temp_dial_tone):
     snap = inspect_graph(fg)
     params = {b["instance_name"]: b["params"] for b in snap["graph"]["blocks"]}
     assert params["samp_rate"]["value"] == "96000"
+
+
+def test_set_param_unknown_key_lists_valid_names(temp_dial_tone):
+    # Regression test: a live chat session guessed the wrong param name
+    # ("samp_rate" instead of qtgui_time_sink_x's "srate") and had to spend
+    # an extra query_knowledge round-trip discovering the real one, because
+    # the old error only said the guessed name was wrong, not what the
+    # right one was — unlike the sibling enum-value error, which already
+    # lists valid options. This mirrors that same UX for unknown param keys.
+    fg = load_flow_graph(str(temp_dial_tone))
+    block = fg.get_block("samp_rate")  # any real block; error content is what's tested
+    with pytest.raises(KeyError) as exc_info:
+        set_param(block, "not_a_real_param", "1")
+    message = str(exc_info.value)
+    assert "not_a_real_param" in message
+    assert "value" in message  # a real param name on this (variable) block
 
 
 def test_change_graph_update_states(temp_dial_tone):
@@ -276,6 +360,58 @@ def test_change_graph_auto_resolve_type(temp_dial_tone):
     snap = inspect_graph(fg)
     params = {b["instance_name"]: b["params"] for b in snap["graph"]["blocks"]}
     assert params["blocks_add_xx"]["type"] == "float"
+
+
+def test_change_graph_auto_resolve_same_batch_explicit_propagates(temp_empty):
+    # Two brand-new blocks connected in the same batch: one has an explicit
+    # type, the other is "auto" — this must resolve from the explicit side.
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "analog_sig_source_x", "instance_name": "src", "params": {"type": "float"}},
+            {"block_id": "qtgui_time_sink_x", "instance_name": "sink", "params": {"type": "auto"}},
+        ],
+        add_connections=["src:0->sink:0"],
+    )
+    assert res["ok"] is True
+    assert fg.get_block("sink").params["type"].get_value() == "float"
+
+
+def test_change_graph_auto_resolve_existing_neighbor_propagates(temp_dial_tone):
+    # A brand-new block connected to a PRE-EXISTING, already-live block must
+    # still resolve from that neighbor's real (already-in-effect) dtype.
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "qtgui_time_sink_x", "instance_name": "new_sink", "params": {"type": "auto"}}
+        ],
+        add_connections=["analog_sig_source_x_0:0->new_sink:0"],
+    )
+    assert res["ok"] is True
+    assert fg.get_block("new_sink").params["type"].get_value() == "float"
+
+
+def test_change_graph_auto_resolve_both_sides_unresolvable_fails_loudly(temp_empty):
+    # Regression test: two brand-new blocks, BOTH left "auto", connected to
+    # each other in the same batch, with no explicit value anywhere. This
+    # used to silently "succeed" by reading each block's own untouched
+    # schema default (analog_sig_source_x and qtgui_time_sink_x both happen
+    # to default to 'complex') — not a real resolution, just two arbitrary
+    # defaults coinciding. Must now fail loudly with an actionable error
+    # instead of silently pairing two unresolved blocks.
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "analog_sig_source_x", "instance_name": "src", "params": {"type": "auto"}},
+            {"block_id": "qtgui_time_sink_x", "instance_name": "sink", "params": {"type": "auto"}},
+        ],
+        add_connections=["src:0->sink:0"],
+    )
+    assert res["ok"] is False
+    assert res["errors"][0]["code"] == "auto_resolve_failed"
 
 
 def test_change_graph_force_bypasses_validation(temp_dial_tone):
@@ -380,6 +516,65 @@ def test_no_op_edit_is_not_pushed(temp_dial_tone):
     )
     assert res["ok"] is True
     assert undo_status(temp_dial_tone) == {"can_undo": False, "can_redo": False}
+
+
+# ==========================================
+# Vector DB dimension check caching (1 test)
+# ==========================================
+
+
+def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
+    """Regression for P1-2: _ensure_db_built used to call embed_document("test")
+    on every query, doubling embedding API calls. The dimension check must be
+    cached per (domain, model) so subsequent queries only issue the real
+    query embedding."""
+    from grc_agent.adapter import _ensure_db_built, get_db_and_model
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_CONFIG_PATH", str(tmp_path / "settings.json"))
+
+    from grc_agent.settings import save_settings
+
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("catalog")
+
+    # Build a minimal valid sqlite-vec DB with a known dimension so
+    # _ensure_db_built reaches the dimension-check branch.
+    import sqlite3
+
+    import sqlite_vec
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.execute("CREATE TABLE catalog_chunks(block_id TEXT);")
+    conn.execute(
+        "CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[3]);"
+    )
+    conn.commit()
+    conn.close()
+
+    call_count = 0
+
+    def counting_embed_document(text, m):
+        nonlocal call_count
+        call_count += 1
+        return [0.0, 0.0, 0.0]
+
+    monkeypatch.setattr(
+        "grc_agent.adapter.embed_document", counting_embed_document
+    )
+
+    _ensure_db_built("catalog", db_path, model)
+    first_count = call_count
+    assert first_count == 1, "first query should perform the dimension check"
+
+    _ensure_db_built("catalog", db_path, model)
+    assert call_count == first_count, (
+        "second query must not repeat the dimension check"
+    )
 
 
 # ==========================================
