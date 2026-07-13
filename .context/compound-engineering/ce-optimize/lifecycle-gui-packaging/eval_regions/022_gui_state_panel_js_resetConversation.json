@@ -1,6 +1,0 @@
-{
-  "area": "gui_state",
-  "file": "panel.js",
-  "function": "resetConversation",
-  "code": "function resetConversation() {\n  state.brokenIframePolls = 0;\n  resetChatFrame(true);\n}"
-}

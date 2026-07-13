@@ -1,6 +1,0 @@
-{
-  "area": "lifecycle",
-  "file": "web.py",
-  "function": "_handle_sigterm",
-  "code": "def _handle_sigterm(signum: int, frame: Any) -> None:\n    \"\"\"Explicit SIGTERM handler \u2014 required because atexit alone does NOT run\n    on SIGTERM. uvicorn's capture_signals()/handle_exit() does its own\n    graceful HTTP shutdown, then RESTORES whatever signal disposition was\n    active when it started and re-raises the captured signal via\n    signal.raise_signal(). For SIGINT, Python's own built-in default handler\n    turns that re-raise into a KeyboardInterrupt \u2014 a normal exception unwind\n    that reaches atexit. SIGTERM has no such built-in Python handler, so\n    without this, the restored disposition is the raw OS default (SIG_DFL,\n    immediate kernel-level termination), killing the process before atexit\n    ever runs and orphaning canvas+broadwayd. Registering this at module\n    level (before uvicorn.run() is ever called, in both the console-script\n    and a bare `uvicorn grc_agent.web:app` entry path) makes THIS the\n    handler uvicorn treats as \"the original\" and restores before its\n    re-raise, so it fires instead of SIG_DFL. Does not touch SIGINT, which\n    already works correctly via the path described above.\"\"\"\n    _cleanup_procs()\n    sys.exit(0)\n\n\n\n"
-}

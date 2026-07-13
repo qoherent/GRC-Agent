@@ -1,6 +1,0 @@
-{
-  "area": "gui_state",
-  "file": "panel.js",
-  "function": "doUndo",
-  "code": "async function doUndo() {\n  try {\n    const res = await fetch(\"/grc/undo\", { method: \"POST\" }).then(r => r.json());\n    if (!res.ok) { setMsg(res.message || \"Nothing to undo.\", \"error\"); return; }\n    await refresh();\n  } catch (e) {\n    setMsg(String(e), \"error\");\n  }\n}"
-}

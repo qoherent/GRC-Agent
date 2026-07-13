@@ -1,6 +1,0 @@
-{
-  "area": "lifecycle",
-  "file": "web.py",
-  "function": "_cleanup_procs",
-  "code": "def _cleanup_procs() -> None:\n    \"\"\"Reap tracked subprocesses (broadwayd + canvas) on shutdown so they\n    don't orphan across restarts. Idempotent.\"\"\"\n    _terminate_canvas_proc()\n    _terminate_broadway()\n\n"
-}

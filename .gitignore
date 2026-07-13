@@ -6,6 +6,7 @@
 benchmark_outputs/
 build/
 .cache/
+.context/
 # Cache / eval artifacts
 demo/remotion/dist/
 demo/remotion/out/

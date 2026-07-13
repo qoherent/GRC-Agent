@@ -1,6 +1,0 @@
-{
-  "area": "lifecycle",
-  "file": "web.py",
-  "function": "grc_close",
-  "code": "async def grc_close(request: Request) -> JSONResponse:\n    global active_path, canvas_ready_state, canvas_error_state\n    async with _flowgraph_state_lock:\n        active.swap(None)\n        active_path = None\n        canvas_ready_state = True\n        canvas_error_state = None\n        await asyncio.to_thread(_terminate_canvas_proc)\n    return JSONResponse({\"ok\": True})\n\n"
-}

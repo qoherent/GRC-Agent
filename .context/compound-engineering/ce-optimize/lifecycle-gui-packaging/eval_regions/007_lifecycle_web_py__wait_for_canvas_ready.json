@@ -1,6 +1,0 @@
-{
-  "area": "lifecycle",
-  "file": "web.py",
-  "function": "_wait_for_canvas_ready",
-  "code": "async def _wait_for_canvas_ready(\n    proc: subprocess.Popen | None, deadline_s: float = CANVAS_READY_TIMEOUT"
-}

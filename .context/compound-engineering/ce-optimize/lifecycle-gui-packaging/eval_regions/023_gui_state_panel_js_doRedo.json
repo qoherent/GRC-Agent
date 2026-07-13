@@ -1,6 +1,0 @@
-{
-  "area": "gui_state",
-  "file": "panel.js",
-  "function": "doRedo",
-  "code": "async function doRedo() {\n  try {\n    const res = await fetch(\"/grc/redo\", { method: \"POST\" }).then(r => r.json());\n    if (!res.ok) { setMsg(res.message || \"Nothing to redo.\", \"error\"); return; }\n    await refresh();\n  } catch (e) {\n    setMsg(String(e), \"error\");\n  }\n}"
-}
