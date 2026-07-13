@@ -1172,7 +1172,10 @@ async def grc_apikey_post(request: Request) -> JSONResponse:
     provider = str(body.get("provider", ""))
     api_key = str(body.get("api_key", "")).strip()
     if provider not in ("ollama_cloud", "openrouter"):
-        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider!r}"}, status_code=400)
+        return JSONResponse(
+            {"ok": False, "message": f"Unknown provider: {provider!r}"},
+            status_code=400,
+        )
     if not api_key:
         return JSONResponse({"ok": False, "message": "API key must be non-empty"}, status_code=400)
 
@@ -1193,7 +1196,9 @@ async def grc_apikey_post(request: Request) -> JSONResponse:
     # Also set in the current process so the health check can see it immediately
     os.environ[env_key] = api_key
 
-    return JSONResponse({"ok": True, "message": f"{env_key} saved. Restart the app for it to take effect."})
+    return JSONResponse(
+        {"ok": True, "message": f"{env_key} saved. Restart the app for it to take effect."}
+    )
 
 
 # to_web() registered its own chat UI at '/' (and '/{id}'), fetched at runtime
