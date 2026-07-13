@@ -206,10 +206,17 @@ async function sendChatMessage(text) {
   _appendChatMsg("user").textContent = text;
 
   const asstBody = _appendChatMsg("assistant");
+  const asstMsg = asstBody.parentElement;
+
+  // Reasoning (thinking) — collapsible <details> above tools.
+  let reasoningEl = null;
+  let reasoningAcc = "";
+
+  // Tool calls — each gets a status line + expandable output div.
   const toolBox = document.createElement("div");
   toolBox.className = "chat-msg-tools";
-  asstBody.parentElement.insertBefore(toolBox, asstBody);
-  const toolCalls = {};   // toolCallId -> status element
+  asstMsg.insertBefore(toolBox, asstBody);
+  const toolCalls = {};   // toolCallId -> { el, outEl, argsAcc }
   let acc = "";
 
   state.chatBusy = true;
@@ -240,25 +247,73 @@ async function sendChatMessage(text) {
             _scrollChatToBottom();
           }
           break;
+        case "reasoning-start":
+          if (!reasoningEl) {
+            reasoningEl = document.createElement("details");
+            reasoningEl.className = "chat-msg-reasoning";
+            reasoningEl.innerHTML = "<summary>Thinking\u2026</summary><div class='reasoning-body'></div>";
+            asstMsg.insertBefore(reasoningEl, toolBox);
+          }
+          break;
+        case "reasoning-delta":
+          if (reasoningEl && typeof data.delta === "string") {
+            reasoningAcc += data.delta;
+            const body = reasoningEl.querySelector(".reasoning-body");
+            if (body) body.textContent = reasoningAcc;
+            _scrollChatToBottom();
+          }
+          break;
+        case "reasoning-end":
+          if (reasoningEl) {
+            reasoningEl.querySelector("summary").textContent = "Thinking";
+          }
+          break;
         case "tool-input-start":
           if (data.toolName) {
             const el = document.createElement("div");
             el.className = "chat-tool pending";
             el.dataset.name = data.toolName;
             el.textContent = "\u25B8 " + data.toolName;
+            const outEl = document.createElement("div");
+            outEl.className = "chat-tool-output";
             toolBox.appendChild(el);
-            toolCalls[data.toolCallId] = el;
+            toolBox.appendChild(outEl);
+            toolCalls[data.toolCallId] = { el, outEl, argsAcc: "" };
             _scrollChatToBottom();
           }
           break;
+        case "tool-input-delta":
+          { const tc = toolCalls[data.toolCallId];
+            if (tc && typeof data.inputTextDelta === "string") {
+              tc.argsAcc += data.inputTextDelta;
+            } }
+          break;
+        case "tool-input-available":
+          { const tc = toolCalls[data.toolCallId];
+            if (tc && data.input !== undefined) {
+              tc.argsAcc = typeof data.input === "string" ? data.input : JSON.stringify(data.input, null, 2);
+            } }
+          break;
         case "tool-output-available":
-          { const el = toolCalls[data.toolCallId];
-            if (el) { el.className = "chat-tool done"; el.textContent = "\u2713 " + el.dataset.name; } }
+          { const tc = toolCalls[data.toolCallId];
+            if (tc) {
+              tc.el.className = "chat-tool done";
+              tc.el.textContent = "\u2713 " + tc.el.dataset.name;
+              const out = data.output;
+              tc.outEl.textContent = (tc.argsAcc ? "Args:\n" + tc.argsAcc + "\n\nResult:\n" : "Result:\n")
+                + (typeof out === "string" ? out : JSON.stringify(out, null, 2) || "(empty)");
+              tc.el.addEventListener("click", () => tc.outEl.classList.toggle("open"));
+            } }
           break;
         case "tool-output-error":
         case "tool-output-denied":
-          { const el = toolCalls[data.toolCallId];
-            if (el) { el.className = "chat-tool error"; el.textContent = "\u2717 " + el.dataset.name; } }
+          { const tc = toolCalls[data.toolCallId];
+            if (tc) {
+              tc.el.className = "chat-tool error";
+              tc.el.textContent = "\u2717 " + tc.el.dataset.name;
+              tc.outEl.textContent = data.errorText || data.error?.message || "error";
+              tc.el.addEventListener("click", () => tc.outEl.classList.toggle("open"));
+            } }
           break;
         case "error":
           throw new Error(data.error?.message || data.errorText || "stream error");

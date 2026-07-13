@@ -265,6 +265,7 @@
     justify-content: center;
     color: var(--text-dim);
   }
+  #chat-toolbar #clear-history-btn { color: var(--danger); }
   #chat-toolbar #clear-history-btn:hover { color: var(--danger); border-color: var(--danger); }
   #chat-toolbar #new-conversation-btn:hover,
   #chat-toolbar #reset-conversation-btn:hover { color: var(--accent); border-color: var(--accent); }
@@ -459,9 +460,9 @@
 
   /* ---- Chat: sidebar right column ---- */
   #chat-pane {
-    flex: 0 1 680px;
-    min-width: 580px;
-    max-width: 720px;
+    flex: 0 0 35%;
+    min-width: 360px;
+    max-width: 50%;
     height: 100%;
     display: flex;
     flex-direction: column;
@@ -527,10 +528,48 @@
     padding: 2px 8px;
     border-left: 2px solid var(--border);
     line-height: 1.4;
+    cursor: pointer;
+    user-select: none;
   }
   .chat-tool.pending { color: var(--accent); border-left-color: var(--accent); }
   .chat-tool.done { color: var(--ok); border-left-color: var(--ok); }
   .chat-tool.error { color: var(--danger); border-left-color: var(--danger); }
+  .chat-tool-output {
+    display: none;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    background: rgba(0,0,0,0.2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin: 2px 0 4px 8px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .chat-tool-output.open { display: block; }
+  .chat-msg-reasoning {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    background: rgba(127,127,127,0.08);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .chat-msg-reasoning summary { outline: none; }
+  .chat-msg-reasoning .reasoning-body {
+    margin-top: 4px;
+    white-space: pre-wrap;
+    font-size: 10px;
+    color: var(--text-dim);
+    opacity: 0.8;
+  }
   .chat-msg.assistant .chat-msg-body { background: var(--surface-2); border: 1px solid var(--border); }
   .chat-msg .chat-msg-body.error { border-color: var(--danger); color: var(--danger); }
   #chat-form {
