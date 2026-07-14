@@ -238,6 +238,34 @@ def test_new_conversation_button_still_unloads_flowgraph(live_server, grc_file, 
     assert status["path"] is None
 
 
+def test_blocks_panel_toggle_resyncs_canvas_size(live_server, grc_file, page):  # noqa: ARG001
+    # Regression: showing/hiding GRC's native Block Library panel adds/removes
+    # a whole pane in the real GTK window, which can grow the window's total
+    # size request past the iframe's bounds (its ScrolledWindow hardcodes its
+    # own minimum width) and get hard-clipped at the iframe edge — live-
+    # confirmed via screenshot. toggleBlocksPanel() must force a
+    # syncCanvasSize(true) resync (POSTing to /grc/canvas/resize again, even
+    # though the container's own DOM size is unchanged) so canvas_app.py
+    # re-clamps the GTK window back to exactly what's visible.
+    _http_json("POST", "/grc/open", {"path": str(grc_file)})
+    page.goto(f"{BASE_URL}/grc/panel")
+    page.wait_for_selector("#blocks-panel-toggle-btn:not([disabled])", timeout=15000)
+
+    resize_requests = []
+    page.on(
+        "request",
+        lambda req: resize_requests.append(req)
+        if req.url.endswith("/grc/canvas/resize") and req.method == "POST"
+        else None,
+    )
+
+    page.click("#blocks-panel-toggle-btn")
+    page.wait_for_timeout(500)
+
+    assert page.evaluate("() => state.blocksPanelVisible") is True
+    assert resize_requests, "toggling the Block Library panel must resync the canvas size"
+
+
 def test_session_history_hides_once_conversation_starts(live_server, page):  # noqa: ARG001
     # The session-history panel only shows on a fresh conversation
     # (getChatFramePath() === "/"). Once a conversation is active

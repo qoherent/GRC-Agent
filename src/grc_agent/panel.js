@@ -68,6 +68,10 @@ const state = {
   // messages yet). Replaces the iframe's pathname-as-conversation-id model.
   chatConvId: null,
   chatBusy: false,
+  // Mirrors GRC's native Block Library panel visibility. Reset to false on
+  // every fresh /grc/open (a new canvas_app.py subprocess always starts
+  // with it hidden — see hide_panels_by_default), not just on page load.
+  blocksPanelVisible: false,
 };
 
 // ===================== Native chat widget =====================
@@ -880,6 +884,54 @@ async function doValidate() {
   await refresh();
 }
 
+// Toggles GRC's native Block Library panel (a real GTK widget in the
+// canvas_app.py subprocess, not DOM content — see grc_canvas_blocks_panel).
+// Self-disables for the duration of its own request: stricter than
+// doUndo/doRedo above, needed here because this button also maintains its
+// own optimistic "is it open" mirror (state.blocksPanelVisible), which two
+// overlapping requests could otherwise resolve out of order.
+async function toggleBlocksPanel() {
+  const btn = document.getElementById("blocks-panel-toggle-btn");
+  if (!btn || btn.disabled) return;
+  const desired = !state.blocksPanelVisible;
+  btn.disabled = true;
+  try {
+    const res = await fetch("/grc/canvas/blocks-panel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visible: desired }),
+    }).then(r => r.json());
+    if (res.ok) {
+      state.blocksPanelVisible = desired;
+      // Showing/hiding the Block Library adds/removes a whole pane in the
+      // real GTK window, which can grow the window's total size request
+      // past the iframe's actual bounds (GRC's block-tree ScrolledWindow
+      // hardcodes its own minimum width) — forcibly re-send the unchanged
+      // canvas-container size so canvas_app.py re-clamps the GTK window
+      // back to exactly what's visible, the same fix syncCanvasSize
+      // already applies on a real pane resize. force=true bypasses its
+      // dedup-by-size-key guard, since the container's own DOM size here
+      // is unchanged (only the GTK-side content behind it changed).
+      syncCanvasSize(true);
+    } else {
+      setMsg(res.message || "Failed to toggle Block Library panel.", "error");
+    }
+  } catch (e) {
+    setMsg(String(e), "error");
+  } finally {
+    updateBlocksPanelButton();
+  }
+}
+
+function updateBlocksPanelButton() {
+  const btn = document.getElementById("blocks-panel-toggle-btn");
+  if (!btn) return;
+  btn.disabled = !state.isGrcLoaded;
+  btn.classList.toggle("active", state.blocksPanelVisible);
+  btn.setAttribute("aria-pressed", String(state.blocksPanelVisible));
+  btn.title = state.blocksPanelVisible ? "Hide Block Library" : "Show Block Library";
+}
+
 setInterval(pollConversationState, 750);
 
 function updateChatInputState() {
@@ -920,6 +972,11 @@ async function openGraph(path, convId = null) {
     });
     const data = await res.json();
     if (!data.ok) { setMsg(data.message || "Failed to load file.", "error"); return; }
+
+    // A fresh canvas_app.py subprocess always starts with the Block Library
+    // hidden (hide_panels_by_default) — reset the frontend's mirror to match,
+    // not just on first page load.
+    state.blocksPanelVisible = false;
 
     if (convId) {
       state.chatConvId = convId;
@@ -1121,15 +1178,18 @@ async function refresh(forceCanvasReload = false, canvasReady, canvasError) {
     document.getElementById("redo-btn").disabled = !statusRes.can_redo;
     if (inspectRes.not_loaded) {
       state.isGrcLoaded = false;
+      updateBlocksPanelButton();
       renderEmptyState();
       return;
     }
     if (!inspectRes.ok) {
       state.isGrcLoaded = false;
+      updateBlocksPanelButton();
       setMsg("Inspect failed.", "error");
       return;
     }
     state.isGrcLoaded = true;
+    updateBlocksPanelButton();
     render(inspectRes.graph);
     // Prefer an explicitly-passed, just-obtained value — openGraph and the
     // auto-reopen path already have the freshest possible signal from their
@@ -1867,6 +1927,7 @@ document.getElementById("browse-btn").addEventListener("click", openBrowse);
 document.getElementById("undo-btn").addEventListener("click", doUndo);
 document.getElementById("redo-btn").addEventListener("click", doRedo);
 document.getElementById("validate-btn").addEventListener("click", doValidate);
+document.getElementById("blocks-panel-toggle-btn").addEventListener("click", toggleBlocksPanel);
 document.getElementById("reset-conversation-btn").addEventListener("click", resetConversation);
 document.getElementById("new-conversation-btn").addEventListener("click", startNewConversation);
 document.getElementById("browse-up-btn").addEventListener("click", browseUp);

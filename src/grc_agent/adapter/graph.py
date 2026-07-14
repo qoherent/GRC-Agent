@@ -100,6 +100,22 @@ def hide_panels_by_default(app: Any) -> None:
             print(f"Failed to hide GRC panel via action {action}: {e}")
 
 
+def set_blocks_panel_visibility(app: Any, visible: bool) -> bool:
+    """Show/hide GRC's native Block Library panel. Idempotent: a no-op if
+    already in the requested state, since the underlying GTK action
+    (TOGGLE_BLOCKS_WINDOW) only flips whatever the current state is — see
+    gnuradio.grc.gui.Application's handler for that action."""
+    from gnuradio.grc.gui import Actions
+
+    action = Actions.TOGGLE_BLOCKS_WINDOW
+    try:
+        if bool(action.get_active()) != bool(visible):
+            app._handle_action(action)
+    except Exception as e:
+        print(f"Failed to set Block Library panel visibility via action {action}: {e}")
+    return bool(action.get_active())
+
+
 def flow_graph_content_hash(flow_graph: Any) -> str:
     """Hash of what write_flow_graph_atomic would currently write for this
     flow_graph — directly comparable to a hash of the on-disk file's raw

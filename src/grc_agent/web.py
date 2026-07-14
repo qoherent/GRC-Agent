@@ -1025,6 +1025,26 @@ async def grc_canvas_resize(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "canvas control server unreachable"})
 
 
+async def grc_canvas_blocks_panel(request: Request) -> JSONResponse:
+    """Show/hide GRC's native Block Library panel in the running
+    canvas_app.py process — fire-and-forget over the loopback control
+    server, same pattern as grc_canvas_resize."""
+    try:
+        body = await request.json()
+        visible = bool(body.get("visible"))
+    except Exception:
+        return JSONResponse({"ok": False, "message": "invalid body"}, status_code=400)
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            r = await client.post(
+                f"http://127.0.0.1:{CANVAS_CONTROL_PORT}/blocks-panel",
+                json={"visible": visible},
+            )
+        return JSONResponse({"ok": 200 <= r.status_code < 300, "visible": visible})
+    except Exception:
+        return JSONResponse({"ok": False, "message": "canvas control server unreachable"})
+
+
 async def grc_settings_get(request: Request) -> JSONResponse:  # noqa: ARG001
     cfg = load_settings()
     return JSONResponse(
@@ -1224,6 +1244,7 @@ app.router.routes[0:0] = [
     Route("/grc/undo", grc_undo, methods=["POST"]),
     Route("/grc/redo", grc_redo, methods=["POST"]),
     Route("/grc/canvas/resize", grc_canvas_resize, methods=["POST"]),
+    Route("/grc/canvas/blocks-panel", grc_canvas_blocks_panel, methods=["POST"]),
     Route("/grc/panel", grc_panel, methods=["GET"]),
     Route("/grc/panel.js", grc_panel_js, methods=["GET"]),
     Route("/grc/settings", grc_settings_get, methods=["GET"]),

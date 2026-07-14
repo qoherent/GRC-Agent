@@ -59,6 +59,25 @@ def test_open_valid_path_then_inspect():
     assert "samp_rate" in block_names
 
 
+def test_canvas_blocks_panel_toggle_round_trip():
+    """Exercises the real GTK toggle end-to-end (spawns a genuine
+    canvas_app.py + broadwayd, same as test_open_valid_path_then_inspect),
+    not a mock. Also confirms idempotency: POSTing the same value twice in a
+    row must not error, since the underlying GTK action only flips and
+    set_blocks_panel_visibility must guard against a double-flip."""
+    res = client.post("/grc/open", json={"path": "tests/data/dial_tone.grc"}).json()
+    assert res["ok"] is True
+
+    show = client.post("/grc/canvas/blocks-panel", json={"visible": True}).json()
+    assert show["ok"] is True
+
+    show_again = client.post("/grc/canvas/blocks-panel", json={"visible": True}).json()
+    assert show_again["ok"] is True
+
+    hide = client.post("/grc/canvas/blocks-panel", json={"visible": False}).json()
+    assert hide["ok"] is True
+
+
 def test_open_second_file_replaces_first():
     """Lifecycle edge case: opening a different file without an explicit close
     must replace the active flowgraph and terminate the old canvas."""
@@ -348,6 +367,22 @@ def test_canvas_app_pending_reload_is_buffered_before_window_exists():
     # assertion is that pending_reload was consumed.
     ctx.apply_pending_reload()
     assert ctx.pending_reload is False
+
+
+def test_canvas_app_blocks_panel_visibility_is_noop_before_window_exists():
+    """A /blocks-panel request that arrives before the GTK window/app exist
+    must be a safe no-op, not a crash — mirrors the pending_reload guard
+    above, but deliberately non-buffering (see apply_blocks_panel_visibility's
+    docstring: the frontend button stays disabled until isGrcLoaded, so this
+    ordering can't happen in practice; it's still worth asserting it's safe)."""
+    from grc_agent.canvas_app import CanvasControlContext
+
+    ctx = CanvasControlContext("/tmp/nonexistent.grc")
+    ctx.window = None
+    ctx.app = None
+
+    result = ctx.apply_blocks_panel_visibility(True)
+    assert result is False  # GLib.idle_add callbacks return False to not repeat
 
 
 def test_canvas_app_reload_uses_loopback_address():

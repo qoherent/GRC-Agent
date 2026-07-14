@@ -26,6 +26,7 @@ from grc_agent.adapter import (
     gui_application_cls,
     hide_panels_by_default,
     push_undo_snapshot,
+    set_blocks_panel_visibility,
     write_flow_graph_atomic,
 )
 
@@ -72,6 +73,7 @@ class CanvasControlContext:
         self.window = None
         self.drawing_area = None
         self.platform = None
+        self.app = None
         self.pending_size = None
         # A /reload request can arrive via the control server before the GTK
         # window/drawing_area have finished building (the server binds before
@@ -169,6 +171,17 @@ class CanvasControlContext:
             self.pending_reload = False
             self._perform_reload()
 
+    def apply_blocks_panel_visibility(self, visible):
+        """Show/hide GRC's native Block Library panel. Unlike resize/reload,
+        a request arriving before self.window/self.app exist is simply
+        dropped rather than buffered: the frontend button that triggers this
+        stays disabled until the canvas is confirmed loaded (isGrcLoaded),
+        so that ordering can't happen in practice."""
+        if not (self.window and self.app):
+            return False
+        set_blocks_panel_visibility(self.app, visible)
+        return False
+
     def _scroll_to_new_blocks(self, flow_graph, old_names):
         """Best-effort: pan the ScrolledWindow so a block added by this
         reload is actually visible, rather than requiring the user to
@@ -262,6 +275,10 @@ def start_control_server(ctx, port) -> bool:  # noqa: C901
                     self.send_response(200)
                 elif self.path == "/reload":
                     GLib.idle_add(ctx.apply_reload)
+                    self.send_response(200)
+                elif self.path == "/blocks-panel":
+                    data = self._read_json()
+                    GLib.idle_add(ctx.apply_blocks_panel_visibility, bool(data.get("visible")))
                     self.send_response(200)
                 else:
                     self.send_response(404)
@@ -390,6 +407,7 @@ def main():  # noqa: C901
     ctx.window = window
     ctx.drawing_area = drawing_area
     ctx.platform = p
+    ctx.app = app
     ctx.apply_pending_size()
     ctx.apply_pending_reload()
     if drawing_area:
