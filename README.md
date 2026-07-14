@@ -1,5 +1,7 @@
 # Qoherent GRC Agent
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A local companion for GNU Radio Companion (`.grc`) flowgraphs. It inspects,
 edits, and documents your graphs through a chat agent, with vector search
 over the full GNU Radio block catalog and docs wiki, and a browser-based GUI
@@ -173,3 +175,13 @@ uv run pytest tests/test_integration.py # live model, ~15-20 min
 - `Find a low-pass filter block.`
 - `Change samp_rate to 48000 and validate.`
 - `Change the signal source frequency from 440 to 1000.`
+
+---
+
+## More docs
+
+- [`AGENTS.md`](AGENTS.md) — architecture, engineering rules, and a long list of specific, live-verified design decisions.
+- [`docs/technical_overview.md`](docs/technical_overview.md) — a deeper architecture writeup with diagrams and benchmark results.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, test gate, conventions.
+- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability.
+- [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — this project is MIT-licensed; the bundled GNU Radio docs corpus used for `query_docs` is CC BY-SA 3.0 (see `NOTICE.md`).

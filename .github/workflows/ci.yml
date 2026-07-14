@@ -40,7 +40,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnuradio
 
-      # Runs the full unit and web app test suite. LLM/vector-dependent tests
-      # will automatically skip if no local Ollama or OpenRouter credentials are found.
+      # Runs the full unit, web app, and settings-isolation test suite.
+      # LLM/vector-dependent tests will automatically skip if no local Ollama
+      # or OpenRouter credentials are found. test_frontend.py (Playwright) and
+      # test_integration.py (live model, ~15-20 min) are not run here.
       - name: Run tests
-        run: uv run pytest tests/test_unit.py tests/test_web_app.py -v
+        run: uv run pytest tests/test_unit.py tests/test_web_app.py tests/test_isolation.py -v
