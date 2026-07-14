@@ -237,6 +237,28 @@ blocks:
         - 91
         rotation: 0
         state: enabled
+-   name: analog_agc_xx_0
+    id: analog_agc_xx
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        gain: '1.0'
+        max_gain: '65536'
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        rate: 1e-4
+        reference: '1.0'
+        type: complex
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 1096
+        - 240.0
+        rotation: 0
+        state: enabled
 -   name: analog_random_source_x_0
     id: analog_random_source_x
     parameters:
@@ -508,8 +530,185 @@ blocks:
         bus_source: false
         bus_structure: null
         coordinate:
-        - 1136
-        - 212.0
+        - 1376
+        - 136.0
+        rotation: 0
+        state: enabled
+-   name: qtgui_const_sink_x_0_0
+    id: qtgui_const_sink_x
+    parameters:
+        affinity: ''
+        alias: ''
+        alpha1: '1.0'
+        alpha10: '1.0'
+        alpha2: '1.0'
+        alpha3: '1.0'
+        alpha4: '1.0'
+        alpha5: '1.0'
+        alpha6: '1.0'
+        alpha7: '1.0'
+        alpha8: '1.0'
+        alpha9: '1.0'
+        autoscale: 'False'
+        axislabels: 'True'
+        color1: '"blue"'
+        color10: '"dark blue"'
+        color2: '"red"'
+        color3: '"green"'
+        color4: '"black"'
+        color5: '"cyan"'
+        color6: '"magenta"'
+        color7: '"yellow"'
+        color8: '"dark red"'
+        color9: '"dark green"'
+        comment: ''
+        grid: 'False'
+        gui_hint: ''
+        label1: ''
+        label10: ''
+        label2: ''
+        label3: ''
+        label4: ''
+        label5: ''
+        label6: ''
+        label7: ''
+        label8: ''
+        label9: ''
+        legend: 'True'
+        marker1: '0'
+        marker10: '0'
+        marker2: '0'
+        marker3: '0'
+        marker4: '0'
+        marker5: '0'
+        marker6: '0'
+        marker7: '0'
+        marker8: '0'
+        marker9: '0'
+        name: Clean Constellation (Before Impairments)
+        nconnections: '1'
+        size: '1024'
+        style1: '0'
+        style10: '0'
+        style2: '0'
+        style3: '0'
+        style4: '0'
+        style5: '0'
+        style6: '0'
+        style7: '0'
+        style8: '0'
+        style9: '0'
+        tr_chan: '0'
+        tr_level: '0.0'
+        tr_mode: qtgui.TRIG_MODE_FREE
+        tr_slope: qtgui.TRIG_SLOPE_POS
+        tr_tag: '""'
+        type: complex
+        update_time: '0.10'
+        width1: '1'
+        width10: '1'
+        width2: '1'
+        width3: '1'
+        width4: '1'
+        width5: '1'
+        width6: '1'
+        width7: '1'
+        width8: '1'
+        width9: '1'
+        xmax: '2'
+        xmin: '-2'
+        ymax: '2'
+        ymin: '-2'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 608
+        - 408.0
+        rotation: 0
+        state: enabled
+-   name: qtgui_freq_sink_x_0
+    id: qtgui_freq_sink_x
+    parameters:
+        affinity: ''
+        alias: ''
+        alpha1: '1.0'
+        alpha10: '1.0'
+        alpha2: '1.0'
+        alpha3: '1.0'
+        alpha4: '1.0'
+        alpha5: '1.0'
+        alpha6: '1.0'
+        alpha7: '1.0'
+        alpha8: '1.0'
+        alpha9: '1.0'
+        autoscale: 'True'
+        average: '1.0'
+        axislabels: 'True'
+        bw: samp_rate
+        color1: '"blue"'
+        color10: '"dark blue"'
+        color2: '"red"'
+        color3: '"green"'
+        color4: '"black"'
+        color5: '"cyan"'
+        color6: '"magenta"'
+        color7: '"yellow"'
+        color8: '"dark red"'
+        color9: '"dark green"'
+        comment: ''
+        ctrlpanel: 'False'
+        fc: '0'
+        fftsize: '1024'
+        freqhalf: 'True'
+        grid: 'False'
+        gui_hint: ''
+        label: Relative Gain
+        label1: ''
+        label10: ''''''
+        label2: ''''''
+        label3: ''''''
+        label4: ''''''
+        label5: ''''''
+        label6: ''''''
+        label7: ''''''
+        label8: ''''''
+        label9: ''''''
+        legend: 'True'
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        name: Spectrum (After Impairments + AGC)
+        nconnections: '1'
+        norm_window: 'False'
+        showports: 'False'
+        tr_chan: '0'
+        tr_level: '0.0'
+        tr_mode: qtgui.TRIG_MODE_FREE
+        tr_tag: '""'
+        type: complex
+        units: dB
+        update_time: '0.10'
+        width1: '1'
+        width10: '1'
+        width2: '1'
+        width3: '1'
+        width4: '1'
+        width5: '1'
+        width6: '1'
+        width7: '1'
+        width8: '1'
+        width9: '1'
+        wintype: window.WIN_BLACKMAN_hARRIS
+        ymax: '10'
+        ymin: '-140'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 1360
+        - 376.0
         rotation: 0
         state: enabled
 -   name: qtgui_time_sink_x_0_0
@@ -607,11 +806,23 @@ blocks:
         bus_source: false
         bus_structure: null
         coordinate:
-        - 1136
-        - 284.0
+        - 1360
+        - 256.0
         rotation: 0
         state: enabled
 connections:
+-   - analog_agc_xx_0
+    - '0'
+    - qtgui_const_sink_x_0
+    - '0'
+-   - analog_agc_xx_0
+    - '0'
+    - qtgui_freq_sink_x_0
+    - '0'
+-   - analog_agc_xx_0
+    - '0'
+    - qtgui_time_sink_x_0_0
+    - '0'
 -   - analog_random_source_x_0
     - '0'
     - blocks_int_to_float_0
@@ -640,13 +851,13 @@ connections:
     - '0'
     - channels_impairments_0
     - '0'
+-   - blocks_throttle_0
+    - '0'
+    - qtgui_const_sink_x_0_0
+    - '0'
 -   - channels_impairments_0
     - '0'
-    - qtgui_const_sink_x_0
-    - '0'
--   - channels_impairments_0
-    - '0'
-    - qtgui_time_sink_x_0_0
+    - analog_agc_xx_0
     - '0'
 metadata:
     file_format: 1

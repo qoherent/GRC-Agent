@@ -201,6 +201,16 @@ canvas_proc: subprocess.Popen | None = None
 # true, since those call sites never had this signal available before.
 canvas_ready_state: bool = True
 canvas_error_state: str | None = None
+# Bumped under _flowgraph_state_lock at the start of every /grc/open. The
+# canvas-readiness wait below runs outside that lock (see grc_open's own
+# comment for why), so a request superseded by a later /grc/open — whose
+# canvas_proc it no longer owns — can still finish its own wait afterward.
+# Captured as my_generation before waiting, so its eventual write to
+# canvas_ready_state/canvas_error_state is skipped unless it's still the most
+# recent open, instead of clobbering a healthy, currently-active canvas's
+# status with its own now-irrelevant (and possibly "crashed", since its
+# canvas_proc handle was killed out from under it) outcome.
+_open_generation: int = 0
 # broadwayd daemons this process spawned (eagerly in main(), lazily in
 # ensure_broadway) — tracked so teardown terminates only OUR daemons, never
 # another instance's (which a global `killall broadwayd` would stomp).
@@ -655,7 +665,7 @@ atexit.register(_cleanup_procs)
 
 
 async def grc_open(request: Request) -> JSONResponse:
-    global active_path, canvas_proc, canvas_ready_state, canvas_error_state
+    global active_path, canvas_proc, canvas_ready_state, canvas_error_state, _open_generation
     try:
         body = await request.json()
     except Exception as e:
@@ -687,6 +697,12 @@ async def grc_open(request: Request) -> JSONResponse:
             return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
         active.swap(new_fg)
         active_path = path
+
+        # Captured while still under the lock so the eventual (post-wait,
+        # unlocked) write to canvas_ready_state/canvas_error_state below can
+        # tell whether a later /grc/open has since superseded this one.
+        _open_generation += 1
+        my_generation = _open_generation
 
         # Ensure broadwayd is running
         await ensure_broadway()
@@ -764,9 +780,12 @@ async def grc_open(request: Request) -> JSONResponse:
         # control server binds before the heavy platform build, so the
         # probe gets 503 (not connection-refused) until /ready flips to 200.
         # Outside the lock (see above) — a concurrent /grc/open racing this
-        # wait could terminate/replace this canvas mid-poll; that's
-        # acceptable last-writer-wins behavior (the poll would then just
-        # reflect whichever canvas currently holds the control port).
+        # wait could terminate/replace this canvas mid-poll. proc.poll() is
+        # checked against THIS request's own (now possibly-killed) canvas_proc
+        # handle, so a superseded request can conclude "crashed" here even
+        # though the canvas that's actually current is healthy — the
+        # my_generation guard below stops that stale outcome from being
+        # written to the shared status globals.
         canvas_ready, canvas_crashed = await _wait_for_canvas_ready(canvas_proc)
         if not canvas_ready:
             canvas_error = (
@@ -778,9 +797,16 @@ async def grc_open(request: Request) -> JSONResponse:
     # Mirrored into module state (not just this response) so a later /grc/status
     # poll can still learn the canvas is unavailable — see canvas_ready_state's
     # own comment. Covers all three outcomes above: launch failed outright,
-    # launched but crashed/timed out, or launched and became ready.
-    canvas_ready_state = canvas_ready
-    canvas_error_state = canvas_error
+    # launched but crashed/timed out, or launched and became ready. Guarded by
+    # my_generation: only commit if no later /grc/open has started since —
+    # otherwise a slow/superseded request's stale outcome (see above) could
+    # clobber the currently-active flowgraph's genuinely healthy canvas status.
+    # This request's own JSON response below still reports its own outcome
+    # unconditionally, regardless of whether it wins this race.
+    async with _flowgraph_state_lock:
+        if my_generation == _open_generation:
+            canvas_ready_state = canvas_ready
+            canvas_error_state = canvas_error
 
     return JSONResponse(
         {
@@ -910,19 +936,26 @@ async def grc_reload(request: Request) -> JSONResponse:
     global active_path, canvas_ready_state, canvas_error_state
     if not active_path:
         return JSONResponse({"ok": False, "message": "No active path"}, status_code=400)
-    # Same shared state as open/close — serialize against them so a reload
-    # can't interleave with a concurrent open/close swap.
+    
+    source = request.query_params.get("source")
+    is_canvas_origin = source == "canvas"
+
     async with _flowgraph_state_lock:
         try:
             new_fg = load_flow_graph(active_path)
             active.swap(new_fg)
-            # Tell the live GTK canvas to reload too — otherwise a disk-reload
-            # here leaves it stale relative to the freshly-reloaded in-memory
-            # graph, the same desync change_graph already guards against.
-            # notify_edit() never raises (its own try/except folds a failure
-            # into the returned dict), so this can't turn a reload into a
-            # failure response — best-effort, surfaced but non-fatal.
-            canvas_synced = (await active.notify_edit()).get("ok", False)
+            
+            if is_canvas_origin:
+                canvas_synced = True
+            else:
+                # Tell the live GTK canvas to reload too — otherwise a disk-reload
+                # here leaves it stale relative to the freshly-reloaded in-memory
+                # graph, the same desync change_graph already guards against.
+                # notify_edit() never raises (its own try/except folds a failure
+                # into the returned dict), so this can't turn a reload into a
+                # failure response — best-effort, surfaced but non-fatal.
+                canvas_synced = (await active.notify_edit()).get("ok", False)
+            
             # A successful reload ping proves the canvas control server is
             # alive and responding. If a prior open had timed out, this means
             # the canvas recovered (or was slow, not dead), so mirror that

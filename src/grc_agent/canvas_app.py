@@ -392,20 +392,7 @@ def main():
     ctx.platform = p
     ctx.apply_pending_size()
     ctx.apply_pending_reload()
-
-    # Hide every sibling on the path from the DrawingArea up to the window
-    # (menu bar, toolbar, block-library tree, console/variable-editor pane,
-    # notebook tabs bar, ...) so only the flowgraph's scrolled canvas shows,
-    # no matter how GRC's MainWindow happens to be laid out.
-    def isolate_drawing_area(root_window, target):
-        pass
-
     if drawing_area:
-        try:
-            isolate_drawing_area(window, drawing_area)
-        except Exception as e:
-            print("Failed to isolate GRC canvas:", e)
-
         # GRC's own Notebook.py hardcodes the ScrolledWindow wrapping the
         # canvas to a 600x400 minimum size request — a real GTK container
         # can never be resized smaller than its child's requested minimum,
@@ -537,29 +524,41 @@ def main():
                         push_undo_snapshot(drawing_area._flow_graph, Path(grc_file_path))
                     finally:
                         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            # Bounded retry: a single failed /grc/reload ping would otherwise
-            # leave the web server's in-memory graph stale indefinitely. The
-            # web reload is the only thing keeping inspect_graph in sync with
-            # manual edits, so a transient hiccup shouldn't silently break it.
-            url = f"http://127.0.0.1:{web_port}/grc/reload"
+        except Exception as e:
+            print("Failed to trigger reload:", e)
+            return False
+
+        # Bounded retry: a single failed /grc/reload ping would otherwise
+        # leave the web server's in-memory graph stale indefinitely. The
+        # web reload is the only thing keeping inspect_graph in sync with
+        # manual edits, so a transient hiccup shouldn't silently break it.
+        # Run on a background thread, not inline: urllib.request.urlopen is
+        # synchronous, and this whole function runs as a GLib idle callback
+        # on the single GTK main thread — inline, up to 3 attempts x 2s
+        # timeout (plus 2 x 0.5s sleeps between them) froze the entire canvas
+        # (no redraw, no further input) for up to ~7s on every edit-producing
+        # release whenever web.py was slow or briefly unreachable.
+        def _ping_web():
+            url = f"http://127.0.0.1:{web_port}/grc/reload?source=canvas"
             for attempt in range(3):
                 try:
                     urllib.request.urlopen(url, timeout=2)
-                    break
+                    return
                 except Exception:
                     if attempt < 2:
                         time.sleep(0.5)
-                    else:
-                        raise
-        except Exception as e:
-            print("Failed to trigger reload:", e)
+            print("Failed to notify web server of canvas edit after 3 attempts")
+
+        threading.Thread(target=_ping_web, daemon=True).start()
         return False
 
     def trigger_reload():
-        # Deferred to an idle callback so the click/drag that triggered
-        # this (a blocking network round-trip plus a full flow-graph
-        # re-parse) doesn't freeze the GTK main loop before the
-        # selection/move the user just made has had a chance to redraw.
+        # Deferred to an idle callback so the click/drag that triggered this
+        # doesn't freeze the GTK main loop before the selection/move the user
+        # just made has had a chance to redraw. idle_add alone only defers
+        # WHEN _do_trigger_reload starts — it doesn't make that function's own
+        # body non-blocking, which is why the network ping inside it is
+        # further offloaded to its own background thread.
         GLib.idle_add(_do_trigger_reload)
 
     # 0. Safety net for edits that don't go through hooks #1/#2 below.

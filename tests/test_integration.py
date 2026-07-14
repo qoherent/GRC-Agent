@@ -5,8 +5,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.capabilities import ProcessHistory
+
+from grc_agent.settings import env_path
+
+load_dotenv(env_path())
 
 # Import components from grc_agent.agent
 from grc_agent.agent import (
@@ -34,12 +39,17 @@ def _ollama_available() -> bool:
         return False
 
 
+def _ollama_cloud_available() -> bool:
+    return bool(os.getenv("OLLAMA_CLOUD_API_KEY"))
+
+
 def _openrouter_available() -> bool:
     return bool(os.getenv("OPENROUTER_API_KEY"))
 
 
 _BACKEND_AVAILABILITY = {
     "ollama": _ollama_available,
+    "ollama_cloud": _ollama_cloud_available,
     "openrouter": _openrouter_available,
 }
 
@@ -71,6 +81,8 @@ _OPENROUTER_DEFAULT_MODEL = os.getenv("GRC_OPENROUTER_MODEL", "openai/gpt-4o-min
 def _build_model_for_backend(backend: str):
     if backend == "openrouter":
         return build_scenario_model("openrouter", _OPENROUTER_DEFAULT_MODEL)
+    if backend == "ollama_cloud":
+        return build_scenario_model("ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud"))
     return build_scenario_model("ollama")
 
 

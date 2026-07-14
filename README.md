@@ -7,6 +7,8 @@ flowgraph, edits it through validated tool calls, and grounds every answer in
 a RAG-searchable GNU Radio block catalog and docs wiki — chatting alongside a
 live, directly-editable canvas.
 
+![Dashboard UI](docs/UI.png)
+
 See [`AGENTS.md`](AGENTS.md) for architecture and design decisions — this file covers install + run.
 
 ---
@@ -79,9 +81,8 @@ and add it (or set it from the dashboard's model selector).
 Get a key at [Ollama Cloud](https://ollama.cloud), then `cp .env.example .env`
 and set `OLLAMA_CLOUD_API_KEY` (or set it from the dashboard).
 
-> Even under Ollama Cloud/OpenRouter, `query_knowledge`'s vector search always
-> uses your **local** Ollama for embeddings — keep `ollama serve` running with
-> `embeddinggemma:latest` pulled.
+> [!NOTE]
+> Since Ollama Cloud does not currently host or expose cloud embedding models, the vector search (`query_knowledge`) still routes embeddings locally. Thus, even when using Ollama Cloud (or OpenRouter) as your chat provider, you will still need to have **Ollama installed locally** to serve the `embeddinggemma:latest` model. If Ollama Cloud introduces cloud embedding models in the future, we will update the system to support them.
 
 ---
 

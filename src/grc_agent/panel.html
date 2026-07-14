@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Qoherent GRC Agent</title>
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
   :root {
     --bg: #0b0f14;
     --surface: #141a21;
@@ -19,7 +21,28 @@
     --danger: #ff6b6b;
     --danger-bg: #3a1418;
     --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-    --sans: -apple-system, "Segoe UI", Roboto, sans-serif;
+    --sans: 'Inter', -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  /* Custom scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--bg);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-dim);
+  }
+
+  /* Global micro-transitions for buttons/inputs/controls */
+  button, input, select, .browse-entry, .chat-tool, #resize-handle, #model-name-label {
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
   }
 
   * { box-sizing: border-box; }
@@ -168,6 +191,9 @@
     color: var(--text-dim);
     word-break: break-all;
     min-width: 0;
+    margin-left: 8px;
+    padding-left: 12px;
+    border-left: 1px solid var(--border);
   }
   #current-path .value { color: var(--text); }
 
@@ -226,6 +252,7 @@
   #chat-toolbar {
     flex: 0 0 auto;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
     padding: 8px 10px;
@@ -235,29 +262,43 @@
   }
   #chat-toolbar select,
   #chat-toolbar input {
-    height: 28px;
+    height: 32px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 6px;
-    font-family: var(--mono);
+    font-family: var(--sans);
     font-size: 12px;
-    padding: 4px 6px;
+    padding: 4px 8px;
   }
   #chat-toolbar select { flex: 0 0 auto; max-width: 120px; }
   #chat-toolbar input { flex: 1 1 auto; min-width: 120px; }
   .chat-toolbar-spacer { flex: 1 1 auto; }
+  .toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .toolbar-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    user-select: none;
+    margin-left: 2px;
+  }
   /* The model NAME is read-only text (#model-name-label) until clicked —
-     swapping in an always-editable input risked an accidental keystroke/blur
-     silently saving a change the user didn't mean to make. Clicking swaps in
-     #model-name-input plus explicit confirm/cancel; nothing saves until
-     confirm (or Enter) — see panel.js. */
+      swapping in an always-editable input risked an accidental keystroke/blur
+      silently saving a change the user didn't mean to make. Clicking swaps in
+      #model-name-input plus explicit confirm/cancel; nothing saves until
+      confirm (or Enter) — see panel.js. */
   #chat-toolbar #clear-history-btn,
   #chat-toolbar #new-conversation-btn,
   #chat-toolbar #reset-conversation-btn {
     flex: 0 0 auto;
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
     padding: 0;
     border-radius: 6px;
     display: inline-flex;
@@ -272,7 +313,7 @@
   #model-name-label {
     flex: 1 1 auto;
     min-width: 130px;
-    height: 28px;
+    height: 32px;
     display: inline-flex;
     align-items: center;
     padding: 4px 8px;
@@ -289,8 +330,8 @@
   #model-name-label:hover { background: var(--surface-2); border-color: var(--border); }
   #model-name-confirm-btn, #model-name-cancel-btn {
     flex: 0 0 auto;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     padding: 0;
   }
   #model-name-confirm-btn { color: var(--ok); border-color: var(--ok); }
@@ -340,8 +381,8 @@
   /* ---- API key button ---- */
   #apikey-btn {
     flex: 0 0 auto;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     padding: 0;
     border-radius: 6px;
     color: var(--text-dim);
@@ -350,15 +391,23 @@
 
   /* ---- API key dialog ---- */
   #apikey-dialog-overlay {
-    display: none;
     position: fixed;
     inset: 0;
     background: rgba(4, 6, 9, .6);
+    display: flex;
     align-items: center;
     justify-content: center;
     z-index: 100;
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+    transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.2s;
   }
-  #apikey-dialog-overlay.open { display: flex; }
+  #apikey-dialog-overlay.open {
+    opacity: 1;
+    pointer-events: auto;
+    visibility: visible;
+  }
   #apikey-dialog {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -367,6 +416,11 @@
     max-width: 90vw;
     padding: 20px;
     box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    transform: scale(0.95) translateY(10px);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  #apikey-dialog-overlay.open #apikey-dialog {
+    transform: scale(1) translateY(0);
   }
   #apikey-dialog-header {
     font-family: var(--sans);
@@ -491,11 +545,11 @@
   .chat-msg .chat-msg-body {
     padding: 8px 11px;
     border-radius: 8px;
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 13.5px;
+    line-height: 1.6;
     overflow-wrap: anywhere;
   }
-  .chat-msg .chat-msg-body p { margin: 0 0 6px; }
+  .chat-msg .chat-msg-body p { margin: 0 0 10px; }
   .chat-msg .chat-msg-body p:last-child { margin-bottom: 0; }
   .chat-msg .chat-msg-body code {
     font-family: var(--mono);
@@ -514,22 +568,60 @@
   }
   .chat-msg .chat-msg-body pre code { background: none; padding: 0; font-size: 12px; }
   .chat-msg .chat-msg-body h1,.chat-msg .chat-msg-body h2,.chat-msg .chat-msg-body h3,
-  .chat-msg .chat-msg-body h4 { margin: 8px 0 4px; line-height: 1.3; }
-  .chat-msg .chat-msg-body h1 { font-size: 16px; }
-  .chat-msg .chat-msg-body h2 { font-size: 15px; }
+  .chat-msg .chat-msg-body h4 { margin: 14px 0 8px; line-height: 1.3; font-weight: 600; }
+  .chat-msg .chat-msg-body h1 { font-size: 18px; }
+  .chat-msg .chat-msg-body h2 { font-size: 16px; }
   .chat-msg .chat-msg-body h3 { font-size: 14px; }
-  .chat-msg .chat-msg-body ul,.chat-msg .chat-msg-body ol { margin: 4px 0; padding-left: 20px; }
-  .chat-msg.user .chat-msg-body { background: var(--accent-dim); color: var(--text); white-space: pre-wrap; }
+  .chat-msg .chat-msg-body ul,.chat-msg .chat-msg-body ol { margin: 6px 0; padding-left: 20px; }
+  .chat-msg.user .chat-msg-body {
+    background: #1b170e;
+    border: 1px solid rgba(224, 166, 58, 0.25);
+    color: var(--text);
+    white-space: pre-wrap;
+  }
+
+  /* ---- Typing Indicator ---- */
+  .typing-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 12px;
+    margin: 4px 0;
+    width: fit-content;
+  }
+  .typing-dot {
+    width: 6px;
+    height: 6px;
+    background-color: var(--text-dim);
+    border-radius: 50%;
+    display: inline-block;
+    animation: typingBounce 1.4s infinite ease-in-out both;
+  }
+  .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+  .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+  @keyframes typingBounce {
+    0%, 80%, 100% { transform: scale(0.3); opacity: 0.5; }
+    40% { transform: scale(1); opacity: 1; }
+  }
   .chat-msg-tools { display: flex; flex-direction: column; gap: 3px; margin-bottom: 4px; }
   .chat-tool {
     font-family: var(--mono);
     font-size: 11px;
     color: var(--text-dim);
-    padding: 2px 8px;
-    border-left: 2px solid var(--border);
+    padding: 4px 8px;
+    border-left: 3px solid var(--border);
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 0 4px 4px 0;
     line-height: 1.4;
     cursor: pointer;
     user-select: none;
+    transition: background 0.15s ease, border-left-color 0.15s ease, color 0.15s ease;
+    margin: 2px 0;
+  }
+  .chat-tool:hover {
+    background: rgba(255, 255, 255, 0.06);
   }
   .chat-tool.pending { color: var(--accent); border-left-color: var(--accent); }
   .chat-tool.done { color: var(--ok); border-left-color: var(--ok); }
@@ -610,8 +702,32 @@
     background: var(--accent);
     color: #fff;
     font-weight: 600;
+    border: none;
+    cursor: pointer;
+    transition: background 0.2s ease, opacity 0.2s ease, transform 0.1s ease, border-color 0.2s ease;
   }
-  #chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #chat-send-btn:hover:not(:disabled) {
+    background: #f0b74b;
+    transform: translateY(-1px);
+  }
+  #chat-send-btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  #chat-send-btn:disabled {
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  #chat-input:placeholder-shown ~ #chat-send-btn {
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
   #chat-empty {
     margin: auto;
     text-align: center;
@@ -638,15 +754,23 @@
 
   /* ---- Browse dialog ---- */
   #browse-overlay {
-    display: none;
     position: fixed;
     inset: 0;
     background: rgba(4, 6, 9, .6);
+    display: flex;
     align-items: center;
     justify-content: center;
     z-index: 100;
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+    transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.2s;
   }
-  #browse-overlay.open { display: flex; }
+  #browse-overlay.open {
+    opacity: 1;
+    pointer-events: auto;
+    visibility: visible;
+  }
   #browse-dialog {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -657,6 +781,11 @@
     display: flex;
     flex-direction: column;
     box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    transform: scale(0.95) translateY(10px);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  #browse-overlay.open #browse-dialog {
+    transform: scale(1) translateY(0);
   }
   #browse-header {
     padding: 12px 14px;
@@ -706,6 +835,7 @@
      degraded state instead of forced pan/zoom. ---- */
   @media (max-width: 900px) {
     body { flex-direction: column; }
+    #resize-handle { display: none !important; }
     #grc-pane { flex: 1 1 42%; min-height: 220px; }
     #chat-pane {
       flex: 1 1 58%;
@@ -719,7 +849,7 @@
 </style>
 </head>
 <body>
-<div id="grc-pane">
+<main id="grc-pane">
   <div id="msg"></div>
 
   <div id="canvas-container">
@@ -733,7 +863,7 @@
       </div>
       <div class="placeholder-title">GRC Companion Workspace</div>
       <span id="canvas-placeholder-text">No flowgraph loaded. Click Browse to choose one.</span>
-      <button id="browse-btn">
+      <button id="browse-btn" aria-label="Browse Flowgraphs">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
         Browse Flowgraph&hellip;
       </button>
@@ -741,13 +871,13 @@
   </div>
 
   <div id="file-block">
-    <button id="undo-btn" title="Undo the last change" disabled>
+    <button id="undo-btn" title="Undo the last change" aria-label="Undo last change" disabled>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
     </button>
-    <button id="redo-btn" title="Redo" disabled>
+    <button id="redo-btn" title="Redo" aria-label="Redo change" disabled>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
     </button>
-    <button id="validate-btn" title="Re-check the flowgraph's validity now">
+    <button id="validate-btn" title="Re-check the flowgraph's validity now" aria-label="Validate flowgraph">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.4 0 4.6.9 6.3 2.5M21 4v5h-5"/></svg>
       Validate
     </button>
@@ -757,80 +887,88 @@
 
   <div id="credit">
     <span>Developed by Mahmoud Sallam</span>
-    <a href="https://www.linkedin.com/in/mahmoudsallam7/" target="_blank" rel="noopener" title="LinkedIn">
+    <a href="https://www.linkedin.com/in/mahmoudsallam7/" target="_blank" rel="noopener" title="LinkedIn" aria-label="LinkedIn Profile">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 1 1 0-4.124 2.062 2.062 0 0 1 0 4.124zM7.119 20.452H3.554V9h3.565v11.452z"/></svg>
     </a>
   </div>
-</div>
+</main>
 <div id="resize-handle"></div>
-<div id="chat-pane">
+<aside id="chat-pane" aria-label="Chat Companion">
   <div id="chat-toolbar">
-    <span id="provider-health" title="Provider connectivity status"></span>
-    <select id="model-provider-select" title="Chat model provider">
-      <option value="ollama">Ollama</option>
-      <option value="ollama_cloud">Ollama Cloud</option>
-      <option value="openrouter">OpenRouter</option>
-    </select>
-    <span id="model-name-label" tabindex="0" role="button" title="Click to change the model name"></span>
-    <input id="model-name-input" type="text" list="model-name-suggestions" placeholder="model name" style="display:none;">
-    <datalist id="model-name-suggestions"></datalist>
-    <button id="model-name-confirm-btn" title="Confirm" style="display:none;">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
-    </button>
-    <button id="model-name-cancel-btn" title="Cancel" style="display:none;">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
-    </button>
-    <span id="model-restart-badge" title="A saved model change only takes effect after restarting the app.">restart to apply</span>
-    <button id="apikey-btn" title="Set API key for this provider" style="display:none;">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-    </button>
-    <span class="chat-toolbar-spacer"></span>
-    <button id="clear-history-btn" title="Clear the chat history">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16z"/></svg>
-    </button>
-    <button id="new-conversation-btn" title="Start a new conversation / load a different file">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
-    <button id="reset-conversation-btn" title="Chat looks stuck or blank? Click to reset.">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
-    </button>
+    <div class="toolbar-group">
+      <span id="provider-health" title="Provider connectivity status"></span>
+      <span class="toolbar-label">Provider:</span>
+      <select id="model-provider-select" title="Chat model provider">
+        <option value="ollama">Ollama</option>
+        <option value="ollama_cloud">Ollama Cloud</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+    </div>
+    <div class="toolbar-group" style="flex: 1 1 auto; min-width: 0;">
+      <span class="toolbar-label">Model:</span>
+      <span id="model-name-label" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false" title="Click to change the model name"></span>
+      <input id="model-name-input" type="text" list="model-name-suggestions" placeholder="model name" style="display:none;" aria-label="Model name input">
+      <datalist id="model-name-suggestions"></datalist>
+      <button id="model-name-confirm-btn" title="Confirm" aria-label="Confirm model name" style="display:none;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+      </button>
+      <button id="model-name-cancel-btn" title="Cancel" aria-label="Cancel model name" style="display:none;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+      <span id="model-restart-badge" title="A saved model change only takes effect after restarting the app.">restart to apply</span>
+      <button id="apikey-btn" title="Set API key for this provider" aria-label="Configure API key" style="display:none;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+      </button>
+    </div>
+    <span class="chat-toolbar-spacer" style="display: none;"></span>
+    <div class="toolbar-group">
+      <button id="clear-history-btn" title="Clear the chat history" aria-label="Clear chat history">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16z"/></svg>
+      </button>
+      <button id="new-conversation-btn" title="Start a new conversation / load a different file" aria-label="New conversation">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button id="reset-conversation-btn" title="Chat looks stuck or blank? Click to reset." aria-label="Reset conversation">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
+      </button>
+    </div>
   </div>
   <div id="chat-messages" aria-live="polite">
     <div id="chat-empty">Load a flowgraph to start chatting.</div>
   </div>
   <form id="chat-form">
     <textarea id="chat-input" placeholder="Ask about your flowgraph…" rows="1" disabled></textarea>
-    <button id="chat-send-btn" type="submit" disabled>Send</button>
+    <button id="chat-send-btn" type="submit" aria-label="Send message" disabled>Send</button>
   </form>
   <div id="session-history-panel">
     <div id="session-history-header">Recent Sessions</div>
     <div id="session-history-list"></div>
   </div>
-</div>
+</aside>
 
-<div id="apikey-dialog-overlay">
+<div id="apikey-dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="apikey-dialog-header">
   <div id="apikey-dialog">
     <div id="apikey-dialog-header">Set API Key</div>
     <p id="apikey-dialog-desc">Enter your API key for <span id="apikey-provider-name"></span>:</p>
-    <input id="apikey-input" type="password" placeholder="API key">
+    <input id="apikey-input" type="password" placeholder="API key" aria-label="API key value">
     <div id="apikey-dialog-footer">
-      <button id="apikey-cancel-btn">Cancel</button>
-      <button id="apikey-save-btn">Save</button>
+      <button id="apikey-cancel-btn" aria-label="Cancel API key edit">Cancel</button>
+      <button id="apikey-save-btn" aria-label="Save API key">Save</button>
     </div>
   </div>
 </div>
 
-<div id="browse-overlay">
+<div id="browse-overlay" role="dialog" aria-modal="true" aria-labelledby="browse-dir">
   <div id="browse-dialog">
     <div id="browse-header">
-      <button id="browse-up-btn" class="secondary">
+      <button id="browse-up-btn" class="secondary" aria-label="Navigate up one directory">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
         Up
       </button>
       <span id="browse-dir">-</span>
     </div>
     <div id="browse-list"></div>
-    <div class="browse-footer"><button id="browse-cancel-btn">Cancel</button></div>
+    <div class="browse-footer"><button id="browse-cancel-btn" aria-label="Cancel file browser">Cancel</button></div>
   </div>
 </div>
 

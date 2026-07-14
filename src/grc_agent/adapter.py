@@ -827,19 +827,27 @@ def _apply_undo_redo_snapshot(
 
     # Same lock file + atomic-replace convention as change_graph's own save
     # and canvas_app.py's drag-save — a reader can never observe a torn file
-    # regardless of which of the three writers is active.
+    # regardless of which of the three writers is active. The cursor
+    # read-modify-write must be INSIDE this same critical section too (not
+    # just the target-file write): push_undo_snapshot (canvas_app.py's
+    # drag-save, and change_graph) always wraps its own cursor.json
+    # read+write in this identical lock, so leaving this function's cursor
+    # update unlocked let a concurrent drag-save read a stale cursor between
+    # this function's file write and its cursor write, then both writers'
+    # cursor.json updates race with whichever lands last silently winning.
     lock_path = target_path.parent / ".grc_agent" / (target_path.name + ".lock")
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            cursor = _read_undo_cursor(undo_dir)
             _atomic_write_text(payload, target_path)
+            cursor["index"] = new_index
+            cursor["hash"] = hashlib.sha256(payload.encode()).hexdigest()
+            _write_undo_cursor(undo_dir, cursor)
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-    cursor["index"] = new_index
-    cursor["hash"] = hashlib.sha256(payload.encode()).hexdigest()
-    _write_undo_cursor(undo_dir, cursor)
     return {
         "ok": True,
         "can_undo": cursor["index"] > 0,

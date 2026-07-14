@@ -358,7 +358,7 @@ def test_canvas_app_reload_uses_loopback_address():
     import grc_agent.canvas_app as canvas_app_module
 
     source = Path(canvas_app_module.__file__).read_text(encoding="utf-8")
-    assert 'url = f"http://127.0.0.1:{web_port}/grc/reload"' in source, (
+    assert 'url = f"http://127.0.0.1:{web_port}/grc/reload?source=canvas"' in source, (
         "canvas_app.py must use the IPv4 loopback explicitly to match web.py"
     )
     assert 'url = f"http://localhost:{web_port}/grc/reload"' not in source, (

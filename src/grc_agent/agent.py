@@ -51,12 +51,21 @@ def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
 
     The web app has its own _build_model() that respects user settings; this
     helper is for the reproducible scenario harness and tests, which may run
-    against either a local Ollama model or an OpenRouter model depending on
-    the environment.
+    against either a local Ollama model, an Ollama Cloud model, or an OpenRouter
+    model depending on the environment.
     """
     if provider == "openrouter":
         return OpenRouterModel(
             model_name or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+        )
+    if provider == "ollama_cloud":
+        key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
+        return OllamaModel(
+            model_name or os.environ.get("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud"),
+            provider=OllamaProvider(
+                base_url="https://ollama.com/v1",
+                api_key=key,
+            ),
         )
     return OllamaModel(model_name or MODEL, provider=OllamaProvider(base_url=OLLAMA_V1))
 

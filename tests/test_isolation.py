@@ -132,9 +132,13 @@ def test_web_build_model_isolation(tmp_path, monkeypatch):
 
 def test_scenario_model_builder_uses_provider():
     """Regression for P2-7: the scenario harness must be able to build a model
-    for either backend so integration tests can run against Ollama or OpenRouter."""
+    for either backend so integration tests can run against Ollama, Ollama Cloud, or OpenRouter."""
     ollama = build_scenario_model("ollama")
     assert isinstance(ollama, OllamaModel)
+
+    ollama_cloud = build_scenario_model("ollama_cloud", "deepseek-v4-flash:cloud")
+    assert isinstance(ollama_cloud, OllamaModel)
+    assert ollama_cloud.model_name == "deepseek-v4-flash:cloud"
 
     openrouter = build_scenario_model("openrouter", "google/gemini-2.5-flash")
     assert isinstance(openrouter, OpenRouterModel)

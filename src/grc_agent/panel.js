@@ -70,8 +70,6 @@ const state = {
   chatBusy: false,
 };
 
-const MAX_SESSION_MAPPINGS = 50;
-
 // ===================== Native chat widget =====================
 // Replaces the @pydantic/ai-chat-ui iframe. Talks directly to pydantic-ai's
 // to_web() backend at POST /api/chat, which speaks the Vercel AI SDK UI
@@ -208,11 +206,90 @@ function renderMarkdown(text) {
 // instead of a raw Args/Result tool dump.
 const FINAL_RESULT_TOOL_NAME = "final_result";
 
+// The full chatMessages history is resent on every turn (the /api/chat
+// backend is stateless), so anything ever stored in it — including
+// conversations saved by an older version of this file — passes back through
+// pydantic-ai's UI-message-part schema (CamelBaseModel, extra='forbid') on
+// every subsequent send. A part shaped wrong in ANY single stored message
+// fails validation for that whole part (and since the 9-member part union
+// then matches nothing, the WHOLE request 500s) — permanently breaking every
+// later turn of that conversation until fixed. Runs on every send so an
+// already-corrupted saved conversation self-heals the moment it's used again,
+// rather than requiring the user to notice and start a new conversation.
+function _toOutgoingMessage(msg) {
+  const parts = [];
+  const toolPartByCallId = new Map();
+  for (const part of msg.parts) {
+    if (part.type === "reasoning") {
+      // ReasoningUIPart is exactly {type, text, state} — an old saved
+      // "reasoning" key (kept briefly for backward-compatible rendering)
+      // must never be resent: its mere presence fails the part, not just
+      // that field.
+      const { reasoning, ...rest } = part;
+      parts.push({ ...rest, text: part.text ?? reasoning ?? "" });
+    } else if (part.type === "tool-call") {
+      // Legacy shape (separate tool-call/tool-result parts) — merge into
+      // the one-object-per-toolCallId shape the schema actually expects.
+      const merged = {
+        type: "tool-" + part.toolName,
+        toolCallId: part.toolCallId,
+        state: "input-available",
+        input: part.args,
+      };
+      toolPartByCallId.set(part.toolCallId, merged);
+      parts.push(merged);
+    } else if (part.type === "tool-result") {
+      const tp = toolPartByCallId.get(part.toolCallId);
+      if (tp) {
+        if (part.error !== undefined) {
+          tp.state = "output-error";
+          tp.errorText = part.error;
+        } else {
+          tp.state = "output-available";
+          tp.output = part.result;
+        }
+      }
+      // Never pushed on its own — folded into its matching tool-call above.
+    } else {
+      parts.push(part);
+    }
+  }
+  return { ...msg, parts };
+}
+
+function _sanitizeOutgoingMessages(messages) {
+  return messages.map(_toOutgoingMessage);
+}
+
 async function sendChatMessage(text) {
   if (state.chatBusy || !text.trim()) return;
-  if (!state.chatConvId) state.chatConvId = _chatId();
 
-  chatMessages.push({ id: _chatId(), role: "user", parts: [{ type: "text", text }] });
+  let isFirstMessage = false;
+  if (!state.chatConvId) {
+    state.chatConvId = _chatId();
+    isFirstMessage = true;
+  }
+
+  if (isFirstMessage) {
+    setUrlConvId(state.chatConvId);
+    localStorage.setItem("grc_active_conv_id", state.chatConvId);
+    const pathEl = document.querySelector("#current-path .value");
+    const activePath = (pathEl && pathEl.textContent !== "-") ? pathEl.textContent : "";
+    if (activePath) {
+      addSessionHistory(state.chatConvId, activePath);
+    }
+  }
+
+  // Captured now (not read fresh later) so a reset/new-conversation/clear-history
+  // click mid-stream — which rebinds the module-level chatMessages to a new array
+  // and nulls state.chatConvId — can't make this request's own success/error
+  // handler splice a stale reply into whatever conversation is active by the time
+  // this async call finally settles.
+  const myConvId = state.chatConvId;
+  const myMessages = chatMessages;
+
+  myMessages.push({ id: _chatId(), role: "user", parts: [{ type: "text", text }] });
+  saveConversationMessages(myConvId, myMessages);
   _appendChatMsg("user").textContent = text;
 
   const box = document.getElementById("chat-messages");
@@ -224,6 +301,14 @@ async function sendChatMessage(text) {
   roleEl.className = "chat-msg-role";
   roleEl.textContent = "assistant";
   asstMsg.appendChild(roleEl);
+
+  // Dynamic visual typing indicator
+  const typingIndicator = document.createElement("div");
+  typingIndicator.id = "chat-typing-indicator";
+  typingIndicator.className = "typing-indicator";
+  typingIndicator.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+  asstMsg.appendChild(typingIndicator);
+
   box.appendChild(asstMsg);
   _scrollChatToBottom();
 
@@ -254,6 +339,19 @@ async function sendChatMessage(text) {
   }
   function endToolGroup() {
     currentToolGroup = null;
+  }
+  function updateToolElement(tc, status) {
+    if (!tc) return;
+    if (status) tc.status = status;
+    const isOpen = tc.outEl.classList.contains("open");
+    const arrow = isOpen ? "▾" : "▸";
+    let suffix = "";
+    if (tc.status === "done") {
+      suffix = " ✓";
+    } else if (tc.status === "error") {
+      suffix = " ✗";
+    }
+    tc.el.textContent = `${arrow} called ${tc.el.dataset.name}${suffix}`;
   }
   function startText() {
     endReasoning();
@@ -324,21 +422,44 @@ async function sendChatMessage(text) {
       signal: chatAbort.signal,
       body: JSON.stringify({
         trigger: "submit-message",
-        id: state.chatConvId,
-        messages: chatMessages,
+        id: myConvId,
+        messages: _sanitizeOutgoingMessages(myMessages),
       }),
     });
     if (!res.ok || !res.body) {
       const errText = await res.text().catch(() => res.statusText);
       throw new Error(`Chat request failed (${res.status}): ${errText}`);
     }
+    let assistantParts = [];
+    let hasRemovedTyping = false;
     await _consumeSSEStream(res.body, (data) => {
+      if (!hasRemovedTyping) {
+        hasRemovedTyping = true;
+        const typingEl = asstMsg.querySelector("#chat-typing-indicator");
+        if (typingEl) typingEl.remove();
+      }
       switch (data.type) {
         case "text-delta":
-          if (typeof data.delta === "string") appendText(data.delta);
+          if (typeof data.delta === "string") {
+            appendText(data.delta);
+            let lastPart = assistantParts[assistantParts.length - 1];
+            if (!lastPart || lastPart.type !== "text") {
+              lastPart = { type: "text", text: "" };
+              assistantParts.push(lastPart);
+            }
+            lastPart.text += data.delta;
+          }
           break;
         case "reasoning-start":
           startReasoning();
+          // pydantic-ai's ReasoningUIPart (the schema /api/chat validates
+          // against) is exactly {type, text, state} with extra='forbid' — no
+          // separate `reasoning` field. A stray extra key here doesn't just
+          // get ignored on the next send: it fails validation for the WHOLE
+          // part, and since no other member of the 9-part union matches
+          // type:"reasoning" either, the ENTIRE request 500s — breaking every
+          // later turn of the conversation, not just this one.
+          assistantParts.push({ type: "reasoning", text: "", state: "streaming" });
           break;
         case "reasoning-delta":
           if (currentReasoning && typeof data.delta === "string") {
@@ -346,14 +467,43 @@ async function sendChatMessage(text) {
             const body = currentReasoning.el.querySelector(".reasoning-body");
             if (body) body.textContent = currentReasoning.acc;
             _scrollChatToBottom();
+
+            let lastPart = assistantParts[assistantParts.length - 1];
+            if (lastPart && lastPart.type === "reasoning") {
+              lastPart.text = (lastPart.text || "") + data.delta;
+            }
           }
           break;
         case "reasoning-end":
           endReasoning();
+          {
+            let lastPart = assistantParts[assistantParts.length - 1];
+            if (lastPart && lastPart.type === "reasoning") {
+              lastPart.state = "done";
+            }
+          }
           break;
         case "tool-input-start":
           if (data.toolName === FINAL_RESULT_TOOL_NAME) {
             finalResultCallIds.add(data.toolCallId);
+          }
+          if (data.toolName) {
+            // pydantic-ai's tool part schema is ONE evolving object per
+            // toolCallId — `type` matches ^tool- (i.e. "tool-<toolName>"),
+            // with `state` progressing input-streaming -> input-available ->
+            // output-available/output-error/output-denied. There's no
+            // toolName/args field (not part of the schema, and rejected as
+            // extra — same failure mode as the reasoning part above); the
+            // tool's name is recovered from `type` when re-rendering saved
+            // history (see renderChatMessagesFromHistory).
+            assistantParts.push({
+              type: "tool-" + data.toolName,
+              toolCallId: data.toolCallId,
+              state: "input-streaming",
+              input: null,
+            });
+          }
+          if (data.toolName === FINAL_RESULT_TOOL_NAME) {
             break;
           }
           if (data.toolName) {
@@ -361,23 +511,41 @@ async function sendChatMessage(text) {
             const el = document.createElement("div");
             el.className = "chat-tool pending";
             el.dataset.name = data.toolName;
-            el.textContent = "▸ " + data.toolName;
             const outEl = document.createElement("div");
             outEl.className = "chat-tool-output";
+            const tc = { el, outEl, argsAcc: "", status: "pending" };
+            updateToolElement(tc);
+            el.addEventListener("click", () => {
+              outEl.classList.toggle("open");
+              updateToolElement(tc);
+            });
             group.appendChild(el);
             group.appendChild(outEl);
-            toolCalls[data.toolCallId] = { el, outEl, argsAcc: "" };
+            toolCalls[data.toolCallId] = tc;
             _scrollChatToBottom();
           }
           break;
         case "tool-input-delta":
+          // Partial input text has no home in the outgoing schema (no
+          // "input so far" string field) — it stays a DOM-only preview via
+          // tc.argsAcc below, never written into assistantParts.
           if (finalResultCallIds.has(data.toolCallId)) break;
           { const tc = toolCalls[data.toolCallId];
             if (tc && typeof data.inputTextDelta === "string") {
               tc.argsAcc += data.inputTextDelta;
+              if (tc.outEl.classList.contains("open")) {
+                tc.outEl.textContent = "Args:\n" + tc.argsAcc;
+              }
             } }
           break;
         case "tool-input-available":
+          {
+            const part = assistantParts.find(p => p.toolCallId === data.toolCallId);
+            if (part) {
+              part.input = data.input;
+              part.state = "input-available";
+            }
+          }
           if (finalResultCallIds.has(data.toolCallId)) {
             renderFinalResult(data.input);
             break;
@@ -385,29 +553,45 @@ async function sendChatMessage(text) {
           { const tc = toolCalls[data.toolCallId];
             if (tc && data.input !== undefined) {
               tc.argsAcc = typeof data.input === "string" ? data.input : JSON.stringify(data.input, null, 2);
+              if (tc.outEl.classList.contains("open")) {
+                tc.outEl.textContent = "Args:\n" + tc.argsAcc;
+              }
             } }
           break;
         case "tool-output-available":
+          {
+            const part = assistantParts.find(p => p.toolCallId === data.toolCallId);
+            if (part) {
+              part.output = data.output;
+              part.state = "output-available";
+            }
+          }
           if (finalResultCallIds.has(data.toolCallId)) break;
           { const tc = toolCalls[data.toolCallId];
             if (tc) {
               tc.el.className = "chat-tool done";
-              tc.el.textContent = "✓ " + tc.el.dataset.name;
               const out = data.output;
               tc.outEl.textContent = (tc.argsAcc ? "Args:\n" + tc.argsAcc + "\n\nResult:\n" : "Result:\n")
                 + (typeof out === "string" ? out : JSON.stringify(out, null, 2) || "(empty)");
-              tc.el.addEventListener("click", () => tc.outEl.classList.toggle("open"));
+              updateToolElement(tc, "done");
             } }
           break;
         case "tool-output-error":
         case "tool-output-denied":
+          {
+            const part = assistantParts.find(p => p.toolCallId === data.toolCallId);
+            const errTxt = data.errorText || data.error?.message || (data.type === "tool-output-denied" ? "denied" : "error");
+            if (part) {
+              part.state = data.type === "tool-output-denied" ? "output-denied" : "output-error";
+              part.errorText = errTxt;
+            }
+          }
           if (finalResultCallIds.has(data.toolCallId)) break;
           { const tc = toolCalls[data.toolCallId];
             if (tc) {
               tc.el.className = "chat-tool error";
-              tc.el.textContent = "✗ " + tc.el.dataset.name;
               tc.outEl.textContent = data.errorText || data.error?.message || "error";
-              tc.el.addEventListener("click", () => tc.outEl.classList.toggle("open"));
+              updateToolElement(tc, "error");
             } }
           break;
         case "error":
@@ -418,26 +602,44 @@ async function sendChatMessage(text) {
       return true;
     });
     endText();
-    chatMessages.push({
+    myMessages.push({
       id: _chatId(),
       role: "assistant",
-      parts: [{ type: "text", text: textSegments.join("\n\n") }],
+      parts: assistantParts,
     });
+    saveConversationMessages(myConvId, myMessages);
   } catch (e) {
     endText();
+    let errText = "";
     if (e.name === "AbortError") {
+      errText = "[aborted]";
       const el = document.createElement("div");
       el.className = "chat-msg-body";
       el.textContent = textSegments.length ? textSegments.join("\n\n") + "\n\n[aborted]" : "[aborted]";
       asstMsg.appendChild(el);
     } else {
+      errText = "Error: " + (e.message || String(e));
       const el = document.createElement("div");
       el.className = "chat-msg-body error";
-      el.textContent = "Error: " + (e.message || String(e));
+      el.textContent = errText;
       asstMsg.appendChild(el);
       console.error("Chat stream failed:", e);
     }
+    assistantParts.push({ type: "text", text: textSegments.length ? textSegments.join("\n\n") + "\n\n" + errText : errText });
+    myMessages.push({
+      id: _chatId(),
+      role: "assistant",
+      parts: assistantParts,
+    });
+    saveConversationMessages(myConvId, myMessages);
   } finally {
+    const typingEl = asstMsg.querySelector("#chat-typing-indicator");
+    if (typingEl) typingEl.remove();
+    // Superseded by a reset/new-conversation/clear-history while in flight —
+    // chatAbort/chatBusy now belong to whatever request (if any) is active for
+    // the CURRENT conversation, not this one; touching them here would corrupt
+    // that unrelated request's own state.
+    if (state.chatConvId !== myConvId) return;
     chatAbort = null;
     state.chatBusy = false;
     updateChatInputState();
@@ -559,62 +761,42 @@ function setUrlConvId(convId) {
 }
 
 function restoreSession() {
-  // Native widget: full client-side conversation restore (persisting
-  // messages[] to localStorage + rehydrating) is Phase 2. Start fresh.
+  const urlParams = new URLSearchParams(window.location.search);
+  const convId = urlParams.get("conv");
+  if (convId) {
+    const entries = loadSessionHistory();
+    const entry = entries.find(e => e.convId === convId);
+    if (entry) {
+      openGraph(entry.path, convId);
+      return;
+    }
+  }
+
+
   clearChatWidget();
 }
 restoreSession();
 
-// The chat widget has no server-side conversation store (confirmed by
-// reading pydantic_ai's own to_web() source — its /api/chat route is
-// stateless); it persists every conversation client-side in a same-origin
-// IndexedDB database named "chat-storage" (confirmed by inspecting the
-// vendor bundle directly). Since this page and the iframe share that origin,
-// deleting it here clears history for good — then start a fresh conversation
-// so the UI doesn't keep pointing at now-gone data.
 function clearHistory() {
   if (!confirm("Delete all conversations? This cannot be undone.")) return;
 
-  // 1. Clear parent storage
   try {
-    localStorage.clear();
-    sessionStorage.clear();
-  } catch (e) {}
-
-  // 2. Clear iframe storage directly to bypass iframe session memory
-  const iframe = document.getElementById("chat-frame");
-  if (iframe) {
-    try {
-      const iframeWin = iframe.contentWindow;
-      if (iframeWin) {
-        iframeWin.localStorage.clear();
-        iframeWin.sessionStorage.clear();
+    localStorage.removeItem("grc_session_history");
+    localStorage.removeItem("grc_active_conv_id");
+    const keysToRemove = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("grc_messages_")) {
+        keysToRemove.push(key);
       }
-    } catch (e) {}
-  }
-
-  // 3. Delete parent IndexedDB chat database only — clearing every DB on
-  // the origin is overly destructive and could wipe unrelated same-origin
-  // application data. The targeted delete is enough to reset the vendor widget.
-  try {
-    indexedDB.deleteDatabase("chat-storage");
+    }
+    for (const key of keysToRemove) {
+      localStorage.removeItem(key);
+    }
   } catch (e) {}
 
-  // 4. Force reload/navigate the iframe
   startNewConversation();
   unloadGrc();
-
-  // 5. Clear again after 150ms to wipe out any state written by React during the unload event
-  setTimeout(() => {
-    try {
-      localStorage.clear();
-      sessionStorage.clear();
-      if (iframe && iframe.contentWindow) {
-        iframe.contentWindow.localStorage.clear();
-        iframe.contentWindow.sessionStorage.clear();
-      }
-    } catch (e) {}
-  }, 150);
 }
 
 // The vendor widget uses pathname "/" as its own "fresh conversation"
@@ -624,32 +806,6 @@ function clearHistory() {
 // progress must not have its flowgraph swapped out from under it — only
 // starting a new conversation (this page's own load, or the widget's own
 // "New conversation" button) should re-enable loading a different file.
-
-function getSessionGrcPath(convId) {
-  try {
-    const mapping = JSON.parse(localStorage.getItem("grc_session_mapping") || "{}");
-    return mapping[convId] || null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// Unlike grc_session_history (capped at 20, see addSessionHistory), this
-// map grew forever — every conversation ever created left a permanent
-// entry with no pruning at all.
-function saveSessionGrcPath(convId, grcPath) {
-  try {
-    const mapping = JSON.parse(localStorage.getItem("grc_session_mapping") || "{}");
-    mapping[convId] = grcPath;
-    const keys = Object.keys(mapping);
-    if (keys.length > MAX_SESSION_MAPPINGS) {
-      for (const staleKey of keys.slice(0, keys.length - MAX_SESSION_MAPPINGS)) {
-        delete mapping[staleKey];
-      }
-    }
-    localStorage.setItem("grc_session_mapping", JSON.stringify(mapping));
-  } catch (e) {}
-}
 
 async function pollConversationState() {
   // A previous tick's auto-reopen /grc/open is still awaiting its (up to
@@ -744,7 +900,7 @@ function setMsg(text, cls) {
   el.className = text ? `visible ${cls || ""}` : "";
 }
 
-async function openGraph(path) {
+async function openGraph(path, convId = null) {
   if (!path) return;
   setMsg("Loading...");
   try {
@@ -756,17 +912,26 @@ async function openGraph(path) {
     });
     const data = await res.json();
     if (!data.ok) { setMsg(data.message || "Failed to load file.", "error"); return; }
-    // Record a session-history entry right away — a real conversation id
-    // doesn't exist yet (the vendor chat widget only mints one once the
-    // first message is sent), so this is a "pending" entry (no convId).
-    // It's upgraded to the real conversation once the user actually
-    // chats (see pollConversationState) — without this, a file load that
-    // never turns into a chat message would never show up anywhere.
-    addSessionHistory(null, data.path);
-    // resetChatFrame(), NOT startNewConversation() — the latter's
-    // unload-if-loaded guard would immediately close the file this call
-    // just opened (see startNewConversation's own comment).
-    resetChatFrame();
+
+    if (convId) {
+      state.chatConvId = convId;
+      localStorage.setItem("grc_active_conv_id", convId);
+      setUrlConvId(convId);
+      chatMessages = loadConversationMessages(convId);
+      renderChatMessagesFromHistory();
+    } else {
+      // Record a session-history entry right away — a real conversation id
+      // doesn't exist yet (the vendor chat widget only mints one once the
+      // first message is sent), so this is a "pending" entry (no convId).
+      // It's upgraded to the real conversation once the user actually
+      // chats (see pollConversationState) — without this, a file load that
+      // never turns into a chat message would never show up anywhere.
+      addSessionHistory(null, data.path);
+      // resetChatFrame(), NOT startNewConversation() — the latter's
+      // unload-if-loaded guard would immediately close the file this call
+      // just opened (see startNewConversation's own comment).
+      resetChatFrame();
+    }
     if (data.canvas_ready === false) {
       // The flowgraph itself DID load (chat/inspect work) — only the
       // canvas subprocess failed/timed out. refresh() itself now sets the
@@ -1207,7 +1372,10 @@ async function saveModelSettings() {
       if (provider === "ollama") state.ollamaModel = model;
       else if (provider === "ollama_cloud") state.ollamaCloudModel = model;
       else state.openrouterModel = model;
+      state.activeProvider = provider;
+      state.activeModel = model;
       renderModelSuggestions();
+      updateRestartBadge();
     }
   } catch (e) {
     overlay.classList.add("error");
@@ -1267,7 +1435,15 @@ function addSessionHistory(convId, path) {
       e.convId !== convId && !(e.path === path && !e.convId)
     );
     list.unshift({convId: convId || null, path, ts: Date.now()});
-    localStorage.setItem("grc_session_history", JSON.stringify(list.slice(0, 20)));
+    const kept = list.slice(0, 20);
+    // Entries pushed past the cap drop out of the index silently — without
+    // this, their grc_messages_<convId> payloads (which can hold full
+    // tool-call args/results) never get cleaned up and accumulate in
+    // localStorage without bound until a quota error silently breaks saving.
+    for (const dropped of list.slice(20)) {
+      if (dropped.convId) localStorage.removeItem("grc_messages_" + dropped.convId);
+    }
+    localStorage.setItem("grc_session_history", JSON.stringify(kept));
   } catch (e) { /* ignore */ }
 }
 
@@ -1281,26 +1457,231 @@ function timeAgo(ts) {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+function saveConversationMessages(convId, messages) {
+  if (!convId) return;
+  try {
+    localStorage.setItem("grc_messages_" + convId, JSON.stringify(messages));
+  } catch (e) {}
+}
+
+function loadConversationMessages(convId) {
+  if (!convId) return [];
+  try {
+    return JSON.parse(localStorage.getItem("grc_messages_" + convId) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function renderChatMessagesFromHistory() {
+  const box = document.getElementById("chat-messages");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!chatMessages.length) {
+    const empty = document.createElement("div");
+    empty.id = "chat-empty";
+    empty.textContent = state.isGrcLoaded
+      ? "Start a conversation about your flowgraph."
+      : "Load a flowgraph (Browse) to start chatting.";
+    box.appendChild(empty);
+    return;
+  }
+
+  for (const msg of chatMessages) {
+    const msgEl = document.createElement("div");
+    msgEl.className = `chat-msg ${msg.role}`;
+    const roleEl = document.createElement("div");
+    roleEl.className = "chat-msg-role";
+    roleEl.textContent = msg.role;
+    msgEl.appendChild(roleEl);
+
+    if (msg.role === "user") {
+      const bodyEl = document.createElement("div");
+      bodyEl.className = "chat-msg-body";
+      const textPart = msg.parts.find(p => p.type === "text");
+      bodyEl.textContent = textPart ? textPart.text : "";
+      msgEl.appendChild(bodyEl);
+    } else {
+      let currentToolGroup = null;
+      for (const part of msg.parts) {
+        if (part.type === "text") {
+          currentToolGroup = null;
+          const bodyEl = document.createElement("div");
+          bodyEl.className = "chat-msg-body";
+          bodyEl.innerHTML = renderMarkdown(part.text);
+          msgEl.appendChild(bodyEl);
+        } else if (part.type === "reasoning") {
+          currentToolGroup = null;
+          const el = document.createElement("details");
+          el.className = "chat-msg-reasoning";
+          el.innerHTML = `<summary>Thinking</summary><div class='reasoning-body'></div>`;
+          el.querySelector(".reasoning-body").textContent = part.text || part.reasoning || "";
+          msgEl.appendChild(el);
+        } else if (part.type === "tool-call") {
+          // Legacy shape: saved by an older version of this file as two
+          // separate tool-call/tool-result parts. No new conversation is
+          // ever stored this way anymore (see sendChatMessage) — kept only
+          // so a conversation saved before that fix still renders.
+          if (part.toolName === FINAL_RESULT_TOOL_NAME) {
+            currentToolGroup = null;
+            let input = part.args;
+            if (typeof input === "string") {
+              try { input = JSON.parse(input); } catch (e) {}
+            }
+            if (input && typeof input === "object") {
+              if (typeof input.explanation === "string" && input.explanation) {
+                const bodyEl = document.createElement("div");
+                bodyEl.className = "chat-msg-body";
+                bodyEl.innerHTML = renderMarkdown(input.explanation);
+                msgEl.appendChild(bodyEl);
+              }
+              if (Array.isArray(input.actions_taken) && input.actions_taken.length) {
+                const ul = document.createElement("ul");
+                ul.className = "chat-msg-actions";
+                for (const action of input.actions_taken) {
+                  const li = document.createElement("li");
+                  li.textContent = String(action);
+                  ul.appendChild(li);
+                }
+                msgEl.appendChild(ul);
+              }
+            }
+            continue;
+          }
+          if (!currentToolGroup) {
+            currentToolGroup = document.createElement("div");
+            currentToolGroup.className = "chat-msg-tools";
+            msgEl.appendChild(currentToolGroup);
+          }
+          const el = document.createElement("div");
+          el.className = "chat-tool";
+          el.dataset.name = part.toolName;
+
+          const outEl = document.createElement("div");
+          outEl.className = "chat-tool-output";
+
+          const tc = {
+            el,
+            outEl,
+            argsAcc: typeof part.args === "string" ? part.args : JSON.stringify(part.args, null, 2) || "",
+            status: "pending"
+          };
+
+          const resultPart = msg.parts.find(p => p.type === "tool-result" && p.toolCallId === part.toolCallId);
+          if (resultPart) {
+            if (resultPart.error) {
+              el.className = "chat-tool error";
+              tc.status = "error";
+              outEl.textContent = resultPart.error;
+            } else {
+              el.className = "chat-tool done";
+              tc.status = "done";
+              const out = resultPart.result;
+              outEl.textContent = (tc.argsAcc ? "Args:\n" + tc.argsAcc + "\n\nResult:\n" : "Result:\n")
+                + (typeof out === "string" ? out : JSON.stringify(out, null, 2) || "(empty)");
+            }
+          }
+
+          updateToolElement(tc);
+          el.addEventListener("click", () => {
+            outEl.classList.toggle("open");
+            if (outEl.classList.contains("open") && tc.status === "pending") {
+              outEl.textContent = "Args:\n" + tc.argsAcc;
+            }
+            updateToolElement(tc);
+          });
+          currentToolGroup.appendChild(el);
+          currentToolGroup.appendChild(outEl);
+        } else if (typeof part.type === "string" && part.type.startsWith("tool-")) {
+          // Current schema-correct shape: one merged part per toolCallId,
+          // `type` = "tool-<toolName>" — recover the display name from it.
+          const toolName = part.type.slice(5);
+          if (toolName === FINAL_RESULT_TOOL_NAME) {
+            currentToolGroup = null;
+            let input = part.input;
+            if (typeof input === "string") {
+              try { input = JSON.parse(input); } catch (e) {}
+            }
+            if (input && typeof input === "object") {
+              if (typeof input.explanation === "string" && input.explanation) {
+                const bodyEl = document.createElement("div");
+                bodyEl.className = "chat-msg-body";
+                bodyEl.innerHTML = renderMarkdown(input.explanation);
+                msgEl.appendChild(bodyEl);
+              }
+              if (Array.isArray(input.actions_taken) && input.actions_taken.length) {
+                const ul = document.createElement("ul");
+                ul.className = "chat-msg-actions";
+                for (const action of input.actions_taken) {
+                  const li = document.createElement("li");
+                  li.textContent = String(action);
+                  ul.appendChild(li);
+                }
+                msgEl.appendChild(ul);
+              }
+            }
+            continue;
+          }
+          if (!currentToolGroup) {
+            currentToolGroup = document.createElement("div");
+            currentToolGroup.className = "chat-msg-tools";
+            msgEl.appendChild(currentToolGroup);
+          }
+          const el = document.createElement("div");
+          el.className = "chat-tool";
+          el.dataset.name = toolName;
+
+          const outEl = document.createElement("div");
+          outEl.className = "chat-tool-output";
+
+          const argsAcc = typeof part.input === "string" ? part.input : JSON.stringify(part.input, null, 2) || "";
+          const tc = { el, outEl, argsAcc, status: "pending" };
+
+          if (part.state === "output-available") {
+            el.className = "chat-tool done";
+            tc.status = "done";
+            const out = part.output;
+            outEl.textContent = (argsAcc ? "Args:\n" + argsAcc + "\n\nResult:\n" : "Result:\n")
+              + (typeof out === "string" ? out : JSON.stringify(out, null, 2) || "(empty)");
+          } else if (part.state === "output-error" || part.state === "output-denied") {
+            el.className = "chat-tool error";
+            tc.status = "error";
+            outEl.textContent = part.errorText || (part.state === "output-denied" ? "denied" : "error");
+          }
+
+          updateToolElement(tc);
+          el.addEventListener("click", () => {
+            outEl.classList.toggle("open");
+            if (outEl.classList.contains("open") && tc.status === "pending") {
+              outEl.textContent = "Args:\n" + tc.argsAcc;
+            }
+            updateToolElement(tc);
+          });
+          currentToolGroup.appendChild(el);
+          currentToolGroup.appendChild(outEl);
+        }
+      }
+    }
+    box.appendChild(msgEl);
+  }
+  _scrollChatToBottom();
+}
+
 function renderSessionHistory() {
   const panel = document.getElementById("session-history-panel");
   if (!panel) return;
   const entries = loadSessionHistory();
-  // Same staleness bug as the Clear History overlay (see integrateSettings)
-  // — read the iframe's live path directly rather than the slower-cadence
-  // state.lastPath, so this panel can't linger visible after a message has
-  // already started a real conversation.
-  if (!entries.length || getChatFramePath() !== "/") {
+  // Hide panel if conversation has started, history is empty, or a GRC file is loaded
+  if (!entries.length || state.isGrcLoaded || getChatFramePath() !== "/") {
     panel.style.display = "none";
     return;
   }
 
-  const iframe = document.getElementById("chat-frame");
+  const form = document.getElementById("chat-form");
   let bottomOffset = 96;
-  try {
-    const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
-    const toolbar = doc && doc.querySelector(".sticky.bottom-0");
-    if (toolbar) bottomOffset = toolbar.getBoundingClientRect().height;
-  } catch (e) { /* keep fallback */ }
+  if (form) {
+    bottomOffset = form.getBoundingClientRect().height;
+  }
   panel.style.bottom = `${bottomOffset}px`;
   panel.style.display = "block";
 
@@ -1315,10 +1696,9 @@ function renderSessionHistory() {
     row.className = "session-history-entry";
     const name = (entry.path || "").split("/").pop() || entry.path || "untitled";
     row.innerHTML = `<span class="she-name">${name}</span><span class="she-time">${timeAgo(entry.ts)}</span>`;
-    // No iframe to resume into — reopen the file fresh. Phase 2 will restore
-    // the widget's saved messages[] for the conversation.
+    // Reopen both the file and the saved chat history
     makeRowFocusable(row, () => {
-      openGraph(entry.path);
+      openGraph(entry.path, entry.convId);
     });
     list.appendChild(row);
   }
@@ -1390,7 +1770,13 @@ async function saveApiKey() {
     if (data.ok) {
       setMsg(data.message, "ok");
       closeApiKeyDialog();
-      // Re-check health now that the key is set in the current process
+      // onModelProviderChange() deliberately skipped saveModelSettings() when
+      // this dialog opened (to avoid persisting an unconfigured provider) —
+      // finish that provider switch now that the key exists, BEFORE checking
+      // health: /grc/health reads the SAVED provider, not the dropdown's
+      // current value, so checking health first would report the OLD
+      // provider's connectivity instead of the one the user just configured.
+      await saveModelSettings();
       checkProviderHealth();
     } else {
       setMsg(data.message || "Failed to save API key.", "error");
@@ -1443,6 +1829,12 @@ function initResize() {
   });
   handle.addEventListener("pointermove", (e) => {
     if (!dragging) return;
+    // The viewport can cross the 900px stacking breakpoint mid-drag (a window
+    // resize/snap, or an orientation change, without the pointer ever being
+    // released) — applyWidth() would otherwise keep re-applying inline
+    // flex/width/minWidth, which beats the @media stacking rule and leaves the
+    // chat pane at a wrong, non-full-width size once stacked.
+    if (window.innerWidth <= 900) { endDrag(e); return; }
     applyWidth(e.clientX);
   });
   const endDrag = (e) => {
