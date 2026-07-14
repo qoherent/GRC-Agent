@@ -40,7 +40,10 @@ Data flow: `.grc` file → `adapter.load_flow_graph()` → live `FlowGraph` → 
   ```
   `libgtk-3-bin` provides `broadwayd` (the dashboard's live-canvas backend) —
   explicit here since a minimal/`--no-install-recommends` setup can miss it.
-- **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/)**.
+- **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/)**:
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
 
 ### 2. Clone & Setup
 ```bash
