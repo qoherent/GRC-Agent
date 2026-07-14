@@ -885,10 +885,18 @@ setInterval(pollConversationState, 750);
 function updateChatInputState() {
   const input = document.getElementById("chat-input");
   const sendBtn = document.getElementById("chat-send-btn");
+  const formLoading = document.getElementById("chat-form-loading");
   if (!input || !sendBtn) return;
   const enable = state.isGrcLoaded && !state.chatBusy;
   input.disabled = !enable;
-  sendBtn.disabled = !enable;
+  if (state.chatBusy) {
+    sendBtn.style.display = "none";
+    if (formLoading) formLoading.style.display = "flex";
+  } else {
+    sendBtn.style.display = "";
+    sendBtn.disabled = !enable;
+    if (formLoading) formLoading.style.display = "none";
+  }
   input.placeholder = state.isGrcLoaded
     ? "Ask about your flowgraph…"
     : "Load a flowgraph (Browse) to start chatting.";

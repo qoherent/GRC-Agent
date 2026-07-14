@@ -1499,18 +1499,22 @@ def change_graph(
 
 
 def get_db_and_model(domain: str) -> tuple[str, str]:
-    from grc_agent.settings import load_settings
+    from grc_agent.settings import get_env_value, load_settings
 
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
     if provider == "openrouter":
-        model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "perplexity/pplx-embed-v1-0.6b")
+        model = get_env_value("OPENROUTER_EMBEDDING_MODEL") or os.getenv(
+            "OPENROUTER_EMBEDDING_MODEL", "perplexity/pplx-embed-v1-0.6b"
+        )
         db_name = f"{domain}_openrouter.db"
     else:
         # ollama and ollama_cloud both use local Ollama for embeddings
         # (Ollama Cloud's API doesn't expose /v1/embeddings)
-        model = os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest")
+        model = get_env_value("OLLAMA_EMBEDDING_MODEL") or os.getenv(
+            "OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest"
+        )
         db_name = f"{domain}_ollama.db"
 
     db_path = vectors_dir() / db_name
@@ -1520,13 +1524,14 @@ def get_db_and_model(domain: str) -> tuple[str, str]:
 def _embed_endpoint() -> tuple[str, str]:
     """Shared base_url/api_key selection for both query- and document-side
     embedding calls."""
-    from grc_agent.settings import load_settings
+    from grc_agent.settings import get_env_value, load_settings
 
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
     if provider == "openrouter":
-        return "https://openrouter.ai/api/v1", os.getenv("OPENROUTER_API_KEY", "")
+        key = get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
+        return "https://openrouter.ai/api/v1", key
     # ollama and ollama_cloud both use local Ollama for embeddings
     return "http://localhost:11434/v1", "not-needed"
 
@@ -1540,7 +1545,7 @@ def _embed(model: str, input_text: str) -> list[float]:
     base_url, api_key = _embed_endpoint()
     client = OpenAI(base_url=base_url, api_key=api_key)
     try:
-        response = client.embeddings.create(model=model, input=input_text)
+        response = client.embeddings.create(model=model, input=input_text, encoding_format="float")
     except APIConnectionError as exc:
         hint = (
             f"Is `ollama serve` running locally, with `ollama pull {model}` done?"

@@ -936,7 +936,7 @@ async def grc_reload(request: Request) -> JSONResponse:
     global active_path, canvas_ready_state, canvas_error_state
     if not active_path:
         return JSONResponse({"ok": False, "message": "No active path"}, status_code=400)
-    
+
     source = request.query_params.get("source")
     is_canvas_origin = source == "canvas"
 
@@ -944,7 +944,7 @@ async def grc_reload(request: Request) -> JSONResponse:
         try:
             new_fg = load_flow_graph(active_path)
             active.swap(new_fg)
-            
+
             if is_canvas_origin:
                 canvas_synced = True
             else:
@@ -955,7 +955,7 @@ async def grc_reload(request: Request) -> JSONResponse:
                 # into the returned dict), so this can't turn a reload into a
                 # failure response — best-effort, surfaced but non-fatal.
                 canvas_synced = (await active.notify_edit()).get("ok", False)
-            
+
             # A successful reload ping proves the canvas control server is
             # alive and responding. If a prior open had timed out, this means
             # the canvas recovered (or was slow, not dead), so mirror that

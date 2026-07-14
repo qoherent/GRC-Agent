@@ -14,7 +14,7 @@ from grc_agent.settings import env_path
 load_dotenv(env_path())
 
 # Import components from grc_agent.agent
-from grc_agent.agent import (
+from grc_agent.agent import (  # noqa: E402
     SCENARIOS,
     GrcAgentResponse,
     StopGracefully,
@@ -28,7 +28,7 @@ from grc_agent.agent import (
     web_fetch_cap,
     web_search_cap,
 )
-from grc_agent.prompts import build_system_prompt
+from grc_agent.prompts import build_system_prompt  # noqa: E402
 
 
 def _ollama_available() -> bool:
@@ -82,7 +82,9 @@ def _build_model_for_backend(backend: str):
     if backend == "openrouter":
         return build_scenario_model("openrouter", _OPENROUTER_DEFAULT_MODEL)
     if backend == "ollama_cloud":
-        return build_scenario_model("ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud"))
+        return build_scenario_model(
+            "ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud")
+        )
     return build_scenario_model("ollama")
 
 
