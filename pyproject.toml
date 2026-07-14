@@ -44,6 +44,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "uvicorn>=0.30",
     "python-dotenv>=1.0",
+    "grandalf>=0.8",
 ]
 
 [project.optional-dependencies]

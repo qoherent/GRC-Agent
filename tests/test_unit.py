@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 
 from grc_agent.adapter import (
+    BLOCK_FOOTPRINT_W,
+    BLOCK_SPACING,
+    _compute_ranks,
+    _find_block_placement,
     _rects_overlap,
     change_graph,
     inspect_graph,
@@ -238,6 +242,43 @@ def test_change_graph_add_block_across_calls_no_overlap(temp_empty):
     for i, a in enumerate(coords):
         for b in coords[i + 1 :]:
             assert not _rects_overlap(*a, *b)
+
+
+def test_compute_ranks_reflects_topology(temp_dial_tone):
+    # dial_tone.grc: 3 sources -> blocks_add_xx -> audio_sink. Variables and
+    # the options block have no wire connections, so they land in their own
+    # trivial rank-0 components.
+    fg = load_flow_graph(str(temp_dial_tone))
+    ranks = _compute_ranks(fg, set(), [])
+    assert ranks["analog_sig_source_x_0"] == 0
+    assert ranks["analog_sig_source_x_1"] == 0
+    assert ranks["analog_noise_source_x_0"] == 0
+    assert ranks["blocks_add_xx"] == 1
+    assert ranks["audio_sink"] == 2
+
+
+def test_find_block_placement_anchors_by_rank_distance_not_fixed_one_hop():
+    # Regression for the greedy placement's core flaw: it used to assume
+    # every connected neighbor is exactly one grid step away, regardless of
+    # actual topological distance. A block with two neighbors 2 and 1 ranks
+    # behind it (a fan-in from a source and from something already one hop
+    # downstream) must anchor proportionally further right than a naive
+    # "average neighbor x + one grid step" would place it.
+    grid_w = BLOCK_FOOTPRINT_W + BLOCK_SPACING
+    neighbor_map = {"new_block": {"far_source", "near_upstream"}}
+    block_coords = {"far_source": (0.0, 0.0), "near_upstream": (grid_w, 0.0)}
+    ranks = {"far_source": 0, "near_upstream": 1, "new_block": 3}
+
+    naive_target_x = (block_coords["far_source"][0] + block_coords["near_upstream"][0]) / 2 + grid_w
+
+    x, _y = _find_block_placement("new_block", [], neighbor_map, block_coords, (), ranks)
+    # far_source is 3 ranks behind (anchor: 0 + 3*grid_w), near_upstream is
+    # 2 ranks behind (anchor: grid_w + 2*grid_w) -> average is 3.5*grid_w,
+    # well past the naive fixed-one-hop target of 1.5*grid_w.
+    assert x > naive_target_x + grid_w, (
+        f"expected rank-distance-aware placement well past the naive target "
+        f"({naive_target_x}), got x={x}"
+    )
 
 
 def test_change_graph_remove_block(temp_dial_tone):
