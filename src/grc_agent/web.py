@@ -1258,7 +1258,14 @@ def main() -> None:
     threading.Thread(target=open_browser, daemon=True).start()
 
     print(f"\n[grc-agent] Starting server. Dashboard URL: {url}\n")
-    uvicorn.run(app, host=host, port=GRC_AGENT_PORT)
+    # log_level="warning": uvicorn's own default INFO-level startup banner
+    # ("Uvicorn running on http://host:port ...") prints the bare host:port
+    # with no path, right between the two messages above that already show
+    # the correct /grc/panel URL — confusing, not informative, for a local
+    # single-user desktop app. This also quiets the per-request access log
+    # (GET/POST lines), consistent with this project's own convention of
+    # using plain "[grc-agent] ..." prints for anything user-facing.
+    uvicorn.run(app, host=host, port=GRC_AGENT_PORT, log_level="warning")
 
 
 if __name__ == "__main__":
