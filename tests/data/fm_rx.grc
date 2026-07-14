@@ -170,8 +170,8 @@ blocks:
         bus_source: false
         bus_structure: null
         coordinate:
-        - 920
-        - 124.0
+        - 968
+        - 88.0
         rotation: 0
         state: enabled
 -   name: blocks_file_source_0
@@ -482,7 +482,7 @@ blocks:
         bus_structure: null
         coordinate:
         - 920
-        - 288.0
+        - 400.0
         rotation: 0
         state: enabled
 -   name: qtgui_time_sink_x_0_0
@@ -778,15 +778,53 @@ blocks:
         bus_source: false
         bus_structure: null
         coordinate:
-        - 920
-        - 196.0
+        - 912
+        - 272.0
+        rotation: 0
+        state: enabled
+-   name: squelch_0
+    id: analog_pwr_squelch_xx
+    parameters:
+        affinity: ''
+        alias: ''
+        alpha: 1e-4
+        comment: ''
+        gate: 'True'
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        ramp: '0'
+        threshold: '0.05'
+        type: float
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 496
+        - 472.0
+        rotation: 0
+        state: enabled
+-   name: volume_control_0
+    id: blocks_multiply_const_vxx
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        const: volume
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        type: float
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        coordinate:
+        - 824
+        - 168.0
         rotation: 0
         state: enabled
 connections:
--   - analog_fm_deemph_0
-    - '0'
-    - pfb_arb_resampler_xxx_0
-    - '0'
 -   - analog_fm_deemph_0
     - '0'
     - qtgui_freq_sink_x_0
@@ -794,6 +832,10 @@ connections:
 -   - analog_fm_deemph_0
     - '0'
     - qtgui_time_sink_x_0_0_0
+    - '0'
+-   - analog_fm_deemph_0
+    - '0'
+    - squelch_0
     - '0'
 -   - analog_quadrature_demod_cf_0
     - '0'
@@ -813,15 +855,23 @@ connections:
     - '0'
 -   - pfb_arb_resampler_xxx_0
     - '0'
-    - audio_sink_0
-    - '0'
--   - pfb_arb_resampler_xxx_0
-    - '0'
     - qtgui_freq_sink_x_0_1
     - '0'
 -   - pfb_arb_resampler_xxx_0
     - '0'
     - qtgui_time_sink_x_0_0_0_0
+    - '0'
+-   - pfb_arb_resampler_xxx_0
+    - '0'
+    - volume_control_0
+    - '0'
+-   - squelch_0
+    - '0'
+    - pfb_arb_resampler_xxx_0
+    - '0'
+-   - volume_control_0
+    - '0'
+    - audio_sink_0
     - '0'
 metadata:
     file_format: 1

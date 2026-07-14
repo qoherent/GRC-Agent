@@ -441,6 +441,12 @@ async function sendChatMessage(text) {
     chatAbort = null;
     state.chatBusy = false;
     updateChatInputState();
+    // Disabling a focused input forces a native blur with no automatic
+    // refocus — restore it once re-enabled, but only if the user hasn't
+    // since focused something else (e.g. opened Browse) while busy.
+    if (document.activeElement === document.body) {
+      document.getElementById("chat-input")?.focus();
+    }
   }
 }
 

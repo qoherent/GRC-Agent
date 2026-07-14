@@ -503,3 +503,33 @@ def test_chat_message_parts_render_in_chronological_order(live_server, page):
     actions_parts = [p for p in result["parts"] if p["cls"] == "chat-msg-actions"]
     assert len(actions_parts) == 1, "actions_taken must render as its own list"
     assert "Added noise_source" in actions_parts[0]["text"]
+
+
+def test_chat_input_regains_focus_after_message_completes(live_server, grc_file, page):
+    # Regression test: updateChatInputState() disables #chat-input while
+    # state.chatBusy is true — disabling a focused form control forces a
+    # native blur with no automatic refocus, so once the reply finished and
+    # the input re-enabled, the user had to manually click it again before
+    # typing the next message.
+    _http_json("POST", "/grc/open", {"path": str(grc_file)})
+    page.goto(f"{BASE_URL}/grc/panel")
+    page.wait_for_timeout(1000)
+
+    body = (
+        "".join(f"data: {json.dumps(f)}\n\n" for f in [{"type": "text-delta", "delta": "ok"}])
+        + "data: [DONE]\n\n"
+    )
+    page.route(
+        "**/api/chat",
+        lambda route: route.fulfill(status=200, content_type="text/event-stream", body=body),
+    )
+
+    page.click("#chat-input")
+    page.fill("#chat-input", "hello")
+    page.click("#chat-send-btn")
+    page.wait_for_timeout(500)
+
+    focused_id = page.evaluate("() => document.activeElement.id")
+    assert focused_id == "chat-input", (
+        f"chat input must regain focus once the reply finishes, got focus on: {focused_id!r}"
+    )
