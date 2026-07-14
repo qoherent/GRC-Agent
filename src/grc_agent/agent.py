@@ -329,11 +329,11 @@ class StopGracefully(AbstractCapability[Any]):
     max_requests: int = 40
     count: int = 0
 
-    async def for_run(self, ctx: RunContext[Any]) -> "StopGracefully":
+    async def for_run(self, ctx: RunContext[Any]) -> "StopGracefully":  # noqa: ARG002
         return StopGracefully(max_requests=self.max_requests)
 
     async def wrap_node_run(
-        self, ctx: RunContext[Any], *, node: AgentNode, handler: WrapNodeRunHandler
+        self, ctx: RunContext[Any], *, node: AgentNode, handler: WrapNodeRunHandler  # noqa: ARG002
     ) -> NodeResult:
         if isinstance(node, ModelRequestNode):
             self.count += 1
@@ -397,7 +397,7 @@ async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = N
 
 
 async def query_knowledge_func(
-    ctx: RunContext[Any], query: str, domain: Literal["catalog", "docs"]
+    ctx: RunContext[Any], query: str, domain: Literal["catalog", "docs"]  # noqa: ARG001
 ) -> str:
     """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts)."""
     if domain == "catalog":
@@ -414,7 +414,7 @@ def validate_change_graph_args(
     remove_blocks: list[str] | None = None,
     update_params: list[ParamUpdate] | None = None,
     update_states: list[StateUpdate] | None = None,
-    **kwargs,
+    **kwargs,  # noqa: ARG001
 ) -> None:
     try:
         current_blocks = {b.name for b in ctx.deps.blocks}
@@ -562,8 +562,7 @@ def prune_history(messages: list[ModelMessage]) -> list[ModelMessage]:
     target = len(messages) - 10
     for i in range(target, 0, -1):
         msg = messages[i]
-        if isinstance(msg, ModelRequest):
-            if any(isinstance(p, UserPromptPart) for p in msg.parts):
+        if isinstance(msg, ModelRequest) and any(isinstance(p, UserPromptPart) for p in msg.parts):
                 return [messages[0]] + messages[i:]
     return messages
 
@@ -609,7 +608,7 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
     return output
 
 
-def check_expect(fixture_path, expect, run_result=None):
+def check_expect(fixture_path, expect, run_result=None):  # noqa: C901
     fg = load_flow_graph(str(fixture_path))
     snap = inspect_graph(fg)["graph"]
     valid = snap["validation"]["status"] == "valid"
@@ -626,13 +625,12 @@ def check_expect(fixture_path, expect, run_result=None):
             from pydantic_ai.messages import ToolCallPart
 
             for msg in run_result.all_messages():
-                if hasattr(msg, "parts"):
-                    if any(
-                        isinstance(p, ToolCallPart)
-                        and p.tool_name in ("query_knowledge", "inspect_graph")
-                        for p in msg.parts
-                    ):
-                        has_read_tool = True
+                if hasattr(msg, "parts") and any(
+                    isinstance(p, ToolCallPart)
+                    and p.tool_name in ("query_knowledge", "inspect_graph")
+                    for p in msg.parts
+                ):
+                    has_read_tool = True
         if not has_read_tool:
             fail_reasons.append("no read tool used")
         if not run_result or not run_result.output:
@@ -670,7 +668,7 @@ def check_expect(fixture_path, expect, run_result=None):
     return {"pass": not fail_reasons, "reasons": fail_reasons, "valid": valid}
 
 
-def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:
+def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:  # noqa: C901
     events = []
     from pydantic_ai import ModelResponse
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
@@ -691,8 +689,7 @@ def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:
     for msg in messages:
         if isinstance(msg, ModelRequest):
             for part in msg.parts:
-                if isinstance(part, ToolReturnPart):
-                    if part.tool_call_id in tool_calls:
+                if isinstance(part, ToolReturnPart) and part.tool_call_id in tool_calls:
                         tool_calls[part.tool_call_id]["result"] = part.content
 
     for msg in messages:

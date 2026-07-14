@@ -48,6 +48,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.15",
     "ruff>=0.15.9",
     "pytest>=8.0.0",
     "playwright>=1.48",
@@ -81,10 +82,21 @@ src = ["src"]
 extend-exclude = ["tests/data/*.py"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
+select = ["E", "F", "W", "I", "B", "UP", "C901", "A", "SIM", "ARG"]
 ignore = [
     "E501",  # line-too-long (handled by formatter)
 ]
+
+[tool.mypy]
+ignore_missing_imports = true
+disallow_untyped_defs = false
+disallow_any_unimported = false
+check_untyped_defs = false
+warn_return_any = false
+warn_unused_ignores = true
+strict_optional = true
+namespace_packages = false
+no_implicit_optional = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

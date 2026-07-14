@@ -111,7 +111,7 @@ def browser():
 
 
 @pytest.fixture
-def page(browser, live_server):
+def page(browser, live_server):  # noqa: ARG001
     # Fresh isolated browsing context per test (own localStorage/cookies) —
     # and a clean server-side slate, since these tests don't depend on order.
     _http_json("POST", "/grc/close")
@@ -187,7 +187,7 @@ def _simulate_conversation_start(page, conv_id="/fake-conv-1"):
     )
 
 
-def test_cold_load_no_console_errors_and_undo_redo_disabled(live_server, page):
+def test_cold_load_no_console_errors_and_undo_redo_disabled(live_server, page):  # noqa: ARG001
     errors = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.on("pageerror", lambda exc: errors.append(str(exc)))
@@ -200,7 +200,7 @@ def test_cold_load_no_console_errors_and_undo_redo_disabled(live_server, page):
     assert page.is_disabled("#redo-btn")
 
 
-def test_reset_conversation_preserves_loaded_flowgraph(live_server, grc_file, page):
+def test_reset_conversation_preserves_loaded_flowgraph(live_server, grc_file, page):  # noqa: ARG001
     # Regression test for the audit's Critical finding: resetting a broken-
     # looking chat conversation (auto-heal, or the "chat looks stuck?"
     # button) must never close the loaded flowgraph or kill its live canvas
@@ -224,7 +224,7 @@ def test_reset_conversation_preserves_loaded_flowgraph(live_server, grc_file, pa
     assert conv is None, "the reset button must still actually reset the chat widget"
 
 
-def test_new_conversation_button_still_unloads_flowgraph(live_server, grc_file, page):
+def test_new_conversation_button_still_unloads_flowgraph(live_server, grc_file, page):  # noqa: ARG001
     # The "+" button is the one control that SHOULD close the loaded file —
     # confirms the fix above didn't overcorrect into never unloading at all.
     _http_json("POST", "/grc/open", {"path": str(grc_file)})
@@ -238,7 +238,7 @@ def test_new_conversation_button_still_unloads_flowgraph(live_server, grc_file, 
     assert status["path"] is None
 
 
-def test_session_history_hides_once_conversation_starts(live_server, page):
+def test_session_history_hides_once_conversation_starts(live_server, page):  # noqa: ARG001
     # The session-history panel only shows on a fresh conversation
     # (getChatFramePath() === "/"). Once a conversation is active
     # (state.chatConvId set), it must hide. The old iframe version of this
@@ -265,7 +265,7 @@ def test_session_history_hides_once_conversation_starts(live_server, page):
     assert display[1] == "none", "session history must hide once a conversation starts"
 
 
-def test_clear_chat_widget_resets_conversation_state(live_server, page):
+def test_clear_chat_widget_resets_conversation_state(live_server, page):  # noqa: ARG001
     # The native widget owns conversation state in memory (chatMessages +
     # state.chatConvId), not in an iframe pathname. clearChatWidget() must
     # drop both, leaving a fresh empty conversation — the equivalent of the
@@ -341,7 +341,7 @@ def test_canvas_timeout_leaves_chat_enabled_and_clears_banner_on_close(
 
 
 def test_canvas_ready_state_recovers_after_successful_reload_ping(
-    canvas_failure_server, grc_file, canvas_failure_page
+    canvas_failure_server, grc_file, canvas_failure_page  # noqa: ARG001
 ):
     # Regression for P1-1: once canvas_ready_state flipped to false, a later
     # successful canvas reload ping must clear it so /grc/status stops lying.
@@ -379,7 +379,7 @@ def test_canvas_ready_state_recovers_after_successful_reload_ping(
     assert status["canvas_error"] is None
 
 
-def test_native_chat_toolbar_renders_and_input_gates_on_file(live_server, grc_file, page):
+def test_native_chat_toolbar_renders_and_input_gates_on_file(live_server, grc_file, page):  # noqa: ARG001
     # The chat UI is now a native widget (no iframe). On a cold load with no
     # flowgraph, the toolbar controls must render and the chat input must be
     # disabled; after opening a file, the input enables (updateChatInputState
@@ -405,7 +405,7 @@ def test_native_chat_toolbar_renders_and_input_gates_on_file(live_server, grc_fi
     assert input_disabled_after is False, "input must enable once a flowgraph loads"
 
 
-def test_chat_message_parts_render_in_chronological_order(live_server, page):
+def test_chat_message_parts_render_in_chronological_order(live_server, page):  # noqa: ARG001
     # Regression test: sendChatMessage used to keep one shared accumulator per
     # event type (a single reasoning box, a single tool-call container, one
     # text buffer) instead of one DOM element per part in arrival order — so a
@@ -505,7 +505,7 @@ def test_chat_message_parts_render_in_chronological_order(live_server, page):
     assert "Added noise_source" in actions_parts[0]["text"]
 
 
-def test_chat_input_regains_focus_after_message_completes(live_server, grc_file, page):
+def test_chat_input_regains_focus_after_message_completes(live_server, grc_file, page):  # noqa: ARG001
     # Regression test: updateChatInputState() disables #chat-input while
     # state.chatBusy is true — disabling a focused form control forces a
     # native blur with no automatic refocus, so once the reply finished and

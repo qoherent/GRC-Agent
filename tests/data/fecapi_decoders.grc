@@ -59,44 +59,6 @@ blocks:
         - 688
         rotation: 0
         state: enabled
--   name: dec_dummy
-    id: variable_dummy_decoder_def
-    parameters:
-        comment: ''
-        dim1: '1'
-        dim2: '1'
-        framebits: frame_size*8
-        ndim: '0'
-        value: '"ok"'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 371
-        - 656
-        rotation: 0
-        state: enabled
--   name: dec_rep
-    id: variable_repetition_decoder_def
-    parameters:
-        comment: ''
-        dim1: '4'
-        dim2: '1'
-        framebits: frame_size*8
-        ndim: '0'
-        prob: '0.5'
-        rep: '3'
-        value: '"ok"'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 553
-        - 674
-        rotation: 0
-        state: enabled
 -   name: enc_ccsds
     id: variable_ccsds_encoder_def
     parameters:
@@ -113,41 +75,6 @@ blocks:
         bus_structure: null
         coordinate:
         - 189
-        - 562
-        rotation: 0
-        state: enabled
--   name: enc_dummy
-    id: variable_dummy_encoder_def
-    parameters:
-        comment: ''
-        dim1: '1'
-        dim2: '4'
-        framebits: frame_size*8
-        ndim: '0'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 371
-        - 562
-        rotation: 0
-        state: enabled
--   name: enc_rep
-    id: variable_repetition_encoder_def
-    parameters:
-        comment: ''
-        dim1: '4'
-        dim2: '1'
-        framebits: frame_size*8
-        ndim: '0'
-        rep: '3'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 553
         - 562
         rotation: 0
         state: enabled
@@ -177,6 +104,7 @@ blocks:
         coordinate:
         - 1080
         - 840
+        rotation: 0
         state: enabled
 -   name: polys
     id: variable
@@ -236,69 +164,10 @@ blocks:
         bus_source: false
         bus_structure: null
         coordinate:
-        - 1440
-        - 840
+        - 984
+        - 792.0
+        rotation: 0
         state: enabled
--   name: add_dummy
-    id: blocks_add_xx
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        num_inputs: '2'
-        type: float
-        vlen: '1'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 1800
-        - 280
-        state: enabled
--   name: add_rep
-    id: blocks_add_xx
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        num_inputs: '2'
-        type: float
-        vlen: '1'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 1800
-        - 0
-        state: enabled
--   name: analog_random_source_x_0
-    id: analog_random_source_x
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        max: '256'
-        maxoutbuf: '0'
-        min: '0'
-        minoutbuf: '0'
-        num_samps: '1000'
-        repeat: 'True'
-        type: byte
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 54
-        - 464
-        rotation: 180
-        state: disabled
 -   name: blocks_char_to_float_0
     id: blocks_char_to_float
     parameters:
@@ -337,44 +206,6 @@ blocks:
         - 425
         rotation: 0
         state: enabled
--   name: blocks_char_to_float_0_0_0
-    id: blocks_char_to_float
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        scale: '1'
-        vlen: '1'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 1067
-        - 330
-        rotation: 0
-        state: enabled
--   name: blocks_char_to_float_0_0_0_0
-    id: blocks_char_to_float
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        scale: '1'
-        vlen: '1'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 1064
-        - 237
-        rotation: 0
-        state: enabled
 -   name: blocks_char_to_float_0_1
     id: blocks_char_to_float
     parameters:
@@ -394,59 +225,6 @@ blocks:
         - 152
         rotation: 0
         state: enabled
--   name: blocks_char_to_float_0_2
-    id: blocks_char_to_float
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        scale: '1'
-        vlen: '1'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 682
-        - 330
-        rotation: 0
-        state: enabled
--   name: blocks_char_to_float_0_2_0
-    id: blocks_char_to_float
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        scale: '1'
-        vlen: '1'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 680
-        - 237
-        rotation: 0
-        state: enabled
--   name: blocks_ctrlport_monitor_performance_0
-    id: blocks_ctrlport_monitor_performance
-    parameters:
-        alias: ''
-        comment: ''
-        en: 'True'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 361
-        - 10
-        rotation: 0
-        state: disabled
 -   name: blocks_throttle_0
     id: blocks_throttle
     parameters:
@@ -526,42 +304,6 @@ blocks:
         - 425
         rotation: 0
         state: enabled
--   name: digital_map_bb_0_0_0
-    id: digital_map_bb
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        map: '[-1, 1]'
-        maxoutbuf: '0'
-        minoutbuf: '0'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 545
-        - 330
-        rotation: 0
-        state: enabled
--   name: digital_map_bb_0_0_0_0
-    id: digital_map_bb
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        map: '[-1, 1]'
-        maxoutbuf: '0'
-        minoutbuf: '0'
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 543
-        - 237
-        rotation: 0
-        state: enabled
 -   name: fec_extended_decoder_0
     id: fec_extended_decoder
     parameters:
@@ -580,52 +322,8 @@ blocks:
         bus_source: false
         bus_structure: null
         coordinate:
-        - 842
-        - 401
-        rotation: 0
-        state: enabled
--   name: fec_extended_decoder_0_1
-    id: fec_extended_decoder
-    parameters:
-        affinity: ''
-        alias: ''
-        ann: None
-        comment: ''
-        decoder_list: dec_rep
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        puncpat: puncpat
-        threadtype: none
-        value: fec_extended_decoder
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 842
-        - 306
-        rotation: 0
-        state: enabled
--   name: fec_extended_decoder_0_1_0
-    id: fec_extended_decoder
-    parameters:
-        affinity: ''
-        alias: ''
-        ann: None
-        comment: ''
-        decoder_list: dec_dummy
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        puncpat: puncpat
-        threadtype: none
-        value: fec_extended_decoder
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 842
-        - 213
+        - 848
+        - 264.0
         rotation: 0
         state: enabled
 -   name: fec_extended_encoder_1
@@ -646,46 +344,6 @@ blocks:
         coordinate:
         - 321
         - 409
-        rotation: 0
-        state: enabled
--   name: fec_extended_encoder_1_0
-    id: fec_extended_encoder
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        encoder_list: enc_rep
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        puncpat: puncpat
-        threadtype: capillary
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 321
-        - 314
-        rotation: 0
-        state: enabled
--   name: fec_extended_encoder_1_0_0
-    id: fec_extended_encoder
-    parameters:
-        affinity: ''
-        alias: ''
-        comment: ''
-        encoder_list: enc_dummy
-        maxoutbuf: '0'
-        minoutbuf: '0'
-        puncpat: puncpat
-        threadtype: capillary
-    states:
-        bus_sink: false
-        bus_source: false
-        bus_structure: null
-        coordinate:
-        - 321
-        - 221
         rotation: 0
         state: enabled
 -   name: frame_size
@@ -726,6 +384,7 @@ blocks:
         coordinate:
         - 1440
         - 560
+        rotation: 0
         state: enabled
 -   name: puncpat
     id: parameter
@@ -780,9 +439,9 @@ blocks:
         gui_hint: ''
         label1: Input
         label10: Signal 10
-        label2: Dummy
-        label3: Rep. (Rate=3)
-        label4: CC (K=7, Rate=2)
+        label2: CC (K=7, Rate=2)
+        label3: ''
+        label4: ''
         label5: CCSDS
         label6: Signal 6
         label7: Signal 7
@@ -800,7 +459,7 @@ blocks:
         marker8: '-1'
         marker9: '-1'
         name: '""'
-        nconnections: '4'
+        nconnections: '2'
         size: '2048'
         srate: samp_rate
         stemplot: 'False'
@@ -850,18 +509,6 @@ connections:
     - '0'
     - fec_extended_decoder_0
     - '0'
--   - add_dummy
-    - '0'
-    - fec_extended_decoder_0_1_0
-    - '0'
--   - add_rep
-    - '0'
-    - fec_extended_decoder_0_1
-    - '0'
--   - analog_random_source_x_0
-    - '0'
-    - blocks_throttle_0
-    - '0'
 -   - blocks_char_to_float_0
     - '0'
     - add_cc
@@ -869,26 +516,10 @@ connections:
 -   - blocks_char_to_float_0_0
     - '0'
     - qtgui_time_sink_x_0
-    - '3'
--   - blocks_char_to_float_0_0_0
-    - '0'
-    - qtgui_time_sink_x_0
-    - '2'
--   - blocks_char_to_float_0_0_0_0
-    - '0'
-    - qtgui_time_sink_x_0
     - '1'
 -   - blocks_char_to_float_0_1
     - '0'
     - qtgui_time_sink_x_0
-    - '0'
--   - blocks_char_to_float_0_2
-    - '0'
-    - add_rep
-    - '0'
--   - blocks_char_to_float_0_2_0
-    - '0'
-    - add_dummy
     - '0'
 -   - blocks_throttle_0
     - '0'
@@ -902,14 +533,6 @@ connections:
     - '0'
     - fec_extended_encoder_1
     - '0'
--   - blocks_unpack_k_bits_bb_0
-    - '0'
-    - fec_extended_encoder_1_0
-    - '0'
--   - blocks_unpack_k_bits_bb_0
-    - '0'
-    - fec_extended_encoder_1_0_0
-    - '0'
 -   - blocks_vector_source_x_0_1_0
     - '0'
     - blocks_throttle_0
@@ -918,49 +541,17 @@ connections:
     - '0'
     - blocks_char_to_float_0
     - '0'
--   - digital_map_bb_0_0_0
-    - '0'
-    - blocks_char_to_float_0_2
-    - '0'
--   - digital_map_bb_0_0_0_0
-    - '0'
-    - blocks_char_to_float_0_2_0
-    - '0'
 -   - fec_extended_decoder_0
     - '0'
     - blocks_char_to_float_0_0
-    - '0'
--   - fec_extended_decoder_0_1
-    - '0'
-    - blocks_char_to_float_0_0_0
-    - '0'
--   - fec_extended_decoder_0_1_0
-    - '0'
-    - blocks_char_to_float_0_0_0_0
     - '0'
 -   - fec_extended_encoder_1
     - '0'
     - digital_map_bb_0_0
     - '0'
--   - fec_extended_encoder_1_0
-    - '0'
-    - digital_map_bb_0_0_0
-    - '0'
--   - fec_extended_encoder_1_0_0
-    - '0'
-    - digital_map_bb_0_0_0_0
-    - '0'
 -   - noise_source
     - '0'
     - add_cc
-    - '1'
--   - noise_source
-    - '0'
-    - add_dummy
-    - '1'
--   - noise_source
-    - '0'
-    - add_rep
     - '1'
 metadata:
     file_format: 1

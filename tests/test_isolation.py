@@ -299,7 +299,7 @@ def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     # Import ingest first so it's in sys.modules, then patch it.
     import grc_agent.ingest as ingest_mod
 
-    def mock_ingest(db_path, model):
+    def mock_ingest(db_path, model):  # noqa: ARG001
         # Verify the flag is 'building' during the ingest call
         assert adapter_mod._rag_building["status"] == "building"
         assert adapter_mod._rag_building["domain"] == "catalog"

@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import contextlib
 import os
 import signal
 import subprocess
@@ -280,10 +281,8 @@ def _killpg_with_fallback(pid: int, wait_s: float = 2.0, poll_interval: float = 
         if not _pid_alive(pid):
             return
         time.sleep(poll_interval)
-    try:
+    with contextlib.suppress(ProcessLookupError, OSError):
         os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, OSError):
-        pass
 
 
 def _reclaim_broadway_orphan() -> None:
@@ -389,21 +388,15 @@ def _terminate_broadway() -> None:
     survive a plain terminate()/kill() on the leader alone."""
     had_tracked = bool(broadway_procs)
     for proc in broadway_procs:
-        try:
+        with contextlib.suppress(ProcessLookupError, OSError):
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            pass
         try:
             proc.wait(timeout=2)
         except Exception:
-            try:
+            with contextlib.suppress(ProcessLookupError, OSError):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 proc.wait(timeout=2)
-            except Exception:
-                pass
     broadway_procs.clear()
     if had_tracked:
         # Only unlink what THIS instance actually owned and just terminated.
@@ -415,10 +408,8 @@ def _terminate_broadway() -> None:
         # defeated _reclaim_broadway_orphan() for that earlier orphan
         # (live-reproduced: crash -> no-op restart -> clean shutdown left
         # the original orphan unreclaimable by any future launch).
-        try:
+        with contextlib.suppress(OSError):
             _broadway_pidfile().unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _cleanup_procs() -> None:
@@ -428,7 +419,7 @@ def _cleanup_procs() -> None:
     _terminate_broadway()
 
 
-def _handle_sigterm(signum: int, frame: Any) -> None:
+def _handle_sigterm(signum: int, frame: Any) -> None:  # noqa: ARG001
     """Explicit SIGTERM handler — required because atexit alone does NOT run
     on SIGTERM. uvicorn's capture_signals()/handle_exit() does its own
     graceful HTTP shutdown, then RESTORES whatever signal disposition was
@@ -548,7 +539,7 @@ app = agent.to_web(models=[model], deps=active)
 # Routes live under /grc/* (two path segments). to_web() still mounts the
 # streaming backend at /api/* and its own '/' and '/{id}' HTML routes, but our
 # index_redirect is inserted ahead of '/' so the dashboard owns the root.
-async def grc_inspect(request: Request) -> JSONResponse:
+async def grc_inspect(request: Request) -> JSONResponse:  # noqa: ARG001
     if not active.is_loaded():
         return JSONResponse(
             {"ok": False, "not_loaded": True, "message": "No .grc file loaded yet."}
@@ -578,10 +569,8 @@ async def ensure_broadway() -> None:
             asyncio.open_connection("127.0.0.1", BROADWAY_PORT), timeout=0.5
         )
         writer.close()
-        try:
+        with contextlib.suppress(Exception):
             await writer.wait_closed()
-        except Exception:
-            pass
     except Exception:
         # Not running on our port — start one. No global `killall broadwayd`:
         # that would stomp another instance's broadwayd (e.g. a concurrent dev
@@ -606,21 +595,15 @@ def _terminate_canvas_proc() -> None:
     global canvas_proc
     had_tracked = canvas_proc is not None
     if canvas_proc:
-        try:
+        with contextlib.suppress(ProcessLookupError, OSError):
             os.killpg(os.getpgid(canvas_proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            pass
         try:
             canvas_proc.wait(timeout=2)
         except Exception:
-            try:
+            with contextlib.suppress(ProcessLookupError, OSError):
                 os.killpg(os.getpgid(canvas_proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 canvas_proc.wait(timeout=2)
-            except Exception:
-                pass
         canvas_proc = None
     if had_tracked:
         # Same reasoning as _terminate_broadway's unlink guard: only erase
@@ -629,10 +612,8 @@ def _terminate_canvas_proc() -> None:
         # /grc/open (so never tracked or reclaimed anything here) would
         # destroy the only record of an earlier, still-orphaned canvas,
         # permanently defeating _reclaim_canvas_orphan() for it.
-        try:
+        with contextlib.suppress(OSError):
             _canvas_pidfile().unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 # Registered here — after every function _cleanup_procs transitively calls
@@ -850,7 +831,7 @@ async def _wait_for_canvas_ready(
     return False, False
 
 
-async def grc_status(request: Request) -> JSONResponse:
+async def grc_status(request: Request) -> JSONResponse:  # noqa: ARG001
     undo_state = undo_status(active_path) if active_path else {"can_undo": False, "can_redo": False}
     return JSONResponse(
         {
@@ -875,7 +856,7 @@ async def grc_status(request: Request) -> JSONResponse:
     )
 
 
-async def grc_close(request: Request) -> JSONResponse:
+async def grc_close(request: Request) -> JSONResponse:  # noqa: ARG001
     global active_path, canvas_ready_state, canvas_error_state
     async with _flowgraph_state_lock:
         active.swap(None)
@@ -919,12 +900,12 @@ async def grc_browse(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "dir": str(directory), "parent": parent, "entries": entries})
 
 
-async def grc_panel(request: Request) -> HTMLResponse:
+async def grc_panel(request: Request) -> HTMLResponse:  # noqa: ARG001
     panel_html = (Path(__file__).parent / "panel.html").read_text(encoding="utf-8")
     return HTMLResponse(panel_html)
 
 
-async def grc_panel_js(request: Request) -> Response:
+async def grc_panel_js(request: Request) -> Response:  # noqa: ARG001
     # The dashboard's logic lives in panel.js (extracted from panel.html).
     # no-cache: the file is patched across deploys without a content hash in
     # its name, so a stale browser cache would silently run an old version.
@@ -1005,11 +986,11 @@ async def _grc_undo_redo(op) -> JSONResponse:
         )
 
 
-async def grc_undo(request: Request) -> JSONResponse:
+async def grc_undo(request: Request) -> JSONResponse:  # noqa: ARG001
     return await _grc_undo_redo(undo_flowgraph)
 
 
-async def grc_redo(request: Request) -> JSONResponse:
+async def grc_redo(request: Request) -> JSONResponse:  # noqa: ARG001
     return await _grc_undo_redo(redo_flowgraph)
 
 
@@ -1044,7 +1025,7 @@ async def grc_canvas_resize(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "canvas control server unreachable"})
 
 
-async def grc_settings_get(request: Request) -> JSONResponse:
+async def grc_settings_get(request: Request) -> JSONResponse:  # noqa: ARG001
     cfg = load_settings()
     return JSONResponse(
         {
@@ -1099,7 +1080,7 @@ async def grc_settings_post(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "message": "Settings saved and applied dynamically."})
 
 
-async def grc_health(request: Request) -> JSONResponse:
+async def grc_health(request: Request) -> JSONResponse:  # noqa: C901, ARG001
     """Check connectivity for the currently selected provider. Async so it
     never blocks the event loop — the dashboard calls this on load and on
     provider switch to show a live status indicator."""
@@ -1226,7 +1207,7 @@ async def grc_apikey_post(request: Request) -> JSONResponse:
 # CDN, no iframe. to_web() still mounts the streaming backend at /api/* (the
 # widget POSTs to /api/chat and consumes the SSE stream); root '/' just
 # redirects to the dashboard.
-async def index_redirect(request: Request) -> RedirectResponse:
+async def index_redirect(request: Request) -> RedirectResponse:  # noqa: ARG001
     return RedirectResponse("/grc/panel")
 
 
@@ -1253,6 +1234,19 @@ app.router.routes[0:0] = [
 
 
 def main() -> None:
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gnuradio import gr  # noqa: F401
+    except ImportError as e:
+        print(
+            f"[grc-agent] ERROR: Missing system libraries ({e}).\n"
+            "Please verify that:\n"
+            "  1. GNU Radio 3.10+ and Gtk-3 are installed on your system.\n"
+            "  2. Your virtual environment was created using: uv venv --system-site-packages\n"
+        )
+        sys.exit(1)
+
     import socket
     import webbrowser
 

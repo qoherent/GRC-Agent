@@ -222,7 +222,7 @@ class CanvasControlContext:
             print("Failed to scroll to newly-added blocks:", e)
 
 
-def start_control_server(ctx, port) -> bool:
+def start_control_server(ctx, port) -> bool:  # noqa: C901
     """Background HTTP listener so the dashboard page (resize) and the web
     server (reload, after an agent-driven edit) can act on this canvas
     process. GTK calls must happen on the main thread, so handlers only
@@ -306,7 +306,7 @@ def start_control_server(ctx, port) -> bool:
     return True
 
 
-def main():
+def main():  # noqa: C901
     if len(sys.argv) < 2:
         print("Usage: python canvas_app.py <path_to_grc> [control_port] [web_port]")
         sys.exit(1)
@@ -451,7 +451,7 @@ def main():
     lock_path = Path(grc_file_path).parent / ".grc_agent" / (Path(grc_file_path).name + ".lock")
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    def _do_trigger_reload():
+    def _do_trigger_reload():  # noqa: C901
         try:
             if drawing_area and hasattr(drawing_area, "_flow_graph"):
                 # No-op guard: on_button_release fires trigger_reload() for
@@ -600,7 +600,7 @@ def main():
             parent = parent.get_parent()
         return parent
 
-    def on_button_press(widget, event):
+    def on_button_press(widget, event):  # noqa: ARG001
         if event.button == 2:  # Middle mouse click
             scrolled_window = get_scrolled_window()
             if scrolled_window:
@@ -612,7 +612,7 @@ def main():
                 return True
         return False
 
-    def on_motion_notify(widget, event):
+    def on_motion_notify(widget, event):  # noqa: ARG001
         if ctx.panning:
             if event.state & Gdk.ModifierType.BUTTON2_MASK:
                 scrolled_window = get_scrolled_window()
@@ -639,7 +639,7 @@ def main():
                 ctx.panning = False
         return False
 
-    def on_button_release(widget, event):
+    def on_button_release(widget, event):  # noqa: ARG001
         if event.button == 2:
             if ctx.panning:
                 ctx.panning = False
@@ -659,7 +659,7 @@ def main():
         drawing_area.connect("motion-notify-event", on_motion_notify)
 
     # 2. Save/reload when properties dialogs are closed (parameter edits)
-    def on_window_added(application, win):
+    def on_window_added(application, win):  # noqa: ARG001
         # We only want to listen to properties dialog windows (not the main window itself)
         if win != window:
             print(f"Properties dialog added to context: {win}")
@@ -678,7 +678,7 @@ def main():
             win.move(20, 20)
             GLib.idle_add(_position_dialog)
 
-            def on_window_destroy(w, event=None):
+            def on_window_destroy(w, event=None):  # noqa: ARG001
                 trigger_reload()
                 return False
 

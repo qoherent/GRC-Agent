@@ -275,7 +275,7 @@ def test_canvas_app_control_server_bind_failure_surfaces_to_caller():
             self.last_disk_hash = None
             self.last_synced_export_hash = None
 
-        def apply_resize(self, width, height):
+        def apply_resize(self, width, height):  # noqa: ARG002
             return False
 
         def apply_pending_size(self):
@@ -369,7 +369,7 @@ def test_canvas_app_reload_uses_loopback_address():
 # ── New comprehensive tests for the .env consolidation + audit fixes ────────
 
 
-def test_settings_get_returns_active_provider_error(tmp_path, monkeypatch):
+def test_settings_get_returns_active_provider_error(tmp_path, monkeypatch):  # noqa: ARG001
     """When _build_model() failed at startup, /grc/settings must return
     active_provider_error so the dashboard can show a specific message
     instead of a misleading restart badge."""
@@ -384,7 +384,7 @@ def test_settings_get_returns_active_provider_error(tmp_path, monkeypatch):
         web_app._model_build_error = None
 
 
-def test_status_returns_rag_building(tmp_path, monkeypatch):
+def test_status_returns_rag_building(tmp_path, monkeypatch):  # noqa: ARG001
     """/grc/status must include the rag_building field so the dashboard can
     show a progress banner during vector DB build."""
     from grc_agent.adapter import _rag_building

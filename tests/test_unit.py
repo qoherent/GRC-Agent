@@ -630,7 +630,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
 
     call_count = 0
 
-    def counting_embed_document(text, m):
+    def counting_embed_document(text, m):  # noqa: ARG001
         nonlocal call_count
         call_count += 1
         return [0.0, 0.0, 0.0]
