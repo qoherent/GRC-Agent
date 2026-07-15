@@ -7,6 +7,8 @@ flowgraph, edits it through validated tool calls, and grounds every answer in
 a RAG-searchable GNU Radio block catalog and docs wiki — chatting alongside a
 live, directly-editable canvas in a single native desktop app.
 
+![GRC Agent User Interface](docs/screenshot.png)
+
 ---
 
 ## Architecture at a glance
