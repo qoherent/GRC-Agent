@@ -43,29 +43,34 @@ _log = logging.getLogger(__name__)
 
 _CHAT_CSS = b"""
 .chat-sidebar {
-    background: #1e1e1e;
+    background: #ffffff;
+    border-left: 1px solid #d0d0d0;
 }
 .chat-user-label {
-    background: #1a3a5c;
-    color: #ffffff;
+    background: #e1f5fe;
+    color: #0d47a1;
+    border: 1px solid #b3e5fc;
     border-radius: 8px;
     padding: 8px 10px;
 }
 .chat-agent-label {
-    background: #2d2d2d;
-    color: #e0e0e0;
+    background: #f5f5f5;
+    color: #212121;
+    border: 1px solid #e0e0e0;
     border-radius: 8px;
     padding: 8px 10px;
 }
 .chat-error-label {
-    background: #4a1c1c;
-    color: #ff8a80;
+    background: #ffebee;
+    color: #c62828;
+    border: 1px solid #ffcdd2;
     border-radius: 8px;
     padding: 8px 10px;
 }
 .chat-tool-expander {
-    background: #2a2a2a;
-    color: #e0e0e0;
+    background: #fafafa;
+    color: #424242;
+    border: 1px solid #e0e0e0;
     border-radius: 4px;
     padding: 2px 6px;
     margin-top: 4px;
@@ -74,61 +79,62 @@ _CHAT_CSS = b"""
     margin-top: 4px;
 }
 .chat-thinking-expander > label {
-    color: #999;
+    color: #666666;
     font-style: italic;
     font-size: 0.9em;
 }
 .chat-toolbar {
-    background: #252526;
-    border-bottom: 1px solid #3c3c3c;
+    background: #f5f5f5;
+    border-bottom: 1px solid #e0e0e0;
 }
 .chat-toolbar-btn {
-    background: #333334;
-    color: #e0e0e0;
-    border: 1px solid #3c3c3c;
+    background: #ffffff;
+    color: #333333;
+    border: 1px solid #cccccc;
     border-radius: 4px;
     padding: 4px 10px;
 }
 .chat-toolbar-btn:hover {
-    background: #3e3e40;
+    background: #f0f0f0;
 }
 .chat-toolbar-btn:active {
-    background: #4e4e50;
+    background: #e0e0e0;
 }
 .chat-toolbar-sep {
-    color: #3c3c3c;
+    color: #cccccc;
 }
 .graph-badge {
-    background: #1a3a5c;
-    color: #9cdcfe;
+    background: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #c8e6c9;
     border-radius: 10px;
     padding: 2px 12px;
     font-size: 0.85em;
     font-weight: bold;
 }
 .chat-side-toggle {
-    background: #252526;
-    color: #e0e0e0;
-    border-right: 1px solid #3c3c3c;
+    background: #f5f5f5;
+    color: #333333;
+    border-right: 1px solid #d0d0d0;
     padding: 4px 2px;
     min-width: 18px;
 }
 .chat-side-toggle:hover {
-    background: #333334;
+    background: #e0e0e0;
 }
 .chat-entry {
-    background: #2d2d2d;
-    color: #e0e0e0;
-    border: 1px solid #3c3c3c;
+    background: #ffffff;
+    color: #000000;
+    border: 1px solid #cccccc;
     border-radius: 6px;
     padding: 10px 8px;
     min-height: 42px;
 }
 .chat-entry placeholder {
-    color: #777;
+    color: #888888;
 }
 .chat-send-btn {
-    background: #0e639c;
+    background: #1976d2;
     color: #ffffff;
     border: none;
     border-radius: 6px;
@@ -136,18 +142,18 @@ _CHAT_CSS = b"""
     font-weight: bold;
 }
 .chat-send-btn:hover {
-    background: #1177bb;
+    background: #1565c0;
 }
 .chat-send-btn:active {
-    background: #094771;
+    background: #0d47a1;
 }
 .chat-msg-list {
-    background: #1e1e1e;
+    background: #ffffff;
 }
 .chat-status-bar {
-    background: #252526;
-    color: #e0e0e0;
-    border-top: 1px solid #3c3c3c;
+    background: #f5f5f5;
+    color: #333333;
+    border-top: 1px solid #e0e0e0;
     padding: 3px 8px;
     font-size: 0.9em;
 }

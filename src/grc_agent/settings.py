@@ -27,7 +27,7 @@ so the health check can see it immediately.
 import os
 from pathlib import Path
 
-from dotenv import dotenv_values, find_dotenv, get_key, set_key
+from dotenv import dotenv_values, get_key, set_key
 
 _VALID_PROVIDERS = ("ollama", "openrouter", "ollama_cloud")
 
@@ -58,17 +58,17 @@ def env_path() -> Path:
     1. `GRC_AGENT_ENV` env var (explicit override — used by tests, and by an
        operator who wants prefs somewhere specific). Takes priority so a test
        redirect can never accidentally pick up the real repo `.env`.
-    2. A `.env` in or above the CWD (find_dotenv, usecwd=True) — the dev
-       workflow (`uv run grc-agent` from the repo root reads repo `.env`).
-    3. `~/.config/grc_agent/.env` — the stable home for an installed package,
-       where there is no repo root to find. Never CWD-relative (that produced
-       inconsistent reads/writes across launch directories).
+    2. A `.env` file in the package repository root to prevent GRC dynamic
+       CWD changes from loading/saving settings from/to different folders.
+    3. `~/.config/grc_agent/.env` fallback.
     """
     override = os.environ.get("GRC_AGENT_ENV")
     if override:
         return Path(override)
-    found = find_dotenv(usecwd=True)
-    return Path(found) if found else Path.home() / ".config" / "grc_agent" / ".env"
+    repo_env = Path(__file__).resolve().parent.parent.parent / ".env"
+    if repo_env.exists():
+        return repo_env
+    return Path.home() / ".config" / "grc_agent" / ".env"
 
 
 def default_settings() -> dict:

@@ -79,7 +79,7 @@ Get a key at [OpenRouter](https://openrouter.ai/), then set it from the
 app's Settings dialog (gear button) or add `OPENROUTER_API_KEY` to `.env`.
 
 #### Option C: Ollama Cloud (Cloud)
-Get a key at [Ollama Cloud](https://ollama.cloud), then set
+Get a key at [Ollama](https://ollama.com/settings/keys), then set
 `OLLAMA_CLOUD_API_KEY` from Settings or `.env`.
 
 > [!NOTE]

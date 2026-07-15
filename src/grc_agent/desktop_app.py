@@ -18,73 +18,7 @@ from gi.repository import Gdk, GLib, Gtk
 
 
 def _apply_dark_theme_patches() -> None:
-    # 1. Force Gtk settings to prefer dark theme
-    try:
-        settings = Gtk.Settings.get_default()
-        if settings:
-            settings.set_property("gtk-application-prefer-dark-theme", True)
-    except Exception as e:
-        print(f"Warning: Failed to set gtk-application-prefer-dark-theme: {e}")
-
-    # 2. Monkeypatch have_dark_theme in ParamWidgets
-    try:
-        import gnuradio.grc.gui.ParamWidgets as ParamWidgets
-        ParamWidgets.have_dark_theme = lambda: True
-    except Exception as e:
-        print(f"Warning: Failed to patch have_dark_theme: {e}")
-
-    # 3. Monkeypatch colors module and its direct imports
-    try:
-        import gnuradio.grc.gui.DrawingArea as DrawingArea
-        import gnuradio.grc.gui.Utils as Utils
-        from gnuradio.grc.gui.canvas import colors
-
-        dark_bg = colors.get_color('#1e1e1e')
-
-        colors.FLOWGRAPH_BACKGROUND_COLOR = dark_bg
-        colors.FONT_COLOR = colors.get_color('#e0e0e0')
-        colors.COMMENT_BACKGROUND_COLOR = colors.get_color('#252526')
-        colors.FLOWGRAPH_EDGE_COLOR = colors.get_color('#252526')
-        colors.HIGHLIGHT_COLOR = colors.get_color('#00ffcc')
-        colors.BORDER_COLOR = colors.get_color('#4b4b4b')
-        colors.BORDER_COLOR_DISABLED = colors.get_color('#333333')
-
-        colors.BLOCK_ENABLED_COLOR = colors.get_color('#2b2d30')
-        colors.BLOCK_DISABLED_COLOR = colors.get_color('#1a1a1a')
-        colors.BLOCK_BYPASSED_COLOR = colors.get_color('#3c3f25')
-
-        colors.CONNECTION_ENABLED_COLOR = colors.get_color('#ffffff')  # pure white for connections
-        colors.CONNECTION_DISABLED_COLOR = colors.get_color('#555555')
-        colors.CONNECTION_ERROR_COLOR = colors.get_color('#ff6b6b')
-
-        colors.MISSING_BLOCK_BACKGROUND_COLOR = colors.get_color('#421d1d')
-        colors.MISSING_BLOCK_BORDER_COLOR = colors.get_color('#ff6b6b')
-        colors.BLOCK_DEPRECATED_BACKGROUND_COLOR = colors.get_color('#4d3c1a')
-        colors.BLOCK_DEPRECATED_BORDER_COLOR = colors.get_color('#ffb86c')
-
-        # Patch directly copied color references to ensure drawing area uses the dark background
-        DrawingArea.FLOWGRAPH_BACKGROUND_COLOR = dark_bg
-        Utils.FLOWGRAPH_BACKGROUND_COLOR = dark_bg
-    except Exception as e:
-        print(f"Warning: Failed to patch GRC canvas colors: {e}")
-
-    # 4. Monkeypatch Connection class to force white/high-contrast lines
-    try:
-        import gnuradio.grc.gui.canvas.connection as connection
-        original_init = connection.Connection.__init__
-
-        def patched_init(self, *args, **kwargs):
-            original_init(self, *args, **kwargs)
-            # Keep message connections dashed (color1 is None), but set line colors to white
-            if self._color1 is None:
-                self._color2 = connection.colors.CONNECTION_ENABLED_COLOR
-            else:
-                self._color1 = connection.colors.CONNECTION_ENABLED_COLOR
-                self._color2 = connection.colors.CONNECTION_ENABLED_COLOR
-
-        connection.Connection.__init__ = patched_init
-    except Exception as e:
-        print(f"Warning: Failed to patch connection colors: {e}")
+    pass
 
 
 from grc_agent.adapter import get_gui_platform, gui_application_cls
@@ -96,65 +30,9 @@ GRC_EXTENSIONS = (".grc", ".yml", ".yaml")
 
 _GLOBAL_CSS_TEMPLATE = """
 * { font-size: %(base)dpx; }
-window, dialog, window dialog, .window, .dialog {
-    background-color: #1e1e1e;
-    color: #e0e0e0;
-}
-window notebook, dialog notebook, notebook, scrolledwindow, viewport {
-    background-color: #1e1e1e;
-    border-color: #323232;
-}
-notebook tab {
-    background-color: #2b2d30;
-    color: #a0a0a0;
-    padding: 4px 8px;
-}
-notebook tab:checked, notebook tab:active {
-    background-color: #1e1e1e;
-    color: #ffffff;
-    border-top: 2px solid #007acc;
-}
-textview text {
-    background-color: #181818;
-    color: #e0e0e0;
-}
-dialog entry, window entry, entry {
-    background-color: #2b2d30;
-    color: #ffffff;
-    border: 1px solid #3c3c3c;
-    border-radius: 4px;
-}
-menu, menuitem, menubar, popover, combobox, combobox button, combobox cellview, treeview, treeview header, headerbar, dialog headerbar, dialog .titlebar {
-    background-color: #1e1e1e;
-    background-image: none;
-    color: #e0e0e0;
-    border-color: #323232;
-}
-menuitem:hover, menuitem:selected, menuitem:active, combobox button:hover, treeview:hover, treeview:selected, headerbar button:hover, dialog headerbar button:hover {
-    background-color: #2b2d30;
-    color: #ffffff;
-}
-menuitem label, treeview header label, headerbar label, dialog headerbar label {
-    color: inherit;
-}
-button, dialog button, dialog .button, dialog buttonbox button, .action-area button {
-    background-color: #2b2d30;
-    color: #e0e0e0;
-    border: 1px solid #3c3c3c;
-    border-radius: 4px;
-    padding: 4px 10px;
-}
-button:hover, dialog button:hover, dialog .button:hover, dialog buttonbox button:hover, .action-area button:hover {
-    background-color: #3e3e40;
-    color: #ffffff;
-}
-button:active, button:checked, dialog button:active, dialog buttonbox button:active, .action-area button:active {
-    background-color: #007acc;
-    color: #ffffff;
-}
 .toolbar-btn { padding: 4px 8px; }
-.validation-valid { color: #6cc46c; font-weight: bold; }
-.validation-invalid { color: #ff8a80; font-weight: bold; }
+.validation-valid { color: #2e7d32; font-weight: bold; }
+.validation-invalid { color: #c62828; font-weight: bold; }
 """
 
 _BASE_FONT_SIZE = 13
