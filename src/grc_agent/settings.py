@@ -68,9 +68,7 @@ def env_path() -> Path:
     if override:
         return Path(override)
     found = find_dotenv(usecwd=True)
-    if found:
-        return Path(found)
-    return Path.home() / ".config" / "grc_agent" / ".env"
+    return Path(found) if found else Path.home() / ".config" / "grc_agent" / ".env"
 
 
 def default_settings() -> dict:

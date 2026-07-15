@@ -33,11 +33,15 @@ def _apply_dark_theme_patches() -> None:
     except Exception as e:
         print(f"Warning: Failed to patch have_dark_theme: {e}")
 
-    # 3. Monkeypatch colors module before it's used
+    # 3. Monkeypatch colors module and its direct imports
     try:
+        import gnuradio.grc.gui.DrawingArea as DrawingArea
+        import gnuradio.grc.gui.Utils as Utils
         from gnuradio.grc.gui.canvas import colors
 
-        colors.FLOWGRAPH_BACKGROUND_COLOR = colors.get_color('#1e1e1e')
+        dark_bg = colors.get_color('#1e1e1e')
+
+        colors.FLOWGRAPH_BACKGROUND_COLOR = dark_bg
         colors.FONT_COLOR = colors.get_color('#e0e0e0')
         colors.COMMENT_BACKGROUND_COLOR = colors.get_color('#252526')
         colors.FLOWGRAPH_EDGE_COLOR = colors.get_color('#252526')
@@ -49,7 +53,7 @@ def _apply_dark_theme_patches() -> None:
         colors.BLOCK_DISABLED_COLOR = colors.get_color('#1a1a1a')
         colors.BLOCK_BYPASSED_COLOR = colors.get_color('#3c3f25')
 
-        colors.CONNECTION_ENABLED_COLOR = colors.get_color('#e0e0e0')
+        colors.CONNECTION_ENABLED_COLOR = colors.get_color('#ffffff')  # pure white for connections
         colors.CONNECTION_DISABLED_COLOR = colors.get_color('#555555')
         colors.CONNECTION_ERROR_COLOR = colors.get_color('#ff6b6b')
 
@@ -57,10 +61,31 @@ def _apply_dark_theme_patches() -> None:
         colors.MISSING_BLOCK_BORDER_COLOR = colors.get_color('#ff6b6b')
         colors.BLOCK_DEPRECATED_BACKGROUND_COLOR = colors.get_color('#4d3c1a')
         colors.BLOCK_DEPRECATED_BORDER_COLOR = colors.get_color('#ffb86c')
+
+        # Patch directly copied color references to ensure drawing area uses the dark background
+        DrawingArea.FLOWGRAPH_BACKGROUND_COLOR = dark_bg
+        Utils.FLOWGRAPH_BACKGROUND_COLOR = dark_bg
     except Exception as e:
         print(f"Warning: Failed to patch GRC canvas colors: {e}")
 
-_apply_dark_theme_patches()
+    # 4. Monkeypatch Connection class to force white/high-contrast lines
+    try:
+        import gnuradio.grc.gui.canvas.connection as connection
+        original_init = connection.Connection.__init__
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            # Keep message connections dashed (color1 is None), but set line colors to white
+            if self._color1 is None:
+                self._color2 = connection.colors.CONNECTION_ENABLED_COLOR
+            else:
+                self._color1 = connection.colors.CONNECTION_ENABLED_COLOR
+                self._color2 = connection.colors.CONNECTION_ENABLED_COLOR
+
+        connection.Connection.__init__ = patched_init
+    except Exception as e:
+        print(f"Warning: Failed to patch connection colors: {e}")
+
 
 from grc_agent.adapter import get_gui_platform, gui_application_cls
 from grc_agent.agent_factory import build_interactive_agent
@@ -71,11 +96,11 @@ GRC_EXTENSIONS = (".grc", ".yml", ".yaml")
 
 _GLOBAL_CSS_TEMPLATE = """
 * { font-size: %(base)dpx; }
-window, dialog {
-    background: #1e1e1e;
+window, dialog, window dialog, .window, .dialog {
+    background-color: #1e1e1e;
     color: #e0e0e0;
 }
-notebook, scrolledwindow, viewport {
+window notebook, dialog notebook, notebook, scrolledwindow, viewport {
     background-color: #1e1e1e;
     border-color: #323232;
 }
@@ -93,11 +118,39 @@ textview text {
     background-color: #181818;
     color: #e0e0e0;
 }
-entry {
+dialog entry, window entry, entry {
     background-color: #2b2d30;
     color: #ffffff;
     border: 1px solid #3c3c3c;
     border-radius: 4px;
+}
+menu, menuitem, menubar, popover, combobox, combobox button, combobox cellview, treeview, treeview header, headerbar, dialog headerbar, dialog .titlebar {
+    background-color: #1e1e1e;
+    background-image: none;
+    color: #e0e0e0;
+    border-color: #323232;
+}
+menuitem:hover, menuitem:selected, menuitem:active, combobox button:hover, treeview:hover, treeview:selected, headerbar button:hover, dialog headerbar button:hover {
+    background-color: #2b2d30;
+    color: #ffffff;
+}
+menuitem label, treeview header label, headerbar label, dialog headerbar label {
+    color: inherit;
+}
+button, dialog button, dialog .button, dialog buttonbox button, .action-area button {
+    background-color: #2b2d30;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+    border-radius: 4px;
+    padding: 4px 10px;
+}
+button:hover, dialog button:hover, dialog .button:hover, dialog buttonbox button:hover, .action-area button:hover {
+    background-color: #3e3e40;
+    color: #ffffff;
+}
+button:active, button:checked, dialog button:active, dialog buttonbox button:active, .action-area button:active {
+    background-color: #007acc;
+    color: #ffffff;
 }
 .toolbar-btn { padding: 4px 8px; }
 .validation-valid { color: #6cc46c; font-weight: bold; }
@@ -213,19 +266,21 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     _apply_global_css()
     platform = get_gui_platform()
     Application = gui_application_cls()
+    _apply_dark_theme_patches()
     argv = [a for a in sys.argv[1:] if a.endswith(GRC_EXTENSIONS)]
     app = Application(argv, platform)
     app.register(None)
     app.activate()
 
-    window = Gtk.Application.get_default().get_active_window()
+    app = Gtk.Application.get_default()
+    window = app.get_active_window() if app else None
     if not window:
         print("Failed to get GRC active MainWindow")
         sys.exit(1)
 
     main_widget = window.main
     parent = main_widget.get_parent()
-    outer_paned = Gtk.HPaned()
+    outer_paned = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
     parent.remove(main_widget)
     outer_paned.pack1(main_widget, resize=True, shrink=False)
 
@@ -278,7 +333,8 @@ def main() -> None:
         loop.stop()
 
     window.connect("destroy", lambda *_: _shutdown())
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (_shutdown(), False)[1])
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: (_shutdown(), False)[1])
 
     window.show_all()
     loop.run_forever()

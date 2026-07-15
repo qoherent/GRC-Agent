@@ -18,7 +18,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Gdk, GObject, Gtk, Pango
+from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 from pydantic_ai import (
     Agent,
     FunctionToolCallEvent,
@@ -27,6 +27,12 @@ from pydantic_ai import (
     PartStartEvent,
     TextPartDelta,
     ThinkingPartDelta,
+)
+from pydantic_ai.exceptions import (
+    ModelAPIError,
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
 )
 from pydantic_ai.messages import ModelMessage, TextPart, ThinkingPart, ToolCallPart
 from pydantic_graph import End
@@ -213,6 +219,14 @@ def _markdown_to_pango(text: str) -> str:
         return f"<tt>{esc}</tt>"
 
     return re.sub(r"\x00B(\d+)\x00", _restore, work)
+
+
+def _safe_set_markup(label: Gtk.Label, text: str) -> None:
+    try:
+        label.set_markup(_markdown_to_pango(text))
+    except Exception:
+        # Fall back to raw text if markup fails (e.g. malformed markdown from the model)
+        label.set_text(text)
 
 
 class _StreamCtx:
@@ -430,7 +444,7 @@ class ChatSidebar(Gtk.Box):
             self._close_thinking(ctx)
             self._close_text(ctx)
             ctx.text_acc = part.content or ""
-            self._ensure_text(ctx).set_markup(_markdown_to_pango(ctx.text_acc))
+            _safe_set_markup(self._ensure_text(ctx), ctx.text_acc)
         elif isinstance(part, ToolCallPart):
             self._close_text(ctx)
             self._close_thinking(ctx)
@@ -461,7 +475,7 @@ class ChatSidebar(Gtk.Box):
 
     def _close_text(self, ctx: _StreamCtx) -> None:
         if ctx.text_lbl is not None and ctx.text_acc:
-            ctx.text_lbl.set_markup(_markdown_to_pango(ctx.text_acc))
+            _safe_set_markup(ctx.text_lbl, ctx.text_acc)
         ctx.text_lbl = None
         ctx.text_acc = ""
 
@@ -585,7 +599,7 @@ class ChatSidebar(Gtk.Box):
         self._set_busy(True)
         self._chat_task = asyncio.ensure_future(self._run_agent_turn(text))
 
-    async def _run_agent_turn(self, text: str) -> None:
+    async def _run_agent_turn(self, text: str) -> None:  # noqa: C901
         if self._agent is None:
             self._append_error("No agent configured.")
             return
@@ -612,12 +626,29 @@ class ChatSidebar(Gtk.Box):
         except asyncio.CancelledError:
             self._append_error("[aborted]")
             raise
-        except Exception:
+        except ModelHTTPError as e:
+            _log.exception("agent run failed with HTTP error")
+            msg = f"Model HTTP {e.status_code} Error"
+            if e.body:
+                msg += f": {e.body}"
+            else:
+                msg += f" from {e.model_name}"
+            self._append_error(msg)
+        except UsageLimitExceeded as e:
+            _log.exception("agent run failed due to usage limit")
+            self._append_error(f"Usage Limit Exceeded: {e}")
+        except ModelAPIError as e:
+            _log.exception("agent run failed with API error")
+            self._append_error(f"Model API Error: {e}")
+        except UnexpectedModelBehavior as e:
+            _log.exception("agent run failed with unexpected behavior")
+            self._append_error(f"Unexpected Model Behavior: {e}")
+        except Exception as e:
             _log.exception("agent run failed")
-            self._append_error("Agent error — check logs.")
+            self._append_error(f"Agent error: {e}")
         finally:
             if ctx.text_lbl is not None and ctx.text_acc:
-                ctx.text_lbl.set_markup(_markdown_to_pango(ctx.text_acc))
+                _safe_set_markup(ctx.text_lbl, ctx.text_acc)
                 ctx.text_lbl = None
                 ctx.text_acc = ""
             self._set_busy(False)
@@ -638,10 +669,13 @@ class ChatSidebar(Gtk.Box):
                 self._entry.grab_focus()
 
     def _scroll_to_bottom(self) -> None:
-        adj = self._scrolled.get_vadjustment()
-        adj.set_value(adj.get_upper() - adj.get_page_size())
+        def _do_scroll():
+            adj = self._scrolled.get_vadjustment()
+            adj.set_value(adj.get_upper() - adj.get_page_size())
+            return False
+        GLib.idle_add(_do_scroll)
 
-    def _open_settings(self) -> None:
+    def _open_settings(self) -> None:  # noqa: C901
         toplevel = self.get_toplevel()
         if not isinstance(toplevel, Gtk.Window):
             toplevel = None
@@ -705,7 +739,9 @@ class ChatSidebar(Gtk.Box):
                 save_settings(provider, model)
             key_var = _PROVIDER_API_KEY.get(provider)
             key_val = key_entry.get_text().strip()
-            if key_var and key_val:
+            if key_var:
                 upsert_env_key(key_var, key_val)
+
+
 
         dlg.destroy()
