@@ -86,7 +86,8 @@ class NativeCanvasManager:
         self.last_disk_hash: str | None = None
         self.last_synced_export_hash: str | None = None
         self._last_block_names: set[str] = set()
-        self._blocks_visible = False
+        from gnuradio.grc.gui import Actions
+        self._blocks_visible = bool(Actions.TOGGLE_BLOCKS_WINDOW.get_active())
         self.panning = False
         self.pan_start_x = 0.0
         self.pan_start_y = 0.0

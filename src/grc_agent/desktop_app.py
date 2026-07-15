@@ -146,12 +146,12 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     Application = gui_application_cls()
     _apply_dark_theme_patches()
     argv = [a for a in sys.argv[1:] if a.endswith(GRC_EXTENSIONS)]
-    app = Application(argv, platform)
-    app.register(None)
-    app.activate()
+    grc_app = Application(argv, platform)
+    grc_app.register(None)
+    grc_app.activate()
 
-    app = Gtk.Application.get_default()
-    window = app.get_active_window() if app else None
+    gtk_app = Gtk.Application.get_default()
+    window = gtk_app.get_active_window() if gtk_app else None
     if not window:
         print("Failed to get GRC active MainWindow")
         sys.exit(1)
@@ -173,7 +173,8 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
         sidebar.set_status(f"Model warning: {model_error} (using defaults)", error=True)
 
     canvas = NativeCanvasManager(window, platform)
-    canvas.app = app
+    canvas.app = grc_app
+    sidebar.set_blocks_expanded(canvas._blocks_visible)
     canvas.on_graphs_changed = lambda: _sync_sidebar(canvas, sidebar)
     canvas.setup_signal_handlers()
     proxy = NativeFlowgraphProxy(canvas)
