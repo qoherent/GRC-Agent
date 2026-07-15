@@ -14,6 +14,20 @@ import gbulb
 
 gbulb.install(gtk=True)
 
+# Patch gbulb to avoid AssertionError in ReadTransport._loop_reading when transports close/change
+try:
+    import gbulb.transports
+    _original_loop_reading = gbulb.transports.ReadTransport._loop_reading
+
+    def _patched_loop_reading(self, fut=None):
+        if fut is not None and self._read_fut is not fut and not (self._read_fut is None and self._closing):
+            return
+        return _original_loop_reading(self, fut)
+
+    gbulb.transports.ReadTransport._loop_reading = _patched_loop_reading
+except Exception as e:
+    print(f"Warning: Failed to patch gbulb transports: {e}")
+
 from gi.repository import Gdk, GLib, Gtk
 
 

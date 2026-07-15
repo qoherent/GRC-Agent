@@ -27,7 +27,7 @@ so the health check can see it immediately.
 import os
 from pathlib import Path
 
-from dotenv import dotenv_values, get_key, set_key
+from dotenv import dotenv_values, set_key
 
 _VALID_PROVIDERS = ("ollama", "openrouter", "ollama_cloud")
 
@@ -124,4 +124,4 @@ def save_settings(provider: str, model: str) -> None:
 
 def get_env_value(key: str) -> str | None:
     """Read a single key from the ``.env`` file (the saved source of truth)."""
-    return get_key(str(env_path()), key)
+    return dotenv_values(env_path()).get(key)
