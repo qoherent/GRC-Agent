@@ -2,49 +2,43 @@
 
 GRC-Agent is an agentic companion designed for digital signal processing (DSP) and software-defined radio (SDR) design, bridging natural language interaction with visual GNU Radio Companion (.grc) flowgraphs. 
 
-This document details the system's architecture, including its model-facing tools, RAG search setup, transactional mutation engine, and integration benchmark results.
+This document details the system's architecture, including its model-facing tools, RAG search setup, transactional mutation engine, and integration scenarios benchmark.
 
 ---
 
 ## System Architecture
 
-GRC-Agent is organized into a modular pipeline connecting the visual representation layer with the LLM reasoning core:
+GRC-Agent runs as a single-process, single-threaded native GTK3 desktop application. It unifies GNU Radio Companion's UI, the canvas drawing area, and the async agentic loop on a single event loop via `gbulb`, eliminating the need for separate server/virtualization layers.
 
 ```mermaid
 flowchart LR
-    User([User]) <--> WebApp[Starlette Web App]
-    WebApp <--> BroadwayCanvas[Broadway Canvas Subprocess]
-    WebApp <--> Agent[PydanticAI Agent]
+    User([User]) <--> ChatSidebar[Native GTK ChatSidebar]
+    ChatSidebar <--> Agent[PydanticAI Agent]
     Agent <--> Flowgraph[GNU Radio Flowgraph API]
-    BroadwayCanvas <--> Flowgraph
+    ChatSidebar <--> CanvasManager[Native Canvas Manager]
+    CanvasManager <--> Flowgraph
 ```
 
-- **Web Application**: Starlette server that manages interactive web chat, settings preferences, and coordinates the GTK Broadway display canvas.
-- **Virtualized GTK Canvas**: GTK application runner that loads the flowgraph, strips unnecessary desktop chrome, and exposes the visual drawing area to the browser via Broadway on a dedicated display port.
-- **Flowgraph Proxy**: Thread-safe state synchronization layer that coordinates file locking during load, edit, or reload operations.
-- **Agent Reasoning Core**: PydanticAI Agent that registers system prompts, capability plugins (such as `StopGracefully`), and manages the model-facing tools.
+- **Native Chat Sidebar**: A custom PyGObject `Gtk.Box` widget (`ChatSidebar`) integrated directly inside GRC's main window. It hosts the streaming message history list, settings menu, and controls.
+- **Native Canvas Manager**: A coordination layer (`NativeCanvasManager`) that connects to GRC's notebooks and drawing area. It tracks page selection, handles manual edits via file hashing, and hooks GRC's built-in actions.
+- **Flowgraph Proxy**: A transparent proxy layer (`NativeFlowgraphProxy`) that forwards agent tool queries and updates directly to GRC's active tab `FlowGraph` instance in-place.
+- **Agent Reasoning Core**: A PydanticAI Agent that registers system prompts, model-facing tools, and custom execution capabilities.
 
 ---
 
-## Web Dashboard & Chat Integration
+## Desktop Application & Layout Integration
 
-The GRC-Agent web dashboard provides a unified UI combining the virtualized GRC canvas and a custom conversational assistant.
+The application merges the GNU Radio Companion desktop canvas with the AI sidebar widget seamlessly:
 
-### 1. Starlette Backend & Streaming
-- **Agent Server**: Wires the PydanticAI agent to a Starlette server using `agent.to_web()`, exposing SSE streams under `/api/*` (compliant with the Vercel AI SDK UI Message Stream protocol).
-- **Stateless History**: The backend maintains no conversation state. The frontend client manages the active session and full chat history, transmitting the entire conversation thread as context for each new inference.
-- **Coexisting Routes**: Custom API endpoints for GRC state management (e.g., `/grc/open`, `/grc/undo`, `/grc/status`, `/grc/settings`) are prepended to the Starlette router, coexisting cleanly with PydanticAI's native routes.
+### 1. Unified Event Loop
+- **Gbulb Integration**: The application initializes the asyncio event loop using `gbulb.install(gtk=True)`. This bridges Python's async task execution with the GLib main loop, allowing agent completions and GRC drawing events to coexist safely on the same thread without cross-thread marshalling.
+- **Obsolete Future Protection**: Obsolete event loop transport assertions are bypassed cleanly to ensure terminal execution output remains noise-free.
 
-### 2. Client-Side SSE & Markdown Rendering
-- **Event Consumer**: A native, lightweight Event Source / SSE reader in `panel.js` consumes stream frames (`text-delta`, `reasoning-delta`, `tool-input-start`, `tool-output-available`) to display reasoning and tool arguments in real time.
-- **Safe Markdown**: Outputs are passed through a custom Markdown-to-HTML parser that escapes inputs to prevent arbitrary code injection, rendering code blocks, bold text, lists, and headings cleanly.
-
-### 3. GRC Panel & Layout Maximization
-- **Window Hiding**: GRC runs under Broadway inside the dashboard's iframe. To optimize workspace visibility, window decorations (`decorated = False`), the top menu bar, and the toolbar are hidden programmatically at startup.
-- **Panel Visibility**: The three GRC panels (Block Library, Console Panel, Variable Editor) are hidden by default on launch via their corresponding GRC action controllers:
-  * Block Library: `Actions.TOGGLE_BLOCKS_WINDOW` (Shortcut: `Ctrl+B`)
-  * Console Panel: `Actions.TOGGLE_CONSOLE_WINDOW` (Shortcut: `Ctrl+R`)
-  * Variable Editor: `Actions.TOGGLE_FLOW_GRAPH_VAR_EDITOR` (Shortcut: `Ctrl+E`)
+### 2. Panel & Layout Synchronization
+- **Pane Layout**: GRC's main window horizontal pane (`window.main`) is wrapped in an outer horizontal paned layout (`Gtk.Paned`), placing the GRC canvas and panels in the left pane and the Chat Sidebar in the right pane.
+- **Block Library Toggling**: GRC's native Block Library panel (`BlockTreeWindow`) is packed inside the main widget. The sidebar's toggle arrow connects directly to GRC's native `Actions.TOGGLE_BLOCKS_WINDOW` action to slide the block panel into view or collapse it dynamically.
+- **Divider Auto-Positioning**: When expanding/collapsing the block library panel via the sidebar toggle, the main widget pane positions are updated dynamically (collapsed to 100% of width, or expanded to 78%) to ensure GRC's block menu renders with adequate width.
+- **Safe Markdown Rendering**: Assistant responses are parsed to HTML with custom safe Pango markup formatting, falling back to raw text layout dynamically if malformed markdown syntax is emitted by the LLM.
 
 ---
 
