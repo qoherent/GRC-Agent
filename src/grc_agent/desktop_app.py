@@ -185,14 +185,29 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     window.connect("key-press-event", _on_window_key_press, canvas, sidebar)
 
     sidebar.connect("new-session-clicked", lambda *_: _on_new_session(sidebar))
-    sidebar.connect("toggle-blocks-panel", lambda *_: sidebar.set_blocks_expanded(canvas.toggle_blocks_panel()))
+
+    def _on_toggle_blocks(*_):
+        expanded = canvas.toggle_blocks_panel()
+        sidebar.set_blocks_expanded(expanded)
+        w_main = main_widget.get_allocated_width()
+        if expanded:
+            main_widget.set_position(int(w_main * 0.78))
+        else:
+            main_widget.set_position(w_main)
+
+    sidebar.connect("toggle-blocks-panel", _on_toggle_blocks)
 
     def _set_pane_positions() -> bool:
+        from gnuradio.grc.gui import Actions
         w = window.get_allocated_width()
         h = window.get_allocated_height()
         if w > 100:
             outer_paned.set_position(int(w * 0.70))
-            main_widget.set_position(int(w * 0.70 * 0.86))
+            w_main = int(w * 0.70)
+            if Actions.TOGGLE_BLOCKS_WINDOW.get_active():
+                main_widget.set_position(int(w_main * 0.78))
+            else:
+                main_widget.set_position(w_main)
         if h > 100 and hasattr(window, "left"):
             window.left.set_position(int(h * 0.78))
         return False
