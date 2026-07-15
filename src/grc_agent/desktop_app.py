@@ -1,0 +1,289 @@
+# ruff: noqa: E402
+import asyncio
+import contextlib
+import signal
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+
+import gbulb
+
+gbulb.install(gtk=True)
+
+from gi.repository import Gdk, GLib, Gtk
+
+
+def _apply_dark_theme_patches() -> None:
+    # 1. Force Gtk settings to prefer dark theme
+    try:
+        settings = Gtk.Settings.get_default()
+        if settings:
+            settings.set_property("gtk-application-prefer-dark-theme", True)
+    except Exception as e:
+        print(f"Warning: Failed to set gtk-application-prefer-dark-theme: {e}")
+
+    # 2. Monkeypatch have_dark_theme in ParamWidgets
+    try:
+        import gnuradio.grc.gui.ParamWidgets as ParamWidgets
+        ParamWidgets.have_dark_theme = lambda: True
+    except Exception as e:
+        print(f"Warning: Failed to patch have_dark_theme: {e}")
+
+    # 3. Monkeypatch colors module before it's used
+    try:
+        from gnuradio.grc.gui.canvas import colors
+
+        colors.FLOWGRAPH_BACKGROUND_COLOR = colors.get_color('#1e1e1e')
+        colors.FONT_COLOR = colors.get_color('#e0e0e0')
+        colors.COMMENT_BACKGROUND_COLOR = colors.get_color('#252526')
+        colors.FLOWGRAPH_EDGE_COLOR = colors.get_color('#252526')
+        colors.HIGHLIGHT_COLOR = colors.get_color('#00ffcc')
+        colors.BORDER_COLOR = colors.get_color('#4b4b4b')
+        colors.BORDER_COLOR_DISABLED = colors.get_color('#333333')
+
+        colors.BLOCK_ENABLED_COLOR = colors.get_color('#2b2d30')
+        colors.BLOCK_DISABLED_COLOR = colors.get_color('#1a1a1a')
+        colors.BLOCK_BYPASSED_COLOR = colors.get_color('#3c3f25')
+
+        colors.CONNECTION_ENABLED_COLOR = colors.get_color('#e0e0e0')
+        colors.CONNECTION_DISABLED_COLOR = colors.get_color('#555555')
+        colors.CONNECTION_ERROR_COLOR = colors.get_color('#ff6b6b')
+
+        colors.MISSING_BLOCK_BACKGROUND_COLOR = colors.get_color('#421d1d')
+        colors.MISSING_BLOCK_BORDER_COLOR = colors.get_color('#ff6b6b')
+        colors.BLOCK_DEPRECATED_BACKGROUND_COLOR = colors.get_color('#4d3c1a')
+        colors.BLOCK_DEPRECATED_BORDER_COLOR = colors.get_color('#ffb86c')
+    except Exception as e:
+        print(f"Warning: Failed to patch GRC canvas colors: {e}")
+
+_apply_dark_theme_patches()
+
+from grc_agent.adapter import get_gui_platform, gui_application_cls
+from grc_agent.agent_factory import build_interactive_agent
+from grc_agent.chat_sidebar import ChatSidebar
+from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
+
+GRC_EXTENSIONS = (".grc", ".yml", ".yaml")
+
+_GLOBAL_CSS_TEMPLATE = """
+* { font-size: %(base)dpx; }
+window, dialog {
+    background: #1e1e1e;
+    color: #e0e0e0;
+}
+notebook, scrolledwindow, viewport {
+    background-color: #1e1e1e;
+    border-color: #323232;
+}
+notebook tab {
+    background-color: #2b2d30;
+    color: #a0a0a0;
+    padding: 4px 8px;
+}
+notebook tab:checked, notebook tab:active {
+    background-color: #1e1e1e;
+    color: #ffffff;
+    border-top: 2px solid #007acc;
+}
+textview text {
+    background-color: #181818;
+    color: #e0e0e0;
+}
+entry {
+    background-color: #2b2d30;
+    color: #ffffff;
+    border: 1px solid #3c3c3c;
+    border-radius: 4px;
+}
+.toolbar-btn { padding: 4px 8px; }
+.validation-valid { color: #6cc46c; font-weight: bold; }
+.validation-invalid { color: #ff8a80; font-weight: bold; }
+"""
+
+_BASE_FONT_SIZE = 13
+_SCALE_MIN = 0.8
+_SCALE_MAX = 2.0
+_SCALE_STEP = 0.1
+_scale_factor = 1.4
+_css_provider: Gtk.CssProvider | None = None
+
+
+def _apply_global_css() -> None:
+    global _css_provider
+    screen = Gdk.Screen.get_default()
+    if screen is None:
+        return
+    base = int(_BASE_FONT_SIZE * _scale_factor)
+    css = _GLOBAL_CSS_TEMPLATE % {"base": base}
+    if _css_provider is None:
+        _css_provider = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, _css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+    _css_provider.load_from_data(css.encode("utf-8"))
+
+
+def _update_scale(delta: float) -> None:
+    global _scale_factor
+    _scale_factor = max(_SCALE_MIN, min(_SCALE_MAX, _scale_factor + delta))
+    _apply_global_css()
+
+
+def _reset_scale() -> None:
+    global _scale_factor
+    _scale_factor = 1.0
+    _apply_global_css()
+
+
+def _apply_canvas_zoom(canvas: NativeCanvasManager, delta: float) -> None:
+    if not (canvas.drawing_area and hasattr(canvas.drawing_area, "zoom_factor")):
+        return
+    current = canvas.drawing_area.zoom_factor
+    canvas.drawing_area.zoom_factor = max(0.5, min(3.0, current + delta))
+    canvas.drawing_area._update_after_zoom = True
+    canvas.drawing_area.queue_draw()
+
+
+def _on_window_key_press(
+    _window: Gtk.Window,
+    event: Gdk.EventKey,
+    canvas: NativeCanvasManager,
+    sidebar: ChatSidebar,
+) -> bool:
+    accel = event.state & Gdk.ModifierType.CONTROL_MASK
+    if not accel:
+        return False
+    key = event.keyval
+    if key in (Gdk.KEY_plus, Gdk.KEY_KP_Add, Gdk.KEY_equal):
+        _update_scale(_SCALE_STEP)
+        _apply_canvas_zoom(canvas, _SCALE_STEP)
+        sidebar.set_status(f"Zoom: {int(_scale_factor * 100)}%")
+        return True
+    if key in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
+        _update_scale(-_SCALE_STEP)
+        _apply_canvas_zoom(canvas, -_SCALE_STEP)
+        sidebar.set_status(f"Zoom: {int(_scale_factor * 100)}%")
+        return True
+    if key == Gdk.KEY_0:
+        _reset_scale()
+        if canvas.drawing_area and hasattr(canvas.drawing_area, "zoom_factor"):
+            canvas.drawing_area.zoom_factor = 1.0
+            canvas.drawing_area._update_after_zoom = True
+            canvas.drawing_area.queue_draw()
+        sidebar.set_status("Zoom reset")
+        return True
+    return False
+
+
+def _show_status(sidebar: ChatSidebar, msg: str, *, error: bool = False) -> None:
+    sidebar.set_status(msg, error=error)
+
+
+def _on_new_session(sidebar: ChatSidebar) -> None:
+    sidebar.clear_messages()
+    _show_status(sidebar, "Chat history cleared.")
+
+
+def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
+    """Update sidebar to match the current GRC page state."""
+    page = canvas.current_page
+    name = None
+    if page:
+        p = page.file_path
+        if p:
+            name = Path(p).stem
+        elif hasattr(page.flow_graph, "get_option"):
+            with contextlib.suppress(Exception):
+                name = page.flow_graph.get_option("title") or page.flow_graph.get_option("id")
+        if not name:
+            name = "untitled"
+    sidebar.set_active_graph(name)
+    fg = canvas.current_flow_graph
+    if fg is not None:
+        sidebar.set_input_enabled(True)
+    else:
+        sidebar.set_input_enabled(False)
+
+
+def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlowgraphProxy]:  # noqa: C901
+    _apply_global_css()
+    platform = get_gui_platform()
+    Application = gui_application_cls()
+    argv = [a for a in sys.argv[1:] if a.endswith(GRC_EXTENSIONS)]
+    app = Application(argv, platform)
+    app.register(None)
+    app.activate()
+
+    window = Gtk.Application.get_default().get_active_window()
+    if not window:
+        print("Failed to get GRC active MainWindow")
+        sys.exit(1)
+
+    main_widget = window.main
+    parent = main_widget.get_parent()
+    outer_paned = Gtk.HPaned()
+    parent.remove(main_widget)
+    outer_paned.pack1(main_widget, resize=True, shrink=False)
+
+    sidebar = ChatSidebar()
+    sidebar.set_size_request(350, -1)
+    outer_paned.pack2(sidebar, resize=True, shrink=False)
+    parent.pack_start(outer_paned, expand=True, fill=True, padding=0)
+
+    agent, model_error = build_interactive_agent()
+    sidebar.set_agent(agent)
+    if model_error:
+        sidebar.set_status(f"Model warning: {model_error} (using defaults)", error=True)
+
+    canvas = NativeCanvasManager(window, platform)
+    canvas.app = app
+    canvas.on_graphs_changed = lambda: _sync_sidebar(canvas, sidebar)
+    canvas.setup_signal_handlers()
+    proxy = NativeFlowgraphProxy(canvas)
+    sidebar.set_flowgraph_proxy(proxy)
+
+    _sync_sidebar(canvas, sidebar)
+
+    window.connect("key-press-event", _on_window_key_press, canvas, sidebar)
+
+    sidebar.connect("new-session-clicked", lambda *_: _on_new_session(sidebar))
+    sidebar.connect("toggle-blocks-panel", lambda *_: sidebar.set_blocks_expanded(canvas.toggle_blocks_panel()))
+
+    def _set_pane_positions() -> bool:
+        w = window.get_allocated_width()
+        h = window.get_allocated_height()
+        if w > 100:
+            outer_paned.set_position(int(w * 0.70))
+            main_widget.set_position(int(w * 0.70 * 0.86))
+        if h > 100 and hasattr(window, "left"):
+            window.left.set_position(int(h * 0.78))
+        return False
+
+    GLib.idle_add(_set_pane_positions)
+
+    return window, canvas, sidebar, proxy
+
+
+def main() -> None:
+    window, canvas, sidebar, proxy = build_app()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _shutdown() -> None:
+        loop.stop()
+
+    window.connect("destroy", lambda *_: _shutdown())
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (_shutdown(), False)[1])
+
+    window.show_all()
+    loop.run_forever()
+    loop.close()
+
+
+if __name__ == "__main__":
+    main()

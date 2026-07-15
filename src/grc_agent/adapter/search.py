@@ -1,8 +1,4 @@
-
-
-
-
-def lite_web_search(query: str) -> str:
+async def lite_web_search(query: str) -> str:
     """Local web-search fallback for pydantic-ai's provider-adaptive
     ``WebSearch`` capability on providers without native search (Ollama).
 
@@ -22,9 +18,7 @@ def lite_web_search(query: str) -> str:
     import httpx
     from bs4 import BeautifulSoup
 
-    response = httpx.get(
-        "https://lite.duckduckgo.com/lite/",
-        params={"q": query},
+    async with httpx.AsyncClient(
         headers={
             "User-Agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
@@ -32,8 +26,9 @@ def lite_web_search(query: str) -> str:
         },
         timeout=15.0,
         follow_redirects=True,
-    )
-    response.raise_for_status()
+    ) as client:
+        response = await client.get("https://lite.duckduckgo.com/lite/", params={"q": query})
+        response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     links = soup.select("a.result-link")

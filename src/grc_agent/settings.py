@@ -25,10 +25,9 @@ so the health check can see it immediately.
 """
 
 import os
-import re
 from pathlib import Path
 
-from dotenv import dotenv_values, find_dotenv
+from dotenv import dotenv_values, find_dotenv, get_key, set_key
 
 _VALID_PROVIDERS = ("ollama", "openrouter", "ollama_cloud")
 
@@ -60,7 +59,7 @@ def env_path() -> Path:
        operator who wants prefs somewhere specific). Takes priority so a test
        redirect can never accidentally pick up the real repo `.env`.
     2. A `.env` in or above the CWD (find_dotenv, usecwd=True) — the dev
-       workflow (`uv run grc-agent-web` from the repo root reads repo `.env`).
+       workflow (`uv run grc-agent` from the repo root reads repo `.env`).
     3. `~/.config/grc_agent/.env` — the stable home for an installed package,
        where there is no repo root to find. Never CWD-relative (that produced
        inconsistent reads/writes across launch directories).
@@ -104,24 +103,10 @@ def load_settings() -> dict:
 
 
 def upsert_env_key(key: str, value: str, path: Path | None = None) -> None:
-    """Insert or update a `KEY=value` line in the `.env` file at `path`
-    (default: env_path()). Shared by save_settings (model/provider prefs) and
-    web.py's /grc/apikey (API keys) so both write to the same single file via
-    the same append-or-replace rule. Creates the file (and parents) on first
-    write."""
+    """Insert or update a ``KEY=value`` line in the ``.env`` file."""
     target = path or env_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        content = target.read_text(encoding="utf-8")
-        if re.search(rf"^{re.escape(key)}=.*$", content, re.MULTILINE):
-            content = re.sub(
-                rf"^{re.escape(key)}=.*$", f"{key}={value}", content, flags=re.MULTILINE
-            )
-        else:
-            content = content.rstrip("\n") + f"\n{key}={value}\n"
-        target.write_text(content, encoding="utf-8")
-    else:
-        target.write_text(f"{key}={value}\n", encoding="utf-8")
+    set_key(str(target), key, value, quote_mode="never")
 
 
 def save_settings(provider: str, model: str) -> None:
@@ -140,10 +125,5 @@ def save_settings(provider: str, model: str) -> None:
 
 
 def get_env_value(key: str) -> str | None:
-    """Read a single key from the `.env` file (the saved source of truth),
-    returning None if absent. Used by the health check and settings GET to
-    read API keys from the file rather than from os.environ — the latter is
-    the running process's startup snapshot and may differ from what's saved
-    (e.g. a key just written by /grc/apikey but not yet restarted)."""
-    vals = dotenv_values(env_path())
-    return vals.get(key)
+    """Read a single key from the ``.env`` file (the saved source of truth)."""
+    return get_key(str(env_path()), key)

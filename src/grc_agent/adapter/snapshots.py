@@ -24,10 +24,10 @@ def _prune_old_backups(backup_dir: Path) -> None:
 
 # ---- Undo/Redo: a shared, disk-based snapshot stack ----
 #
-# Both change_graph() (this process) and canvas_app.py's manual drag-save
-# path write to the SAME target .grc file, from two separate processes —
-# so the undo/redo history has to live on disk too, not as an in-memory
-# stack in either process. Mirrors GRC's own native undo (gnuradio.grc.gui's
+# Both change_graph() (agent edits) and native_canvas.py's manual drag-save
+# path write to the SAME target .grc file from the same process (single-thread
+# via gbulb), so the undo/redo history lives on disk for persistence across
+# sessions. Mirrors GRC's own native undo (gnuradio.grc.gui's
 # StateCache), which is also just export_data()/import_data() snapshots —
 # independent confirmation this is the right shape, not just a plausible
 # analogy. Each snapshot is a plain numbered .grc file (same serialization
@@ -74,7 +74,7 @@ def _prune_undo_stack(undo_dir: Path, cursor: dict) -> None:
 def push_undo_snapshot(flow_graph: Any, target_path: Path, initial_data: dict | None = None) -> None:
     """Push the CURRENT (post-edit) state of flow_graph onto target_path's
     undo stack. Called from both change_graph's own success path and
-    canvas_app.py's manual drag-save path, so both mutation sources share
+    native_canvas.py's manual drag-save path, so both mutation sources share
     one history. Deduplicates against a genuinely-unchanged state (e.g. a
     selection click that didn't move anything) via content hash. A new push
     after an undo discards the redo branch — standard undo/redo semantics.
@@ -139,10 +139,10 @@ def _apply_undo_redo_snapshot(
     payload = snapshot_path.read_text(encoding="utf-8")
 
     # Same lock file + atomic-replace convention as change_graph's own save
-    # and canvas_app.py's drag-save — a reader can never observe a torn file
+    # and native_canvas.py's drag-save — a reader can never observe a torn file
     # regardless of which of the three writers is active. The cursor
     # read-modify-write must be INSIDE this same critical section too (not
-    # just the target-file write): push_undo_snapshot (canvas_app.py's
+    # just the target-file write): push_undo_snapshot (native_canvas.py's
     # drag-save, and change_graph) always wraps its own cursor.json
     # read+write in this identical lock, so leaving this function's cursor
     # update unlocked let a concurrent drag-save read a stale cursor between
@@ -171,7 +171,7 @@ def _apply_undo_redo_snapshot(
 def undo_flowgraph(target_path: Path) -> dict:
     """Move target_path's undo cursor back one step and write that
     snapshot to disk. Does NOT touch any in-memory flow_graph object —
-    callers (web.py's /grc/undo) reload from disk afterward, the same way
+    callers (native_canvas.py undo/redo) reload from disk afterward, the same way
     grc_reload already does for a canvas-triggered disk change."""
     target_path = Path(target_path)
     undo_dir = _undo_dir(target_path)

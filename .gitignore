@@ -36,6 +36,8 @@ src/grc_agent/vectors/
 # Test / scratch output
 tests/output/
 tmp/
+playground/
+
 
 # experiments/*/ eval pipelines — generated artifacts only, scripts stay tracked
 experiments/*/raw_outputs/

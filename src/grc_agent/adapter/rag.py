@@ -49,23 +49,34 @@ def _embed_endpoint() -> tuple[str, str | None]:
     return "http://localhost:11434/v1", "not-needed"
 
 
-def _embed(model: str, input_text: str) -> list[float]:
-    """Shared embeddings.create() call for both query- and document-side
-    embedding. Raises a clear, actionable error on connection failure — the
-    bare "Connection error." from openai's client gives no hint that a local
-    Ollama server (not necessarily the active chat provider) is what's
-    actually being reached for embeddings."""
+_embed_client: OpenAI | None = None
+_embed_client_key: tuple[str, str] | None = None
+
+
+def _get_embed_client() -> OpenAI:
+    global _embed_client, _embed_client_key
     base_url, api_key = _embed_endpoint()
-    client = OpenAI(base_url=base_url, api_key=api_key)
+    key = (base_url, api_key)
+    if _embed_client is None or _embed_client_key != key:
+        _embed_client = OpenAI(base_url=base_url, api_key=api_key)
+        _embed_client_key = key
+    return _embed_client
+
+
+def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[float]]:
+    client = _get_embed_client()
     try:
         response = client.embeddings.create(model=model, input=input_text, encoding_format="float")
     except APIConnectionError as exc:
+        base_url, _ = _embed_endpoint()
         hint = (
             f"Is `ollama serve` running locally, with `ollama pull {model}` done?"
             if "localhost" in base_url
             else "Check OPENROUTER_API_KEY and network connectivity."
         )
         raise RuntimeError(f"Cannot reach the embeddings endpoint at {base_url}. {hint}") from exc
+    if isinstance(input_text, list):
+        return [d.embedding for d in response.data]
     return response.data[0].embedding
 
 
@@ -77,7 +88,9 @@ def embed_query(query: str) -> list[float]:
     use_prefix = provider != "openrouter"
 
     _, model = get_db_and_model("catalog")
-    return _embed(model, ("task: search result | query: " + query) if use_prefix else query)
+    result = _embed(model, ("task: search result | query: " + query) if use_prefix else query)
+    assert isinstance(result, list) and (not result or isinstance(result[0], float))
+    return result  # type: ignore[return-value]
 
 
 _DOCUMENT_PREFIX = "task: search result | document: "
@@ -94,8 +107,6 @@ def _cap_words(text: str, max_words: int) -> str:
 
 
 def embed_document(text: str, model: str) -> list[float]:
-    """Document-side counterpart to embed_query() — same backend-conditional
-    prefix convention, used only at ingestion time."""
     from grc_agent.settings import load_settings
 
     cfg = load_settings()
@@ -103,7 +114,9 @@ def embed_document(text: str, model: str) -> list[float]:
     use_prefix = provider != "openrouter"
 
     body = text if not use_prefix else _DOCUMENT_PREFIX + text
-    return _embed(model, body)
+    result = _embed(model, body)
+    assert isinstance(result, list) and (not result or isinstance(result[0], float))
+    return result  # type: ignore[return-value]
 
 
 _EMBEDDING_DIM_CACHE: dict[str, int] = {}
@@ -113,7 +126,7 @@ _CORPUS_VERSION_CACHE: dict[str, str] = {}
 # Exposed to the dashboard via /grc/status so the UI can show a "Building
 # knowledge database..." banner instead of an indefinite hang during the
 # first query_knowledge call (or after a provider switch that changes the
-# embedding model). Set by _ensure_db_built, read by web.py's grc_status.
+# embedding model). Set by _ensure_db_built, no longer read by any endpoint.
 _rag_building: dict[str, str | None] = {"domain": None, "status": None}
 
 
@@ -205,8 +218,8 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:  # noqa: C9
                     os.remove(db_path)
             else:
                 os.remove(db_path)
-        except Exception:
-            with contextlib.suppress(Exception):
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            with contextlib.suppress(OSError):
                 os.remove(db_path)
 
     _rag_building["domain"] = domain

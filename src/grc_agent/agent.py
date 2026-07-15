@@ -356,7 +356,7 @@ class StopGracefully(AbstractCapability[Any]):
 # lite.duckduckgo.com scrape (`lite_web_search`) and the bundled markdownify
 # fetch (`WebFetch(local=True)`). Eager (defer_loading=False) so the tools are
 # always callable — no load_capability round-trip. Defined once here and
-# imported by web.py / tests so every Agent shares the same instances.
+# imported by agent_factory.py / tests so every Agent shares the same instances.
 web_search_cap = WebSearch(local=lite_web_search)
 web_fetch_cap = WebFetch(local=True)
 
@@ -371,14 +371,10 @@ def fresh_agent(fixture):
 
 async def _with_state_lock(ctx: RunContext[Any], fn):
     """Run the zero-arg callable `fn` under ctx.deps's state lock if it
-    exposes one (a real FlowgraphProxy from web.py) — a no-op passthrough
-    otherwise (e.g. the scenario harness passes a raw flowgraph as deps,
-    which has no lock to acquire), exactly like the existing
-    hasattr(ctx.deps, "notify_edit")/"bump_version" guards below. Without
-    this, FlowgraphProxy's __getattr__/__setattr__ doing a fresh `_target`
-    lookup on every attribute access means a concurrent /grc/open or
-    /grc/close swap mid-call could make a single change_graph/inspect_graph
-    call silently straddle two different flowgraphs."""
+    exposes one — a no-op passthrough otherwise (the native desktop app's
+    NativeFlowgraphProxy returns None from get_state_lock since gbulb runs
+    everything on one thread; the scenario harness passes a raw flowgraph
+    as deps, which has no lock at all)."""
     if hasattr(ctx.deps, "get_state_lock"):
         lock = ctx.deps.get_state_lock()
         if lock is not None:
@@ -443,14 +439,6 @@ def validate_change_graph_args(
                 )
     except ModelRetry:
         raise
-    except Exception as exc:  # pragma: no cover
-        # Log unexpected validator errors so they surface as real failures
-        # rather than silently letting the model proceed with a broken harness.
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "validate_change_graph_args raised unexpectedly: %s", exc, exc_info=True
-        )
 
 
 async def change_graph_func(
@@ -806,4 +794,4 @@ def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:  # noq
 # resolve into edges, so g.build() raised GraphValidationError("no edges
 # from the start node") on the only two ways to reach it (running this file
 # directly, or `python -m grc_agent.agent` — neither is a registered
-# entry point; pyproject.toml's only console script is grc-agent-web).
+# entry point; pyproject.toml's console script is grc-agent).

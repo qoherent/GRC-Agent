@@ -4,6 +4,7 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 
 from grc_agent.adapter import _embed_endpoint, get_db_and_model
 from grc_agent.agent import build_scenario_model
+from grc_agent.agent_factory import _build_model, _retrying_http_client
 from grc_agent.settings import (
     env_path,
     get_env_value,
@@ -11,7 +12,6 @@ from grc_agent.settings import (
     save_settings,
     upsert_env_key,
 )
-from grc_agent.web import _build_model
 
 
 def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
@@ -102,37 +102,33 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
 
 
 def test_web_build_model_isolation(tmp_path, monkeypatch):
-    """Verify that web._build_model instantiates the correct model type based on the settings."""
+    """Verify that agent_factory._build_model instantiates the correct model type based on the settings."""
     tmp_env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-test-key")
 
-    import grc_agent.web
+    http_client = _retrying_http_client()
 
-    # Setup provider: ollama
-    monkeypatch.setitem(grc_agent.web._cfg, "provider", "ollama")
-    monkeypatch.setitem(grc_agent.web._cfg, "model", "qwen3.6:35b-a3b-q4_K_M")
-    m = _build_model()
+    cfg = {"provider": "ollama", "model": "qwen3.6:35b-a3b-q4_K_M"}
+    m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
     assert m.model_name == "qwen3.6:35b-a3b-q4_K_M"
 
-    # Setup provider: openrouter
-    monkeypatch.setitem(grc_agent.web._cfg, "provider", "openrouter")
-    monkeypatch.setitem(grc_agent.web._cfg, "model", "openai/gpt-4o-mini")
-    m = _build_model()
+    cfg = {"provider": "openrouter", "model": "openai/gpt-4o-mini"}
+    m = _build_model(cfg, http_client)
     assert isinstance(m, OpenRouterModel)
     assert m.model_name == "openai/gpt-4o-mini"
 
-    # Setup provider: ollama_cloud
-    monkeypatch.setitem(grc_agent.web._cfg, "provider", "ollama_cloud")
-    monkeypatch.setitem(grc_agent.web._cfg, "model", "deepseek-v4-flash:cloud")
-    m = _build_model()
+    cfg = {"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"}
+    m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
     assert m.model_name == "deepseek-v4-flash:cloud"
 
 
-def test_scenario_model_builder_uses_provider():
+def test_scenario_model_builder_uses_provider(monkeypatch):
     """Regression for P2-7: the scenario harness must be able to build a model
     for either backend so integration tests can run against Ollama, Ollama Cloud, or OpenRouter."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-test-key")
     ollama = build_scenario_model("ollama")
     assert isinstance(ollama, OllamaModel)
 
@@ -239,41 +235,24 @@ def test_save_settings_writes_ollama_cloud_model_to_env(tmp_path, monkeypatch):
 
 def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
     """When _build_model() fails (e.g. OpenRouter with no API key), the
-    fallback must NOT mutate _cfg — otherwise the dashboard's restart badge
-    would show a misleading "restart to apply" for a config that can never
-    succeed on restart. _model_build_error must be set instead."""
-    import grc_agent.web
-
-    # Save OpenRouter with no API key set
+    fallback in build_interactive_agent must NOT mutate the saved cfg."""
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
     save_settings("openrouter", "openai/gpt-4o-mini")
 
-    # Reload web module to trigger _build_model with the bad config
-    # (we can't re-import, so test the fallback logic directly)
-    grc_agent.web._cfg["provider"] = "openrouter"
-    grc_agent.web._cfg["model"] = "openai/gpt-4o-mini"
-    grc_agent.web._model_build_error = None
-
-    # _build_model for openrouter without OPENROUTER_API_KEY should raise
     import os
 
     had_key = os.environ.pop("OPENROUTER_API_KEY", None)
     try:
-        # The model construction itself may or may not raise depending on
-        # pydantic_ai version — what matters is that the fallback path in
-        # web.py's try/except handles it correctly. Test the fallback logic
-        # directly by simulating what the except block does.
         from grc_agent.settings import default_settings
 
-        saved_cfg = grc_agent.web._cfg
-        grc_agent.web._cfg = default_settings()
-        fallback_model = grc_agent.web._build_model()
-        grc_agent.web._cfg = saved_cfg
+        http_client = _retrying_http_client()
+        saved_cfg = load_settings()
+        fallback_cfg = default_settings()
+        fallback_model = _build_model(fallback_cfg, http_client)
         assert isinstance(fallback_model, OllamaModel)
-        # _cfg must still be the original (openrouter) config
-        assert grc_agent.web._cfg["provider"] == "openrouter"
-        assert grc_agent.web._cfg["model"] == "openai/gpt-4o-mini"
+        assert saved_cfg["provider"] == "openrouter"
+        assert saved_cfg["model"] == "openai/gpt-4o-mini"
     finally:
         if had_key is not None:
             os.environ["OPENROUTER_API_KEY"] = had_key

@@ -13,6 +13,7 @@ from grc_agent.adapter import (
     _find_block_placement,
     _rects_overlap,
     change_graph,
+    generate_flowgraph_py,
     inspect_graph,
     lite_web_search,
     load_flow_graph,
@@ -595,7 +596,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     # real 768-dim entry doesn't cause a false dimension mismatch (768 != 3)
     # that triggers a full DB rebuild instead of the cached dimension check
     # this test is measuring.
-    monkeypatch.setattr("grc_agent.adapter._EMBEDDING_DIM_CACHE", {})
+    monkeypatch.setattr("grc_agent.adapter.rag._EMBEDDING_DIM_CACHE", {})
 
     from grc_agent.settings import save_settings
 
@@ -635,7 +636,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
         call_count += 1
         return [0.0, 0.0, 0.0]
 
-    monkeypatch.setattr("grc_agent.adapter.embed_document", counting_embed_document)
+    monkeypatch.setattr("grc_agent.adapter.rag.embed_document", counting_embed_document)
 
     _ensure_db_built("catalog", db_path, model)
     first_count = call_count
@@ -706,8 +707,75 @@ def test_query_docs_rag():
 def test_web_search_success():
     # lite_web_search hits lite.duckduckgo.com directly (no LLM), and must NOT
     # silently return "No results" like the old adapter.web_search did.
-    res = lite_web_search("python programming language")
+    import asyncio
+    res = asyncio.run(lite_web_search("python programming language"))
     assert isinstance(res, str)
     assert len(res) > 0
     assert "No web results" not in res
     assert "python.org" in res
+
+
+# ==========================================
+# generate_flowgraph_py Unit Tests (4 tests)
+# ==========================================
+
+
+@pytest.fixture
+def temp_run_null_sink():
+    tmp_dir = tempfile.mkdtemp()
+    src = FIXTURES_DIR / "run_test_null_sink.grc"
+    dst = Path(tmp_dir) / "run_test_null_sink.grc"
+    shutil.copy2(src, dst)
+    yield dst
+    shutil.rmtree(tmp_dir)
+
+
+@pytest.fixture
+def temp_run_head():
+    tmp_dir = tempfile.mkdtemp()
+    src = FIXTURES_DIR / "run_test_head.grc"
+    dst = Path(tmp_dir) / "run_test_head.grc"
+    shutil.copy2(src, dst)
+    yield dst
+    shutil.rmtree(tmp_dir)
+
+
+@pytest.fixture
+def temp_broken():
+    tmp_dir = tempfile.mkdtemp()
+    src = FIXTURES_DIR / "broken_unconnected_sink.grc"
+    dst = Path(tmp_dir) / "broken_unconnected_sink.grc"
+    shutil.copy2(src, dst)
+    yield dst
+    shutil.rmtree(tmp_dir)
+
+
+def test_generate_flowgraph_py_validates_first(temp_broken):
+    fg = load_flow_graph(str(temp_broken))
+    with pytest.raises(ValueError, match="not valid"):
+        generate_flowgraph_py(fg, tempfile.mkdtemp())
+
+
+def test_generate_flowgraph_py_rejects_hb(temp_run_null_sink):
+    fg = load_flow_graph(str(temp_run_null_sink))
+    rop = fg.options_block.params["generate_options"]
+    rop.set_value("hb")
+    rop.rewrite()
+    with pytest.raises(ValueError, match="Hierarchical blocks"):
+        generate_flowgraph_py(fg, tempfile.mkdtemp())
+
+
+def test_generate_flowgraph_py_run_options_override(temp_run_null_sink):
+    fg = load_flow_graph(str(temp_run_null_sink))
+    output_dir = Path(temp_run_null_sink).parent / "run"
+    file_path = generate_flowgraph_py(fg, output_dir)
+    content = file_path.read_text()
+    assert "Press Enter to quit" not in content
+
+
+def test_generate_flowgraph_py_restores_run_options(temp_run_null_sink):
+    fg = load_flow_graph(str(temp_run_null_sink))
+    assert fg.get_option("run_options") == "prompt"
+    output_dir = Path(temp_run_null_sink).parent / "run"
+    generate_flowgraph_py(fg, output_dir)
+    assert fg.get_option("run_options") == "prompt"

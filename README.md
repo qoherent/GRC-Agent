@@ -5,29 +5,29 @@
 An autonomous AI agent for GNU Radio Companion. It reasons over your `.grc`
 flowgraph, edits it through validated tool calls, and grounds every answer in
 a RAG-searchable GNU Radio block catalog and docs wiki — chatting alongside a
-live, directly-editable canvas.
-
-![Dashboard UI](docs/UI.png)
-
-See [`AGENTS.md`](AGENTS.md) for architecture and design decisions — this file covers install + run.
+live, directly-editable canvas in a single native desktop app.
 
 ---
 
 ## Architecture at a glance
 
-Everything lives in the installable `grc_agent` package (`src/grc_agent/`):
+Single-process, single-thread native GTK3 app (via `gbulb`). GRC's own
+`MainWindow` is extended with a `ChatSidebar` — no web server, no subprocess,
+no Broadway. The agent streams responses directly on the GLib main loop.
 
 | File | Role |
 |------|------|
-| `adapter.py` | Sole `gnuradio` import. Flowgraph load/save, param/port filtering, the `change_graph` mutation engine, catalog/docs vector RAG. |
-| `agent.py` | Wires `adapter.py` into PydanticAI `Tool`s, defines the agent's system prompt and `WebSearch`/`WebFetch` capabilities. |
-| `web.py` | Starlette app: chat API, GNU Radio dashboard (`panel.html`), `/grc/*` JSON API, broadwayd/canvas subprocess lifecycle. |
-| `panel.html` / `panel.js` | The dashboard UI — plain HTML/CSS/vanilla JS, no build step. |
-| `canvas_app.py` | The live GTK canvas subprocess, embedded via Broadway (GTK's HTML5 backend). |
+| `desktop_app.py` | Entrypoint. `gbulb` install, GRC `Application`/`MainWindow`, sidebar packing, Ctrl+/- zoom. |
+| `chat_sidebar.py` | Native GTK chat UI. Streaming via `agent.iter()` + `run.next()`, settings dialog, slim blocks toggle, graph badge, Send/Stop button. |
+| `native_canvas.py` | GRC `MainWindow` signal-wiring: dynamic graph resolution from `window.current_page`, notebook tab tracking, manual-edit disk-sync, agent-edit redraw, pan. |
+| `agent_factory.py` | Builds the interactive `Agent` from saved settings (provider/model/API-key). |
+| `runner.py` | Flowgraph Run/Stop subprocess lifecycle. |
+| `adapter/` | Sole `gnuradio` importer. Flowgraph load/save, `change_graph`, param filtering, RAG with cached embed client, codegen. |
+| `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `change_graph`), capabilities, scenario harness. |
+| `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `python-dotenv`. |
 | `ingest.py` | Builds the catalog/docs vector databases on first use. |
-| `settings.py` | Persisted chat-agent preferences (provider, models, API keys) — all in `.env`. |
 
-Data flow: `.grc` file → `adapter.load_flow_graph()` → live `FlowGraph` → `inspect_graph()` → JSON tool result.
+Data flow: `.grc` file → GRC's `MainWindow` → live `FlowGraph` → shared between canvas and agent tools.
 
 ---
 
@@ -36,10 +36,8 @@ Data flow: `.grc` file → `adapter.load_flow_graph()` → live `FlowGraph` → 
 ### 1. Prerequisites
 - **GNU Radio 3.10+** with Python bindings:
   ```bash
-  sudo apt install gnuradio gnuradio-dev libgtk-3-bin  # Ubuntu/Debian
+  sudo apt install gnuradio gnuradio-dev  # Ubuntu/Debian
   ```
-  `libgtk-3-bin` provides `broadwayd` (the dashboard's live-canvas backend) —
-  explicit here since a minimal/`--no-install-recommends` setup can miss it.
 - **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/)**:
   ```bash
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -55,8 +53,8 @@ uv sync --extra dev --python .venv/bin/python
 `--system-site-packages` bridges the venv to your system-installed GNU Radio.
 
 ### 3. Setup LLM Backend
-Three chat providers, switchable anytime from the dashboard GUI. The active
-provider and model names persist in `.env` (restart the app to apply a change).
+Three chat providers, switchable anytime from the app's Settings dialog. The
+active provider and model names persist in `.env` (restart the app to apply).
 
 #### Option A: Ollama (Local & Free)
 ```bash
@@ -65,7 +63,7 @@ ollama pull embeddinggemma:latest    # embedding model
 ```
 
 <details>
-<summary>⚙️ Required: increase Ollama's context window (click to expand)</summary>
+<summary>Required: increase Ollama's context window (click to expand)</summary>
 
 Ollama's default context window is too small for multi-turn tool-calling.
 Set it to `120000`:
@@ -77,48 +75,46 @@ Set it to `120000`:
 </details>
 
 #### Option B: OpenRouter (Cloud)
-Get a key at [OpenRouter](https://openrouter.ai/), then `cp .env.example .env`
-and add it (or set it from the dashboard's model selector).
+Get a key at [OpenRouter](https://openrouter.ai/), then set it from the
+app's Settings dialog (gear button) or add `OPENROUTER_API_KEY` to `.env`.
 
 #### Option C: Ollama Cloud (Cloud)
-Get a key at [Ollama Cloud](https://ollama.cloud), then `cp .env.example .env`
-and set `OLLAMA_CLOUD_API_KEY` (or set it from the dashboard).
+Get a key at [Ollama Cloud](https://ollama.cloud), then set
+`OLLAMA_CLOUD_API_KEY` from Settings or `.env`.
 
 > [!NOTE]
-> Since Ollama Cloud does not currently host or expose cloud embedding models, the vector search (`query_knowledge`) still routes embeddings locally. Thus, even when using Ollama Cloud (or OpenRouter) as your chat provider, you will still need to have **Ollama installed locally** to serve the `embeddinggemma:latest` model. If Ollama Cloud introduces cloud embedding models in the future, we will update the system to support them.
+> Vector search (`query_knowledge`) always routes embeddings locally via
+> Ollama (`embeddinggemma:latest`), even when using a cloud chat provider.
 
 ---
 
 ## Usage
 
-### Launch the web GUI
+### Launch the app
 ```bash
-uv run grc-agent-web
+uv run grc-agent
 ```
-Opens the dashboard at **http://127.0.0.1:7932/grc/panel**. Override the
-host/port with `GRC_AGENT_HOST`/`GRC_AGENT_PORT`.
-
-Click **Browse** to load a `.grc` file. Once a conversation starts, Browse
-locks until you start a new one, so a chat never spans two flowgraphs.
+Opens a native GTK3 window with GRC's canvas on the left and the chat sidebar
+on the right. Open `.grc` files via GRC's native File menu — the agent
+auto-detects the active graph from GRC's notebook tabs.
 
 - **First run** builds the catalog/docs vector databases (a few minutes,
-  needs a reachable embeddings backend — see Option A). Cached afterward, and
-  rebuilt automatically if the embedding model or source data changes.
-- **Model settings:** switch provider/model anytime from the dashboard;
-  changes write to `.env` and need a restart (a badge flags a pending one).
-- **Undo/redo & validation:** one shared history across the agent's edits and
-  manual canvas edits. Validate re-runs GNU Radio's own native validation.
-- **Canvas:** fully editable — drag, double-click for properties, right-click
-  menu — same as native GRC. Every edit writes straight to the `.grc` file.
-  New blocks the agent adds are placed automatically, clear of existing ones.
+  needs a reachable embeddings backend). Cached afterward, rebuilt
+  automatically if the embedding model or source data changes.
+- **Model settings:** switch provider/model anytime from Settings (gear
+  button); changes write to `.env` and need a restart.
+- **Run/Stop & validation:** use GRC's own built-in toolbar buttons.
+- **Undo/redo:** GRC's native Ctrl+Z/Y works directly.
+- **Zoom:** Ctrl+/- to zoom the app, Ctrl+0 to reset.
+- **Block library:** toggle via the slim arrow button on the left edge of the sidebar.
 
 ### Run the tests
 ```bash
-uv run playwright install chromium      # one-time, for test_frontend.py
-uv run pytest tests/test_unit.py        # fast, no LLM
-uv run pytest tests/test_web_app.py     # web endpoints, no LLM
-uv run pytest tests/test_frontend.py    # dashboard UI, real Chromium, no LLM
-uv run pytest tests/test_integration.py # live model, ~15-20 min
+uv run pytest tests/test_unit.py              # fast, no LLM
+uv run pytest tests/test_isolation.py         # settings/model isolation, no LLM
+uv run pytest tests/test_button_integration.py # tool integration, Ollama Cloud
+uv run pytest tests/test_integration.py       # live model, ~15-20 min
+uv run ruff check                             # lint
 ```
 
 ### Example prompts

@@ -70,12 +70,12 @@ def gui_application_cls() -> Any:
 def disable_native_undo_redo() -> None:
     """GRC's own GUI ships a complete, working undo/redo (gnuradio.grc.gui's
     StateCache + Actions.FLOW_GRAPH_UNDO/REDO on Ctrl+Z/Ctrl+Y) that stays
-    reachable even with canvas_app.py's chrome hidden — live-confirmed: it
+    reachable even with native_canvas.py's chrome hidden — live-confirmed: it
     visibly moves things back on the canvas, but never touches disk, so it
     silently diverges from the shared undo/redo stack in this module (which
     IS disk-synced across both the agent and manual-edit paths). Disabling
     the native one keeps exactly one undo/redo history reachable, avoiding
-    that divergence. canvas_app.py calls this once at startup rather than
+    that divergence. native_canvas.py calls this once at startup rather than
     importing gnuradio.grc.gui.Actions itself, keeping this module the sole
     gnuradio importer."""
     from gnuradio.grc.gui import Actions
@@ -119,10 +119,10 @@ def set_blocks_panel_visibility(app: Any, visible: bool) -> bool:
 def flow_graph_content_hash(flow_graph: Any) -> str:
     """Hash of what write_flow_graph_atomic would currently write for this
     flow_graph — directly comparable to a hash of the on-disk file's raw
-    bytes (e.g. canvas_app.py's `_sha256_file`/`last_disk_hash`), since it's
+    bytes (e.g. native_canvas.py's `_sha256_file`/`last_disk_hash`), since it's
     the exact same serialization. Used to detect in-memory edits that
     haven't reached disk yet (a safety net for GTK-native interactions that
-    don't go through a specific, hooked signal — see canvas_app.py)."""
+    don't go through a specific, hooked signal — see native_canvas.py)."""
     return hashlib.sha256(_serialize_flow_graph(flow_graph).encode()).hexdigest()
 
 
@@ -916,7 +916,6 @@ def change_graph(  # noqa: C901
                 block_coords[instance_name] = placement
                 block.states["coordinate"] = list(placement)
                 block.params["id"].set_value(str(instance_name))
-                flow_graph.rewrite()
 
                 for k, v in (item.get("params") or {}).items():
                     if v == "auto":
@@ -1015,6 +1014,10 @@ def change_graph(  # noqa: C901
                                 "message": f"Failed to auto-resolve type parameter {k!r} on block {b.name!r}: {e}",
                             }
                         )
+
+        if add_blocks:
+            flow_graph.rewrite()
+            flow_graph._error_messages = []
 
         # Phase 6: update_states
         if update_states:
@@ -1137,3 +1140,42 @@ def change_graph(  # noqa: C901
         }
 
     return {"ok": True}
+
+
+def generate_flowgraph_py(flow_graph: Any, output_dir: "Path | str") -> Path:
+    """Generate a runnable Python script from a flowgraph.
+
+    Validates the graph, rejects hierarchical blocks (hb*) and C++ output.
+    Overrides run_options to 'run' (no input() prompt) — MUST call
+    .rewrite() after setting the value, or the cached _evaluated stays
+    stale and the generated script still contains input('Press Enter to
+    quit:').
+    """
+    flow_graph.validate()
+    if not flow_graph.is_valid():
+        errors = [msg for _, msg in flow_graph.iter_error_messages()]
+        raise ValueError(f"Flowgraph is not valid: {errors}")
+
+    gen_opts = flow_graph.get_option("generate_options")
+    if gen_opts.startswith("hb"):
+        raise ValueError("Hierarchical blocks cannot be run directly.")
+    if flow_graph.get_option("output_language") == "cpp":
+        raise ValueError("C++ output requires a build step — not supported.")
+
+    rop = flow_graph.options_block.params["run_options"]
+    original = rop.value
+    rop.set_value("run")
+    rop.rewrite()
+    try:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        from gnuradio.grc.core.generator.Generator import Generator
+
+        gen = Generator(flow_graph, str(out))
+        gen.write()
+        file_path = Path(gen.file_path)
+    finally:
+        rop.set_value(original)
+        rop.rewrite()
+
+    return file_path
