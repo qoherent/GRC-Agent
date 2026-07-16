@@ -1,6 +1,6 @@
 # Third-party content
 
-This package's source code is licensed under the MIT License (see `LICENSE`).
+This package's source code is licensed under the GNU Affero General Public License version 3 (see `LICENSE`).
 
 `grc_agent`'s docs vector-search corpus, bundled with this package at
 `grc_agent/docs/wiki_gnuradio_org/` (source: `docs/wiki_gnuradio_org/` in this
@@ -11,6 +11,6 @@ under the [Creative Commons Attribution-ShareAlike 3.0 Unported License
 otherwise noted on the individual page.
 
 This corpus is used unmodified as source data for `query_docs`'s vector
-search (see `AGENTS.md`) — it is not covered by this project's MIT license.
+search (see `AGENTS.md`) — it is not covered by this project's AGPL-3.0 license.
 If you redistribute this package, you must also comply with CC BY-SA 3.0 for
 the contents of that directory (attribution, share-alike, and so on).

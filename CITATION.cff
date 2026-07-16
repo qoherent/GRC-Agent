@@ -4,7 +4,7 @@ title: "GRC Agent"
 type: software
 date-released: 2026-06-05
 version: 0.1.0
-license: MIT
+license: AGPL-3.0-only
 authors:
   - name: Qoherent
 keywords:

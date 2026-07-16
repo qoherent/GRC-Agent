@@ -7,7 +7,7 @@ name = "grc-agent"
 version = "0.1.0"
 description = "Autonomous AI agent for GNU Radio Companion — reasons over, edits, and validates .grc flowgraphs, built on PydanticAI."
 readme = {file = "README.md", content-type = "text/markdown"}
-license = {text = "MIT"}
+license = {text = "AGPL-3.0-only"}
 authors = [{name = "Qoherent"}]
 keywords = [
     "gnu-radio",
@@ -22,7 +22,7 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
@@ -43,6 +43,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "grandalf>=0.8",
     "gbulb>=0.6.6",
+    "markdown-it-py>=3.0.0",
 ]
 
 [project.optional-dependencies]
