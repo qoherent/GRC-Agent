@@ -272,9 +272,9 @@ class NativeCanvasManager:
 
     def _setup_drawing_area(self) -> None:
         da = self.drawing_area
-        if da is None or id(da) in self._connected_drawing_areas:
+        if da is None or getattr(da, "_grc_agent_setup", False):
             return
-        self._connected_drawing_areas.add(id(da))
+        da._grc_agent_setup = True
 
         sw = self._get_scrolled_window()
         if sw is not None:

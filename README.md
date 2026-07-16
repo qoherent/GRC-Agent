@@ -1,6 +1,6 @@
 # Qoherent GRC Agent
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
 An autonomous AI agent for GNU Radio Companion. It reasons over your `.grc`
 flowgraph, edits it through validated tool calls, and grounds every answer in
@@ -134,4 +134,4 @@ uv run ruff check                             # lint
 - [`docs/technical_overview.md`](docs/technical_overview.md) — a deeper architecture writeup with diagrams and benchmarks.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, test gate, conventions.
 - [`SECURITY.md`](SECURITY.md) — how to report a vulnerability.
-- [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — MIT-licensed; the bundled GNU Radio docs corpus is CC BY-SA 3.0.
+- [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — AGPL-3.0-licensed; the bundled GNU Radio docs corpus is CC BY-SA 3.0.

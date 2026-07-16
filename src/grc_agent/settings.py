@@ -125,3 +125,39 @@ def save_settings(provider: str, model: str) -> None:
 def get_env_value(key: str) -> str | None:
     """Read a single key from the ``.env`` file (the saved source of truth)."""
     return dotenv_values(env_path()).get(key)
+
+
+def load_recent_sessions() -> list[str]:
+    """Load the list of recently active GRC flowgraph session paths from disk,
+    filtering out any paths that have been deleted or no longer exist."""
+    p = env_path().parent / "recent_sessions.json"
+    if p.exists():
+        try:
+            import json
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [str(path) for path in data if Path(path).exists()]
+        except Exception:
+            pass
+    return []
+
+
+def save_recent_session(path: str) -> None:
+    """Save the given path to the recent sessions list, moving it to the top
+    and keeping up to 10 unique recent sessions."""
+    if not path:
+        return
+    p = env_path().parent / "recent_sessions.json"
+    p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    sessions = load_recent_sessions()
+    abs_path = str(Path(path).resolve())
+    if abs_path in sessions:
+        sessions.remove(abs_path)
+    sessions.insert(0, abs_path)
+    sessions = sessions[:10]
+    try:
+        import json
+        p.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
