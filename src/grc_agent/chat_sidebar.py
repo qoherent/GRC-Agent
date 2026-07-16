@@ -11,9 +11,11 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 
 import asyncio
 import logging
-import re
+from pathlib import Path
 
 import gi
+from bs4 import BeautifulSoup, NavigableString
+from markdown_it import MarkdownIt
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
@@ -37,7 +39,14 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.messages import ModelMessage, TextPart, ThinkingPart, ToolCallPart
 from pydantic_graph import End
 
-from .settings import get_env_value, load_settings, save_settings, upsert_env_key
+from .settings import (
+    get_env_value,
+    load_recent_sessions,
+    load_settings,
+    save_recent_session,
+    save_settings,
+    upsert_env_key,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -157,6 +166,39 @@ _CHAT_CSS = b"""
     padding: 3px 8px;
     font-size: 0.9em;
 }
+.chat-monospace {
+    font-family: monospace;
+}
+.chat-welcome-box {
+    background: #fafafa;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 16px;
+    margin: 12px;
+}
+.chat-recent-header {
+    font-size: 1.05em;
+    font-weight: bold;
+    color: #424242;
+    margin-top: 16px;
+    margin-bottom: 8px;
+    margin-left: 12px;
+}
+.chat-recent-item {
+    background: #ffffff;
+    color: #212121;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    margin-left: 12px;
+    margin-right: 12px;
+}
+.chat-recent-item:hover {
+    background: #e3f2fd;
+    border-color: #90caf9;
+    color: #0d47a1;
+}
 """
 
 _PROVIDER_LABELS = {
@@ -194,37 +236,105 @@ def _apply_css() -> None:
     _css_applied = True
 
 
-def _markdown_to_pango(text: str) -> str:
+def _markdown_to_pango(text: str) -> str:  # noqa: C901
     """Convert basic markdown to Pango markup for Gtk.Label.set_markup().
 
-    Supports: fenced code blocks, headings, **bold**, *italic*, `inline
-    code`, [link](url). XML special chars are escaped before tags are
-    applied so model output containing ``<``, ``>``, ``&`` is safe.
+    Supports bold, italic, inline/block code, links, headings, lists,
+    and formats markdown tables as clean monospace tables.
     """
-    code_blocks: list[str] = []
+    def _format_table(table_soup) -> str:
+        headers = []
+        thead = table_soup.find("thead")
+        if thead:
+            headers = [th.get_text().strip() for th in thead.find_all("th")]
 
-    def _stash(m: re.Match) -> str:
-        code_blocks.append(m.group(1))
-        return f"\x00B{len(code_blocks) - 1}\x00"
+        tbody = table_soup.find("tbody")
+        rows = []
+        if tbody:
+            for tr in tbody.find_all("tr"):
+                rows.append([td.get_text().strip() for td in tr.find_all(["td", "th"])])
+        else:
+            for tr in table_soup.find_all("tr"):
+                rows.append([td.get_text().strip() for td in tr.find_all(["td", "th"])])
 
-    work = re.sub(r"```(?:\w*)\n?(.*?)```", _stash, text, flags=re.DOTALL)
-    work = work.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    work = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", work, flags=re.MULTILINE)
-    work = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", work)
-    work = re.sub(r"(^|[^*])\*([^*\n]+)\*", r"\1<i>\2</i>", work)
-    work = re.sub(r"`([^`\n]+)`", r"<tt>\1</tt>", work)
-    work = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', work)
+        if not headers and rows:
+            headers = rows[0]
+            rows = rows[1:]
 
-    def _restore(m: re.Match) -> str:
-        esc = (
-            code_blocks[int(m.group(1))]
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-        return f"<tt>{esc}</tt>"
+        num_cols = max(len(headers), max((len(r) for r in rows), default=0))
+        if num_cols == 0:
+            return ""
 
-    return re.sub(r"\x00B(\d+)\x00", _restore, work)
+        headers += [""] * (num_cols - len(headers))
+        for r in rows:
+            r += [""] * (num_cols - len(r))
+
+        col_widths = [0] * num_cols
+        for i in range(num_cols):
+            col_widths[i] = max(
+                len(headers[i]),
+                max((len(r[i]) for r in rows), default=0)
+            )
+
+        lines = []
+        header_line = " | ".join(f"{h:<{col_widths[i]}}" for i, h in enumerate(headers))
+        lines.append("| " + header_line + " |")
+
+        sep_line = "-+-".join("-" * col_widths[i] for i in range(num_cols))
+        lines.append("+" + sep_line + "+")
+
+        for r in rows:
+            row_line = " | ".join(f"{val:<{col_widths[i]}}" for i, val in enumerate(r))
+            lines.append("| " + row_line + " |")
+
+        return "\n" + "\n".join(lines) + "\n"
+
+    def _node_to_pango(node) -> str:  # noqa: C901
+        if isinstance(node, NavigableString):
+            return str(node).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        tag = node.name
+        if not tag:
+            return ""
+
+        inner_text = "".join(_node_to_pango(child) for child in node.children)
+
+        if tag in ("p", "div"):
+            return f"{inner_text}\n"
+        elif tag in ("strong", "b"):
+            return f"<b>{inner_text}</b>"
+        elif tag in ("em", "i"):
+            return f"<i>{inner_text}</i>"
+        elif tag in ("code", "tt") or tag == "pre":
+            return f"<tt>{inner_text.replace(' ', '\u00A0')}</tt>"
+        elif tag == "a":
+            href = node.get("href", "")
+            href_esc = href.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            return f'<a href="{href_esc}">{inner_text}</a>'
+        elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            return f"\n<b>{inner_text}</b>\n"
+        elif tag == "ul" or tag == "ol":
+            return f"{inner_text}\n"
+        elif tag == "li":
+            return f" • {inner_text}\n"
+        elif tag == "table":
+            table_str = _format_table(node)
+            table_str_esc = table_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            return f"<tt>{table_str_esc.replace(' ', '\u00A0')}</tt>"
+        elif tag in ("thead", "tbody", "tr", "td", "th"):
+            return ""
+        else:
+            return inner_text
+
+    try:
+        md = MarkdownIt("commonmark").enable("table")
+        html = md.render(text)
+        soup = BeautifulSoup(html, "html.parser")
+        result = "".join(_node_to_pango(child) for child in soup.contents)
+        return result.strip()
+    except Exception as e:
+        _log.warning("Failed to render markdown via markdown-it: %s", e)
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _safe_set_markup(label: Gtk.Label, text: str) -> None:
@@ -246,6 +356,7 @@ class _StreamCtx:
         "think_body",
         "think_acc",
         "tools",
+        "full_raw_text",
     )
 
     def __init__(self, box: Gtk.Box) -> None:
@@ -255,6 +366,7 @@ class _StreamCtx:
         self.think_body: Gtk.Label | None = None
         self.think_acc = ""
         self.tools: dict[str, Gtk.Expander] = {}
+        self.full_raw_text = ""
 
 
 class ChatSidebar(Gtk.Box):
@@ -312,7 +424,7 @@ class ChatSidebar(Gtk.Box):
             bar.pack_start(b, False, False, 0)
             return b
 
-        _signal_btn("New", "Clear chat history", "new-session-clicked")
+        _signal_btn("New Session", "Clear chat history", "new-session-clicked")
 
         # Active graph badge
         self._graph_label = Gtk.Label(label="no graph")
@@ -410,13 +522,226 @@ class ChatSidebar(Gtk.Box):
 
     def set_flowgraph_proxy(self, proxy: object) -> None:
         self._flowgraph_proxy = proxy
+        cm = getattr(proxy, "_canvas_manager", None)
+        path = cm.path if cm else None
+        self.load_history_for_path(path)
 
     def clear_messages(self) -> None:
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
+        self._message_history = []
+        self._save_history()
+        self._render_history()
+
+    def _render_history(self) -> None:  # noqa: C901
         for child in self._listbox.get_children():
             self._listbox.remove(child)
+
+        if not self._message_history:
+            self._render_welcome_screen()
+            self._listbox.show_all()
+            return
+
+        for msg in self._message_history:
+            cls_name = msg.__class__.__name__
+            if cls_name == "ModelRequest":
+                for part in msg.parts:
+                    if part.__class__.__name__ == "UserPromptPart":
+                        content = part.content
+                        if not isinstance(content, str):
+                            parts = []
+                            for item in content:
+                                if hasattr(item, "text"):
+                                    parts.append(item.text)
+                                elif isinstance(item, str):
+                                    parts.append(item)
+                            content = "".join(parts)
+                        self._append_user_message(content)
+            elif cls_name == "ModelResponse":
+                box = self._start_agent_message()
+                self._render_last_message_rich(box, msg)
+        self._scroll_to_bottom()
+
+    def _render_welcome_screen(self) -> None:
+        # 1. Welcome Card
+        welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        welcome_box.get_style_context().add_class("chat-welcome-box")
+
+        # Title
+        title_lbl = Gtk.Label()
+        title_lbl.set_markup("<span size='large' weight='bold'>GRC Agent Chat</span>")
+        title_lbl.set_xalign(0.0)
+        welcome_box.pack_start(title_lbl, False, False, 0)
+
+        # Subtitle
+        sub_lbl = Gtk.Label()
+        sub_lbl.set_line_wrap(True)
+        sub_lbl.set_xalign(0.0)
+
+        path = None
+        page = None
+        if self._flowgraph_proxy is not None:
+            cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+            if cm:
+                page = cm.current_page
+                path = cm.path
+
+        if page is not None:
+            sub_lbl.set_markup(
+                "<span fgcolor='#666666' size='small'>Ask a question or request a modification for this flowgraph.</span>"
+            )
+        else:
+            sub_lbl.set_markup(
+                "No active flowgraph file open.\n"
+                "Open a saved flowgraph to start chatting, or load a recent session below:"
+            )
+        welcome_box.pack_start(sub_lbl, False, False, 0)
+        self._listbox.add(welcome_box)
+
+        # 2. Recent Sessions List
+        sessions = load_recent_sessions()
+
+        # Filter out current active path from the suggestions if we are already inside it
+        if path:
+            abs_path = str(Path(path).resolve())
+            sessions = [s for s in sessions if str(Path(s).resolve()) != abs_path]
+
+        if sessions:
+            # Header
+            hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            hdr_box.get_style_context().add_class("chat-recent-header")
+
+            icon = Gtk.Image.new_from_icon_name("document-open-recent-symbolic", Gtk.IconSize.MENU)
+            lbl = Gtk.Label()
+            lbl.set_markup("<b>Recent Sessions</b>")
+
+            hdr_box.pack_start(icon, False, False, 0)
+            hdr_box.pack_start(lbl, False, False, 0)
+            self._listbox.add(hdr_box)
+
+            # List items
+            for s in sessions:
+                btn = Gtk.Button()
+                btn.get_style_context().add_class("chat-recent-item")
+                btn.set_relief(Gtk.ReliefStyle.NONE)
+
+                # Content layout
+                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                item_icon = Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU)
+
+                text_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+
+                name_lbl = Gtk.Label()
+                name_lbl.set_markup(f"<b>{Path(s).name}</b>")
+                name_lbl.set_xalign(0.0)
+
+                path_lbl = Gtk.Label()
+                path_lbl.set_markup(f"<span fgcolor='#777777' size='small'>{Path(s).parent}</span>")
+                path_lbl.set_xalign(0.0)
+                path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
+
+                text_vbox.pack_start(name_lbl, False, False, 0)
+                text_vbox.pack_start(path_lbl, False, False, 0)
+
+                box.pack_start(item_icon, False, False, 0)
+                box.pack_start(text_vbox, True, True, 0)
+
+                btn.add(box)
+                btn.set_tooltip_text(s)
+
+                # Connect click handler
+                btn.connect("clicked", lambda _, p=s: self._open_recent_session(p))
+                self._listbox.add(btn)
+
+    def _open_recent_session(self, path: str) -> None:
+        if not path or not Path(path).exists():
+            self.set_status("File not found on disk.", error=True)
+            return
+
+        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None) if self._flowgraph_proxy else None
+        if not cm or not cm.window:
+            self.set_status("GRC window not available.", error=True)
+            return
+
+        notebook = getattr(cm.window, "notebook", None)
+        if not notebook:
+            self.set_status("GRC notebook not available.", error=True)
+            return
+
+        target_path = Path(path).resolve()
+        for i in range(notebook.get_n_pages()):
+            p = notebook.get_nth_page(i)
+            p_path = getattr(p, "file_path", None)
+            if p_path:
+                try:
+                    if Path(p_path).resolve() == target_path:
+                        notebook.set_current_page(i)
+                        self.set_status("Switched to active tab.")
+                        return
+                except Exception:
+                    pass
+
+        try:
+            cm.window.new_page(path)
+            self.set_status("Opened session file.")
+        except Exception as e:
+            _log.error("Failed to open recent session %s: %s", path, e)
+            self.set_status(f"Failed to open session: {e}", error=True)
+
+    def _save_history(self) -> None:
+        if self._flowgraph_proxy is None:
+            return
+        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+        path = cm.path if cm else None
+        if not path:
+            return
+        try:
+            import json
+
+            from pydantic_core import to_jsonable_python
+            hist_path = Path(path).parent / ".grc_agent" / (Path(path).name + ".chat.json")
+            hist_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+            data = to_jsonable_python(self._message_history)
+
+            import os
+            import tempfile
+            fd, tmp_file = tempfile.mkstemp(dir=str(hist_path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_file, hist_path)
+                dir_fd = os.open(str(hist_path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception:
+                if os.path.exists(tmp_file):
+                    os.unlink(tmp_file)
+                raise
+        except Exception as e:
+            _log.error("Failed to save chat history: %s", e)
+
+    def load_history_for_path(self, path: str | None) -> None:
         self._message_history = []
+        if path:
+            save_recent_session(path)
+            hist_path = Path(path).parent / ".grc_agent" / (Path(path).name + ".chat.json")
+            if hist_path.exists():
+                try:
+                    import json
+
+                    from pydantic_ai import ModelMessagesTypeAdapter
+                    content = hist_path.read_text(encoding="utf-8")
+                    if content.strip():
+                        data = json.loads(content)
+                        self._message_history = ModelMessagesTypeAdapter.validate_python(data)
+                except Exception as e:
+                    _log.error("Failed to load chat history from %s: %s", hist_path, e)
+        self._render_history()
 
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
@@ -442,7 +767,10 @@ class ChatSidebar(Gtk.Box):
                     tcid = event.tool_call_id or ""
                     exp = ctx.tools.get(tcid)
                     if exp is not None:
-                        self._set_tool_result(exp, str(event.part.content))
+                        res_str = str(event.part.content)
+                        self._set_tool_result(exp, res_str)
+                        ctx.full_raw_text += f"<Tool Result: {res_str}>\n"
+                        self._update_copy_text(ctx.box, ctx.full_raw_text)
 
     def _on_part_start(self, ctx: _StreamCtx, event: PartStartEvent) -> None:
         part = event.part
@@ -450,38 +778,48 @@ class ChatSidebar(Gtk.Box):
             self._close_thinking(ctx)
             self._close_text(ctx)
             ctx.text_acc = part.content or ""
-            _safe_set_markup(self._ensure_text(ctx), ctx.text_acc)
+            ctx.full_raw_text += part.content or ""
+            lbl = self._ensure_text(ctx)
+            lbl.set_text(ctx.text_acc)
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ToolCallPart):
             self._close_text(ctx)
             self._close_thinking(ctx)
             tcid = part.tool_call_id or ""
             exp = self._make_tool_expander(part.tool_name or "?")
-            if part.args:
-                self._set_tool_body(exp, str(part.args))
+            args_str = str(part.args) if part.args else ""
+            if args_str:
+                self._set_tool_body(exp, args_str)
             ctx.box.pack_start(exp, False, False, 0)
             exp.show_all()
             ctx.tools[tcid] = exp
+            ctx.full_raw_text += f"<Tool Call: {part.tool_name}>\nArgs: {args_str}\n"
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
             self._close_text(ctx)
             body = self._ensure_thinking(ctx)
             ctx.think_acc = part.content or ""
+            ctx.full_raw_text += part.content or ""
             body.set_text(ctx.think_acc)
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
 
     def _on_part_delta(self, ctx: _StreamCtx, event: PartDeltaEvent) -> None:
         delta = event.delta
         if isinstance(delta, TextPartDelta):
             self._close_thinking(ctx)
             ctx.text_acc += delta.content_delta
+            ctx.full_raw_text += delta.content_delta
             lbl = self._ensure_text(ctx)
             lbl.set_text(ctx.text_acc)
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(delta, ThinkingPartDelta):
             self._close_text(ctx)
             ctx.think_acc += delta.content_delta
+            ctx.full_raw_text += delta.content_delta
             self._ensure_thinking(ctx).set_text(ctx.think_acc)
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
 
     def _close_text(self, ctx: _StreamCtx) -> None:
-        if ctx.text_lbl is not None and ctx.text_acc:
-            _safe_set_markup(ctx.text_lbl, ctx.text_acc)
         ctx.text_lbl = None
         ctx.text_acc = ""
 
@@ -522,6 +860,18 @@ class ChatSidebar(Gtk.Box):
         lbl.get_style_context().add_class("chat-agent-label")
         return lbl
 
+    def _copy_to_clipboard(self, text: str) -> None:
+        if not text:
+            return
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(text, -1)
+        self.set_status("Copied message to clipboard.")
+
+    def _update_copy_text(self, box: Gtk.Box, text: str) -> None:
+        parent = box.get_parent()
+        if parent and hasattr(parent, "_grc_copy_btn"):
+            parent._grc_copy_btn._grc_copy_text = text
+
     def _append_user_message(self, text: str) -> None:
         lbl = Gtk.Label(label=text)
         lbl.set_line_wrap(True)
@@ -531,14 +881,273 @@ class ChatSidebar(Gtk.Box):
         lbl.set_selectable(True)
         lbl.get_style_context().add_class("chat-user-label")
         lbl.set_margin_start(40)
-        self._add_message_row(lbl)
+
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        hbox.set_halign(Gtk.Align.END)
+
+        copy_btn = Gtk.Button()
+        copy_btn.set_relief(Gtk.ReliefStyle.NONE)
+        copy_btn.set_focus_on_click(False)
+        img = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+        copy_btn.set_image(img)
+        copy_btn.set_tooltip_text("Copy message")
+        copy_btn.connect("clicked", lambda *_: self._copy_to_clipboard(text))
+
+        hbox.pack_start(copy_btn, False, False, 0)
+        hbox.pack_start(lbl, True, True, 0)
+        self._add_message_row(hbox)
 
     def _start_agent_message(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self._add_message_row(box)
+
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        hbox.set_halign(Gtk.Align.START)
+        hbox.pack_start(box, True, True, 0)
+
+        copy_btn = Gtk.Button()
+        copy_btn.set_relief(Gtk.ReliefStyle.NONE)
+        copy_btn.set_focus_on_click(False)
+        img = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+        copy_btn.set_image(img)
+        copy_btn.set_tooltip_text("Copy message")
+
+        copy_btn._grc_copy_text = ""
+        copy_btn.connect("clicked", lambda b: self._copy_to_clipboard(b._grc_copy_text))
+
+        hbox.pack_start(copy_btn, False, False, 0)
+        hbox._grc_copy_btn = copy_btn
+
+        self._add_message_row(hbox)
         return box
 
+    def _format_table(self, table_soup) -> str:
+        headers = []
+        thead = table_soup.find("thead")
+        if thead:
+            headers = [th.get_text().strip() for th in thead.find_all("th")]
+
+        tbody = table_soup.find("tbody")
+        rows = []
+        if tbody:
+            for tr in tbody.find_all("tr"):
+                rows.append([td.get_text().strip() for td in tr.find_all(["td", "th"])])
+        else:
+            for tr in table_soup.find_all("tr"):
+                rows.append([td.get_text().strip() for td in tr.find_all(["td", "th"])])
+
+        if not headers and rows:
+            headers = rows[0]
+            rows = rows[1:]
+
+        num_cols = max(len(headers), max((len(r) for r in rows), default=0))
+        if num_cols == 0:
+            return ""
+
+        headers += [""] * (num_cols - len(headers))
+        for r in rows:
+            r += [""] * (num_cols - len(r))
+
+        col_widths = [0] * num_cols
+        for i in range(num_cols):
+            col_widths[i] = max(
+                len(headers[i]),
+                max((len(r[i]) for r in rows), default=0)
+            )
+
+        lines = []
+        header_line = " | ".join(f"{h:<{col_widths[i]}}" for i, h in enumerate(headers))
+        lines.append("| " + header_line + " |")
+
+        sep_line = "-+-".join("-" * col_widths[i] for i in range(num_cols))
+        lines.append("+" + sep_line + "+")
+
+        for r in rows:
+            row_line = " | ".join(f"{val:<{col_widths[i]}}" for i, val in enumerate(r))
+            lines.append("| " + row_line + " |")
+
+        return "\n" + "\n".join(lines) + "\n"
+
+    def _node_to_pango(self, node) -> str:  # noqa: C901
+        if isinstance(node, NavigableString):
+            return str(node).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        tag = node.name
+        if not tag:
+            return ""
+
+        inner_text = "".join(self._node_to_pango(child) for child in node.children)
+
+        if tag in ("p", "div"):
+            return f"{inner_text}\n"
+        elif tag in ("strong", "b"):
+            return f"<b>{inner_text}</b>"
+        elif tag in ("em", "i"):
+            return f"<i>{inner_text}</i>"
+        elif tag in ("code", "tt") or tag == "pre":
+            return f'<span face="monospace">{inner_text.replace(" ", "\u00A0")}</span>'
+        elif tag == "a":
+            href = node.get("href", "")
+            href_esc = href.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            return f'<a href="{href_esc}">{inner_text}</a>'
+        elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            return f"\n<b>{inner_text}</b>\n"
+        elif tag == "ul" or tag == "ol":
+            return f"{inner_text}\n"
+        elif tag == "li":
+            return f" • {inner_text}\n"
+        elif tag == "table":
+            table_str = self._format_table(node)
+            table_str_esc = table_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            return f'<span face="monospace" size="small">{table_str_esc.replace(" ", "\u00A0")}</span>'
+        elif tag in ("thead", "tbody", "tr", "td", "th"):
+            return ""
+        else:
+            return inner_text
+
+    def _render_markdown_to_box(self, box: Gtk.Box, text: str, clear: bool = True) -> None:
+        if clear:
+            for child in box.get_children():
+                box.remove(child)
+
+        try:
+            md = MarkdownIt("commonmark").enable("table")
+            html = md.render(text)
+            soup = BeautifulSoup(html, "html.parser")
+
+            for element in soup.contents:
+                if not element.name:
+                    t = str(element).strip()
+                    if t:
+                        lbl = self._make_text_label()
+                        lbl.set_markup(t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                        box.pack_start(lbl, False, False, 0)
+                    continue
+
+                tag = element.name
+                if tag == "table":
+                    table_str = self._format_table(element)
+                    table_str_esc = table_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(" ", "\u00A0")
+
+                    lbl = Gtk.Label()
+                    lbl.get_style_context().add_class("chat-monospace")
+                    lbl.set_markup(f'<span face="monospace" size="small">{table_str_esc}</span>')
+                    lbl.set_line_wrap(False)
+                    lbl.set_xalign(0.0)
+                    lbl.set_selectable(True)
+                    lbl.set_margin_start(4)
+                    lbl.set_margin_end(4)
+                    lbl.set_margin_top(4)
+                    lbl.set_margin_bottom(4)
+
+                    sw = Gtk.ScrolledWindow()
+                    sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+                    sw.add(lbl)
+                    sw.set_min_content_height(100)
+                    sw.get_style_context().add_class("chat-agent-label")
+
+                    box.pack_start(sw, False, False, 0)
+                elif tag == "pre":
+                    code_text = element.get_text()
+                    code_text_esc = code_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(" ", "\u00A0")
+
+                    lbl = Gtk.Label()
+                    lbl.get_style_context().add_class("chat-agent-label")
+                    lbl.get_style_context().add_class("chat-monospace")
+                    lbl.set_markup(f'<span face="monospace" size="small">{code_text_esc}</span>')
+                    lbl.set_line_wrap(True)
+                    lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                    lbl.set_xalign(0.0)
+                    lbl.set_selectable(True)
+
+                    box.pack_start(lbl, False, False, 0)
+                else:
+                    block_markup = self._node_to_pango(element)
+                    if block_markup.strip():
+                        lbl = self._make_text_label()
+                        lbl.set_markup(block_markup)
+                        box.pack_start(lbl, False, False, 0)
+
+            box.show_all()
+        except Exception as e:
+            _log.warning("Failed to render markdown to box: %s", e)
+            lbl = self._make_text_label()
+            lbl.set_text(text)
+            box.pack_start(lbl, False, False, 0)
+            box.show_all()
+
+    def _render_last_message_rich(self, box: Gtk.Box, msg: ModelMessage) -> None:  # noqa: C901
+        for child in box.get_children():
+            box.remove(child)
+
+        full_text = ""
+        for part in msg.parts:
+            part_cls = part.__class__.__name__
+            if part_cls == "TextPart":
+                self._render_markdown_to_box(box, part.content, clear=False)
+                full_text += part.content
+            elif part_cls == "ThinkingPart":
+                exp = Gtk.Expander(label="Thinking...")
+                exp.set_expanded(False)
+                exp.get_style_context().add_class("chat-thinking-expander")
+                body = Gtk.Label(label=part.content)
+                body.set_line_wrap(True)
+                body.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                body.set_xalign(0.0)
+                body.set_selectable(True)
+                exp.add(body)
+                box.pack_start(exp, False, False, 0)
+                exp.show_all()
+                full_text += f"<Thinking>\n{part.content}\n</Thinking>\n"
+            elif part_cls == "ToolCallPart":
+                tool_name = part.tool_name or "?"
+                exp = self._make_tool_expander(tool_name)
+                args_str = str(part.args) if part.args else ""
+                self._set_tool_body(exp, args_str)
+
+                tcid = part.tool_call_id
+                ret_content, is_success = "", True
+                if tcid:
+                    for m in self._message_history:
+                        if m.__class__.__name__ == "ModelRequest":
+                            for p in m.parts:
+                                if p.__class__.__name__ == "ToolReturnPart" and p.tool_call_id == tcid:
+                                    ret_content = str(p.content)
+                                    is_success = (p.outcome != "failed")
+                                    break
+
+                if ret_content:
+                    self._set_tool_body(exp, ret_content)
+                    if is_success:
+                        exp.set_label(f"\u2699 {tool_name} \u2713")
+                    else:
+                        exp.set_label(f"\u2699 {tool_name} \u2717")
+                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
+                else:
+                    exp.set_label(f"\u2699 {tool_name} ✓")
+                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\n"
+
+                box.pack_start(exp, False, False, 0)
+                exp.show_all()
+
+        parent = box.get_parent()
+        if parent and hasattr(parent, "_grc_copy_btn"):
+            parent._grc_copy_btn._grc_copy_text = full_text
+
+    def _clear_welcome_screen(self) -> None:
+        has_welcome = False
+        for c in self._listbox.get_children():
+            inner = c.get_child() if isinstance(c, Gtk.ListBoxRow) else c
+            if inner:
+                ctx = inner.get_style_context()
+                if ctx.has_class("chat-welcome-box") or ctx.has_class("chat-recent-header") or ctx.has_class("chat-recent-item"):
+                    has_welcome = True
+                    break
+        if has_welcome:
+            for child in self._listbox.get_children():
+                self._listbox.remove(child)
+
     def _add_message_row(self, child: Gtk.Widget) -> None:
+        self._clear_welcome_screen()
         row = Gtk.ListBoxRow()
         row.set_activatable(False)
         row.set_selectable(False)
@@ -610,6 +1219,7 @@ class ChatSidebar(Gtk.Box):
             self._append_error("No agent configured.")
             return
         ctx = _StreamCtx(self._start_agent_message())
+        rich_rendered = False
         try:
             async with self._agent.iter(
                 text,
@@ -629,6 +1239,10 @@ class ChatSidebar(Gtk.Box):
 
             if run.result is not None:
                 self._message_history = run.result.all_messages()
+                self._save_history()
+                if self._message_history:
+                    self._render_last_message_rich(ctx.box, self._message_history[-1])
+                    rich_rendered = True
         except asyncio.CancelledError:
             self._append_error("[aborted]")
             raise
@@ -653,10 +1267,8 @@ class ChatSidebar(Gtk.Box):
             _log.exception("agent run failed")
             self._append_error(f"Agent error: {e}")
         finally:
-            if ctx.text_lbl is not None and ctx.text_acc:
-                _safe_set_markup(ctx.text_lbl, ctx.text_acc)
-                ctx.text_lbl = None
-                ctx.text_acc = ""
+            if not rich_rendered and ctx.full_raw_text:
+                self._render_markdown_to_box(ctx.box, ctx.full_raw_text)
             self._set_busy(False)
             self._scroll_to_bottom()
 

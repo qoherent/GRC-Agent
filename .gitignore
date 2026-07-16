@@ -49,3 +49,5 @@ experiments/*/final_findings_and_causes.md
 .opencode/
 .cache/
 .context/
+recent_sessions.json
+unsloth_compiled_cache/

@@ -135,6 +135,7 @@ def _on_new_session(sidebar: ChatSidebar) -> None:
 
 def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
     """Update sidebar to match the current GRC page state."""
+    sidebar.stop_chat()
     page = canvas.current_page
     name = None
     if page:
@@ -152,6 +153,7 @@ def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
         sidebar.set_input_enabled(True)
     else:
         sidebar.set_input_enabled(False)
+    sidebar.load_history_for_path(page.file_path if page else None)
 
 
 def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlowgraphProxy]:  # noqa: C901
@@ -238,7 +240,17 @@ def main() -> None:
     asyncio.set_event_loop(loop)
 
     def _shutdown() -> None:
-        loop.stop()
+        sidebar.stop_chat()
+
+        async def _async_cleanup():
+            tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+            for t in tasks:
+                t.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            loop.stop()
+
+        asyncio.ensure_future(_async_cleanup())
 
     window.connect("destroy", lambda *_: _shutdown())
     for sig in (signal.SIGTERM, signal.SIGINT):

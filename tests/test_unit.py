@@ -779,3 +779,184 @@ def test_generate_flowgraph_py_restores_run_options(temp_run_null_sink):
     output_dir = Path(temp_run_null_sink).parent / "run"
     generate_flowgraph_py(fg, output_dir)
     assert fg.get_option("run_options") == "prompt"
+
+
+# ==========================================
+# Markdown to Pango Unit Tests
+# ==========================================
+
+
+def test_markdown_to_pango_table():
+    from grc_agent.chat_sidebar import _markdown_to_pango
+
+    test_md = (
+        "Some text\n\n"
+        "| Param | Type |\n"
+        "|---|---|\n"
+        "| freq | float |\n\n"
+        "More text"
+    )
+    res = _markdown_to_pango(test_md)
+    assert "Some text" in res
+    assert "<tt>" in res
+    assert "| Param | Type  |".replace(" ", "\u00A0") in res
+    assert "| freq  | float |".replace(" ", "\u00A0") in res
+    assert "More text" in res
+
+
+def test_message_history_serialization_round_trip(tmp_path):
+    import json
+
+    from pydantic_ai import ModelMessagesTypeAdapter
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        ToolCallPart,
+        UserPromptPart,
+    )
+    from pydantic_core import to_jsonable_python
+
+    messages = [
+        ModelRequest(parts=[UserPromptPart(content="Hello")]),
+        ModelResponse(parts=[TextPart(content="Hi there!"), ToolCallPart(tool_name="inspect_graph", args={"view": "overview"}, tool_call_id="call1")]),
+    ]
+
+    # Serialize
+    json_data = to_jsonable_python(messages)
+
+    # Write and read back
+    filepath = tmp_path / "chat.json"
+    with open(filepath, "w") as f:
+        json.dump(json_data, f)
+
+    with open(filepath) as f:
+        loaded_data = json.load(f)
+
+    # Deserialize
+    restored = ModelMessagesTypeAdapter.validate_python(loaded_data)
+
+    assert len(restored) == 2
+    assert restored[0].__class__.__name__ == "ModelRequest"
+    assert restored[0].parts[0].content == "Hello"
+    assert restored[1].__class__.__name__ == "ModelResponse"
+    assert restored[1].parts[0].content == "Hi there!"
+    assert restored[1].parts[1].tool_name == "inspect_graph"
+    assert restored[1].parts[1].args == {"view": "overview"}
+    assert restored[1].parts[1].tool_call_id == "call1"
+
+
+def test_chat_sidebar_copy_and_rich_rendering():
+    from gi.repository import Gtk
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart, ToolCallPart
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+
+    # 1. Test copy button text update during streaming
+    box = sidebar._start_agent_message()
+    sidebar._update_copy_text(box, "test copy text")
+    parent = box.get_parent()
+    assert parent is not None
+    assert parent._grc_copy_btn._grc_copy_text == "test copy text"
+
+    # 2. Test horizontal-scrolling table rendering
+    sidebar._render_markdown_to_box(box, "| Head |\n|---|\n| cell |")
+    children = box.get_children()
+    assert any(isinstance(c, Gtk.ScrolledWindow) for c in children)
+
+    # 3. Test last message rich rendering maps thinking, text, and tools
+    msg = ModelResponse(parts=[
+        ThinkingPart(content="think progress"),
+        TextPart(content="here is a table:\n| A | B |\n|---|---|\n| 1 | 2 |"),
+        ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_test")
+    ])
+    sidebar._render_last_message_rich(box, msg)
+    new_children = box.get_children()
+
+    # Verify we have Gtk.Expander for thinking/tools and Gtk.ScrolledWindow for the table
+    exp_classes = [c.__class__.__name__ for c in new_children]
+    assert "Expander" in exp_classes
+    assert "ScrolledWindow" in exp_classes
+
+
+def test_recent_sessions_persistence(tmp_path, monkeypatch):
+    # Mock settings.env_path to point to a tmp directory
+    env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+
+    from grc_agent.settings import load_recent_sessions, save_recent_session
+
+    # Assert initially empty
+    assert load_recent_sessions() == []
+
+    # Create two temporary files
+    file1 = tmp_path / "graph1.grc"
+    file1.touch()
+    file2 = tmp_path / "graph2.grc"
+    file2.touch()
+
+    # Save session for file1
+    save_recent_session(str(file1))
+    sessions = load_recent_sessions()
+    assert len(sessions) == 1
+    assert sessions[0] == str(file1.resolve())
+
+    # Save session for file2
+    save_recent_session(str(file2))
+    sessions = load_recent_sessions()
+    assert len(sessions) == 2
+    # Newest should be at index 0
+    assert sessions[0] == str(file2.resolve())
+    assert sessions[1] == str(file1.resolve())
+
+    # Delete file1 and verify it is filtered out
+    file1.unlink()
+    sessions = load_recent_sessions()
+    assert len(sessions) == 1
+    assert sessions[0] == str(file2.resolve())
+
+
+def test_open_recent_session_tab_switching(tmp_path):
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+
+    # Mock flowgraph proxy, canvas manager, and GRC window/notebook
+    proxy = MagicMock()
+    cm = MagicMock()
+    window = MagicMock()
+    notebook = MagicMock()
+
+    proxy._canvas_manager = cm
+    cm.window = window
+    window.notebook = notebook
+
+    sidebar.set_flowgraph_proxy(proxy)
+
+    # Prepare files
+    file_real = tmp_path / "target.grc"
+    file_real.touch()
+
+    # Case 1: Page has relative file path, target is absolute
+    page1 = MagicMock()
+    page1.file_path = "target.grc"
+    notebook.get_n_pages.return_value = 1
+    notebook.get_nth_page.return_value = page1
+
+    import os
+    orig_cwd = os.getcwd()
+    os.chdir(str(tmp_path))
+    try:
+        sidebar._open_recent_session(str(file_real.resolve()))
+    finally:
+        os.chdir(orig_cwd)
+
+    notebook.set_current_page.assert_called_once_with(0)
+
+
+
+
