@@ -63,11 +63,18 @@ _CHAT_CSS = b"""
     padding: 8px 10px;
 }
 .chat-agent-label {
-    background: #f5f5f5;
     color: #212121;
+}
+.chat-agent-msg-box {
+    background: #f5f5f5;
     border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    padding: 8px 10px;
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+.chat-code-block {
+    background: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
 }
 .chat-error-label {
     background: #ffebee;
@@ -77,7 +84,7 @@ _CHAT_CSS = b"""
     padding: 8px 10px;
 }
 .chat-tool-expander {
-    background: #fafafa;
+    background: #ffffff;
     color: #424242;
     border: 1px solid #e0e0e0;
     border-radius: 4px;
@@ -888,6 +895,7 @@ class ChatSidebar(Gtk.Box):
         copy_btn = Gtk.Button()
         copy_btn.set_relief(Gtk.ReliefStyle.NONE)
         copy_btn.set_focus_on_click(False)
+        copy_btn.set_valign(Gtk.Align.START)
         img = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
         copy_btn.set_image(img)
         copy_btn.set_tooltip_text("Copy message")
@@ -898,7 +906,8 @@ class ChatSidebar(Gtk.Box):
         self._add_message_row(hbox)
 
     def _start_agent_message(self) -> Gtk.Box:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.get_style_context().add_class("chat-agent-msg-box")
 
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         hbox.set_halign(Gtk.Align.START)
@@ -907,6 +916,7 @@ class ChatSidebar(Gtk.Box):
         copy_btn = Gtk.Button()
         copy_btn.set_relief(Gtk.ReliefStyle.NONE)
         copy_btn.set_focus_on_click(False)
+        copy_btn.set_valign(Gtk.Align.START)
         img = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
         copy_btn.set_image(img)
         copy_btn.set_tooltip_text("Copy message")
@@ -990,11 +1000,11 @@ class ChatSidebar(Gtk.Box):
             href_esc = href.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
             return f'<a href="{href_esc}">{inner_text}</a>'
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            return f"\n<b>{inner_text}</b>\n"
+            return f'<span size="larger" weight="bold">{inner_text}</span>\n'
         elif tag == "ul" or tag == "ol":
             return f"{inner_text}\n"
         elif tag == "li":
-            return f" • {inner_text}\n"
+            return f"  •  {inner_text}\n"
         elif tag == "table":
             table_str = self._format_table(node)
             table_str_esc = table_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1043,7 +1053,7 @@ class ChatSidebar(Gtk.Box):
                     sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
                     sw.add(lbl)
                     sw.set_min_content_height(100)
-                    sw.get_style_context().add_class("chat-agent-label")
+                    sw.get_style_context().add_class("chat-code-block")
 
                     box.pack_start(sw, False, False, 0)
                 elif tag == "pre":
@@ -1051,7 +1061,7 @@ class ChatSidebar(Gtk.Box):
                     code_text_esc = code_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(" ", "\u00A0")
 
                     lbl = Gtk.Label()
-                    lbl.get_style_context().add_class("chat-agent-label")
+                    lbl.get_style_context().add_class("chat-code-block")
                     lbl.get_style_context().add_class("chat-monospace")
                     lbl.set_markup(f'<span face="monospace" size="small">{code_text_esc}</span>')
                     lbl.set_line_wrap(True)
@@ -1061,8 +1071,8 @@ class ChatSidebar(Gtk.Box):
 
                     box.pack_start(lbl, False, False, 0)
                 else:
-                    block_markup = self._node_to_pango(element)
-                    if block_markup.strip():
+                    block_markup = self._node_to_pango(element).strip()
+                    if block_markup:
                         lbl = self._make_text_label()
                         lbl.set_markup(block_markup)
                         box.pack_start(lbl, False, False, 0)
