@@ -5,9 +5,18 @@ separate CLI or warmup step to run by hand.
 
 Schema (must exactly match what query_catalog()/query_docs() read):
     catalog_chunks(rowid, block_id, payload)
-    catalog_idx    vec0(embedding)
+    catalog_idx    vec0(embedding)                                — vector search, primary
+    catalog_fts    fts5(block_id, payload, content=catalog_chunks) — lexical fallback
     docs_chunks(rowid, path, heading, payload)
-    docs_idx       vec0(embedding)
+    docs_idx       vec0(embedding)                                — vector search, primary
+    docs_fts       fts5(path, heading, payload, content=docs_chunks) — lexical fallback
+
+catalog_idx/docs_idx are only built for rows that embedded successfully; if
+every embed call fails (e.g. the embedding backend is unreachable), the
+respective vec0 table is skipped entirely and the DB is left lexical-only —
+catalog_fts/docs_fts are always built from the full chunk set regardless of
+embedding outcome. See adapter/rag.py's query_catalog()/query_docs() for the
+vector-first, lexical-fallback query logic.
 """
 
 import logging
@@ -50,14 +59,20 @@ def _write_meta(conn: sqlite3.Connection, model: str, domain: str) -> None:
     )
 
 
-def ingest_catalog(
+def ingest_catalog(  # noqa: C901
     db_path: str, model: str, on_progress: Any = None
 ) -> int:
     platform = get_platform()
     block_ids = sorted(b for b in platform.blocks if not b.startswith("_"))
     total = len(block_ids)
 
-    rows: list[tuple[str, str, list[float]]] = []
+    # fts_rows holds every renderable block regardless of embedding outcome —
+    # the lexical (FTS5) index is built from this unconditionally, so it stays
+    # usable even when embedding fails for some/all blocks (e.g. the embedding
+    # backend is unreachable). vec_rows is the subset that also embedded
+    # successfully; the vector index is only built if it's non-empty.
+    fts_rows: list[tuple[str, str]] = []
+    vec_rows: list[tuple[str, list[float]]] = []
     for i, block_id in enumerate(block_ids):
         # Render + embed; a failure for one block skips it without aborting the
         # whole build. on_progress fires per iteration (including skipped
@@ -67,9 +82,10 @@ def ingest_catalog(
             rendered = render_catalog_block(block_id, distance=0.0)
             if rendered:
                 text = _compose_catalog_text(rendered)
+                fts_rows.append((block_id, text))
                 try:
                     embedding = embed_document(text, model)
-                    rows.append((block_id, text, embedding))
+                    vec_rows.append((block_id, embedding))
                 except Exception as exc:
                     _log.warning("catalog embed failed for block_id=%s: %s", block_id, exc)
         except Exception as exc:
@@ -77,31 +93,52 @@ def ingest_catalog(
         if on_progress is not None:
             on_progress(i + 1, total)
 
-    if not rows:
+    if not fts_rows:
         raise RuntimeError(
-            "No catalog blocks could be embedded — check the embedding backend is reachable."
+            "No catalog blocks could be rendered — check the GNU Radio platform is available."
+        )
+    if not vec_rows:
+        _log.warning(
+            "catalog: no blocks could be embedded (embedding backend unreachable?) — "
+            "building a lexical-only (FTS5) index; vector search stays unavailable "
+            "until the next successful rebuild."
         )
 
-    dim = len(rows[0][2])
     conn = _open_db(db_path)
     try:
         conn.execute(
             "CREATE TABLE catalog_chunks (rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT)"
         )
-        conn.execute(f"CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[{dim}])")
-        for block_id, text, embedding in rows:
+        rowid_by_block_id: dict[str, int] = {}
+        for block_id, text in fts_rows:
             cur = conn.execute(
                 "INSERT INTO catalog_chunks(block_id, payload) VALUES(?, ?)", (block_id, text)
             )
-            conn.execute(
-                "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
-                (cur.lastrowid, sqlite_vec.serialize_float32(embedding)),
-            )
+            assert cur.lastrowid is not None  # guaranteed after a successful INSERT
+            rowid_by_block_id[block_id] = cur.lastrowid
+
+        # External-content FTS5 table: indexes catalog_chunks' text without
+        # storing a second copy of it, then 'rebuild' populates the index from
+        # the content table in one pass.
+        conn.execute(
+            "CREATE VIRTUAL TABLE catalog_fts USING fts5("
+            "block_id, payload, content='catalog_chunks', content_rowid='rowid')"
+        )
+        conn.execute("INSERT INTO catalog_fts(catalog_fts) VALUES('rebuild')")
+
+        if vec_rows:
+            dim = len(vec_rows[0][1])
+            conn.execute(f"CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[{dim}])")
+            for block_id, embedding in vec_rows:
+                conn.execute(
+                    "INSERT INTO catalog_idx(rowid, embedding) VALUES(?, ?)",
+                    (rowid_by_block_id[block_id], sqlite_vec.serialize_float32(embedding)),
+                )
         _write_meta(conn, model, "catalog")
         conn.commit()
     finally:
         conn.close()
-    return len(rows)
+    return len(fts_rows)
 
 
 def _compose_catalog_text(rendered: dict[str, Any]) -> str:
@@ -140,7 +177,7 @@ def _chunk_markdown(text: str) -> list[tuple[str, str]]:
     return chunks or [("", _cap_words(text, EMBED_MAX_WORDS))]
 
 
-def ingest_docs(
+def ingest_docs(  # noqa: C901
     db_path: str, model: str, on_progress: Any = None
 ) -> int:
     corpus_dir = docs_dir()
@@ -156,43 +193,64 @@ def ingest_docs(
         for heading, body in _chunk_markdown(text):
             chunk_list.append((md_file.stem, heading, body))
 
-    rows: list[tuple[str, str, str, list[float]]] = []
+    # composed_list holds every chunk's text regardless of embedding outcome —
+    # the lexical (FTS5) index is built from this unconditionally. vec_rows
+    # (index into chunk_list, embedding) is only the subset that also embedded
+    # successfully; the vector index is only built if it's non-empty.
     total = len(chunk_list)
+    composed_list: list[str] = []
+    vec_rows: list[tuple[int, list[float]]] = []
     for i, (path, heading, body) in enumerate(chunk_list):
         composed = f"path: {path}\nheading: {heading}\n{body}"
+        composed_list.append(composed)
         try:
             embedding = embed_document(composed, model)
+            vec_rows.append((i, embedding))
         except Exception as exc:
             _log.warning("docs embed failed for path=%s heading=%s: %s", path, heading, exc)
-            embedding = None
-        if embedding is not None:
-            rows.append((path, heading, composed, embedding))
         if on_progress is not None:
             on_progress(i + 1, total)
 
-    if not rows:
-        raise RuntimeError(
-            "No docs chunks could be embedded — check the embedding backend is reachable."
+    if not vec_rows:
+        _log.warning(
+            "docs: no chunks could be embedded (embedding backend unreachable?) — "
+            "building a lexical-only (FTS5) index; vector search stays unavailable "
+            "until the next successful rebuild."
         )
 
-    dim = len(rows[0][3])
     conn = _open_db(db_path)
     try:
         conn.execute(
             "CREATE TABLE docs_chunks (rowid INTEGER PRIMARY KEY, path TEXT, heading TEXT, payload TEXT)"
         )
-        conn.execute(f"CREATE VIRTUAL TABLE docs_idx USING vec0(embedding float[{dim}])")
-        for path, heading, payload, embedding in rows:
+        rowid_by_index: dict[int, int] = {}
+        for i, (path, heading, _body) in enumerate(chunk_list):
             cur = conn.execute(
                 "INSERT INTO docs_chunks(path, heading, payload) VALUES(?, ?, ?)",
-                (path, heading, payload),
+                (path, heading, composed_list[i]),
             )
-            conn.execute(
-                "INSERT INTO docs_idx(rowid, embedding) VALUES(?, ?)",
-                (cur.lastrowid, sqlite_vec.serialize_float32(embedding)),
-            )
+            assert cur.lastrowid is not None  # guaranteed after a successful INSERT
+            rowid_by_index[i] = cur.lastrowid
+
+        # External-content FTS5 table: indexes docs_chunks' text without
+        # storing a second copy of it, then 'rebuild' populates the index from
+        # the content table in one pass.
+        conn.execute(
+            "CREATE VIRTUAL TABLE docs_fts USING fts5("
+            "path, heading, payload, content='docs_chunks', content_rowid='rowid')"
+        )
+        conn.execute("INSERT INTO docs_fts(docs_fts) VALUES('rebuild')")
+
+        if vec_rows:
+            dim = len(vec_rows[0][1])
+            conn.execute(f"CREATE VIRTUAL TABLE docs_idx USING vec0(embedding float[{dim}])")
+            for i, embedding in vec_rows:
+                conn.execute(
+                    "INSERT INTO docs_idx(rowid, embedding) VALUES(?, ?)",
+                    (rowid_by_index[i], sqlite_vec.serialize_float32(embedding)),
+                )
         _write_meta(conn, model, "docs")
         conn.commit()
     finally:
         conn.close()
-    return len(rows)
+    return len(chunk_list)

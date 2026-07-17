@@ -60,6 +60,7 @@ Knowledge grounding is enforced through a local SQLite vector database (`sqlite-
 - **Catalog Domain**: Queries GNU Radio block metadata, block IDs, category mappings, parameter options, and port structures.
 - **Docs Domain**: Queries wiki pages, tutorials, and conceptual documentation parsed and heading-chunked.
 - **Embedding Provider Fallback**: Embeddings are generated using local Ollama (`embeddinggemma:latest`) or OpenRouter (`perplexity/pplx-embed-v1-0.6b`) backends, checking for model or dimensionality changes on startup.
+- **Lexical Fallback**: Vector search is primary. If the embedding call itself fails (backend unreachable, model not pulled), `query_knowledge` transparently falls back to a local SQLite FTS5 (BM25) keyword search over the same catalog/docs corpus — including on a cold cache where the embedding backend was never reachable, in which case the DB is built lexical-only (no vector index) rather than failing the whole ingest. The tool result always tags which path served it (`"search_mode": "vector" | "lexical"`), so a fallback is never silent to the caller.
 
 ### 3. Transactional Mutation Engine (`change_graph`)
 

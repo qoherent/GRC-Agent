@@ -53,6 +53,7 @@ flowchart TB
   AG --> RG
   AG -->|"search.py fallback"| SR["DuckDuckGo"]
   RG <--> ING["ingest.py"]
+  RG -.->|"embedding unreachable"| FTS["SQLite FTS5<br/>lexical fallback"]
   GR <--> SN
   GR --> LY
   GR -.->|"shared FlowGraph object"| NC
@@ -67,7 +68,7 @@ flowchart TB
 | `native_canvas.py` | GRC `MainWindow` signal-wiring: dynamic graph resolution from `window.current_page`, notebook tab tracking, manual-edit disk-sync, agent-edit redraw, pan. |
 | `agent_factory.py` | Builds the interactive `Agent` from saved settings (provider/model/API-key). |
 | `runner.py` | Flowgraph Run/Stop subprocess lifecycle. |
-| `adapter/` | Sole `gnuradio` importer. Flowgraph load/save, `change_graph`, param filtering, RAG with cached embed client, codegen. |
+| `adapter/` | Sole `gnuradio` importer. Flowgraph load/save, `change_graph`, param filtering, RAG (vector search with an SQLite FTS5 lexical fallback) with cached embed client, codegen. |
 | `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `change_graph`), capabilities, scenario harness. |
 | `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `python-dotenv`. |
 | `ingest.py` | Builds the catalog/docs vector databases on first use. |
@@ -127,7 +128,12 @@ Get a key at [Ollama](https://ollama.com/settings/keys), then set
 
 > [!NOTE]
 > Vector search (`query_knowledge`) always routes embeddings locally via
-> Ollama (`embeddinggemma:latest`), even when using a cloud chat provider.
+> Ollama (`embeddinggemma:latest`), even when using a cloud chat provider. If
+> that backend is unreachable (Ollama not running, model not pulled),
+> catalog/docs search automatically falls back to a local SQLite FTS5
+> (BM25) keyword search over the same corpus instead of failing outright —
+> the tool result always says `"search_mode": "lexical"` (vs. `"vector"`)
+> so a fallback is never silent.
 
 ---
 
@@ -143,7 +149,10 @@ auto-detects the active graph from GRC's notebook tabs.
 
 - **First run** builds the catalog/docs vector databases (a few minutes,
   needs a reachable embeddings backend). Cached afterward, rebuilt
-  automatically if the embedding model or source data changes.
+  automatically if the embedding model or source data changes. If no
+  embeddings backend is reachable on first run, a keyword (FTS5) index is
+  built instead so search still works, lexically, until a real rebuild
+  succeeds.
 - **Model settings:** switch provider/model anytime from Settings (gear
   button); changes write to `.env` and need a restart.
 - **Run/Stop & validation:** use GRC's own built-in toolbar buttons.
@@ -174,6 +183,5 @@ uv run ruff check                             # lint
 - [`AGENTS.md`](AGENTS.md) — architecture, engineering rules, and live-verified design decisions.
 - [`docs/technical_overview.md`](docs/technical_overview.md) — a deeper architecture writeup with diagrams and benchmarks.
 - [`docs/codebase_audit_report.md`](docs/codebase_audit_report.md) — code quality & architecture audit with prioritized findings.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, test gate, conventions.
-- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability.
+- [`docs/efficiency_audit.md`](docs/efficiency_audit.md) — performance/efficiency-focused audit: what's fixed, what's deferred and why.
 - [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — AGPL-3.0-licensed; the bundled GNU Radio docs corpus is CC BY-SA 3.0.

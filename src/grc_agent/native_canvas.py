@@ -14,6 +14,21 @@ from gi.repository import Gdk, GLib, Gtk
 
 _log = logging.getLogger(__name__)
 
+# GRC's own undo/redo state_cache (see NativeCanvasManager._state_cache_version)
+# is a necessary-but-not-sufficient signal: (a) block-library drag-and-drop
+# add, double-click add, and Variable Editor add/remove mutate the flowgraph
+# without touching state_cache at all, and (b) an ordinary "undo, then make a
+# different edit" sequence provably returns state_cache to the exact same
+# (current_state_index, num_prev_states, num_next_states) tuple it had before
+# the undo — indistinguishable from "nothing happened" by that tuple alone,
+# even though the content differs. Both were confirmed by direct testing
+# against the installed gnuradio package. Rather than making the cheap check
+# itself airtight (it structurally can't be, from read-only counters alone),
+# every Nth tick forces the full check regardless of the cheap comparison —
+# bounding the staleness window for those two gaps to a few seconds instead of
+# "until the next unrelated state_cache movement, or never."
+_POLL_FULL_CHECK_EVERY = 10  # ~15s at the 1.5s poll interval
+
 from grc_agent.adapter import (
     flow_graph_content_hash,
     get_blocks_panel_visibility,
@@ -77,6 +92,15 @@ class NativeCanvasManager:
         self.last_disk_hash: str | None = None
         self.last_synced_export_hash: str | None = None
         self._last_block_names: set[str] = set()
+        # Cheap gate for the 1.5s safety-net poll: GRC's own undo/redo ring
+        # buffer (page.state_cache) moves on most interactive edit paths that
+        # don't fire a trackable GTK signal (properties-dialog OK/Apply,
+        # paste, align, rotate, delete, undo/redo) — see
+        # _check_for_unsynced_edit. None until the first baseline sync, or if
+        # the current page has no state_cache. Not fully sufficient on its
+        # own — see _POLL_FULL_CHECK_EVERY above — hence _poll_tick_count.
+        self._last_state_cache_version: tuple[int, int, int] | None = None
+        self._poll_tick_count = 0
         self._blocks_visible = get_blocks_panel_visibility()
         self.panning = False
         self.pan_start_x = 0.0
@@ -277,6 +301,18 @@ class NativeCanvasManager:
         da.connect("button-release-event", self._on_button_release)
         da.connect("motion-notify-event", self._on_motion_notify)
 
+    @staticmethod
+    def _state_cache_version(page: Any) -> tuple[int, int, int] | None:
+        """A cheap, read-only fingerprint of GRC's own undo/redo ring buffer.
+        Necessarily changes on every interactive edit path GRC itself tracks
+        (see the class-level comment on _last_state_cache_version) — a
+        necessary condition for flow_graph_content_hash to have changed too,
+        used to skip that far more expensive check when nothing moved."""
+        sc = getattr(page, "state_cache", None) if page is not None else None
+        if sc is None:
+            return None
+        return (sc.current_state_index, sc.num_prev_states, sc.num_next_states)
+
     def _sync_page_baselines(self) -> None:
         try:
             fg = self.current_flow_graph
@@ -287,6 +323,7 @@ class NativeCanvasManager:
                 self.last_synced_export_hash = flow_graph_content_hash(fg)
                 self.last_disk_hash = _sha256_file(self.path) if self.path else None
                 self._last_block_names = {b.name for b in fg.blocks}
+                self._last_state_cache_version = self._state_cache_version(page)
         except Exception as e:
             # Guard the only signal handlers touching disk hashing: if this
             # raised, last_synced_export_hash would stay at the previous tab's
@@ -357,12 +394,29 @@ class NativeCanvasManager:
     def _check_for_unsynced_edit(self) -> bool:
         if self.drawing_area and hasattr(self.drawing_area, "_flow_graph"):
             try:
+                self._poll_tick_count += 1
+                page = self.current_page
+                version = self._state_cache_version(page)
+                state_cache_unchanged = (
+                    version is not None and version == self._last_state_cache_version
+                )
+                due_for_backstop = self._poll_tick_count % _POLL_FULL_CHECK_EVERY == 0
+                if state_cache_unchanged and not due_for_backstop:
+                    # GRC's own undo/redo cache says nothing has moved since the
+                    # last tick — skip the expensive full export+YAML+hash
+                    # below, unless this is a periodic backstop tick (see
+                    # _POLL_FULL_CHECK_EVERY). Pages with no state_cache
+                    # (version is None) always fall through to the full check,
+                    # unchanged from before.
+                    return True
+
                 current_hash = flow_graph_content_hash(self.drawing_area._flow_graph)
                 if (
                     self.last_synced_export_hash is not None
                     and current_hash != self.last_synced_export_hash
                 ):
                     self.sync_manual_edit(current_hash)
+                self._last_state_cache_version = version
             except Exception as e:
                 # Log instead of silently swallowing — a single transient error
                 # here would otherwise blind the sole guard against un-synced

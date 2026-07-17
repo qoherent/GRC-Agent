@@ -297,7 +297,7 @@ _CHAT_CSS = b"""
 _PROVIDER_LABELS = {
     "ollama": "Ollama (local)",
     "openrouter": "OpenRouter (cloud)",
-    "ollama_cloud": "Ollama Cloud",
+    "ollama_cloud": "Ollama Cloud (cloud)",
 }
 _PROVIDER_MODEL_KEY = {
     "ollama": "ollama_model",
@@ -308,6 +308,17 @@ _PROVIDER_API_KEY = {
     "ollama": None,
     "openrouter": "OPENROUTER_API_KEY",
     "ollama_cloud": "OLLAMA_CLOUD_API_KEY",
+}
+# Example text for the Settings dialog's placeholders — mirrors the real
+# per-provider defaults in settings.py's _DEFAULT_MODELS.
+_PROVIDER_MODEL_PLACEHOLDER = {
+    "ollama": "qwen3.6:35b-a3b-q4_K_M",
+    "openrouter": "deepseek/deepseek-v4-flash",
+    "ollama_cloud": "deepseek-v4-flash:cloud",
+}
+_PROVIDER_KEY_PLACEHOLDER = {
+    "openrouter": "sk-or-v1-...",
+    "ollama_cloud": "Paste your API key",
 }
 _PROVIDER_ORDER = ("ollama", "openrouter", "ollama_cloud")
 
@@ -496,6 +507,7 @@ class ChatSidebar(Gtk.Box):
         self._entry.set_hexpand(True)
         self._entry.get_style_context().add_class("chat-entry")
         self._entry.connect("activate", self._on_entry_activate)
+        self._entry.connect("changed", lambda *_: self._update_send_sensitivity())
         self._entry.set_sensitive(False)
 
         self._send_btn = Gtk.Button.new_with_label("Send")
@@ -655,14 +667,21 @@ class ChatSidebar(Gtk.Box):
     def set_input_enabled(self, enabled: bool) -> None:
         if not self._busy:
             self._entry.set_sensitive(enabled)
-            self._send_btn.set_sensitive(enabled)
+            self._update_send_sensitivity()
         if enabled:
             self._entry.set_placeholder_text("Ask about your flowgraph...")
+
+    def _update_send_sensitivity(self) -> None:
+        # Gate Send on non-blank input too, on top of the entry's own
+        # busy/flowgraph-present sensitivity — otherwise a click on
+        # whitespace-only text is a silent no-op (see _dispatch_send).
+        self._send_btn.set_sensitive(self._entry.get_sensitive() and bool(self._entry.get_text().strip()))
 
     def set_blocks_expanded(self, expanded: bool) -> None:
         self._blocks_expanded = expanded
         icon = "pan-start-symbolic" if expanded else "pan-end-symbolic"
         self._blocks_arrow.set_from_icon_name(icon, Gtk.IconSize.SMALL_TOOLBAR)
+        self._blocks_toggle.set_tooltip_text("Hide block library" if expanded else "Show block library")
 
     def set_agent(self, agent: Agent) -> None:
         self._agent = agent
@@ -916,7 +935,7 @@ class ChatSidebar(Gtk.Box):
             del_btn.set_relief(Gtk.ReliefStyle.NONE)
             del_icon = Gtk.Image.new_from_icon_name("user-trash-symbolic", Gtk.IconSize.MENU)
             del_btn.set_image(del_icon)
-            del_btn.set_tooltip_text("Remove from recent sessions")
+            del_btn.set_tooltip_text("Delete this session permanently")
             del_btn.connect("clicked", lambda _, session_id=sid: self._on_delete_recent_session(session_id))
 
             row_box.pack_start(btn, True, True, 0)
@@ -1405,6 +1424,10 @@ class ChatSidebar(Gtk.Box):
                     lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
                     lbl.set_xalign(0.0)
                     lbl.set_selectable(True)
+                    lbl.set_margin_start(4)
+                    lbl.set_margin_end(4)
+                    lbl.set_margin_top(4)
+                    lbl.set_margin_bottom(4)
 
                     box.pack_start(lbl, False, False, 0)
                 else:
@@ -1779,7 +1802,7 @@ class ChatSidebar(Gtk.Box):
             if self.current_page is origin_page:
                 self._remember_user_message(text)
                 await self._save_history()
-                self._append_error(f"Agent error: {e}")
+                self._append_error(f"Agent Error: {e}")
                 rich_rendered = True
         finally:
             # Paint any throttled-but-unflushed tail before deciding whether to
@@ -1818,8 +1841,8 @@ class ChatSidebar(Gtk.Box):
             self._entry.set_sensitive(False)
         else:
             self._send_btn.set_label("Send")
-            self._send_btn.set_sensitive(can_type)
             self._entry.set_sensitive(can_type)
+            self._update_send_sensitivity()
             if can_type:
                 self._entry.grab_focus()
 
@@ -1847,6 +1870,7 @@ class ChatSidebar(Gtk.Box):
         dlg = Gtk.Dialog(title="Chat Settings", transient_for=toplevel, modal=True)
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dlg.add_button("Save", Gtk.ResponseType.APPLY)
+        dlg.set_default_response(Gtk.ResponseType.APPLY)
         content = dlg.get_content_area()
         content.set_spacing(8)
         content.set_border_width(12)
@@ -1865,11 +1889,13 @@ class ChatSidebar(Gtk.Box):
         model_entry = Gtk.Entry()
         model_entry.set_text(cfg["model"])
         model_entry.set_hexpand(True)
+        model_entry.set_activates_default(True)
         grid.attach(model_entry, 1, 1, 1, 1)
 
         grid.attach(Gtk.Label(label="API Key:"), 0, 2, 1, 1)
         key_entry = Gtk.Entry()
         key_entry.set_visibility(False)
+        key_entry.set_activates_default(True)
         grid.attach(key_entry, 1, 2, 1, 1)
 
         info = Gtk.Label(label="Changes take effect after restart.")
@@ -1881,13 +1907,16 @@ class ChatSidebar(Gtk.Box):
                 return
             p = _PROVIDER_ORDER[idx]
             model_entry.set_text(cfg.get(_PROVIDER_MODEL_KEY[p], ""))
+            model_entry.set_placeholder_text(f"e.g. {_PROVIDER_MODEL_PLACEHOLDER[p]}")
             key_var = _PROVIDER_API_KEY[p]
             if key_var:
                 key_entry.set_text(get_env_value(key_var) or "")
                 key_entry.set_sensitive(True)
+                key_entry.set_placeholder_text(_PROVIDER_KEY_PLACEHOLDER[p])
             else:
                 key_entry.set_text("")
                 key_entry.set_sensitive(False)
+                key_entry.set_placeholder_text("")
 
         provider_combo.connect("changed", _sync_provider_fields)
         _sync_provider_fields(provider_combo)
@@ -1920,6 +1949,10 @@ class ChatSidebar(Gtk.Box):
                 save_settings(provider, model)
             if key_var:
                 upsert_env_key(key_var, key_val)
+            if model:
+                self.set_status("Settings saved.")
+            else:
+                self.set_status("Settings not saved — model name is required.", error=True)
 
         dlg.connect("response", _on_response)
         dlg.show()

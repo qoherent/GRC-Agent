@@ -548,8 +548,14 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
-    conn.execute("CREATE TABLE catalog_chunks(block_id TEXT);")
+    conn.execute("CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT);")
     conn.execute("CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[3]);")
+    # A catalog_fts table must also exist, or _ensure_db_built treats this as
+    # a pre-lexical-fallback DB and rebuilds it (see rag.py's _build_db).
+    conn.execute(
+        "CREATE VIRTUAL TABLE catalog_fts USING fts5("
+        "block_id, payload, content='catalog_chunks', content_rowid='rowid')"
+    )
     # _db_meta must exist with the correct model name and corpus_version,
     # otherwise _ensure_db_built deletes and rebuilds the DB (calling
     # embed_document many times during ingestion, not just once for the
@@ -589,6 +595,32 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     from grc_agent.adapter import _EMBEDDING_DIM_CACHE
 
     _EMBEDDING_DIM_CACHE.pop(model, None)
+
+
+def test_fts_query_string_dedupes_and_caps_tokens():
+    """Regression: an adversarially long or highly repetitive query used to
+    build an uncapped OR-joined FTS5 MATCH expression whose own size drove
+    evaluation cost — measured at 8-46 seconds for a ~100k-character query,
+    synchronously blocking the calling thread. _fts_query_string must
+    dedupe (case-insensitively, order-preserving) and cap at _FTS_MAX_TOKENS."""
+    from grc_agent.adapter.rag import _FTS_MAX_TOKENS, _fts_query_string
+
+    # Repetitive input collapses to a single token, not one term per repeat.
+    result = _fts_query_string("filter Filter FILTER filter filter")
+    assert result == '"filter"'
+
+    # A very long, highly-repetitive query stays bounded regardless of input size.
+    huge_query = " ".join(f"word{i % 5}" for i in range(50_000))
+    result = _fts_query_string(huge_query)
+    assert result is not None
+    assert result.count(" OR ") + 1 <= _FTS_MAX_TOKENS
+
+    # Genuinely varied input beyond the cap is truncated, not rejected.
+    many_unique = " ".join(f"uniqueterm{i}" for i in range(1000))
+    result = _fts_query_string(many_unique)
+    assert result is not None
+    assert result.count(" OR ") + 1 == _FTS_MAX_TOKENS
+    assert '"uniqueterm0"' in result
 
 
 # ==========================================
@@ -1678,6 +1710,13 @@ def test_check_for_unsynced_edit_logs_and_rearms(monkeypatch, caplog):
     cm.window = MagicMock()
     cm.window.current_page.drawing_area = da
     cm.last_synced_export_hash = "X"
+    # __new__ bypasses __init__, so the state-cache-version poll gate's
+    # baseline must be set explicitly. None here means the cheap gate always
+    # falls through to the full hash path below (the MagicMock page's
+    # state_cache attributes never equal None), preserving this test's
+    # original intent of exercising the full-hash error path.
+    cm._last_state_cache_version = None
+    cm._poll_tick_count = 0
 
     def boom(_):
         raise RuntimeError("hash failed")
@@ -1687,6 +1726,101 @@ def test_check_for_unsynced_edit_logs_and_rearms(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="grc_agent.native_canvas"):
         assert cm._check_for_unsynced_edit() is True
     assert "hash failed" in caplog.text
+
+
+def test_check_for_unsynced_edit_skips_hash_when_state_cache_unchanged(monkeypatch):
+    """Efficiency fix: when GRC's own undo/redo state_cache hasn't moved since
+    the last poll tick, _check_for_unsynced_edit must skip the expensive full
+    flow_graph_content_hash (export+YAML+hash) entirely — that full check is
+    the single biggest always-on cost this 1.5s poll incurs."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    da = MagicMock()
+    da._flow_graph = MagicMock()
+    page = MagicMock()
+    page.drawing_area = da
+    page.state_cache.current_state_index = 3
+    page.state_cache.num_prev_states = 3
+    page.state_cache.num_next_states = 0
+    cm.window = MagicMock()
+    cm.window.current_page = page
+    cm.last_synced_export_hash = "X"
+    cm._last_state_cache_version = (3, 3, 0)  # matches page.state_cache exactly
+    cm._poll_tick_count = 0  # ticks 1-2 below stay well short of the periodic backstop
+
+    call_count = 0
+
+    def counting_hash(_):
+        nonlocal call_count
+        call_count += 1
+        return "X"
+
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", counting_hash)
+
+    assert cm._check_for_unsynced_edit() is True
+    assert call_count == 0, "unchanged state_cache must skip the full hash check"
+
+    # A GRC-tracked edit (e.g. properties-dialog OK/Apply) bumps the state
+    # cache — the next tick must fall through to the full hash check again.
+    page.state_cache.current_state_index = 4
+    assert cm._check_for_unsynced_edit() is True
+    assert call_count == 1, "a moved state_cache must trigger the full hash check"
+
+
+def test_check_for_unsynced_edit_periodic_backstop_catches_undo_then_edit_collision(monkeypatch):
+    """Regression for a real gap found in adversarial testing: GRC's
+    state_cache can return to the EXACT SAME (current_state_index,
+    num_prev_states, num_next_states) tuple after an ordinary "undo, then make
+    a different edit" sequence — the cheap gate alone would then miss that
+    edit forever. A periodic backstop (_POLL_FULL_CHECK_EVERY) must still
+    force the full hash check within a bounded number of ticks even when the
+    state_cache tuple never appears to change."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import _POLL_FULL_CHECK_EVERY, NativeCanvasManager
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    da = MagicMock()
+    da._flow_graph = MagicMock()
+    page = MagicMock()
+    page.drawing_area = da
+    page.state_cache.current_state_index = 5
+    page.state_cache.num_prev_states = 5
+    page.state_cache.num_next_states = 0
+    cm.window = MagicMock()
+    cm.window.current_page = page
+    cm.last_synced_export_hash = "stale-hash-from-before-the-undo"
+    # Baseline matches the (unchanged-looking) state_cache tuple exactly, as it
+    # would after the undo+edit collision — the cheap gate alone sees no change.
+    cm._last_state_cache_version = (5, 5, 0)
+    cm._poll_tick_count = 0
+
+    call_count = 0
+
+    def counting_hash(_):
+        nonlocal call_count
+        call_count += 1
+        return "new-hash-after-the-collision"
+
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", counting_hash)
+
+    synced = []
+    monkeypatch.setattr(cm, "sync_manual_edit", lambda h=None: synced.append(h))
+
+    for _ in range(_POLL_FULL_CHECK_EVERY - 1):
+        assert cm._check_for_unsynced_edit() is True
+    assert call_count == 0, "state_cache tuple never moved, so no tick before the backstop should hash"
+
+    # The Nth tick is the periodic backstop — it must force the full check
+    # regardless of the (unchanged-looking) state_cache tuple.
+    assert cm._check_for_unsynced_edit() is True
+    assert call_count == 1, "the periodic backstop tick must run the full hash check"
+    assert synced == ["new-hash-after-the-collision"], (
+        "the backstop must detect and sync the content the state_cache tuple alone missed"
+    )
 
 
 def test_sync_page_baselines_swallows_hash_error(monkeypatch):

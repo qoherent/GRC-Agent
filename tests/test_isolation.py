@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
@@ -377,6 +379,224 @@ def test_catalog_corpus_version_reflects_block_set(monkeypatch):
         # (test_unit's RAG tests call _corpus_version("catalog") for real, and a
         # stale fake-platform hash here would force a spurious rebuild there).
         _CORPUS_VERSION_CACHE.pop("catalog", None)
+
+
+def test_ingest_catalog_builds_lexical_only_when_all_embeds_fail(tmp_path, monkeypatch):
+    """When the embedding backend is unreachable for every block, ingest_catalog
+    must still build a usable FTS5 lexical index from the real block catalog
+    (no vector index) instead of raising — this is what makes the
+    query_knowledge fallback possible on a cold cache with no reachable
+    embedding backend at all."""
+    import sqlite3
+
+    import sqlite_vec
+
+    import grc_agent.ingest as ingest_mod
+
+    def fail_embed(text, model):  # noqa: ARG001
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+
+    db_path = str(tmp_path / "catalog.db")
+    n = ingest_mod.ingest_catalog(db_path, "fake-model")
+    assert n > 0
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')"
+        ).fetchall()
+    }
+    assert "catalog_fts" in tables
+    assert "catalog_idx" not in tables, "no vector index should exist when every embed failed"
+
+    rows = conn.execute(
+        "SELECT rowid FROM catalog_fts WHERE catalog_fts MATCH ? ORDER BY bm25(catalog_fts) LIMIT 5",
+        ('"low" OR "pass" OR "filter"',),
+    ).fetchall()
+    block_ids = {
+        conn.execute("SELECT block_id FROM catalog_chunks WHERE rowid = ?", (r[0],)).fetchone()[0]
+        for r in rows
+    }
+    conn.close()
+    assert any("low_pass_filter" in b for b in block_ids)
+
+
+def test_lexical_only_db_does_not_rehammer_embedding_backend(tmp_path, monkeypatch):
+    """Once a catalog DB has settled into lexical-only (the embedding backend
+    was down when it was last built), subsequent queries must not keep
+    re-attempting a full re-embed on every call — only a genuine corpus
+    change should give embedding a fresh chance (see rag.py's _build_db)."""
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import _ensure_db_built, get_db_and_model
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("catalog")
+
+    def fail_embed(text, model):  # noqa: ARG001
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+
+    # First build: real ingestion, every embed call fails -> lexical-only DB.
+    _ensure_db_built("catalog", db_path, model)
+    assert os.path.exists(db_path)
+
+    # Second call, same (unchanged) corpus: must not re-invoke ingestion.
+    real_ingest_catalog = ingest_mod.ingest_catalog
+    called = {"n": 0}
+
+    def counting_ingest(*args, **kwargs):
+        called["n"] += 1
+        return real_ingest_catalog(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_mod, "ingest_catalog", counting_ingest)
+    try:
+        _ensure_db_built("catalog", db_path, model)
+        assert called["n"] == 0, (
+            "a lexical-only DB with an unchanged corpus must not re-attempt ingestion"
+        )
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
+
+
+def test_query_catalog_falls_back_to_lexical_when_embedding_unreachable(tmp_path, monkeypatch):
+    """End-to-end: query_catalog must return real, tagged results via the
+    FTS5 fallback when embed_query fails, instead of the old hard failure
+    ({"ok": False, "message": "Embedding failed: ..."})."""
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import get_db_and_model, query_catalog
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("catalog")
+
+    def fail_embed(text, model):  # noqa: ARG001
+        raise RuntimeError("backend down")
+
+    # Build a real lexical-only DB (embedding fails during ingest too — the
+    # cold-start-with-no-backend case).
+    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    ingest_mod.ingest_catalog(db_path, model)
+
+    import grc_agent.adapter.rag as rag_mod
+
+    def fail_embed_query(q):  # noqa: ARG001
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(rag_mod, "embed_query", fail_embed_query)
+
+    try:
+        res = query_catalog("low pass filter")
+        assert res["ok"] is True
+        assert res["search_mode"] == "lexical"
+        assert "fallback" in res.get("message", "").lower()
+        assert res["results"]
+        assert any("low_pass_filter" in r["block_id"] for r in res["results"])
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
+
+
+def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, monkeypatch):
+    """Same fallback behavior as query_catalog, exercised on the docs domain
+    (different table shape: path/heading/payload instead of block_id/payload)."""
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import get_db_and_model, query_docs
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("docs")
+
+    def fail_embed(text, model):  # noqa: ARG001
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    ingest_mod.ingest_docs(db_path, model)
+
+    import grc_agent.adapter.rag as rag_mod
+
+    def fail_embed_query(q):  # noqa: ARG001
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(rag_mod, "embed_query", fail_embed_query)
+
+    try:
+        res = query_docs("what is a stream tag")
+        assert res["ok"] is True
+        assert res["search_mode"] == "lexical"
+        assert "fallback" in res.get("message", "").lower()
+        assert "tag" in res["answer"].lower()
+    finally:
+        _FRESHNESS_CACHE.pop("docs", None)
+
+
+def test_ensure_db_built_rebuilds_when_fts_table_missing(tmp_path, monkeypatch):
+    """Migration path: a DB built before the lexical-fallback feature existed
+    (vec0 index + _db_meta, no FTS5 table) must be detected as stale and
+    rebuilt — not silently left without lexical fallback forever."""
+    import sqlite3
+
+    import sqlite_vec
+
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import _corpus_version, _ensure_db_built, get_db_and_model
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("catalog")
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.execute(
+        "CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT);"
+    )
+    conn.execute("CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[3]);")
+    conn.execute("CREATE TABLE _db_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,))
+    conn.execute(
+        "INSERT INTO _db_meta (key, value) VALUES ('corpus_version', ?)",
+        (_corpus_version("catalog"),),
+    )
+    conn.commit()
+    conn.close()
+    # Deliberately no catalog_fts table — the pre-lexical-fallback DB shape.
+
+    called = {"n": 0}
+
+    def mock_ingest(db_path, model, on_progress=None):  # noqa: ARG001
+        called["n"] += 1
+        return 0
+
+    monkeypatch.setattr(ingest_mod, "ingest_catalog", mock_ingest)
+
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    try:
+        _ensure_db_built("catalog", db_path, model)
+        assert called["n"] == 1, "a DB missing the FTS5 table must trigger a rebuild"
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
 
 
 def test_ollama_cloud_model_builds_and_runs():

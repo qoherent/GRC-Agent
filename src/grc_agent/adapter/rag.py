@@ -240,6 +240,12 @@ def _corpus_version(domain: str) -> str:
 
 _BUILD_LOCKS: dict[str, threading.Lock] = {}
 
+# Per-domain "last verified fresh" (db_path, model), so _build_db can skip its
+# metadata re-check entirely on a warm cache instead of re-opening a
+# connection and re-querying sqlite_master/_db_meta on every single
+# query_catalog/query_docs call. See _build_db for cache population/use.
+_FRESHNESS_CACHE: dict[str, tuple[str, str]] = {}
+
 
 def _build_lock_for(domain: str) -> threading.Lock:
     """Per-domain build lock. RAG builds run on real OS threads (dispatched via
@@ -265,17 +271,33 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
 
 def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
     global _rag_building
+
+    # Once a (domain, db_path, model) combo has been verified fresh in this
+    # process, later calls skip re-opening a connection and re-running the
+    # metadata checks below entirely — query_catalog/query_docs call this on
+    # every single query, and the checks are otherwise redundant work on a
+    # warm cache. Invalidated implicitly: any rebuild below re-populates it
+    # with the new state; a mismatch never populates it at all.
+    if _FRESHNESS_CACHE.get(domain) == (db_path, model) and os.path.exists(db_path):
+        return
+
     if os.path.exists(db_path):
-        # Check vector dimension, embedding model name, and corpus version
-        # (all stored in _db_meta). Any mismatch triggers a rebuild —
-        # different models produce different embedding spaces, and a changed
-        # corpus/block-library would otherwise go stale silently forever.
+        # Check the lexical (FTS5) fallback index, vector dimension, embedding
+        # model name, and corpus version (all stored in _db_meta /
+        # sqlite_master). A changed corpus/block-library or model would
+        # otherwise go stale silently forever.
         try:
             conn = sqlite3.connect(db_path)
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
+            fts_exists = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = ?", (f"{domain}_fts",)
+                ).fetchone()
+                is not None
+            )
             sql_row = conn.execute(
-                f"SELECT sql FROM sqlite_master WHERE name = '{domain}_idx'"
+                "SELECT sql FROM sqlite_master WHERE name = ?", (f"{domain}_idx",)
             ).fetchone()
             meta: dict[str, str] = {}
             try:
@@ -285,12 +307,15 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
                 pass
             conn.close()
 
-            if sql_row and sql_row[0]:
+            reason = None
+            if not fts_exists:
+                # Pre-lexical-fallback DB, built before FTS5 support existed.
+                reason = "missing lexical (FTS5) fallback index"
+            elif sql_row and sql_row[0]:
                 match = re.search(r"float\[(\d+)\]", sql_row[0])
                 if match:
                     db_dim = int(match.group(1))
                     model_dim = _get_embedding_dim(model)
-                    reason = None
                     if model_dim != db_dim:
                         reason = f"dimension mismatch (DB has {db_dim}, model has {model_dim})"
                     elif not meta:
@@ -302,16 +327,26 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
                         )
                     elif meta.get("corpus_version") != _corpus_version(domain):
                         reason = "source data changed since this DB was built"
-
-                    if reason:
-                        print(f"[grc-agent] {domain} vector DB stale: {reason}. Rebuilding...")
-                        os.remove(db_path)
-                    else:
-                        return
                 else:
-                    os.remove(db_path)
+                    reason = "corrupt vector index"
             else:
+                # No vector index at all — a valid steady state, not
+                # necessarily staleness: the embedding backend was
+                # unreachable when this DB was last (re)built, so it's
+                # lexical-only by design. Do NOT rebuild merely because the
+                # vector index is absent — that would re-attempt (and
+                # re-fail) embedding on every single query while the backend
+                # stays down. Only a genuine corpus change should give
+                # embedding a fresh chance.
+                if not meta or meta.get("corpus_version") != _corpus_version(domain):
+                    reason = "lexical-only DB is stale or missing metadata"
+
+            if reason:
+                print(f"[grc-agent] {domain} vector DB stale: {reason}. Rebuilding...")
                 os.remove(db_path)
+            else:
+                _FRESHNESS_CACHE[domain] = (db_path, model)
+                return
         except (sqlite3.DatabaseError, sqlite3.OperationalError):
             with contextlib.suppress(OSError):
                 os.remove(db_path)
@@ -339,13 +374,17 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
         else:
             count = ingest.ingest_docs(db_path, model, on_progress=_on_progress)
         print(f"[grc-agent] {domain} vector DB build complete: {db_path}")
-        # `indexed` is the count actually embedded (len(rows)), which can be <
-        # `total` if some items failed to render/embed — so the GUI's "entries
-        # ready" message doesn't overclaim the processed count.
+        # `indexed` is the count actually indexed for lexical search (len(rows)),
+        # which can be < `total` if some items failed to render — so the GUI's
+        # "entries ready" message doesn't overclaim the processed count. It may
+        # exceed the count that embedded successfully if the embedding backend
+        # failed for some/all items (see ingest.py) — those still get a
+        # lexical-only entry.
         entry = _rag_building.get(domain)
         if entry is not None:
             entry["status"] = "ready"
             entry["indexed"] = count
+        _FRESHNESS_CACHE[domain] = (db_path, model)
     except Exception:
         entry = _rag_building.get(domain)
         if entry is not None:
@@ -353,15 +392,59 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
         raise
 
 
-def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return (
+        conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone()
+        is not None
+    )
+
+
+_FTS_TOKEN_RE = re.compile(r"\w+")
+
+# Caps the MATCH expression's own size. Without this, an adversarially long or
+# highly repetitive query (e.g. tens of thousands of words) builds an
+# OR-joined MATCH expression whose evaluation cost scales with the expression
+# itself, not the corpus — measured to stall a single query for 8-46 seconds
+# on a ~100k-character input, synchronously blocking the calling thread.
+# Realistic natural-language queries are far under this cap.
+_FTS_MAX_TOKENS = 32
+
+
+def _fts_query_string(q: str) -> str | None:
+    """Build a permissive FTS5 MATCH expression from free-text input.
+
+    Quotes each token so punctuation in the query (e.g. 'samp_rate?') can't
+    produce an invalid MATCH expression, and ORs tokens together — this is a
+    recall-oriented fallback for when vector search is unavailable, not a
+    primary ranking mechanism, so broad matching beats precision here.
+    Deduplicates (case-insensitive, order-preserving) and caps at
+    _FTS_MAX_TOKENS before building the expression. Returns None if the query
+    has no word tokens (nothing to search on).
+    """
+    tokens = _FTS_TOKEN_RE.findall(q)
+    if not tokens:
+        return None
+    seen: set[str] = set()
+    deduped = []
+    for t in tokens:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(t)
+    return " OR ".join(f'"{t}"' for t in deduped[:_FTS_MAX_TOKENS])
+
+
+def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:  # noqa: C901
     q = " ".join(str(query).split())
     if not q:
         return {"ok": False, "results": [], "message": "query must be non-empty"}
 
+    embed_error: str | None = None
+    query_vec: list[float] | None = None
     try:
         query_vec = embed_query(q)
     except Exception as exc:
-        return {"ok": False, "results": [], "message": f"Embedding failed: {exc}"}
+        embed_error = str(exc)
 
     db_path, model = get_db_and_model("catalog")
     try:
@@ -377,36 +460,73 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
         sqlite_vec.load(conn)
         conn.row_factory = sqlite3.Row
 
-        vec_rows = conn.execute(
-            "SELECT rowid, distance FROM catalog_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (sqlite_vec.serialize_float32(query_vec), limit + 1),
-        ).fetchall()
+        # Vector search is primary; fall back to the local FTS5 (BM25) lexical
+        # index only when the embedding call itself failed (backend
+        # unreachable/model missing) or no vector index exists for this DB
+        # (e.g. it was built while the embedding backend was down — see
+        # ingest.py/_build_db). Never silent: search_mode/message below always
+        # say which path served the result.
+        vec_available = query_vec is not None and _table_exists(conn, "catalog_idx")
+
+        if vec_available:
+            vec_rows = conn.execute(
+                "SELECT rowid, distance FROM catalog_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vec), limit + 1),
+            ).fetchall()
+            ranked_rowids = [row["rowid"] for row in vec_rows]
+            distance_by_rowid = {row["rowid"]: row["distance"] for row in vec_rows}
+            output_truncated = len(vec_rows) > limit
+            search_mode = "vector"
+        else:
+            fts_query = _fts_query_string(q)
+            fts_rows = (
+                conn.execute(
+                    "SELECT rowid FROM catalog_fts WHERE catalog_fts MATCH ? "
+                    "ORDER BY bm25(catalog_fts) LIMIT ?",
+                    (fts_query, limit + 1),
+                ).fetchall()
+                if fts_query and _table_exists(conn, "catalog_fts")
+                else []
+            )
+            ranked_rowids = [row["rowid"] for row in fts_rows]
+            distance_by_rowid = {}
+            output_truncated = len(fts_rows) > limit
+            search_mode = "lexical"
+
+        # Batch the rowid -> block_id lookup into one query instead of one
+        # SELECT per hit.
+        block_id_by_rowid: dict[int, str] = {}
+        if ranked_rowids:
+            placeholders = ",".join("?" for _ in ranked_rowids)
+            for row in conn.execute(
+                f"SELECT rowid, block_id FROM catalog_chunks WHERE rowid IN ({placeholders})",
+                ranked_rowids,
+            ):
+                block_id_by_rowid[row["rowid"]] = row["block_id"]
 
         results = []
-        for row in vec_rows:
-            rowid = row["rowid"]
-            distance = row["distance"]
-            chunk = conn.execute(
-                "SELECT block_id FROM catalog_chunks WHERE rowid = ?",
-                (rowid,),
-            ).fetchone()
-            if not chunk:
+        for rowid in ranked_rowids:
+            block_id = block_id_by_rowid.get(rowid)
+            if not block_id:
                 continue
-
-            block_id = chunk["block_id"]
-            rendered = render_catalog_block(block_id, distance)
+            rendered = render_catalog_block(block_id, distance_by_rowid.get(rowid, 0.0))
             if rendered:
                 results.append(rendered)
-
             if len(results) >= limit:
                 break
 
-        return {
+        response: dict[str, Any] = {
             "ok": True,
             "query": q,
             "results": results,
-            "output_truncated": len(vec_rows) > limit,
+            "output_truncated": output_truncated,
+            "search_mode": search_mode,
         }
+        if search_mode == "lexical" and embed_error:
+            response["message"] = (
+                f"Vector search unavailable ({embed_error}); used lexical (keyword) fallback."
+            )
+        return response
     finally:
         conn.close()
 
@@ -481,10 +601,12 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
     if not q:
         return {"ok": False, "answer": "", "message": "query must be non-empty"}
 
+    embed_error: str | None = None
+    query_vec: list[float] | None = None
     try:
         query_vec = embed_query(q)
     except Exception as exc:
-        return {"ok": False, "answer": "", "message": f"Embedding failed: {exc}"}
+        embed_error = str(exc)
 
     db_path, model = get_db_and_model("docs")
     try:
@@ -500,22 +622,53 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
         sqlite_vec.load(conn)
         conn.row_factory = sqlite3.Row
 
-        vec_rows = conn.execute(
-            "SELECT rowid, distance FROM docs_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (sqlite_vec.serialize_float32(query_vec), limit),
-        ).fetchall()
+        vec_available = query_vec is not None and _table_exists(conn, "docs_idx")
 
-        chunks = []
-        for row in vec_rows:
-            rowid = row["rowid"]
-            chunk = conn.execute(
-                "SELECT payload FROM docs_chunks WHERE rowid = ?",
-                (rowid,),
-            ).fetchone()
-            if chunk:
-                chunks.append(chunk["payload"])
+        if vec_available:
+            vec_rows = conn.execute(
+                "SELECT rowid, distance FROM docs_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vec), limit),
+            ).fetchall()
+            ranked_rowids = [row["rowid"] for row in vec_rows]
+            search_mode = "vector"
+        else:
+            fts_query = _fts_query_string(q)
+            fts_rows = (
+                conn.execute(
+                    "SELECT rowid FROM docs_fts WHERE docs_fts MATCH ? "
+                    "ORDER BY bm25(docs_fts) LIMIT ?",
+                    (fts_query, limit),
+                ).fetchall()
+                if fts_query and _table_exists(conn, "docs_fts")
+                else []
+            )
+            ranked_rowids = [row["rowid"] for row in fts_rows]
+            search_mode = "lexical"
 
+        # Batch the rowid -> payload lookup into one query instead of one
+        # SELECT per hit.
+        payload_by_rowid: dict[int, str] = {}
+        if ranked_rowids:
+            placeholders = ",".join("?" for _ in ranked_rowids)
+            for row in conn.execute(
+                f"SELECT rowid, payload FROM docs_chunks WHERE rowid IN ({placeholders})",
+                ranked_rowids,
+            ):
+                payload_by_rowid[row["rowid"]] = row["payload"]
+
+        chunks = [payload_by_rowid[r] for r in ranked_rowids if r in payload_by_rowid]
         answer = "\n\n---\n\n".join(chunks)
-        return {"ok": True, "query": q, "answer": answer}
+
+        response: dict[str, Any] = {
+            "ok": True,
+            "query": q,
+            "answer": answer,
+            "search_mode": search_mode,
+        }
+        if search_mode == "lexical" and embed_error:
+            response["message"] = (
+                f"Vector search unavailable ({embed_error}); used lexical (keyword) fallback."
+            )
+        return response
     finally:
         conn.close()
