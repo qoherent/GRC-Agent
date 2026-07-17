@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import sqlite3
+import threading
 from typing import Any
 
 import sqlite_vec
@@ -169,7 +170,32 @@ def _corpus_version(domain: str) -> str:
     return version
 
 
-def _ensure_db_built(domain: str, db_path: str, model: str) -> None:  # noqa: C901
+_BUILD_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _build_lock_for(domain: str) -> threading.Lock:
+    """Per-domain build lock. RAG builds run on real OS threads (dispatched via
+    asyncio.to_thread from query_catalog/query_docs), so two concurrent
+    cold-cache builds of the SAME domain would otherwise race on the unlocked
+    os.remove + rebuild and on the module-level embed/dimension caches.
+    Different domains (catalog vs docs) target different files and use
+    different locks, so they still build concurrently."""
+    lock = _BUILD_LOCKS.get(domain)
+    if lock is None:
+        lock = threading.Lock()
+        _BUILD_LOCKS[domain] = lock
+    return lock
+
+
+def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
+    with _build_lock_for(domain):
+        # The implementation re-checks os.path.exists + validity under the
+        # lock, so a concurrent builder that finished first makes a waiting
+        # caller a no-op instead of rebuilding (and racing) a second time.
+        _build_db(domain, db_path, model)
+
+
+def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
     global _rag_building
     if os.path.exists(db_path):
         # Check vector dimension, embedding model name, and corpus version

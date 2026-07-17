@@ -30,11 +30,6 @@ except Exception as e:
 
 from gi.repository import Gdk, GLib, Gtk
 
-
-def _apply_dark_theme_patches() -> None:
-    pass
-
-
 from grc_agent.adapter import get_gui_platform, gui_application_cls
 from grc_agent.agent_factory import build_interactive_agent
 from grc_agent.chat_sidebar import ChatSidebar
@@ -99,10 +94,28 @@ def _on_window_key_press(
     canvas: NativeCanvasManager,
     sidebar: ChatSidebar,
 ) -> bool:
+    focus_widget = _window.get_focus()
     accel = event.state & Gdk.ModifierType.CONTROL_MASK
+    key = event.keyval
+
+    # Ctrl+A: text selection on chat widgets, overriding GRC's global
+    # select-all. Only consumed when a text widget is focused — canvas Ctrl+A
+    # falls through (returns False below) and reaches GRC's select-all.
+    if accel and key in (Gdk.KEY_a, Gdk.KEY_A) and focus_widget:
+        if isinstance(focus_widget, (Gtk.Entry, Gtk.Label)):
+            focus_widget.select_region(0, -1)
+            return True
+        if isinstance(focus_widget, Gtk.TextView):
+            buf = focus_widget.get_buffer()
+            buf.select_range(buf.get_start_iter(), buf.get_end_iter())
+            return True
+
+    # All non-Ctrl keys propagate to GTK's native focus dispatch, which routes
+    # them through the widget's IM-context path (so CJK/IME input composes
+    # correctly instead of being re-emitted raw).
     if not accel:
         return False
-    key = event.keyval
+
     if key in (Gdk.KEY_plus, Gdk.KEY_KP_Add, Gdk.KEY_equal):
         _update_scale(_SCALE_STEP)
         _apply_canvas_zoom(canvas, _SCALE_STEP)
@@ -130,7 +143,7 @@ def _show_status(sidebar: ChatSidebar, msg: str, *, error: bool = False) -> None
 
 def _on_new_session(sidebar: ChatSidebar) -> None:
     sidebar.clear_messages()
-    _show_status(sidebar, "Chat history cleared.")
+    _show_status(sidebar, "")
 
 
 def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
@@ -153,14 +166,13 @@ def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
         sidebar.set_input_enabled(True)
     else:
         sidebar.set_input_enabled(False)
-    sidebar.load_history_for_path(page.file_path if page else None)
+    sidebar.sync_to_file(page.file_path if page else None)
 
 
 def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlowgraphProxy]:  # noqa: C901
     _apply_global_css()
     platform = get_gui_platform()
     Application = gui_application_cls()
-    _apply_dark_theme_patches()
     argv = [a for a in sys.argv[1:] if a.endswith(GRC_EXTENSIONS)]
     grc_app = Application(argv, platform)
     grc_app.register(None)

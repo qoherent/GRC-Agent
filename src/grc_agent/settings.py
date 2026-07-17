@@ -1,27 +1,25 @@
-"""User preferences for the interactive web agent — the provider, the per-
-provider chat model names, and the API keys for the cloud providers — all
+"""User preferences for the interactive desktop agent — the provider, the
+per-provider chat model names, and the API keys for the cloud providers — all
 persisted in a single `.env` file (the source of truth), editable from the
-dashboard GUI or directly. Separate from the scenario-harness's fixed
+Settings dialog or directly. Separate from the scenario-harness's fixed
 MODEL/OLLAMA_V1 constants in agent.py, which stay pinned for reproducible
 benchmarking.
 
-Env vars (read in order: GRC_AGENT_ENV override -> repo `.env` found by
-walking up from CWD -> ~/.config/grc_agent/.env for an installed package):
+Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
+-> ~/.config/grc_agent/.env for an installed package):
 
   GRC_PROVIDER          active provider: ollama | openrouter | ollama_cloud
   OLLAMA_CHAT_MODEL     local Ollama chat model
   OPENROUTER_MODEL      OpenRouter chat model
   OLLAMA_CLOUD_MODEL    Ollama Cloud chat model
-  OPENROUTER_API_KEY    OpenRouter API key (written by /grc/apikey)
-  OLLAMA_CLOUD_API_KEY  Ollama Cloud API key (written by /grc/apikey)
+  OPENROUTER_API_KEY    OpenRouter API key
+  OLLAMA_CLOUD_API_KEY  Ollama Cloud API key
 
-`load_settings()` reads the `.env` *file* (the saved source of truth), NOT
-os.environ — the latter is the running process's startup snapshot, which is
-what `_build_model()` captures once at import. That split is what lets the
-dashboard's restart badge distinguish "saved" from "actually running". A
-model/provider change therefore needs an app restart to take effect (the
-Agent is built once); only the API key is also set into os.environ on save
-so the health check can see it immediately.
+`load_settings()` reads the `.env` *file* (the saved source of truth), never
+os.environ. A model/provider change needs an app restart to take effect: the
+Agent is built once at startup (`build_interactive_agent`), so the running
+process keeps the model it booted with. The Settings dialog surfaces a static
+"Changes take effect after restart." label to make this explicit.
 """
 
 import os
@@ -112,8 +110,8 @@ def save_settings(provider: str, model: str) -> None:
     Only the selected provider's model var is touched — the other providers'
     saved model names are preserved verbatim (standard `.env` upsert). Does
     NOT touch os.environ: a model/provider change is restart-gated (the Agent
-    is built once at import), so updating the running snapshot here would only
-    mask the pending-restart state the dashboard badge exists to surface."""
+    is built once at startup), so updating the running snapshot here would
+    only mask the fact that a restart is needed to apply it."""
     if provider not in _VALID_PROVIDERS:
         raise ValueError(f"Unknown provider: {provider!r}")
     if not model.strip():
@@ -126,38 +124,4 @@ def get_env_value(key: str) -> str | None:
     """Read a single key from the ``.env`` file (the saved source of truth)."""
     return dotenv_values(env_path()).get(key)
 
-
-def load_recent_sessions() -> list[str]:
-    """Load the list of recently active GRC flowgraph session paths from disk,
-    filtering out any paths that have been deleted or no longer exist."""
-    p = env_path().parent / "recent_sessions.json"
-    if p.exists():
-        try:
-            import json
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return [str(path) for path in data if Path(path).exists()]
-        except Exception:
-            pass
-    return []
-
-
-def save_recent_session(path: str) -> None:
-    """Save the given path to the recent sessions list, moving it to the top
-    and keeping up to 10 unique recent sessions."""
-    if not path:
-        return
-    p = env_path().parent / "recent_sessions.json"
-    p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    sessions = load_recent_sessions()
-    abs_path = str(Path(path).resolve())
-    if abs_path in sessions:
-        sessions.remove(abs_path)
-    sessions.insert(0, abs_path)
-    sessions = sessions[:10]
-    try:
-        import json
-        p.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
-    except Exception:
-        pass
 

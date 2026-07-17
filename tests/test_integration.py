@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelSettings
-from pydantic_ai.capabilities import ProcessHistory
 
 from grc_agent.settings import env_path
 
@@ -22,7 +21,6 @@ from grc_agent.agent import (  # noqa: E402
     check_expect,
     fresh_agent,
     grc_tools,
-    prune_history,
     render_scenario_markdown,
     validate_flowgraph_state,
     web_fetch_cap,
@@ -127,7 +125,6 @@ def test_scenario_execution(sc_name, backend):
             instructions=build_system_prompt("pai-experiment-test"),
             tools=grc_tools(),
             capabilities=[
-                ProcessHistory(prune_history),
                 StopGracefully(),
                 web_search_cap,
                 web_fetch_cap,

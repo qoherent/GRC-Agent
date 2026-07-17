@@ -17,6 +17,49 @@ Single-process, single-thread native GTK3 app (via `gbulb`). GRC's own
 `MainWindow` is extended with a `ChatSidebar` — no web server, no subprocess,
 no Broadway. The agent streams responses directly on the GLib main loop.
 
+A single asyncio+GTK event loop (unified by `gbulb`) hosts GRC's native
+window, the chat sidebar, and a PydanticAI agent that shares one live
+`FlowGraph` object with the canvas — the agent mutates it in place, and the
+canvas just redraws. Chat history persists to SQLite (`db.py`). `ingest.py`
+is the only module permitted to read outside the package (the GNU Radio
+docs corpus, for RAG).
+
+```mermaid
+flowchart TB
+  subgraph UI["GTK3 UI — single gbulb event loop"]
+    DA["desktop_app.py"]
+    CS["chat_sidebar.py"]
+    NC["native_canvas.py"]
+  end
+  subgraph AGT["PydanticAI agent"]
+    AF["agent_factory.py"]
+    AG["agent.py"]
+    PR["prompts.py"]
+  end
+  subgraph ADP["adapter/ — sole gnuradio importer"]
+    GR["graph.py<br/>change_graph 7-phase engine"]
+    SN["snapshots.py<br/>disk undo/redo"]
+    LY["layout.py"]
+    RG["rag.py"]
+  end
+  ST["settings.py"] <--> ENV[(".env")]
+  ST --> AF
+  DA --> CS
+  DA --> NC
+  CS <--> AG
+  AF --> AG
+  PR --> AG
+  AG --> GR
+  AG --> RG
+  AG -->|"search.py fallback"| SR["DuckDuckGo"]
+  RG <--> ING["ingest.py"]
+  GR <--> SN
+  GR --> LY
+  GR -.->|"shared FlowGraph object"| NC
+  CS <--> DB[("chat_sessions.db")]
+  NC -.->|"never wired — dead"| RN["runner.py"]
+```
+
 | File | Role |
 |------|------|
 | `desktop_app.py` | Entrypoint. `gbulb` install, GRC `Application`/`MainWindow`, sidebar packing, Ctrl+/- zoom. |
@@ -28,8 +71,6 @@ no Broadway. The agent streams responses directly on the GLib main loop.
 | `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `change_graph`), capabilities, scenario harness. |
 | `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `python-dotenv`. |
 | `ingest.py` | Builds the catalog/docs vector databases on first use. |
-
-Data flow: `.grc` file → GRC's `MainWindow` → live `FlowGraph` → shared between canvas and agent tools.
 
 ---
 
@@ -132,6 +173,7 @@ uv run ruff check                             # lint
 
 - [`AGENTS.md`](AGENTS.md) — architecture, engineering rules, and live-verified design decisions.
 - [`docs/technical_overview.md`](docs/technical_overview.md) — a deeper architecture writeup with diagrams and benchmarks.
+- [`docs/codebase_audit_report.md`](docs/codebase_audit_report.md) — code quality & architecture audit with prioritized findings.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, test gate, conventions.
 - [`SECURITY.md`](SECURITY.md) — how to report a vulnerability.
 - [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — AGPL-3.0-licensed; the bundled GNU Radio docs corpus is CC BY-SA 3.0.

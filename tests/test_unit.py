@@ -104,6 +104,27 @@ def test_change_graph_add_block(temp_dial_tone):
     assert "my_throttle" in block_names
 
 
+def test_change_graph_unsaved_flowgraph():
+    from grc_agent.adapter.graph import get_platform
+    fg = get_platform().make_flow_graph()
+    fg.grc_file_path = ""
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "blocks_throttle2",
+                "instance_name": "my_throttle",
+                "params": {"type": "float"},
+            }
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    snap = inspect_graph(fg)
+    block_names = {b["instance_name"] for b in snap["graph"]["blocks"]}
+    assert "my_throttle" in block_names
+
+
 def test_change_graph_add_block_no_overlap_with_existing(temp_dial_tone):
     fg = load_flow_graph(str(temp_dial_tone))
     existing_coords = [
@@ -786,24 +807,6 @@ def test_generate_flowgraph_py_restores_run_options(temp_run_null_sink):
 # ==========================================
 
 
-def test_markdown_to_pango_table():
-    from grc_agent.chat_sidebar import _markdown_to_pango
-
-    test_md = (
-        "Some text\n\n"
-        "| Param | Type |\n"
-        "|---|---|\n"
-        "| freq | float |\n\n"
-        "More text"
-    )
-    res = _markdown_to_pango(test_md)
-    assert "Some text" in res
-    assert "<tt>" in res
-    assert "| Param | Type  |".replace(" ", "\u00A0") in res
-    assert "| freq  | float |".replace(" ", "\u00A0") in res
-    assert "More text" in res
-
-
 def test_message_history_serialization_round_trip(tmp_path):
     import json
 
@@ -886,10 +889,10 @@ def test_recent_sessions_persistence(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
 
-    from grc_agent.settings import load_recent_sessions, save_recent_session
+    from grc_agent.db import delete_session, get_recent_sessions, load_session, save_session
 
     # Assert initially empty
-    assert load_recent_sessions() == []
+    assert get_recent_sessions() == []
 
     # Create two temporary files
     file1 = tmp_path / "graph1.grc"
@@ -898,28 +901,40 @@ def test_recent_sessions_persistence(tmp_path, monkeypatch):
     file2.touch()
 
     # Save session for file1
-    save_recent_session(str(file1))
-    sessions = load_recent_sessions()
+    sid1 = save_session(None, str(file1), [])
+    sessions = get_recent_sessions()
     assert len(sessions) == 1
-    assert sessions[0] == str(file1.resolve())
+    assert sessions[0]["id"] == sid1
+    assert sessions[0]["grc_file_path"] == str(file1.resolve())
 
     # Save session for file2
-    save_recent_session(str(file2))
-    sessions = load_recent_sessions()
+    sid2 = save_session(None, str(file2), [])
+    sessions = get_recent_sessions()
     assert len(sessions) == 2
-    # Newest should be at index 0
-    assert sessions[0] == str(file2.resolve())
-    assert sessions[1] == str(file1.resolve())
+    # Newest (updated_at desc) should be at index 0
+    assert sessions[0]["id"] == sid2
+    assert sessions[0]["grc_file_path"] == str(file2.resolve())
+    assert sessions[1]["id"] == sid1
+    assert sessions[1]["grc_file_path"] == str(file1.resolve())
 
-    # Delete file1 and verify it is filtered out
+    # Load session
+    s_loaded = load_session(sid1)
+    assert s_loaded is not None
+    assert s_loaded["grc_file_path"] == str(file1.resolve())
+
+    # Delete file1 and verify it is filtered out from get_recent_sessions (but still loaded by id)
     file1.unlink()
-    sessions = load_recent_sessions()
+    sessions = get_recent_sessions()
     assert len(sessions) == 1
-    assert sessions[0] == str(file2.resolve())
+    assert sessions[0]["id"] == sid2
+
+    # Delete session
+    delete_session(sid2)
+    assert len(get_recent_sessions()) == 0
 
 
 def test_open_recent_session_tab_switching(tmp_path):
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
 
     from grc_agent.chat_sidebar import ChatSidebar
 
@@ -951,11 +966,644 @@ def test_open_recent_session_tab_switching(tmp_path):
     orig_cwd = os.getcwd()
     os.chdir(str(tmp_path))
     try:
-        sidebar._open_recent_session(str(file_real.resolve()))
+        with patch("grc_agent.chat_sidebar.load_session") as mock_load:
+            mock_load.return_value = {
+                "id": 123,
+                "grc_file_path": str(file_real.resolve()),
+                "messages": "[]",
+                "created_at": "...",
+                "updated_at": "..."
+            }
+            sidebar._on_recent_session_clicked(123)
     finally:
         os.chdir(orig_cwd)
 
     notebook.set_current_page.assert_called_once_with(0)
+
+
+def test_sidebar_session_tab_switching_isolation(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import save_session
+
+    sidebar = ChatSidebar()
+
+    # Prepare files and sessions
+    f1 = tmp_path / "flow1.grc"
+    f1.touch()
+    f2 = tmp_path / "flow2.grc"
+    f2.touch()
+
+    sid1 = save_session(None, str(f1), [])
+    sid2 = save_session(None, str(f2), [])
+
+    # Set up mocks for current_page and flowgraph_proxy
+    class DummyPage:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+    page1 = DummyPage(str(f1))
+    page2 = DummyPage(str(f2))
+
+    proxy = object()
+    sidebar._flowgraph_proxy = proxy
+
+    # We patch current_page property on the sidebar dynamically
+    current_page_val = page1
+    monkeypatch.setattr(ChatSidebar, "current_page", property(lambda _self: current_page_val))
+
+    # Simulating switching to page1 (flow1.grc)
+    sidebar._active_session_id = None
+    sidebar.sync_to_file(str(f1))
+    assert sidebar._active_session_id == sid1
+    assert page1._grc_agent_session_id == sid1
+
+    # Simulate creating a new session for page1
+    sidebar.clear_messages()
+    assert sidebar._active_session_id is None
+    assert page1._grc_agent_session_id is None
+
+    # Simulate sending a message to start a new session (sets page1._grc_agent_session_id to new ID)
+    new_sid1 = save_session(None, str(f1), [])
+    page1._grc_agent_session_id = new_sid1
+    sidebar.sync_to_file(str(f1))
+    assert sidebar._active_session_id == new_sid1
+
+    # Simulating switching to page2 (flow2.grc)
+    current_page_val = page2
+    sidebar.sync_to_file(str(f2))
+    assert sidebar._active_session_id == sid2
+    assert page2._grc_agent_session_id == sid2
+
+    # Simulating switching back to page1 (flow1.grc)
+    current_page_val = page1
+    sidebar.sync_to_file(str(f1))
+    # It should restore our new_sid1 (the custom session we started on page1)
+    assert sidebar._active_session_id == new_sid1
+
+
+def test_active_graph_label_format():
+    from grc_agent.chat_sidebar import ChatSidebar
+    sidebar = ChatSidebar()
+
+    # Initial state
+    assert sidebar._graph_label.get_text() == "Active Graph: none"
+
+    # Set active graph
+    sidebar.set_active_graph("my_cool_flowgraph")
+    assert sidebar._graph_label.get_text() == "Active Graph: my_cool_flowgraph"
+
+    # Clear active graph
+    sidebar.set_active_graph(None)
+    assert sidebar._graph_label.get_text() == "Active Graph: none"
+
+
+def test_delete_recent_session_ui(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar._render_history = MagicMock()
+
+    mock_delete = MagicMock()
+    monkeypatch.setattr("grc_agent.chat_sidebar.delete_session", mock_delete)
+
+    sidebar._on_delete_recent_session(123)
+    mock_delete.assert_called_once_with(123)
+    sidebar._render_history.assert_called_once()
+
+
+def test_clear_history_confirmation(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.clear_messages = MagicMock()
+    sidebar.set_status = MagicMock()
+
+    mock_dialog = MagicMock()
+
+    mock_dialog_cls = MagicMock(return_value=mock_dialog)
+    monkeypatch.setattr(Gtk, "MessageDialog", mock_dialog_cls)
+
+    sidebar._on_clear_history_clicked(None)
+
+    # The dialog is now non-blocking (signal-based under gbulb); invoke the
+    # registered "response" callback with YES to simulate the user confirming.
+    handler = mock_dialog.connect.call_args.args[1]
+    handler(mock_dialog, Gtk.ResponseType.YES)
+
+    sidebar.clear_messages.assert_called_once()
+    sidebar.set_status.assert_called_once_with("Chat history cleared.")
+
+
+def test_clear_history_deletes_active_session(monkeypatch):
+    """UI-2 regression: 'Clear History' must delete the persisted DB row, not
+    just blank in-memory state (the dialog copy promises irreversible deletion)."""
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar._active_session_id = 42
+    sidebar._render_history = MagicMock()
+
+    deleted = []
+    monkeypatch.setattr("grc_agent.chat_sidebar.delete_session", lambda sid: deleted.append(sid))
+
+    mock_dialog = MagicMock()
+    monkeypatch.setattr(Gtk, "MessageDialog", MagicMock(return_value=mock_dialog))
+
+    sidebar._on_clear_history_clicked(None)
+
+    handler = mock_dialog.connect.call_args.args[1]
+    handler(mock_dialog, Gtk.ResponseType.YES)
+
+    assert deleted == [42]
+    assert sidebar._active_session_id is None
+
+
+def test_clear_history_deletes_by_path(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar._active_session_id = 42
+    sidebar._render_history = MagicMock()
+
+    proxy = MagicMock()
+    cm = MagicMock()
+    proxy._canvas_manager = cm
+    cm.path = "/path/to/my_flowgraph.grc"
+    sidebar._flowgraph_proxy = proxy
+
+    deleted_paths = []
+    monkeypatch.setattr("grc_agent.chat_sidebar.delete_sessions_for_path", lambda path: deleted_paths.append(path))
+
+    mock_dialog = MagicMock()
+    monkeypatch.setattr(Gtk, "MessageDialog", MagicMock(return_value=mock_dialog))
+
+    sidebar._on_clear_history_clicked(None)
+
+    handler = mock_dialog.connect.call_args.args[1]
+    handler(mock_dialog, Gtk.ResponseType.YES)
+
+    assert deleted_paths == ["/path/to/my_flowgraph.grc"]
+    assert sidebar._active_session_id is None
+
+
+def test_clear_history_dialog_survives_gc_and_responds():
+    """Regression: a non-blocking dialog shown via .show() must be anchored on
+    self, otherwise PyGObject garbage-collects the toplevel once the
+    constructing method returns and the 'response' signal never fires."""
+    import gc
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.clear_messages = MagicMock()
+    sidebar.set_status = MagicMock()
+
+    sidebar._on_clear_history_clicked(None)
+
+    assert sidebar._open_dialog is not None
+    gc.collect()
+    assert sidebar._open_dialog is not None
+
+    sidebar._open_dialog.emit("response", Gtk.ResponseType.YES)
+
+    sidebar.clear_messages.assert_called_once()
+    assert sidebar._open_dialog is None
+
+
+def test_sync_to_file_restores_session_for_path(tmp_path, monkeypatch):
+    """UI-3 regression: opening a file must restore that file's own prior chat
+    session instead of blanking it."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from unittest.mock import MagicMock
+
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import get_session_for_path, save_session
+
+    f = tmp_path / "flow.grc"
+    f.touch()
+    save_session(None, str(f), [ModelRequest(parts=[UserPromptPart(content="hello")])])
+
+    row = get_session_for_path(str(f))
+    assert row is not None
+    assert row["grc_file_path"] == str(f.resolve())
+
+    sidebar = ChatSidebar()
+    sidebar._render_history = MagicMock()
+    sidebar.sync_to_file(str(f))
+
+    assert sidebar._active_session_id == row["id"]
+    assert len(sidebar._message_history) == 1
+
+
+def test_run_agent_turn_error_preserves_user_message():
+    """UI-1 regression: an error mid-turn must NOT wipe the user's just-sent
+    message (nor rebuild the widget, which would discard any partial reply)."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar._render_history = MagicMock()
+    sidebar._append_error = MagicMock()
+    sidebar._set_busy = MagicMock()
+    sidebar._scroll_to_bottom = MagicMock()
+    sidebar._save_history = AsyncMock()
+    sidebar._flowgraph_proxy = MagicMock()
+
+    agent = MagicMock()
+    agent.iter.side_effect = RuntimeError("boom")
+    sidebar._agent = agent
+
+    asyncio.run(sidebar._run_agent_turn("my question"))
+
+    user_texts = [
+        part.content
+        for m in sidebar._message_history
+        if m.__class__.__name__ == "ModelRequest"
+        for part in m.parts
+        if part.__class__.__name__ == "UserPromptPart"
+    ]
+    assert "my question" in user_texts
+    sidebar._render_history.assert_not_called()
+
+
+def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
+    """DB-1 regression: _save_history must be async and dispatch save_session via
+    asyncio.to_thread so it never blocks the gbulb event loop."""
+    import asyncio
+    import inspect
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    assert inspect.iscoroutinefunction(ChatSidebar._save_history)
+
+    sidebar = ChatSidebar()
+    sidebar._active_session_id = 7
+    proxy = MagicMock()
+    cm = MagicMock()
+    cm.path = "/tmp/x.grc"
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    used = {"to_thread": False}
+
+    def fake_to_thread(fn, *a, **k):
+        used["to_thread"] = True
+        return asyncio.to_thread(fn, *a, **k)
+
+    monkeypatch.setattr("grc_agent.chat_sidebar.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("grc_agent.chat_sidebar.save_session", MagicMock(return_value=7))
+
+    asyncio.run(sidebar._save_history())
+    assert used["to_thread"] is True
+
+
+def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
+    """CANVAS-1 regression: sync_manual_edit must not block the single UI
+    thread when the .grc lock is already held — LOCK_NB + skip (the 1.5s poll
+    retries later) instead of a blocking flock."""
+    import fcntl
+    import threading
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    grc = tmp_path / "f.grc"
+    grc.write_text("data")
+    (tmp_path / ".grc_agent").mkdir()
+
+    fg = MagicMock()
+    da = MagicMock()
+    da._flow_graph = fg
+    page = MagicMock()
+    page.file_path = str(grc)
+    page.drawing_area = da
+    window = MagicMock()
+    window.current_page = page
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = window
+    cm.last_synced_export_hash = "PREVIOUS"
+    cm.last_disk_hash = None
+
+    # Make the content-hash check differ so sync proceeds to the flock.
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", lambda _: "CURRENT")
+    # Neutralize side effects if a deferred writer ever runs after lock release.
+    monkeypatch.setattr("grc_agent.native_canvas.write_flow_graph_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("grc_agent.native_canvas.push_undo_snapshot", lambda *_args, **_kwargs: None)
+
+    lock_path = tmp_path / ".grc_agent" / (grc.name + ".lock")
+    held = lock_path.open("a", encoding="utf-8")
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+    try:
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                cm.sync_manual_edit()
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                done.set()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        finished = done.wait(timeout=1.5)
+    finally:
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+        held.close()
+
+    assert finished, "sync_manual_edit blocked waiting for a held lock"
+
+
+def test_check_for_unsynced_edit_logs_and_rearms(monkeypatch, caplog):
+    """CANVAS-3 regression: a transient error in the safety-net poll must be
+    logged (not silently swallowed) and the poll must still re-arm."""
+    import logging
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    da = MagicMock()
+    da._flow_graph = MagicMock()
+    cm.window = MagicMock()
+    cm.window.current_page.drawing_area = da
+    cm.last_synced_export_hash = "X"
+
+    def boom(_):
+        raise RuntimeError("hash failed")
+
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", boom)
+
+    with caplog.at_level(logging.WARNING, logger="grc_agent.native_canvas"):
+        assert cm._check_for_unsynced_edit() is True
+    assert "hash failed" in caplog.text
+
+
+def test_sync_page_baselines_swallows_hash_error(monkeypatch):
+    """CANVAS-4 regression: a hashing error during a tab switch must not
+    propagate (which would leave the sidebar's active-graph label stale and
+    bias the next poll against a stale baseline)."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    fg = MagicMock()
+    page = MagicMock()
+    page.file_path = "/tmp/x.grc"
+    page.flow_graph = fg
+    cm.window = MagicMock()
+    cm.window.current_page = page
+
+    def boom(_):
+        raise RuntimeError("hash failed")
+
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", boom)
+
+    cm._sync_page_baselines()  # must not raise
+
+
+def test_deserialize_messages_logs_on_malformed_json(caplog):
+    """DB-2 regression: deserialization failures must be logged, not silently
+    swallowed as an empty list (a stale/incompatible row would otherwise look
+    identical to a brand-new empty chat)."""
+    import logging
+
+    from grc_agent.db import deserialize_messages
+
+    with caplog.at_level(logging.WARNING):
+        result = deserialize_messages("{not valid json")
+    assert result == []
+    assert any(
+        "deserialize" in r.message.lower() or "failed" in r.message.lower()
+        for r in caplog.records
+    )
+
+
+def test_get_recent_sessions_drops_blob_and_bounds(tmp_path, monkeypatch):
+    """DB-3 / UI-4 regression: the recent-sessions list omits the heavy
+    messages blob and is bounded by a SQL LIMIT rather than trimming the whole
+    table in Python."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.db import get_recent_sessions, save_session
+
+    for i in range(5):
+        f = tmp_path / f"g{i}.grc"
+        f.touch()
+        save_session(None, str(f), [])
+
+    rows = get_recent_sessions(limit=3)
+    assert len(rows) == 3
+    assert all("messages" not in r for r in rows)
+
+
+def test_prune_sessions_bounds_growth(tmp_path, monkeypatch):
+    """DB-3 regression: an eviction policy caps the sessions table so it does
+    not grow without limit (the old JSON store bounded itself to 10 on write)."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.db import get_recent_sessions, prune_sessions, save_session
+
+    for i in range(8):
+        f = tmp_path / f"g{i}.grc"
+        f.touch()
+        save_session(None, str(f), [])
+
+    prune_sessions(keep=3)
+    assert len(get_recent_sessions(limit=100)) <= 3
+
+
+def test_db_connection_is_closed_after_use(tmp_path, monkeypatch):
+    """DB-4 regression: connections must be explicitly closed — sqlite3's
+    `with conn:` only commits/rolls back, it does not close."""
+    import sqlite3
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.db import _conn
+
+    with _conn() as conn:
+        conn.execute("SELECT 1")
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+
+def test_disable_native_undo_redo_removed():
+    """ADPT-1: the dead disable_native_undo_redo() is gone — it contradicted
+    the documented design (native undo is intentionally enabled; the 1.5s poll
+    syncs native undo to disk) and had zero call sites."""
+    from grc_agent import adapter
+
+    assert not hasattr(adapter, "disable_native_undo_redo")
+
+
+def test_change_graph_auto_standalone_new_block_fails_loudly(temp_empty):
+    """ADPT-3 regression: a brand-new block whose type-controlling param is
+    'auto' but which has NO connection in this batch has nothing to resolve
+    from. Must fail loudly (auto_resolve_failed) instead of silently keeping
+    GNU Radio's arbitrary schema default and returning ok:true."""
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "analog_sig_source_x",
+                "instance_name": "src",
+                "params": {"type": "auto"},
+            },
+        ],
+    )
+    assert res["ok"] is False
+    assert res["errors"][0]["code"] == "auto_resolve_failed"
+
+
+def test_change_graph_validation_gate_exception_rolls_back(temp_empty):
+    """ADPT-2 regression: if the native validation gate raises instead of
+    populating an error list, change_graph must still revert the shared
+    flowgraph to its pre-mutation state and return ok:false (mutation_failed)
+    — not leave the graph mutated and propagate the exception."""
+    fg = load_flow_graph(str(temp_empty))
+    initial_block_count = len(fg.blocks)
+
+    def boom():
+        raise RuntimeError("validate blew up")
+
+    fg.validate = boom
+
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "v1", "params": {"value": "2"}},
+        ],
+    )
+    assert res["ok"] is False
+    assert res["errors"][0]["code"] == "mutation_failed"
+    assert len(fg.blocks) == initial_block_count
+
+
+def test_canonical_dtype_uses_native_aliases():
+    """ADPT-4: dtype alias resolution is sourced from GNU Radio's own
+    ALIASES_OF, not a hand-maintained map that had drifted (bogus 'u8' and
+    missing sc16/s8/sc8). Unknown tokens pass through unchanged."""
+    from grc_agent.adapter.graph import _canonical_dtype
+
+    assert _canonical_dtype("complex") == "complex"
+    assert _canonical_dtype("fc32") == "complex"
+    assert _canonical_dtype("sc16") == "short"
+    assert _canonical_dtype("s8") == "byte"
+    assert _canonical_dtype("sc8") == "byte"
+    assert _canonical_dtype("u8") == "u8"  # was bogusly mapped to 'byte'
+    assert _canonical_dtype("nonsense") == "nonsense"
+
+
+def test_prune_history_removed():
+    """ADPT-5: the fixed message-count cutoff (12/10) is removed — it enforced
+    an arbitrary context limit the backend's own context window already bounds."""
+    from grc_agent import agent
+
+    assert not hasattr(agent, "prune_history")
+
+
+def test_lite_web_search_logs_selector_drift(monkeypatch, caplog):
+    """ADPT-8: a 200 response that parses zero result selectors must be logged
+    (so selector drift is diagnosable, not masked as a plain 'no results'), and
+    the empty/ mismatched parse must not be silently truncated."""
+    import asyncio
+    import logging
+
+    import httpx
+
+    from grc_agent.adapter import search
+
+    class FakeResp:
+        status_code = 200
+        text = "<html><body>page loaded, no result-link anchors here</body></html>"
+
+        def raise_for_status(self) -> None:
+            pass
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, _url, **_kwargs):
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *_args, **_kwargs: FakeClient())
+    with caplog.at_level(logging.WARNING):
+        result = asyncio.run(search.lite_web_search("anything"))
+    assert "No web results" in result
+    assert any(
+        "drift" in r.message.lower() or "selector" in r.message.lower()
+        for r in caplog.records
+    )
+
+
+def test_window_keypress_editable_propagation():
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gdk, Gtk
+
+    from grc_agent.desktop_app import _on_window_key_press
+
+    win = MagicMock()
+    entry = MagicMock(spec=Gtk.Entry)
+    win.get_focus.return_value = entry
+
+    canvas = MagicMock()
+    sidebar = MagicMock()
+
+    # Bare (unmodified) keys must propagate (return False) so GTK's native
+    # focus dispatch routes them through the widget's IM-context path — no raw
+    # re-emission that would bypass IME composition (the old .event() forward).
+    event = MagicMock(spec=Gdk.EventKey)
+    event.state = 0
+    event.keyval = Gdk.KEY_minus
+
+    result = _on_window_key_press(win, event, canvas, sidebar)
+
+    assert result is False
+    entry.event.assert_not_called()
+
+    # Ctrl+A override still selects all on the entry and is consumed.
+    event_ctrl_a = MagicMock(spec=Gdk.EventKey)
+    event_ctrl_a.state = Gdk.ModifierType.CONTROL_MASK
+    event_ctrl_a.keyval = Gdk.KEY_a
+
+    result = _on_window_key_press(win, event_ctrl_a, canvas, sidebar)
+    assert result is True
+    entry.select_region.assert_called_once_with(0, -1)
 
 
 

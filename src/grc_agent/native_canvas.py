@@ -1,6 +1,7 @@
 # ruff: noqa: E402
 import fcntl
 import hashlib
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
+
+_log = logging.getLogger(__name__)
 
 from grc_agent.adapter import (
     flow_graph_content_hash,
@@ -51,18 +54,8 @@ class NativeFlowgraphProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(self._get_target(), name, value)
 
-    def swap(self, flowgraph: Any) -> None:
-        pass
-
     def bump_version(self) -> None:
         pass
-
-    def get_version(self) -> int:
-        return 0
-
-    def is_loaded(self) -> bool:
-        cm = object.__getattribute__(self, "_canvas_manager")
-        return cm.current_flow_graph is not None
 
     def get_state_lock(self) -> None:
         return None
@@ -124,13 +117,6 @@ class NativeCanvasManager:
             return None
         return Path(p).parent / ".grc_agent" / (Path(p).name + ".lock")
 
-    @property
-    def graph_count(self) -> int:
-        return self.window.notebook.get_n_pages()
-
-    def get_drawing_area(self) -> Any:
-        return self.drawing_area
-
     def _get_scrolled_window(self) -> Any:
         da = self.drawing_area
         if not da:
@@ -144,6 +130,19 @@ class NativeCanvasManager:
         if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph")):
             return
         fg = self.drawing_area._flow_graph
+
+        # Update flowgraph elements to draw, labels, and shapes first. A
+        # failure here must not skip queue_draw below — the graph is already
+        # mutated (and possibly persisted), so a stale canvas is worse than a
+        # partially-updated one.
+        try:
+            if hasattr(fg, "update"):
+                fg.update()
+            if hasattr(self.window, "vars") and hasattr(self.window.vars, "update_gui"):
+                self.window.vars.update_gui(fg.blocks)
+        except Exception:
+            _log.warning("flowgraph update() raised during after_agent_edit", exc_info=True)
+
         old_names = self._last_block_names
         self.drawing_area._update_after_zoom = True
         self.drawing_area.queue_draw()
@@ -153,49 +152,54 @@ class NativeCanvasManager:
             self.last_disk_hash = _sha256_file(self.path)
         self._last_block_names = {b.name for b in fg.blocks}
 
-    def reload_from_disk(self) -> None:
-        if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph") and self.path):
+        # Push to GRC's native undo cache and mark page as modified
+        page = self.current_page
+        if page:
+            page.saved = False
+            if hasattr(page, "state_cache"):
+                page.state_cache.save_new_state(fg.export_data())
+            if hasattr(self.window, "update"):
+                self.window.update()
+
+    def sync_manual_edit(self) -> None:
+        if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph")):
+            return
+        fg = self.drawing_area._flow_graph
+        if (
+            self.last_synced_export_hash is not None
+            and flow_graph_content_hash(fg) == self.last_synced_export_hash
+        ):
+            return
+        if not self.path:
+            # Unsaved/untitled graph: nothing to persist to disk, but re-arm the
+            # poll baseline so the 1.5s safety-net doesn't keep firing forever.
+            self.last_synced_export_hash = flow_graph_content_hash(fg)
+            self._last_block_names = {b.name for b in fg.blocks}
             return
         try:
-            fg = self.drawing_area._flow_graph
-            old_names = {b.name for b in fg.blocks}
-            new_data = self.platform.parse_flow_graph(self.path)
-            fg.import_data(new_data)
-            fg.update()
-            self.drawing_area._update_after_zoom = True
-            self.drawing_area.queue_draw()
-            self.last_disk_hash = _sha256_file(self.path)
-            self.last_synced_export_hash = flow_graph_content_hash(fg)
-            self._scroll_to_new_blocks(fg, old_names)
-            self._last_block_names = {b.name for b in fg.blocks}
-        except Exception as e:
-            print("Failed to reload flowgraph from disk:", e)
-
-    def sync_manual_edit(self) -> bool:
-        if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph") and self.path):
-            return False
-        try:
-            fg = self.drawing_area._flow_graph
-            if (
-                self.last_synced_export_hash is not None
-                and flow_graph_content_hash(fg) == self.last_synced_export_hash
-            ):
-                return False
             lock = self._lock_path
             if lock is None:
-                return False
+                return
             lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with lock.open("a", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    # Lock contended (e.g. the same .grc open in another
+                    # instance, or a writer mid-commit). Never block the single
+                    # gbulb UI thread — skip; the 1.5s safety-net poll re-arms
+                    # and retries this sync on the next tick.
+                    _log.debug("Flowgraph lock busy — deferring this sync to the next poll.")
+                    return
                 try:
                     current_hash = _sha256_file(self.path)
                     if self.last_disk_hash is None:
-                        return False
+                        return
                     if current_hash is None:
-                        return False
+                        return
                     if current_hash != self.last_disk_hash:
-                        print("Disk changed since last reload — skipping drag-save.")
-                        return False
+                        _log.debug("Disk changed since last reload — skipping drag-save.")
+                        return
                     write_flow_graph_atomic(fg, Path(self.path))
                     self.last_disk_hash = _sha256_file(self.path)
                     self.last_synced_export_hash = flow_graph_content_hash(fg)
@@ -204,30 +208,13 @@ class NativeCanvasManager:
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as e:
-            print("Failed to sync manual edit:", e)
-        return False
+            _log.warning("Failed to sync manual edit: %s", e)
 
     def toggle_blocks_panel(self) -> bool:
         if not self.app:
             return False
         self._blocks_visible = not self._blocks_visible
         return set_blocks_panel_visibility(self.app, self._blocks_visible)
-
-    def validate(self) -> tuple[bool, list[str]]:
-        if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph")):
-            return False, ["No flowgraph loaded"]
-        fg = self.drawing_area._flow_graph
-        fg.validate()
-        if fg.is_valid():
-            return True, []
-        errors = []
-        for elem, msg in fg.iter_error_messages():
-            parent = getattr(elem, "parent_block", None)
-            if parent is not None and parent is not elem:
-                errors.append(f"{parent.name}: {elem}: {msg}")
-            else:
-                errors.append(f"{elem}: {msg}")
-        return False, errors
 
     def _scroll_to_new_blocks(self, flow_graph: Any, old_names: set[str]) -> None:
         try:
@@ -258,7 +245,7 @@ class NativeCanvasManager:
                 )
                 adjustment.set_value(max(adjustment.get_lower(), min(target, upper_bound)))
         except Exception as e:
-            print("Failed to scroll to newly-added blocks:", e)
+            _log.warning("Failed to scroll to newly-added blocks: %s", e)
 
     def setup_signal_handlers(self) -> None:
         notebook = self.window.notebook
@@ -290,14 +277,21 @@ class NativeCanvasManager:
         da.connect("motion-notify-event", self._on_motion_notify)
 
     def _sync_page_baselines(self) -> None:
-        fg = self.current_flow_graph
-        if fg is not None:
-            page = self.current_page
-            if page and page.file_path:
-                fg.grc_file_path = page.file_path
-            self.last_synced_export_hash = flow_graph_content_hash(fg)
-            self.last_disk_hash = _sha256_file(self.path) if self.path else None
-            self._last_block_names = {b.name for b in fg.blocks}
+        try:
+            fg = self.current_flow_graph
+            if fg is not None:
+                page = self.current_page
+                if page and page.file_path:
+                    fg.grc_file_path = page.file_path
+                self.last_synced_export_hash = flow_graph_content_hash(fg)
+                self.last_disk_hash = _sha256_file(self.path) if self.path else None
+                self._last_block_names = {b.name for b in fg.blocks}
+        except Exception as e:
+            # Guard the only signal handlers touching disk hashing: if this
+            # raised, last_synced_export_hash would stay at the previous tab's
+            # value and the next poll would compare the new page against a
+            # stale baseline.
+            _log.warning("Failed to sync page baselines on tab switch: %s", e)
 
     def _on_page_switched(self, _notebook: Any, _page: Any, _page_num: int) -> None:
         self._setup_drawing_area()
@@ -367,6 +361,9 @@ class NativeCanvasManager:
                     and current_hash != self.last_synced_export_hash
                 ):
                     self.sync_manual_edit()
-            except Exception:
-                pass
+            except Exception as e:
+                # Log instead of silently swallowing — a single transient error
+                # here would otherwise blind the sole guard against un-synced
+                # manual edits for the rest of the session.
+                _log.warning("Safety-net poll error: %s", e)
         return True

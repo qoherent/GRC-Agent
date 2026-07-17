@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelSettings
-from pydantic_ai.capabilities import ProcessHistory
 
 from grc_agent.settings import env_path
 
@@ -33,7 +32,6 @@ from grc_agent.agent import (  # noqa: E402
     build_scenario_model,
     fresh_agent,
     grc_tools,
-    prune_history,
     validate_flowgraph_state,
     web_fetch_cap,
     web_search_cap,
@@ -66,7 +64,7 @@ def _build_cloud_agent(fixture: str):
         name="grc_button_integration_test",
         instructions=build_system_prompt("pai-button-test"),
         tools=grc_tools(),
-        capabilities=[ProcessHistory(prune_history), StopGracefully(), web_search_cap, web_fetch_cap],
+        capabilities=[StopGracefully(), web_search_cap, web_fetch_cap],
         model_settings=ModelSettings(extra_body={"think": True}),
         retries={"tools": 3, "output": 3},
     )

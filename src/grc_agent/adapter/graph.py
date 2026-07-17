@@ -67,23 +67,6 @@ def gui_application_cls() -> Any:
     return Application
 
 
-def disable_native_undo_redo() -> None:
-    """GRC's own GUI ships a complete, working undo/redo (gnuradio.grc.gui's
-    StateCache + Actions.FLOW_GRAPH_UNDO/REDO on Ctrl+Z/Ctrl+Y) that stays
-    reachable even with native_canvas.py's chrome hidden — live-confirmed: it
-    visibly moves things back on the canvas, but never touches disk, so it
-    silently diverges from the shared undo/redo stack in this module (which
-    IS disk-synced across both the agent and manual-edit paths). Disabling
-    the native one keeps exactly one undo/redo history reachable, avoiding
-    that divergence. native_canvas.py calls this once at startup rather than
-    importing gnuradio.grc.gui.Actions itself, keeping this module the sole
-    gnuradio importer."""
-    from gnuradio.grc.gui import Actions
-
-    Actions.FLOW_GRAPH_UNDO.set_enabled(False)
-    Actions.FLOW_GRAPH_REDO.set_enabled(False)
-
-
 def hide_panels_by_default(app: Any) -> None:
     """Hide GRC's panels (block library, console, and variable editor) by default."""
     from gnuradio.grc.gui import Actions
@@ -257,6 +240,32 @@ def ports_governed_by(block_type: str, param_key: str) -> tuple[frozenset[str], 
     return _match("inputs"), _match("outputs")
 
 
+_DTYPE_CANON_CACHE: dict[str, str] | None = None
+
+
+def _canonical_dtype(token: str) -> str:
+    """Resolve a dtype token (canonical core type or alias) to its canonical
+    core type using GNU Radio's own ``Constants.ALIASES_OF`` — not a hand-
+    maintained alias table, which had drifted (a bogus ``u8`` entry that maps
+    to no real GNU Radio type, and missing ``sc16`` / ``s8`` / ``sc8``).
+
+    Core types map to themselves; recognized aliases map to their core;
+    unrecognized tokens pass through unchanged so an explicit value is never
+    silently rewritten (feeding straight into the silent-reset mechanism).
+    """
+    global _DTYPE_CANON_CACHE
+    if _DTYPE_CANON_CACHE is None:
+        from gnuradio.grc.core import Constants
+
+        core_types = ("complex", "float", "int", "short", "byte")
+        cache = {c: c for c in core_types}
+        for core in core_types:
+            for alias in Constants.ALIASES_OF.get(core, ()):
+                cache[alias] = core
+        _DTYPE_CANON_CACHE = cache
+    return _DTYPE_CANON_CACHE.get(token, token)
+
+
 def resolve_auto(  # noqa: C901
     flow_graph: Any,
     block_name: str,
@@ -354,19 +363,7 @@ def resolve_auto(  # noqa: C901
                                     break
 
                 if other_type_val:
-                    dtype_map = {
-                        "complex": "complex",
-                        "float": "float",
-                        "int": "int",
-                        "short": "short",
-                        "byte": "byte",
-                        "fc32": "complex",
-                        "f32": "float",
-                        "s32": "int",
-                        "s16": "short",
-                        "u8": "byte",
-                    }
-                    dtype_str = dtype_map.get(other_type_val, other_type_val)
+                    dtype_str = _canonical_dtype(other_type_val)
                     if new_block_names and other in new_block_names:
                         if new_dtype is None:
                             new_dtype = dtype_str
@@ -993,6 +990,23 @@ def change_graph(  # noqa: C901
                                 is_connected = True
                                 break
                         if not is_connected:
+                            # A brand-new block with type='auto' and no
+                            # connection in this batch has nothing to resolve
+                            # from. Failing loudly here (the batch rolls back
+                            # via the `if errors:` gate below) instead of
+                            # silently letting rewrite() reset it to GNU Radio's
+                            # arbitrary schema default.
+                            errors.append(
+                                {
+                                    "code": "auto_resolve_failed",
+                                    "message": (
+                                        f"Block {b.name!r} has type parameter {k!r} set to "
+                                        "'auto' but no connection in this batch to resolve it "
+                                        "from. Set an explicit type value, or connect it to an "
+                                        "already-typed block."
+                                    ),
+                                }
+                            )
                             continue
                     try:
                         resolved = resolve_auto(
@@ -1017,7 +1031,6 @@ def change_graph(  # noqa: C901
 
         if add_blocks:
             flow_graph.rewrite()
-            flow_graph._error_messages = []
 
         # Phase 6: update_states
         if update_states:
@@ -1074,31 +1087,43 @@ def change_graph(  # noqa: C901
     # it, is_valid() reports "valid" regardless of actual state (confirmed
     # live: removing a required connection without force=True was silently
     # accepted, leaving a genuinely broken graph persisted to disk).
-    flow_graph.validate()
-    valid = bool(flow_graph.is_valid())
-    if not valid and not force:
-        validation_errors = []
-        for elem, msg in flow_graph.iter_error_messages():
-            parent = getattr(elem, "parent_block", None)
-            if parent is not None and parent is not elem:
-                validation_errors.append(
-                    {"code": "gnu_validation", "message": f"{parent.name}: {elem}: {msg}"}
-                )
-            else:
-                validation_errors.append({"code": "gnu_validation", "message": f"{elem}: {msg}"})
+    try:
+        flow_graph.validate()
+        valid = bool(flow_graph.is_valid())
+        if not valid and not force:
+            validation_errors = []
+            for elem, msg in flow_graph.iter_error_messages():
+                parent = getattr(elem, "parent_block", None)
+                if parent is not None and parent is not elem:
+                    validation_errors.append(
+                        {"code": "gnu_validation", "message": f"{parent.name}: {elem}: {msg}"}
+                    )
+                else:
+                    validation_errors.append({"code": "gnu_validation", "message": f"{elem}: {msg}"})
+            flow_graph.import_data(initial_data)
+            flow_graph.rewrite()
+            return {
+                "ok": False,
+                "error_type": "validation_failed",
+                "errors": validation_errors
+                if validation_errors
+                else [{"code": "gnu_validation", "message": "GRC validation failed."}],
+            }
+    except Exception as exc:
+        # The validation gate itself raised (rather than populating an error
+        # list). The phases above already mutated the shared, canvas-rendered
+        # flowgraph, so revert it exactly like the enclosing mutation rollback
+        # instead of propagating the exception and leaving the graph mutated.
         flow_graph.import_data(initial_data)
         flow_graph.rewrite()
-        return {
-            "ok": False,
-            "error_type": "validation_failed",
-            "errors": validation_errors
-            if validation_errors
-            else [{"code": "gnu_validation", "message": "GRC validation failed."}],
-        }
+        return {"ok": False, "errors": [{"code": "mutation_failed", "message": str(exc)}]}
 
     # Write atomically with lock and backup
     try:
-        original = Path(flow_graph.grc_file_path)
+        grc_file_path = getattr(flow_graph, "grc_file_path", "")
+        if not grc_file_path or Path(grc_file_path).is_dir():
+            return {"ok": True}
+        original = Path(grc_file_path)
         # resolve() follows symlinks, so the symlink check must run on the
         # unresolved path — checking it after resolve() is always False and
         # silently defeats the guard.
@@ -1108,22 +1133,25 @@ def change_graph(  # noqa: C901
         if target_path.exists() and target_path.stat().st_nlink > 1:
             raise OSError(f"Refusing to save hard-linked graph file: {target_path}")
 
-        if target_path.exists():
-            backup_dir = target_path.parent / ".grc_agent" / "backups"
-            backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with open(target_path, "rb") as f:
-                old_hash = hashlib.sha256(f.read()).hexdigest()
-            timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-            backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
-            shutil.copy2(target_path, backup_path)
-            _prune_old_backups(backup_dir)
-
         lock_path = target_path.parent / ".grc_agent" / (target_path.name + ".lock")
         lock_path.parent.mkdir(mode=0o700, exist_ok=True)
 
         with lock_path.open("a", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
+                # Backup is taken INSIDE the lock so it snapshots exactly the
+                # on-disk state about to be overwritten — a concurrent writer
+                # can't slip in between the backup copy and the locked write
+                # and leave the backup stale.
+                if target_path.exists():
+                    backup_dir = target_path.parent / ".grc_agent" / "backups"
+                    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with open(target_path, "rb") as f:
+                        old_hash = hashlib.sha256(f.read()).hexdigest()
+                    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                    backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
+                    shutil.copy2(target_path, backup_path)
+                    _prune_old_backups(backup_dir)
                 write_flow_graph_atomic(flow_graph, target_path)
                 push_undo_snapshot(flow_graph, target_path, initial_data)
             finally:

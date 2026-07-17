@@ -2,7 +2,6 @@ from typing import Any
 
 import httpx
 from pydantic_ai import Agent, ModelSettings
-from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
@@ -15,7 +14,6 @@ from grc_agent.agent import (
     GrcAgentResponse,
     StopGracefully,
     grc_tools,
-    prune_history,
     validate_flowgraph_state,
     web_fetch_cap,
     web_search_cap,
@@ -79,7 +77,6 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
         instructions=build_system_prompt("pai-desktop-chat"),
         tools=grc_tools(),
         capabilities=[
-            ProcessHistory(prune_history),
             StopGracefully(),
             web_search_cap,
             web_fetch_cap,

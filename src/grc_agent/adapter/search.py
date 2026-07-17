@@ -1,23 +1,32 @@
+import logging
+from urllib.parse import parse_qs, urlparse
+
+import httpx
+from bs4 import BeautifulSoup
+
+_log = logging.getLogger(__name__)
+
+
 async def lite_web_search(query: str) -> str:
     """Local web-search fallback for pydantic-ai's provider-adaptive
     ``WebSearch`` capability on providers without native search (Ollama).
 
-    DuckDuckGo's primary endpoint silently empties responses for the standard
-    ``ddgs``/``duckduckgo_search`` client (and for pydantic-ai's own built-in
-    duckduckgo fallback, which calls the same ``DDGS().text()``), returning zero
-    results for every query including controls. ``lite.duckduckgo.com`` is the
-    one DuckDuckGo surface that still returns real results, so this scrapes it.
+    Scrapes ``lite.duckduckgo.com`` (the one DuckDuckGo surface that still
+    returns real results for this client). Network errors propagate via
+    ``raise_for_status`` so a backend failure surfaces honestly instead of
+    being masked as "no results".
 
-    Raw snippets are returned verbatim for the model to ground on directly — no
-    secondary synthesis call, no clipping. Network errors propagate so a backend
-    failure surfaces honestly instead of being masked as "no results" (the exact
-    bug that made the previous ``web_search`` silently return nothing).
+    Two failure modes that previously looked identical to a genuine
+    "no results" are made diagnosable here via logging (per the project's
+    "no silent transformation" rule):
+
+    * a 200 response that parses ZERO result anchors — either a real
+      no-results query OR DuckDuckGo's HTML selectors having drifted. The
+      empty parse alone can't tell them apart, so a warning naming both
+      possibilities is logged instead of masking drift as "no results".
+    * a link/snippet selector-count mismatch (page layout changed) — logged
+      rather than silently truncated by ``zip(..., strict=False)``.
     """
-    from urllib.parse import parse_qs, urlparse
-
-    import httpx
-    from bs4 import BeautifulSoup
-
     async with httpx.AsyncClient(
         headers={
             "User-Agent": (
@@ -33,6 +42,25 @@ async def lite_web_search(query: str) -> str:
     soup = BeautifulSoup(response.text, "html.parser")
     links = soup.select("a.result-link")
     snippets = soup.select("td.result-snippet")
+
+    if not links:
+        # Empty parse: could be genuine no-results OR selector drift. The log
+        # makes drift diagnosable; the return stays the honest "no results".
+        _log.warning(
+            "lite_web_search: no result-link anchors parsed for %r "
+            "(possible DuckDuckGo HTML selector drift, or a genuine no-results query).",
+            query,
+        )
+        return f"No web results found for: {query}"
+
+    if len(links) != len(snippets):
+        _log.warning(
+            "lite_web_search: selector count mismatch for %r (%d links vs %d snippets) "
+            "— pairing to the shorter length instead of silently misaligning.",
+            query,
+            len(links),
+            len(snippets),
+        )
 
     results = []
     for anchor, snippet in zip(links, snippets, strict=False):

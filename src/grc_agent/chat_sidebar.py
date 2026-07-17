@@ -12,6 +12,7 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 import gi
 from bs4 import BeautifulSoup, NavigableString
@@ -20,6 +21,8 @@ from markdown_it import MarkdownIt
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
+from datetime import UTC
+
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 from pydantic_ai import (
     Agent,
@@ -36,19 +39,70 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
-from pydantic_ai.messages import ModelMessage, TextPart, ThinkingPart, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_graph import End
 
+from .db import (
+    delete_session,
+    delete_sessions_for_path,
+    deserialize_messages,
+    get_recent_sessions,
+    get_session_for_path,
+    load_session,
+    save_session,
+)
 from .settings import (
     get_env_value,
-    load_recent_sessions,
     load_settings,
-    save_recent_session,
     save_settings,
     upsert_env_key,
 )
 
 _log = logging.getLogger(__name__)
+
+# When auto-scrolling incrementally (streaming / appended rows), only stick to
+# the bottom if the user is already within this many pixels of it — so a user
+# scrolled up to read earlier messages isn't yanked back down on every token.
+_SCROLL_STICK_THRESHOLD = 80
+
+
+def _esc(text: str) -> str:
+    """Escape text for safe interpolation into Pango markup."""
+    return GLib.markup_escape_text(text, -1)
+
+
+def format_relative_time(timestamp_str: str) -> str:
+    from datetime import datetime
+    try:
+        if "T" in timestamp_str:
+            dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        else:
+            dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        now = datetime.now(UTC)
+        diff = now - dt
+        seconds = diff.total_seconds()
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{int(minutes)}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{int(hours)}h ago"
+        days = hours // 24
+        if days < 7:
+            return f"{int(days)}d ago"
+        return dt.strftime("%b %d, %Y")
+    except Exception:
+        return timestamp_str
+
 
 _CHAT_CSS = b"""
 .chat-sidebar {
@@ -191,20 +245,35 @@ _CHAT_CSS = b"""
     margin-bottom: 8px;
     margin-left: 12px;
 }
+.chat-recent-row {
+    margin-bottom: 6px;
+    margin-left: 12px;
+    margin-right: 12px;
+}
 .chat-recent-item {
     background: #ffffff;
     color: #212121;
     border: 1px solid #e0e0e0;
-    border-radius: 6px;
+    border-radius: 6px 0px 0px 6px;
     padding: 8px 12px;
-    margin-bottom: 6px;
-    margin-left: 12px;
-    margin-right: 12px;
 }
 .chat-recent-item:hover {
     background: #e3f2fd;
     border-color: #90caf9;
     color: #0d47a1;
+}
+.chat-recent-delete-btn {
+    background: #ffffff;
+    color: #c62828;
+    border: 1px solid #e0e0e0;
+    border-left: none;
+    border-radius: 0px 6px 6px 0px;
+    padding: 8px;
+}
+.chat-recent-delete-btn:hover {
+    background: #ffebee;
+    border-color: #ffcdd2;
+    color: #b71c1c;
 }
 """
 
@@ -241,115 +310,6 @@ def _apply_css() -> None:
         screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
     )
     _css_applied = True
-
-
-def _markdown_to_pango(text: str) -> str:  # noqa: C901
-    """Convert basic markdown to Pango markup for Gtk.Label.set_markup().
-
-    Supports bold, italic, inline/block code, links, headings, lists,
-    and formats markdown tables as clean monospace tables.
-    """
-    def _format_table(table_soup) -> str:
-        headers = []
-        thead = table_soup.find("thead")
-        if thead:
-            headers = [th.get_text().strip() for th in thead.find_all("th")]
-
-        tbody = table_soup.find("tbody")
-        rows = []
-        if tbody:
-            for tr in tbody.find_all("tr"):
-                rows.append([td.get_text().strip() for td in tr.find_all(["td", "th"])])
-        else:
-            for tr in table_soup.find_all("tr"):
-                rows.append([td.get_text().strip() for td in tr.find_all(["td", "th"])])
-
-        if not headers and rows:
-            headers = rows[0]
-            rows = rows[1:]
-
-        num_cols = max(len(headers), max((len(r) for r in rows), default=0))
-        if num_cols == 0:
-            return ""
-
-        headers += [""] * (num_cols - len(headers))
-        for r in rows:
-            r += [""] * (num_cols - len(r))
-
-        col_widths = [0] * num_cols
-        for i in range(num_cols):
-            col_widths[i] = max(
-                len(headers[i]),
-                max((len(r[i]) for r in rows), default=0)
-            )
-
-        lines = []
-        header_line = " | ".join(f"{h:<{col_widths[i]}}" for i, h in enumerate(headers))
-        lines.append("| " + header_line + " |")
-
-        sep_line = "-+-".join("-" * col_widths[i] for i in range(num_cols))
-        lines.append("+" + sep_line + "+")
-
-        for r in rows:
-            row_line = " | ".join(f"{val:<{col_widths[i]}}" for i, val in enumerate(r))
-            lines.append("| " + row_line + " |")
-
-        return "\n" + "\n".join(lines) + "\n"
-
-    def _node_to_pango(node) -> str:  # noqa: C901
-        if isinstance(node, NavigableString):
-            return str(node).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-        tag = node.name
-        if not tag:
-            return ""
-
-        inner_text = "".join(_node_to_pango(child) for child in node.children)
-
-        if tag in ("p", "div"):
-            return f"{inner_text}\n"
-        elif tag in ("strong", "b"):
-            return f"<b>{inner_text}</b>"
-        elif tag in ("em", "i"):
-            return f"<i>{inner_text}</i>"
-        elif tag in ("code", "tt") or tag == "pre":
-            return f"<tt>{inner_text.replace(' ', '\u00A0')}</tt>"
-        elif tag == "a":
-            href = node.get("href", "")
-            href_esc = href.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-            return f'<a href="{href_esc}">{inner_text}</a>'
-        elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            return f"\n<b>{inner_text}</b>\n"
-        elif tag == "ul" or tag == "ol":
-            return f"{inner_text}\n"
-        elif tag == "li":
-            return f" • {inner_text}\n"
-        elif tag == "table":
-            table_str = _format_table(node)
-            table_str_esc = table_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            return f"<tt>{table_str_esc.replace(' ', '\u00A0')}</tt>"
-        elif tag in ("thead", "tbody", "tr", "td", "th"):
-            return ""
-        else:
-            return inner_text
-
-    try:
-        md = MarkdownIt("commonmark").enable("table")
-        html = md.render(text)
-        soup = BeautifulSoup(html, "html.parser")
-        result = "".join(_node_to_pango(child) for child in soup.contents)
-        return result.strip()
-    except Exception as e:
-        _log.warning("Failed to render markdown via markdown-it: %s", e)
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _safe_set_markup(label: Gtk.Label, text: str) -> None:
-    try:
-        label.set_markup(_markdown_to_pango(text))
-    except Exception:
-        # Fall back to raw text if markup fails (e.g. malformed markdown from the model)
-        label.set_text(text)
 
 
 class _StreamCtx:
@@ -395,9 +355,16 @@ class ChatSidebar(Gtk.Box):
         self._agent: Agent | None = None
         self._flowgraph_proxy: object | None = None
         self._message_history: list[ModelMessage] = []
+        self._active_session_id: int | None = None
+        self._loading_session_id: int | None = None
         self._busy = False
         self._chat_task: asyncio.Task | None = None
-        self._chat_abort: asyncio.Future | None = None
+        # Holds the currently-open non-blocking modal dialog so the gbulb loop
+        # keeps pumping while it's shown. A non-blocking toplevel shown via
+        # .show() would be garbage-collected once the constructing method
+        # returns (PyGObject holds no Python-side root ref), so we anchor it
+        # here and clear it in the response handler.
+        self._open_dialog: Gtk.Dialog | None = None
 
         # Slim side toggle for GRC block library
         self._blocks_toggle = Gtk.Button()
@@ -419,6 +386,11 @@ class ChatSidebar(Gtk.Box):
         self._build_status_bar(content)
         self.pack_start(content, True, True, 0)
 
+        # Refresh relative timestamps ("2m ago") on the recent-sessions list
+        # while the welcome screen is visible. Re-renders only when idle and
+        # empty so live-streaming bubbles are never wiped.
+        GLib.timeout_add_seconds(60, self._refresh_welcome_times)
+
     def _build_toolbar(self, content: Gtk.Box) -> None:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         bar.set_border_width(4)
@@ -431,10 +403,17 @@ class ChatSidebar(Gtk.Box):
             bar.pack_start(b, False, False, 0)
             return b
 
-        _signal_btn("New Session", "Clear chat history", "new-session-clicked")
+        _signal_btn("New Session", "Start a new chat session", "new-session-clicked")
+
+        # Clear History button
+        self._clear_hist_btn = Gtk.Button.new_with_label("Clear History")
+        self._clear_hist_btn.set_tooltip_text("Clear chat history for this flowgraph")
+        self._clear_hist_btn.get_style_context().add_class("chat-toolbar-btn")
+        self._clear_hist_btn.connect("clicked", self._on_clear_history_clicked)
+        bar.pack_start(self._clear_hist_btn, False, False, 0)
 
         # Active graph badge
-        self._graph_label = Gtk.Label(label="no graph")
+        self._graph_label = Gtk.Label(label="Active Graph: none")
         self._graph_label.get_style_context().add_class("graph-badge")
         bar.pack_start(self._graph_label, False, False, 8)
 
@@ -443,11 +422,11 @@ class ChatSidebar(Gtk.Box):
         bar.pack_start(spacer, True, True, 0)
 
         # Settings
-        gear = Gtk.Button.new_with_label("Settings")
-        gear.set_tooltip_text("Provider / model settings")
-        gear.get_style_context().add_class("chat-toolbar-btn")
-        gear.connect("clicked", lambda *_: self._open_settings())
-        bar.pack_start(gear, False, False, 0)
+        self._gear_btn = Gtk.Button.new_with_label("Settings")
+        self._gear_btn.set_tooltip_text("Provider / model settings")
+        self._gear_btn.get_style_context().add_class("chat-toolbar-btn")
+        self._gear_btn.connect("clicked", lambda *_: self._open_settings())
+        bar.pack_start(self._gear_btn, False, False, 0)
 
         bar.get_style_context().add_class("chat-toolbar")
         content.pack_start(bar, False, False, 0)
@@ -510,7 +489,61 @@ class ChatSidebar(Gtk.Box):
             self._status_label.get_style_context().remove_class("validation-valid")
 
     def set_active_graph(self, name: str | None) -> None:
-        self._graph_label.set_text(f"{name} active" if name else "no graph")
+        self._graph_label.set_text(f"Active Graph: {name}" if name else "Active Graph: none")
+
+    def _on_clear_history_clicked(self, _widget: Gtk.Button) -> None:
+        dialog = Gtk.MessageDialog(
+            transient_for=self.get_toplevel() if isinstance(self.get_toplevel(), Gtk.Window) else None,
+            flags=Gtk.DialogFlags.MODAL,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Clear Chat History",
+        )
+        dialog.format_secondary_text(
+            "Are you sure you want to clear the chat history for this flowgraph? This cannot be undone."
+        )
+        self._open_dialog = dialog
+
+        def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
+            self._open_dialog = None
+            dialog.destroy()
+            if response != Gtk.ResponseType.YES:
+                return
+            sid = self._active_session_id
+            path = None
+            if self._flowgraph_proxy is not None:
+                cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+                path = cm.path if cm else None
+            # Delete persisted rows BEFORE clearing/rendering, so the just-cleared
+            # session doesn't briefly reappear at the top of the Recent list.
+            if path:
+                try:
+                    delete_sessions_for_path(path)
+                except Exception as e:
+                    _log.error("Failed to delete sessions for path %s: %s", path, e)
+            elif sid is not None:
+                try:
+                    delete_session(sid)
+                except Exception as e:
+                    _log.error("Failed to delete cleared session %s: %s", sid, e)
+            self.clear_messages()
+            self.set_status("Chat history cleared.")
+
+        dialog.connect("response", _on_response)
+        dialog.show()
+
+    def _on_delete_recent_session(self, session_id: int) -> None:
+        try:
+            delete_session(session_id)
+            if self._active_session_id == session_id:
+                self._active_session_id = None
+                self._message_history = []
+                page = self.current_page
+                if page:
+                    page._grc_agent_session_id = None
+        except Exception as e:
+            _log.error("Failed to delete session %s: %s", session_id, e)
+        self._render_history()
 
     def set_input_enabled(self, enabled: bool) -> None:
         if not self._busy:
@@ -531,14 +564,91 @@ class ChatSidebar(Gtk.Box):
         self._flowgraph_proxy = proxy
         cm = getattr(proxy, "_canvas_manager", None)
         path = cm.path if cm else None
-        self.load_history_for_path(path)
+        self.sync_to_file(path)
+
+    @property
+    def current_page(self) -> Any:
+        if self._flowgraph_proxy is None:
+            return None
+        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+        return cm.current_page if cm else None
+
+    def sync_to_file(self, path: str | None) -> None:
+        page = self.current_page
+        if self._loading_session_id is not None:
+            if page:
+                page._grc_agent_session_id = self._loading_session_id
+            return
+
+        if page:
+            self._sync_page_session(page, path)
+        else:
+            self._sync_headless_session(path)
+
+    def _sync_page_session(self, page: Any, path: str | None) -> None:
+        session_id = getattr(page, "_grc_agent_session_id", None)
+        if session_id is not None and not isinstance(session_id, int):
+            session_id = None
+            if hasattr(page, "_grc_agent_session_id"):
+                import contextlib
+                with contextlib.suppress(AttributeError):
+                    delattr(page, "_grc_agent_session_id")
+
+        if not hasattr(page, "_grc_agent_session_id"):
+            # Page opened for the first time — look up most recently updated session for its path
+            if path:
+                session = get_session_for_path(path)
+                page._grc_agent_session_id = session["id"] if session else None
+            else:
+                page._grc_agent_session_id = None
+
+        session_id = page._grc_agent_session_id
+        if session_id is not None:
+            session = load_session(session_id)
+            if session:
+                self._active_session_id = session["id"]
+                self._message_history = deserialize_messages(session["messages"])
+                self._render_history()
+                return
+            else:
+                # Session was deleted/not found, reset page association
+                page._grc_agent_session_id = None
+
+        self._active_session_id = None
+        self._message_history = []
+        self._render_history()
+
+    def _sync_headless_session(self, path: str | None) -> None:
+        if path:
+            session = get_session_for_path(path)
+            if session:
+                self._active_session_id = session["id"]
+                self._message_history = deserialize_messages(session["messages"])
+                self._render_history()
+                return
+
+        self._active_session_id = None
+        self._message_history = []
+        self._render_history()
 
     def clear_messages(self) -> None:
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
         self._message_history = []
-        self._save_history()
+        self._active_session_id = None
+        page = self.current_page
+        if page:
+            page._grc_agent_session_id = None
         self._render_history()
+
+    def _refresh_welcome_times(self) -> bool:
+        """Periodically re-render the welcome/recent-sessions list so the
+        relative timestamps ("2m ago") stay fresh. Only runs when idle and the
+        history is empty (the only state in which the list is visible); never
+        disturbs a live chat stream."""
+        if not self._busy and not self._message_history:
+            self._render_history()
+        return True  # re-arm
 
     def _render_history(self) -> None:  # noqa: C901
         for child in self._listbox.get_children():
@@ -567,7 +677,7 @@ class ChatSidebar(Gtk.Box):
             elif cls_name == "ModelResponse":
                 box = self._start_agent_message()
                 self._render_last_message_rich(box, msg)
-        self._scroll_to_bottom()
+        self._scroll_to_bottom(force=True)
 
     def _render_welcome_screen(self) -> None:
         # 1. Welcome Card
@@ -585,13 +695,7 @@ class ChatSidebar(Gtk.Box):
         sub_lbl.set_line_wrap(True)
         sub_lbl.set_xalign(0.0)
 
-        path = None
-        page = None
-        if self._flowgraph_proxy is not None:
-            cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
-            if cm:
-                page = cm.current_page
-                path = cm.path
+        page = self.current_page
 
         if page is not None:
             sub_lbl.set_markup(
@@ -606,65 +710,134 @@ class ChatSidebar(Gtk.Box):
         self._listbox.add(welcome_box)
 
         # 2. Recent Sessions List
-        sessions = load_recent_sessions()
+        try:
+            sessions = get_recent_sessions()
+        except Exception as e:
+            # A corrupt/unwritable chat_sessions.db must not abort the UI —
+            # degrade to an empty recent list rather than crashing launch.
+            _log.error("Failed to load recent sessions: %s", e)
+            sessions = []
 
-        # Filter out current active path from the suggestions if we are already inside it
-        if path:
-            abs_path = str(Path(path).resolve())
-            sessions = [s for s in sessions if str(Path(s).resolve()) != abs_path]
+        # Filter out the current active session from the suggestions
+        if self._active_session_id is not None:
+            sessions = [s for s in sessions if s["id"] != self._active_session_id]
 
         if sessions:
-            # Header
-            hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            hdr_box.get_style_context().add_class("chat-recent-header")
+            self._add_recent_sessions_to_list(sessions)
 
-            icon = Gtk.Image.new_from_icon_name("document-open-recent-symbolic", Gtk.IconSize.MENU)
-            lbl = Gtk.Label()
-            lbl.set_markup("<b>Recent Sessions</b>")
+    def _add_recent_sessions_to_list(self, sessions: list[dict[str, Any]]) -> None:
+        # Header
+        hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        hdr_box.get_style_context().add_class("chat-recent-header")
 
-            hdr_box.pack_start(icon, False, False, 0)
-            hdr_box.pack_start(lbl, False, False, 0)
-            self._listbox.add(hdr_box)
+        icon = Gtk.Image.new_from_icon_name("document-open-recent-symbolic", Gtk.IconSize.MENU)
+        lbl = Gtk.Label()
+        lbl.set_markup("<b>Recent Sessions</b>")
 
-            # List items
-            for s in sessions:
-                btn = Gtk.Button()
-                btn.get_style_context().add_class("chat-recent-item")
-                btn.set_relief(Gtk.ReliefStyle.NONE)
+        hdr_box.pack_start(icon, False, False, 0)
+        hdr_box.pack_start(lbl, False, False, 0)
+        self._listbox.add(hdr_box)
 
-                # Content layout
-                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-                item_icon = Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU)
+        # List items
+        for s in sessions:
+            sid = s["id"]
+            grc_path = s["grc_file_path"]
+            last_message = s.get("last_message", "")
+            updated_at = s.get("updated_at", "")
 
-                text_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+            row_box.get_style_context().add_class("chat-recent-row")
 
-                name_lbl = Gtk.Label()
-                name_lbl.set_markup(f"<b>{Path(s).name}</b>")
-                name_lbl.set_xalign(0.0)
+            btn = Gtk.Button()
+            btn.get_style_context().add_class("chat-recent-item")
+            btn.set_relief(Gtk.ReliefStyle.NONE)
+            btn.set_hexpand(True)
 
-                path_lbl = Gtk.Label()
-                path_lbl.set_markup(f"<span fgcolor='#777777' size='small'>{Path(s).parent}</span>")
-                path_lbl.set_xalign(0.0)
-                path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
+            # Content layout
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            item_icon = Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU)
 
-                text_vbox.pack_start(name_lbl, False, False, 0)
-                text_vbox.pack_start(path_lbl, False, False, 0)
+            text_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
 
-                box.pack_start(item_icon, False, False, 0)
-                box.pack_start(text_vbox, True, True, 0)
+            top_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            name_lbl = Gtk.Label()
+            name_lbl.set_markup(f"<b>{_esc(Path(grc_path).name)}</b>")
+            name_lbl.set_xalign(0.0)
+            top_hbox.pack_start(name_lbl, False, False, 0)
 
-                btn.add(box)
-                btn.set_tooltip_text(s)
+            if updated_at:
+                time_str = format_relative_time(updated_at)
+                time_lbl = Gtk.Label()
+                time_lbl.set_markup(f"<span fgcolor='#888888' size='small'>{_esc(time_str)}</span>")
+                time_lbl.set_xalign(1.0)
+                top_hbox.pack_end(time_lbl, False, False, 0)
 
-                # Connect click handler
-                btn.connect("clicked", lambda _, p=s: self._open_recent_session(p))
-                self._listbox.add(btn)
+            path_lbl = Gtk.Label()
+            path_lbl.set_markup(f"<span fgcolor='#777777' size='small'>{_esc(str(Path(grc_path).parent))}</span>")
+            path_lbl.set_xalign(0.0)
+            path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
 
-    def _open_recent_session(self, path: str) -> None:
-        if not path or not Path(path).exists():
-            self.set_status("File not found on disk.", error=True)
+            text_vbox.pack_start(top_hbox, False, False, 0)
+            text_vbox.pack_start(path_lbl, False, False, 0)
+
+            if last_message:
+                snippet = last_message.replace("\n", " ").strip()
+                if len(snippet) > 60:
+                    snippet = snippet[:57] + "..."
+                snippet_lbl = Gtk.Label()
+                snippet_lbl.set_markup(f"<span fgcolor='#555555' style='italic' size='small'>{_esc(snippet)}</span>")
+                snippet_lbl.set_xalign(0.0)
+                snippet_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                text_vbox.pack_start(snippet_lbl, False, False, 0)
+
+            box.pack_start(item_icon, False, False, 0)
+            box.pack_start(text_vbox, True, True, 0)
+
+            btn.add(box)
+            btn.set_tooltip_text(grc_path)
+
+            # Connect click handler
+            btn.connect("clicked", lambda _, session_id=sid: self._on_recent_session_clicked(session_id))
+
+            # Individual delete button next to each previous session
+            del_btn = Gtk.Button()
+            del_btn.get_style_context().add_class("chat-recent-delete-btn")
+            del_btn.set_relief(Gtk.ReliefStyle.NONE)
+            del_icon = Gtk.Image.new_from_icon_name("user-trash-symbolic", Gtk.IconSize.MENU)
+            del_btn.set_image(del_icon)
+            del_btn.set_tooltip_text("Remove from recent sessions")
+            del_btn.connect("clicked", lambda _, session_id=sid: self._on_delete_recent_session(session_id))
+
+            row_box.pack_start(btn, True, True, 0)
+            row_box.pack_start(del_btn, False, False, 0)
+
+            self._listbox.add(row_box)
+
+    def _on_recent_session_clicked(self, session_id: int) -> None:
+        if self._busy:
+            self.set_status("Stop or wait for the current response before switching sessions.", error=True)
+            return
+        session_data = load_session(session_id)
+        if not session_data:
+            self.set_status("Session not found in database.", error=True)
             return
 
+        path = session_data["grc_file_path"]
+        if not path or not Path(path).exists():
+            self.set_status("Associated file not found on disk.", error=True)
+            return
+
+        self._active_session_id = session_id
+        self._message_history = deserialize_messages(session_data["messages"])
+        self._render_history()
+
+        self._loading_session_id = session_id
+        try:
+            self._switch_or_open_file(path)
+        finally:
+            self._loading_session_id = None
+
+    def _switch_or_open_file(self, path: str) -> None:
         cm = getattr(self._flowgraph_proxy, "_canvas_manager", None) if self._flowgraph_proxy else None
         if not cm or not cm.window:
             self.set_status("GRC window not available.", error=True)
@@ -676,6 +849,7 @@ class ChatSidebar(Gtk.Box):
             return
 
         target_path = Path(path).resolve()
+        switched = False
         for i in range(notebook.get_n_pages()):
             p = notebook.get_nth_page(i)
             p_path = getattr(p, "file_path", None)
@@ -684,18 +858,22 @@ class ChatSidebar(Gtk.Box):
                     if Path(p_path).resolve() == target_path:
                         notebook.set_current_page(i)
                         self.set_status("Switched to active tab.")
-                        return
+                        switched = True
+                        break
                 except Exception:
                     pass
 
-        try:
-            cm.window.new_page(path)
-            self.set_status("Opened session file.")
-        except Exception as e:
-            _log.error("Failed to open recent session %s: %s", path, e)
-            self.set_status(f"Failed to open session: {e}", error=True)
+        if not switched:
+            try:
+                cm.window.new_page(path)
+                self.set_status("Opened session file.")
+            except Exception as e:
+                _log.error("Failed to open recent session file %s: %s", path, e)
+                self.set_status(f"Failed to open session: {e}", error=True)
 
-    def _save_history(self) -> None:
+    async def _save_history(self) -> None:
+        if self._active_session_id is None:
+            return
         if self._flowgraph_proxy is None:
             return
         cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
@@ -703,52 +881,11 @@ class ChatSidebar(Gtk.Box):
         if not path:
             return
         try:
-            import json
-
-            from pydantic_core import to_jsonable_python
-            hist_path = Path(path).parent / ".grc_agent" / (Path(path).name + ".chat.json")
-            hist_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-            data = to_jsonable_python(self._message_history)
-
-            import os
-            import tempfile
-            fd, tmp_file = tempfile.mkstemp(dir=str(hist_path.parent))
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_file, hist_path)
-                dir_fd = os.open(str(hist_path.parent), os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-            except Exception:
-                if os.path.exists(tmp_file):
-                    os.unlink(tmp_file)
-                raise
+            await asyncio.to_thread(
+                save_session, self._active_session_id, path, self._message_history
+            )
         except Exception as e:
-            _log.error("Failed to save chat history: %s", e)
-
-    def load_history_for_path(self, path: str | None) -> None:
-        self._message_history = []
-        if path:
-            save_recent_session(path)
-            hist_path = Path(path).parent / ".grc_agent" / (Path(path).name + ".chat.json")
-            if hist_path.exists():
-                try:
-                    import json
-
-                    from pydantic_ai import ModelMessagesTypeAdapter
-                    content = hist_path.read_text(encoding="utf-8")
-                    if content.strip():
-                        data = json.loads(content)
-                        self._message_history = ModelMessagesTypeAdapter.validate_python(data)
-                except Exception as e:
-                    _log.error("Failed to load chat history from %s: %s", hist_path, e)
-        self._render_history()
+            _log.error("Failed to save chat history to database: %s", e)
 
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
@@ -1221,16 +1358,42 @@ class ChatSidebar(Gtk.Box):
             return
         self._entry.set_text("")
         self._append_user_message(text)
+
+        if self._active_session_id is None:
+            path = None
+            if self._flowgraph_proxy is not None:
+                cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+                path = cm.path if cm else None
+            if path:
+                try:
+                    self._active_session_id = save_session(None, path, self._message_history)
+                    page = self.current_page
+                    if page:
+                        page._grc_agent_session_id = self._active_session_id
+                except Exception as e:
+                    _log.error("Failed to create new session in database: %s", e)
+
         self._set_busy(True)
         self._chat_task = asyncio.ensure_future(self._run_agent_turn(text))
+        self._chat_task.add_done_callback(self._on_chat_task_done)
+
+    def _remember_user_message(self, text: str) -> None:
+        """Record the user's just-sent prompt into the canonical history on a
+        failed turn, so it is persisted and survives the next render instead of
+        being wiped along with the error bubble."""
+        self._message_history = self._message_history + [
+            ModelRequest(parts=[UserPromptPart(content=text)])
+        ]
 
     async def _run_agent_turn(self, text: str) -> None:  # noqa: C901
-        if self._agent is None:
-            self._append_error("No agent configured.")
-            return
-        ctx = _StreamCtx(self._start_agent_message())
         rich_rendered = False
+        origin_page = self.current_page
+        ctx: _StreamCtx | None = None
         try:
+            if self._agent is None:
+                self._append_error("No agent configured.")
+                return
+            ctx = _StreamCtx(self._start_agent_message())
             async with self._agent.iter(
                 text,
                 message_history=self._message_history,
@@ -1249,42 +1412,84 @@ class ChatSidebar(Gtk.Box):
 
             if run.result is not None:
                 self._message_history = run.result.all_messages()
-                self._save_history()
-                if self._message_history:
-                    self._render_last_message_rich(ctx.box, self._message_history[-1])
-                    rich_rendered = True
+                await self._save_history()
+                self._render_history()
+                rich_rendered = True
         except asyncio.CancelledError:
-            self._append_error("[aborted]")
+            # A tab switch mid-stream cancels this task then synchronously
+            # swaps _message_history/_active_session_id to the new page. Only
+            # touch shared state if we're still on the originating tab — the
+            # prompt for a saved graph was already persisted by the eager
+            # save_session in _dispatch_send. Do NOT await save here; the task
+            # is already cancelling.
+            if self.current_page is origin_page:
+                self._remember_user_message(text)
+                self._append_error("[aborted]")
+                rich_rendered = True
             raise
         except ModelHTTPError as e:
             _log.exception("agent run failed with HTTP error")
-            msg = f"Model HTTP {e.status_code} Error"
-            if e.body:
-                msg += f": {e.body}"
-            else:
-                msg += f" from {e.model_name}"
-            self._append_error(msg)
+            if self.current_page is origin_page:
+                msg = f"Model HTTP {e.status_code} Error"
+                if e.body:
+                    msg += f": {e.body}"
+                else:
+                    msg += f" from {e.model_name}"
+                self._remember_user_message(text)
+                await self._save_history()
+                self._append_error(msg)
+                rich_rendered = True
         except UsageLimitExceeded as e:
             _log.exception("agent run failed due to usage limit")
-            self._append_error(f"Usage Limit Exceeded: {e}")
+            if self.current_page is origin_page:
+                self._remember_user_message(text)
+                await self._save_history()
+                self._append_error(f"Usage Limit Exceeded: {e}")
+                rich_rendered = True
         except ModelAPIError as e:
             _log.exception("agent run failed with API error")
-            self._append_error(f"Model API Error: {e}")
+            if self.current_page is origin_page:
+                self._remember_user_message(text)
+                await self._save_history()
+                self._append_error(f"Model API Error: {e}")
+                rich_rendered = True
         except UnexpectedModelBehavior as e:
             _log.exception("agent run failed with unexpected behavior")
-            self._append_error(f"Unexpected Model Behavior: {e}")
+            if self.current_page is origin_page:
+                self._remember_user_message(text)
+                await self._save_history()
+                self._append_error(f"Unexpected Model Behavior: {e}")
+                rich_rendered = True
         except Exception as e:
             _log.exception("agent run failed")
-            self._append_error(f"Agent error: {e}")
+            if self.current_page is origin_page:
+                self._remember_user_message(text)
+                await self._save_history()
+                self._append_error(f"Agent error: {e}")
+                rich_rendered = True
         finally:
-            if not rich_rendered and ctx.full_raw_text:
+            if ctx is not None and not rich_rendered and ctx.full_raw_text and self.current_page is origin_page:
                 self._render_markdown_to_box(ctx.box, ctx.full_raw_text)
             self._set_busy(False)
             self._scroll_to_bottom()
 
+    def _on_chat_task_done(self, task: asyncio.Task) -> None:
+        """Defence in depth: log any unhandled exception that escaped the
+        _run_agent_turn try/except (e.g. a BaseException), and guarantee the
+        busy UI is released. The finally in _run_agent_turn already resets
+        busy for normal paths."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _log.error("chat task ended with unhandled exception: %s", exc, exc_info=exc)
+        if self._busy:
+            self._set_busy(False)
+
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         can_type = self._flowgraph_proxy is not None
+        self._gear_btn.set_sensitive(not busy)
         if busy:
             self._send_btn.set_label("Stop")
             self._send_btn.set_sensitive(True)
@@ -1296,11 +1501,21 @@ class ChatSidebar(Gtk.Box):
             if can_type:
                 self._entry.grab_focus()
 
-    def _scroll_to_bottom(self) -> None:
+    def _scroll_to_bottom(self, *, force: bool = False) -> None:
         def _do_scroll():
-            adj = self._scrolled.get_vadjustment()
-            adj.set_value(adj.get_upper() - adj.get_page_size())
+            sw = self._scrolled
+            if sw is None:
+                return False
+            adj = sw.get_vadjustment()
+            upper = adj.get_upper()
+            page = adj.get_page_size()
+            # Don't yank the view down while streaming if the user scrolled up
+            # to read (unless explicitly forced, e.g. after a full rebuild).
+            if not force and (upper - page - adj.get_value()) > _SCROLL_STICK_THRESHOLD:
+                return False
+            adj.set_value(upper - page)
             return False
+
         GLib.idle_add(_do_scroll)
 
     def _open_settings(self) -> None:  # noqa: C901
@@ -1359,7 +1574,13 @@ class ChatSidebar(Gtk.Box):
         content.pack_start(info, False, False, 0)
         content.show_all()
 
-        if dlg.run() == Gtk.ResponseType.APPLY:
+        self._open_dialog = dlg
+
+        def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
+            self._open_dialog = None
+            dlg.destroy()
+            if response != Gtk.ResponseType.APPLY:
+                return
             idx = provider_combo.get_active()
             provider = _PROVIDER_ORDER[idx] if idx >= 0 else "ollama"
             model = model_entry.get_text().strip()
@@ -1370,6 +1591,5 @@ class ChatSidebar(Gtk.Box):
             if key_var:
                 upsert_env_key(key_var, key_val)
 
-
-
-        dlg.destroy()
+        dlg.connect("response", _on_response)
+        dlg.show()

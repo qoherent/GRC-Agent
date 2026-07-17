@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import (
-    ModelMessage,
     ModelRequest,
     ModelRequestNode,
     ModelRetry,
@@ -24,7 +23,6 @@ from pydantic_ai.capabilities import (
     WebSearch,
     WrapNodeRunHandler,
 )
-from pydantic_ai.messages import UserPromptPart
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
@@ -333,7 +331,11 @@ class StopGracefully(AbstractCapability[Any]):
         return StopGracefully(max_requests=self.max_requests)
 
     async def wrap_node_run(
-        self, ctx: RunContext[Any], *, node: AgentNode, handler: WrapNodeRunHandler  # noqa: ARG002
+        self,
+        ctx: RunContext[Any],  # noqa: ARG002
+        *,
+        node: AgentNode,
+        handler: WrapNodeRunHandler,
     ) -> NodeResult:
         if isinstance(node, ModelRequestNode):
             self.count += 1
@@ -393,11 +395,13 @@ async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = N
 
 
 async def query_knowledge_func(
-    ctx: RunContext[Any], query: str, domain: Literal["catalog", "docs"]  # noqa: ARG001
+    ctx: RunContext[Any],  # noqa: ARG001
+    query: str,
+    domain: Literal["catalog", "docs"],
 ) -> str:
     """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts)."""
     if domain == "catalog":
-        res = await asyncio.to_thread(query_catalog, query)
+        res = query_catalog(query)
         return json.dumps(res)
     else:
         res = await asyncio.to_thread(query_docs, query)
@@ -500,10 +504,12 @@ async def change_graph_func(
         )
     if hasattr(ctx.deps, "bump_version"):
         ctx.deps.bump_version()
-    # Tell the live GTK canvas (if any) to reload from disk — the in-memory
-    # graph and the on-disk file are now ahead of what's visually rendered.
-    # The outcome is surfaced so a desync isn't silent; on a raw flowgraph
-    # deps (scenario harness) notify_edit is absent and this is skipped.
+    # Tell the live GTK canvas (if any) to redraw — the agent mutated the very
+    # same in-memory FlowGraph the canvas renders (single-process, shared
+    # object), so there is nothing to reload from disk; notify_edit just queues
+    # a draw, scrolls to new blocks, and refreshes the sync baseline. The
+    # outcome is surfaced so a desync isn't silent; on a raw flowgraph deps
+    # (scenario harness) notify_edit is absent and this is skipped.
     if hasattr(ctx.deps, "notify_edit"):
         res["canvas_synced"] = (await ctx.deps.notify_edit()).get("ok", False)
     return json.dumps(res)
@@ -542,17 +548,6 @@ def grc_tools() -> list[Tool[Any]]:
     change_tool.max_retries = 3
 
     return [inspect_tool, query_tool, change_tool]
-
-
-def prune_history(messages: list[ModelMessage]) -> list[ModelMessage]:
-    if len(messages) <= 12:
-        return messages
-    target = len(messages) - 10
-    for i in range(target, 0, -1):
-        msg = messages[i]
-        if isinstance(msg, ModelRequest) and any(isinstance(p, UserPromptPart) for p in msg.parts):
-                return [messages[0]] + messages[i:]
-    return messages
 
 
 async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
@@ -678,7 +673,7 @@ def render_scenario_markdown(sc, grc_before, run_result, verdict) -> str:  # noq
         if isinstance(msg, ModelRequest):
             for part in msg.parts:
                 if isinstance(part, ToolReturnPart) and part.tool_call_id in tool_calls:
-                        tool_calls[part.tool_call_id]["result"] = part.content
+                    tool_calls[part.tool_call_id]["result"] = part.content
 
     for msg in messages:
         if isinstance(msg, ModelResponse):

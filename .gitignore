@@ -29,6 +29,8 @@ Thumbs.db
 *.restored.grc
 *.tmp.grc
 *.bak
+# Persisted chat sessions (SQLite) — local user transcripts, not source
+chat_sessions.db
 
 # Generated vector indexes (per-backend, built on first use — see grc_agent.ingest)
 src/grc_agent/vectors/
@@ -49,5 +51,4 @@ experiments/*/final_findings_and_causes.md
 .opencode/
 .cache/
 .context/
-recent_sessions.json
 unsloth_compiled_cache/
