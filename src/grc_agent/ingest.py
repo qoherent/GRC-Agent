@@ -47,24 +47,32 @@ def _write_meta(conn: sqlite3.Connection, model: str, domain: str) -> None:
     )
 
 
-def ingest_catalog(db_path: str, model: str) -> int:
+def ingest_catalog(
+    db_path: str, model: str, on_progress: Any = None
+) -> int:
     platform = get_platform()
     block_ids = sorted(b for b in platform.blocks if not b.startswith("_"))
+    total = len(block_ids)
 
     rows: list[tuple[str, str, list[float]]] = []
-    for block_id in block_ids:
+    for i, block_id in enumerate(block_ids):
+        # Render + embed; a failure for one block skips it without aborting the
+        # whole build. on_progress fires per iteration (including skipped
+        # blocks) so the caller's progress bar reflects processed/total, not
+        # just successful/total.
         try:
             rendered = render_catalog_block(block_id, distance=0.0)
+            if rendered:
+                text = _compose_catalog_text(rendered)
+                try:
+                    embedding = embed_document(text, model)
+                    rows.append((block_id, text, embedding))
+                except Exception:
+                    pass
         except Exception:
-            continue
-        if not rendered:
-            continue
-        text = _compose_catalog_text(rendered)
-        try:
-            embedding = embed_document(text, model)
-        except Exception:
-            continue
-        rows.append((block_id, text, embedding))
+            pass
+        if on_progress is not None:
+            on_progress(i + 1, total)
 
     if not rows:
         raise RuntimeError(
@@ -129,22 +137,34 @@ def _chunk_markdown(text: str) -> list[tuple[str, str]]:
     return chunks or [("", _cap_words(text, EMBED_MAX_WORDS))]
 
 
-def ingest_docs(db_path: str, model: str) -> int:
+def ingest_docs(
+    db_path: str, model: str, on_progress: Any = None
+) -> int:
     corpus_dir = docs_dir()
     md_files = sorted(corpus_dir.glob("*.md"))
     if not md_files:
         raise RuntimeError(f"No docs corpus found at {corpus_dir}")
 
-    rows: list[tuple[str, str, str, list[float]]] = []
+    # Pre-compute the chunk list so progress reflects per-chunk embedding work
+    # (the slow part), not just per-file iteration.
+    chunk_list: list[tuple[str, str, str]] = []
     for md_file in md_files:
         text = md_file.read_text(encoding="utf-8", errors="ignore")
         for heading, body in _chunk_markdown(text):
-            composed = f"path: {md_file.stem}\nheading: {heading}\n{body}"
-            try:
-                embedding = embed_document(composed, model)
-            except Exception:
-                continue
-            rows.append((md_file.stem, heading, composed, embedding))
+            chunk_list.append((md_file.stem, heading, body))
+
+    rows: list[tuple[str, str, str, list[float]]] = []
+    total = len(chunk_list)
+    for i, (path, heading, body) in enumerate(chunk_list):
+        composed = f"path: {path}\nheading: {heading}\n{body}"
+        try:
+            embedding = embed_document(composed, model)
+        except Exception:
+            embedding = None
+        if embedding is not None:
+            rows.append((path, heading, composed, embedding))
+        if on_progress is not None:
+            on_progress(i + 1, total)
 
     if not rows:
         raise RuntimeError(

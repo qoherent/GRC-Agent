@@ -260,7 +260,7 @@ def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
 
 def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     """_rag_building must be set to 'building' before the DB build and
-    'ready' after, so the dashboard can show a progress banner."""
+    'ready' after (per-domain), so the GUI can show a progress banner."""
     import grc_agent.adapter as adapter_mod
     from grc_agent.adapter import _ensure_db_built, get_db_and_model
 
@@ -272,24 +272,109 @@ def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
-    # Before build, the flag should be at its initial state
-    assert adapter_mod._rag_building["status"] is None
+    # _rag_building is module-global; a prior test's build may have left a
+    # catalog entry. This test verifies the building->ready transition, so
+    # reset to pristine.
+    adapter_mod._rag_building.pop("catalog", None)
+    assert adapter_mod._rag_building.get("catalog") is None
 
     # Import ingest first so it's in sys.modules, then patch it.
     import grc_agent.ingest as ingest_mod
 
-    def mock_ingest(db_path, model):  # noqa: ARG001
-        # Verify the flag is 'building' during the ingest call
-        assert adapter_mod._rag_building["status"] == "building"
-        assert adapter_mod._rag_building["domain"] == "catalog"
+    def mock_ingest(db_path, model, on_progress=None):  # noqa: ARG001
+        # _build_db MUST forward the progress callback — assert it unconditionally
+        # (an `if on_progress is not None` guard here would silently pass if the
+        # wiring regressed and None was passed).
+        assert on_progress is not None, "_build_db did not forward on_progress to ingest"
+        entry = adapter_mod._rag_building["catalog"]
+        # Verify the entry is 'building' during the ingest call, with counters reset.
+        assert entry["status"] == "building"
+        assert entry["current"] == 0
+        assert entry["total"] == 0
+        # The progress callback must write back into the per-domain entry so the
+        # GUI poller can surface live progress.
+        on_progress(7, 10)
+        assert entry["current"] == 7
+        assert entry["total"] == 10
+        return 5  # embedded count (distinct from total=10, to prove the GUI can show it)
 
     monkeypatch.setattr(ingest_mod, "ingest_catalog", mock_ingest)
 
     # Build the DB (mocked)
     _ensure_db_built("catalog", db_path, model)
-    # After build, the flag should be 'ready'
-    assert adapter_mod._rag_building["status"] == "ready"
-    assert adapter_mod._rag_building["domain"] == "catalog"
+    # After build, the entry should be 'ready' and carry the embedded count.
+    entry = adapter_mod._rag_building["catalog"]
+    assert entry["status"] == "ready"
+    assert entry["indexed"] == 5
+
+
+def test_ingest_catalog_reports_progress_per_block(tmp_path, monkeypatch):
+    """ingest_catalog must call on_progress once per block with (current, total)
+    — including blocks that fail to render/embed — so the GUI progress bar
+    reflects processed/total, not successful/total."""
+    import grc_agent.ingest as ingest_mod
+
+    class FakePlatform:
+        blocks = ["blocks/keep_a", "blocks/fails_render", "_skip_internal", "blocks/keep_c"]
+
+    def fake_render(block_id, distance=0.0):  # noqa: ARG001
+        if block_id == "blocks/fails_render":
+            raise RuntimeError("render boom")
+        return {
+            "label": block_id,
+            "block_id": block_id,
+            "category": "test",
+            "params": {},
+            "inputs": [],
+            "outputs": [],
+        }
+
+    monkeypatch.setattr(ingest_mod, "get_platform", lambda: FakePlatform())
+    monkeypatch.setattr(ingest_mod, "render_catalog_block", fake_render)
+    monkeypatch.setattr(ingest_mod, "embed_document", lambda text, model: [0.1, 0.2, 0.3])  # noqa: ARG005
+
+    db_path = str(tmp_path / "catalog.db")
+    seen: list[tuple[int, int]] = []
+    n = ingest_mod.ingest_catalog(db_path, "fake-model", on_progress=lambda cur, tot: seen.append((cur, tot)))
+
+    # 2 of the 3 non-underscore blocks indexed (the failing-render one skipped);
+    # total still counts all 3 non-underscore blocks.
+    assert n == 2
+    totals = {t for _, t in seen}
+    assert totals == {3}
+    # Progress still ticks once per block — including the one that failed to render.
+    assert [c for c, _ in seen] == [1, 2, 3]
+
+
+def test_catalog_corpus_version_reflects_block_set(monkeypatch):
+    """OOT detection: the catalog corpus_version must change when the live block
+    set changes (so a freshly installed OOT module triggers a rebuild), instead
+    of being pinned to GNU Radio's version string. Order-independent (sorted)."""
+    import grc_agent.adapter.graph as graph_mod
+    from grc_agent.adapter.rag import _CORPUS_VERSION_CACHE, _corpus_version
+
+    class FakePlatform:
+        def __init__(self, blocks):
+            self.blocks = blocks
+
+    def version_for(blocks):
+        _CORPUS_VERSION_CACHE.pop("catalog", None)
+        monkeypatch.setattr(graph_mod, "get_platform", lambda: FakePlatform(blocks))
+        return _corpus_version("catalog")
+
+    try:
+        v1 = version_for(["blocks/a", "blocks/b"])
+        # Same set, reordered → stable hash.
+        assert version_for(["blocks/b", "blocks/a"]) == v1
+        # A newly added OOT block changes the identity → triggers rebuild.
+        assert version_for(["blocks/a", "blocks/b", "blocks/oot_new"]) != v1
+        # A removed block also changes the identity.
+        assert version_for(["blocks/a"]) != v1
+    finally:
+        # Don't poison the module-level cache for tests that run after this one
+        # (test_unit's RAG tests call _corpus_version("catalog") for real, and a
+        # stale fake-platform hash here would force a spurious rebuild there).
+        _CORPUS_VERSION_CACHE.pop("catalog", None)
 
 
 def test_ollama_cloud_model_builds_and_runs():

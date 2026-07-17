@@ -1137,7 +1137,12 @@ def change_graph(  # noqa: C901
         lock_path.parent.mkdir(mode=0o700, exist_ok=True)
 
         with lock_path.open("a", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            # Non-blocking: this runs on the unified gbulb UI thread (the agent
+            # write path). LOCK_NB means a held lock raises BlockingIOError
+            # immediately instead of freezing GTK+asyncio for the contention
+            # window; the outer except rolls back and returns save_failed, which
+            # the change_graph tool surfaces as a retryable ModelRetry.
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
                 # Backup is taken INSIDE the lock so it snapshots exactly the
                 # on-disk state about to be overwritten — a concurrent writer
@@ -1147,7 +1152,7 @@ def change_graph(  # noqa: C901
                     backup_dir = target_path.parent / ".grc_agent" / "backups"
                     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
                     with open(target_path, "rb") as f:
-                        old_hash = hashlib.sha256(f.read()).hexdigest()
+                        old_hash = hashlib.file_digest(f, "sha256").hexdigest()
                     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
                     backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
                     shutil.copy2(target_path, backup_path)

@@ -288,10 +288,12 @@ def delete_session(session_id: int) -> None:
         conn.commit()
 
 
-def delete_sessions_for_path(grc_file_path: str) -> None:
-    """Delete all sessions for a given .grc path."""
+def delete_all_sessions() -> None:
+    """Delete every saved session. Used by the toolbar 'Clear History' button,
+    which clears the whole recent-sessions list the user sees — independent of
+    which flowgraph (if any) is active. Per-session deletion stays available via
+    the per-row delete buttons (delete_session)."""
     init_db()
-    abs_path = str(Path(grc_file_path).resolve())
     with _conn() as conn:
-        conn.execute("DELETE FROM sessions WHERE grc_file_path = ?", (abs_path,))
+        conn.execute("DELETE FROM sessions")
         conn.commit()

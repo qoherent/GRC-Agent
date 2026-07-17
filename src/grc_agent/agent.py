@@ -401,7 +401,7 @@ async def query_knowledge_func(
 ) -> str:
     """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts)."""
     if domain == "catalog":
-        res = query_catalog(query)
+        res = await asyncio.to_thread(query_catalog, query)
         return json.dumps(res)
     else:
         res = await asyncio.to_thread(query_docs, query)

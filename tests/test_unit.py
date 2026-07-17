@@ -1099,70 +1099,138 @@ def test_clear_history_confirmation(monkeypatch):
     handler(mock_dialog, Gtk.ResponseType.YES)
 
     sidebar.clear_messages.assert_called_once()
-    sidebar.set_status.assert_called_once_with("Chat history cleared.")
+    sidebar.set_status.assert_called_once_with("All chat history cleared.")
 
 
-def test_clear_history_deletes_active_session(monkeypatch):
-    """UI-2 regression: 'Clear History' must delete the persisted DB row, not
-    just blank in-memory state (the dialog copy promises irreversible deletion)."""
-    from unittest.mock import MagicMock
+def _seed_session(grc_path: str) -> int:
+    """Insert one session row for grc_path and return its id. Uses the real
+    save_session so path resolution matches production exactly."""
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
 
+    from grc_agent.db import save_session
+
+    return save_session(None, grc_path, [ModelRequest(parts=[UserPromptPart(content="seed")])])
+
+
+def _count_sessions_for_path(grc_path: str) -> int:
+    import sqlite3
+    from pathlib import Path
+
+    from grc_agent.db import get_db_path
+
+    abs_path = str(Path(grc_path).resolve())
+    conn = sqlite3.connect(str(get_db_path()))
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE grc_file_path = ?", (abs_path,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_clear_history_deletes_active_session_real_db(tmp_path, monkeypatch):
+    """UI-2 regression: 'Clear History' must actually DELETE the persisted DB
+    row for the active session, not just blank in-memory state. Uses a real
+    temp SQLite DB (via GRC_AGENT_ENV isolation) instead of mocking
+    delete_session — the original mocked test could not catch this bug."""
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    grc = tmp_path / "flow.grc"
+    grc.write_text("# grc")
+
+    sid = _seed_session(str(grc))
+    assert _count_sessions_for_path(str(grc)) == 1
+
     sidebar = ChatSidebar()
-    sidebar._active_session_id = 42
-    sidebar._render_history = MagicMock()
-
-    deleted = []
-    monkeypatch.setattr("grc_agent.chat_sidebar.delete_session", lambda sid: deleted.append(sid))
-
-    mock_dialog = MagicMock()
-    monkeypatch.setattr(Gtk, "MessageDialog", MagicMock(return_value=mock_dialog))
+    sidebar._active_session_id = sid
+    # No flowgraph proxy → path is None → must fall back to deleting by sid.
+    sidebar._flowgraph_proxy = None
 
     sidebar._on_clear_history_clicked(None)
+    assert sidebar._open_dialog is not None
+    sidebar._open_dialog.emit("response", Gtk.ResponseType.YES)
 
-    handler = mock_dialog.connect.call_args.args[1]
-    handler(mock_dialog, Gtk.ResponseType.YES)
-
-    assert deleted == [42]
+    assert _count_sessions_for_path(str(grc)) == 0
     assert sidebar._active_session_id is None
 
 
-def test_clear_history_deletes_by_path(monkeypatch):
+def test_clear_history_deletes_all_sessions_for_path_real_db(tmp_path, monkeypatch):
+    """Regression for the exact bug seen in production: multiple sessions
+    accumulated for the SAME flowgraph path despite repeated 'Clear History'
+    clicks. Deleting by path must remove every row for that file."""
     from unittest.mock import MagicMock
 
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
-    sidebar = ChatSidebar()
-    sidebar._active_session_id = 42
-    sidebar._render_history = MagicMock()
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    grc = tmp_path / "fm_rx.grc"
+    grc.write_text("# grc")
 
+    # Seed THREE sessions for the same path — mirrors the real DB state.
+    ids = [_seed_session(str(grc)) for _ in range(3)]
+    assert _count_sessions_for_path(str(grc)) == 3
+
+    sidebar = ChatSidebar()
+    sidebar._active_session_id = ids[-1]
     proxy = MagicMock()
     cm = MagicMock()
+    cm.path = str(grc)
     proxy._canvas_manager = cm
-    cm.path = "/path/to/my_flowgraph.grc"
     sidebar._flowgraph_proxy = proxy
 
-    deleted_paths = []
-    monkeypatch.setattr("grc_agent.chat_sidebar.delete_sessions_for_path", lambda path: deleted_paths.append(path))
-
-    mock_dialog = MagicMock()
-    monkeypatch.setattr(Gtk, "MessageDialog", MagicMock(return_value=mock_dialog))
-
     sidebar._on_clear_history_clicked(None)
+    sidebar._open_dialog.emit("response", Gtk.ResponseType.YES)
 
-    handler = mock_dialog.connect.call_args.args[1]
-    handler(mock_dialog, Gtk.ResponseType.YES)
-
-    assert deleted_paths == ["/path/to/my_flowgraph.grc"]
+    assert _count_sessions_for_path(str(grc)) == 0
     assert sidebar._active_session_id is None
 
 
-def test_clear_history_dialog_survives_gc_and_responds():
+def test_clear_history_deletes_all_sessions_no_active_flowgraph(tmp_path, monkeypatch):
+    """Regression for the user-reported bug: with NO flowgraph open (path=None)
+    and NO active session (sid=None) — i.e. sitting on the welcome screen
+    looking at the recent-sessions list — Clear History must still delete every
+    visible session. The old per-flowgraph logic (delete-by-path elif
+    delete-by-sid) deleted NOTHING in this case, which is exactly when the user
+    is staring at the list. Clear History is now global."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    grc_a = tmp_path / "fm_rx.grc"
+    grc_b = tmp_path / "demo_qam.grc"
+    grc_a.write_text("#")
+    grc_b.write_text("#")
+
+    # Sessions across MULTIPLE flowgraphs (the visible recent-sessions list).
+    _seed_session(str(grc_a))
+    _seed_session(str(grc_a))
+    _seed_session(str(grc_b))
+
+    def total():
+        return _count_sessions_for_path(str(grc_a)) + _count_sessions_for_path(str(grc_b))
+
+    assert total() == 3
+
+    sidebar = ChatSidebar()
+    # No proxy (path will be None) and no active session (sid None) — the exact
+    # state where the old per-flowgraph logic deleted nothing.
+    sidebar._flowgraph_proxy = None
+    sidebar._active_session_id = None
+
+    sidebar._on_clear_history_clicked(None)
+    sidebar._open_dialog.emit("response", Gtk.ResponseType.YES)
+
+    assert total() == 0
+    assert sidebar._active_session_id is None
+
+
+def test_clear_history_dialog_survives_gc_and_responds(tmp_path, monkeypatch):
     """Regression: a non-blocking dialog shown via .show() must be anchored on
     self, otherwise PyGObject garbage-collects the toplevel once the
     constructing method returns and the 'response' signal never fires."""
@@ -1172,6 +1240,8 @@ def test_clear_history_dialog_survives_gc_and_responds():
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
     sidebar = ChatSidebar()
     sidebar.clear_messages = MagicMock()
@@ -1187,6 +1257,244 @@ def test_clear_history_dialog_survives_gc_and_responds():
 
     sidebar.clear_messages.assert_called_once()
     assert sidebar._open_dialog is None
+
+
+def test_settings_dialog_persists_model_name(tmp_path, monkeypatch):
+    """Regression: the Settings dialog must read widget values BEFORE
+    gtk_widget_destroy(). Reading after destroy returns '' / -1, which silently
+    skipped save_settings so the model name never persisted (and would have
+    wiped the API key). Exercises the real _open_settings() dialog tree, not a
+    mock."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import load_settings, save_settings
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "old-model-name")  # known starting model
+
+    sidebar = ChatSidebar()
+    sidebar._open_settings()
+    dlg = sidebar._open_dialog
+    assert dlg is not None
+
+    # Locate the Model entry. Gtk.Grid.get_children() order isn't row order, so
+    # identify it by content: on dialog open it holds the current model name
+    # (the API-key entry is empty/insensitive for the keyless ollama provider).
+    entries: list[Gtk.Entry] = []
+
+    def walk(w):
+        if isinstance(w, Gtk.Entry):
+            entries.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                walk(c)
+
+    walk(dlg)
+    assert entries, "no Gtk.Entry found in settings dialog"
+    model_entry = next(e for e in entries if e.get_text() == "old-model-name")
+    model_entry.set_text("brand-new-model-name")
+
+    dlg.emit("response", Gtk.ResponseType.APPLY)
+
+    # With the read-after-destroy bug this stayed "old-model-name".
+    assert load_settings()["model"] == "brand-new-model-name"
+
+
+def test_streaming_text_flush_is_throttled(monkeypatch):
+    """Streaming must NOT call Gtk.Label.set_text on every token (that re-runs
+    Pango line-wrap layout over the whole growing message = O(n^2) and freezes
+    the UI). _flush_streaming throttles to _STREAM_FLUSH_INTERVAL; force=True
+    bypasses it. Time is mocked for determinism."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    sidebar = ChatSidebar()
+    ctx = _StreamCtx(Gtk.Box())
+    sidebar._ensure_text(ctx)
+    assert ctx.text_lbl is not None
+
+    t = [0.0]
+    monkeypatch.setattr("grc_agent.chat_sidebar.time.monotonic", lambda: t[0])
+
+    # First flush at t=0 with last_flush=0.0 -> (0 - 0.0) < interval -> skip.
+    ctx.text_acc = "chunk1"
+    ctx.text_dirty = True
+    sidebar._flush_streaming(ctx)
+    assert ctx.text_lbl.get_text() == ""  # throttled, not painted
+
+    # Advance past the interval -> flush fires.
+    t[0] = 0.05
+    sidebar._flush_streaming(ctx)
+    assert ctx.text_lbl.get_text() == "chunk1"
+    assert ctx.text_dirty is False
+
+    # A second chunk immediately after is throttled again.
+    ctx.text_acc = "chunk2"
+    ctx.text_dirty = True
+    sidebar._flush_streaming(ctx)  # t=0.05, last_flush=0.05 -> skip
+    assert ctx.text_lbl.get_text() == "chunk1"
+
+    # force=True bypasses the interval (used on part start/close/stream end).
+    sidebar._flush_streaming(ctx, force=True)
+    assert ctx.text_lbl.get_text() == "chunk2"
+
+
+def test_streaming_thinking_flush_throttled(monkeypatch):
+    """Mirror of the text-flush test for the ThinkingPart branch: thinking
+    tokens are throttled the same way and force=True flushes them."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    sidebar = ChatSidebar()
+    ctx = _StreamCtx(Gtk.Box())
+    sidebar._ensure_thinking(ctx)
+    assert ctx.think_body is not None
+
+    t = [0.0]
+    monkeypatch.setattr("grc_agent.chat_sidebar.time.monotonic", lambda: t[0])
+
+    ctx.think_acc = "thought1"
+    ctx.think_dirty = True
+    sidebar._flush_streaming(ctx)  # t=0, last_flush=0.0 -> throttled
+    assert ctx.think_body.get_text() == ""
+
+    t[0] = 0.05
+    sidebar._flush_streaming(ctx)
+    assert ctx.think_body.get_text() == "thought1"
+
+    ctx.think_acc = "thought2"
+    ctx.think_dirty = True
+    sidebar._flush_streaming(ctx)  # immediately after -> throttled
+    assert ctx.think_body.get_text() == "thought1"
+    sidebar._flush_streaming(ctx, force=True)
+    assert ctx.think_body.get_text() == "thought2"
+
+
+def test_poll_indexing_building_ready_failed_idle(monkeypatch):
+    """_poll_indexing drives the status bar across the full state machine:
+    idle (no-op), building (live progress, content-guarded), ready transition
+    (notifies once, using the embedded `indexed` count not `total`), and failed
+    (error). Per-domain so concurrent builds don't tangle."""
+    import grc_agent.adapter as adapter_mod
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        sidebar, "set_status", lambda msg, *, error=False: calls.append((msg, error))
+    )
+
+    adapter_mod._rag_building.clear()
+    try:
+        # Idle: no domains -> no status writes.
+        sidebar._poll_indexing()
+        assert calls == []
+
+        # Building: live progress shows counts.
+        adapter_mod._rag_building["catalog"] = {
+            "status": "building", "current": 3, "total": 10, "indexed": 0
+        }
+        sidebar._poll_indexing()
+        assert calls[-1] == ("Indexing block library for search\u2026 3/10", False)
+        # Same progress -> suppressed (content guard).
+        n = len(calls)
+        sidebar._poll_indexing()
+        assert len(calls) == n
+        # Progress advances -> new message.
+        adapter_mod._rag_building["catalog"]["current"] = 9
+        sidebar._poll_indexing()
+        assert calls[-1] == ("Indexing block library for search\u2026 9/10", False)
+
+        # Transition to ready with indexed(8) < total(10): message uses indexed.
+        adapter_mod._rag_building["catalog"] = {
+            "status": "ready", "current": 10, "total": 10, "indexed": 8
+        }
+        sidebar._poll_indexing()
+        assert calls[-1] == ("Block library indexed \u2014 8 entries ready for search.", False)
+        n = len(calls)
+        sidebar._poll_indexing()  # still ready -> no re-notify
+        assert len(calls) == n
+
+        # A docs failure surfaces as an error status.
+        adapter_mod._rag_building["docs"] = {
+            "status": "failed", "current": 0, "total": 0, "indexed": 0
+        }
+        sidebar._poll_indexing()
+        assert calls[-1][1] is True
+    finally:
+        adapter_mod._rag_building.clear()
+
+
+def test_change_graph_lock_busy_returns_save_failed(temp_dial_tone, monkeypatch):
+    """The non-blocking flock (LOCK_EX|LOCK_NB) on the agent write path must
+    surface contention as a retryable save_failed (rolled back) instead of
+    freezing the unified UI thread. Validates the ADHOC-2 fix end-to-end."""
+    import fcntl as fcntl_mod
+
+    fg = load_flow_graph(str(temp_dial_tone))
+
+    def boom(fd, op):  # noqa: ARG001
+        raise BlockingIOError(11, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(fcntl_mod, "flock", boom)
+
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "blocks_throttle2",
+                "instance_name": "my_throttle",
+                "params": {"type": "float"},
+            }
+        ],
+        force=True,
+    )
+
+    assert res["ok"] is False
+    assert res["error_type"] == "save_failed"
+    # Rollback: the mutation was reverted in memory, not left half-applied.
+    names = {b["instance_name"] for b in inspect_graph(fg)["graph"]["blocks"]}
+    assert "my_throttle" not in names
+
+
+def test_settings_dialog_persists_api_key(tmp_path, monkeypatch):
+    """The API-key field must also be read BEFORE destroy() (the read-after-
+    destroy bug would have wiped it with ''). Covers the keyless-provider gap
+    left by test_settings_dialog_persists_model_name (which uses ollama)."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import get_env_value, save_settings
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("openrouter", "openai/gpt-4o-mini")
+
+    sidebar = ChatSidebar()
+    sidebar._open_settings()
+    dlg = sidebar._open_dialog
+    assert dlg is not None
+
+    # Find the API-key Gtk.Entry (visibility=False distinguishes it from the
+    # model Entry, which is the only other Entry and has default visibility).
+    entries: list[Gtk.Entry] = []
+
+    def walk(w):
+        if isinstance(w, Gtk.Entry):
+            entries.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                walk(c)
+
+    walk(dlg)
+    key_entry = next(e for e in entries if e.get_visibility() is False)
+    key_entry.set_text("sk-test-persists-123")
+
+    dlg.emit("response", Gtk.ResponseType.APPLY)
+
+    assert get_env_value("OPENROUTER_API_KEY") == "sk-test-persists-123"
 
 
 def test_sync_to_file_restores_session_for_path(tmp_path, monkeypatch):

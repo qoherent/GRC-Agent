@@ -128,7 +128,16 @@ _CORPUS_VERSION_CACHE: dict[str, str] = {}
 # knowledge database..." banner instead of an indefinite hang during the
 # first query_knowledge call (or after a provider switch that changes the
 # embedding model). Set by _ensure_db_built, no longer read by any endpoint.
-_rag_building: dict[str, str | None] = {"domain": None, "status": None}
+_rag_building: dict[str, dict[str, Any]] = {}
+"""Per-domain build status, keyed by domain ("catalog" | "docs"). Each value:
+{"status": None|"building"|"ready"|"failed", "current": int, "total": int,
+"indexed": int}. Keyed by domain (not a single flat dict) so that concurrent
+catalog+docs cold builds — pydantic-ai runs function tools in parallel — don't
+clobber each other's progress. The GUI poller reads the entry for whichever
+domain is currently "building". Entries persist after completion so the final
+"ready"/"failed" transition is observable; a domain key is (re)created on each
+build. Mutated from the worker thread ingest runs on; read from the main loop
+(CPython per-key dict ops are atomic under the GIL)."""
 
 
 def _get_embedding_dim(model: str) -> int:
@@ -142,21 +151,31 @@ def _get_embedding_dim(model: str) -> int:
 
 def _corpus_version(domain: str) -> str:
     """A cheap identity for the domain's underlying source data, independent
-    of the embedding model — GNU Radio's own version string for the catalog
-    (its block library changes across GNU Radio versions), a content hash of
-    the docs corpus for docs (its files change across grc-agent releases).
-    Without this, a cached DB that still matches on embedding_model alone
-    would silently keep serving stale results forever after a GNU Radio
-    upgrade or a docs-corpus update, with no error or indication anything's
-    wrong. Cached per-process: neither changes during a single run, and
-    re-hashing ~100 markdown files on every query would be wasteful."""
+    of the embedding model — a hash of the live block-id set for the catalog,
+    a content hash of the docs corpus for docs (its files change across
+    grc-agent releases). Without this, a cached DB that still matches on
+    embedding_model alone would silently keep serving stale results forever
+    after a change to the source data, with no error or indication anything's
+    wrong.
+
+    For the catalog, hashing the actual block set (not GNU Radio's version
+    string) is what makes newly installed OOT modules discoverable: installing
+    an OOT block changes the block set but not gr.version(), so a fingerprint
+    of platform.blocks is the only identity that catches it. Cached per-process:
+    the block set doesn't change during a single run, and re-hashing ~100
+    markdown files (docs) on every query would be wasteful."""
     if domain in _CORPUS_VERSION_CACHE:
         return _CORPUS_VERSION_CACHE[domain]
 
     if domain == "catalog":
-        from gnuradio import gr
+        # Same non-underscore filter ingest_catalog indexes, so the fingerprint
+        # matches exactly what's embedded. get_platform() is cached after first
+        # load and is needed for querying anyway, so this adds no net cost.
+        from grc_agent.adapter.graph import get_platform
 
-        version = gr.version()
+        platform = get_platform()
+        block_ids = sorted(b for b in platform.blocks if not b.startswith("_"))
+        version = hashlib.sha256("\n".join(block_ids).encode()).hexdigest()[:16]
     else:
         from grc_agent._paths import docs_dir
 
@@ -248,8 +267,17 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
             with contextlib.suppress(OSError):
                 os.remove(db_path)
 
-    _rag_building["domain"] = domain
-    _rag_building["status"] = "building"
+    _rag_building[domain] = {"status": "building", "current": 0, "total": 0, "indexed": 0}
+
+    def _on_progress(current: int, total: int) -> None:
+        # Called from the worker thread ingest runs on; mutates the per-domain
+        # entry in place (CPython atomic per-key). The GUI polls from the main
+        # loop instead of receiving cross-thread widget calls.
+        entry = _rag_building.get(domain)
+        if entry is not None:
+            entry["current"] = current
+            entry["total"] = total
+
     try:
         print(
             f"[grc-agent] {domain} vector DB not found or stale — building it now "
@@ -258,15 +286,21 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
         from grc_agent import ingest
 
         if domain == "catalog":
-            ingest.ingest_catalog(db_path, model)
+            count = ingest.ingest_catalog(db_path, model, on_progress=_on_progress)
         else:
-            ingest.ingest_docs(db_path, model)
+            count = ingest.ingest_docs(db_path, model, on_progress=_on_progress)
         print(f"[grc-agent] {domain} vector DB build complete: {db_path}")
-        _rag_building["domain"] = domain
-        _rag_building["status"] = "ready"
+        # `indexed` is the count actually embedded (len(rows)), which can be <
+        # `total` if some items failed to render/embed — so the GUI's "entries
+        # ready" message doesn't overclaim the processed count.
+        entry = _rag_building.get(domain)
+        if entry is not None:
+            entry["status"] = "ready"
+            entry["indexed"] = count
     except Exception:
-        _rag_building["domain"] = domain
-        _rag_building["status"] = "failed"
+        entry = _rag_building.get(domain)
+        if entry is not None:
+            entry["status"] = "failed"
         raise
 
 

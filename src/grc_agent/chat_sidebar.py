@@ -11,6 +11,7 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -50,8 +51,8 @@ from pydantic_ai.messages import (
 from pydantic_graph import End
 
 from .db import (
+    delete_all_sessions,
     delete_session,
-    delete_sessions_for_path,
     deserialize_messages,
     get_recent_sessions,
     get_session_for_path,
@@ -72,6 +73,13 @@ _log = logging.getLogger(__name__)
 # scrolled up to read earlier messages isn't yanked back down on every token.
 _SCROLL_STICK_THRESHOLD = 80
 
+# Minimum interval between streamed-text UI flushes (seconds). Without this,
+# every token called Gtk.Label.set_text(accumulated_text), re-running Pango's
+# line-wrap layout over the ENTIRE growing message each token = O(n^2) and a
+# frozen UI on long responses. Flushing at ~30fps keeps streaming smooth while
+# the final markdown render (at part/stream close) shows the polished result.
+_STREAM_FLUSH_INTERVAL = 0.033
+
 
 def _esc(text: str) -> str:
     """Escape text for safe interpolation into Pango markup."""
@@ -82,7 +90,7 @@ def format_relative_time(timestamp_str: str) -> str:
     from datetime import datetime
     try:
         if "T" in timestamp_str:
-            dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(timestamp_str)
         else:
             dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
         now = datetime.now(UTC)
@@ -320,20 +328,26 @@ class _StreamCtx:
         "box",
         "text_lbl",
         "text_acc",
+        "text_dirty",
         "think_body",
         "think_acc",
+        "think_dirty",
         "tools",
         "full_raw_text",
+        "last_flush",
     )
 
     def __init__(self, box: Gtk.Box) -> None:
         self.box = box
         self.text_lbl: Gtk.Label | None = None
         self.text_acc = ""
+        self.text_dirty = False
         self.think_body: Gtk.Label | None = None
         self.think_acc = ""
+        self.think_dirty = False
         self.tools: dict[str, Gtk.Expander] = {}
         self.full_raw_text = ""
+        self.last_flush = 0.0
 
 
 class ChatSidebar(Gtk.Box):
@@ -358,7 +372,17 @@ class ChatSidebar(Gtk.Box):
         self._active_session_id: int | None = None
         self._loading_session_id: int | None = None
         self._busy = False
+        # Bumped on every global Clear History. _save_history captures it before
+        # dispatching its (uncancellable) worker-thread save; if a clear lands
+        # while that save is in flight, the saved row is removed so a cleared
+        # session can't resurrect.
+        self._clear_generation: int = 0
         self._chat_task: asyncio.Task | None = None
+        # Per-domain last-seen RAG build status, so the poller only writes the
+        # status bar on transitions (and while building) — never when idle.
+        # Catalog and docs build independently and can run concurrently.
+        self._last_index_state: dict[str, str] = {}
+        self._last_index_msg: str | None = None
         # Holds the currently-open non-blocking modal dialog so the gbulb loop
         # keeps pumping while it's shown. A non-blocking toplevel shown via
         # .show() would be garbage-collected once the constructing method
@@ -391,6 +415,11 @@ class ChatSidebar(Gtk.Box):
         # empty so live-streaming bubbles are never wiped.
         GLib.timeout_add_seconds(60, self._refresh_welcome_times)
 
+        # Poll the RAG index-build status (set by the worker thread that runs
+        # ingest) and surface progress in the status bar. Cheap dict reads; the
+        # build itself runs off the main loop via asyncio.to_thread.
+        GLib.timeout_add(500, self._poll_indexing)
+
     def _build_toolbar(self, content: Gtk.Box) -> None:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         bar.set_border_width(4)
@@ -407,7 +436,7 @@ class ChatSidebar(Gtk.Box):
 
         # Clear History button
         self._clear_hist_btn = Gtk.Button.new_with_label("Clear History")
-        self._clear_hist_btn.set_tooltip_text("Clear chat history for this flowgraph")
+        self._clear_hist_btn.set_tooltip_text("Delete ALL saved chat sessions")
         self._clear_hist_btn.get_style_context().add_class("chat-toolbar-btn")
         self._clear_hist_btn.connect("clicked", self._on_clear_history_clicked)
         bar.pack_start(self._clear_hist_btn, False, False, 0)
@@ -491,46 +520,115 @@ class ChatSidebar(Gtk.Box):
     def set_active_graph(self, name: str | None) -> None:
         self._graph_label.set_text(f"Active Graph: {name}" if name else "Active Graph: none")
 
+    def _domain_label(self, domain: str | None) -> str:
+        if domain == "catalog":
+            return "block library"
+        if domain == "docs":
+            return "documentation"
+        return "index"
+
+    def _poll_indexing(self) -> bool:
+        """Surface RAG index-build progress in the status bar.
+
+        Builds run on worker threads (dispatched via ``asyncio.to_thread`` from
+        the agent tools) and mutate the per-domain ``_rag_building`` entries in
+        place. This polls from the main loop so no cross-thread widget calls are
+        needed (CPython per-key dict reads/writes are atomic). Catalog and docs
+        builds can run concurrently (pydantic-ai runs tools in parallel), so
+        status is tracked per-domain. Only writes the status bar while a build
+        is in progress or on a transition — never when idle — so it can't
+        clobber other messages.
+        """
+        from .adapter import _rag_building
+
+        # Snapshot the keys: the worker thread may add a domain entry
+        # concurrently, and iterating a dict view during mutation raises.
+        building_msg: str | None = None
+        for domain in list(_rag_building):
+            entry = _rag_building.get(domain)
+            if not entry:
+                continue
+            status = entry.get("status")
+            last = self._last_index_state.get(domain)
+            label = self._domain_label(domain)
+            if status == "building":
+                self._last_index_state[domain] = "building"
+                # Show progress for the first building domain found; a second
+                # concurrent build is rare and its transition is still notified.
+                if building_msg is None:
+                    current = entry.get("current", 0)
+                    total = entry.get("total", 0)
+                    if total:
+                        building_msg = f"Indexing {label} for search\u2026 {current}/{total}"
+                    else:
+                        building_msg = f"Indexing {label} for search\u2026"
+            elif status in ("ready", "failed") and last != status:
+                # Terminal transition for this domain — notify exactly once.
+                self._last_index_state[domain] = status
+                self._last_index_msg = None
+                if status == "ready":
+                    # `indexed` is the actually-embedded count (may be < total).
+                    n = entry.get("indexed", entry.get("total", 0))
+                    self.set_status(
+                        f"{label.capitalize()} indexed \u2014 {n} entries ready for search."
+                    )
+                else:
+                    self.set_status(
+                        f"{label.capitalize()} indexing failed; search may return no or stale results.",
+                        error=True,
+                    )
+                return True  # re-arm
+        if building_msg is not None and building_msg != self._last_index_msg:
+            self._last_index_msg = building_msg
+            self.set_status(building_msg)
+        return True  # re-arm
+
     def _on_clear_history_clicked(self, _widget: Gtk.Button) -> None:
+        _log.info("Clear History: button clicked")
         dialog = Gtk.MessageDialog(
             transient_for=self.get_toplevel() if isinstance(self.get_toplevel(), Gtk.Window) else None,
             flags=Gtk.DialogFlags.MODAL,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO,
-            text="Clear Chat History",
+            text="Clear ALL Chat History",
         )
         dialog.format_secondary_text(
-            "Are you sure you want to clear the chat history for this flowgraph? This cannot be undone."
+            "This will permanently delete EVERY saved chat session for all flowgraphs. "
+            "This cannot be undone."
         )
         self._open_dialog = dialog
 
         def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
+            _log.info("Clear History: dialog response=%s (YES=%s)", response, Gtk.ResponseType.YES)
             self._open_dialog = None
             dialog.destroy()
             if response != Gtk.ResponseType.YES:
                 return
-            sid = self._active_session_id
-            path = None
-            if self._flowgraph_proxy is not None:
-                cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
-                path = cm.path if cm else None
-            # Delete persisted rows BEFORE clearing/rendering, so the just-cleared
-            # session doesn't briefly reappear at the top of the Recent list.
-            if path:
-                try:
-                    delete_sessions_for_path(path)
-                except Exception as e:
-                    _log.error("Failed to delete sessions for path %s: %s", path, e)
-            elif sid is not None:
-                try:
-                    delete_session(sid)
-                except Exception as e:
-                    _log.error("Failed to delete cleared session %s: %s", sid, e)
+            # Bump the generation first so any in-flight _save_history worker
+            # (uncancellable) will undo its own INSERT instead of resurrecting a
+            # session the user just cleared (see _save_history).
+            self._clear_generation += 1
+            # Global clear: delete every saved session. The toolbar button is not
+            # tied to a specific flowgraph, and the welcome screen lists sessions
+            # across all files — so scoping the delete to "the active flowgraph's
+            # path" (the old behavior) silently did nothing when no flowgraph was
+            # saved/active (path=None, sid=None), which is exactly the case where
+            # the user is staring at the recent-sessions list. Per-session
+            # deletion stays available via the per-row delete buttons.
+            try:
+                delete_all_sessions()
+                _log.info("Clear History: deleted all sessions")
+            except Exception as e:
+                _log.exception("Failed to delete all sessions")
+                self.clear_messages()
+                self.set_status(f"Failed to clear history ({e})", error=True)
+                return
             self.clear_messages()
-            self.set_status("Chat history cleared.")
+            self.set_status("All chat history cleared.")
 
         dialog.connect("response", _on_response)
         dialog.show()
+        _log.info("Clear History: dialog shown, awaiting response")
 
     def _on_delete_recent_session(self, session_id: int) -> None:
         try:
@@ -880,12 +978,25 @@ class ChatSidebar(Gtk.Box):
         path = cm.path if cm else None
         if not path:
             return
+        # Capture the clear-generation BEFORE dispatching. The save runs on a
+        # worker thread that can't be cancelled; if a global Clear History runs
+        # while it's in flight, the worker's save_session can INSERT a row that
+        # resurrects a session the user just deleted. After the await, if the
+        # generation changed, undo that resurrection. (Both reads of
+        # _clear_generation happen on the main loop — no cross-thread access.)
+        gen = self._clear_generation
         try:
-            await asyncio.to_thread(
+            new_id = await asyncio.to_thread(
                 save_session, self._active_session_id, path, self._message_history
             )
         except Exception as e:
             _log.error("Failed to save chat history to database: %s", e)
+            return
+        if new_id is not None and gen != self._clear_generation:
+            try:
+                delete_session(new_id)
+            except Exception:
+                _log.exception("Failed to remove session resurrected by in-flight save")
 
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
@@ -898,6 +1009,9 @@ class ChatSidebar(Gtk.Box):
                     self._on_part_start(ctx, event)
                 elif isinstance(event, PartDeltaEvent):
                     self._on_part_delta(ctx, event)
+        # Force a final flush so the last throttled chunk is painted before the
+        # node hands control back (and before any markdown re-render).
+        self._flush_streaming(ctx, force=True)
 
     async def _stream_tools(self, ctx: _StreamCtx, node, run) -> None:
         async with node.stream(run.ctx) as stream:
@@ -923,9 +1037,10 @@ class ChatSidebar(Gtk.Box):
             self._close_text(ctx)
             ctx.text_acc = part.content or ""
             ctx.full_raw_text += part.content or ""
-            lbl = self._ensure_text(ctx)
-            lbl.set_text(ctx.text_acc)
+            self._ensure_text(ctx)
+            ctx.text_dirty = True
             self._update_copy_text(ctx.box, ctx.full_raw_text)
+            self._flush_streaming(ctx, force=True)
         elif isinstance(part, ToolCallPart):
             self._close_text(ctx)
             self._close_thinking(ctx)
@@ -941,11 +1056,12 @@ class ChatSidebar(Gtk.Box):
             self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
             self._close_text(ctx)
-            body = self._ensure_thinking(ctx)
+            self._ensure_thinking(ctx)
             ctx.think_acc = part.content or ""
             ctx.full_raw_text += part.content or ""
-            body.set_text(ctx.think_acc)
+            ctx.think_dirty = True
             self._update_copy_text(ctx.box, ctx.full_raw_text)
+            self._flush_streaming(ctx, force=True)
 
     def _on_part_delta(self, ctx: _StreamCtx, event: PartDeltaEvent) -> None:
         delta = event.delta
@@ -953,23 +1069,54 @@ class ChatSidebar(Gtk.Box):
             self._close_thinking(ctx)
             ctx.text_acc += delta.content_delta
             ctx.full_raw_text += delta.content_delta
-            lbl = self._ensure_text(ctx)
-            lbl.set_text(ctx.text_acc)
+            self._ensure_text(ctx)
+            ctx.text_dirty = True
             self._update_copy_text(ctx.box, ctx.full_raw_text)
+            self._flush_streaming(ctx)
         elif isinstance(delta, ThinkingPartDelta):
             self._close_text(ctx)
             ctx.think_acc += delta.content_delta
             ctx.full_raw_text += delta.content_delta
-            self._ensure_thinking(ctx).set_text(ctx.think_acc)
+            self._ensure_thinking(ctx)
+            ctx.think_dirty = True
             self._update_copy_text(ctx.box, ctx.full_raw_text)
+            self._flush_streaming(ctx)
+
+    def _flush_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:
+        """Push accumulated streamed text/thinking to their labels at most once
+        per ``_STREAM_FLUSH_INTERVAL``. Each ``Gtk.Label.set_text`` re-runs
+        Pango's line-wrap layout over the full (growing) text, so calling it
+        per token is O(n^2); throttling to ~30fps keeps the UI responsive and
+        lets the idle autoscroll handler run between flushes. A forced flush
+        (part start/close, stream end) bypasses the interval so transitions
+        never show stale text."""
+        now = time.monotonic()
+        if not force and (now - ctx.last_flush) < _STREAM_FLUSH_INTERVAL:
+            return
+        flushed = False
+        if ctx.text_dirty and ctx.text_lbl is not None:
+            ctx.text_lbl.set_text(ctx.text_acc)
+            ctx.text_dirty = False
+            flushed = True
+        if ctx.think_dirty and ctx.think_body is not None:
+            ctx.think_body.set_text(ctx.think_acc)
+            ctx.think_dirty = False
+            flushed = True
+        if flushed:
+            ctx.last_flush = now
+            self._scroll_to_bottom()
 
     def _close_text(self, ctx: _StreamCtx) -> None:
+        self._flush_streaming(ctx, force=True)
         ctx.text_lbl = None
         ctx.text_acc = ""
+        ctx.text_dirty = False
 
     def _close_thinking(self, ctx: _StreamCtx) -> None:
+        self._flush_streaming(ctx, force=True)
         ctx.think_body = None
         ctx.think_acc = ""
+        ctx.think_dirty = False
 
     def _ensure_text(self, ctx: _StreamCtx) -> Gtk.Label:
         if ctx.text_lbl is None:
@@ -1116,7 +1263,7 @@ class ChatSidebar(Gtk.Box):
 
     def _node_to_pango(self, node) -> str:  # noqa: C901
         if isinstance(node, NavigableString):
-            return str(node).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            return _esc(str(node))
 
         tag = node.name
         if not tag:
@@ -1134,7 +1281,7 @@ class ChatSidebar(Gtk.Box):
             return f'<span face="monospace">{inner_text.replace(" ", "\u00A0")}</span>'
         elif tag == "a":
             href = node.get("href", "")
-            href_esc = href.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            href_esc = _esc(href)
             return f'<a href="{href_esc}">{inner_text}</a>'
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             return f'<span size="larger" weight="bold">{inner_text}</span>\n'
@@ -1144,7 +1291,7 @@ class ChatSidebar(Gtk.Box):
             return f"  •  {inner_text}\n"
         elif tag == "table":
             table_str = self._format_table(node)
-            table_str_esc = table_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            table_str_esc = _esc(table_str)
             return f'<span face="monospace" size="small">{table_str_esc.replace(" ", "\u00A0")}</span>'
         elif tag in ("thead", "tbody", "tr", "td", "th"):
             return ""
@@ -1166,14 +1313,14 @@ class ChatSidebar(Gtk.Box):
                     t = str(element).strip()
                     if t:
                         lbl = self._make_text_label()
-                        lbl.set_markup(t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                        lbl.set_markup(_esc(t))
                         box.pack_start(lbl, False, False, 0)
                     continue
 
                 tag = element.name
                 if tag == "table":
                     table_str = self._format_table(element)
-                    table_str_esc = table_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(" ", "\u00A0")
+                    table_str_esc = _esc(table_str).replace(" ", "\u00A0")
 
                     lbl = Gtk.Label()
                     lbl.get_style_context().add_class("chat-monospace")
@@ -1195,7 +1342,7 @@ class ChatSidebar(Gtk.Box):
                     box.pack_start(sw, False, False, 0)
                 elif tag == "pre":
                     code_text = element.get_text()
-                    code_text_esc = code_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(" ", "\u00A0")
+                    code_text_esc = _esc(code_text).replace(" ", "\u00A0")
 
                     lbl = Gtk.Label()
                     lbl.get_style_context().add_class("chat-code-block")
@@ -1468,6 +1615,12 @@ class ChatSidebar(Gtk.Box):
                 self._append_error(f"Agent error: {e}")
                 rich_rendered = True
         finally:
+            # Paint any throttled-but-unflushed tail before deciding whether to
+            # markdown-render, so an error/cancel mid-part never leaves the live
+            # bubble stuck at a ~33ms-stale snapshot (the per-token throttle can
+            # hold back the last chunk when the stream raises before a flush).
+            if ctx is not None:
+                self._flush_streaming(ctx, force=True)
             if ctx is not None and not rich_rendered and ctx.full_raw_text and self.current_page is origin_page:
                 self._render_markdown_to_box(ctx.box, ctx.full_raw_text)
             self._set_busy(False)
@@ -1577,17 +1730,25 @@ class ChatSidebar(Gtk.Box):
         self._open_dialog = dlg
 
         def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
+            # Read widget values BEFORE destroying the dialog. After
+            # gtk_widget_destroy(), Gtk.Entry.get_text() returns "" and
+            # ComboBox.get_active() returns -1, so reading them afterwards
+            # silently skipped save_settings (empty model) and would wipe the
+            # API key with an empty string.
+            if response == Gtk.ResponseType.APPLY:
+                idx = provider_combo.get_active()
+                provider = _PROVIDER_ORDER[idx] if idx >= 0 else "ollama"
+                model = model_entry.get_text().strip()
+                key_var = _PROVIDER_API_KEY.get(provider)
+                key_val = key_entry.get_text().strip()
+            else:
+                provider = model = key_var = key_val = None
             self._open_dialog = None
             dlg.destroy()
             if response != Gtk.ResponseType.APPLY:
                 return
-            idx = provider_combo.get_active()
-            provider = _PROVIDER_ORDER[idx] if idx >= 0 else "ollama"
-            model = model_entry.get_text().strip()
             if model:
                 save_settings(provider, model)
-            key_var = _PROVIDER_API_KEY.get(provider)
-            key_val = key_entry.get_text().strip()
             if key_var:
                 upsert_env_key(key_var, key_val)
 
