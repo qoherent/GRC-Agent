@@ -8,6 +8,7 @@ from grc_agent.adapter.graph import (
     classify_role,
     flow_graph_content_hash,
     generate_flowgraph_py,
+    get_blocks_panel_visibility,
     get_gui_platform,
     get_platform,
     gui_application_cls,
@@ -21,6 +22,7 @@ from grc_agent.adapter.graph import (
     port_metadata,
     port_object,
     ports_governed_by,
+    register_execution_messenger,
     render_port,
     resolve_auto,
     set_block_state,
@@ -55,16 +57,12 @@ from grc_agent.adapter.rag import (
 )
 from grc_agent.adapter.search import lite_web_search
 from grc_agent.adapter.snapshots import (
-    _apply_undo_redo_snapshot,
     _prune_old_backups,
     _prune_undo_stack,
     _read_undo_cursor,
     _undo_dir,
     _write_undo_cursor,
     push_undo_snapshot,
-    redo_flowgraph,
-    undo_flowgraph,
-    undo_status,
 )
 
 __all__ = [
@@ -73,7 +71,6 @@ __all__ = [
     "BLOCK_SPACING",
     "EMBED_MAX_WORDS",
     "_PLATFORM",
-    "_apply_undo_redo_snapshot",
     "_atomic_write_text",
     "_cap_words",
     "_compute_ranks",
@@ -99,6 +96,7 @@ __all__ = [
     "embed_query",
     "flow_graph_content_hash",
     "generate_flowgraph_py",
+    "get_blocks_panel_visibility",
     "get_db_and_model",
     "get_gui_platform",
     "get_platform",
@@ -117,7 +115,7 @@ __all__ = [
     "push_undo_snapshot",
     "query_catalog",
     "query_docs",
-    "redo_flowgraph",
+    "register_execution_messenger",
     "render_catalog_block",
     "render_port",
     "resolve_auto",
@@ -125,7 +123,5 @@ __all__ = [
     "set_blocks_panel_visibility",
     "set_param",
     "type_controlling_params",
-    "undo_flowgraph",
-    "undo_status",
     "write_flow_graph_atomic",
 ]

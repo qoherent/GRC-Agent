@@ -32,11 +32,12 @@ shipped package data via `pyproject.toml`'s `force-include`.
 | `chat_sidebar.py` | Native GTK chat UI. `Gtk.ListBox` message list with streaming via `agent.iter()` + `run.next(node)` (fires capability hooks). Pango markup for basic markdown (applied at part-close, not per-token). Settings dialog backed by `settings.py`. Slim side toggle for GRC block library. Send button doubles as Stop/abort while busy. Graph badge shows `<name> active`. |
 | `native_canvas.py` | GRC `MainWindow` canvas signal-wiring. `NativeCanvasManager` resolves `drawing_area`/`path`/`current_flow_graph` dynamically from `window.current_page` — follows tab switches automatically. Connects to notebook `switch-page`/`page-added`/`page-removed` signals. `NativeFlowgraphProxy` is the agent's `deps` — forwards attribute access to the current page's live `FlowGraph`. 1.5s safety-net poll for unsynced edits. Middle-click pan. GRC's native undo/redo is left enabled. |
 | `agent_factory.py` | `build_interactive_agent()` — constructs the provider-specific model from `settings.py` (Ollama/OllamaCloud/OpenRouter) and the PydanticAI `Agent` with tools, capabilities, output validator. `extra_body={"think": True}` only for Ollama providers. Retries on `HTTPStatusError` for cloud providers. |
-| `adapter/` | Sole `gnuradio` importer. `graph.py` (flowgraph load/save, `change_graph` 7-phase mutation engine with single `rewrite()` after `resolve_auto`, `keep_param` filtering, `generate_flowgraph_py` codegen), `rag.py` (catalog/docs vector RAG with cached embed client), `snapshots.py` (undo/redo disk stack), `layout.py` (grandalf block placement), `search.py` (async DuckDuckGo fallback). |
+| `adapter/` | Sole `gnuradio` importer. `graph.py` (flowgraph load/save, `change_graph` 7-phase mutation engine with two batch-level `rewrite()` calls (after Phase 5, and after Phase 7), `keep_param` filtering, `generate_flowgraph_py` codegen), `rag.py` (catalog/docs vector RAG with cached embed client), `snapshots.py` (undo/redo disk stack), `layout.py` (grandalf block placement), `search.py` (async DuckDuckGo fallback). |
 | `agent.py` | PydanticAI `Tool`s via `grc_tools()` (`inspect_graph`, `query_knowledge`, `change_graph`), `web_search_cap`/`web_fetch_cap` capabilities, system prompt, scenario harness for integration tests. `MODEL`/`OLLAMA_V1` constants are fixed for reproducible benchmarking. |
-| `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `dotenv.set_key`/`get_key`. `env_path()`: `GRC_AGENT_ENV` override → `.env` walking up from CWD → `~/.config/grc_agent/.env`. |
+| `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `dotenv.set_key`/`get_key`. `env_path()`: `GRC_AGENT_ENV` override → repo-root `.env` (fixed, package-relative — `Path(__file__).resolve().parent.parent.parent / ".env"` — deliberately ignores CWD so GRC's dynamic working-directory changes can't redirect settings I/O) → `~/.config/grc_agent/.env`. |
 | `ingest.py` | Builds catalog/docs sqlite-vec databases on first use (`adapter._ensure_db_built`). |
 | `_paths.py` | Package-relative runtime-data directory resolution (`vectors_dir()`, `docs_dir()`). |
+| `exec_monitor.py` | Detects flowgraph execution failures from GRC's native console message bus (`gnuradio.grc.core.Messages.register_messenger`) — parses `>>> Done (return code N)`/`Generate Error:` markers, ignores SIGTERM (`-15`, GRC's own Kill button) as a user-requested stop, buffers a bounded log — and reports failures via callback to `ChatSidebar.prompt_fix_error()` for an inline "want me to fix this?" prompt. Wired at startup in `desktop_app.py`. |
 
 Data flow: `.grc` file → GRC's `MainWindow` → `window.current_page.flow_graph` (shared between canvas and agent tools on the same thread) → `inspect_graph()` → JSON tool result.
 
@@ -87,7 +88,7 @@ signature/type-hint introspection. The other two are provider-adaptive
 - **`set_param`'s "unknown param" error lists the block's actual valid param keys** — so the model doesn't waste a `query_knowledge` round-trip guessing.
 - **`resolve_auto` only ever resolves from an explicit, non-`"auto"` value** — it never guesses from an equally-unresolved neighbor, and it fails loudly instead of silently defaulting.
 - **`change_graph`'s tool description is derived from its own docstring** (`docstring_format="google", require_parameter_descriptions=True`).
-- **`change_graph` calls `flow_graph.rewrite()` once** — after `resolve_auto` (Phase 5) and before `add_connections` (Phase 7), so new blocks' ports are initialized. The old per-block `rewrite()` in the add_blocks loop was removed (O(N) rewrites → 1).
+- **`change_graph` calls `flow_graph.rewrite()` twice** in its success path — once conditionally right after Phase 5 (`resolve_auto`), only if `add_blocks` is non-empty, since GNU Radio's `Block.rewrite()` is what populates a newly-added block's `active_sinks`/`active_sources`, which Phase 7's connection lookup (`_find_port`) needs; and once unconditionally at the end, after Phase 7 (`add_connections`), to settle all derived state before the validation gate. Both are load-bearing — the old *per-block* `rewrite()` inside the `add_blocks` loop (one call per new block) was removed and replaced by these two batch-level calls.
 - **Undo/redo uses GRC's native StateCache.** Our custom disk-based undo/redo stack (`adapter/snapshots.py`) is kept for snapshot pushes during `sync_manual_edit` and `change_graph`, but the UI buttons and `NativeCanvasManager.undo()`/`redo()` methods are removed. GRC's built-in Ctrl+Z/Y works natively.
 - **New blocks are positioned by a headless, collision-avoiding placement.** `change_graph`'s `add_blocks` phase uses `grandalf`'s Sugiyama-style rank assignment + a spiral grid search for the non-overlapping coordinate. This must stay fully automatic since `inspect_graph` filters coordinates out of context.
 - **Vector DBs are built, not shipped.** `adapter._ensure_db_built` lazily calls `ingest.py` to build the catalog/docs DB on first `query_catalog`/`query_docs` call. Each backend gets its own `.db` file. `_db_meta` table stores `embedding_model` and `corpus_version` (checked on every query, auto-rebuild on mismatch). The OpenAI embed client is cached at module level for connection reuse.
@@ -107,16 +108,18 @@ signature/type-hint introspection. The other two are provider-adaptive
 ## Test Gate
 
 ```bash
-uv run pytest tests/test_unit.py              # fast, no LLM, no display
-uv run pytest tests/test_isolation.py         # settings/model isolation, no LLM
+uv run pytest tests/test_unit.py              # fast, no LLM; needs a display (xvfb-run)
+uv run pytest tests/test_exec_monitor.py      # fast, no LLM, no display
+uv run pytest tests/test_isolation.py         # settings/model isolation, no LLM (one test makes a live Ollama Cloud call if OLLAMA_CLOUD_API_KEY is set)
 uv run pytest tests/test_button_integration.py # tool/button integration, Ollama Cloud
 uv run pytest tests/test_integration.py       # live model scenarios, ~15-20 min
 uv run ruff check
 ```
 
 `test_unit.py`/`test_isolation.py` touch live network (lite.duckduckgo.com search,
-Ollama embeddings/chat for RAG) — they are not fully hermetic, but need no
-GUI/display server. `test_integration.py` runs the full scenario suite against
+Ollama embeddings/chat for RAG) — they are not fully hermetic. `test_isolation.py`
+needs no GUI/display server; `test_unit.py` builds real GTK widget trees and needs
+one (`xvfb-run`). `test_integration.py` runs the full scenario suite against
 a live local model.
 
 Tests that need a real GTK widget tree require `xvfb-run` (e.g. `xvfb-run -a uv run pytest`).

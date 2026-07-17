@@ -10,6 +10,7 @@ Schema (must exactly match what query_catalog()/query_docs() read):
     docs_idx       vec0(embedding)
 """
 
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -26,6 +27,8 @@ from grc_agent.adapter import (
     get_platform,
     render_catalog_block,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _open_db(db_path: str) -> sqlite3.Connection:
@@ -67,10 +70,10 @@ def ingest_catalog(
                 try:
                     embedding = embed_document(text, model)
                     rows.append((block_id, text, embedding))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as exc:
+                    _log.warning("catalog embed failed for block_id=%s: %s", block_id, exc)
+        except Exception as exc:
+            _log.warning("catalog render failed for block_id=%s: %s", block_id, exc)
         if on_progress is not None:
             on_progress(i + 1, total)
 
@@ -159,7 +162,8 @@ def ingest_docs(
         composed = f"path: {path}\nheading: {heading}\n{body}"
         try:
             embedding = embed_document(composed, model)
-        except Exception:
+        except Exception as exc:
+            _log.warning("docs embed failed for path=%s heading=%s: %s", path, heading, exc)
             embedding = None
         if embedding is not None:
             rows.append((path, heading, composed, embedding))

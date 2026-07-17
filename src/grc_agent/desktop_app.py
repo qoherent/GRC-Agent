@@ -30,9 +30,15 @@ except Exception as e:
 
 from gi.repository import Gdk, GLib, Gtk
 
-from grc_agent.adapter import get_gui_platform, gui_application_cls
+from grc_agent.adapter import (
+    get_blocks_panel_visibility,
+    get_gui_platform,
+    gui_application_cls,
+    register_execution_messenger,
+)
 from grc_agent.agent_factory import build_interactive_agent
 from grc_agent.chat_sidebar import ChatSidebar
+from grc_agent.exec_monitor import ExecutionErrorMonitor
 from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
 
 GRC_EXTENSIONS = (".grc", ".yml", ".yaml")
@@ -200,6 +206,9 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     if model_error:
         sidebar.set_status(f"Model warning: {model_error} (using defaults)", error=True)
 
+    exec_monitor = ExecutionErrorMonitor(on_error=sidebar.prompt_fix_error)
+    register_execution_messenger(exec_monitor.handle_message)
+
     canvas = NativeCanvasManager(window, platform)
     canvas.app = grc_app
     sidebar.set_blocks_expanded(canvas._blocks_visible)
@@ -226,13 +235,12 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     sidebar.connect("toggle-blocks-panel", _on_toggle_blocks)
 
     def _set_pane_positions() -> bool:
-        from gnuradio.grc.gui import Actions
         w = window.get_allocated_width()
         h = window.get_allocated_height()
         if w > 100:
             outer_paned.set_position(int(w * 0.70))
             w_main = int(w * 0.70)
-            if Actions.TOGGLE_BLOCKS_WINDOW.get_active():
+            if get_blocks_panel_visibility():
                 main_widget.set_position(int(w_main * 0.78))
             else:
                 main_widget.set_position(w_main)

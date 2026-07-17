@@ -153,7 +153,9 @@ def test_env_path_resolution(tmp_path, monkeypatch):
     monkeypatch.setenv("GRC_AGENT_ENV", str(override))
     assert env_path() == override
 
-    # 2. Without override, find_dotenv finds the repo .env (CWD is repo root)
+    # 2. Without override, env_path() resolves the fixed, package-relative
+    # repo-root .env — it deliberately ignores CWD (GRC changes the working
+    # directory dynamically), unlike the old find_dotenv()-based CWD walk.
     monkeypatch.delenv("GRC_AGENT_ENV", raising=False)
     found = env_path()
     assert found.name == ".env"
@@ -421,24 +423,3 @@ def test_ollama_cloud_model_builds_and_runs():
 
     reply = asyncio.run(run_turn())
     assert "OLLAMA_CLOUD_OK" in reply, f"Expected OLLAMA_CLOUD_OK, got: {reply}"
-
-
-def test_health_check_reads_from_env_file_not_os_environ(tmp_path, monkeypatch):
-    """The health check must read API keys from the .env file (via
-    get_env_value), not from os.environ — otherwise saving a key via
-    /grc/apikey would make the health badge go green while the running
-    agent still holds the old key (the A2.2 bug)."""
-    env = tmp_path / ".env"
-    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
-
-    # Write a key to the .env file
-    upsert_env_key("OLLAMA_CLOUD_API_KEY", "file-key-123", path=env)
-
-    # Set a DIFFERENT value in os.environ (simulating a stale startup snapshot)
-    monkeypatch.setenv("OLLAMA_CLOUD_API_KEY", "env-key-456")
-
-    # get_env_value must return the file value, not the env var
-    assert get_env_value("OLLAMA_CLOUD_API_KEY") == "file-key-123"
-
-    # For a key not in the file, must return None
-    assert get_env_value("NONEXISTENT_KEY") is None

@@ -6,6 +6,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,22 @@ def set_blocks_panel_visibility(app: Any, visible: bool) -> bool:
     except Exception as e:
         print(f"Failed to set Block Library panel visibility via action {action}: {e}")
     return bool(action.get_active())
+
+
+def get_blocks_panel_visibility() -> bool:
+    """Read GRC's native Block Library panel's current visibility state."""
+    from gnuradio.grc.gui import Actions
+
+    return bool(Actions.TOGGLE_BLOCKS_WINDOW.get_active())
+
+
+def register_execution_messenger(callback: Callable[[str], None]) -> None:
+    """Register a callback to receive every message GRC sends to its native
+    console panel (see gnuradio.grc.core.Messages). Used to detect flow
+    graph execution failures without a dedicated log-scraping mechanism."""
+    from gnuradio.grc.core import Messages
+
+    Messages.register_messenger(callback)
 
 
 def flow_graph_content_hash(flow_graph: Any) -> str:
@@ -701,8 +718,11 @@ def set_param(block: Any, param_key: str, value: str) -> None:
         )
     if param_key == "id":
         if str(value) != str(block.params["id"].value):
-            value = str(block.params["id"].value)
-        block.params[param_key].set_value(str(value))
+            raise ValueError(
+                f"Cannot rename block {block.name!r} via param 'id': block "
+                f"identity is fixed at creation. Attempted to change id from "
+                f"{block.params['id'].value!r} to {value!r}."
+            )
         return
 
     raw_value = str(value)
@@ -716,6 +736,13 @@ def set_param(block: Any, param_key: str, value: str) -> None:
         )
 
     param = block.params[param_key]
+    if raw_value == "auto":
+        # change_graph's own sentinel for deferred dtype resolution (Phase
+        # 5) — GNU Radio does not define 'auto' as a real option value on
+        # type-controlling enums, so it must bypass enum validation below
+        # rather than be rejected as invalid.
+        param.set_value(raw_value)
+        return
     if str(getattr(param, "dtype", "") or "") == "enum":
         options = [str(o) for o in (getattr(param, "options", None) or [])]
         labels = [str(o) for o in (getattr(param, "option_labels", None) or [])]
@@ -915,9 +942,6 @@ def change_graph(  # noqa: C901
                 block.params["id"].set_value(str(instance_name))
 
                 for k, v in (item.get("params") or {}).items():
-                    if v == "auto":
-                        block.params[k].set_value("auto")
-                        continue
                     try:
                         set_param(block, k, v)
                     except Exception as e:
@@ -945,11 +969,6 @@ def change_graph(  # noqa: C901
                 try:
                     block = flow_graph.get_block(name)
                     for k, v in (item.get("params") or {}).items():
-                        if v == "auto":
-                            block.params[k].set_value("auto")
-                            continue
-                        if k == "id":
-                            continue
                         try:
                             set_param(block, k, v)
                         except Exception as e:

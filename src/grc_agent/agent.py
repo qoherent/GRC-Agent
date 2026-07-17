@@ -387,7 +387,12 @@ async def _with_state_lock(ctx: RunContext[Any], fn):
 
 # Module-level tool functions
 async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = None) -> str:
-    """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status."""
+    """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.
+
+    Args:
+        targets: Block/variable instance names to scope the inspection to.
+            Omit, or pass "all"/"*", to inspect the whole graph.
+    """
     result = await _with_state_lock(
         ctx, lambda: inspect_graph(ctx.deps, targets=targets, view="overview")
     )
@@ -416,33 +421,30 @@ def validate_change_graph_args(
     update_states: list[StateUpdate] | None = None,
     **kwargs,  # noqa: ARG001
 ) -> None:
-    try:
-        current_blocks = {b.name for b in ctx.deps.blocks}
-        added_names = {b.instance_name for b in add_blocks} if add_blocks else set()
+    current_blocks = {b.name for b in ctx.deps.blocks}
+    added_names = {b.instance_name for b in add_blocks} if add_blocks else set()
 
-        # Check block presence for updates
-        for item in update_params or []:
-            if item.instance_name not in current_blocks and item.instance_name not in added_names:
-                raise ModelRetry(
-                    f"Block '{item.instance_name}' does not exist in the flowgraph. "
-                    "You must add the block first before trying to update its parameters."
-                )
+    # Check block presence for updates
+    for item in update_params or []:
+        if item.instance_name not in current_blocks and item.instance_name not in added_names:
+            raise ModelRetry(
+                f"Block '{item.instance_name}' does not exist in the flowgraph. "
+                "You must add the block first before trying to update its parameters."
+            )
 
-        for item in update_states or []:
-            if item.instance_name not in current_blocks and item.instance_name not in added_names:
-                raise ModelRetry(
-                    f"Block '{item.instance_name}' does not exist in the flowgraph. "
-                    "You must add the block first before trying to update its state."
-                )
+    for item in update_states or []:
+        if item.instance_name not in current_blocks and item.instance_name not in added_names:
+            raise ModelRetry(
+                f"Block '{item.instance_name}' does not exist in the flowgraph. "
+                "You must add the block first before trying to update its state."
+            )
 
-        # Check block presence for removals
-        for name in remove_blocks or []:
-            if name not in current_blocks:
-                raise ModelRetry(
-                    f"Cannot remove block '{name}' because it does not exist in the flowgraph."
-                )
-    except ModelRetry:
-        raise
+    # Check block presence for removals
+    for name in remove_blocks or []:
+        if name not in current_blocks:
+            raise ModelRetry(
+                f"Cannot remove block '{name}' because it does not exist in the flowgraph."
+            )
 
 
 async def change_graph_func(
@@ -502,8 +504,6 @@ async def change_graph_func(
             f"Graph modification failed. Errors: {res.get('errors') or res.get('message') or '(no detail)'}. "
             "Please adjust your parameters/connections or set force=True if appropriate and retry."
         )
-    if hasattr(ctx.deps, "bump_version"):
-        ctx.deps.bump_version()
     # Tell the live GTK canvas (if any) to redraw — the agent mutated the very
     # same in-memory FlowGraph the canvas renders (single-process, shared
     # object), so there is nothing to reload from disk; notify_edit just queues
@@ -519,7 +519,8 @@ def grc_tools() -> list[Tool[Any]]:
     inspect_tool = Tool(
         inspect_graph_func,
         name="inspect_graph",
-        description="Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.",
+        docstring_format="google",
+        require_parameter_descriptions=True,
     )
 
     query_tool = Tool(

@@ -16,6 +16,7 @@ _log = logging.getLogger(__name__)
 
 from grc_agent.adapter import (
     flow_graph_content_hash,
+    get_blocks_panel_visibility,
     push_undo_snapshot,
     set_blocks_panel_visibility,
     write_flow_graph_atomic,
@@ -54,9 +55,6 @@ class NativeFlowgraphProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(self._get_target(), name, value)
 
-    def bump_version(self) -> None:
-        pass
-
     def get_state_lock(self) -> None:
         return None
 
@@ -79,8 +77,7 @@ class NativeCanvasManager:
         self.last_disk_hash: str | None = None
         self.last_synced_export_hash: str | None = None
         self._last_block_names: set[str] = set()
-        from gnuradio.grc.gui import Actions
-        self._blocks_visible = bool(Actions.TOGGLE_BLOCKS_WINDOW.get_active())
+        self._blocks_visible = get_blocks_panel_visibility()
         self.panning = False
         self.pan_start_x = 0.0
         self.pan_start_y = 0.0
@@ -117,8 +114,9 @@ class NativeCanvasManager:
             return None
         return Path(p).parent / ".grc_agent" / (Path(p).name + ".lock")
 
-    def _get_scrolled_window(self) -> Any:
-        da = self.drawing_area
+    def _get_scrolled_window(self, da: Any = None) -> Any:
+        if da is None:
+            da = self.drawing_area
         if not da:
             return None
         parent = da.get_parent()
@@ -161,13 +159,14 @@ class NativeCanvasManager:
             if hasattr(self.window, "update"):
                 self.window.update()
 
-    def sync_manual_edit(self) -> None:
+    def sync_manual_edit(self, current_hash: str | None = None) -> None:
         if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph")):
             return
         fg = self.drawing_area._flow_graph
+        current_hash = current_hash or flow_graph_content_hash(fg)
         if (
             self.last_synced_export_hash is not None
-            and flow_graph_content_hash(fg) == self.last_synced_export_hash
+            and current_hash == self.last_synced_export_hash
         ):
             return
         if not self.path:
@@ -253,17 +252,19 @@ class NativeCanvasManager:
         notebook.connect("page-added", self._on_page_added)
         notebook.connect("page-removed", self._on_page_removed)
 
-        self._setup_drawing_area()
+        for i in range(notebook.get_n_pages()):
+            self._setup_drawing_area(notebook.get_nth_page(i))
+        self._sync_page_baselines()
 
         GLib.timeout_add(1500, self._check_for_unsynced_edit)
 
-    def _setup_drawing_area(self) -> None:
-        da = self.drawing_area
+    def _setup_drawing_area(self, page: Any = None) -> None:
+        da = page.drawing_area if page is not None else self.drawing_area
         if da is None or getattr(da, "_grc_agent_setup", False):
             return
         da._grc_agent_setup = True
 
-        sw = self._get_scrolled_window()
+        sw = self._get_scrolled_window(da)
         if sw is not None:
             sw.set_size_request(1, 1)
 
@@ -299,7 +300,8 @@ class NativeCanvasManager:
         if self.on_graphs_changed:
             self.on_graphs_changed()
 
-    def _on_page_added(self, *_args: Any) -> None:
+    def _on_page_added(self, _notebook: Any, child: Any, _page_num: int) -> None:
+        self._setup_drawing_area(child)
         if self.on_graphs_changed:
             self.on_graphs_changed()
 
@@ -360,7 +362,7 @@ class NativeCanvasManager:
                     self.last_synced_export_hash is not None
                     and current_hash != self.last_synced_export_hash
                 ):
-                    self.sync_manual_edit()
+                    self.sync_manual_edit(current_hash)
             except Exception as e:
                 # Log instead of silently swallowing — a single transient error
                 # here would otherwise blind the sole guard against un-synced

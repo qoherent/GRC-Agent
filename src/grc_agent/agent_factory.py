@@ -32,7 +32,8 @@ def _retrying_http_client() -> httpx.AsyncClient:
                 wait=wait_exponential(multiplier=1, max=10),
                 stop=stop_after_attempt(3),
                 reraise=True,
-            )
+            ),
+            validate_response=lambda r: r.raise_for_status(),
         )
     )
 
@@ -40,12 +41,12 @@ def _retrying_http_client() -> httpx.AsyncClient:
 def _build_model(cfg: dict, http_client: httpx.AsyncClient):
     if cfg["provider"] == "openrouter":
         key = get_env_value("OPENROUTER_API_KEY") or ""
-        return OpenRouterModel(cfg["model"], provider=OpenRouterProvider(api_key=key))
+        return OpenRouterModel(cfg["model"], provider=OpenRouterProvider(api_key=key, http_client=http_client))
     if cfg["provider"] == "ollama_cloud":
         key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
         return OllamaModel(
             cfg["model"],
-            provider=OllamaProvider(base_url="https://ollama.com/v1", api_key=key),
+            provider=OllamaProvider(base_url="https://ollama.com/v1", api_key=key, http_client=http_client),
         )
     return OllamaModel(
         cfg["model"],

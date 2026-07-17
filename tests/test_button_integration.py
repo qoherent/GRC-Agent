@@ -1,7 +1,7 @@
 """Integration tests for agent tools and flowgraph operations.
 
 Uses Ollama Cloud as the LLM backend. Each test exercises a different
-tool/button pathway: inspect, modify, undo/redo, validate, query_knowledge.
+tool/button pathway: inspect, modify, validate, query_knowledge.
 
 Run:  GRC_TEST_BACKEND=ollama_cloud uv run pytest tests/test_button_integration.py -v
 """
@@ -22,9 +22,6 @@ load_dotenv(env_path())
 from grc_agent.adapter import (  # noqa: E402
     change_graph,
     inspect_graph,
-    redo_flowgraph,
-    undo_flowgraph,
-    undo_status,
 )
 from grc_agent.agent import (  # noqa: E402
     GrcAgentResponse,
@@ -105,7 +102,7 @@ def test_inspect_graph_targets_filter():
         shutil.rmtree(tmp_dir)
 
 
-# --- change_graph + Undo/Redo ---
+# --- change_graph ---
 
 
 def test_change_graph_add_block():
@@ -119,28 +116,6 @@ def test_change_graph_add_block():
         assert result["ok"] is True
         names = {b.name for b in fg.blocks}
         assert "my_new_var" in names
-    finally:
-        shutil.rmtree(tmp_dir)
-
-
-def test_undo_redo_cycle():
-    """After a change_graph mutation, undo reverses it, redo re-applies it."""
-    fg, tmp, tmp_dir = fresh_agent(_EMPTY)
-    try:
-        change_graph(
-            fg,
-            add_blocks=[{"block_id": "variable", "instance_name": "undo_test_var", "params": {"value": "99"}}],
-        )
-        assert "undo_test_var" in {b.name for b in fg.blocks}
-
-        undo_result = undo_flowgraph(str(tmp))
-        assert undo_result["ok"] is True
-
-        status = undo_status(str(tmp))
-        assert status["can_undo"] is True or status["can_redo"] is True
-
-        redo_result = redo_flowgraph(str(tmp))
-        assert redo_result["ok"] is True
     finally:
         shutil.rmtree(tmp_dir)
 

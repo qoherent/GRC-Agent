@@ -19,10 +19,7 @@ from grc_agent.adapter import (
     load_flow_graph,
     query_catalog,
     query_docs,
-    redo_flowgraph,
     set_param,
-    undo_flowgraph,
-    undo_status,
 )
 
 FIXTURES_DIR = Path("tests/data")
@@ -513,88 +510,6 @@ def test_change_graph_force_bypasses_validation(temp_dial_tone):
     assert res["ok"] is True
     snap = inspect_graph(fg)
     assert snap["graph"]["validation"]["status"] == "invalid"
-
-
-# ==========================================
-# Undo/Redo Unit Tests (6 tests)
-# ==========================================
-
-
-def test_undo_status_no_history(temp_dial_tone):
-    # No edit has been made yet, so no undo dir exists at all.
-    status = undo_status(temp_dial_tone)
-    assert status == {"can_undo": False, "can_redo": False}
-
-
-def test_undo_redo_round_trip(temp_dial_tone):
-    fg = load_flow_graph(str(temp_dial_tone))
-    res = change_graph(
-        fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}]
-    )
-    assert res["ok"] is True
-
-    status = undo_status(temp_dial_tone)
-    assert status == {"can_undo": True, "can_redo": False}
-
-    undo_res = undo_flowgraph(temp_dial_tone)
-    assert undo_res["ok"] is True
-    reverted = load_flow_graph(str(temp_dial_tone))
-    assert reverted.get_block("samp_rate").params["value"].get_value() == "32000"
-    status = undo_status(temp_dial_tone)
-    assert status == {"can_undo": False, "can_redo": True}
-
-    redo_res = redo_flowgraph(temp_dial_tone)
-    assert redo_res["ok"] is True
-    reapplied = load_flow_graph(str(temp_dial_tone))
-    assert reapplied.get_block("samp_rate").params["value"].get_value() == "48000"
-    status = undo_status(temp_dial_tone)
-    assert status == {"can_undo": True, "can_redo": False}
-
-
-def test_undo_with_nothing_to_undo(temp_dial_tone):
-    fg = load_flow_graph(str(temp_dial_tone))
-    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}])
-    undo_flowgraph(temp_dial_tone)  # back to the baseline (index 0)
-
-    res = undo_flowgraph(temp_dial_tone)
-    assert res["ok"] is False
-
-
-def test_redo_with_nothing_to_redo(temp_dial_tone):
-    fg = load_flow_graph(str(temp_dial_tone))
-    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}])
-
-    res = redo_flowgraph(temp_dial_tone)
-    assert res["ok"] is False
-
-
-def test_new_edit_discards_redo_branch(temp_dial_tone):
-    fg = load_flow_graph(str(temp_dial_tone))
-    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}])
-    undo_flowgraph(temp_dial_tone)  # back to baseline; a redo branch to 48000 now exists
-    assert undo_status(temp_dial_tone) == {"can_undo": False, "can_redo": True}
-
-    fg = load_flow_graph(str(temp_dial_tone))
-    change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "64000"}}])
-
-    status = undo_status(temp_dial_tone)
-    assert status["can_undo"] is True
-    assert status["can_redo"] is False  # the 48000 branch was discarded, not just hidden
-
-    undo_flowgraph(temp_dial_tone)
-    reverted = load_flow_graph(str(temp_dial_tone))
-    assert reverted.get_block("samp_rate").params["value"].get_value() == "32000"
-
-
-def test_no_op_edit_is_not_pushed(temp_dial_tone):
-    fg = load_flow_graph(str(temp_dial_tone))
-    # Re-setting a param to its current value produces identical exported
-    # content, so push_undo_snapshot's content-hash dedup should skip it.
-    res = change_graph(
-        fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "32000"}}]
-    )
-    assert res["ok"] is True
-    assert undo_status(temp_dial_tone) == {"can_undo": False, "can_redo": False}
 
 
 # ==========================================
@@ -1558,6 +1473,60 @@ def test_run_agent_turn_error_preserves_user_message():
     sidebar._render_history.assert_not_called()
 
 
+def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
+    """M14 regression: send_message's blank-text/busy no-op guards and its
+    session-creation branch had zero direct coverage — every other test that
+    touches send_message replaces it with a MagicMock. This calls the real
+    method (only _run_agent_turn itself is stubbed, so no live agent/model is
+    needed)."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    grc = tmp_path / "flow.grc"
+    grc.write_text("# grc")
+
+    sidebar = ChatSidebar()
+    sidebar._run_agent_turn = AsyncMock()
+
+    # (a) Blank/whitespace-only text is a no-op: no task started.
+    assert sidebar.send_message("   ") is False
+    assert sidebar._chat_task is None
+
+    # (b) A call while a turn is already in flight (_busy) is a no-op.
+    sidebar._busy = True
+    assert sidebar.send_message("hello") is False
+    assert sidebar._chat_task is None
+    sidebar._busy = False
+
+    # (c) A real call on a sidebar with a flowgraph_proxy set creates a new DB
+    # session row on first send.
+    proxy = MagicMock()
+    cm = MagicMock()
+    cm.path = str(grc)
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    assert sidebar._active_session_id is None
+
+    async def _run():
+        result = sidebar.send_message("hello agent")
+        assert result is True
+        await sidebar._chat_task
+
+    asyncio.run(_run())
+
+    sidebar._run_agent_turn.assert_called_once_with("hello agent")
+    assert sidebar._active_session_id is not None
+
+    from grc_agent.db import get_recent_sessions
+
+    sessions = get_recent_sessions()
+    assert any(s["id"] == sidebar._active_session_id for s in sessions)
+
+
 def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
     """DB-1 regression: _save_history must be async and dispatch save_session via
     asyncio.to_thread so it never blocks the gbulb event loop."""
@@ -1588,6 +1557,53 @@ def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
 
     asyncio.run(sidebar._save_history())
     assert used["to_thread"] is True
+
+
+def test_save_history_deletes_session_resurrected_by_concurrent_clear(monkeypatch):
+    """M13 regression: _save_history captures _clear_generation BEFORE the
+    asyncio.to_thread(save_session, ...) await. If a global Clear History bumps
+    _clear_generation while that save is still in flight, the worker's INSERT
+    can resurrect a row Clear History just deleted — this must be undone by
+    calling delete_session on the resurrected id once the await returns."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar._active_session_id = 42
+    proxy = MagicMock()
+    cm = MagicMock()
+    cm.path = "/tmp/race.grc"
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    resumed = asyncio.Event()
+
+    def fake_to_thread(fn, *a, **k):
+        async def _runner():
+            # Block until the test bumps _clear_generation, simulating a
+            # concurrent Clear History completing while save_session is still
+            # running on its worker thread.
+            await resumed.wait()
+            return fn(*a, **k)
+
+        return _runner()
+
+    monkeypatch.setattr("grc_agent.chat_sidebar.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("grc_agent.chat_sidebar.save_session", MagicMock(return_value=42))
+    mock_delete = MagicMock()
+    monkeypatch.setattr("grc_agent.chat_sidebar.delete_session", mock_delete)
+
+    async def _run():
+        task = asyncio.ensure_future(sidebar._save_history())
+        await asyncio.sleep(0)  # let _save_history capture gen and start the await
+        sidebar._clear_generation += 1  # simulate the concurrent Clear History
+        resumed.set()
+        await task
+
+    asyncio.run(_run())
+    mock_delete.assert_called_once_with(42)
 
 
 def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
@@ -1912,6 +1928,115 @@ def test_window_keypress_editable_propagation():
     result = _on_window_key_press(win, event_ctrl_a, canvas, sidebar)
     assert result is True
     entry.select_region.assert_called_once_with(0, -1)
+
+
+def _find_buttons(widget, gtk_button_cls):
+    found = []
+    if isinstance(widget, gtk_button_cls):
+        found.append(widget)
+    if hasattr(widget, "get_children"):
+        for child in widget.get_children():
+            found.extend(_find_buttons(child, gtk_button_cls))
+    return found
+
+
+def test_prompt_fix_error_adds_yes_no_row():
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.prompt_fix_error("Traceback (most recent call last):\nZeroDivisionError")
+
+    rows = sidebar._listbox.get_children()
+    assert len(rows) == 1
+
+    buttons = _find_buttons(rows[0], Gtk.Button)
+    labels = {b.get_label() for b in buttons}
+    assert labels == {"Yes, fix it", "No thanks"}
+
+
+def test_prompt_fix_error_yes_sends_message_with_log(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.send_message = MagicMock()
+
+    sidebar.prompt_fix_error("ZeroDivisionError: division by zero")
+
+    row = sidebar._listbox.get_children()[0]
+    buttons = _find_buttons(row, Gtk.Button)
+    yes_btn = next(b for b in buttons if b.get_label() == "Yes, fix it")
+    no_btn = next(b for b in buttons if b.get_label() == "No thanks")
+
+    captured = {}
+
+    def fake_ensure_future(coro):
+        captured["coro"] = coro
+        return MagicMock()
+
+    monkeypatch.setattr("grc_agent.chat_sidebar.asyncio.ensure_future", fake_ensure_future)
+
+    yes_btn.clicked()
+
+    assert not yes_btn.get_sensitive()
+    assert not no_btn.get_sensitive()
+    assert "coro" in captured
+
+    # _chat_task is None on a fresh sidebar, so the coroutine sends right away.
+    asyncio.run(captured["coro"])
+    sidebar.send_message.assert_called_once()
+    sent_text = sidebar.send_message.call_args.args[0]
+    assert "ZeroDivisionError: division by zero" in sent_text
+
+
+def test_prompt_fix_error_no_does_not_send():
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.send_message = MagicMock()
+
+    sidebar.prompt_fix_error("some error log")
+
+    row = sidebar._listbox.get_children()[0]
+    buttons = _find_buttons(row, Gtk.Button)
+    yes_btn = next(b for b in buttons if b.get_label() == "Yes, fix it")
+    no_btn = next(b for b in buttons if b.get_label() == "No thanks")
+
+    no_btn.clicked()
+
+    assert not yes_btn.get_sensitive()
+    assert not no_btn.get_sensitive()
+    sidebar.send_message.assert_not_called()
+
+
+def test_send_fix_when_free_waits_for_in_flight_turn():
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.send_message = MagicMock()
+
+    async def _run():
+        async def _pending():
+            await asyncio.sleep(0.01)
+
+        sidebar._chat_task = asyncio.ensure_future(_pending())
+        await sidebar._send_fix_when_free("fix prompt")
+
+    asyncio.run(_run())
+    sidebar.send_message.assert_called_once_with("fix prompt")
 
 
 

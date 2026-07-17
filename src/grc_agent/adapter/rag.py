@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import logging
 import os
 import re
 import sqlite3
@@ -11,22 +12,66 @@ from openai import APIConnectionError, OpenAI
 
 from grc_agent._paths import vectors_dir
 
+_log = logging.getLogger(__name__)
+
+# settings.py's load_settings()/get_env_value() each re-parse the whole .env
+# file from disk on every call with no caching. rag.py's embedding path calls
+# them repeatedly per query/chunk (get_db_and_model, _embed_endpoint,
+# embed_query, embed_document all call in), which adds up to thousands of
+# redundant .env parses over a single ingestion run. Cached here, gated on the
+# file's mtime (a cheap stat(), not a full parse) so a live settings change —
+# e.g. save_settings() called again within the same process, as the isolation
+# tests do — still invalidates the cache instead of pinning it to whatever was
+# first read.
+_settings_cache: tuple[float, dict[str, Any]] | None = None
+_env_value_cache: tuple[float, dict[str, str | None]] | None = None
+
+
+def _env_mtime() -> float:
+    from grc_agent.settings import env_path
+
+    try:
+        return env_path().stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _cached_load_settings() -> dict[str, Any]:
+    global _settings_cache
+    mtime = _env_mtime()
+    if _settings_cache is None or _settings_cache[0] != mtime:
+        from grc_agent.settings import load_settings
+
+        _settings_cache = (mtime, load_settings())
+    return _settings_cache[1]
+
+
+def _cached_get_env_value(key: str) -> str | None:
+    global _env_value_cache
+    mtime = _env_mtime()
+    if _env_value_cache is None or _env_value_cache[0] != mtime:
+        _env_value_cache = (mtime, {})
+    cache = _env_value_cache[1]
+    if key not in cache:
+        from grc_agent.settings import get_env_value
+
+        cache[key] = get_env_value(key)
+    return cache[key]
+
 
 def get_db_and_model(domain: str) -> tuple[str, str | None]:
-    from grc_agent.settings import get_env_value, load_settings
-
-    cfg = load_settings()
+    cfg = _cached_load_settings()
     provider = cfg.get("provider", "ollama")
 
     if provider == "openrouter":
-        model = get_env_value("OPENROUTER_EMBEDDING_MODEL") or os.getenv(
+        model = _cached_get_env_value("OPENROUTER_EMBEDDING_MODEL") or os.getenv(
             "OPENROUTER_EMBEDDING_MODEL", "perplexity/pplx-embed-v1-0.6b"
         )
         db_name = f"{domain}_openrouter.db"
     else:
         # ollama and ollama_cloud both use local Ollama for embeddings
         # (Ollama Cloud's API doesn't expose /v1/embeddings)
-        model = get_env_value("OLLAMA_EMBEDDING_MODEL") or os.getenv(
+        model = _cached_get_env_value("OLLAMA_EMBEDDING_MODEL") or os.getenv(
             "OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest"
         )
         db_name = f"{domain}_ollama.db"
@@ -38,13 +83,11 @@ def get_db_and_model(domain: str) -> tuple[str, str | None]:
 def _embed_endpoint() -> tuple[str, str | None]:
     """Shared base_url/api_key selection for both query- and document-side
     embedding calls."""
-    from grc_agent.settings import get_env_value, load_settings
-
-    cfg = load_settings()
+    cfg = _cached_load_settings()
     provider = cfg.get("provider", "ollama")
 
     if provider == "openrouter":
-        key = get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
+        key = _cached_get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
         return "https://openrouter.ai/api/v1", key
     # ollama and ollama_cloud both use local Ollama for embeddings
     return "http://localhost:11434/v1", "not-needed"
@@ -82,9 +125,7 @@ def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[f
 
 
 def embed_query(query: str) -> list[float]:
-    from grc_agent.settings import load_settings
-
-    cfg = load_settings()
+    cfg = _cached_load_settings()
     provider = cfg.get("provider", "ollama")
     use_prefix = provider != "openrouter"
 
@@ -98,19 +139,26 @@ _DOCUMENT_PREFIX = "task: search result | document: "
 EMBED_MAX_WORDS = 900
 
 
-def _cap_words(text: str, max_words: int) -> str:
+def _cap_words(text: str, max_words: int, *, label: str = "") -> str:
     """Cap document text at a maximum word count.
     Used strictly to satisfy hard input token constraints of embedding model APIs
     during database ingestion (ingest_catalog, ingest_docs) to prevent API failures.
     """
     words = text.split()
-    return text if len(words) <= max_words else " ".join(words[:max_words])
+    if len(words) <= max_words:
+        return text
+    _log.warning(
+        "_cap_words: truncating %s from %d to %d words (%.0f%% discarded)",
+        label or "a document chunk",
+        len(words),
+        max_words,
+        100 * (1 - max_words / len(words)),
+    )
+    return " ".join(words[:max_words])
 
 
 def embed_document(text: str, model: str) -> list[float]:
-    from grc_agent.settings import load_settings
-
-    cfg = load_settings()
+    cfg = _cached_load_settings()
     provider = cfg.get("provider", "ollama")
     use_prefix = provider != "openrouter"
 
@@ -124,10 +172,11 @@ _EMBEDDING_DIM_CACHE: dict[str, int] = {}
 _CORPUS_VERSION_CACHE: dict[str, str] = {}
 
 
-# Exposed to the dashboard via /grc/status so the UI can show a "Building
-# knowledge database..." banner instead of an indefinite hang during the
+# Read by chat_sidebar.py's _poll_indexing (polled every 500ms via
+# GLib.timeout_add) to drive the ChatSidebar's status bar with a "Building
+# knowledge database..." message instead of an indefinite hang during the
 # first query_knowledge call (or after a provider switch that changes the
-# embedding model). Set by _ensure_db_built, no longer read by any endpoint.
+# embedding model). Set by _ensure_db_built.
 _rag_building: dict[str, dict[str, Any]] = {}
 """Per-domain build status, keyed by domain ("catalog" | "docs"). Each value:
 {"status": None|"building"|"ready"|"failed", "current": int, "total": int,

@@ -43,6 +43,9 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
+    NativeToolCallPart,
+    NativeToolReturnPart,
+    RetryPromptPart,
     TextPart,
     ThinkingPart,
     ToolCallPart,
@@ -144,6 +147,12 @@ _CHAT_CSS = b"""
     border: 1px solid #ffcdd2;
     border-radius: 8px;
     padding: 8px 10px;
+}
+.chat-confirm-box {
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 8px;
+    padding: 10px 12px;
 }
 .chat-tool-expander {
     background: #ffffff;
@@ -378,6 +387,10 @@ class ChatSidebar(Gtk.Box):
         # session can't resurrect.
         self._clear_generation: int = 0
         self._chat_task: asyncio.Task | None = None
+        # True while an inline Yes/No confirm bubble (prompt_fix_error) is
+        # awaiting a response — blocks _refresh_welcome_times from wiping the
+        # listbox (and the pending bubble with it) out from under the user.
+        self._pending_confirm = False
         # Per-domain last-seen RAG build status, so the poller only writes the
         # status bar on transitions (and while building) — never when idle.
         # Catalog and docs build independently and can run concurrently.
@@ -432,7 +445,7 @@ class ChatSidebar(Gtk.Box):
             bar.pack_start(b, False, False, 0)
             return b
 
-        _signal_btn("New Session", "Start a new chat session", "new-session-clicked")
+        self._new_session_btn = _signal_btn("New Session", "Start a new chat session", "new-session-clicked")
 
         # Clear History button
         self._clear_hist_btn = Gtk.Button.new_with_label("Clear History")
@@ -604,10 +617,6 @@ class ChatSidebar(Gtk.Box):
             dialog.destroy()
             if response != Gtk.ResponseType.YES:
                 return
-            # Bump the generation first so any in-flight _save_history worker
-            # (uncancellable) will undo its own INSERT instead of resurrecting a
-            # session the user just cleared (see _save_history).
-            self._clear_generation += 1
             # Global clear: delete every saved session. The toolbar button is not
             # tied to a specific flowgraph, and the welcome screen lists sessions
             # across all files — so scoping the delete to "the active flowgraph's
@@ -730,6 +739,12 @@ class ChatSidebar(Gtk.Box):
         self._render_history()
 
     def clear_messages(self) -> None:
+        # Bump the generation first so any in-flight _save_history worker
+        # (uncancellable) will undo its own INSERT instead of resurrecting a
+        # session the user just cleared (see _save_history), and so any
+        # in-flight _run_agent_turn's CancelledError handler recognizes this
+        # clear and skips re-populating the listbox it just wiped.
+        self._clear_generation += 1
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
         self._message_history = []
@@ -744,7 +759,7 @@ class ChatSidebar(Gtk.Box):
         relative timestamps ("2m ago") stay fresh. Only runs when idle and the
         history is empty (the only state in which the list is visible); never
         disturbs a live chat stream."""
-        if not self._busy and not self._message_history:
+        if not self._busy and not self._message_history and not self._pending_confirm:
             self._render_history()
         return True  # re-arm
 
@@ -880,8 +895,6 @@ class ChatSidebar(Gtk.Box):
 
             if last_message:
                 snippet = last_message.replace("\n", " ").strip()
-                if len(snippet) > 60:
-                    snippet = snippet[:57] + "..."
                 snippet_lbl = Gtk.Label()
                 snippet_lbl.set_markup(f"<span fgcolor='#555555' style='italic' size='small'>{_esc(snippet)}</span>")
                 snippet_lbl.set_xalign(0.0)
@@ -1025,8 +1038,14 @@ class ChatSidebar(Gtk.Box):
                     tcid = event.tool_call_id or ""
                     exp = ctx.tools.get(tcid)
                     if exp is not None:
-                        res_str = str(event.part.content)
-                        self._set_tool_result(exp, res_str)
+                        if isinstance(event.part, RetryPromptPart):
+                            res_str = event.part.model_response()
+                            name = getattr(exp, "_grc_tool_name", "?")
+                            self._set_tool_body(exp, res_str)
+                            exp.set_label(f"⚠ {name} retry")
+                        else:
+                            res_str = str(event.part.content)
+                            self._set_tool_result(exp, res_str)
                         ctx.full_raw_text += f"<Tool Result: {res_str}>\n"
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
 
@@ -1054,6 +1073,31 @@ class ChatSidebar(Gtk.Box):
             ctx.tools[tcid] = exp
             ctx.full_raw_text += f"<Tool Call: {part.tool_name}>\nArgs: {args_str}\n"
             self._update_copy_text(ctx.box, ctx.full_raw_text)
+        elif isinstance(part, NativeToolCallPart):
+            # Native tool calls (e.g. provider-native web_search/web_fetch) never
+            # fire FunctionToolCallEvent/FunctionToolResultEvent — call and return
+            # arrive purely as ordinary response parts, each in its own
+            # PartStartEvent (no delta class exists for either).
+            self._close_text(ctx)
+            self._close_thinking(ctx)
+            tcid = part.tool_call_id or ""
+            exp = self._make_tool_expander(part.tool_name or "?")
+            args_str = str(part.args) if part.args else ""
+            if args_str:
+                self._set_tool_body(exp, args_str)
+            ctx.box.pack_start(exp, False, False, 0)
+            exp.show_all()
+            ctx.tools[tcid] = exp
+            ctx.full_raw_text += f"<Tool Call: {part.tool_name}>\nArgs: {args_str}\n"
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
+        elif isinstance(part, NativeToolReturnPart):
+            tcid = part.tool_call_id or ""
+            exp = ctx.tools.get(tcid)
+            if exp is not None:
+                res_str = str(part.content)
+                self._set_tool_result(exp, res_str)
+                ctx.full_raw_text += f"<Tool Result: {res_str}>\n"
+                self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
             self._close_text(ctx)
             self._ensure_thinking(ctx)
@@ -1261,7 +1305,7 @@ class ChatSidebar(Gtk.Box):
 
         return "\n" + "\n".join(lines) + "\n"
 
-    def _node_to_pango(self, node) -> str:  # noqa: C901
+    def _node_to_pango(self, node, depth: int = 0) -> str:  # noqa: C901
         if isinstance(node, NavigableString):
             return _esc(str(node))
 
@@ -1269,7 +1313,16 @@ class ChatSidebar(Gtk.Box):
         if not tag:
             return ""
 
-        inner_text = "".join(self._node_to_pango(child) for child in node.children)
+        if tag in ("ul", "ol"):
+            li_children = [c for c in node.children if getattr(c, "name", None) == "li"]
+            lines = [
+                f"{'  ' * depth}{f'{i}.' if tag == 'ol' else '•'}  "
+                + "".join(self._node_to_pango(child, depth + 1) for child in li.children).strip()
+                for i, li in enumerate(li_children, start=1)
+            ]
+            return "\n".join(lines) + "\n"
+
+        inner_text = "".join(self._node_to_pango(child, depth) for child in node.children)
 
         if tag in ("p", "div"):
             return f"{inner_text}\n"
@@ -1285,9 +1338,9 @@ class ChatSidebar(Gtk.Box):
             return f'<a href="{href_esc}">{inner_text}</a>'
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             return f'<span size="larger" weight="bold">{inner_text}</span>\n'
-        elif tag == "ul" or tag == "ol":
-            return f"{inner_text}\n"
         elif tag == "li":
+            # Defensive fallback for a stray orphaned <li> outside any ul/ol —
+            # the normal case is handled above by the ul/ol branch itself.
             return f"  •  {inner_text}\n"
         elif tag == "table":
             table_str = self._format_table(node)
@@ -1374,8 +1427,17 @@ class ChatSidebar(Gtk.Box):
             box.remove(child)
 
         full_text = ""
+        # Native tool call+return live as sibling parts within this same
+        # ModelResponse (unlike function tools, whose return is a separate
+        # ToolReturnPart in a later ModelRequest) — pre-scan the returns so
+        # the call part can be resolved in a single forward pass.
+        native_returns = {
+            p.tool_call_id: p for p in msg.parts if isinstance(p, NativeToolReturnPart)
+        }
         for part in msg.parts:
             part_cls = part.__class__.__name__
+            if isinstance(part, NativeToolReturnPart):
+                continue
             if part_cls == "TextPart":
                 self._render_markdown_to_box(box, part.content, clear=False)
                 full_text += part.content
@@ -1399,7 +1461,7 @@ class ChatSidebar(Gtk.Box):
                 self._set_tool_body(exp, args_str)
 
                 tcid = part.tool_call_id
-                ret_content, is_success = "", True
+                ret_content, is_success, is_retry = "", True, False
                 if tcid:
                     for m in self._message_history:
                         if m.__class__.__name__ == "ModelRequest":
@@ -1408,16 +1470,41 @@ class ChatSidebar(Gtk.Box):
                                     ret_content = str(p.content)
                                     is_success = (p.outcome != "failed")
                                     break
+                                if isinstance(p, RetryPromptPart) and p.tool_call_id == tcid:
+                                    ret_content = p.model_response()
+                                    is_retry = True
+                                    break
 
                 if ret_content:
                     self._set_tool_body(exp, ret_content)
-                    if is_success:
+                    if is_retry:
+                        exp.set_label(f"⚠ {tool_name} retry")
+                    elif is_success:
                         exp.set_label(f"\u2699 {tool_name} \u2713")
                     else:
                         exp.set_label(f"\u2699 {tool_name} \u2717")
                     full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
                 else:
                     exp.set_label(f"\u2699 {tool_name} ✓")
+                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\n"
+
+                box.pack_start(exp, False, False, 0)
+                exp.show_all()
+            elif isinstance(part, NativeToolCallPart):
+                tool_name = part.tool_name or "?"
+                exp = self._make_tool_expander(tool_name)
+                args_str = str(part.args) if part.args else ""
+                self._set_tool_body(exp, args_str)
+
+                ret_part = native_returns.get(part.tool_call_id)
+                if ret_part is not None:
+                    ret_content = str(ret_part.content)
+                    is_success = (ret_part.outcome != "failed")
+                    self._set_tool_body(exp, ret_content)
+                    exp.set_label(f"⚙ {tool_name} {'✓' if is_success else '✗'}")
+                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
+                else:
+                    exp.set_label(f"⚙ {tool_name} ✓")
                     full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\n"
 
                 box.pack_start(exp, False, False, 0)
@@ -1490,6 +1577,73 @@ class ChatSidebar(Gtk.Box):
         lbl.get_style_context().add_class("chat-error-label")
         self._add_message_row(lbl)
 
+    def prompt_fix_error(self, log_text: str) -> None:
+        """Show an inline Yes/No bubble asking whether to auto-fix a failed
+        flowgraph run, offering to resend the captured console log as a
+        prompt for the agent to diagnose."""
+        log_text = log_text.strip()
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.get_style_context().add_class("chat-confirm-box")
+
+        question = Gtk.Label(
+            label="The flowgraph run failed. Want me to look at the log and try to fix it?"
+        )
+        question.set_line_wrap(True)
+        question.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        question.set_xalign(0.0)
+        box.pack_start(question, False, False, 0)
+
+        expander = Gtk.Expander(label="Show error log")
+        expander.set_expanded(False)
+        log_lbl = Gtk.Label()
+        log_lbl.set_markup(f'<span face="monospace" size="small">{_esc(log_text)}</span>')
+        log_lbl.set_line_wrap(True)
+        log_lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        log_lbl.set_xalign(0.0)
+        log_lbl.set_selectable(True)
+        log_lbl.get_style_context().add_class("chat-code-block")
+        expander.add(log_lbl)
+        box.pack_start(expander, False, False, 0)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        yes_btn = Gtk.Button.new_with_label("Yes, fix it")
+        no_btn = Gtk.Button.new_with_label("No thanks")
+        btn_row.pack_start(yes_btn, False, False, 0)
+        btn_row.pack_start(no_btn, False, False, 0)
+        box.pack_start(btn_row, False, False, 0)
+
+        def _on_yes(_btn: Gtk.Button) -> None:
+            self._pending_confirm = False
+            yes_btn.set_sensitive(False)
+            no_btn.set_sensitive(False)
+            question.set_text("Sending the error log for a fix...")
+            prompt = (
+                "The flowgraph execution failed. Here is the console log:\n\n"
+                f"```\n{log_text}\n```\n\n"
+                "Please diagnose the error and fix the flowgraph."
+            )
+            asyncio.ensure_future(self._send_fix_when_free(prompt))
+
+        def _on_no(_btn: Gtk.Button) -> None:
+            self._pending_confirm = False
+            yes_btn.set_sensitive(False)
+            no_btn.set_sensitive(False)
+            question.set_text("Okay, dismissed.")
+
+        yes_btn.connect("clicked", _on_yes)
+        no_btn.connect("clicked", _on_no)
+
+        self._pending_confirm = True
+        self._add_message_row(box)
+
+    async def _send_fix_when_free(self, text: str) -> None:
+        """Wait out any in-flight agent turn, then send `text` as the next
+        user message in the current session."""
+        if self._chat_task and not self._chat_task.done():
+            await asyncio.gather(self._chat_task, return_exceptions=True)
+        self.send_message(text)
+
     def _on_entry_activate(self, _entry: Gtk.Entry) -> None:
         self._dispatch_send()
 
@@ -1504,6 +1658,14 @@ class ChatSidebar(Gtk.Box):
         if not text.strip() or self._busy:
             return
         self._entry.set_text("")
+        self.send_message(text)
+
+    def send_message(self, text: str) -> bool:
+        """Send `text` as a user turn in the current session, as if it had
+        been typed into the entry and submitted. Returns False (no-op) if
+        `text` is blank or a turn is already in flight."""
+        if not text.strip() or self._busy:
+            return False
         self._append_user_message(text)
 
         if self._active_session_id is None:
@@ -1523,6 +1685,7 @@ class ChatSidebar(Gtk.Box):
         self._set_busy(True)
         self._chat_task = asyncio.ensure_future(self._run_agent_turn(text))
         self._chat_task.add_done_callback(self._on_chat_task_done)
+        return True
 
     def _remember_user_message(self, text: str) -> None:
         """Record the user's just-sent prompt into the canonical history on a
@@ -1535,6 +1698,7 @@ class ChatSidebar(Gtk.Box):
     async def _run_agent_turn(self, text: str) -> None:  # noqa: C901
         rich_rendered = False
         origin_page = self.current_page
+        origin_gen = self._clear_generation
         ctx: _StreamCtx | None = None
         try:
             if self._agent is None:
@@ -1564,13 +1728,16 @@ class ChatSidebar(Gtk.Box):
                 rich_rendered = True
         except asyncio.CancelledError:
             # A tab switch mid-stream cancels this task then synchronously
-            # swaps _message_history/_active_session_id to the new page. Only
-            # touch shared state if we're still on the originating tab — the
-            # prompt for a saved graph was already persisted by the eager
-            # save_session in _dispatch_send. Do NOT await save here; the task
-            # is already cancelling.
-            if self.current_page is origin_page:
+            # swaps _message_history/_active_session_id to the new page, and a
+            # Clear History/New Session bumps _clear_generation and wipes the
+            # listbox synchronously too — only touch shared state if neither
+            # happened. The eager save in send_message only creates the session
+            # row; it does not contain this turn's prompt, so persist it now
+            # via a fire-and-forget save (not awaited — this task is already
+            # cancelling and must not suspend).
+            if self.current_page is origin_page and self._clear_generation == origin_gen:
                 self._remember_user_message(text)
+                asyncio.ensure_future(self._save_history())
                 self._append_error("[aborted]")
                 rich_rendered = True
             raise
@@ -1643,6 +1810,8 @@ class ChatSidebar(Gtk.Box):
         self._busy = busy
         can_type = self._flowgraph_proxy is not None
         self._gear_btn.set_sensitive(not busy)
+        self._new_session_btn.set_sensitive(not busy)
+        self._clear_hist_btn.set_sensitive(not busy)
         if busy:
             self._send_btn.set_label("Stop")
             self._send_btn.set_sensitive(True)
