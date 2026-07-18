@@ -1505,6 +1505,28 @@ def test_run_agent_turn_error_preserves_user_message():
     sidebar._render_history.assert_not_called()
 
 
+def test_append_error_aborted_style_uses_neutral_css_class():
+    """A user-initiated Stop ("[aborted]") is not an error and must not be
+    styled like one. _append_error's style="aborted" must apply the neutral
+    chat-aborted-label CSS class instead of chat-error-label; the default
+    (style="error", used by every other caller) must be unaffected."""
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+
+    sidebar._append_error("Agent Error: boom")
+    error_row = sidebar._listbox.get_children()[-1]
+    error_lbl = error_row.get_child() if hasattr(error_row, "get_child") else error_row
+    assert "chat-error-label" in error_lbl.get_style_context().list_classes()
+
+    sidebar._append_error("[aborted]", style="aborted")
+    aborted_row = sidebar._listbox.get_children()[-1]
+    aborted_lbl = aborted_row.get_child() if hasattr(aborted_row, "get_child") else aborted_row
+    classes = aborted_lbl.get_style_context().list_classes()
+    assert "chat-aborted-label" in classes
+    assert "chat-error-label" not in classes
+
+
 def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
     """M14 regression: send_message's blank-text/busy no-op guards and its
     session-creation branch had zero direct coverage — every other test that

@@ -148,6 +148,13 @@ _CHAT_CSS = b"""
     border-radius: 8px;
     padding: 8px 10px;
 }
+.chat-aborted-label {
+    background: #f5f5f5;
+    color: #616161;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
 .chat-confirm-box {
     background: #fff8e1;
     border: 1px solid #ffe082;
@@ -1591,13 +1598,21 @@ class ChatSidebar(Gtk.Box):
         name = getattr(exp, "_grc_tool_name", "?")
         exp.set_label(f"\u2699 {name} \u2713")
 
-    def _append_error(self, message: str) -> None:
+    def _append_error(self, message: str, style: str = "error") -> None:
+        """Append an inline status label to the chat log.
+
+        ``style="error"`` (the default) renders in the red error styling used
+        for genuine failures. ``style="aborted"`` renders in a neutral/muted
+        style instead, for user-initiated cancellations (e.g. clicking Stop)
+        which are not errors and shouldn't look like one.
+        """
         lbl = Gtk.Label(label=message)
         lbl.set_line_wrap(True)
         lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
         lbl.set_xalign(0.0)
         lbl.set_selectable(True)
-        lbl.get_style_context().add_class("chat-error-label")
+        css_class = "chat-error-label" if style == "error" else "chat-aborted-label"
+        lbl.get_style_context().add_class(css_class)
         self._add_message_row(lbl)
 
     def prompt_fix_error(self, log_text: str) -> None:
@@ -1761,7 +1776,7 @@ class ChatSidebar(Gtk.Box):
             if self.current_page is origin_page and self._clear_generation == origin_gen:
                 self._remember_user_message(text)
                 asyncio.ensure_future(self._save_history())
-                self._append_error("[aborted]")
+                self._append_error("[aborted]", style="aborted")
                 rich_rendered = True
             raise
         except ModelHTTPError as e:
