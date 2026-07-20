@@ -12,6 +12,7 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,6 @@ from .db import (
     delete_session,
     deserialize_messages,
     get_recent_sessions,
-    get_session_for_path,
     load_session,
     save_session,
 )
@@ -87,6 +87,23 @@ _STREAM_FLUSH_INTERVAL = 0.033
 def _esc(text: str) -> str:
     """Escape text for safe interpolation into Pango markup."""
     return GLib.markup_escape_text(text, -1)
+
+
+def _format_turn_error(e: Exception) -> str:
+    """User-facing message for a failed agent turn (_run_agent_turn's catch-all).
+    ModelHTTPError carries a status code and optional body/model_name that no
+    other exception type has, so it gets its own message shape; everything
+    else is a plain `{Label}: {e}`."""
+    if isinstance(e, ModelHTTPError):
+        msg = f"Model HTTP {e.status_code} Error"
+        return f"{msg}: {e.body}" if e.body else f"{msg} from {e.model_name}"
+    if isinstance(e, UsageLimitExceeded):
+        return f"Usage Limit Exceeded: {e}"
+    if isinstance(e, ModelAPIError):
+        return f"Model API Error: {e}"
+    if isinstance(e, UnexpectedModelBehavior):
+        return f"Unexpected Model Behavior: {e}"
+    return f"Agent Error: {e}"
 
 
 def format_relative_time(timestamp_str: str) -> str:
@@ -186,7 +203,7 @@ _CHAT_CSS = b"""
     color: #333333;
     border: 1px solid #cccccc;
     border-radius: 4px;
-    padding: 4px 10px;
+    padding: 4px 6px;
 }
 .chat-toolbar-btn:hover {
     background: #f0f0f0;
@@ -206,6 +223,20 @@ _CHAT_CSS = b"""
     font-size: 0.85em;
     font-weight: bold;
 }
+.provider-badge {
+    background: #e3f2fd;
+    color: #0d47a1;
+    border: 1px solid #90caf9;
+    border-radius: 10px;
+    padding: 2px 12px;
+    font-size: 0.85em;
+    font-weight: bold;
+}
+.provider-badge.is-default {
+    background: #fff3e0;
+    color: #e65100;
+    border-color: #ffcc80;
+}
 .chat-side-toggle {
     background: #f5f5f5;
     color: #333333;
@@ -222,7 +253,7 @@ _CHAT_CSS = b"""
     border: 1px solid #cccccc;
     border-radius: 6px;
     padding: 10px 8px;
-    min-height: 42px;
+    min-height: 32px;
 }
 .chat-entry placeholder {
     color: #888888;
@@ -231,9 +262,8 @@ _CHAT_CSS = b"""
     background: #1976d2;
     color: #ffffff;
     border: none;
-    border-radius: 6px;
-    padding: 8px 16px;
-    font-weight: bold;
+    border-radius: 4px;
+    padding: 6px 8px;
 }
 .chat-send-btn:hover {
     background: #1565c0;
@@ -316,8 +346,8 @@ _PROVIDER_API_KEY = {
     "openrouter": "OPENROUTER_API_KEY",
     "ollama_cloud": "OLLAMA_CLOUD_API_KEY",
 }
-# Example text for the Settings dialog's placeholders — mirrors the real
-# per-provider defaults in settings.py's _DEFAULT_MODELS.
+# Example text for the Settings dialog's placeholders — derives from
+# settings.py's _DEFAULT_MODELS rather than duplicating them.
 _PROVIDER_MODEL_PLACEHOLDER = {
     "ollama": "qwen3.6:35b-a3b-q4_K_M",
     "openrouter": "deepseek/deepseek-v4-flash",
@@ -328,6 +358,36 @@ _PROVIDER_KEY_PLACEHOLDER = {
     "ollama_cloud": "Paste your API key",
 }
 _PROVIDER_ORDER = ("ollama", "openrouter", "ollama_cloud")
+
+# Map the live model's base_url back to a canonical provider key. Used by
+# set_agent to resolve which provider is *actually* running — required
+# because OllamaProvider reports .name == "ollama" for both local Ollama
+# and Ollama Cloud (only base_url differs), so provider.name alone can't
+# tell them apart. Matched by host substring (not exact URL) so different
+# path conventions ("http://localhost:11434/v1/" vs "https://openrouter.ai/api/v1")
+# all resolve correctly. One uniform rule: provider identity comes from the
+# base_url host, never from .name.
+_PROVIDER_HOST_MARKERS = (
+    ("localhost:11434", "ollama"),
+    ("ollama.com", "ollama_cloud"),
+    ("openrouter.ai", "openrouter"),
+)
+# Short badge labels — _PROVIDER_LABELS forms like "Ollama Cloud (cloud)"
+# are too long for the toolbar.
+_PROVIDER_BADGE_LABEL = {
+    "ollama": "ollama",
+    "ollama_cloud": "ollama cloud",
+    "openrouter": "openrouter",
+}
+
+
+def _resolve_provider_from_base_url(base_url: str) -> str:
+    """Map a provider's base_url back to its canonical cfg key. Returns
+    '' if no known host marker matches."""
+    for needle, key in _PROVIDER_HOST_MARKERS:
+        if needle in base_url:
+            return key
+    return ""
 
 _css_applied = False
 
@@ -394,6 +454,30 @@ class ChatSidebar(Gtk.Box):
         _apply_css()
         self.get_style_context().add_class("chat-sidebar")
         self._agent: Agent | None = None
+        # Live-swap callback: when the Settings dialog saves a new provider/
+        # model/key, this rebuilds the Agent in-place. Set by desktop_app.py
+        # right after set_agent(). None in tests/headless mode (the Settings
+        # dialog falls back to the old restart-gated behavior if unset).
+        self._rebuild_agent: Callable[[], tuple[Agent, str | None]] | None = None
+        # Active provider/model label shown in the toolbar; updated on every
+        # set_agent call (startup + live-swap) so the user always sees which
+        # backend the running agent is actually using.
+        self._active_provider: str = ""
+        self._active_model: str = ""
+        self._active_provider_is_default: bool = False
+        # True when the status bar currently shows an error. set_status uses
+        # this to enforce the "background poll can't clobber a sticky error"
+        # rule (M5) — saves save/preflight failures visible past the next
+        # "Catalog indexed" transition.
+        self._status_is_error: bool = False
+        # Auto-scroll tracking: True by default (follow new content). Cleared
+        # by a user-initiated scroll-up (scroll-event signal), re-enabled when
+        # the user scrolls back near the bottom or sends a new message. Replaces
+        # the old position-based stickiness check which death-spiraled during
+        # streaming: once a scroll was skipped (>80px from bottom), the gap
+        # only grew as more content arrived, so ALL subsequent scrolls were
+        # skipped until the agent finished.
+        self._auto_scroll: bool = True
         self._flowgraph_proxy: object | None = None
         self._message_history: list[ModelMessage] = []
         self._active_session_id: int | None = None
@@ -409,6 +493,11 @@ class ChatSidebar(Gtk.Box):
         # awaiting a response — blocks _refresh_welcome_times from wiping the
         # listbox (and the pending bubble with it) out from under the user.
         self._pending_confirm = False
+        # Set by shutting_down() (called from desktop_app.py's _shutdown)
+        # just before stop_chat(). _run_agent_turn's finally block checks
+        # this to skip widget operations on widgets that are mid-destroy
+        # when the window closes (L7).
+        self._shutting_down: bool = False
         # Per-domain last-seen RAG build status, so the poller only writes the
         # status bar on transitions (and while building) — never when idle.
         # Catalog and docs build independently and can run concurrently.
@@ -455,38 +544,43 @@ class ChatSidebar(Gtk.Box):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         bar.set_border_width(4)
 
-        def _signal_btn(label: str, tooltip: str, signal: str) -> Gtk.Button:
-            b = Gtk.Button.new_with_label(label)
+        def _icon_btn(icon_name: str, tooltip: str, signal: str | None = None, cb=None) -> Gtk.Button:
+            b = Gtk.Button.new_from_icon_name(icon_name, Gtk.IconSize.SMALL_TOOLBAR)
             b.set_tooltip_text(tooltip)
             b.get_style_context().add_class("chat-toolbar-btn")
-            b.connect("clicked", lambda *_: self.emit(signal))
+            if signal:
+                b.connect("clicked", lambda *_: self.emit(signal))
+            if cb:
+                b.connect("clicked", cb)
             bar.pack_start(b, False, False, 0)
             return b
 
-        self._new_session_btn = _signal_btn("New Session", "Start a new chat session", "new-session-clicked")
+        self._new_session_btn = _icon_btn("document-new-symbolic", "New chat session", "new-session-clicked")
+        self._clear_hist_btn = _icon_btn("edit-clear-all-symbolic", "Delete ALL saved chat sessions", cb=self._on_clear_history_clicked)
 
-        # Clear History button
-        self._clear_hist_btn = Gtk.Button.new_with_label("Clear History")
-        self._clear_hist_btn.set_tooltip_text("Delete ALL saved chat sessions")
-        self._clear_hist_btn.get_style_context().add_class("chat-toolbar-btn")
-        self._clear_hist_btn.connect("clicked", self._on_clear_history_clicked)
-        bar.pack_start(self._clear_hist_btn, False, False, 0)
-
-        # Active graph badge
+        # Active graph badge — ellipsizes so it shrinks with the sidebar
         self._graph_label = Gtk.Label(label="Active Graph: none")
         self._graph_label.get_style_context().add_class("graph-badge")
-        bar.pack_start(self._graph_label, False, False, 8)
+        self._graph_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._graph_label.set_max_width_chars(15)
+        bar.pack_start(self._graph_label, True, True, 4)
 
-        # Spacer
-        spacer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        bar.pack_start(spacer, True, True, 0)
+        # Active provider badge — reflects the *running* agent's actual
+        # provider/model, not the saved .env (which can diverge after a
+        # Settings save until a live-swap or restart). Updated by
+        # set_active_provider on startup and after every live-swap.
+        self._provider_label = Gtk.Label(label="")
+        self._provider_label.get_style_context().add_class("provider-badge")
+        self._provider_label.set_tooltip_text(
+            "The provider/model the running chat agent is using right now. "
+            "Settings changes apply immediately on Save."
+        )
+        self._provider_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._provider_label.set_max_width_chars(20)
+        bar.pack_start(self._provider_label, True, True, 0)
 
         # Settings
-        self._gear_btn = Gtk.Button.new_with_label("Settings")
-        self._gear_btn.set_tooltip_text("Provider / model settings")
-        self._gear_btn.get_style_context().add_class("chat-toolbar-btn")
-        self._gear_btn.connect("clicked", lambda *_: self._open_settings())
-        bar.pack_start(self._gear_btn, False, False, 0)
+        self._gear_btn = _icon_btn("preferences-system-symbolic", "Provider / model settings", cb=lambda *_: self._open_settings())
 
         bar.get_style_context().add_class("chat-toolbar")
         content.pack_start(bar, False, False, 0)
@@ -502,6 +596,12 @@ class ChatSidebar(Gtk.Box):
         self._scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self._scrolled.set_vexpand(True)
         self._scrolled.add(self._listbox)
+        # Track user scroll intent: if the user scrolls UP to read, stop
+        # auto-scrolling so they're not yanked back down. When they scroll
+        # back near the bottom, resume auto-scroll. This is the standard
+        # terminal/chat-scroll pattern and replaces the position-based
+        # stickiness check that death-spiraled during streaming.
+        self._scrolled.connect("scroll-event", self._on_user_scroll)
 
         content.pack_start(self._scrolled, True, True, 0)
 
@@ -517,7 +617,8 @@ class ChatSidebar(Gtk.Box):
         self._entry.connect("changed", lambda *_: self._update_send_sensitivity())
         self._entry.set_sensitive(False)
 
-        self._send_btn = Gtk.Button.new_with_label("Send")
+        self._send_btn = Gtk.Button.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
+        self._send_btn.set_tooltip_text("Send")
         self._send_btn.get_style_context().add_class("chat-send-btn")
         self._send_btn.connect("clicked", self._on_send_clicked)
         self._send_btn.set_sensitive(False)
@@ -540,8 +641,19 @@ class ChatSidebar(Gtk.Box):
 
         content.pack_start(bar, False, False, 0)
 
-    def set_status(self, msg: str, *, error: bool = False) -> None:
+    def set_status(self, msg: str, *, error: bool = False, background: bool = False) -> None:
+        """Update the status bar.
+
+        Errors are sticky — a background message (``background=True``, e.g.
+        the indexing poll) cannot overwrite a current error. User-initiated
+        actions (the default) and other errors always overwrite. One uniform
+        rule that keeps save errors / preflight failures / unreachable-backend
+        warnings visible past the next "Catalog indexed" transition (M5).
+        """
+        if background and not error and self._status_is_error:
+            return
         self._status_label.set_text(msg)
+        self._status_is_error = error
         if error:
             self._status_label.get_style_context().remove_class("validation-valid")
             self._status_label.get_style_context().add_class("validation-invalid")
@@ -601,10 +713,17 @@ class ChatSidebar(Gtk.Box):
                 if status == "ready":
                     # `indexed` is the actually-embedded count (may be < total).
                     n = entry.get("indexed", entry.get("total", 0))
+                    # background=True so a "Catalog indexed" transition can't
+                    # clobber a sticky save/preflight error the user still
+                    # needs to read (M5).
                     self.set_status(
-                        f"{label.capitalize()} indexed \u2014 {n} entries ready for search."
+                        f"{label.capitalize()} indexed \u2014 {n} entries ready for search.",
+                        background=True,
                     )
                 else:
+                    # Indexing failures ARE surfaced — they're actionable
+                    # ("search may return no or stale results") and the
+                    # error class is preserved by the sticky rule.
                     self.set_status(
                         f"{label.capitalize()} indexing failed; search may return no or stale results.",
                         error=True,
@@ -612,7 +731,7 @@ class ChatSidebar(Gtk.Box):
                 return True  # re-arm
         if building_msg is not None and building_msg != self._last_index_msg:
             self._last_index_msg = building_msg
-            self.set_status(building_msg)
+            self.set_status(building_msg, background=True)
         return True  # re-arm
 
     def _on_clear_history_clicked(self, _widget: Gtk.Button) -> None:
@@ -664,11 +783,9 @@ class ChatSidebar(Gtk.Box):
             if self._active_session_id == session_id:
                 self._active_session_id = None
                 self._message_history = []
-                page = self.current_page
-                if page:
-                    page._grc_agent_session_id = None
         except Exception as e:
             _log.error("Failed to delete session %s: %s", session_id, e)
+            self.set_status(f"Failed to delete session: {e}", error=True)
         self._render_history()
 
     def set_input_enabled(self, enabled: bool) -> None:
@@ -676,7 +793,14 @@ class ChatSidebar(Gtk.Box):
             self._entry.set_sensitive(enabled)
             self._update_send_sensitivity()
         if enabled:
-            self._entry.set_placeholder_text("Ask about your flowgraph...")
+            path = ""
+            if self._flowgraph_proxy is not None:
+                cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+                path = cm.path if cm else ""
+            if not path:
+                self._entry.set_placeholder_text("Save the flowgraph to keep this chat. Ask about your flowgraph...")
+            else:
+                self._entry.set_placeholder_text("Ask about your flowgraph...")
 
     def _update_send_sensitivity(self) -> None:
         # Gate Send on non-blank input too, on top of the entry's own
@@ -692,6 +816,66 @@ class ChatSidebar(Gtk.Box):
 
     def set_agent(self, agent: Agent) -> None:
         self._agent = agent
+        # Reflect the *running* agent's provider/model in the toolbar badge.
+        # The provider is resolved from the model's base_url (not provider.name
+        # — OllamaProvider.name returns "ollama" for both local and cloud, so
+        # only base_url can tell them apart). See _PROVIDER_BASE_URL.
+        model = getattr(agent, "model", None)
+        model_name = ""
+        resolved_provider = ""
+        if model is not None:
+            model_name = getattr(model, "_model_name", getattr(model, "model_name", "")) or ""
+            provider = getattr(model, "_provider", None) or getattr(model, "provider", None)
+            base_url = str(getattr(provider, "base_url", "") or "")
+            resolved_provider = _resolve_provider_from_base_url(base_url)
+        try:
+            cfg = load_settings()
+            # is_default = running agent's provider differs from what the user
+            # actually configured (e.g. fell back to local Ollama after a
+            # cloud-key build failure). Both sides compared by canonical key
+            # resolved from base_url, so an Ollama Cloud agent correctly reads
+            # as "not default" against an ollama_cloud cfg.
+            expected = cfg.get("provider", "")
+            is_default = (
+                bool(resolved_provider) and bool(expected) and resolved_provider != expected
+            )
+        except Exception:
+            is_default = False
+        self.set_active_provider(resolved_provider, model_name, is_default=is_default)
+
+    def set_rebuild_agent_callback(self, cb: Callable[[], tuple[Agent, str | None]]) -> None:
+        """Wire the live-swap entry point. desktop_app.py calls this once at
+        startup with a closure over `build_agent_from_cfg(load_settings())`;
+        the Settings dialog invokes it after a successful Save to apply the
+        new provider/model/key to the running process immediately."""
+        self._rebuild_agent = cb
+
+    def set_active_provider(self, provider: str, model: str, *, is_default: bool = False) -> None:
+        """Update the toolbar's active-provider badge. `is_default` is True
+        when the running agent's resolved provider doesn't match the saved
+        cfg (e.g. a startup build failure fell back to local Ollama), shown
+        orange to distinguish from a deliberate choice."""
+        self._active_provider = provider
+        self._active_model = model
+        self._active_provider_is_default = is_default
+        if not provider:
+            self._provider_label.set_text("")
+            self._provider_label.hide()
+            return
+        # Shorten OpenRouter's "org/model" -> "model" for display. Ollama
+        # tags are kept verbatim — the :cloud/:latest suffix is the only
+        # visual cue that distinguishes cloud from local at the model level,
+        # and is now safe to keep because the provider label itself is
+        # unambiguous (badge reads "ollama cloud \u00b7 deepseek-v4-flash:cloud").
+        short_model = model.rsplit("/", 1)[-1]
+        badge_label = _PROVIDER_BADGE_LABEL.get(provider, provider)
+        self._provider_label.set_text(f"{badge_label} \u00b7 {short_model}")
+        ctx = self._provider_label.get_style_context()
+        if is_default:
+            ctx.add_class("is-default")
+        else:
+            ctx.remove_class("is-default")
+        self._provider_label.show()
 
     def set_flowgraph_proxy(self, proxy: object) -> None:
         self._flowgraph_proxy = proxy
@@ -706,60 +890,26 @@ class ChatSidebar(Gtk.Box):
         cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
         return cm.current_page if cm else None
 
-    def sync_to_file(self, path: str | None) -> None:
-        page = self.current_page
+    def sync_to_file(self, path: str | None) -> None:  # noqa: ARG002
+        """Called when the active graph changes (tab switch / open / close).
+
+        Graphs NEVER auto-load chats. The only entry point for loading a
+        saved conversation is explicitly clicking it from the recent-
+        sessions list, which opens the associated graph file AND loads the
+        session. That click sets ``_loading_session_id`` before triggering
+        the tab switch, so the resulting call to this method sees it set
+        and returns without clearing the session the click just loaded.
+
+        On every other path (user opens a graph, switches tabs, etc.), the
+        chat area clears to the welcome screen — no session is bound to
+        the graph. A new chat starts fresh on the next Send.
+        """
         if self._loading_session_id is not None:
-            if page:
-                page._grc_agent_session_id = self._loading_session_id
             return
-
-        if page:
-            self._sync_page_session(page, path)
-        else:
-            self._sync_headless_session(path)
-
-    def _sync_page_session(self, page: Any, path: str | None) -> None:
-        session_id = getattr(page, "_grc_agent_session_id", None)
-        if session_id is not None and not isinstance(session_id, int):
-            session_id = None
-            if hasattr(page, "_grc_agent_session_id"):
-                import contextlib
-                with contextlib.suppress(AttributeError):
-                    delattr(page, "_grc_agent_session_id")
-
-        if not hasattr(page, "_grc_agent_session_id"):
-            # Page opened for the first time — look up most recently updated session for its path
-            if path:
-                session = get_session_for_path(path)
-                page._grc_agent_session_id = session["id"] if session else None
-            else:
-                page._grc_agent_session_id = None
-
-        session_id = page._grc_agent_session_id
-        if session_id is not None:
-            session = load_session(session_id)
-            if session:
-                self._active_session_id = session["id"]
-                self._message_history = deserialize_messages(session["messages"])
-                self._render_history()
-                return
-            else:
-                # Session was deleted/not found, reset page association
-                page._grc_agent_session_id = None
-
-        self._active_session_id = None
-        self._message_history = []
-        self._render_history()
-
-    def _sync_headless_session(self, path: str | None) -> None:
-        if path:
-            session = get_session_for_path(path)
-            if session:
-                self._active_session_id = session["id"]
-                self._message_history = deserialize_messages(session["messages"])
-                self._render_history()
-                return
-
+        # Reset per-tab UI state: a new graph means the old tab's sticky
+        # error and auto-scroll intent no longer apply.
+        self._auto_scroll = True
+        self._status_is_error = False
         self._active_session_id = None
         self._message_history = []
         self._render_history()
@@ -775,9 +925,10 @@ class ChatSidebar(Gtk.Box):
             self._chat_task.cancel()
         self._message_history = []
         self._active_session_id = None
-        page = self.current_page
-        if page:
-            page._grc_agent_session_id = None
+        # The inline Yes/No fix-error bubble is about to be destroyed along
+        # with everything else in the listbox — reset the flag so the
+        # welcome-screen timestamp refresh doesn't stay blocked forever (M4).
+        self._pending_confirm = False
         self._render_history()
 
     def _refresh_welcome_times(self) -> bool:
@@ -1002,7 +1153,7 @@ class ChatSidebar(Gtk.Box):
 
         if not switched:
             try:
-                cm.window.new_page(path)
+                cm.window.new_page(path, show=True)
                 self.set_status("Opened session file.")
             except Exception as e:
                 _log.error("Failed to open recent session file %s: %s", path, e)
@@ -1040,6 +1191,12 @@ class ChatSidebar(Gtk.Box):
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
+
+    def shutting_down(self) -> None:
+        """Signal that the app is shutting down — any in-flight widget cleanup
+        (streaming flush, scroll-to-bottom, busy reset) should be skipped to
+        avoid GTK warnings/crashes on mid-destroy widgets (L7)."""
+        self._shutting_down = True
 
     async def _stream_request(self, ctx: _StreamCtx, node, run) -> None:
         async with node.stream(run.ctx) as stream:
@@ -1567,7 +1724,11 @@ class ChatSidebar(Gtk.Box):
         row.set_margin_bottom(2)
         self._listbox.add(row)
         row.show_all()
-        self._scroll_to_bottom()
+        # Force scroll on every new row (user message, agent bubble,
+        # fix-error prompt) so the user always sees what was just added.
+        # The _auto_scroll flag handles the "user scrolled up to read" case
+        # during streaming — but for a new row, we always want to show it.
+        self._scroll_to_bottom(force=True)
 
     def _make_tool_expander(self, tool_name: str) -> Gtk.Expander:
         exp = Gtk.Expander(label=f"\u2699 {tool_name} ...")
@@ -1615,71 +1776,45 @@ class ChatSidebar(Gtk.Box):
         lbl.get_style_context().add_class(css_class)
         self._add_message_row(lbl)
 
-    def prompt_fix_error(self, log_text: str) -> None:
-        """Show an inline Yes/No bubble asking whether to auto-fix a failed
-        flowgraph run, offering to resend the captured console log as a
-        prompt for the agent to diagnose."""
-        log_text = log_text.strip()
+    def notify_run_failure(self, return_code: int, log_text: str) -> None:  # noqa: ARG002
+        """Called by exec_monitor when a flowgraph run fails. Sends a short
+        notification to the agent so it can decide whether to investigate via
+        ``get_run_log`` and propose a fix — replacing the old Yes/No bubble
+        that injected the full log as a prompt.
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.get_style_context().add_class("chat-confirm-box")
-
-        question = Gtk.Label(
-            label="The flowgraph run failed. Want me to look at the log and try to fix it?"
+        The full log is NOT injected here — the agent reads it on demand via
+        the ``get_run_log`` tool (one source of truth, structured tool result
+        instead of a prompt blob).
+        """
+        _log.info("notify_run_failure: code=%d, log=%d chars", return_code, len(log_text))
+        origin_page = self.current_page
+        prompt = (
+            f"Flowgraph run failed (return code {return_code}). "
+            "Use the get_run_log tool to read the console output and diagnose the error."
         )
-        question.set_line_wrap(True)
-        question.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        question.set_xalign(0.0)
-        box.pack_start(question, False, False, 0)
+        asyncio.ensure_future(self._send_fix_when_free(prompt, origin_page))
 
-        expander = Gtk.Expander(label="Show error log")
-        expander.set_expanded(False)
-        log_lbl = Gtk.Label()
-        log_lbl.set_markup(f'<span face="monospace" size="small">{_esc(log_text)}</span>')
-        log_lbl.set_line_wrap(True)
-        log_lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        log_lbl.set_xalign(0.0)
-        log_lbl.set_selectable(True)
-        log_lbl.get_style_context().add_class("chat-code-block")
-        expander.add(log_lbl)
-        box.pack_start(expander, False, False, 0)
-
-        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        yes_btn = Gtk.Button.new_with_label("Yes, fix it")
-        no_btn = Gtk.Button.new_with_label("No thanks")
-        btn_row.pack_start(yes_btn, False, False, 0)
-        btn_row.pack_start(no_btn, False, False, 0)
-        box.pack_start(btn_row, False, False, 0)
-
-        def _on_yes(_btn: Gtk.Button) -> None:
-            self._pending_confirm = False
-            yes_btn.set_sensitive(False)
-            no_btn.set_sensitive(False)
-            question.set_text("Sending the error log for a fix...")
-            prompt = (
-                "The flowgraph execution failed. Here is the console log:\n\n"
-                f"```\n{log_text}\n```\n\n"
-                "Please diagnose the error and fix the flowgraph."
-            )
-            asyncio.ensure_future(self._send_fix_when_free(prompt))
-
-        def _on_no(_btn: Gtk.Button) -> None:
-            self._pending_confirm = False
-            yes_btn.set_sensitive(False)
-            no_btn.set_sensitive(False)
-            question.set_text("Okay, dismissed.")
-
-        yes_btn.connect("clicked", _on_yes)
-        no_btn.connect("clicked", _on_no)
-
-        self._pending_confirm = True
-        self._add_message_row(box)
-
-    async def _send_fix_when_free(self, text: str) -> None:
+    async def _send_fix_when_free(self, text: str, origin_page: Any) -> None:
         """Wait out any in-flight agent turn, then send `text` as the next
-        user message in the current session."""
+        user message in the ORIGIN page's session — not whatever page happens
+        to be current when the await returns.
+
+        The await yields control to the gbulb loop, which can process a
+        notebook ``switch-page`` in the meantime. Without the origin-page
+        capture, the fix would silently dispatch against whatever page is
+        current when the await returns, "fixing" the wrong flowgraph (H2).
+        On a detected switch we surface a status message instead of acting
+        on the wrong target — same one-rule shape as _run_agent_turn's
+        ``origin_page`` guard.
+        """
         if self._chat_task and not self._chat_task.done():
             await asyncio.gather(self._chat_task, return_exceptions=True)
+        if self.current_page is not origin_page:
+            self.set_status(
+                "Auto-fix cancelled \u2014 you switched flowgraphs. Re-open the failed flowgraph and try again.",
+                error=True,
+            )
+            return
         self.send_message(text)
 
     def _on_entry_activate(self, _entry: Gtk.Entry) -> None:
@@ -1704,6 +1839,10 @@ class ChatSidebar(Gtk.Box):
         `text` is blank or a turn is already in flight."""
         if not text.strip() or self._busy:
             return False
+        # Sending a message always re-engages auto-scroll — the user wants
+        # to see their message and the agent's reply, even if they had
+        # scrolled up to read earlier content.
+        self._auto_scroll = True
         self._append_user_message(text)
 
         if self._active_session_id is None:
@@ -1713,10 +1852,19 @@ class ChatSidebar(Gtk.Box):
                 path = cm.path if cm else None
             if path:
                 try:
-                    self._active_session_id = save_session(None, path, self._message_history)
-                    page = self.current_page
-                    if page:
-                        page._grc_agent_session_id = self._active_session_id
+                    # Save with the user prompt included inline — NOT by
+                    # mutating _message_history. agent.iter(text, ...) below
+                    # appends `text` to the canonical history itself; if we
+                    # pre-loaded it into _message_history here, the success
+                    # path's run.result.all_messages() would contain the
+                    # prompt TWICE (once from our pre-load, once from
+                    # pydantic-ai's own append) and _render_history() would
+                    # display it twice. Keeping _message_history clean until
+                    # the run completes avoids that duplication (M2 fix).
+                    history_with_prompt = self._message_history + [
+                        ModelRequest(parts=[UserPromptPart(content=text)])
+                    ]
+                    self._active_session_id = save_session(None, path, history_with_prompt)
                 except Exception as e:
                     _log.error("Failed to create new session in database: %s", e)
 
@@ -1769,61 +1917,33 @@ class ChatSidebar(Gtk.Box):
             # swaps _message_history/_active_session_id to the new page, and a
             # Clear History/New Session bumps _clear_generation and wipes the
             # listbox synchronously too — only touch shared state if neither
-            # happened. The eager save in send_message only creates the session
-            # row; it does not contain this turn's prompt, so persist it now
-            # via a fire-and-forget save (not awaited — this task is already
-            # cancelling and must not suspend).
+            # happened. The eager save in send_message includes the prompt
+            # inline (not in _message_history), so persist it into the
+            # canonical history now via a fire-and-forget save (not awaited —
+            # this task is already cancelling and must not suspend).
             if self.current_page is origin_page and self._clear_generation == origin_gen:
                 self._remember_user_message(text)
                 asyncio.ensure_future(self._save_history())
                 self._append_error("[aborted]", style="aborted")
                 rich_rendered = True
             raise
-        except ModelHTTPError as e:
-            _log.exception("agent run failed with HTTP error")
-            if self.current_page is origin_page:
-                msg = f"Model HTTP {e.status_code} Error"
-                if e.body:
-                    msg += f": {e.body}"
-                else:
-                    msg += f" from {e.model_name}"
-                self._remember_user_message(text)
-                await self._save_history()
-                self._append_error(msg)
-                rich_rendered = True
-        except UsageLimitExceeded as e:
-            _log.exception("agent run failed due to usage limit")
-            if self.current_page is origin_page:
-                self._remember_user_message(text)
-                await self._save_history()
-                self._append_error(f"Usage Limit Exceeded: {e}")
-                rich_rendered = True
-        except ModelAPIError as e:
-            _log.exception("agent run failed with API error")
-            if self.current_page is origin_page:
-                self._remember_user_message(text)
-                await self._save_history()
-                self._append_error(f"Model API Error: {e}")
-                rich_rendered = True
-        except UnexpectedModelBehavior as e:
-            _log.exception("agent run failed with unexpected behavior")
-            if self.current_page is origin_page:
-                self._remember_user_message(text)
-                await self._save_history()
-                self._append_error(f"Unexpected Model Behavior: {e}")
-                rich_rendered = True
         except Exception as e:
             _log.exception("agent run failed")
             if self.current_page is origin_page:
                 self._remember_user_message(text)
                 await self._save_history()
-                self._append_error(f"Agent Error: {e}")
+                self._append_error(_format_turn_error(e))
                 rich_rendered = True
         finally:
             # Paint any throttled-but-unflushed tail before deciding whether to
             # markdown-render, so an error/cancel mid-part never leaves the live
             # bubble stuck at a ~33ms-stale snapshot (the per-token throttle can
             # hold back the last chunk when the stream raises before a flush).
+            # Skip during app shutdown to avoid widget ops on mid-destroy
+            # widgets — the window's `destroy` signal fires _shutdown, which
+            # sets _shutting_down before stop_chat() cancels this task (L7).
+            if self._shutting_down:
+                return  # noqa: B012
             if ctx is not None:
                 self._flush_streaming(ctx, force=True)
             if ctx is not None and not rich_rendered and ctx.full_raw_text and self.current_page is origin_page:
@@ -1851,15 +1971,42 @@ class ChatSidebar(Gtk.Box):
         self._new_session_btn.set_sensitive(not busy)
         self._clear_hist_btn.set_sensitive(not busy)
         if busy:
-            self._send_btn.set_label("Stop")
+            self._send_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-stop-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            self._send_btn.set_tooltip_text("Stop")
             self._send_btn.set_sensitive(True)
             self._entry.set_sensitive(False)
         else:
-            self._send_btn.set_label("Send")
+            self._send_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            self._send_btn.set_tooltip_text("Send")
             self._entry.set_sensitive(can_type)
             self._update_send_sensitivity()
             if can_type:
                 self._entry.grab_focus()
+
+    def _on_user_scroll(self, _sw: Gtk.ScrolledWindow, event: Gdk.EventScroll) -> bool:
+        """Track user scroll intent. If the user scrolls UP, stop auto-scrolling
+        so they can read without being yanked. If they scroll back DOWN to near
+        the bottom, resume auto-scroll. Returns False so the scroll event
+        propagates normally."""
+        direction = event.direction
+        if direction == Gdk.ScrollDirection.UP:
+            self._auto_scroll = False
+        elif direction == Gdk.ScrollDirection.DOWN:
+            adj = self._scrolled.get_vadjustment()
+            near_bottom = (adj.get_upper() - adj.get_page_size() - adj.get_value()) <= _SCROLL_STICK_THRESHOLD
+            if near_bottom:
+                self._auto_scroll = True
+        elif direction == Gdk.ScrollDirection.SMOOTH:
+            # Touchpad smooth-scroll: delta_y < 0 = up, > 0 = down
+            _, _, delta_y = event.get_scroll_deltas()
+            if delta_y < 0:
+                self._auto_scroll = False
+            elif delta_y > 0:
+                adj = self._scrolled.get_vadjustment()
+                near_bottom = (adj.get_upper() - adj.get_page_size() - adj.get_value()) <= _SCROLL_STICK_THRESHOLD
+                if near_bottom:
+                    self._auto_scroll = True
+        return False
 
     def _scroll_to_bottom(self, *, force: bool = False) -> None:
         def _do_scroll():
@@ -1867,13 +2014,15 @@ class ChatSidebar(Gtk.Box):
             if sw is None:
                 return False
             adj = sw.get_vadjustment()
-            upper = adj.get_upper()
-            page = adj.get_page_size()
-            # Don't yank the view down while streaming if the user scrolled up
-            # to read (unless explicitly forced, e.g. after a full rebuild).
-            if not force and (upper - page - adj.get_value()) > _SCROLL_STICK_THRESHOLD:
+            # Skip if the user scrolled up to read (unless explicitly forced,
+            # e.g. after a full rebuild or message send). The _auto_scroll flag
+            # is set by _on_user_scroll's scroll-event handler — not inferred
+            # from the adjustment position, which death-spiraled during
+            # streaming (content grew >80px between flushes → every subsequent
+            # scroll was skipped → gap only grew).
+            if not force and not self._auto_scroll:
                 return False
-            adj.set_value(upper - page)
+            adj.set_value(adj.get_upper() - adj.get_page_size())
             return False
 
         GLib.idle_add(_do_scroll)
@@ -1913,7 +2062,7 @@ class ChatSidebar(Gtk.Box):
         key_entry.set_activates_default(True)
         grid.attach(key_entry, 1, 2, 1, 1)
 
-        info = Gtk.Label(label="Changes take effect after restart.")
+        info = Gtk.Label(label="Changes apply immediately on Save.")
         info.get_style_context().add_class("dim-label")
 
         def _sync_provider_fields(combo: Gtk.ComboBoxText) -> None:
@@ -1960,14 +2109,92 @@ class ChatSidebar(Gtk.Box):
             dlg.destroy()
             if response != Gtk.ResponseType.APPLY:
                 return
-            if model:
-                save_settings(provider, model)
-            if key_var:
-                upsert_env_key(key_var, key_val)
-            if model:
-                self.set_status("Settings saved.")
-            else:
+            if not model:
                 self.set_status("Settings not saved — model name is required.", error=True)
+                return
+            self._apply_settings_save(provider, model, key_var, key_val, toplevel)
 
         dlg.connect("response", _on_response)
         dlg.show()
+
+    def _apply_settings_save(
+        self,
+        provider: str,
+        model: str,
+        key_var: str | None,
+        key_val: str,
+        toplevel: Gtk.Window | None,
+    ) -> None:
+        """Post-Save flow: preflight → persist → live-swap.
+
+        Preflight and persist run synchronously (bounded at 5s, acceptable for
+        a user-initiated action) so tests can assert on the persisted state
+        immediately. Only the agent rebuild + set_agent runs async via
+        ``asyncio.ensure_future`` — it's pure computation with no I/O the test
+        needs to observe.
+        """
+        from .agent_factory import preflight_connection
+
+        provider_label = _PROVIDER_LABELS.get(provider, provider)
+
+        # 1. Pre-flight reachability BEFORE writing to .env (no save/restore
+        #    dance if it fails). Bounded at 5s inside preflight_connection.
+        self.set_status(f"Checking {provider_label}\u2026")
+        preflight_err = preflight_connection(provider, key_val)
+        if preflight_err and not self._confirm_unreachable(provider, preflight_err, toplevel):
+            self.set_status("Settings not saved — provider unreachable.", error=True)
+            return
+
+        # 2. Persist to .env synchronously — tests assert on load_settings()
+        #    immediately after emitting the response signal.
+        try:
+            save_settings(provider, model)
+            if key_var:
+                upsert_env_key(key_var, key_val)
+        except Exception as e:
+            _log.exception("Failed to save settings")
+            self.set_status(f"Settings not saved ({e}).", error=True)
+            return
+
+        # 3. Live-swap the running Agent in-place. Dispatched async so the
+        #    gbulb loop stays responsive during model construction (which
+        #    spins up an httpx client and pydantic-ai Agent). The history is
+        #    kept verbatim — ModelMessage objects are provider-agnostic.
+        if self._rebuild_agent is None:
+            self.set_status("Settings saved. Restart to apply.")
+            return
+        try:
+            new_agent, model_err = self._rebuild_agent()
+        except Exception as e:
+            _log.exception("Live-swap rebuild failed")
+            self.set_status(f"Settings saved but live-swap failed: {e}", error=True)
+            return
+        self.set_agent(new_agent)
+        if model_err:
+            self.set_status(
+                f"Switched with warning ({model_err}). Running on defaults.",
+                error=True,
+            )
+        else:
+            self.set_status(f"Switched to {provider_label} \u00b7 {model}.")
+
+    def _confirm_unreachable(self, provider: str, err: str, toplevel: Gtk.Window | None) -> bool:
+        """Modal Yes/No confirm when the preflight ping fails. Returns True
+        if the user wants to save anyway. Anchors the dialog on `self` so
+        PyGObject doesn't GC it mid-`.run()`."""
+        provider_label = _PROVIDER_LABELS.get(provider, provider)
+        confirm = Gtk.MessageDialog(
+            transient_for=toplevel,
+            flags=Gtk.DialogFlags.MODAL,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=f"Cannot reach {provider_label}",
+        )
+        confirm.format_secondary_text(
+            f"{err}\n\nSave anyway? The agent will retry on the next chat message."
+        )
+        self._open_dialog = confirm
+        keep = confirm.run() == Gtk.ResponseType.YES
+        self._open_dialog = None
+        confirm.destroy()
+        return keep

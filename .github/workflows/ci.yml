@@ -27,7 +27,7 @@ jobs:
           enable-cache: true
 
       - name: Sync dependencies
-        run: uv sync --extra dev --frozen
+        run: uv sync --extra dev --locked
 
       - name: Run Ruff (lint)
         run: uv run ruff check
@@ -40,9 +40,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnuradio
 
-      # Runs the full unit, web app, and settings-isolation test suite.
-      # LLM/vector-dependent tests will automatically skip if no local Ollama
-      # or OpenRouter credentials are found. test_frontend.py (Playwright) and
-      # test_integration.py (live model, ~15-20 min) are not run here.
+      # Runs the fast, no-live-model test suites (matches AGENTS.md's Test
+      # Gate). LLM/vector-dependent tests inside these suites automatically
+      # skip if no local Ollama or OpenRouter credentials are found.
+      # test_button_integration.py (Ollama Cloud) and test_integration.py
+      # (live model, ~15-20 min) are not run here.
       - name: Run tests
-        run: uv run pytest tests/test_unit.py tests/test_web_app.py tests/test_isolation.py -v
+        run: uv run pytest tests/test_unit.py tests/test_exec_monitor.py tests/test_isolation.py -v

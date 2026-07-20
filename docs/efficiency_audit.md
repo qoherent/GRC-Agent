@@ -1,12 +1,14 @@
 # GRC Agent Efficiency Audit
 
-**Performance/efficiency-focused audit — a separate pass from
-[`docs/codebase_audit_report.md`](codebase_audit_report.md), which covers
-general code quality and architecture.** That audit is a snapshot from
-before commits `417d214`/`f838ba2`/`f839a45`; several of its findings are
-already resolved in the current tree (noted below). This document is scoped
-narrowly to *cost*: what runs, how often, and on which thread — read-only
-investigation plus the highest-confidence fixes, applied live.
+**Performance/efficiency-focused audit.** A separate, earlier code-quality
+audit (`docs/codebase_audit_report.md`, a snapshot from before commits
+`417d214`/`f838ba2`/`f839a45`) has been removed: every finding in it was
+re-verified against the current tree and is either fixed (with a passing
+regression test) or was already documented, accepted debt independent of
+that report (see the status table below for the full re-verification). This
+document is scoped narrowly to *cost*: what runs, how often, and on which
+thread — read-only investigation plus the highest-confidence fixes, applied
+live.
 
 ---
 
@@ -234,18 +236,40 @@ changed, for the following reasons:
 
 ---
 
-## Status of `docs/codebase_audit_report.md` findings, re-verified against the current tree
+## Status of the (now-removed) `docs/codebase_audit_report.md` findings
 
-That audit predates commits `417d214`, `f838ba2`, and `f839a45`. Re-checked
-directly (not assumed) while working in these files this pass:
+That audit predated commits `417d214`, `f838ba2`, and `f839a45`. Every
+finding in it was re-verified directly against the current tree — not
+assumed from commit messages — either by running its named regression test
+(where one exists) or by reading the relevant code path. All 19 findings are
+now either fixed (confirmed) or were already documented, accepted debt at
+the time the report was written (unchanged since). The report itself has
+been removed as fully superseded; this table is the durable record.
 
 | Finding | Status |
 |---|---|
-| `DB-1` (blocking SQLite calls on the gbulb thread) | Partially fixed — `_save_history` now uses `asyncio.to_thread`; the two sites above are the remainder, reviewed above and left as-is. |
-| `DB-3` / `UI-4` (unbounded `get_recent_sessions`, no eviction) | Fixed — `db.py` has a `LIMIT` and a 200-row prune (`_MAX_SESSIONS`, `_prune_in`). |
-| `DB-4` (double connection open per call) | Fixed — `_initialized_paths` guard added; connections are explicitly closed via the `_conn()` context manager. |
-| `CANVAS-3` (silent poll-exception swallow) | Fixed — `_check_for_unsynced_edit`'s except branch logs via `_log.warning`, not a bare `pass`. |
-| `CANVAS-2` (dead `FlowgraphRunner`, double-spawn race) | `runner.py` no longer exists in the tree. |
-| `ADPT-7` (unlocked concurrent RAG DB builds) | Fixed — `_build_lock_for`/`_BUILD_LOCKS` (per-domain `threading.Lock`) guard `_ensure_db_built`. |
+| `UI-1` (error path wipes the user's message) | **Fixed** — confirmed via `test_run_agent_turn_error_preserves_user_message` (passing). |
+| `UI-2` ("Clear History" doesn't delete) | **Fixed** — confirmed via `test_clear_history_deletes_active_session_real_db` (passing). |
+| `UI-3` (a file's own session is unreachable) | **Fixed** — confirmed via `test_sync_to_file_restores_session_for_path` (passing). |
+| `UI-4` / `DB-3` (unbounded `get_recent_sessions`, no eviction) | **Fixed** — `db.py` has a `LIMIT` and a 200-row prune (`_MAX_SESSIONS`, `_prune_in`). |
+| `CANVAS-1` (blocking `flock`, no timeout, on the UI thread) | **Fixed** — `native_canvas.py` uses `LOCK_EX \| LOCK_NB`, defers to the next poll tick on contention instead of blocking. |
+| `CANVAS-2` (dead `FlowgraphRunner`, double-spawn race) | **Resolved** — `runner.py` no longer exists in the tree. |
+| `CANVAS-3` (silent poll-exception swallow) | **Fixed** — `_check_for_unsynced_edit`'s except branch logs via `_log.warning`, not a bare `pass`. |
+| `CANVAS-4` (tab-switch baseline sync has no exception guard) | **Fixed** — `_sync_page_baselines` is wrapped in try/except, logs on failure. |
+| `ADPT-1` (native undo/redo never actually disabled) | **Fixed** — confirmed via `test_disable_native_undo_redo_removed` (passing); resolved by deleting the disk-based undo/redo split entirely rather than wiring up the dead disable function — native `state_cache` is now the sole undo/redo path, consistent with the poll-efficiency work above. |
+| `ADPT-2` (rollback doesn't cover the validation gate) | **Fixed** — confirmed via `test_change_graph_validation_gate_exception_rolls_back` (passing). |
+| `ADPT-3` ("auto" dtype silently resets for standalone new blocks) | **Fixed** — confirmed via `test_change_graph_auto_standalone_new_block_fails_loudly` (passing). |
+| `ADPT-4` (hand-rolled `dtype_map` reinvents `Constants.ALIASES_OF`, incorrectly) | **Fixed** — confirmed via `test_canonical_dtype_uses_native_aliases` (passing); now sourced from GNU Radio's own alias table. |
+| `ADPT-5` (`prune_history` enforces an arbitrary context-limit) | **Fixed** — confirmed via `test_prune_history_removed` (passing); the fixed cutoff was removed rather than tied to a backend context window. |
+| `ADPT-6` (`keep_param`'s 3 hardcoded param-key literals) | **Still present — unchanged, accepted debt.** Verified directly in `adapter/graph.py` (`"showports"`, `bus_structure_*`, `"generate_options"`). This was already documented as intentional, acknowledged debt in `AGENTS.md` itself (`AGENTS.md`'s param-filtering rule names these same three exceptions) at the time the original report was written, and remains so — not a regression, not silently drifted. |
+| `ADPT-7` (unlocked concurrent RAG DB builds) | **Fixed** — `_build_lock_for`/`_BUILD_LOCKS` (per-domain `threading.Lock`) guard `_ensure_db_built`; also stress-tested with real concurrent threads this session (see "Independent adversarial verification" above). |
+| `ADPT-8` (`search.py` can't distinguish selector drift from genuine no-results) | **Fixed** — confirmed via `test_lite_web_search_logs_selector_drift` (passing). |
+| `ADPT-9` (backup snapshot taken outside the save lock) | **Fixed** — verified directly in `adapter/graph.py`: the backup copy now happens inside the lock (comment explicitly notes "Backup is taken INSIDE the lock so it snapshots exactly the on-disk state about to be overwritten"). |
+| `ADPT-10` (dead redundant `_error_messages = []` line) | **Fixed** — verified directly; the line no longer exists in `adapter/graph.py`. |
+| `ADPT-11` (system prompt describes an already-fixed gap, omits the real one) | **Fixed** — verified directly; `prompts.py` now accurately describes the current "auto" failure-mode behavior (fails loudly, per `ADPT-3`'s fix) rather than a stale scenario. |
+| Dead `NativeCanvasManager`/`Proxy` methods (`reload_from_disk`, `get_drawing_area`, `graph_count`, `validate`, `swap`, `get_version`, `is_loaded`) | **Fixed** — verified directly; zero matches for any of these method names in `native_canvas.py`. |
+| Duplicate markdown→Pango converters | **Fixed** — verified directly; only one `_node_to_pango` implementation remains, used consistently by `_render_markdown_to_box`. |
+| Untracked `chat_sessions.db`, no `.gitignore` entry | **Fixed** — `chat_sessions.db` is now in `.gitignore`. |
+| Stale `recent_sessions.json` `.gitignore` entry | **Fixed** — no longer present in `.gitignore`. |
 
 No contradictions found between the two documents as of this writing.

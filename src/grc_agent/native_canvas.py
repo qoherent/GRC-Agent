@@ -49,10 +49,16 @@ def _sha256_file(path) -> str | None:
 class NativeFlowgraphProxy:
     """Transparent proxy for the active flowgraph (agent deps). Resolves
     to ``window.current_page.flow_graph`` on every access — automatically
-    follows tab switches and file-open/close in GRC's native UI."""
+    follows tab switches and file-open/close in GRC's native UI.
 
-    def __init__(self, canvas_manager: "NativeCanvasManager") -> None:
+    Also carries an optional ``_exec_monitor`` reference so the
+    ``get_run_log`` tool can read the last run's output via
+    ``ctx.deps.get_run_log()`` without a separate module-level singleton.
+    """
+
+    def __init__(self, canvas_manager: "NativeCanvasManager", exec_monitor: Any = None) -> None:
         object.__setattr__(self, "_canvas_manager", canvas_manager)
+        object.__setattr__(self, "_exec_monitor", exec_monitor)
 
     def _get_target(self) -> Any:
         cm = object.__getattribute__(self, "_canvas_manager")
@@ -72,6 +78,14 @@ class NativeFlowgraphProxy:
 
     def get_state_lock(self) -> None:
         return None
+
+    def get_run_log(self) -> dict | None:
+        """Return the last completed run's log via the exec_monitor wired at
+        startup, or None if no monitor is wired or no run has completed."""
+        monitor = object.__getattribute__(self, "_exec_monitor")
+        if monitor is None:
+            return None
+        return monitor.get_last_run_log()
 
     async def notify_edit(self) -> dict:
         cm = object.__getattribute__(self, "_canvas_manager")
@@ -108,7 +122,20 @@ class NativeCanvasManager:
         self.pan_start_hadj = 0.0
         self.pan_start_vadj = 0.0
         self._connected_drawing_areas: set[int] = set()
+        # Fired on switch-page (current page actually changed) — wired by
+        # desktop_app.py to _sync_sidebar, which cancels any in-flight chat
+        # and re-binds the sidebar to the new current page's session.
         self.on_graphs_changed: Callable[[], None] | None = None
+        # Fired on page-added / page-removed (the set of open tabs changed,
+        # but the current tab hasn't necessarily changed). Distinct from
+        # on_graphs_changed because background tab add/remove must NOT
+        # cancel the current chat (M1) — only switch-page (and
+        # page-removed-of-the-current-page, which GTK follows with a
+        # switch-page) should. Left as None (no-op) — the current page
+        # doesn't change on background tab events, so no badge/sidebar
+        # refresh is needed.
+        self.on_graph_list_changed: Callable[[], None] | None = None
+        self.on_sync_failed: Callable[[str], None] | None = None
 
     @property
     def current_page(self) -> Any:
@@ -183,7 +210,7 @@ class NativeCanvasManager:
             if hasattr(self.window, "update"):
                 self.window.update()
 
-    def sync_manual_edit(self, current_hash: str | None = None) -> None:
+    def sync_manual_edit(self, current_hash: str | None = None) -> None:  # noqa: C901
         if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph")):
             return
         fg = self.drawing_area._flow_graph
@@ -222,6 +249,15 @@ class NativeCanvasManager:
                         return
                     if current_hash != self.last_disk_hash:
                         _log.debug("Disk changed since last reload — skipping drag-save.")
+                        # Unlike the exception branch below, this used to be
+                        # silent — the poll would keep re-attempting and
+                        # re-skipping this same edit indefinitely with zero
+                        # indication anything was wrong.
+                        if self.on_sync_failed:
+                            self.on_sync_failed(
+                                "Your edit wasn't saved — the file changed on disk. "
+                                "Reload it before continuing."
+                            )
                         return
                     write_flow_graph_atomic(fg, Path(self.path))
                     self.last_disk_hash = _sha256_file(self.path)
@@ -232,6 +268,11 @@ class NativeCanvasManager:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as e:
             _log.warning("Failed to sync manual edit: %s", e)
+            # Log-only was a real data-loss risk: a disk-full/unwritable-file
+            # edit would silently never persist, with zero user-visible
+            # signal. Surface it through the sidebar's status bar.
+            if self.on_sync_failed:
+                self.on_sync_failed(f"Failed to save your edit: {e}")
 
     def toggle_blocks_panel(self) -> bool:
         if not self.app:
@@ -338,13 +379,23 @@ class NativeCanvasManager:
             self.on_graphs_changed()
 
     def _on_page_added(self, _notebook: Any, child: Any, _page_num: int) -> None:
+        # A new tab was appended — could be the foreground OR a background
+        # tab. If it's foreground, switch-page will fire next and run the
+        # full sync (chat-cancel + rebind). If it's background, the current
+        # chat must NOT be cancelled — call the light list-change callback
+        # instead of on_graphs_changed (M1).
         self._setup_drawing_area(child)
-        if self.on_graphs_changed:
-            self.on_graphs_changed()
+        if self.on_graph_list_changed:
+            self.on_graph_list_changed()
 
     def _on_page_removed(self, *_args: Any) -> None:
-        if self.on_graphs_changed:
-            self.on_graphs_changed()
+        # Closing a background tab does NOT change the current page — chat
+        # must keep running. Closing the current tab fires page-removed
+        # AND THEN switch-page, so the chat-cancel correctly happens via
+        # the switch-page handler. Either way, this handler must NOT
+        # itself cancel the chat (M1).
+        if self.on_graph_list_changed:
+            self.on_graph_list_changed()
 
     def _on_button_press(self, _widget: Any, event: Any) -> bool:
         if event.button == 2:

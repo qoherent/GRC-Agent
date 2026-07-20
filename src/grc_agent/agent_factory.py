@@ -1,7 +1,10 @@
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from pydantic_ai import Agent, ModelSettings
+from pydantic_ai import Agent, ModelSettings, RunContext
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
@@ -20,6 +23,8 @@ from grc_agent.agent import (
 )
 from grc_agent.prompts import build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
+
+_log = logging.getLogger(__name__)
 
 
 def _retrying_http_client() -> httpx.AsyncClient:
@@ -44,6 +49,15 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
         return OpenRouterModel(cfg["model"], provider=OpenRouterProvider(api_key=key, http_client=http_client))
     if cfg["provider"] == "ollama_cloud":
         key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
+        if not key:
+            # OllamaProvider itself never raises on a missing key — it silently
+            # substitutes a placeholder ('api-key-not-set') and the failure only
+            # surfaces as an HTTP 401 on the first real chat call. Raise here so
+            # this degrades the same way the openrouter branch already does
+            # (OpenRouterProvider raises UserError on an empty key, caught below).
+            raise ValueError(
+                "OLLAMA_CLOUD_API_KEY is not set. Configure it in Settings or the .env file to use Ollama Cloud."
+            )
         return OllamaModel(
             cfg["model"],
             provider=OllamaProvider(base_url="https://ollama.com/v1", api_key=key, http_client=http_client),
@@ -54,15 +68,51 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
     )
 
 
-def build_interactive_agent() -> tuple[Agent, str | None]:
+@dataclass
+class ModelRequestLogger(AbstractCapability[Any]):
+    """Logs the active provider name, base_url, and model name once per model
+    request. Makes a `ModelAPIError: Connection error.` debuggable — the next
+    log line says exactly which backend was attempted, so a stale-Agent-after-
+    settings-swap (or any other provider/endpoint confusion) is visible
+    immediately instead of being inferred from a stack trace.
+
+    Uses `before_model_request` (the cheapest model-lifecycle hook — pure
+    observation, no wrap) and reads provider/base_url off the live Model via
+    its Provider, which both OllamaProvider and OpenRouterProvider expose as
+    `name`/`base_url` properties.
+    """
+
+    async def before_model_request(  # type: ignore[override]
+        self,
+        ctx: RunContext[Any],  # noqa: ARG002
+        request_context: Any,
+    ) -> Any:
+        model = request_context.model
+        provider_name = "<unknown>"
+        base_url = "<unknown>"
+        model_name = getattr(model, "_model_name", getattr(model, "model_name", "<unknown>"))
+        provider = getattr(model, "_provider", None) or getattr(model, "provider", None)
+        if provider is not None:
+            provider_name = getattr(provider, "name", provider_name)
+            base_url = getattr(provider, "base_url", base_url)
+        _log.info("model request -> provider=%s base_url=%s model=%s", provider_name, base_url, model_name)
+        return request_context
+
+
+def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
+    """Construct a fresh Agent from an already-loaded settings dict.
+
+    Shared between startup (`build_interactive_agent`) and live-swap (the
+    Settings dialog's Save handler). Returns `(agent, model_build_error)` —
+    on a model-construction failure, falls back to defaults and surfaces the
+    error string so the caller can warn the user without crashing the app.
+    """
     http_client = _retrying_http_client()
-    cfg = load_settings()
     model_build_error: str | None = None
     try:
         model = _build_model(cfg, http_client)
     except Exception as e:
-        print(f"[grc-agent] Failed to build chat model from saved settings: {e}")
-        print("[grc-agent] Falling back to Ollama defaults so the app can still start.")
+        _log.warning("Failed to build chat model from cfg (provider=%s): %s", cfg.get("provider"), e)
         model_build_error = str(e)
         cfg = default_settings()
         model = _build_model(cfg, http_client)
@@ -79,6 +129,7 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
         tools=grc_tools(),
         capabilities=[
             StopGracefully(),
+            ModelRequestLogger(),
             web_search_cap,
             web_fetch_cap,
         ],
@@ -87,3 +138,79 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
     )
     agent.output_validator(validate_flowgraph_state)
     return agent, model_build_error
+
+
+def build_interactive_agent() -> tuple[Agent, str | None]:
+    """Startup path — read .env via load_settings() and build the Agent.
+
+    Kept as a thin wrapper over `build_agent_from_cfg` so `desktop_app.py`'s
+    call site stays unchanged. Live-swap callers use `build_agent_from_cfg`
+    directly so they can show a before/after diff to the user."""
+    return build_agent_from_cfg(load_settings())
+
+
+def preflight_connection(provider: str, api_key: str = "", *, timeout: float = 5.0) -> str | None:
+    """Cheap sync reachability check against the configured provider's
+    `GET /models`-equivalent. Returns None on success, an error string on any
+    failure (connection refused, bad status, missing key, etc.).
+
+    Sync intentionally — runs from the GTK Save handler and from startup
+    (which is itself sync up to the gbulb loop.run_forever()). Bounded at
+    `timeout` so a hung host fails fast instead of blocking the UI.
+
+    Takes provider + api_key explicitly so the Save handler can validate a
+    NEW config BEFORE writing it to .env (no save/restore dance), while
+    startup resolves them from the already-loaded cfg/env.
+
+    Endpoints:
+      - openrouter:  GET https://openrouter.ai/api/v1/models  (Bearer key)
+      - ollama_cloud: GET https://ollama.com/v1/models         (Bearer key)
+      - ollama:      GET http://localhost:11434/api/tags        (no key)
+    """
+    try:
+        if provider == "openrouter":
+            if not api_key:
+                return "OPENROUTER_API_KEY is not set"
+            r = httpx.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout,
+            )
+        elif provider == "ollama_cloud":
+            if not api_key:
+                return "OLLAMA_CLOUD_API_KEY is not set"
+            r = httpx.get(
+                "https://ollama.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout,
+            )
+        else:
+            r = httpx.get("http://localhost:11434/api/tags", timeout=timeout)
+    except httpx.HTTPError as exc:
+        return f"connection failed: {exc}"
+    if r.status_code >= 400:
+        detail = ""
+        try:
+            body = r.text.strip()
+            if body:
+                first = body.split("\n", 1)[0].strip()
+                if first:
+                    detail = f": {first}"
+        except Exception:
+            pass
+        return f"HTTP {r.status_code}{detail}"
+    return None
+
+
+def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
+    """Startup-path convenience: resolve provider + key from a loaded cfg/env,
+    then call `preflight_connection`. Used by desktop_app.py after
+    build_interactive_agent() to warn (not block) on an unreachable backend."""
+    provider = cfg.get("provider", "ollama")
+    if provider == "openrouter":
+        key = get_env_value("OPENROUTER_API_KEY") or ""
+    elif provider == "ollama_cloud":
+        key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
+    else:
+        key = ""
+    return preflight_connection(provider, key, timeout=timeout)

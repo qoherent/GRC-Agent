@@ -30,15 +30,16 @@ flowchart TB
     DA["desktop_app.py"]
     CS["chat_sidebar.py"]
     NC["native_canvas.py"]
+    EM["exec_monitor.py"]
   end
   subgraph AGT["PydanticAI agent"]
-    AF["agent_factory.py"]
+    AF["agent_factory.py<br/>live-swap + preflight"]
     AG["agent.py"]
     PR["prompts.py"]
   end
   subgraph ADP["adapter/ — sole gnuradio importer"]
     GR["graph.py<br/>change_graph 7-phase engine"]
-    SN["snapshots.py<br/>disk undo/redo"]
+    SN["snapshots.py<br/>edit sync snapshots"]
     LY["layout.py"]
     RG["rag.py"]
   end
@@ -46,7 +47,9 @@ flowchart TB
   ST --> AF
   DA --> CS
   DA --> NC
+  DA --> EM
   CS <--> AG
+  CS <--> DB[("chat_sessions.db")]
   AF --> AG
   PR --> AG
   AG --> GR
@@ -57,19 +60,19 @@ flowchart TB
   GR <--> SN
   GR --> LY
   GR -.->|"shared FlowGraph object"| NC
-  CS <--> DB[("chat_sessions.db")]
-  NC -.->|"never wired — dead"| RN["runner.py"]
+  EM -->|"execution failure notification"| CS
 ```
 
 | File | Role |
 |------|------|
-| `desktop_app.py` | Entrypoint. `gbulb` install, GRC `Application`/`MainWindow`, sidebar packing, Ctrl+/- zoom. |
-| `chat_sidebar.py` | Native GTK chat UI. Streaming via `agent.iter()` + `run.next()`, settings dialog, slim blocks toggle, graph badge, Send/Stop button. |
+| `desktop_app.py` | Entrypoint. `gbulb` install, GRC `Application`/`MainWindow`, sidebar packing, Ctrl+/- zoom, startup preflight. |
+| `chat_sidebar.py` | Native GTK chat UI. Streaming via `agent.iter()` + `run.next()`, settings dialog with live-swap, provider badge, auto-scroll tracking, Send/Stop button. |
 | `native_canvas.py` | GRC `MainWindow` signal-wiring: dynamic graph resolution from `window.current_page`, notebook tab tracking, manual-edit disk-sync, agent-edit redraw, pan. |
-| `agent_factory.py` | Builds the interactive `Agent` from saved settings (provider/model/API-key). |
-| `runner.py` | Flowgraph Run/Stop subprocess lifecycle. |
+| `exec_monitor.py` | Detects flowgraph execution failures from GRC's console message bus; auto-notifies the agent with the return code (agent reads the full log via `get_run_log`). |
+| `agent_factory.py` | Builds the interactive `Agent` from saved settings (live-swappable). Includes preflight connection check and `ModelRequestLogger`. |
+| `db.py` | SQLite chat-session persistence (save/load/delete, recent-sessions list). |
 | `adapter/` | Sole `gnuradio` importer. Flowgraph load/save, `change_graph`, param filtering, RAG (vector search with an SQLite FTS5 lexical fallback) with cached embed client, codegen. |
-| `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `change_graph`), capabilities, scenario harness. |
+| `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `generate_python`, `change_graph`, `get_run_log`), capabilities, scenario harness. |
 | `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `python-dotenv`. |
 | `ingest.py` | Builds the catalog/docs vector databases on first use. |
 
@@ -78,27 +81,26 @@ flowchart TB
 ## Installation
 
 ### 1. Prerequisites
-- **GNU Radio 3.10+** with Python bindings:
-  ```bash
-  sudo apt install gnuradio gnuradio-dev  # Ubuntu/Debian
-  ```
-- **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/)**:
-  ```bash
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  ```
+- **[GNU Radio 3.10](https://wiki.gnuradio.org/index.php?title=InstallingGR)**
+  with Python bindings (CI and development are done against `3.10.9.2` on
+  Ubuntu 24.04 — other 3.10.x builds are likely fine, 3.11+/4.x are untested).
+- **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**.
 
 ### 2. Clone & Setup
 ```bash
 git clone https://github.com/qoherent/grc-agent.git
 cd grc-agent
 uv venv --system-site-packages --python 3.12
-uv sync --extra dev --python .venv/bin/python
+uv sync --extra dev --locked --python .venv/bin/python
 ```
 `--system-site-packages` bridges the venv to your system-installed GNU Radio.
+`--locked` installs exactly what's pinned in `uv.lock` (matching CI) instead
+of a loose resolve that could silently pick up untested dependency versions.
 
 ### 3. Setup LLM Backend
 Three chat providers, switchable anytime from the app's Settings dialog. The
-active provider and model names persist in `.env` (restart the app to apply).
+active provider and model names persist in `.env` and apply immediately on
+Save (no restart needed).
 
 #### Option A: Ollama (Local & Free)
 ```bash
@@ -154,7 +156,7 @@ auto-detects the active graph from GRC's notebook tabs.
   built instead so search still works, lexically, until a real rebuild
   succeeds.
 - **Model settings:** switch provider/model anytime from Settings (gear
-  button); changes write to `.env` and need a restart.
+  button); changes apply immediately (live-swap, no restart).
 - **Run/Stop & validation:** use GRC's own built-in toolbar buttons.
 - **Undo/redo:** GRC's native Ctrl+Z/Y works directly.
 - **Zoom:** Ctrl+/- to zoom the app, Ctrl+0 to reset.
@@ -182,6 +184,6 @@ uv run ruff check                             # lint
 
 - [`AGENTS.md`](AGENTS.md) — architecture, engineering rules, and live-verified design decisions.
 - [`docs/technical_overview.md`](docs/technical_overview.md) — a deeper architecture writeup with diagrams and benchmarks.
-- [`docs/codebase_audit_report.md`](docs/codebase_audit_report.md) — code quality & architecture audit with prioritized findings.
 - [`docs/efficiency_audit.md`](docs/efficiency_audit.md) — performance/efficiency-focused audit: what's fixed, what's deferred and why.
+- [`docs/harness_tutorial_audit.md`](docs/harness_tutorial_audit.md) — capability audit against every GNU Radio wiki tutorial in the docs corpus: what the harness can and can't do, and why.
 - [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — AGPL-3.0-licensed; the bundled GNU Radio docs corpus is CC BY-SA 3.0.

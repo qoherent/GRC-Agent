@@ -163,33 +163,6 @@ def load_session(session_id: int) -> dict[str, Any] | None:
     return None
 
 
-def get_session_for_path(grc_file_path: str) -> dict[str, Any] | None:
-    """Return the most-recently-updated session for a given .grc path, or None.
-
-    Paths are stored resolved-absolute (see ``save_session``); the input is
-    resolved the same way before lookup. Used to restore a file's own chat
-    session when its tab is (re)opened.
-    """
-    init_db()
-    abs_path = str(Path(grc_file_path).resolve())
-    with _conn() as conn:
-        row = conn.execute(
-            "SELECT id, grc_file_path, messages, created_at, updated_at "
-            "FROM sessions WHERE grc_file_path = ? "
-            "ORDER BY updated_at DESC, id DESC LIMIT 1",
-            (abs_path,),
-        ).fetchone()
-    if row:
-        return {
-            "id": row["id"],
-            "grc_file_path": row["grc_file_path"],
-            "messages": row["messages"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
-    return None
-
-
 def serialize_messages(messages: list[ModelMessage]) -> str:
     """Serialize Pydantic AI ModelMessages to a JSON string."""
     return json.dumps(to_jsonable_python(messages))
@@ -250,9 +223,20 @@ def prune_sessions(keep: int = _MAX_SESSIONS) -> None:
         _prune_in(conn, keep)
 
 
-def save_session(session_id: int | None, grc_file_path: str, messages: list[ModelMessage]) -> int:
-    """Save the session to SQLite. If session_id is provided and exists, it updates it.
-    Otherwise, it inserts a new row. Returns the session ID."""
+def save_session(
+    session_id: int | None, grc_file_path: str, messages: list[ModelMessage]
+) -> int | None:
+    """Save the session to SQLite. If session_id is None, inserts a new row
+    and returns its id. If session_id is provided and still exists, updates
+    it and returns the same id.
+
+    If session_id is provided but no longer exists — e.g. a per-row delete
+    (`_on_delete_recent_session`) or a global Clear History raced an
+    in-flight save dispatched before the deletion — the save is skipped
+    entirely rather than falling through to an INSERT, which used to
+    silently resurrect the deleted session under a new row id. Returns None
+    in that case so callers can tell "skipped" apart from a real save.
+    """
     init_db()
     global _cleanup_needed
     _cleanup_needed = True
@@ -270,6 +254,12 @@ def save_session(session_id: int | None, grc_file_path: str, messages: list[Mode
                 conn.commit()
                 _prune_in(conn)
                 return session_id
+            _log.warning(
+                "save_session: session %s no longer exists (deleted concurrently?) "
+                "— skipping save instead of resurrecting it under a new id",
+                session_id,
+            )
+            return None
         cursor = conn.execute(
             "INSERT INTO sessions (grc_file_path, messages, last_message) VALUES (?, ?, ?)",
             (abs_path, messages_str, last_message),

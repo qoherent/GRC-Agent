@@ -35,6 +35,7 @@ from grc_agent.adapter import (
     inspect_graph,
     lite_web_search,
     load_flow_graph,
+    preview_flowgraph_py,
     query_catalog,
     query_docs,
 )
@@ -277,6 +278,56 @@ SCENARIOS = [
             "valid": True,
         },
     },
+    {
+        # Not part of tests/test_integration.py's SELECTED_SCENARIOS multi-backend
+        # sweep — it is driven by a single dedicated, ollama_cloud-only test
+        # (test_scenario_lexical_fallback_ollama_cloud_only) that first breaks
+        # the local embedding backend for real (bad OLLAMA_EMBEDDING_MODEL name
+        # + a fresh GRC_AGENT_VECTORS_DIR — see rag.py's _embed_endpoint/query_catalog),
+        # so query_knowledge's catalog lookup below is forced into its real
+        # SQLite FTS5/BM25 lexical fallback (search_mode == "lexical") instead
+        # of vector search. "complex conjugate" is deliberately literal/exact
+        # wording — it is the block's own label text — so BM25 keyword matching
+        # reliably surfaces `blocks_conjugate_cc` even with no embeddings at
+        # all, proving the agent can still complete a real graph edit end to
+        # end using only lexically retrieved catalog info.
+        "name": "23_lexical_conjugate_insert",
+        "fixture": "tests/data/resampler_demo.grc",
+        "prompt": (
+            "Inspect the flowgraph. Search the catalog for the block that"
+            " computes the complex conjugate of a complex signal using"
+            " query_knowledge (catalog domain) — don't guess the block id."
+            " Add it, call it `signal_conjugate`, and insert it right after"
+            " the resampler (`pfb_arb_resampler_xxx_0`) and before the"
+            " resampled spectrum display (`qtgui_freq_sink_x_0_0`), so the"
+            " resampler's output goes through the conjugate block before"
+            " reaching that display. Remove the direct connection from the"
+            " resampler to that display. Make sure the flowgraph is valid"
+            " and inspect it to confirm."
+        ),
+        "expect": {
+            "blocks_present": ["signal_conjugate"],
+            "valid": True,
+        },
+    },
+    {
+        # In SELECTED_SCENARIOS (generic mode="read" check: some read tool was
+        # used, answer non-empty) AND covered by a dedicated test,
+        # test_scenario_generate_python_writes_nothing_to_disk, which asserts
+        # generate_python specifically was called, that it returned real
+        # generated source, and — the tool's actual load-bearing promise —
+        # that the fixture's temp directory holds exactly the same files
+        # after the live agent turn as before it.
+        "name": "24_generate_python_preview",
+        "fixture": "tests/data/dial_tone.grc",
+        "prompt": (
+            "Show me the Python code GNU Radio would actually generate for"
+            " this flowgraph — use the generate_python tool for the real"
+            " generated source, don't write or guess the code yourself."
+            " Briefly summarize what it does. Don't change the graph."
+        ),
+        "expect": {"mode": "read"},
+    },
 ]
 
 
@@ -399,18 +450,63 @@ async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = N
     return json.dumps(result)
 
 
+_QUERY_KNOWLEDGE_MIN_K = 1
+_QUERY_KNOWLEDGE_MAX_K = 20
+
+
 async def query_knowledge_func(
     ctx: RunContext[Any],  # noqa: ARG001
     query: str,
     domain: Literal["catalog", "docs"],
+    k: int = 5,
 ) -> str:
-    """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts)."""
+    """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts).
+
+    Args:
+        query: The search text.
+        domain: "catalog" for block lookups, "docs" for conceptual/how-to questions.
+        k: How many results to return. Defaults to 5 — raise it (e.g. 10-20)
+            when you need broader recall (a vague query, or comparing several
+            candidate blocks); lower it (e.g. 2-3) when you already know
+            roughly what you're looking for and just need the top match.
+            Clamped to 1-20.
+    """
+    k = max(_QUERY_KNOWLEDGE_MIN_K, min(_QUERY_KNOWLEDGE_MAX_K, k))
     if domain == "catalog":
-        res = await asyncio.to_thread(query_catalog, query)
+        res = await asyncio.to_thread(query_catalog, query, k)
         return json.dumps(res)
     else:
-        res = await asyncio.to_thread(query_docs, query)
+        res = await asyncio.to_thread(query_docs, query, k)
         return json.dumps(res)
+
+
+_GENERATE_PYTHON_MIN_K = 1
+_GENERATE_PYTHON_MAX_K = 20
+
+
+async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
+    """Render the Python source GNU Radio would generate from the current graph. Read-only — never writes to disk or runs the flowgraph.
+
+    Returns one entry per generated file: the main flowgraph script, plus one
+    per Embedded Python Block/Module instance if any are present. The main
+    script is always included; if there are more block-source files than
+    fit, the excess is dropped and counted in "omitted_files" — never
+    silently. Raises if the graph is currently invalid, or is a
+    hierarchical-block or C++-output flowgraph (neither can be rendered this
+    way) — fix the graph with change_graph and retry.
+
+    Args:
+        k: Max number of block-source files to include alongside the main
+            script (the main script itself doesn't count against this).
+            Defaults to 5 — raise it (up to 20) only if you actually need to
+            see every Embedded Python Block/Module's source in one call.
+    """
+    k = max(_GENERATE_PYTHON_MIN_K, min(_GENERATE_PYTHON_MAX_K, k))
+    try:
+        result = await _with_state_lock(ctx, lambda: preview_flowgraph_py(ctx.deps, k=k))
+    except ValueError as exc:
+        raise ModelRetry(str(exc)) from exc
+    return json.dumps(result)
 
 
 def validate_change_graph_args(
@@ -500,9 +596,20 @@ async def change_graph_func(
         ),
     )
     if not res.get("ok"):
+        # force=True only ever bypasses the native-validation gate
+        # (error_type == "validation_failed") — every other failure in the
+        # `errors` list (auto_resolve_failed, connection_silently_dropped,
+        # add_connection_failed, etc.) is rolled back unconditionally
+        # regardless of force, so suggesting it there is actively misleading
+        # and can waste one of the model's limited retries chasing something
+        # that can never succeed.
+        hint = (
+            "Set force=True to bypass GNU Radio's own validation opinion and retry."
+            if res.get("error_type") == "validation_failed"
+            else "Adjust your parameters/connections based on the errors above and retry — force=True will not help here."
+        )
         raise ModelRetry(
-            f"Graph modification failed. Errors: {res.get('errors') or res.get('message') or '(no detail)'}. "
-            "Please adjust your parameters/connections or set force=True if appropriate and retry."
+            f"Graph modification failed. Errors: {res.get('errors') or res.get('message') or '(no detail)'}. {hint}"
         )
     # Tell the live GTK canvas (if any) to redraw — the agent mutated the very
     # same in-memory FlowGraph the canvas renders (single-process, shared
@@ -513,6 +620,32 @@ async def change_graph_func(
     if hasattr(ctx.deps, "notify_edit"):
         res["canvas_synced"] = (await ctx.deps.notify_edit()).get("ok", False)
     return json.dumps(res)
+
+
+async def get_run_log_func(ctx: RunContext[Any]) -> str:
+    """Read the console output (stdout + stderr) of the most recent flowgraph run.
+
+    Returns the full captured log from the last Execute action, whether it succeeded
+    or failed. Use this after running a flowgraph to diagnose runtime errors (e.g.
+    hardware not found, parameter mismatches, GPU/CPU issues) that are not visible
+    in the static graph structure.
+
+    The log is retained until the next run — you can call this tool at any time
+    after a run to re-read the output.
+    """
+    get_fn = getattr(ctx.deps, "get_run_log", None)
+    if get_fn is None or not callable(get_fn):
+        return json.dumps({
+            "log_text": "",
+            "message": "No execution log available — no run monitor wired.",
+        })
+    data = get_fn()
+    if data is None:
+        return json.dumps({
+            "log_text": "",
+            "message": "No flowgraph has been run yet. Use GRC's Execute button to run the flowgraph first.",
+        })
+    return json.dumps(data)
 
 
 def grc_tools() -> list[Tool[Any]]:
@@ -527,6 +660,13 @@ def grc_tools() -> list[Tool[Any]]:
         query_knowledge_func,
         name="query_knowledge",
         description="Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts).",
+    )
+
+    generate_python_tool = Tool(
+        generate_python_func,
+        name="generate_python",
+        docstring_format="google",
+        require_parameter_descriptions=True,
     )
 
     change_tool = Tool(
@@ -548,7 +688,14 @@ def grc_tools() -> list[Tool[Any]]:
     )
     change_tool.max_retries = 3
 
-    return [inspect_tool, query_tool, change_tool]
+    run_log_tool = Tool(
+        get_run_log_func,
+        name="get_run_log",
+        docstring_format="google",
+        require_parameter_descriptions=True,
+    )
+
+    return [inspect_tool, query_tool, generate_python_tool, change_tool, run_log_tool]
 
 
 async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
@@ -611,7 +758,7 @@ def check_expect(fixture_path, expect, run_result=None):  # noqa: C901
             for msg in run_result.all_messages():
                 if hasattr(msg, "parts") and any(
                     isinstance(p, ToolCallPart)
-                    and p.tool_name in ("query_knowledge", "inspect_graph")
+                    and p.tool_name in ("query_knowledge", "inspect_graph", "generate_python")
                     for p in msg.parts
                 ):
                     has_read_tool = True

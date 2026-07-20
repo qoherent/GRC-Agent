@@ -16,10 +16,11 @@ Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
   OLLAMA_CLOUD_API_KEY  Ollama Cloud API key
 
 `load_settings()` reads the `.env` *file* (the saved source of truth), never
-os.environ. A model/provider change needs an app restart to take effect: the
-Agent is built once at startup (`build_interactive_agent`), so the running
-process keeps the model it booted with. The Settings dialog surfaces a static
-"Changes take effect after restart." label to make this explicit.
+os.environ. A model/provider change is applied live by the Settings dialog's
+Save handler — `chat_sidebar.py:_apply_settings_save` writes here, then calls
+`build_agent_from_cfg(load_settings())` to rebuild the Agent in-place and
+swaps it via `sidebar.set_agent`. The Settings dialog surfaces "Changes apply
+immediately on Save." to make this explicit.
 """
 
 import os
@@ -109,9 +110,9 @@ def save_settings(provider: str, model: str) -> None:
     """Persist the active provider + its chat model name into the `.env` file.
     Only the selected provider's model var is touched — the other providers'
     saved model names are preserved verbatim (standard `.env` upsert). Does
-    NOT touch os.environ: a model/provider change is restart-gated (the Agent
-    is built once at startup), so updating the running snapshot here would
-    only mask the fact that a restart is needed to apply it."""
+    NOT touch os.environ: `load_settings()` reads from the file on every call,
+    so a write here is immediately visible to the next `build_agent_from_cfg`
+    (the live-swap entry point invoked by the Settings dialog's Save handler)."""
     if provider not in _VALID_PROVIDERS:
         raise ValueError(f"Unknown provider: {provider!r}")
     if not model.strip():

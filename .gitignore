@@ -28,6 +28,12 @@ Thumbs.db
 *.saved.grc
 *.restored.grc
 *.tmp.grc
+
+# ---- Test output (generated .md logs from integration test runs) ----
+tests/output/
+
+# ---- Local dev planning docs (not part of the shipped project) ----
+docs/backlog.md
 *.bak
 # Persisted chat sessions (SQLite) — local user transcripts, not source
 chat_sessions.db

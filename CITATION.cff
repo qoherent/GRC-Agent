@@ -6,7 +6,12 @@ date-released: 2026-06-05
 version: 0.1.0
 license: AGPL-3.0-only
 authors:
+  - given-names: Mahmoud
+    family-names: Sallam
+    email: mahmoud.sallam@mail.mcgill.ca
+    affiliation: Qoherent
   - name: Qoherent
+    type: organization
 keywords:
   - gnu-radio
   - sdr

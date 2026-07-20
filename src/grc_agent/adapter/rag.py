@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from typing import Any
 
+import httpx
 import sqlite_vec
 from openai import APIConnectionError, OpenAI
 
@@ -93,18 +94,39 @@ def _embed_endpoint() -> tuple[str, str | None]:
     return "http://localhost:11434/v1", "not-needed"
 
 
-_embed_client: OpenAI | None = None
-_embed_client_key: tuple[str, str] | None = None
+
+# (base_url, api_key, client) as ONE tuple, replaced by a single atomic
+# assignment below. embed_query/embed_document run on real OS threads (via
+# asyncio.to_thread), so two threads racing here with DIFFERENT keys (e.g.
+# a provider switch overlapping a catalog+docs cold query) must never observe
+# a torn update — with the client and its key-tag as separate globals updated
+# in two statements, a reader could see a new client paired with the old key
+# (or vice versa), silently reusing the wrong endpoint/credentials for a
+# request that "looks" cached. Bundling them means every read sees either the
+# fully-old or the fully-new state, never a mix.
+_embed_client_state: tuple[str, str, OpenAI] | None = None
 
 
 def _get_embed_client() -> OpenAI:
-    global _embed_client, _embed_client_key
+    global _embed_client_state
     base_url, api_key = _embed_endpoint()
-    key = (base_url, api_key)
-    if _embed_client is None or _embed_client_key != key:
-        _embed_client = OpenAI(base_url=base_url, api_key=api_key)
-        _embed_client_key = key
-    return _embed_client
+    state = _embed_client_state
+    if state is not None and state[0] == base_url and state[1] == api_key:
+        return state[2]
+    # The SDK's own default timeout allows up to ~600s per attempt (a
+    # backend that accepts the connection but then hangs, e.g. a local
+    # Ollama server mid-model-load) — bounded here to the same order of
+    # magnitude as the chat-model client's ~30s retry budget
+    # (agent_factory.py's _retrying_http_client), so a hung embedding
+    # backend fails fast instead of blocking a chat turn for up to ~30
+    # minutes.
+    client = OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0),
+    )
+    _embed_client_state = (base_url, api_key, client)
+    return client
 
 
 def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[float]]:
@@ -253,12 +275,20 @@ def _build_lock_for(domain: str) -> threading.Lock:
     cold-cache builds of the SAME domain would otherwise race on the unlocked
     os.remove + rebuild and on the module-level embed/dimension caches.
     Different domains (catalog vs docs) target different files and use
-    different locks, so they still build concurrently."""
-    lock = _BUILD_LOCKS.get(domain)
-    if lock is None:
-        lock = threading.Lock()
-        _BUILD_LOCKS[domain] = lock
-    return lock
+    different locks, so they still build concurrently.
+
+    dict.setdefault is a single atomic C-level dict operation in CPython (not
+    interruptible by another thread mid-check) — required here, not just a
+    style preference: a plain "get, then if-None set" (as this used to be)
+    lets two threads racing to build the SAME domain for the first time each
+    construct their own Lock() before either publishes it, so they'd return
+    two DIFFERENT lock objects and take zero mutual exclusion from each
+    other — exactly the race this lock exists to prevent. The throwaway
+    Lock() built on every call when one already exists is cheap and
+    discarded immediately by setdefault; that's a fine tradeoff for
+    correctness that doesn't depend on GIL-scheduling luck.
+    """
+    return _BUILD_LOCKS.setdefault(domain, threading.Lock())
 
 
 def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
@@ -434,11 +464,51 @@ def _fts_query_string(q: str) -> str | None:
     return " OR ".join(f'"{t}"' for t in deduped[:_FTS_MAX_TOKENS])
 
 
-def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:  # noqa: C901
-    q = " ".join(str(query).split())
-    if not q:
-        return {"ok": False, "results": [], "message": "query must be non-empty"}
+def _lexical_fallback_message(embed_error: str | None) -> str:
+    """Explain why a result came back lexical instead of vector — covers both
+    "the embedding call just failed" (embed_error set) and "this corpus has no
+    vector index at all yet" (embed_error is None: the DB was built
+    lexical-only during a past outage and hasn't been rebuilt since, even
+    though the embedding backend may be reachable again right now). Per
+    AGENTS.md's "no silent transformation" rule, a lexical result must always
+    say so — including this second case, which previously fell through with
+    no message at all whenever the current embed call happened to succeed."""
+    if embed_error:
+        return f"Vector search unavailable ({embed_error}); used lexical (keyword) fallback."
+    return (
+        "No vector index exists for this corpus yet (built lexical-only during "
+        "a prior embedding-backend outage); used lexical (keyword) fallback. "
+        "Vector search resumes automatically once a corpus or model change "
+        "triggers a rebuild with the embedding backend reachable."
+    )
 
+
+def _query_index(
+    domain: str,
+    q: str,
+    limit: int,
+    *,
+    idx_table: str,
+    fts_table: str,
+    chunks_table: str,
+    id_column: str,
+    extra_limit: int = 0,
+) -> dict[str, Any]:
+    """Shared vector-then-lexical retrieval behind query_catalog/query_docs:
+    embed the query, ensure/open the domain DB, rank rowids via sqlite-vec
+    (primary) or FTS5 BM25 (fallback — embedding call failed, or no vector
+    index exists yet for this DB, e.g. built during a past embedding-backend
+    outage), then batch-resolve `id_column` for the ranked rowids in one
+    query instead of one SELECT per hit.
+
+    idx_table/fts_table/chunks_table are internal per-domain constants
+    (never user input), so interpolating them into the SQL text below is
+    safe. Returns {"ok": False, "message": ...} on a DB build/missing
+    failure (same shape both callers returned before this was factored out),
+    else the ranked-rowid bundle for the caller to finish rendering into its
+    own response shape (catalog's block list vs docs' joined answer
+    string).
+    """
     embed_error: str | None = None
     query_vec: list[float] | None = None
     try:
@@ -446,13 +516,13 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:  # noqa: C901
     except Exception as exc:
         embed_error = str(exc)
 
-    db_path, model = get_db_and_model("catalog")
+    db_path, model = get_db_and_model(domain)
     try:
-        _ensure_db_built("catalog", db_path, model)
+        _ensure_db_built(domain, db_path, model)
     except Exception as exc:
-        return {"ok": False, "results": [], "message": f"Catalog DB build failed: {exc}"}
+        return {"ok": False, "message": f"{domain.capitalize()} DB build failed: {exc}"}
     if not os.path.exists(db_path):
-        return {"ok": False, "results": [], "message": f"Catalog DB not found at: {db_path}"}
+        return {"ok": False, "message": f"{domain.capitalize()} DB not found at: {db_path}"}
 
     conn = sqlite3.connect(db_path)
     try:
@@ -460,18 +530,13 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:  # noqa: C901
         sqlite_vec.load(conn)
         conn.row_factory = sqlite3.Row
 
-        # Vector search is primary; fall back to the local FTS5 (BM25) lexical
-        # index only when the embedding call itself failed (backend
-        # unreachable/model missing) or no vector index exists for this DB
-        # (e.g. it was built while the embedding backend was down — see
-        # ingest.py/_build_db). Never silent: search_mode/message below always
-        # say which path served the result.
-        vec_available = query_vec is not None and _table_exists(conn, "catalog_idx")
+        fetch_limit = limit + extra_limit
+        vec_available = query_vec is not None and _table_exists(conn, idx_table)
 
         if vec_available:
             vec_rows = conn.execute(
-                "SELECT rowid, distance FROM catalog_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (sqlite_vec.serialize_float32(query_vec), limit + 1),
+                f"SELECT rowid, distance FROM {idx_table} WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vec), fetch_limit),
             ).fetchall()
             ranked_rowids = [row["rowid"] for row in vec_rows]
             distance_by_rowid = {row["rowid"]: row["distance"] for row in vec_rows}
@@ -481,11 +546,11 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:  # noqa: C901
             fts_query = _fts_query_string(q)
             fts_rows = (
                 conn.execute(
-                    "SELECT rowid FROM catalog_fts WHERE catalog_fts MATCH ? "
-                    "ORDER BY bm25(catalog_fts) LIMIT ?",
-                    (fts_query, limit + 1),
+                    f"SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ? "
+                    f"ORDER BY bm25({fts_table}) LIMIT ?",
+                    (fts_query, fetch_limit),
                 ).fetchall()
-                if fts_query and _table_exists(conn, "catalog_fts")
+                if fts_query and _table_exists(conn, fts_table)
                 else []
             )
             ranked_rowids = [row["rowid"] for row in fts_rows]
@@ -493,42 +558,67 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:  # noqa: C901
             output_truncated = len(fts_rows) > limit
             search_mode = "lexical"
 
-        # Batch the rowid -> block_id lookup into one query instead of one
-        # SELECT per hit.
-        block_id_by_rowid: dict[int, str] = {}
+        id_by_rowid: dict[int, Any] = {}
         if ranked_rowids:
             placeholders = ",".join("?" for _ in ranked_rowids)
             for row in conn.execute(
-                f"SELECT rowid, block_id FROM catalog_chunks WHERE rowid IN ({placeholders})",
+                f"SELECT rowid, {id_column} FROM {chunks_table} WHERE rowid IN ({placeholders})",
                 ranked_rowids,
             ):
-                block_id_by_rowid[row["rowid"]] = row["block_id"]
+                id_by_rowid[row["rowid"]] = row[id_column]
 
-        results = []
-        for rowid in ranked_rowids:
-            block_id = block_id_by_rowid.get(rowid)
-            if not block_id:
-                continue
-            rendered = render_catalog_block(block_id, distance_by_rowid.get(rowid, 0.0))
-            if rendered:
-                results.append(rendered)
-            if len(results) >= limit:
-                break
-
-        response: dict[str, Any] = {
+        return {
             "ok": True,
-            "query": q,
-            "results": results,
-            "output_truncated": output_truncated,
             "search_mode": search_mode,
+            "ranked_rowids": ranked_rowids,
+            "id_by_rowid": id_by_rowid,
+            "distance_by_rowid": distance_by_rowid,
+            "output_truncated": output_truncated,
+            "embed_error": embed_error,
         }
-        if search_mode == "lexical" and embed_error:
-            response["message"] = (
-                f"Vector search unavailable ({embed_error}); used lexical (keyword) fallback."
-            )
-        return response
     finally:
         conn.close()
+
+
+def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
+    q = " ".join(str(query).split())
+    if not q:
+        return {"ok": False, "results": [], "message": "query must be non-empty"}
+
+    result = _query_index(
+        "catalog",
+        q,
+        limit,
+        idx_table="catalog_idx",
+        fts_table="catalog_fts",
+        chunks_table="catalog_chunks",
+        id_column="block_id",
+        extra_limit=1,
+    )
+    if not result["ok"]:
+        return {"ok": False, "results": [], "message": result["message"]}
+
+    results = []
+    for rowid in result["ranked_rowids"]:
+        block_id = result["id_by_rowid"].get(rowid)
+        if not block_id:
+            continue
+        rendered = render_catalog_block(block_id, result["distance_by_rowid"].get(rowid, 0.0))
+        if rendered:
+            results.append(rendered)
+        if len(results) >= limit:
+            break
+
+    response: dict[str, Any] = {
+        "ok": True,
+        "query": q,
+        "results": results,
+        "output_truncated": result["output_truncated"],
+        "search_mode": result["search_mode"],
+    }
+    if result["search_mode"] == "lexical":
+        response["message"] = _lexical_fallback_message(result["embed_error"])
+    return response
 
 
 def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | None:
@@ -601,74 +691,28 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
     if not q:
         return {"ok": False, "answer": "", "message": "query must be non-empty"}
 
-    embed_error: str | None = None
-    query_vec: list[float] | None = None
-    try:
-        query_vec = embed_query(q)
-    except Exception as exc:
-        embed_error = str(exc)
+    result = _query_index(
+        "docs",
+        q,
+        limit,
+        idx_table="docs_idx",
+        fts_table="docs_fts",
+        chunks_table="docs_chunks",
+        id_column="payload",
+    )
+    if not result["ok"]:
+        return {"ok": False, "answer": "", "message": result["message"]}
 
-    db_path, model = get_db_and_model("docs")
-    try:
-        _ensure_db_built("docs", db_path, model)
-    except Exception as exc:
-        return {"ok": False, "answer": "", "message": f"Docs DB build failed: {exc}"}
-    if not os.path.exists(db_path):
-        return {"ok": False, "answer": "", "message": f"Docs DB not found at: {db_path}"}
+    id_by_rowid = result["id_by_rowid"]
+    chunks = [id_by_rowid[r] for r in result["ranked_rowids"] if r in id_by_rowid]
+    answer = "\n\n---\n\n".join(chunks)
 
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.row_factory = sqlite3.Row
-
-        vec_available = query_vec is not None and _table_exists(conn, "docs_idx")
-
-        if vec_available:
-            vec_rows = conn.execute(
-                "SELECT rowid, distance FROM docs_idx WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (sqlite_vec.serialize_float32(query_vec), limit),
-            ).fetchall()
-            ranked_rowids = [row["rowid"] for row in vec_rows]
-            search_mode = "vector"
-        else:
-            fts_query = _fts_query_string(q)
-            fts_rows = (
-                conn.execute(
-                    "SELECT rowid FROM docs_fts WHERE docs_fts MATCH ? "
-                    "ORDER BY bm25(docs_fts) LIMIT ?",
-                    (fts_query, limit),
-                ).fetchall()
-                if fts_query and _table_exists(conn, "docs_fts")
-                else []
-            )
-            ranked_rowids = [row["rowid"] for row in fts_rows]
-            search_mode = "lexical"
-
-        # Batch the rowid -> payload lookup into one query instead of one
-        # SELECT per hit.
-        payload_by_rowid: dict[int, str] = {}
-        if ranked_rowids:
-            placeholders = ",".join("?" for _ in ranked_rowids)
-            for row in conn.execute(
-                f"SELECT rowid, payload FROM docs_chunks WHERE rowid IN ({placeholders})",
-                ranked_rowids,
-            ):
-                payload_by_rowid[row["rowid"]] = row["payload"]
-
-        chunks = [payload_by_rowid[r] for r in ranked_rowids if r in payload_by_rowid]
-        answer = "\n\n---\n\n".join(chunks)
-
-        response: dict[str, Any] = {
-            "ok": True,
-            "query": q,
-            "answer": answer,
-            "search_mode": search_mode,
-        }
-        if search_mode == "lexical" and embed_error:
-            response["message"] = (
-                f"Vector search unavailable ({embed_error}); used lexical (keyword) fallback."
-            )
-        return response
-    finally:
-        conn.close()
+    response: dict[str, Any] = {
+        "ok": True,
+        "query": q,
+        "answer": answer,
+        "search_mode": result["search_mode"],
+    }
+    if result["search_mode"] == "lexical":
+        response["message"] = _lexical_fallback_message(result["embed_error"])
+    return response

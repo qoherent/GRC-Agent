@@ -44,7 +44,7 @@ The application merges the GNU Radio Companion desktop canvas with the AI sideba
 
 ## Genius Tool Design
 
-The agent interacts with the flowgraph through three highly specialized tools:
+The agent interacts with the flowgraph through five highly specialized tools:
 
 ### 1. Context-Efficient Graph Inspection (`inspect_graph`)
 
@@ -62,7 +62,15 @@ Knowledge grounding is enforced through a local SQLite vector database (`sqlite-
 - **Embedding Provider Fallback**: Embeddings are generated using local Ollama (`embeddinggemma:latest`) or OpenRouter (`perplexity/pplx-embed-v1-0.6b`) backends, checking for model or dimensionality changes on startup.
 - **Lexical Fallback**: Vector search is primary. If the embedding call itself fails (backend unreachable, model not pulled), `query_knowledge` transparently falls back to a local SQLite FTS5 (BM25) keyword search over the same catalog/docs corpus — including on a cold cache where the embedding backend was never reachable, in which case the DB is built lexical-only (no vector index) rather than failing the whole ingest. The tool result always tags which path served it (`"search_mode": "vector" | "lexical"`), so a fallback is never silent to the caller.
 
-### 3. Transactional Mutation Engine (`change_graph`)
+### 3. Python Code Preview (`generate_python`)
+
+Read-only codegen that renders the flowgraph's generated Python source via GNU Radio's own `Generator` in-memory (never writes to disk). Returns the main script plus any Embedded Python Block/Module source files. A failure (invalid graph, hierarchical block, C++ output) raises `ModelRetry` so the agent can self-correct.
+
+### 4. Runtime Log Access (`get_run_log`)
+
+Reads the captured console output (stdout + stderr) from the most recent flowgraph execution, whether it succeeded or failed. The log is retained by the `exec_monitor` until the next run, so the agent can re-read it on demand at any point in a conversation. When a run fails (non-zero, non-SIGTERM return code), the agent is **automatically notified** with the return code via a short chat message — it then calls `get_run_log` to read the full output and diagnose the error, with no user interaction needed. This replaces the old Yes/No fix-error bubble that injected the full log as a raw prompt blob.
+
+### 5. Transactional Mutation Engine (`change_graph`)
 
 Graph editing executes a batch of updates in a strict 7-phase transactional sequence, guaranteeing that the flowgraph is not left in a partially mutated or corrupted state:
 
@@ -99,17 +107,33 @@ flowchart TD
     Validate -- Fail --> Retry[ModelRetry up to 3x]
     Retry --> Plan
     Validate -- Pass --> Commit[Commit transaction & atomic save]
-    Commit --> UndoSnapshot[Push Undo/Redo Snapshot]
-    UndoSnapshot --> Sync[Broadway Canvas Sync /reload]
+    Commit --> Sync[Native Canvas Redraw]
     Sync --> Explained[Explain changes to user]
     Explained --> Idle
 ```
+
+### Run Failure Auto-Diagnosis
+
+When a flowgraph execution fails, the agent is notified automatically — no user intervention needed:
+
+```mermaid
+flowchart TD
+    Run[User hits Execute] --> Exec[Flowgraph subprocess runs]
+    Exec --> Monitor[exec_monitor detects '>>> Done (return code N)']
+    Monitor -->|non-zero, non-SIGTERM| Notify[notify_run_failure sends short message to agent]
+    Notify --> AgentReads[Agent receives 'Flowgraph run failed (return code N)']
+    AgentReads --> Tool[Agent calls get_run_log tool]
+    Tool --> Diagnose[Agent reads full stdout/stderr, diagnoses error]
+    Diagnose --> Fix[Agent proposes or applies a fix]
+```
+
+This replaces the old Yes/No "fix it?" bubble — the agent now reads the log as a structured tool result (same pattern as `inspect_graph`/`generate_python`) and can decide whether the failure is relevant without the user mediating.
 
 ---
 
 ## Integration Scenarios Benchmark
 
-The integration test suite executes 11 distinct scenarios mapping real-world editing workflows. All scenarios pass successfully across both local and cloud LLM backends:
+The integration test suite executes 13 distinct scenarios mapping real-world editing workflows. All scenarios pass successfully across both local and cloud LLM backends:
 
 | Scenario Name | qwen3.6:35b (Ollama Local) | deepseek-v4-flash (Ollama Cloud) | Verification Objective |
 | :--- | :---: | :---: | :--- |
@@ -123,4 +147,6 @@ The integration test suite executes 11 distinct scenarios mapping real-world edi
 | `10_bypass_source_block` | Pass | Pass | Transitions a signal source block into bypass state. |
 | `11_scoped_inspect_and_update` | Pass | Pass | Inspects specific target blocks and modifies sample rate. |
 | `14_build_chain_from_scratch` | Pass | Pass | Constructs a signal source -> throttle -> sink chain on an empty flowgraph. |
+| `21_type_conversion_and_conjugate` | Pass | Pass | Converts signal types and applies conjugate operations across connected blocks. |
 | `22_fm_rx_filter_squelch` | Pass | Pass | Inserts a low-pass filter and simple squelch block inline inside an FM receiver chain. |
+| `24_generate_python_preview` | Pass | Pass | Previews the generated Python source of the active flowgraph via `generate_python`. |

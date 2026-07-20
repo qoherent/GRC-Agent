@@ -1,3 +1,4 @@
+import contextlib
 import fcntl
 import functools
 import hashlib
@@ -846,6 +847,16 @@ def change_graph(  # noqa: C901
                         }
                     )
 
+        # Snapshot every connection object that legitimately survives the
+        # caller's own deliberate removals (Phase 1/2), before any phase or
+        # rewrite() call that could have side effects on ports. Compared
+        # against the post-final-rewrite state below to catch ANY connection
+        # — pre-existing or newly made in this batch — that a block's own
+        # rewrite (e.g. an epy_block reparsing changed source) silently
+        # disconnects as a side effect of replacing a port object, including
+        # via the conditional Phase-5 rewrite below, not just the final one.
+        connections_before_rewrites = set(flow_graph.connections)
+
         # Phase 3: add_blocks
         if add_blocks:
             # GNU Radio's own headless block-creation API never sets a
@@ -914,7 +925,11 @@ def change_graph(  # noqa: C901
                 block_id = item["block_id"]
                 instance_name = item["instance_name"]
 
-                if any(b.name == instance_name for b in flow_graph.blocks):
+                try:
+                    flow_graph.get_block(instance_name)
+                except KeyError:
+                    pass
+                else:
                     errors.append(
                         {
                             "code": "duplicate_block_name",
@@ -1067,6 +1082,7 @@ def change_graph(  # noqa: C901
                     )
 
         # Phase 7: add_connections
+        made_connections = []
         if add_connections:
             for conn_str in add_connections:
                 p = parse_conn(conn_str)
@@ -1081,16 +1097,77 @@ def change_graph(  # noqa: C901
                 try:
                     src_port = _find_port(flow_graph, p["src_block"], p["src_port"], kind="source")
                     dst_port = _find_port(flow_graph, p["dst_block"], p["dst_port"], kind="sink")
-                    flow_graph.connect(src_port, dst_port)
+                    connection = flow_graph.connect(src_port, dst_port)
+                    made_connections.append((conn_str, connection))
                 except Exception as e:
+                    # Enrich with port dtype details so the model can diagnose
+                    # mismatches (e.g. complex source → float sink) and decide
+                    # whether to split the batch, insert a converter, or change
+                    # a type param — instead of reflexively re-batching.
+                    detail = str(e)
+                    if src_port is not None and dst_port is not None:
+                        with contextlib.suppress(Exception):
+                            detail += (
+                                f" (source dtype={getattr(src_port, 'dtype', '?')}, "
+                                f"sink dtype={getattr(dst_port, 'dtype', '?')})"
+                            )
                     errors.append(
                         {
                             "code": "add_connection_failed",
-                            "message": f"Failed to connect {conn_str}: {e}",
+                            "message": f"Failed to connect {conn_str}: {detail}",
                         }
                     )
 
         flow_graph.rewrite()
+
+        # A block's own rewrite (e.g. an epy_block reparsing changed
+        # _source_code) can replace one of its ports as a side effect,
+        # silently disconnecting anything attached to the old port object —
+        # a pre-existing connection untouched by this batch, or one Phase 7
+        # just made, if that block wasn't also in add_blocks (the only thing
+        # that triggers the earlier, Phase-5 rewrite). Verified live: with
+        # force=True this would otherwise return ok=true while a connection
+        # is silently absent — for BOTH a pre-existing connection dropped by
+        # an update_params-only batch (no add_connections at all, so nothing
+        # upstream of this point would have tracked it) and a same-batch
+        # add_connections drop. Checked unconditionally, not just under
+        # `not force` — a connection vanishing without a word is never
+        # acceptable, force or not; force only bypasses GNU Radio's own
+        # general validity opinion, not this.
+        #
+        # Compares actual Connection objects (via set membership/identity),
+        # not (block_name, port_key) string tuples: GNU Radio can rekey a
+        # port in place (Port.rewrite() sets self.key = self.name — same
+        # object — whenever a stream/vector port's dtype becomes "message",
+        # e.g. a pad_sink reconfigured to type='message'), which would make
+        # a string-tuple comparison false-positive on a connection that
+        # never actually dropped. Object identity is immune to that.
+        expected_connections = connections_before_rewrites | {c for _, c in made_connections}
+        actual_connections = set(flow_graph.connections)
+        dropped = expected_connections - actual_connections
+        if dropped:
+            conn_str_by_connection = {c: s for s, c in made_connections}
+            for connection in dropped:
+                label = conn_str_by_connection.get(connection)
+                if label is None:
+                    label = (
+                        f"{connection.source_block.name}:{connection.source_port.key}"
+                        f"->{connection.sink_block.name}:{connection.sink_port.key}"
+                    )
+                errors.append(
+                    {
+                        "code": "connection_silently_dropped",
+                        "message": (
+                            f"Connection {label!r} no longer exists after this batch "
+                            "finished — a block's own code/port regeneration (e.g. an "
+                            "epy_block's _source_code change) likely replaced the port "
+                            "it was attached to. Change the block's code/ports in its "
+                            "own change_graph call first, confirm the new ports via "
+                            "inspect_graph, then add/re-add this connection in a "
+                            "follow-up call."
+                        ),
+                    }
+                )
 
     except Exception as exc:
         flow_graph.import_data(initial_data)
@@ -1194,6 +1271,25 @@ def change_graph(  # noqa: C901
     return {"ok": True}
 
 
+def _check_codegen_preconditions(flow_graph: Any) -> None:
+    """Shared gate for generate_flowgraph_py/preview_flowgraph_py: the graph
+    must be valid, and hierarchical-block or C++ output can't be generated
+    this way (a hierarchical block's own Generator subclass does an os.mkdir
+    as a side effect of construction — not just of writing — so there is no
+    side-effect-free path for it here; C++ output requires a separate build
+    step this harness doesn't perform)."""
+    flow_graph.validate()
+    if not flow_graph.is_valid():
+        errors = [msg for _, msg in flow_graph.iter_error_messages()]
+        raise ValueError(f"Flowgraph is not valid: {errors}")
+
+    gen_opts = flow_graph.get_option("generate_options")
+    if gen_opts.startswith("hb"):
+        raise ValueError("Hierarchical blocks cannot be generated this way.")
+    if flow_graph.get_option("output_language") == "cpp":
+        raise ValueError("C++ output requires a build step — not supported.")
+
+
 def generate_flowgraph_py(flow_graph: Any, output_dir: "Path | str") -> Path:
     """Generate a runnable Python script from a flowgraph.
 
@@ -1203,16 +1299,7 @@ def generate_flowgraph_py(flow_graph: Any, output_dir: "Path | str") -> Path:
     stale and the generated script still contains input('Press Enter to
     quit:').
     """
-    flow_graph.validate()
-    if not flow_graph.is_valid():
-        errors = [msg for _, msg in flow_graph.iter_error_messages()]
-        raise ValueError(f"Flowgraph is not valid: {errors}")
-
-    gen_opts = flow_graph.get_option("generate_options")
-    if gen_opts.startswith("hb"):
-        raise ValueError("Hierarchical blocks cannot be run directly.")
-    if flow_graph.get_option("output_language") == "cpp":
-        raise ValueError("C++ output requires a build step — not supported.")
+    _check_codegen_preconditions(flow_graph)
 
     rop = flow_graph.options_block.params["run_options"]
     original = rop.value
@@ -1231,3 +1318,65 @@ def generate_flowgraph_py(flow_graph: Any, output_dir: "Path | str") -> Path:
         rop.rewrite()
 
     return file_path
+
+
+def preview_flowgraph_py(flow_graph: Any, k: int = 5) -> dict[str, Any]:
+    """Render the Python source GNU Radio would generate from the current
+    flowgraph, without writing anything to disk.
+
+    Shares generate_flowgraph_py's validity/hier-block/C++ gate, but does
+    NOT apply that function's run_options override — this shows the
+    flowgraph's actual configured output (e.g. a real 'no_gui' script may
+    still contain input('Press Enter to quit:') if that's how run_options
+    is set), since the point here is showing what GRC would really
+    generate, not what a Run/Stop launch needs.
+
+    GNU Radio's own Generator (gnuradio.grc.core.generator.top_block.
+    TopBlockGenerator) already separates in-memory rendering from disk
+    writing internally: write() is a thin wrapper that calls
+    _build_python_code_from_template() (pure computation, no I/O) and then
+    opens/writes each returned (path, source) pair. Calling the former
+    directly — confirmed by reading GNU Radio's installed source and by
+    direct testing against real fixtures — never touches the filesystem.
+    Each entry's "path" is informational only (where GRC would write it if
+    the user clicked Generate) — it is not a real file and nothing can be
+    read from or downloaded at it.
+
+    GNU Radio's generator always appends the main flowgraph script last,
+    after one entry per Embedded Python Block/Module instance (confirmed by
+    reading TopBlockGenerator._build_python_code_from_template), so the main
+    script — what most callers actually want — is kept unconditionally and
+    never counts against `k`; `k` caps how many of the (usually few, but
+    unbounded) block-source entries are included alongside it. Excess
+    entries are dropped from the end of that block-source list (arbitrarily,
+    since GNU Radio doesn't order them meaningfully) and counted in the
+    returned "omitted_files", never silently.
+    """
+    _check_codegen_preconditions(flow_graph)
+
+    grc_file_path = getattr(flow_graph, "grc_file_path", "")
+    output_dir = Path(grc_file_path).parent if grc_file_path else Path(tempfile.gettempdir())
+
+    from gnuradio.grc.core.generator.Generator import Generator
+
+    gen = Generator(flow_graph, str(output_dir))
+    if not hasattr(gen, "_build_python_code_from_template"):
+        raise ValueError(
+            "GNU Radio's code generator no longer exposes the in-memory "
+            "rendering step this preview relies on (_build_python_code_from_template) "
+            "— this installed GNU Radio version isn't supported by generate_python."
+        )
+    rendered = gen._build_python_code_from_template()
+
+    files = [{"path": path, "source": source} for path, source in rendered]
+    # The main script is always the last entry (see docstring); only the
+    # block-source entries before it count against k.
+    block_source_count = len(files) - 1
+    omitted_files = 0
+    if block_source_count > k:
+        main_script = files[-1]
+        kept = files[:k]
+        omitted_files = block_source_count - len(kept)
+        files = [*kept, main_script]
+
+    return {"files": files, "omitted_files": omitted_files}

@@ -6,24 +6,28 @@ and streams its merged stdout/stderr through a simple global pub/sub
 (``Messages.register_messenger``). This module registers as one more
 messenger, buffers the output of the current run, and calls back with the
 captured log when a run ends in failure.
+
+The last completed run's log (success OR failure) is retained in
+``_last_run_log`` / ``_last_run_code`` so the ``get_run_log`` agent tool
+can read it on demand — the agent is no longer blind to runtime output.
 """
 
+import logging
 import re
 from collections.abc import Callable
 
+_log = logging.getLogger(__name__)
+
 _RETURN_CODE_RE = re.compile(r"\(return code (-?\d+)\)")
 _START_MARKER = "Executing: "
-# Messages.send_end_exec() always prepends a leading "\n" (even for code=0);
-# Messages.send_end_load(), fired whenever any tab loads/opens a .grc file,
-# emits ">>> Done\n" with no leading "\n". The leading "\n" is therefore a
-# reliable way to tell "a flowgraph run just finished" apart from "some tab
-# just finished loading a file" on this shared, originless message bus.
 _EXEC_DONE_MARKER = "\n>>> Done"
 _GENERATE_ERROR_MARKER = "Generate Error:"
-
-# GRC's own "Kill" button calls process.terminate() (SIGTERM), which reports
-# this exact code via send_end_exec(-15). That's a user-requested stop, not a
-# crash, so it must not trigger a "fix this" prompt.
+# GNU Radio's log subsystem prints runtime errors (buffer overflows, rate
+# mismatches, dropped samples) with ":error:" as the log-level prefix —
+# these do NOT crash the process (exit code stays 0), so the monitor must
+# detect them separately from non-zero return codes. The ":error:" string
+# does NOT appear in block names, parameter values, or normal output.
+_RUNTIME_ERROR_MARKER = ":error:"
 _SIGTERM_RETURN_CODE = -15
 
 
@@ -36,55 +40,97 @@ class ExecutionErrorMonitor:
     markers, single characters during verbose execution output).
     """
 
-    def __init__(self, on_error: Callable[[str], None]) -> None:
+    def __init__(self, on_error: Callable[[int, str], None]) -> None:
         self._on_error = on_error
         self._chunks: list[str] = []
-        # Whether we're currently following a run we started tracking via
-        # _START_MARKER. The message bus carries no origin, so this is the
-        # only way to tell "our tracked run" apart from unrelated messages
-        # from another tab's Generate/Execute/file-load happening at the
-        # same time. This eliminates false resets and false failure
-        # misattribution, but interleaved output bytes from a second,
-        # ignored concurrent run can still leak into the tracked buffer —
-        # full multi-tab isolation isn't possible without origin tagging.
         self._tracking = False
+        # Set to True when a ":error:" runtime error is seen in the output
+        # during tracking — even if the process exits cleanly (code 0).
+        # GNU Radio's scheduler handles buffer/rate errors gracefully, so
+        # non-zero return codes don't catch all failures.
+        self._has_runtime_error = False
+        self._last_run_log: str | None = None
+        self._last_run_code: int | None = None
+        # Saved copy of _has_runtime_error at Done time — _fail() calls
+        # _reset() which clears _has_runtime_error, but get_last_run_log
+        # must still reflect whether errors occurred.
+        self._last_run_had_runtime_error = False
+
+    @property
+    def has_last_run(self) -> bool:
+        """True if at least one run has completed (success or failure)."""
+        return self._last_run_log is not None
+
+    def get_last_run_log(self) -> dict | None:
+        """Return the last completed run's log as a dict, or None if no run
+        has completed yet.
+
+        Shape: ``{"return_code": int, "log_text": str, "ran_successfully": bool}``.
+        ``ran_successfully`` is False when either the return code is non-zero
+        OR a ``:error:`` runtime error was detected in the output.
+        """
+        if self._last_run_log is None or self._last_run_code is None:
+            return None
+        return {
+            "return_code": self._last_run_code,
+            "log_text": self._last_run_log,
+            "ran_successfully": self._last_run_code == 0 and not self._last_run_had_runtime_error,
+        }
 
     def handle_message(self, text: str) -> None:
         if _START_MARKER in text:
             if self._tracking:
-                return  # another run already in flight elsewhere; ignore
+                _log.debug("exec_monitor: ignoring start (already tracking): %r", text[:80])
+                return
             self._tracking = True
             self._reset()
+            _log.info("exec_monitor: started tracking run: %r", text[:120])
 
         self._append(text)
 
         if _EXEC_DONE_MARKER in text:
             if not self._tracking:
-                return  # not our run (e.g. a stray done from an ignored run)
+                _log.debug("exec_monitor: ignoring done (not tracking): %r", text[:80])
+                return
             self._tracking = False
             match = _RETURN_CODE_RE.search(text)
             code = int(match.group(1)) if match else 0
-            if code != 0 and code != _SIGTERM_RETURN_CODE:
-                self._fail()
+            _log.info("exec_monitor: run finished with code=%d, chunks=%d bytes", code, len("".join(self._chunks)))
+            # Retain the log for get_run_log BEFORE resetting the buffer.
+            self._last_run_log = "".join(self._chunks)
+            self._last_run_code = code
+            # Check for runtime errors in the full buffer — verbose exec
+            # arrives character-by-character via read(1), so per-message
+            # marker checks can't match multi-char patterns.
+            if _RUNTIME_ERROR_MARKER in self._last_run_log:
+                self._has_runtime_error = True
+            self._last_run_had_runtime_error = self._has_runtime_error
+            if code != _SIGTERM_RETURN_CODE and (code != 0 or self._has_runtime_error):
+                self._fail(code)
             else:
                 self._reset()
             return
 
         if _GENERATE_ERROR_MARKER in text:
             if self._tracking:
-                # Generate always precedes Executing for a given run, so a
-                # Generate Error seen while already tracking one belongs to
-                # a different, untracked tab.
                 return
-            self._fail()
+            _log.info("exec_monitor: generate error detected")
+            self._last_run_log = "".join(self._chunks)
+            self._last_run_code = 1
+            self._fail(1)
 
     def _append(self, text: str) -> None:
         self._chunks.append(text)
 
     def _reset(self) -> None:
         self._chunks.clear()
+        self._has_runtime_error = False
 
-    def _fail(self) -> None:
-        log_text = "".join(self._chunks)
+    def _fail(self, code: int) -> None:
+        log_text = self._last_run_log or ""
+        _log.info("exec_monitor: reporting failure (code=%d, %d chars), invoking callback", code, len(log_text))
+        try:
+            self._on_error(code, log_text)
+        except Exception:
+            _log.exception("exec_monitor: callback raised")
         self._reset()
-        self._on_error(log_text)

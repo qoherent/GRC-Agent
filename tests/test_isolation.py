@@ -5,7 +5,7 @@ from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
 from grc_agent.adapter import _embed_endpoint, get_db_and_model
-from grc_agent.agent import build_scenario_model
+from grc_agent.agent import build_scenario_model, grc_tools
 from grc_agent.agent_factory import _build_model, _retrying_http_client
 from grc_agent.settings import (
     env_path,
@@ -103,6 +103,45 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
     assert api_key == "dummy-openrouter-key"
 
 
+def test_get_embed_client_never_returns_mismatched_client_for_key(tmp_path, monkeypatch):
+    """Regression: _embed_client/_embed_client_key used to be two separate
+    globals updated in two statements — a thread race between two different
+    endpoints (e.g. a provider switch overlapping a cold catalog+docs query)
+    could leave a NEW client paired with the OLD key-tag, so a later caller
+    computing the old key would see it "match" and silently reuse the wrong
+    endpoint/credentials. Bundled into one atomically-assigned tuple; this
+    verifies the client returned always matches the endpoint it was built
+    for, across repeated endpoint changes (a structural check that the
+    cache-key and the cached client can never be observed out of sync,
+    which the single-tuple design guarantees regardless of thread timing)."""
+    import grc_agent.adapter.rag as rag_mod
+
+    tmp_env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-openrouter-key")
+    rag_mod._embed_client_state = None
+
+    try:
+        save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+        client_ollama = rag_mod._get_embed_client()
+        assert str(client_ollama.base_url).rstrip("/") == "http://localhost:11434/v1"
+
+        save_settings("openrouter", "openai/gpt-4o-mini")
+        client_openrouter = rag_mod._get_embed_client()
+        assert str(client_openrouter.base_url).rstrip("/") == "https://openrouter.ai/api/v1"
+        assert client_openrouter is not client_ollama
+
+        # Switch back — must rebuild again (not silently reuse the openrouter
+        # client, and not incorrectly rebuild a third distinct instance for
+        # settings it's already seen — the state is exactly one entry, not a
+        # growing cache, so "switch back" must reuse neither stale client).
+        save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+        client_ollama_again = rag_mod._get_embed_client()
+        assert str(client_ollama_again.base_url).rstrip("/") == "http://localhost:11434/v1"
+    finally:
+        rag_mod._embed_client_state = None
+
+
 def test_web_build_model_isolation(tmp_path, monkeypatch):
     """Verify that agent_factory._build_model instantiates the correct model type based on the settings."""
     tmp_env_file = tmp_path / ".env"
@@ -121,6 +160,12 @@ def test_web_build_model_isolation(tmp_path, monkeypatch):
     assert isinstance(m, OpenRouterModel)
     assert m.model_name == "openai/gpt-4o-mini"
 
+    # ollama_cloud reads its key via get_env_value (the .env file, not
+    # os.environ) — unlike the openrouter case above, OllamaProvider's own
+    # os.getenv fallback checks OLLAMA_API_KEY, not OLLAMA_CLOUD_API_KEY, so
+    # the monkeypatched env var alone wouldn't satisfy it. Write the key to
+    # the actual .env file so _build_model's explicit guard sees it.
+    upsert_env_key("OLLAMA_CLOUD_API_KEY", "dummy-test-key")
     cfg = {"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"}
     m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
@@ -207,6 +252,20 @@ def test_get_env_value_reads_from_file_not_os_environ(tmp_path, monkeypatch):
 
     # For a key not in the file, must return None
     assert get_env_value("NONEXISTENT_KEY") is None
+
+
+def test_build_model_ollama_cloud_raises_on_missing_api_key(tmp_path, monkeypatch):
+    """Regression: OllamaProvider itself never raises on a missing API key —
+    it silently substitutes a placeholder ('api-key-not-set') and the failure
+    only ever surfaces as an HTTP 401 on the first real chat call. _build_model
+    must raise explicitly for ollama_cloud with no key configured, matching
+    openrouter's existing behavior (OpenRouterProvider raises UserError on an
+    empty key) so build_interactive_agent's existing fallback-and-warn path
+    catches it instead of silently proceeding."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    http_client = _retrying_http_client()
+    with pytest.raises(ValueError, match="OLLAMA_CLOUD_API_KEY"):
+        _build_model({"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"}, http_client)
 
 
 def test_save_settings_writes_ollama_cloud_model_to_env(tmp_path, monkeypatch):
@@ -426,6 +485,46 @@ def test_ingest_catalog_builds_lexical_only_when_all_embeds_fail(tmp_path, monke
     assert any("low_pass_filter" in b for b in block_ids)
 
 
+def test_build_lock_for_returns_same_lock_under_real_thread_contention():
+    """Regression: _build_lock_for's lazy per-domain lock creation used to be
+    unsynchronized check-then-act (get, then if-None construct-and-store) —
+    two real OS threads racing to build the SAME domain for the first time
+    could each construct their own Lock() before either published it,
+    returning two DIFFERENT lock objects and taking zero mutual exclusion
+    from each other (exactly the race the lock exists to prevent). Fixed via
+    dict.setdefault (atomic in CPython). Stress-tested with real threads and
+    a barrier to maximize contention at the exact race window."""
+    import threading
+
+    from grc_agent.adapter.rag import _BUILD_LOCKS, _build_lock_for
+
+    domain = "stress-test-domain"
+    _BUILD_LOCKS.pop(domain, None)
+    try:
+        n = 50
+        barrier = threading.Barrier(n)
+        results: list[threading.Lock] = [None] * n  # type: ignore[list-item]
+
+        def worker(i: int) -> None:
+            barrier.wait()  # release all threads at (as close to) the same instant
+            results[i] = _build_lock_for(domain)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        distinct_lock_ids = {id(lock) for lock in results}
+        assert len(distinct_lock_ids) == 1, (
+            f"expected every thread to receive the SAME lock object, got "
+            f"{len(distinct_lock_ids)} distinct lock instances — mutual "
+            f"exclusion was bypassed"
+        )
+    finally:
+        _BUILD_LOCKS.pop(domain, None)
+
+
 def test_lexical_only_db_does_not_rehammer_embedding_backend(tmp_path, monkeypatch):
     """Once a catalog DB has settled into lexical-only (the embedding backend
     was down when it was last built), subsequent queries must not keep
@@ -506,6 +605,50 @@ def test_query_catalog_falls_back_to_lexical_when_embedding_unreachable(tmp_path
         assert "fallback" in res.get("message", "").lower()
         assert res["results"]
         assert any("low_pass_filter" in r["block_id"] for r in res["results"])
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
+
+
+def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path, monkeypatch):
+    """Regression: a DB that's lexical-only (built during a past embedding
+    outage) must still explain itself via "message" even when the CURRENT
+    embed_query call succeeds — previously the message was only attached
+    when search_mode == "lexical" AND embed_error was set, silently omitting
+    the explanation in exactly this case (no vector index exists, but the
+    embedding backend has since recovered), breaking AGENTS.md's "no silent
+    transformation" contract."""
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import get_db_and_model, query_catalog
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("catalog")
+
+    def fail_embed(text, model):  # noqa: ARG001
+        raise RuntimeError("backend down")
+
+    # Build lexical-only (embeddings failed at build time — no catalog_idx table).
+    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    ingest_mod.ingest_catalog(db_path, model)
+
+    # Simulate the embedding backend having recovered since: embed_query now succeeds.
+    import grc_agent.adapter.rag as rag_mod
+
+    monkeypatch.setattr(rag_mod, "embed_query", lambda q: [0.1, 0.2, 0.3])  # noqa: ARG005
+
+    try:
+        res = query_catalog("low pass filter")
+        assert res["ok"] is True
+        assert res["search_mode"] == "lexical"
+        assert "message" in res, (
+            "a lexical result must always explain itself, even when the "
+            "current embed call succeeded but no vector index exists yet"
+        )
+        assert "no vector index" in res["message"].lower()
     finally:
         _FRESHNESS_CACHE.pop("catalog", None)
 
@@ -643,3 +786,156 @@ def test_ollama_cloud_model_builds_and_runs():
 
     reply = asyncio.run(run_turn())
     assert "OLLAMA_CLOUD_OK" in reply, f"Expected OLLAMA_CLOUD_OK, got: {reply}"
+
+
+def test_grc_tools_includes_generate_python():
+    # Structural check only (no LLM, no gnuradio execution) — confirms the
+    # tool is actually wired into the agent's tool list, not just defined.
+    names = {tool.name for tool in grc_tools()}
+    assert names == {"inspect_graph", "query_knowledge", "generate_python", "change_graph", "get_run_log"}
+
+
+def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path, monkeypatch):
+    """Regression: build_agent_from_cfg must produce a model whose type
+    matches the saved provider — OllamaModel for ollama/ollama_cloud,
+    OpenRouterModel for openrouter. No LLM call is made (the model is built
+    but never .run()); this just locks the provider -> model-type mapping
+    that the live-swap path relies on. Catches the original "swapped to
+    openrouter but the backend still kept calling ollama cloud" class of
+    bug at the construction layer."""
+    env = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
+
+    from grc_agent.agent_factory import build_agent_from_cfg
+
+    # ollama (local default)
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    agent_local, _ = build_agent_from_cfg(load_settings())
+    assert isinstance(agent_local.model, OllamaModel), (
+        f"local ollama cfg must produce OllamaModel, got {type(agent_local.model).__name__}"
+    )
+
+    # ollama_cloud
+    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
+    upsert_env_key("OLLAMA_CLOUD_API_KEY", "dummy-key-for-build-test")
+    agent_cloud, _ = build_agent_from_cfg(load_settings())
+    assert isinstance(agent_cloud.model, OllamaModel), (
+        f"ollama_cloud cfg must produce OllamaModel, got {type(agent_cloud.model).__name__}"
+    )
+    # And its base_url must point at ollama.com, not localhost — the exact
+    # confusion the live-swap fix exists to prevent.
+    assert "ollama.com" in str(agent_cloud.model._provider.base_url), (
+        f"ollama_cloud base_url must be ollama.com, got {agent_cloud.model._provider.base_url}"
+    )
+
+    # openrouter (key required by OpenRouterProvider at construction time)
+    save_settings("openrouter", "deepseek/deepseek-v4-flash")
+    upsert_env_key("OPENROUTER_API_KEY", "sk-or-dummy-key-for-build-test")
+    agent_or, _ = build_agent_from_cfg(load_settings())
+    assert isinstance(agent_or.model, OpenRouterModel), (
+        f"openrouter cfg must produce OpenRouterModel, got {type(agent_or.model).__name__}"
+    )
+    assert "openrouter.ai" in str(agent_or.model._provider.base_url), (
+        f"openrouter base_url must be openrouter.ai, got {agent_or.model._provider.base_url}"
+    )
+
+
+def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
+    """Regression for the reported bug: changing provider via save_settings +
+    rebuild must produce an Agent whose model actually points at the NEW
+    provider — not the one the process booted with. Live OpenRouter call
+    validates end-to-end (the swap was applied AND the new backend is
+    actually reachable). Skipped without OPENROUTER_API_KEY."""
+    import asyncio
+
+    from dotenv import load_dotenv
+
+    # Load the repo .env first so OPENROUTER_API_KEY is visible when set
+    # there (matches the existing Ollama Cloud live-test pattern). The
+    # monkeypatched GRC_AGENT_ENV below redirects only the grc_agent
+    # settings module's .env reads — os.environ is independent and still
+    # sees this loaded key.
+    load_dotenv(env_path())
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        pytest.skip("OPENROUTER_API_KEY not set — cannot validate live swap end-to-end")
+
+    env = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
+
+    from grc_agent.agent_factory import build_agent_from_cfg
+
+    # 1. Boot with ollama_cloud cfg + a dummy key. We never send a real
+    #    request on this agent, so the dummy key is fine — it just exercises
+    #    the build path and gives us a baseline agent to "swap away from".
+    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
+    upsert_env_key("OLLAMA_CLOUD_API_KEY", "dummy-boot-key-not-used")
+    agent1, _ = build_agent_from_cfg(load_settings())
+    assert isinstance(agent1.model, OllamaModel)
+    assert "ollama.com" in str(agent1.model._provider.base_url)
+
+    # 2. Simulate the Settings dialog's Save path: write the new provider +
+    #    real key to .env, then rebuild (exactly what
+    #    ChatSidebar._rebuild_agent invokes after a successful Save).
+    save_settings("openrouter", "deepseek/deepseek-v4-flash")
+    upsert_env_key("OPENROUTER_API_KEY", api_key)
+    agent2, _ = build_agent_from_cfg(load_settings())
+
+    # 3. The new agent's model must actually be the new provider's type and
+    #    point at the new base_url. This is the assertion that would have
+    #    failed under the old restart-gated design if you forgot to restart
+    #    (the agent would silently still be the old OllamaModel-on-ollama.com
+    #    instance).
+    assert agent2 is not agent1, "live-swap must build a NEW agent, not return the cached one"
+    assert isinstance(agent2.model, OpenRouterModel), (
+        f"post-swap model must be OpenRouterModel, got {type(agent2.model).__name__}"
+    )
+    assert "openrouter.ai" in str(agent2.model._provider.base_url)
+
+    # 4. End-to-end: the new agent actually reaches OpenRouter and gets a
+    #    coherent reply. A simple no-tools prompt; output_type=str so the
+    #    agent doesn't need a flowgraph deps for its tools.
+    async def _run():
+        # Build a tiny no-tools agent that reuses agent2's model — agent2
+        # itself has grc_tools wired in, which would need a real flowgraph.
+        from pydantic_ai import Agent
+
+        mini = Agent(
+            agent2.model,
+            output_type=str,
+            instructions="You are a terse assistant. Reply in one short sentence.",
+        )
+        result = await mini.run("Reply with exactly: OPENROUTER_LIVE_OK")
+        return result.output.strip()
+
+    reply = asyncio.run(_run())
+    assert "OPENROUTER_LIVE_OK" in reply, f"expected OPENROUTER_LIVE_OK in reply, got: {reply!r}"
+
+
+def test_preflight_connection_returns_none_on_success_and_error_on_failure():
+    """preflight_connection must return None on a reachable endpoint and a
+    descriptive error string on any failure. Two paths exercised:
+
+    - Success: real OpenRouter /v1/models ping with the configured key (when
+      set) — proves the endpoint, headers, and status-code check all work.
+    - Failure (deterministic, no network): a missing api_key must return a
+      non-None error string. OpenRouter's /v1/models is a public listing
+      endpoint (no auth required), so a bogus key doesn't 401 there — the
+      only reliable, network-independent failure case is the empty-key guard.
+    """
+    from grc_agent.agent_factory import preflight_connection
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if api_key:
+        # Real success path — exercises the actual endpoint.
+        err = preflight_connection("openrouter", api_key, timeout=10.0)
+        assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
+
+    # Deterministic failure: missing key for each cloud provider must return
+    # a non-empty error string. The exact message wording is not asserted so
+    # the test stays robust to message edits.
+    err = preflight_connection("openrouter", "", timeout=10.0)
+    assert isinstance(err, str) and err, "missing openrouter key must produce a non-empty error"
+
+    err = preflight_connection("ollama_cloud", "", timeout=10.0)
+    assert isinstance(err, str) and err, "missing ollama_cloud key must produce a non-empty error"

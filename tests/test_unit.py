@@ -17,6 +17,7 @@ from grc_agent.adapter import (
     inspect_graph,
     lite_web_search,
     load_flow_graph,
+    preview_flowgraph_py,
     query_catalog,
     query_docs,
     set_param,
@@ -373,6 +374,216 @@ def test_change_graph_add_connection(temp_empty):
     assert "sig:0->sink:0" in conns
 
 
+# Two epy_block sources of the same shape (1 complex64 in, 1 complex64 out)
+# used to reproduce a real GNU Radio mechanism: EPyBlock.rewrite() only
+# reparses _source_code (regenerating ports) when THAT block's own rewrite()
+# runs, which for a call with no add_blocks only happens in change_graph's
+# final unconditional rewrite — i.e. after Phase 7's add_connections already
+# ran. A same-port-count DTYPE change (unlike a port-count change, which
+# _find_port simply can't find) is worse: _find_port/connect() succeed
+# against the pre-rewrite port object, then the final rewrite builds a new
+# port object and disconnects the one Phase 7 just connected.
+_EPY_COMPLEX_IO_SOURCE = (
+    "import numpy as np\n"
+    "from gnuradio import gr\n\n"
+    "class blk(gr.sync_block):\n"
+    "    def __init__(self):\n"
+    "        gr.sync_block.__init__(self, name='epy', in_sig=[np.complex64], out_sig=[np.complex64])\n"
+    "    def work(self, input_items, output_items):\n"
+    "        output_items[0][:] = input_items[0]\n"
+    "        return len(output_items[0])\n"
+)
+
+_EPY_FLOAT_INPUT_SOURCE = (
+    "import numpy as np\n"
+    "from gnuradio import gr\n\n"
+    "class blk(gr.sync_block):\n"
+    "    def __init__(self):\n"
+    "        gr.sync_block.__init__(self, name='epy', in_sig=[np.float32], out_sig=[np.complex64])\n"
+    "    def work(self, input_items, output_items):\n"
+    "        return 0\n"
+)
+
+
+def test_change_graph_same_call_port_dtype_change_and_connect_rolls_back(temp_empty):
+    """Regression for the exact silent-drop scenario found live: changing an
+    existing epy_block's port dtype and connecting to that port in the same
+    change_graph call (no add_blocks in that call) must fail loudly, even
+    under force=True — never report ok=true while the requested connection
+    is actually absent."""
+    fg = load_flow_graph(str(temp_empty))
+    setup = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "epy_block",
+                "instance_name": "my_src",
+                "params": {"_source_code": _EPY_COMPLEX_IO_SOURCE},
+            },
+            {
+                "block_id": "epy_block",
+                "instance_name": "my_epy",
+                "params": {"_source_code": _EPY_COMPLEX_IO_SOURCE},
+            },
+        ],
+        force=True,  # both left unconnected between this call and the next
+    )
+    assert setup["ok"] is True
+
+    res = change_graph(
+        fg,
+        update_params=[{"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}],
+        add_connections=["my_src:0->my_epy:0"],
+        force=True,
+    )
+    assert res["ok"] is False
+    assert any(e.get("code") == "connection_silently_dropped" for e in res["errors"])
+
+    # The whole batch rolled back — including the source-code edit, not just
+    # the connection — since this is one atomic transaction.
+    snap = inspect_graph(fg)
+    my_epy = next(b for b in snap["graph"]["blocks"] if b["instance_name"] == "my_epy")
+    assert my_epy["params"]["_source_code"] == _EPY_COMPLEX_IO_SOURCE
+
+
+_EPY_FLOAT_IO_SOURCE = (
+    "import numpy as np\n"
+    "from gnuradio import gr\n\n"
+    "class blk(gr.sync_block):\n"
+    "    def __init__(self):\n"
+    "        gr.sync_block.__init__(self, name='epy', in_sig=[np.float32], out_sig=[np.float32])\n"
+    "    def work(self, input_items, output_items):\n"
+    "        output_items[0][:] = input_items[0]\n"
+    "        return len(output_items[0])\n"
+)
+
+
+def test_change_graph_epy_block_port_change_works_across_two_calls(temp_empty):
+    """The recommended workaround for the same scenario above: change the
+    block's code/ports in its own call first, confirm via inspect_graph,
+    then wire the new port in a follow-up call — this must succeed cleanly.
+    my_src emits float32 here (not complex64, unlike the roll-back test
+    above) since it needs to actually type-match my_epy's new float32 input
+    for the connection itself to be valid — this test is about the two-call
+    sequencing working, not about tolerating a real dtype mismatch."""
+    fg = load_flow_graph(str(temp_empty))
+    setup = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "epy_block",
+                "instance_name": "my_src",
+                "params": {"_source_code": _EPY_FLOAT_IO_SOURCE},
+            },
+            {
+                "block_id": "epy_block",
+                "instance_name": "my_epy",
+                "params": {"_source_code": _EPY_COMPLEX_IO_SOURCE},
+            },
+        ],
+        force=True,
+    )
+    assert setup["ok"] is True
+
+    step1 = change_graph(
+        fg,
+        update_params=[{"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}],
+        force=True,  # still unconnected — expected at this intermediate step
+    )
+    assert step1["ok"] is True
+    snap = inspect_graph(fg)
+    my_epy = next(b for b in snap["graph"]["blocks"] if b["instance_name"] == "my_epy")
+    assert my_epy["params"]["_source_code"] == _EPY_FLOAT_INPUT_SOURCE
+
+    # force=True: my_epy's own output stays unconnected, which isn't what
+    # this test is checking — only that the input-side connection succeeds.
+    step2 = change_graph(fg, add_connections=["my_src:0->my_epy:0"], force=True)
+    assert step2["ok"] is True
+    snap = inspect_graph(fg)
+    assert "my_src:0->my_epy:0" in snap["graph"]["connections"]
+
+
+def test_change_graph_update_params_only_batch_catches_dropped_preexisting_connection(temp_empty):
+    """Regression for a real bug found by adversarial testing: the original
+    fix only tracked connections made in the SAME call's add_connections
+    (made_connections), so a call with ONLY update_params — no
+    add_connections at all — left made_connections empty and skipped the
+    check entirely, even though the final rewrite can silently drop an
+    ALREADY-EXISTING connection the same way (verified live: this used to
+    return ok=true while the connection vanished). The fix now snapshots
+    every connection before any rewrite and compares against the post-batch
+    state regardless of what phases ran this call."""
+    fg = load_flow_graph(str(temp_empty))
+    setup = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "epy_block",
+                "instance_name": "my_src",
+                "params": {"_source_code": _EPY_COMPLEX_IO_SOURCE},
+            },
+            {
+                "block_id": "epy_block",
+                "instance_name": "my_epy",
+                "params": {"_source_code": _EPY_COMPLEX_IO_SOURCE},
+            },
+        ],
+        force=True,
+    )
+    assert setup["ok"] is True
+    wire = change_graph(fg, add_connections=["my_src:0->my_epy:0"], force=True)
+    assert wire["ok"] is True
+    assert "my_src:0->my_epy:0" in inspect_graph(fg)["graph"]["connections"]
+
+    # ONLY update_params — no add_connections in this call at all.
+    res = change_graph(
+        fg,
+        update_params=[{"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}],
+        force=True,
+    )
+    assert res["ok"] is False
+    assert any(e.get("code") == "connection_silently_dropped" for e in res["errors"])
+    # Rolled back — the pre-existing connection must still be there.
+    assert "my_src:0->my_epy:0" in inspect_graph(fg)["graph"]["connections"]
+
+
+def test_change_graph_port_key_rekey_is_not_a_false_positive(temp_empty):
+    """Regression for a real bug found by adversarial testing (confirming a
+    concern the maintainability reviewer raised): GNU Radio's Port.rewrite()
+    changes a port's .key IN PLACE (same object) rather than replacing it,
+    for any port whose dtype becomes 'message' — e.g. a pad_sink switched
+    from a stream type to type='message'. The original string-tuple-based
+    check ((block_name, port_key) as plain strings) would see the OLD key
+    and misreport this as a dropped connection, rolling back a perfectly
+    valid batch. Comparing actual Connection objects (whose __eq__/__hash__
+    are keyed on the underlying Port objects' identity, confirmed by reading
+    GNU Radio's own Connection class) is immune to an in-place key mutation
+    on the same port object, since object identity doesn't change."""
+    fg = load_flow_graph(str(temp_empty))
+    setup = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "pad_sink", "instance_name": "my_pad", "params": {"type": "complex"}},
+            {"block_id": "blocks_message_strobe", "instance_name": "my_strobe"},
+        ],
+        force=True,
+    )
+    assert setup["ok"] is True
+
+    res = change_graph(
+        fg,
+        update_params=[{"instance_name": "my_pad", "params": {"type": "message"}}],
+        add_connections=["my_strobe:strobe->my_pad:0"],
+        force=True,
+    )
+    assert res["ok"] is True, f"expected no false-positive rollback, got: {res}"
+    snap = inspect_graph(fg)
+    # The port was rekeyed from '0' to 'in' (message-domain naming) as a side
+    # effect of the type change — the connection must still be present under
+    # its new key, not reported as dropped.
+    assert "my_strobe:strobe->my_pad:in" in snap["graph"]["connections"]
+
+
 def test_change_graph_remove_connection(temp_dial_tone):
     fg = load_flow_graph(str(temp_dial_tone))
     # force=True: leaves blocks_add_xx's in0 port unconnected — a genuine
@@ -638,6 +849,83 @@ def has_llm_backend():
         return False
 
 
+def test_query_knowledge_func_passes_through_k(monkeypatch):
+    """The model can control how many results come back via k (default 5,
+    clamped 1-20) — no live LLM/backend needed, just verifying the plumbing."""
+    import asyncio
+
+    from grc_agent.agent import query_knowledge_func
+
+    seen_calls: list[tuple[str, int]] = []
+
+    def fake_query_catalog(query, limit=5):
+        seen_calls.append((query, limit))
+        return {"ok": True, "query": query, "results": [], "search_mode": "vector"}
+
+    def fake_query_docs(query, limit=5):
+        seen_calls.append((query, limit))
+        return {"ok": True, "query": query, "answer": "", "search_mode": "vector"}
+
+    monkeypatch.setattr("grc_agent.agent.query_catalog", fake_query_catalog)
+    monkeypatch.setattr("grc_agent.agent.query_docs", fake_query_docs)
+
+    asyncio.run(query_knowledge_func(None, "low pass filter", "catalog", k=10))
+    assert seen_calls[-1] == ("low pass filter", 10)
+
+    asyncio.run(query_knowledge_func(None, "stream tags", "docs"))
+    assert seen_calls[-1] == ("stream tags", 5), "default k must still be 5"
+
+    # Out-of-range k is clamped, not passed through raw or rejected.
+    asyncio.run(query_knowledge_func(None, "x", "catalog", k=1000))
+    assert seen_calls[-1] == ("x", 20)
+    asyncio.run(query_knowledge_func(None, "x", "catalog", k=0))
+    assert seen_calls[-1] == ("x", 1)
+
+
+def test_generate_python_func_passes_through_k_and_wraps_valueerror(monkeypatch):
+    """Mirrors test_query_knowledge_func_passes_through_k for generate_python_func:
+    k (default 5, clamped 1-20) reaches preview_flowgraph_py correctly, and a
+    ValueError from it (invalid/hb/cpp graph) becomes a ModelRetry, not a raw
+    exception — no live LLM/backend or real gnuradio flowgraph needed."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from pydantic_ai import ModelRetry
+
+    from grc_agent.agent import generate_python_func
+
+    seen_calls: list[tuple[object, int]] = []
+
+    def fake_preview_flowgraph_py(flow_graph, k=5):
+        seen_calls.append((flow_graph, k))
+        return {"files": [{"path": "x.py", "source": "..."}], "omitted_files": 0}
+
+    monkeypatch.setattr("grc_agent.agent.preview_flowgraph_py", fake_preview_flowgraph_py)
+    ctx = SimpleNamespace(deps=object())
+
+    asyncio.run(generate_python_func(ctx, k=10))
+    assert seen_calls[-1] == (ctx.deps, 10)
+
+    asyncio.run(generate_python_func(ctx))
+    assert seen_calls[-1] == (ctx.deps, 5), "default k must still be 5"
+
+    # Out-of-range k is clamped, not passed through raw or rejected.
+    asyncio.run(generate_python_func(ctx, k=1000))
+    assert seen_calls[-1] == (ctx.deps, 20)
+    asyncio.run(generate_python_func(ctx, k=0))
+    assert seen_calls[-1] == (ctx.deps, 1)
+
+    def raising_preview_flowgraph_py(flow_graph, k=5):  # noqa: ARG001
+        raise ValueError("Flowgraph is not valid: ['boom']")
+
+    monkeypatch.setattr("grc_agent.agent.preview_flowgraph_py", raising_preview_flowgraph_py)
+    try:
+        asyncio.run(generate_python_func(ctx))
+        raise AssertionError("expected ModelRetry")
+    except ModelRetry as exc:
+        assert "boom" in str(exc)
+
+
 requires_llm = pytest.mark.skipif(
     not has_llm_backend(),
     reason="Requires a running local Ollama server or an OPENROUTER_API_KEY set in the environment",
@@ -747,6 +1035,128 @@ def test_generate_flowgraph_py_restores_run_options(temp_run_null_sink):
     output_dir = Path(temp_run_null_sink).parent / "run"
     generate_flowgraph_py(fg, output_dir)
     assert fg.get_option("run_options") == "prompt"
+
+
+# ==========================================
+# preview_flowgraph_py Unit Tests (5 tests)
+# ==========================================
+
+
+def test_preview_flowgraph_py_validates_first(temp_broken):
+    fg = load_flow_graph(str(temp_broken))
+    with pytest.raises(ValueError, match="not valid"):
+        preview_flowgraph_py(fg)
+
+
+def test_preview_flowgraph_py_rejects_hb(temp_run_null_sink):
+    fg = load_flow_graph(str(temp_run_null_sink))
+    gen_opts = fg.options_block.params["generate_options"]
+    gen_opts.set_value("hb")
+    gen_opts.rewrite()
+    with pytest.raises(ValueError, match="Hierarchical blocks"):
+        preview_flowgraph_py(fg)
+
+
+def test_preview_flowgraph_py_shows_real_run_options(temp_run_null_sink):
+    # Unlike generate_flowgraph_py, preview must NOT override run_options —
+    # it shows the flowgraph's actual configured generated output.
+    fg = load_flow_graph(str(temp_run_null_sink))
+    assert fg.get_option("run_options") == "prompt"
+    result = preview_flowgraph_py(fg)
+    main_source = result["files"][-1]["source"]
+    assert "Press Enter to quit" in main_source
+    assert fg.get_option("run_options") == "prompt"
+
+
+def test_preview_flowgraph_py_writes_nothing_to_disk(temp_run_null_sink):
+    output_dir = Path(temp_run_null_sink).parent
+    before = set(output_dir.iterdir())
+    fg = load_flow_graph(str(temp_run_null_sink))
+    preview_flowgraph_py(fg)
+    after = set(output_dir.iterdir())
+    assert before == after
+
+
+def test_preview_flowgraph_py_returns_main_script(temp_run_null_sink):
+    fg = load_flow_graph(str(temp_run_null_sink))
+    result = preview_flowgraph_py(fg)
+    assert result["files"], "expected at least the main flowgraph script"
+    main = result["files"][-1]
+    assert main["path"].endswith(fg.get_option("id") + ".py")
+    assert "import" in main["source"]
+
+
+# A minimal Embedded Python Block with zero stream/message ports (gr.basic_block
+# with in_sig=out_sig=None) — needs no wiring to keep the flowgraph valid, unlike
+# the default epy_block template (1 complex64 in, 1 complex64 out).
+_NOOP_EPY_SOURCE = (
+    "from gnuradio import gr\n\n"
+    "class blk(gr.basic_block):\n"
+    "    def __init__(self):\n"
+    "        gr.basic_block.__init__(self, name='noop', in_sig=None, out_sig=None)\n"
+)
+
+
+def _add_epy_blocks(fg, count):
+    change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "epy_block",
+                "instance_name": f"epy_{i}",
+                "params": {"_source_code": _NOOP_EPY_SOURCE},
+            }
+            for i in range(count)
+        ],
+    )
+
+
+def test_preview_flowgraph_py_includes_embedded_python_block_source(temp_empty):
+    fg = load_flow_graph(str(temp_empty))
+    _add_epy_blocks(fg, 1)
+    result = preview_flowgraph_py(fg)
+    assert len(result["files"]) == 2, "expected the epy_block's file plus the main script"
+    assert result["omitted_files"] == 0
+    assert any("gr.basic_block" in f["source"] for f in result["files"][:-1])
+    assert result["files"][-1]["path"].endswith(fg.get_option("id") + ".py")
+
+
+def test_preview_flowgraph_py_caps_block_source_files_and_reports_omitted(temp_empty):
+    # k caps the block-source files ONLY, per the documented contract (the
+    # main script never counts against it) — 4 epy_block files + 1 main = 5
+    # total; k=3 keeps 3 block-sources + the main script = 4 returned.
+    fg = load_flow_graph(str(temp_empty))
+    _add_epy_blocks(fg, 4)
+    result = preview_flowgraph_py(fg, k=3)
+    assert len(result["files"]) == 4, "k caps block-source files, not the main script"
+    assert result["omitted_files"] == 1  # 4 block-sources - 3 kept
+    # The main script must never be among the dropped entries.
+    assert result["files"][-1]["path"].endswith(fg.get_option("id") + ".py")
+
+
+def test_preview_flowgraph_py_k_exactly_equal_to_block_source_count(temp_empty):
+    fg = load_flow_graph(str(temp_empty))
+    _add_epy_blocks(fg, 3)  # 3 epy_block files + 1 main script = 4 total
+    result = preview_flowgraph_py(fg, k=3)
+    assert len(result["files"]) == 4
+    assert result["omitted_files"] == 0
+
+
+def test_preview_flowgraph_py_k_one_keeps_only_main_script(temp_empty):
+    fg = load_flow_graph(str(temp_empty))
+    _add_epy_blocks(fg, 3)
+    result = preview_flowgraph_py(fg, k=1)
+    assert len(result["files"]) == 2  # 1 block-source kept + main script
+    assert result["omitted_files"] == 2
+    assert result["files"][-1]["path"].endswith(fg.get_option("id") + ".py")
+
+
+def test_preview_flowgraph_py_k_below_total_keeps_everything(temp_empty):
+    fg = load_flow_graph(str(temp_empty))
+    _add_epy_blocks(fg, 2)  # 2 epy_block files + 1 main script = 3 total
+    result = preview_flowgraph_py(fg, k=5)
+    assert len(result["files"]) == 3
+    assert result["omitted_files"] == 0
 
 
 # ==========================================
@@ -928,7 +1338,11 @@ def test_open_recent_session_tab_switching(tmp_path):
     notebook.set_current_page.assert_called_once_with(0)
 
 
-def test_sidebar_session_tab_switching_isolation(tmp_path, monkeypatch):
+def test_sidebar_session_no_autoload_on_graph_open(tmp_path, monkeypatch):
+    """Graphs never auto-load chats. Opening/switching a graph tab clears the
+    chat area to a fresh welcome screen — no session lookup by path. The only
+    way to load a saved conversation is explicitly from the recent-sessions
+    list (which opens the graph AND loads the session via _loading_session_id)."""
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
     from grc_agent.chat_sidebar import ChatSidebar
@@ -942,52 +1356,34 @@ def test_sidebar_session_tab_switching_isolation(tmp_path, monkeypatch):
     f2 = tmp_path / "flow2.grc"
     f2.touch()
 
-    sid1 = save_session(None, str(f1), [])
-    sid2 = save_session(None, str(f2), [])
+    # Even though sessions exist for these paths, sync_to_file must NOT load them
+    save_session(None, str(f1), [])
+    save_session(None, str(f2), [])
 
-    # Set up mocks for current_page and flowgraph_proxy
     class DummyPage:
         def __init__(self, file_path):
             self.file_path = file_path
 
-    page1 = DummyPage(str(f1))
-    page2 = DummyPage(str(f2))
-
-    proxy = object()
-    sidebar._flowgraph_proxy = proxy
-
-    # We patch current_page property on the sidebar dynamically
-    current_page_val = page1
+    sidebar._flowgraph_proxy = object()
+    current_page_val = DummyPage(str(f1))
     monkeypatch.setattr(ChatSidebar, "current_page", property(lambda _self: current_page_val))
 
-    # Simulating switching to page1 (flow1.grc)
-    sidebar._active_session_id = None
+    # Switching to flow1.grc — no session loads, chat is blank
     sidebar.sync_to_file(str(f1))
-    assert sidebar._active_session_id == sid1
-    assert page1._grc_agent_session_id == sid1
-
-    # Simulate creating a new session for page1
-    sidebar.clear_messages()
     assert sidebar._active_session_id is None
-    assert page1._grc_agent_session_id is None
+    assert sidebar._message_history == []
 
-    # Simulate sending a message to start a new session (sets page1._grc_agent_session_id to new ID)
-    new_sid1 = save_session(None, str(f1), [])
-    page1._grc_agent_session_id = new_sid1
-    sidebar.sync_to_file(str(f1))
-    assert sidebar._active_session_id == new_sid1
-
-    # Simulating switching to page2 (flow2.grc)
-    current_page_val = page2
+    # Switching to flow2.grc — same: no autoload
+    current_page_val = DummyPage(str(f2))
     sidebar.sync_to_file(str(f2))
-    assert sidebar._active_session_id == sid2
-    assert page2._grc_agent_session_id == sid2
+    assert sidebar._active_session_id is None
+    assert sidebar._message_history == []
 
-    # Simulating switching back to page1 (flow1.grc)
-    current_page_val = page1
+    # Switching back to flow1.grc — still blank, no per-page binding
+    current_page_val = DummyPage(str(f1))
     sidebar.sync_to_file(str(f1))
-    # It should restore our new_sid1 (the custom session we started on page1)
-    assert sidebar._active_session_id == new_sid1
+    assert sidebar._active_session_id is None
+    assert sidebar._message_history == []
 
 
 def test_active_graph_label_format():
@@ -1248,6 +1644,35 @@ def test_settings_dialog_persists_model_name(tmp_path, monkeypatch):
     assert load_settings()["model"] == "brand-new-model-name"
 
 
+def test_settings_dialog_reports_save_failure(tmp_path, monkeypatch):
+    """Regression: a failed save_settings()/upsert_env_key() call (e.g. a
+    read-only home dir, disk full) must be caught and reported via the status
+    bar, matching the existing pattern in _on_clear_history_clicked — not
+    close the dialog and silently pretend nothing happened."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import save_settings
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "old-model-name")
+
+    sidebar = ChatSidebar()
+    sidebar._open_settings()
+    dlg = sidebar._open_dialog
+    assert dlg is not None
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("grc_agent.chat_sidebar.save_settings", _boom)
+
+    dlg.emit("response", Gtk.ResponseType.APPLY)
+
+    assert "not saved" in sidebar._status_label.get_text().lower()
+    assert "validation-invalid" in sidebar._status_label.get_style_context().list_classes()
+
+
 def test_streaming_text_flush_is_throttled(monkeypatch):
     """Streaming must NOT call Gtk.Label.set_text on every token (that re-runs
     Pango line-wrap layout over the whole growing message = O(n^2) and freezes
@@ -1331,7 +1756,7 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
     sidebar = ChatSidebar()
     calls: list[tuple[str, bool]] = []
     monkeypatch.setattr(
-        sidebar, "set_status", lambda msg, *, error=False: calls.append((msg, error))
+        sidebar, "set_status", lambda msg, *, error=False, background=False: calls.append((msg, error))  # noqa: ARG005
     )
 
     adapter_mod._rag_building.clear()
@@ -1444,9 +1869,10 @@ def test_settings_dialog_persists_api_key(tmp_path, monkeypatch):
     assert get_env_value("OPENROUTER_API_KEY") == "sk-test-persists-123"
 
 
-def test_sync_to_file_restores_session_for_path(tmp_path, monkeypatch):
-    """UI-3 regression: opening a file must restore that file's own prior chat
-    session instead of blanking it."""
+def test_sync_to_file_does_not_autoload_session(tmp_path, monkeypatch):
+    """Graphs never auto-load chats. Even when a session exists for the path,
+    sync_to_file must clear the chat area — not restore the saved session.
+    Loading is exclusively via the recent-sessions list click."""
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
     from unittest.mock import MagicMock
@@ -1454,22 +1880,19 @@ def test_sync_to_file_restores_session_for_path(tmp_path, monkeypatch):
     from pydantic_ai.messages import ModelRequest, UserPromptPart
 
     from grc_agent.chat_sidebar import ChatSidebar
-    from grc_agent.db import get_session_for_path, save_session
+    from grc_agent.db import save_session
 
     f = tmp_path / "flow.grc"
     f.touch()
     save_session(None, str(f), [ModelRequest(parts=[UserPromptPart(content="hello")])])
 
-    row = get_session_for_path(str(f))
-    assert row is not None
-    assert row["grc_file_path"] == str(f.resolve())
-
     sidebar = ChatSidebar()
     sidebar._render_history = MagicMock()
     sidebar.sync_to_file(str(f))
 
-    assert sidebar._active_session_id == row["id"]
-    assert len(sidebar._message_history) == 1
+    # No autoload — chat stays blank despite a session existing for this path
+    assert sidebar._active_session_id is None
+    assert sidebar._message_history == []
 
 
 def test_run_agent_turn_error_preserves_user_message():
@@ -1525,6 +1948,44 @@ def test_append_error_aborted_style_uses_neutral_css_class():
     classes = aborted_lbl.get_style_context().list_classes()
     assert "chat-aborted-label" in classes
     assert "chat-error-label" not in classes
+
+
+def test_format_turn_error_covers_each_exception_type():
+    """_run_agent_turn collapsed 4 near-duplicate except blocks (ModelHTTPError,
+    UsageLimitExceeded, ModelAPIError, UnexpectedModelBehavior) plus the
+    generic Exception fallback into one handler backed by this message
+    builder. Each branch's message shape must survive the refactor exactly,
+    including ModelHTTPError's extra status/body-vs-model_name distinction."""
+    from pydantic_ai.exceptions import (
+        ModelAPIError,
+        ModelHTTPError,
+        UnexpectedModelBehavior,
+        UsageLimitExceeded,
+    )
+
+    from grc_agent.chat_sidebar import _format_turn_error
+
+    assert (
+        _format_turn_error(ModelHTTPError(500, "gpt-x", body="server exploded"))
+        == "Model HTTP 500 Error: server exploded"
+    )
+    assert (
+        _format_turn_error(ModelHTTPError(503, "gpt-x"))
+        == "Model HTTP 503 Error from gpt-x"
+    )
+    assert (
+        _format_turn_error(UsageLimitExceeded("too many tokens"))
+        == "Usage Limit Exceeded: too many tokens"
+    )
+    assert (
+        _format_turn_error(ModelAPIError("gpt-x", "bad request"))
+        == "Model API Error: bad request"
+    )
+    assert (
+        _format_turn_error(UnexpectedModelBehavior("no tool call"))
+        == "Unexpected Model Behavior: no tool call"
+    )
+    assert _format_turn_error(RuntimeError("boom")) == "Agent Error: boom"
 
 
 def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
@@ -1658,6 +2119,98 @@ def test_save_history_deletes_session_resurrected_by_concurrent_clear(monkeypatc
 
     asyncio.run(_run())
     mock_delete.assert_called_once_with(42)
+
+
+def test_sync_manual_edit_reports_failure_via_on_sync_failed(tmp_path, monkeypatch):
+    """A failed auto-save (e.g. disk full) used to be log-only — a real
+    data-loss risk with zero user-visible signal. It must now surface via
+    the on_sync_failed callback (wired to the sidebar's status bar in
+    desktop_app.py)."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    grc = tmp_path / "f.grc"
+    grc.write_text("data")
+    (tmp_path / ".grc_agent").mkdir()
+
+    fg = MagicMock()
+    da = MagicMock()
+    da._flow_graph = fg
+    page = MagicMock()
+    page.file_path = str(grc)
+    page.drawing_area = da
+    window = MagicMock()
+    window.current_page = page
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = window
+    cm.last_synced_export_hash = "PREVIOUS"
+    cm.last_disk_hash = "SAME"
+
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", lambda _: "CURRENT")
+    monkeypatch.setattr("grc_agent.native_canvas._sha256_file", lambda _: "SAME")
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("grc_agent.native_canvas.write_flow_graph_atomic", _boom)
+
+    failures = []
+    cm.on_sync_failed = lambda msg: failures.append(msg)
+
+    cm.sync_manual_edit()
+
+    assert failures, "on_sync_failed was not called on a failed auto-save"
+    assert "disk full" in failures[0]
+
+
+def test_sync_manual_edit_reports_stale_disk_conflict_via_on_sync_failed(tmp_path, monkeypatch):
+    """A stale-disk conflict (another program changed the file on disk since
+    grc-agent last read it) used to be silently skipped (debug-log only,
+    unlike the exception branch a few lines below it) — the safety-net poll
+    would keep re-attempting and re-skipping the same edit forever with zero
+    indication anything was wrong. Must now surface via on_sync_failed too."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    grc = tmp_path / "f.grc"
+    grc.write_text("data")
+    (tmp_path / ".grc_agent").mkdir()
+
+    fg = MagicMock()
+    da = MagicMock()
+    da._flow_graph = fg
+    page = MagicMock()
+    page.file_path = str(grc)
+    page.drawing_area = da
+    window = MagicMock()
+    window.current_page = page
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = window
+    cm.last_synced_export_hash = "PREVIOUS"
+    cm.last_disk_hash = "ORIGINAL_ON_DISK"
+
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", lambda _: "CURRENT")
+    # Simulate another program having changed the file on disk since we last read it.
+    monkeypatch.setattr("grc_agent.native_canvas._sha256_file", lambda _: "CHANGED_BY_SOMEONE_ELSE")
+
+    write_calls = []
+    monkeypatch.setattr(
+        "grc_agent.native_canvas.write_flow_graph_atomic",
+        lambda *a, **k: write_calls.append((a, k)),
+    )
+
+    failures = []
+    cm.on_sync_failed = lambda msg: failures.append(msg)
+
+    cm.sync_manual_edit()
+
+    assert not write_calls, "must not overwrite a file that changed on disk underneath us"
+    assert failures, "on_sync_failed was not called on a stale-disk conflict"
+    assert "changed on disk" in failures[0]
 
 
 def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
@@ -1886,6 +2439,27 @@ def test_deserialize_messages_logs_on_malformed_json(caplog):
     )
 
 
+def test_save_session_does_not_resurrect_deleted_session(tmp_path, monkeypatch):
+    """Regression: save_session used to silently fall through to an INSERT
+    (under a brand-new row id) whenever the given session_id no longer
+    existed — e.g. a per-row delete (_on_delete_recent_session) or Clear
+    History racing an in-flight save dispatched before the deletion. Must
+    now skip the write and return None instead of resurrecting it."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.db import delete_session, get_recent_sessions, save_session
+
+    f = tmp_path / "g.grc"
+    f.touch()
+    sid = save_session(None, str(f), [])
+    delete_session(sid)
+
+    result = save_session(sid, str(f), [])
+
+    assert result is None, "must signal 'skipped', not fabricate a new id"
+    assert get_recent_sessions() == [], "the deleted session must not reappear under a new row"
+
+
 def test_get_recent_sessions_drops_blob_and_bounds(tmp_path, monkeypatch):
     """DB-3 / UI-4 regression: the recent-sessions list omits the heavy
     messages blob and is bounded by a SQL LIMIT rather than trimming the whole
@@ -2050,6 +2624,40 @@ def test_lite_web_search_logs_selector_drift(monkeypatch, caplog):
     )
 
 
+def test_apply_canvas_zoom_delegates_to_native_drawing_area_methods():
+    """Regression: Ctrl+Plus/Minus/0 must delegate to GRC's own
+    DrawingArea.zoom_in()/zoom_out()/reset_zoom() instead of hand-rolling
+    zoom math — GRC's own View menu triggers these same native methods for
+    the identical accelerators, so a hand-rolled reimplementation here would
+    silently diverge (previously: additive +/-0.1 clamped 0.5-3.0 here vs.
+    native multiplicative x1.2 clamped 0.1-5.0), making keyboard zoom and
+    menu zoom disagree."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.desktop_app import _apply_canvas_zoom
+
+    canvas = MagicMock()
+    da = MagicMock()
+    canvas.drawing_area = da
+
+    _apply_canvas_zoom(canvas, "in")
+    da.zoom_in.assert_called_once()
+    da.zoom_out.assert_not_called()
+    da.reset_zoom.assert_not_called()
+
+    _apply_canvas_zoom(canvas, "out")
+    da.zoom_out.assert_called_once()
+
+    _apply_canvas_zoom(canvas, "reset")
+    da.reset_zoom.assert_called_once()
+
+    # The hand-rolled math this replaced used to write zoom_factor directly —
+    # confirm the delegated version never touches it, only calls the native methods.
+    da.zoom_factor = "untouched-sentinel"
+    _apply_canvas_zoom(canvas, "in")
+    assert da.zoom_factor == "untouched-sentinel"
+
+
 def test_window_keypress_editable_propagation():
     from unittest.mock import MagicMock
 
@@ -2086,6 +2694,68 @@ def test_window_keypress_editable_propagation():
     entry.select_region.assert_called_once_with(0, -1)
 
 
+def test_build_app_shows_fatal_error_when_gnuradio_missing(monkeypatch):
+    """Regression: a missing/broken GNU Radio install must show a friendly
+    Gtk.MessageDialog (via _show_fatal_error) and exit cleanly, instead of a
+    raw traceback — this is the fix for the GUI-only "friendly startup
+    failures" requirement, and previously had zero test coverage."""
+    from unittest.mock import MagicMock
+
+    import grc_agent.desktop_app as desktop_app
+
+    def _boom():
+        raise ModuleNotFoundError("No module named 'gnuradio'")
+
+    monkeypatch.setattr(desktop_app, "get_gui_platform", _boom)
+    fatal = MagicMock()
+    monkeypatch.setattr(desktop_app, "_show_fatal_error", fatal)
+
+    with pytest.raises(SystemExit):
+        desktop_app.build_app()
+
+    fatal.assert_called_once()
+    title, message = fatal.call_args[0]
+    assert "gnu radio" in title.lower() or "gnuradio" in message.lower()
+    assert "gnuradio" in message.lower()
+
+
+def test_build_app_shows_fatal_error_when_window_not_found(monkeypatch):
+    """Regression: if GRC's own MainWindow can't be found after activation,
+    build_app() must show a friendly dialog (via _show_fatal_error) and exit
+    cleanly — matching the fix that replaced a bare print() at this exact
+    branch (previously the only console-only fatal path left, violating the
+    GUI-only rule)."""
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    import grc_agent.desktop_app as desktop_app
+
+    monkeypatch.setattr(desktop_app, "get_gui_platform", lambda: object())
+
+    class _FakeApplication:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def register(self, *_args, **_kwargs):
+            pass
+
+        def activate(self):
+            pass
+
+    monkeypatch.setattr(desktop_app, "gui_application_cls", lambda: _FakeApplication)
+    monkeypatch.setattr(Gtk.Application, "get_default", staticmethod(lambda: None))
+    fatal = MagicMock()
+    monkeypatch.setattr(desktop_app, "_show_fatal_error", fatal)
+
+    with pytest.raises(SystemExit):
+        desktop_app.build_app()
+
+    fatal.assert_called_once()
+    title, _message = fatal.call_args[0]
+    assert "window" in title.lower()
+
+
 def _find_buttons(widget, gtk_button_cls):
     found = []
     if isinstance(widget, gtk_button_cls):
@@ -2096,39 +2766,16 @@ def _find_buttons(widget, gtk_button_cls):
     return found
 
 
-def test_prompt_fix_error_adds_yes_no_row():
-    from gi.repository import Gtk
-
-    from grc_agent.chat_sidebar import ChatSidebar
-
-    sidebar = ChatSidebar()
-    sidebar.prompt_fix_error("Traceback (most recent call last):\nZeroDivisionError")
-
-    rows = sidebar._listbox.get_children()
-    assert len(rows) == 1
-
-    buttons = _find_buttons(rows[0], Gtk.Button)
-    labels = {b.get_label() for b in buttons}
-    assert labels == {"Yes, fix it", "No thanks"}
-
-
-def test_prompt_fix_error_yes_sends_message_with_log(monkeypatch):
+def test_notify_run_failure_dispatches_short_notification(monkeypatch):
+    """notify_run_failure sends a SHORT notification (return code + tool hint)
+    — NOT the full log. The full log is read on demand via get_run_log."""
     import asyncio
     from unittest.mock import MagicMock
-
-    from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     sidebar.send_message = MagicMock()
-
-    sidebar.prompt_fix_error("ZeroDivisionError: division by zero")
-
-    row = sidebar._listbox.get_children()[0]
-    buttons = _find_buttons(row, Gtk.Button)
-    yes_btn = next(b for b in buttons if b.get_label() == "Yes, fix it")
-    no_btn = next(b for b in buttons if b.get_label() == "No thanks")
 
     captured = {}
 
@@ -2138,40 +2785,49 @@ def test_prompt_fix_error_yes_sends_message_with_log(monkeypatch):
 
     monkeypatch.setattr("grc_agent.chat_sidebar.asyncio.ensure_future", fake_ensure_future)
 
-    yes_btn.clicked()
+    sidebar.notify_run_failure(1, "RuntimeError: No RTL-SDR devices found!\n" * 100)
 
-    assert not yes_btn.get_sensitive()
-    assert not no_btn.get_sensitive()
     assert "coro" in captured
-
-    # _chat_task is None on a fresh sidebar, so the coroutine sends right away.
+    # _chat_task is None on a fresh sidebar, so the coroutine sends right away
     asyncio.run(captured["coro"])
     sidebar.send_message.assert_called_once()
     sent_text = sidebar.send_message.call_args.args[0]
-    assert "ZeroDivisionError: division by zero" in sent_text
+    # The notification must contain the return code
+    assert "return code 1" in sent_text
+    # The notification must NOT contain the full log — the agent reads it
+    # via get_run_log tool
+    assert "RTL-SDR" not in sent_text
+    # Must mention get_run_log so the agent knows what tool to call
+    assert "get_run_log" in sent_text
 
 
-def test_prompt_fix_error_no_does_not_send():
+def test_notify_run_failure_does_not_send_when_busy(monkeypatch):
+    """If the agent is mid-turn, the notification queues behind it
+    via _send_fix_when_free (which awaits the in-flight task)."""
     from unittest.mock import MagicMock
-
-    from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     sidebar.send_message = MagicMock()
 
-    sidebar.prompt_fix_error("some error log")
+    captured = {}
 
-    row = sidebar._listbox.get_children()[0]
-    buttons = _find_buttons(row, Gtk.Button)
-    yes_btn = next(b for b in buttons if b.get_label() == "Yes, fix it")
-    no_btn = next(b for b in buttons if b.get_label() == "No thanks")
+    def fake_ensure_future(coro):
+        captured["coro"] = coro
+        return MagicMock()
 
-    no_btn.clicked()
+    monkeypatch.setattr("grc_agent.chat_sidebar.asyncio.ensure_future", fake_ensure_future)
 
-    assert not yes_btn.get_sensitive()
-    assert not no_btn.get_sensitive()
+    # Simulate a busy agent
+    sidebar._busy = True
+    sidebar._chat_task = MagicMock()
+    sidebar._chat_task.done.return_value = False
+
+    sidebar.notify_run_failure(1, "some error")
+    # The coroutine was dispatched but won't call send_message until
+    # _chat_task is done — verify it was captured but not yet run
+    assert "coro" in captured
     sidebar.send_message.assert_not_called()
 
 
@@ -2189,10 +2845,42 @@ def test_send_fix_when_free_waits_for_in_flight_turn():
             await asyncio.sleep(0.01)
 
         sidebar._chat_task = asyncio.ensure_future(_pending())
-        await sidebar._send_fix_when_free("fix prompt")
+        # origin_page = current_page (None without a flowgraph proxy) so the
+        # post-await "did the user switch tabs?" guard passes through to
+        # send_message. H2 regression coverage lives in a separate test.
+        await sidebar._send_fix_when_free("fix prompt", sidebar.current_page)
 
     asyncio.run(_run())
     sidebar.send_message.assert_called_once_with("fix prompt")
+
+
+def test_send_fix_when_free_aborts_when_user_switched_tabs():
+    """H2 regression: if the user switches flowgraph tabs while the fix
+    bubble is awaiting an in-flight chat task, _send_fix_when_free must NOT
+    dispatch the fix prompt to the now-current (different) flowgraph."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.send_message = MagicMock()
+
+    async def _run():
+        async def _pending():
+            await asyncio.sleep(0.01)
+
+        sidebar._chat_task = asyncio.ensure_future(_pending())
+        # Capture a "page A" identity; simulate the user switching to a
+        # different page during the await by having current_page return a
+        # distinct object afterwards.
+        origin_page = object()
+        sidebar._flowgraph_proxy = MagicMock()
+        sidebar._flowgraph_proxy._canvas_manager.current_page = object()
+        await sidebar._send_fix_when_free("fix prompt", origin_page)
+
+    asyncio.run(_run())
+    sidebar.send_message.assert_not_called()
 
 
 
