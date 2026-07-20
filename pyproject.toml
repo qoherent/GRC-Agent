@@ -44,6 +44,7 @@ dependencies = [
     "grandalf>=0.8",
     "gbulb>=0.6.6",
     "markdown-it-py>=3.0.0",
+    "ddgs>=9.0",
 ]
 
 [project.optional-dependencies]

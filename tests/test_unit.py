@@ -2586,42 +2586,40 @@ def test_prune_history_removed():
     assert not hasattr(agent, "prune_history")
 
 
-def test_lite_web_search_logs_selector_drift(monkeypatch, caplog):
-    """ADPT-8: a 200 response that parses zero result selectors must be logged
-    (so selector drift is diagnosable, not masked as a plain 'no results'), and
-    the empty/ mismatched parse must not be silently truncated."""
+def test_lite_web_search_returns_results_for_real_query():
+    """The ddgs-based search returns real results for a normal query.
+    No mocking — tests the live backend."""
     import asyncio
-    import logging
-
-    import httpx
 
     from grc_agent.adapter import search
 
-    class FakeResp:
-        status_code = 200
-        text = "<html><body>page loaded, no result-link anchors here</body></html>"
+    result = asyncio.run(search.lite_web_search("GNU Radio tutorial"))
+    assert not result.startswith("No web results")
+    assert not result.startswith("Web search failed")
+    assert len(result) > 100
 
-        def raise_for_status(self) -> None:
-            pass
 
-    class FakeClient:
-        async def __aenter__(self):
+def test_lite_web_search_handles_ddgs_failure_gracefully(monkeypatch):
+    """When the ddgs library raises (network error, rate limit, etc.),
+    the search returns a 'Web search failed' message instead of crashing."""
+    import asyncio
+
+    from grc_agent.adapter import search
+
+    class _BrokenDDGS:
+        def __enter__(self):
             return self
 
-        async def __aexit__(self, *_args):
+        def __exit__(self, *_a):
             return False
 
-        async def get(self, _url, **_kwargs):
-            return FakeResp()
+        def text(self, *_a, **_kw):
+            raise RuntimeError("ddgs backend down")
 
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *_args, **_kwargs: FakeClient())
-    with caplog.at_level(logging.WARNING):
-        result = asyncio.run(search.lite_web_search("anything"))
-    assert "No web results" in result
-    assert any(
-        "drift" in r.message.lower() or "selector" in r.message.lower()
-        for r in caplog.records
-    )
+    import ddgs
+    monkeypatch.setattr(ddgs, "DDGS", _BrokenDDGS)
+    result = asyncio.run(search.lite_web_search("anything"))
+    assert "Web search failed" in result
 
 
 def test_apply_canvas_zoom_delegates_to_native_drawing_area_methods():
