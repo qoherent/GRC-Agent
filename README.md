@@ -83,7 +83,7 @@ flowchart TB
 ### 1. Prerequisites
 - **[GNU Radio 3.10](https://wiki.gnuradio.org/index.php?title=InstallingGR)**
   with Python bindings (CI and development are done against `3.10.9.2` on
-  Ubuntu 24.04 — other 3.10.x builds are likely fine, 3.11+/4.x are untested).
+  Ubuntu 24.04 — other 3.10.x builds are likely fine).
 - **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**.
 
 ### 2. Clone & Setup
