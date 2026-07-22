@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "grc-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Autonomous AI agent for GNU Radio Companion — reasons over, edits, and validates .grc flowgraphs, built on PydanticAI."
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "AGPL-3.0-only"}

@@ -9,6 +9,18 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-22
+
+### Added
+- Native agent context usage indicator under text input box displaying exact input context tokens and dynamic provider-reported maximum model context limits.
+- Dynamic API model context resolution (`resolve_model_context_length`) querying `/api/show` (Ollama / Ollama Cloud) and `/api/v1/models` (OpenRouter) with zero hardcoded lookup tables.
+
+### Fixed
+- Fixed block layout wire criss-crossing and backward loops by enforcing topological rank sorting on `add_blocks` and `min_allowed_x` downstream placement boundaries in `layout.py`.
+- Fixed thinking expander sizing to expand 100% width and label transition ("Thinking..." -> "Thinked").
+- Fixed quick prompt chip handler and recent sessions list rendering in Welcome Screen.
+- Attached `_graph_modified_since_last_run` warning to `get_run_log` when called post-edit before a fresh run.
+
 ## [0.1.0] - 2026-07-18
 
 ### Added

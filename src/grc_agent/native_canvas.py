@@ -30,11 +30,12 @@ _log = logging.getLogger(__name__)
 _POLL_FULL_CHECK_EVERY = 10  # ~15s at the 1.5s poll interval
 
 from grc_agent.adapter import (
+    _atomic_write_text,
+    _serialize_flow_graph,
     flow_graph_content_hash,
     get_blocks_panel_visibility,
     push_undo_snapshot,
     set_blocks_panel_visibility,
-    write_flow_graph_atomic,
 )
 
 
@@ -90,6 +91,9 @@ class NativeFlowgraphProxy:
     async def notify_edit(self) -> dict:
         cm = object.__getattribute__(self, "_canvas_manager")
         cm.after_agent_edit()
+        monitor = object.__getattribute__(self, "_exec_monitor")
+        if monitor is not None and hasattr(monitor, "notify_graph_modified"):
+            monitor.notify_graph_modified()
         return {"ok": True}
 
 
@@ -121,20 +125,10 @@ class NativeCanvasManager:
         self.pan_start_y = 0.0
         self.pan_start_hadj = 0.0
         self.pan_start_vadj = 0.0
-        self._connected_drawing_areas: set[int] = set()
         # Fired on switch-page (current page actually changed) — wired by
         # desktop_app.py to _sync_sidebar, which cancels any in-flight chat
         # and re-binds the sidebar to the new current page's session.
         self.on_graphs_changed: Callable[[], None] | None = None
-        # Fired on page-added / page-removed (the set of open tabs changed,
-        # but the current tab hasn't necessarily changed). Distinct from
-        # on_graphs_changed because background tab add/remove must NOT
-        # cancel the current chat (M1) — only switch-page (and
-        # page-removed-of-the-current-page, which GTK follows with a
-        # switch-page) should. Left as None (no-op) — the current page
-        # doesn't change on background tab events, so no badge/sidebar
-        # refresh is needed.
-        self.on_graph_list_changed: Callable[[], None] | None = None
         self.on_sync_failed: Callable[[str], None] | None = None
 
     @property
@@ -207,6 +201,10 @@ class NativeCanvasManager:
             page.saved = False
             if hasattr(page, "state_cache"):
                 page.state_cache.save_new_state(fg.export_data())
+                # save_new_state bumps the version tuple — re-derive the
+                # poll's cheap-gate baseline so the next tick doesn't
+                # needlessly run a full export-hash comparison.
+                self._last_state_cache_version = self._state_cache_version(page)
             if hasattr(self.window, "update"):
                 self.window.update()
 
@@ -259,7 +257,7 @@ class NativeCanvasManager:
                                 "Reload it before continuing."
                             )
                         return
-                    write_flow_graph_atomic(fg, Path(self.path))
+                    _atomic_write_text(_serialize_flow_graph(fg), Path(self.path))
                     self.last_disk_hash = _sha256_file(self.path)
                     self.last_synced_export_hash = flow_graph_content_hash(fg)
                     push_undo_snapshot(fg, Path(self.path))
@@ -382,11 +380,8 @@ class NativeCanvasManager:
         # A new tab was appended — could be the foreground OR a background
         # tab. If it's foreground, switch-page will fire next and run the
         # full sync (chat-cancel + rebind). If it's background, the current
-        # chat must NOT be cancelled — call the light list-change callback
-        # instead of on_graphs_changed (M1).
+        # chat must NOT be cancelled (M1).
         self._setup_drawing_area(child)
-        if self.on_graph_list_changed:
-            self.on_graph_list_changed()
 
     def _on_page_removed(self, *_args: Any) -> None:
         # Closing a background tab does NOT change the current page — chat
@@ -394,8 +389,7 @@ class NativeCanvasManager:
         # AND THEN switch-page, so the chat-cancel correctly happens via
         # the switch-page handler. Either way, this handler must NOT
         # itself cancel the chat (M1).
-        if self.on_graph_list_changed:
-            self.on_graph_list_changed()
+        pass
 
     def _on_button_press(self, _widget: Any, event: Any) -> bool:
         if event.button == 2:

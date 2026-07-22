@@ -12,67 +12,24 @@ import sqlite_vec
 from openai import APIConnectionError, OpenAI
 
 from grc_agent._paths import vectors_dir
+from grc_agent.settings import get_env_value, load_settings
 
 _log = logging.getLogger(__name__)
 
-# settings.py's load_settings()/get_env_value() each re-parse the whole .env
-# file from disk on every call with no caching. rag.py's embedding path calls
-# them repeatedly per query/chunk (get_db_and_model, _embed_endpoint,
-# embed_query, embed_document all call in), which adds up to thousands of
-# redundant .env parses over a single ingestion run. Cached here, gated on the
-# file's mtime (a cheap stat(), not a full parse) so a live settings change —
-# e.g. save_settings() called again within the same process, as the isolation
-# tests do — still invalidates the cache instead of pinning it to whatever was
-# first read.
-_settings_cache: tuple[float, dict[str, Any]] | None = None
-_env_value_cache: tuple[float, dict[str, str | None]] | None = None
-
-
-def _env_mtime() -> float:
-    from grc_agent.settings import env_path
-
-    try:
-        return env_path().stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def _cached_load_settings() -> dict[str, Any]:
-    global _settings_cache
-    mtime = _env_mtime()
-    if _settings_cache is None or _settings_cache[0] != mtime:
-        from grc_agent.settings import load_settings
-
-        _settings_cache = (mtime, load_settings())
-    return _settings_cache[1]
-
-
-def _cached_get_env_value(key: str) -> str | None:
-    global _env_value_cache
-    mtime = _env_mtime()
-    if _env_value_cache is None or _env_value_cache[0] != mtime:
-        _env_value_cache = (mtime, {})
-    cache = _env_value_cache[1]
-    if key not in cache:
-        from grc_agent.settings import get_env_value
-
-        cache[key] = get_env_value(key)
-    return cache[key]
-
 
 def get_db_and_model(domain: str) -> tuple[str, str | None]:
-    cfg = _cached_load_settings()
+    cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
     if provider == "openrouter":
-        model = _cached_get_env_value("OPENROUTER_EMBEDDING_MODEL") or os.getenv(
+        model = get_env_value("OPENROUTER_EMBEDDING_MODEL") or os.getenv(
             "OPENROUTER_EMBEDDING_MODEL", "perplexity/pplx-embed-v1-0.6b"
         )
         db_name = f"{domain}_openrouter.db"
     else:
         # ollama and ollama_cloud both use local Ollama for embeddings
         # (Ollama Cloud's API doesn't expose /v1/embeddings)
-        model = _cached_get_env_value("OLLAMA_EMBEDDING_MODEL") or os.getenv(
+        model = get_env_value("OLLAMA_EMBEDDING_MODEL") or os.getenv(
             "OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest"
         )
         db_name = f"{domain}_ollama.db"
@@ -84,11 +41,11 @@ def get_db_and_model(domain: str) -> tuple[str, str | None]:
 def _embed_endpoint() -> tuple[str, str | None]:
     """Shared base_url/api_key selection for both query- and document-side
     embedding calls."""
-    cfg = _cached_load_settings()
+    cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
     if provider == "openrouter":
-        key = _cached_get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
+        key = get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
         return "https://openrouter.ai/api/v1", key
     # ollama and ollama_cloud both use local Ollama for embeddings
     return "http://localhost:11434/v1", "not-needed"
@@ -147,13 +104,14 @@ def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[f
 
 
 def embed_query(query: str) -> list[float]:
-    cfg = _cached_load_settings()
+    cfg = load_settings()
     provider = cfg.get("provider", "ollama")
     use_prefix = provider != "openrouter"
 
     _, model = get_db_and_model("catalog")
     result = _embed(model, ("task: search result | query: " + query) if use_prefix else query)
-    assert isinstance(result, list) and (not result or isinstance(result[0], float))
+    if not isinstance(result, list) or (result and not isinstance(result[0], float)):
+        raise TypeError(f"Unexpected embedding response shape from _embed: {type(result)}")
     return result  # type: ignore[return-value]
 
 
@@ -180,13 +138,14 @@ def _cap_words(text: str, max_words: int, *, label: str = "") -> str:
 
 
 def embed_document(text: str, model: str) -> list[float]:
-    cfg = _cached_load_settings()
+    cfg = load_settings()
     provider = cfg.get("provider", "ollama")
     use_prefix = provider != "openrouter"
 
     body = text if not use_prefix else _DOCUMENT_PREFIX + text
     result = _embed(model, body)
-    assert isinstance(result, list) and (not result or isinstance(result[0], float))
+    if not isinstance(result, list) or (result and not isinstance(result[0], float)):
+        raise TypeError(f"Unexpected embedding response shape from _embed: {type(result)}")
     return result  # type: ignore[return-value]
 
 
@@ -338,6 +297,7 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
             conn.close()
 
             reason = None
+            dim_verified = True
             if not fts_exists:
                 # Pre-lexical-fallback DB, built before FTS5 support existed.
                 reason = "missing lexical (FTS5) fallback index"
@@ -345,7 +305,24 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
                 match = re.search(r"float\[(\d+)\]", sql_row[0])
                 if match:
                     db_dim = int(match.group(1))
-                    model_dim = _get_embedding_dim(model)
+                    try:
+                        model_dim = _get_embedding_dim(model)
+                    except Exception as exc:
+                        # Embedding backend unreachable — can't verify the dim.
+                        # Skip the dim comparison (metadata checks below still
+                        # validate embedding_model + corpus_version) but do NOT
+                        # write _FRESHNESS_CACHE for this path, so the next
+                        # query re-attempts the dim check once the backend is back.
+                        _log.warning(
+                            "%s vector DB: could not verify embedding dimension "
+                            "(backend unreachable: %s); skipping dim check",
+                            domain,
+                            exc,
+                        )
+                        dim_verified = False
+                        model_dim = db_dim
+                    else:
+                        dim_verified = True
                     if model_dim != db_dim:
                         reason = f"dimension mismatch (DB has {db_dim}, model has {model_dim})"
                     elif not meta:
@@ -374,10 +351,16 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
             if reason:
                 print(f"[grc-agent] {domain} vector DB stale: {reason}. Rebuilding...")
                 os.remove(db_path)
+            elif not dim_verified:
+                # DB is valid but the embedding dim couldn't be verified
+                # (backend was unreachable). Don't cache freshness — the next
+                # query re-attempts the dim check once the backend is back.
+                return
             else:
                 _FRESHNESS_CACHE[domain] = (db_path, model)
                 return
-        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+            _log.warning("%s vector DB unreadable (%s); removing and rebuilding", domain, exc)
             with contextlib.suppress(OSError):
                 os.remove(db_path)
 
@@ -440,7 +423,7 @@ _FTS_TOKEN_RE = re.compile(r"\w+")
 _FTS_MAX_TOKENS = 32
 
 
-def _fts_query_string(q: str) -> str | None:
+def _fts_query_string(q: str) -> tuple[str, bool] | None:
     """Build a permissive FTS5 MATCH expression from free-text input.
 
     Quotes each token so punctuation in the query (e.g. 'samp_rate?') can't
@@ -449,7 +432,7 @@ def _fts_query_string(q: str) -> str | None:
     primary ranking mechanism, so broad matching beats precision here.
     Deduplicates (case-insensitive, order-preserving) and caps at
     _FTS_MAX_TOKENS before building the expression. Returns None if the query
-    has no word tokens (nothing to search on).
+    has no word tokens (nothing to search on), otherwise ``(match_expr, was_capped)``.
     """
     tokens = _FTS_TOKEN_RE.findall(q)
     if not tokens:
@@ -461,7 +444,8 @@ def _fts_query_string(q: str) -> str | None:
         if key not in seen:
             seen.add(key)
             deduped.append(t)
-    return " OR ".join(f'"{t}"' for t in deduped[:_FTS_MAX_TOKENS])
+    was_capped = len(deduped) > _FTS_MAX_TOKENS
+    return (" OR ".join(f'"{t}"' for t in deduped[:_FTS_MAX_TOKENS]), was_capped)
 
 
 def _lexical_fallback_message(embed_error: str | None) -> str:
@@ -543,7 +527,8 @@ def _query_index(
             output_truncated = len(vec_rows) > limit
             search_mode = "vector"
         else:
-            fts_query = _fts_query_string(q)
+            fts_result = _fts_query_string(q)
+            fts_query = fts_result[0] if fts_result else None
             fts_rows = (
                 conn.execute(
                     f"SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ? "
@@ -557,6 +542,9 @@ def _query_index(
             distance_by_rowid = {}
             output_truncated = len(fts_rows) > limit
             search_mode = "lexical"
+            if fts_result and fts_result[1]:
+                extra_note = f" (lexical query capped to {_FTS_MAX_TOKENS} tokens)"
+                embed_error = (embed_error or "") + extra_note if embed_error else extra_note.strip()
 
         id_by_rowid: dict[int, Any] = {}
         if ranked_rowids:

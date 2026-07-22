@@ -89,6 +89,105 @@ def _esc(text: str) -> str:
     return GLib.markup_escape_text(text, -1)
 
 
+_MAX_THINKING_DISPLAY_CHARS = 4000
+_MAX_TOOL_DISPLAY_CHARS = 8000
+
+
+def _format_thinking_display(text: str, max_chars: int = _MAX_THINKING_DISPLAY_CHARS) -> str:
+    """Format thinking text for Gtk.Label display. Massive thinking output (e.g. 50k+
+    chars from deep reasoning models) forces Pango line wrapping to recalculate over the
+    entire string, freezing GTK layout and spiking CPU. Truncating display text to a
+    bounded window keeps Pango line-wrapping sub-millisecond without affecting full raw text."""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return f"{text[:half]}\n\n... [thinking truncated for display ({len(text)} chars total)] ...\n\n{text[-half:]}"
+
+
+def _format_tool_display(text: str, max_chars: int = _MAX_TOOL_DISPLAY_CHARS) -> str:
+    """Format tool argument/result text for Gtk.Expander display labels, keeping Pango bounded."""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return f"{text[:half]}\n\n... [truncated {len(text) - max_chars} chars] ...\n\n{text[-half:]}"
+
+
+_context_length_cache: dict[tuple[str, str], int] = {}
+
+
+def format_tokens(n: int) -> str:
+    """Format token count for display (e.g. 1.2k, 14.7k, 128k, 1M)."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k".replace(".0k", "k")
+    return str(n)
+
+
+def resolve_model_context_length(provider: str, model: str) -> int | None:
+    """Dynamically query the active provider's API for the model's exact context length.
+
+    Queries:
+    - Ollama / Ollama Cloud: POST {base_url}/api/show with {"name": model} -> reads model_info context_length
+    - OpenRouter: GET https://openrouter.ai/api/v1/models -> reads context_length for the model
+
+    Cached in-memory per (provider, model) pair. Returns None if unresolvable,
+    so callers render exact token count without hardcoded guesses.
+    """
+    key = (provider or "", model or "")
+    if key in _context_length_cache:
+        return _context_length_cache[key]
+
+    if not provider or not model:
+        return None
+
+    import httpx
+    from grc_agent.settings import get_env_value
+
+    try:
+        if provider in ("ollama", "ollama_cloud"):
+            base_url = "https://ollama.com" if provider == "ollama_cloud" else "http://localhost:11434"
+            api_key = get_env_value("OLLAMA_CLOUD_API_KEY") if provider == "ollama_cloud" else ""
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            url = f"{base_url}/api/show"
+            with httpx.Client(timeout=3.0) as client:
+                r = client.post(url, json={"name": model}, headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    for k, v in data.get("model_info", {}).items():
+                        if "context_length" in k and isinstance(v, (int, float)):
+                            ctx_len = int(v)
+                            _context_length_cache[key] = ctx_len
+                            return ctx_len
+                    params = str(data.get("parameters", ""))
+                    for line in params.splitlines():
+                        if "num_ctx" in line:
+                            parts = line.split()
+                            if len(parts) >= 2 and parts[1].isdigit():
+                                ctx_len = int(parts[1])
+                                _context_length_cache[key] = ctx_len
+                                return ctx_len
+
+        elif provider == "openrouter":
+            api_key = get_env_value("OPENROUTER_API_KEY") or ""
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            with httpx.Client(timeout=3.0) as client:
+                r = client.get("https://openrouter.ai/api/v1/models", headers=headers)
+                if r.status_code == 200:
+                    for m in r.json().get("data", []):
+                        m_id = m.get("id", "")
+                        if m_id == model or m_id.endswith(model):
+                            ctx_len = m.get("context_length")
+                            if isinstance(ctx_len, (int, float)):
+                                res = int(ctx_len)
+                                _context_length_cache[key] = res
+                                return res
+    except Exception as e:
+        _log.debug("Failed to resolve dynamic context length for provider=%s model=%s: %s", provider, model, e)
+
+    return None
+
+
 def _format_turn_error(e: Exception) -> str:
     """User-facing message for a failed agent turn (_run_agent_turn's catch-all).
     ModelHTTPError carries a status code and optional body/model_name that no
@@ -171,12 +270,6 @@ _CHAT_CSS = b"""
     border: 1px solid #e0e0e0;
     border-radius: 8px;
     padding: 8px 10px;
-}
-.chat-confirm-box {
-    background: #fff8e1;
-    border: 1px solid #ffe082;
-    border-radius: 8px;
-    padding: 10px 12px;
 }
 .chat-tool-expander {
     background: #ffffff;
@@ -417,6 +510,7 @@ class _StreamCtx:
         "text_acc",
         "text_dirty",
         "think_body",
+        "think_expander",
         "think_acc",
         "think_dirty",
         "tools",
@@ -429,7 +523,8 @@ class _StreamCtx:
         self.text_lbl: Gtk.Label | None = None
         self.text_acc = ""
         self.text_dirty = False
-        self.think_body: Gtk.Label | None = None
+        self.think_body: Any = None
+        self.think_expander: Gtk.Expander | None = None
         self.think_acc = ""
         self.think_dirty = False
         self.tools: dict[str, Gtk.Expander] = {}
@@ -489,10 +584,6 @@ class ChatSidebar(Gtk.Box):
         # session can't resurrect.
         self._clear_generation: int = 0
         self._chat_task: asyncio.Task | None = None
-        # True while an inline Yes/No confirm bubble (prompt_fix_error) is
-        # awaiting a response — blocks _refresh_welcome_times from wiping the
-        # listbox (and the pending bubble with it) out from under the user.
-        self._pending_confirm = False
         # Set by shutting_down() (called from desktop_app.py's _shutdown)
         # just before stop_chat(). _run_agent_turn's finally block checks
         # this to skip widget operations on widgets that are mid-destroy
@@ -516,7 +607,10 @@ class ChatSidebar(Gtk.Box):
         self._blocks_toggle.get_style_context().add_class("chat-side-toggle")
         self._blocks_toggle.set_valign(Gtk.Align.FILL)
         self._blocks_arrow = Gtk.Image.new_from_icon_name("pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
+        self._blocks_toggle.set_valign(Gtk.Align.FILL)
+        self._blocks_arrow = Gtk.Image.new_from_icon_name("pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
         self._blocks_toggle.set_image(self._blocks_arrow)
+        self._blocks_toggle.set_tooltip_text("Toggle GRC block library")
         self._blocks_toggle.connect("clicked", lambda *_: self.emit("toggle-blocks-panel"))
         self._blocks_expanded = False
         self.pack_start(self._blocks_toggle, False, False, 0)
@@ -530,6 +624,8 @@ class ChatSidebar(Gtk.Box):
         self._build_status_bar(content)
         self.pack_start(content, True, True, 0)
 
+        self.connect("key-press-event", self._on_key_press_event)
+
         # Refresh relative timestamps ("2m ago") on the recent-sessions list
         # while the welcome screen is visible. Re-renders only when idle and
         # empty so live-streaming bubbles are never wiped.
@@ -539,6 +635,12 @@ class ChatSidebar(Gtk.Box):
         # ingest) and surface progress in the status bar. Cheap dict reads; the
         # build itself runs off the main loop via asyncio.to_thread.
         GLib.timeout_add(500, self._poll_indexing)
+
+    def _on_key_press_event(self, _widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
+        if (event.state & Gdk.ModifierType.CONTROL_MASK) and event.keyval in (Gdk.KEY_comma, Gdk.KEY_Comma):
+            self._open_settings()
+            return True
+        return False
 
     def _build_toolbar(self, content: Gtk.Box) -> None:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -556,7 +658,7 @@ class ChatSidebar(Gtk.Box):
             return b
 
         self._new_session_btn = _icon_btn("document-new-symbolic", "New chat session", "new-session-clicked")
-        self._clear_hist_btn = _icon_btn("edit-clear-all-symbolic", "Delete ALL saved chat sessions", cb=self._on_clear_history_clicked)
+        self._clear_hist_btn = _icon_btn("edit-clear-all-symbolic", "Clear conversation history", cb=self._on_clear_history_clicked)
 
         # Active graph badge — ellipsizes so it shrinks with the sidebar
         self._graph_label = Gtk.Label(label="Active Graph: none")
@@ -580,7 +682,7 @@ class ChatSidebar(Gtk.Box):
         bar.pack_start(self._provider_label, True, True, 0)
 
         # Settings
-        self._gear_btn = _icon_btn("preferences-system-symbolic", "Provider / model settings", cb=lambda *_: self._open_settings())
+        self._gear_btn = _icon_btn("preferences-system-symbolic", "Preferences (Ctrl+,)", cb=lambda *_: self._open_settings())
 
         bar.get_style_context().add_class("chat-toolbar")
         content.pack_start(bar, False, False, 0)
@@ -606,8 +708,10 @@ class ChatSidebar(Gtk.Box):
         content.pack_start(self._scrolled, True, True, 0)
 
     def _build_input_area(self, content: Gtk.Box) -> None:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        vbox.set_border_width(4)
+
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.set_border_width(6)
 
         self._entry = Gtk.Entry()
         self._entry.set_placeholder_text("Open a flowgraph in GRC to start chatting...")
@@ -618,14 +722,70 @@ class ChatSidebar(Gtk.Box):
         self._entry.set_sensitive(False)
 
         self._send_btn = Gtk.Button.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
-        self._send_btn.set_tooltip_text("Send")
+        self._send_btn.set_tooltip_text("Send message (Enter)")
         self._send_btn.get_style_context().add_class("chat-send-btn")
         self._send_btn.connect("clicked", self._on_send_clicked)
         self._send_btn.set_sensitive(False)
 
         box.pack_start(self._entry, True, True, 0)
         box.pack_start(self._send_btn, False, False, 0)
-        content.pack_start(box, False, False, 0)
+        vbox.pack_start(box, False, False, 0)
+
+        # Context usage label right under the text input box
+        self._context_label = Gtk.Label()
+        self._context_label.set_xalign(0.0)
+        self._context_label.set_halign(Gtk.Align.START)
+        self._context_label.get_style_context().add_class("chat-context-label")
+        self._context_label.set_margin_start(4)
+        self._context_label.set_margin_top(2)
+        self._context_label.set_margin_bottom(2)
+        vbox.pack_start(self._context_label, False, False, 0)
+
+        content.pack_start(vbox, False, False, 0)
+        self._update_context_label()
+
+    def _update_context_label(self) -> None:
+        """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
+        last_input_tokens = 0
+        total_session_tokens = 0
+        for msg in self._message_history:
+            if msg.__class__.__name__ == "ModelResponse" and hasattr(msg, "usage") and msg.usage:
+                u = msg.usage
+                inp = getattr(u, "input_tokens", 0) or 0
+                if inp:
+                    last_input_tokens = inp
+                total_session_tokens += getattr(u, "total_tokens", 0) or 0
+
+        active_provider = getattr(self, "_active_provider", "") or ""
+        active_model = getattr(self, "_active_model", "") or ""
+        max_context = resolve_model_context_length(active_provider, active_model)
+
+        if not self._message_history or last_input_tokens == 0:
+            if max_context:
+                text = f"<span fgcolor='#888888' size='small'>Context: 0 / {format_tokens(max_context)} tokens</span>"
+            else:
+                text = "<span fgcolor='#888888' size='small'>Context: 0 tokens</span>"
+        else:
+            if max_context:
+                pct = min(100.0, (last_input_tokens / max_context) * 100)
+                color = "#888888" if pct < 75 else ("#d97706" if pct < 90 else "#dc2626")
+                text = (
+                    f"<span fgcolor='{color}' size='small'>"
+                    f"Context: {format_tokens(last_input_tokens)} / {format_tokens(max_context)} tokens ({pct:.0f}%)"
+                    f"</span>"
+                )
+            else:
+                text = f"<span fgcolor='#888888' size='small'>Context: {format_tokens(last_input_tokens)} tokens</span>"
+
+        if hasattr(self, "_context_label"):
+            self._context_label.set_markup(text)
+            self._context_label.set_tooltip_text(
+                f"Active model: {active_model or 'default'}\n"
+                f"Provider: {active_provider or 'unknown'}\n"
+                f"Last turn input context: {last_input_tokens:,} tokens\n"
+                f"Total session tokens: {total_session_tokens:,} tokens\n"
+                f"Max model context: {f'{max_context:,}' if max_context else 'unknown'}"
+            )
 
     def _build_status_bar(self, content: Gtk.Box) -> None:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -876,6 +1036,7 @@ class ChatSidebar(Gtk.Box):
         else:
             ctx.remove_class("is-default")
         self._provider_label.show()
+        self._update_context_label()
 
     def set_flowgraph_proxy(self, proxy: object) -> None:
         self._flowgraph_proxy = proxy
@@ -925,10 +1086,6 @@ class ChatSidebar(Gtk.Box):
             self._chat_task.cancel()
         self._message_history = []
         self._active_session_id = None
-        # The inline Yes/No fix-error bubble is about to be destroyed along
-        # with everything else in the listbox — reset the flag so the
-        # welcome-screen timestamp refresh doesn't stay blocked forever (M4).
-        self._pending_confirm = False
         self._render_history()
 
     def _refresh_welcome_times(self) -> bool:
@@ -936,7 +1093,7 @@ class ChatSidebar(Gtk.Box):
         relative timestamps ("2m ago") stay fresh. Only runs when idle and the
         history is empty (the only state in which the list is visible); never
         disturbs a live chat stream."""
-        if not self._busy and not self._message_history and not self._pending_confirm:
+        if not self._busy and not self._message_history:
             self._render_history()
         return True  # re-arm
 
@@ -947,6 +1104,7 @@ class ChatSidebar(Gtk.Box):
         if not self._message_history:
             self._render_welcome_screen()
             self._listbox.show_all()
+            self._update_context_label()
             return
 
         for msg in self._message_history:
@@ -968,6 +1126,7 @@ class ChatSidebar(Gtk.Box):
                 box = self._start_agent_message()
                 self._render_last_message_rich(box, msg)
         self._scroll_to_bottom(force=True)
+        self._update_context_label()
 
     def _render_welcome_screen(self) -> None:
         # 1. Welcome Card
@@ -991,12 +1150,33 @@ class ChatSidebar(Gtk.Box):
             sub_lbl.set_markup(
                 "<span fgcolor='#666666' size='small'>Ask a question or request a modification for this flowgraph.</span>"
             )
+            welcome_box.pack_start(sub_lbl, False, False, 0)
+
+            # Quick Action Prompt Chips
+            chips_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            chips_box.set_margin_top(4)
+
+            quick_prompts = [
+                ("🔍 Inspect graph", "Inspect this flowgraph and summarize its architecture."),
+                ("⚡ Check errors", "Check this flowgraph for configuration errors or missing parameters."),
+                ("❓ Explain pipeline", "Explain what signal processing pipeline this flowgraph implements."),
+            ]
+
+            for label_text, prompt_text in quick_prompts:
+                btn = Gtk.Button(label=label_text)
+                btn.get_style_context().add_class("chat-toolbar-btn")
+                btn.set_tooltip_text(f'Send: "{prompt_text}"')
+                btn.connect("clicked", lambda _, p=prompt_text: self._send_quick_prompt(p))
+                chips_box.pack_start(btn, False, False, 0)
+
+            welcome_box.pack_start(chips_box, False, False, 0)
         else:
             sub_lbl.set_markup(
                 "No active flowgraph file open.\n"
                 "Open a saved flowgraph to start chatting, or load a recent session below:"
             )
-        welcome_box.pack_start(sub_lbl, False, False, 0)
+            welcome_box.pack_start(sub_lbl, False, False, 0)
+
         self._listbox.add(welcome_box)
 
         # 2. Recent Sessions List
@@ -1014,6 +1194,11 @@ class ChatSidebar(Gtk.Box):
 
         if sessions:
             self._add_recent_sessions_to_list(sessions)
+
+    def _send_quick_prompt(self, text: str) -> None:
+        if self._busy or self.current_page is None:
+            return
+        self.send_message(text)
 
     def _add_recent_sessions_to_list(self, sessions: list[dict[str, Any]]) -> None:
         # Header
@@ -1149,7 +1334,7 @@ class ChatSidebar(Gtk.Box):
                         switched = True
                         break
                 except Exception:
-                    pass
+                    _log.debug("recent-session: skipping page %r during resolve", p_path, exc_info=True)
 
         if not switched:
             try:
@@ -1298,7 +1483,6 @@ class ChatSidebar(Gtk.Box):
             ctx.full_raw_text += delta.content_delta
             self._ensure_text(ctx)
             ctx.text_dirty = True
-            self._update_copy_text(ctx.box, ctx.full_raw_text)
             self._flush_streaming(ctx)
         elif isinstance(delta, ThinkingPartDelta):
             self._close_text(ctx)
@@ -1306,7 +1490,6 @@ class ChatSidebar(Gtk.Box):
             ctx.full_raw_text += delta.content_delta
             self._ensure_thinking(ctx)
             ctx.think_dirty = True
-            self._update_copy_text(ctx.box, ctx.full_raw_text)
             self._flush_streaming(ctx)
 
     def _flush_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:
@@ -1329,9 +1512,11 @@ class ChatSidebar(Gtk.Box):
             ctx.think_body.set_text(ctx.think_acc)
             ctx.think_dirty = False
             flushed = True
-        if flushed:
+        if flushed or force:
             ctx.last_flush = now
-            self._scroll_to_bottom()
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
+            if flushed:
+                self._scroll_to_bottom()
 
     def _close_text(self, ctx: _StreamCtx) -> None:
         self._flush_streaming(ctx, force=True)
@@ -1341,7 +1526,10 @@ class ChatSidebar(Gtk.Box):
 
     def _close_thinking(self, ctx: _StreamCtx) -> None:
         self._flush_streaming(ctx, force=True)
+        if ctx.think_expander is not None:
+            ctx.think_expander.set_label("Thinked")
         ctx.think_body = None
+        ctx.think_expander = None
         ctx.think_acc = ""
         ctx.think_dirty = False
 
@@ -1352,20 +1540,53 @@ class ChatSidebar(Gtk.Box):
             ctx.text_lbl.show_all()
         return ctx.text_lbl
 
-    def _ensure_thinking(self, ctx: _StreamCtx) -> Gtk.Label:
+    def _make_thinking_textview(self, text: str = "") -> Gtk.TextView:
+        tv = Gtk.TextView()
+        tv.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        tv.set_editable(False)
+        tv.set_cursor_visible(False)
+        tv.get_style_context().add_class("chat-thinking-textview")
+        tv.set_text = lambda t: tv.get_buffer().set_text(t)  # type: ignore[attr-defined]
+        tv.get_text = lambda: tv.get_buffer().get_text(  # type: ignore[attr-defined]
+            tv.get_buffer().get_start_iter(), tv.get_buffer().get_end_iter(), True
+        )
+        if text:
+            tv.set_text(text)
+        return tv
+
+    def _make_thinking_widget(
+        self, text: str = "", label: str = "Thinking..."
+    ) -> tuple[Gtk.Expander, Gtk.TextView]:
+        exp = Gtk.Expander(label=label)
+        exp.set_expanded(False)
+        exp.get_style_context().add_class("chat-thinking-expander")
+        exp.set_hexpand(True)
+        exp.set_halign(Gtk.Align.FILL)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_shadow_type(Gtk.ShadowType.NONE)
+        sw.set_min_content_height(80)
+        sw.set_max_content_height(250)
+        sw.set_propagate_natural_height(True)
+        sw.set_hexpand(True)
+        sw.set_halign(Gtk.Align.FILL)
+
+        tv = self._make_thinking_textview(text)
+        tv.set_hexpand(True)
+        tv.set_halign(Gtk.Align.FILL)
+
+        sw.add(tv)
+        exp.add(sw)
+        return exp, tv
+
+    def _ensure_thinking(self, ctx: _StreamCtx) -> Any:
         if ctx.think_body is None:
-            exp = Gtk.Expander(label="Thinking...")
-            exp.set_expanded(False)
-            exp.get_style_context().add_class("chat-thinking-expander")
-            body = Gtk.Label(label="")
-            body.set_line_wrap(True)
-            body.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-            body.set_xalign(0.0)
-            body.set_selectable(True)
-            exp.add(body)
-            ctx.box.pack_start(exp, False, False, 0)
+            exp, tv = self._make_thinking_widget(label="Thinking...")
+            ctx.box.pack_start(exp, True, True, 0)
             exp.show_all()
-            ctx.think_body = body
+            ctx.think_expander = exp
+            ctx.think_body = tv
         return ctx.think_body
 
     def _make_text_label(self) -> Gtk.Label:
@@ -1378,12 +1599,22 @@ class ChatSidebar(Gtk.Box):
         lbl.get_style_context().add_class("chat-agent-label")
         return lbl
 
-    def _copy_to_clipboard(self, text: str) -> None:
+    def _copy_to_clipboard(self, text: str, btn: Gtk.Button | None = None) -> None:
         if not text:
             return
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(text, -1)
         self.set_status("Copied message to clipboard.")
+        if btn is not None:
+            btn.set_image(Gtk.Image.new_from_icon_name("emblem-ok-symbolic", Gtk.IconSize.MENU))
+            btn.set_tooltip_text("Copied!")
+
+            def _revert() -> bool:
+                btn.set_image(Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU))
+                btn.set_tooltip_text("Copy message")
+                return False
+
+            GLib.timeout_add(1500, _revert)
 
     def _update_copy_text(self, box: Gtk.Box, text: str) -> None:
         parent = box.get_parent()
@@ -1410,7 +1641,7 @@ class ChatSidebar(Gtk.Box):
         img = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
         copy_btn.set_image(img)
         copy_btn.set_tooltip_text("Copy message")
-        copy_btn.connect("clicked", lambda *_: self._copy_to_clipboard(text))
+        copy_btn.connect("clicked", lambda b: self._copy_to_clipboard(text, b))
 
         hbox.pack_start(copy_btn, False, False, 0)
         hbox.pack_start(lbl, True, True, 0)
@@ -1433,7 +1664,7 @@ class ChatSidebar(Gtk.Box):
         copy_btn.set_tooltip_text("Copy message")
 
         copy_btn._grc_copy_text = ""
-        copy_btn.connect("clicked", lambda b: self._copy_to_clipboard(b._grc_copy_text))
+        copy_btn.connect("clicked", lambda b: self._copy_to_clipboard(getattr(b, "_grc_copy_text", ""), b))
 
         hbox.pack_start(copy_btn, False, False, 0)
         hbox._grc_copy_btn = copy_btn
@@ -1629,16 +1860,8 @@ class ChatSidebar(Gtk.Box):
                 self._render_markdown_to_box(box, part.content, clear=False)
                 full_text += part.content
             elif part_cls == "ThinkingPart":
-                exp = Gtk.Expander(label="Thinking...")
-                exp.set_expanded(False)
-                exp.get_style_context().add_class("chat-thinking-expander")
-                body = Gtk.Label(label=part.content)
-                body.set_line_wrap(True)
-                body.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-                body.set_xalign(0.0)
-                body.set_selectable(True)
-                exp.add(body)
-                box.pack_start(exp, False, False, 0)
+                exp, _tv = self._make_thinking_widget(part.content, label="Thinked")
+                box.pack_start(exp, True, True, 0)
                 exp.show_all()
                 full_text += f"<Thinking>\n{part.content}\n</Thinking>\n"
             elif part_cls == "ToolCallPart":
@@ -1724,8 +1947,8 @@ class ChatSidebar(Gtk.Box):
         row.set_margin_bottom(2)
         self._listbox.add(row)
         row.show_all()
-        # Force scroll on every new row (user message, agent bubble,
-        # fix-error prompt) so the user always sees what was just added.
+        # Force scroll on every new row (user message, agent bubble) so the
+        # user always sees what was just added.
         # The _auto_scroll flag handles the "user scrolled up to read" case
         # during streaming — but for a new row, we always want to show it.
         self._scroll_to_bottom(force=True)
@@ -1734,10 +1957,13 @@ class ChatSidebar(Gtk.Box):
         exp = Gtk.Expander(label=f"\u2699 {tool_name} ...")
         exp.set_expanded(False)
         exp.get_style_context().add_class("chat-tool-expander")
+        exp.set_hexpand(True)
+        exp.set_halign(Gtk.Align.FILL)
         body = Gtk.Label(label="")
         body.set_line_wrap(True)
         body.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
         body.set_xalign(0.0)
+        body.set_halign(Gtk.Align.FILL)
         body.set_selectable(True)
         exp.add(body)
         exp._grc_tool_name = tool_name
@@ -1747,7 +1973,7 @@ class ChatSidebar(Gtk.Box):
     def _set_tool_body(self, exp: Gtk.Expander, text: str) -> None:
         body = getattr(exp, "_grc_tool_body", None)
         if body is not None:
-            body.set_text(text)
+            body.set_text(_format_tool_display(text))
 
     def _set_tool_status(self, exp: Gtk.Expander, status: str) -> None:
         name = getattr(exp, "_grc_tool_name", "?")

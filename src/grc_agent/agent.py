@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -40,6 +41,8 @@ from grc_agent.adapter import (
     query_docs,
 )
 from grc_agent.prompts import build_system_prompt
+
+_log = logging.getLogger(__name__)
 
 MODEL = "qwen3.6:35b-a3b-q4_K_M"
 OLLAMA_V1 = "http://localhost:11434/v1"
@@ -391,6 +394,10 @@ class StopGracefully(AbstractCapability[Any]):
         if isinstance(node, ModelRequestNode):
             self.count += 1
             if self.count > self.max_requests:
+                _log.warning(
+                    "StopGracefully: hit max_requests=%d ceiling — ending run to avoid a stuck loop",
+                    self.max_requests,
+                )
                 return End(
                     FinalResult(
                         output=(
@@ -480,10 +487,6 @@ async def query_knowledge_func(
         return json.dumps(res)
 
 
-_GENERATE_PYTHON_MIN_K = 1
-_GENERATE_PYTHON_MAX_K = 20
-
-
 async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
     """Render the Python source GNU Radio would generate from the current graph. Read-only — never writes to disk or runs the flowgraph.
 
@@ -501,46 +504,11 @@ async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
             Defaults to 5 — raise it (up to 20) only if you actually need to
             see every Embedded Python Block/Module's source in one call.
     """
-    k = max(_GENERATE_PYTHON_MIN_K, min(_GENERATE_PYTHON_MAX_K, k))
     try:
         result = await _with_state_lock(ctx, lambda: preview_flowgraph_py(ctx.deps, k=k))
     except ValueError as exc:
         raise ModelRetry(str(exc)) from exc
     return json.dumps(result)
-
-
-def validate_change_graph_args(
-    ctx: RunContext[Any],
-    add_blocks: list[BlockAdd] | None = None,
-    remove_blocks: list[str] | None = None,
-    update_params: list[ParamUpdate] | None = None,
-    update_states: list[StateUpdate] | None = None,
-    **kwargs,  # noqa: ARG001
-) -> None:
-    current_blocks = {b.name for b in ctx.deps.blocks}
-    added_names = {b.instance_name for b in add_blocks} if add_blocks else set()
-
-    # Check block presence for updates
-    for item in update_params or []:
-        if item.instance_name not in current_blocks and item.instance_name not in added_names:
-            raise ModelRetry(
-                f"Block '{item.instance_name}' does not exist in the flowgraph. "
-                "You must add the block first before trying to update its parameters."
-            )
-
-    for item in update_states or []:
-        if item.instance_name not in current_blocks and item.instance_name not in added_names:
-            raise ModelRetry(
-                f"Block '{item.instance_name}' does not exist in the flowgraph. "
-                "You must add the block first before trying to update its state."
-            )
-
-    # Check block presence for removals
-    for name in remove_blocks or []:
-        if name not in current_blocks:
-            raise ModelRetry(
-                f"Cannot remove block '{name}' because it does not exist in the flowgraph."
-            )
 
 
 async def change_graph_func(
@@ -659,7 +627,8 @@ def grc_tools() -> list[Tool[Any]]:
     query_tool = Tool(
         query_knowledge_func,
         name="query_knowledge",
-        description="Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts).",
+        docstring_format="google",
+        require_parameter_descriptions=True,
     )
 
     generate_python_tool = Tool(
@@ -672,19 +641,13 @@ def grc_tools() -> list[Tool[Any]]:
     change_tool = Tool(
         change_graph_func,
         name="change_graph",
-        # No explicit description= here (unlike inspect_tool/query_tool above,
-        # which just duplicate their own docstring verbatim): an explicit
-        # description replaces the function's docstring rather than
-        # supplementing it, and this tool's hand-written copy had already
-        # drifted from change_graph_func's real docstring (no mention of
-        # `force`, no phase-order/auto-resolution notes). docstring_format
-        # + require_parameter_descriptions is PydanticAI's own sanctioned
-        # idiom for deriving both the tool description and each top-level
-        # arg's schema description straight from the docstring — one source
-        # of truth instead of two that can silently disagree.
+        # docstring_format + require_parameter_descriptions is PydanticAI's
+        # own sanctioned idiom for deriving both the tool description and
+        # each top-level arg's schema description straight from the
+        # docstring — one source of truth instead of a hand-written
+        # description that can silently drift from the real signature.
         docstring_format="google",
         require_parameter_descriptions=True,
-        args_validator=validate_change_graph_args,
     )
     change_tool.max_retries = 3
 
@@ -709,11 +672,12 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
                     has_mutated = True
                     break
     if has_mutated:
-        # Hold the same state lock as the tool functions so this final
-        # validation read can't race a concurrent /grc/open or /grc/close swap
-        # that would change which flowgraph object is being validated mid-read.
-        # The body is synchronous, but mirroring the tool pattern keeps the
-        # harness consistent and safe if this validator ever gains an await.
+        # Hold the same state lock as the tool functions for harness
+        # consistency. In this single-process gbulb desktop app,
+        # NativeFlowgraphProxy.get_state_lock() returns None (no races),
+        # so _with_state_lock is a no-op passthrough — but mirroring the
+        # tool pattern keeps the harness safe if this validator ever
+        # gains an await or runs under a different harness.
         def _do_validate():
             fg = ctx.deps
             # is_valid()/iter_error_messages() only read _error_messages, which

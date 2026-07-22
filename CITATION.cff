@@ -3,7 +3,7 @@ message: "If you use GRC Agent in research or a published project, please cite i
 title: "GRC Agent"
 type: software
 date-released: 2026-06-05
-version: 0.1.0
+version: 0.1.1
 license: AGPL-3.0-only
 authors:
   - given-names: Mahmoud

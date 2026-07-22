@@ -14,6 +14,7 @@ can read it on demand — the agent is no longer blind to runtime output.
 
 import logging
 import re
+from collections import deque
 from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
@@ -30,6 +31,11 @@ _GENERATE_ERROR_MARKER = "Generate Error:"
 _RUNTIME_ERROR_MARKER = ":error:"
 _SIGTERM_RETURN_CODE = -15
 
+# Bound the retained run log at 512KB so a verbose/infinite-looping flowgraph
+# cannot grow memory without limit. Oldest chunks are dropped (whole, never
+# by slicing the joined string) until under the cap.
+_MAX_LOG_BYTES = 512 * 1024
+
 
 class ExecutionErrorMonitor:
     """Watches GRC's console message stream for a failed flowgraph run.
@@ -42,7 +48,8 @@ class ExecutionErrorMonitor:
 
     def __init__(self, on_error: Callable[[int, str], None]) -> None:
         self._on_error = on_error
-        self._chunks: list[str] = []
+        self._chunks: deque[str] = deque()
+        self._chunk_bytes = 0
         self._tracking = False
         # Set to True when a ":error:" runtime error is seen in the output
         # during tracking — even if the process exits cleanly (code 0).
@@ -55,6 +62,11 @@ class ExecutionErrorMonitor:
         # _reset() which clears _has_runtime_error, but get_last_run_log
         # must still reflect whether errors occurred.
         self._last_run_had_runtime_error = False
+        self._graph_modified_since_last_run = False
+
+    def notify_graph_modified(self) -> None:
+        """Called when change_graph modifies the flowgraph state."""
+        self._graph_modified_since_last_run = True
 
     @property
     def has_last_run(self) -> bool:
@@ -71,11 +83,19 @@ class ExecutionErrorMonitor:
         """
         if self._last_run_log is None or self._last_run_code is None:
             return None
-        return {
+        res = {
             "return_code": self._last_run_code,
             "log_text": self._last_run_log,
             "ran_successfully": self._last_run_code == 0 and not self._last_run_had_runtime_error,
         }
+        if self._graph_modified_since_last_run:
+            res["note"] = (
+                "IMPORTANT: The flowgraph has been modified in memory since this run completed. "
+                "This log reflects the PREVIOUS run BEFORE your recent changes. "
+                "Do NOT assume the previous error still exists or that the file on disk is stale. "
+                "Ask the user to click Execute/Play in GRC to test your recent changes."
+            )
+        return res
 
     def handle_message(self, text: str) -> None:
         if _START_MARKER in text:
@@ -83,6 +103,7 @@ class ExecutionErrorMonitor:
                 _log.debug("exec_monitor: ignoring start (already tracking): %r", text[:80])
                 return
             self._tracking = True
+            self._graph_modified_since_last_run = False
             self._reset()
             _log.info("exec_monitor: started tracking run: %r", text[:120])
 
@@ -121,9 +142,13 @@ class ExecutionErrorMonitor:
 
     def _append(self, text: str) -> None:
         self._chunks.append(text)
+        self._chunk_bytes += len(text)
+        while self._chunk_bytes > _MAX_LOG_BYTES and len(self._chunks) > 1:
+            self._chunk_bytes -= len(self._chunks.popleft())
 
     def _reset(self) -> None:
         self._chunks.clear()
+        self._chunk_bytes = 0
         self._has_runtime_error = False
 
     def _fail(self, code: int) -> None:

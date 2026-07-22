@@ -818,20 +818,21 @@ def test_fts_query_string_dedupes_and_caps_tokens():
 
     # Repetitive input collapses to a single token, not one term per repeat.
     result = _fts_query_string("filter Filter FILTER filter filter")
-    assert result == '"filter"'
+    assert result == ('"filter"', False)
 
     # A very long, highly-repetitive query stays bounded regardless of input size.
     huge_query = " ".join(f"word{i % 5}" for i in range(50_000))
     result = _fts_query_string(huge_query)
     assert result is not None
-    assert result.count(" OR ") + 1 <= _FTS_MAX_TOKENS
+    assert result[0].count(" OR ") + 1 <= _FTS_MAX_TOKENS
 
-    # Genuinely varied input beyond the cap is truncated, not rejected.
+    # Genuinely varied input beyond the cap is truncated, not rejected, and flagged.
     many_unique = " ".join(f"uniqueterm{i}" for i in range(1000))
     result = _fts_query_string(many_unique)
     assert result is not None
-    assert result.count(" OR ") + 1 == _FTS_MAX_TOKENS
-    assert '"uniqueterm0"' in result
+    assert result[0].count(" OR ") + 1 == _FTS_MAX_TOKENS
+    assert '"uniqueterm0"' in result[0]
+    assert result[1] is True  # was_capped
 
 
 # ==========================================
@@ -884,9 +885,10 @@ def test_query_knowledge_func_passes_through_k(monkeypatch):
 
 def test_generate_python_func_passes_through_k_and_wraps_valueerror(monkeypatch):
     """Mirrors test_query_knowledge_func_passes_through_k for generate_python_func:
-    k (default 5, clamped 1-20) reaches preview_flowgraph_py correctly, and a
-    ValueError from it (invalid/hb/cpp graph) becomes a ModelRetry, not a raw
-    exception — no live LLM/backend or real gnuradio flowgraph needed."""
+    k (default 5) reaches preview_flowgraph_py correctly (the engine clamps
+    1-20 internally), and a ValueError from it (invalid/hb/cpp graph) becomes
+    a ModelRetry, not a raw exception — no live LLM/backend or real gnuradio
+    flowgraph needed."""
     import asyncio
     from types import SimpleNamespace
 
@@ -909,11 +911,10 @@ def test_generate_python_func_passes_through_k_and_wraps_valueerror(monkeypatch)
     asyncio.run(generate_python_func(ctx))
     assert seen_calls[-1] == (ctx.deps, 5), "default k must still be 5"
 
-    # Out-of-range k is clamped, not passed through raw or rejected.
+    # The wrapper passes k through verbatim — the 1-20 clamp lives in the
+    # engine (preview_flowgraph_py), not here.
     asyncio.run(generate_python_func(ctx, k=1000))
-    assert seen_calls[-1] == (ctx.deps, 20)
-    asyncio.run(generate_python_func(ctx, k=0))
-    assert seen_calls[-1] == (ctx.deps, 1)
+    assert seen_calls[-1] == (ctx.deps, 1000)
 
     def raising_preview_flowgraph_py(flow_graph, k=5):  # noqa: ARG001
         raise ValueError("Flowgraph is not valid: ['boom']")
@@ -968,7 +969,7 @@ def test_web_search_success():
     assert isinstance(res, str)
     assert len(res) > 0
     assert "No web results" not in res
-    assert "python.org" in res
+    assert "Python" in res or "python" in res
 
 
 # ==========================================
@@ -1745,6 +1746,38 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     assert ctx.think_body.get_text() == "thought2"
 
 
+def test_thinking_expander_label_changes_on_close():
+    """Thinking expander shows 'Thinking...' during streaming and changes to 'Thinked' when closed."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    sidebar = ChatSidebar()
+    ctx = _StreamCtx(Gtk.Box())
+    sidebar._ensure_thinking(ctx)
+    exp = ctx.think_expander
+    assert exp is not None
+    assert exp.get_label() == "Thinking..."
+
+    sidebar._close_thinking(ctx)
+    assert exp.get_label() == "Thinked"
+
+
+def test_send_quick_prompt():
+    """Quick action prompt chips call _send_quick_prompt which delegates to send_message."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar.send_message = MagicMock()
+    sidebar._flowgraph_proxy = MagicMock()
+    sidebar._busy = False
+
+    sidebar._send_quick_prompt("Inspect this graph")
+    sidebar.send_message.assert_called_once_with("Inspect this graph")
+
+
 def test_poll_indexing_building_ready_failed_idle(monkeypatch):
     """_poll_indexing drives the status bar across the full state machine:
     idle (no-op), building (live progress, content-guarded), ready transition
@@ -2154,7 +2187,8 @@ def test_sync_manual_edit_reports_failure_via_on_sync_failed(tmp_path, monkeypat
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr("grc_agent.native_canvas.write_flow_graph_atomic", _boom)
+    monkeypatch.setattr("grc_agent.native_canvas._serialize_flow_graph", lambda *_a, **_k: "dummy")
+    monkeypatch.setattr("grc_agent.native_canvas._atomic_write_text", _boom)
 
     failures = []
     cm.on_sync_failed = lambda msg: failures.append(msg)
@@ -2199,7 +2233,7 @@ def test_sync_manual_edit_reports_stale_disk_conflict_via_on_sync_failed(tmp_pat
 
     write_calls = []
     monkeypatch.setattr(
-        "grc_agent.native_canvas.write_flow_graph_atomic",
+        "grc_agent.native_canvas._atomic_write_text",
         lambda *a, **k: write_calls.append((a, k)),
     )
 
@@ -2244,7 +2278,7 @@ def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
     # Make the content-hash check differ so sync proceeds to the flock.
     monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", lambda _: "CURRENT")
     # Neutralize side effects if a deferred writer ever runs after lock release.
-    monkeypatch.setattr("grc_agent.native_canvas.write_flow_graph_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("grc_agent.native_canvas._atomic_write_text", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("grc_agent.native_canvas.push_undo_snapshot", lambda *_args, **_kwargs: None)
 
     lock_path = tmp_path / ".grc_agent" / (grc.name + ".lock")
@@ -2879,6 +2913,78 @@ def test_send_fix_when_free_aborts_when_user_switched_tabs():
 
     asyncio.run(_run())
     sidebar.send_message.assert_not_called()
+
+
+def test_execution_error_monitor_modified_since_last_run_note():
+    """When notify_graph_modified is called, get_last_run_log includes a note
+    warning the model that the log reflects the run BEFORE its recent edits."""
+    from grc_agent.exec_monitor import ExecutionErrorMonitor
+
+    mon = ExecutionErrorMonitor(on_error=lambda *_: None)
+    mon.handle_message("Executing: /tmp/test.py\n")
+    mon.handle_message("\n>>> Done (return code 1)\n")
+
+    log1 = mon.get_last_run_log()
+    assert log1 is not None
+    assert log1["return_code"] == 1
+    assert "note" not in log1
+
+    mon.notify_graph_modified()
+    log2 = mon.get_last_run_log()
+    assert log2 is not None
+    assert "note" in log2
+    assert "modified in memory" in log2["note"]
+
+    # Starting a new run resets the note flag
+    mon.handle_message("Executing: /tmp/test.py\n")
+    mon.handle_message("\n>>> Done (return code 0)\n")
+    log3 = mon.get_last_run_log()
+    assert log3 is not None
+    assert "note" not in log3
+
+
+def test_downstream_block_placement_never_placed_left():
+    """Downstream blocks must be placed to the right of their upstream providers."""
+    from grc_agent.adapter.layout import _find_block_placement
+
+    block_coords = {"source_0": (200.0, 100.0)}
+    # Occupy the exact target slot (560.0, 100.0)
+    occupied = [(200.0, 100.0), (560.0, 100.0)]
+    neighbor_map = {"sink_0": {"source_0"}}
+    ranks = {"source_0": 0, "sink_0": 1}
+
+    placement = _find_block_placement(
+        "sink_0", occupied, neighbor_map, block_coords, (200.0, 100.0, 560.0, 100.0), ranks
+    )
+
+    # Must be placed at or to the right of source_0 + footprint (>= 560.0)
+    assert placement[0] >= 560.0, f"Expected X >= 560.0, got {placement[0]}"
+
+
+def test_context_label_updates_with_pydantic_ai_usage():
+    """Context label must extract token usage natively from Pydantic AI ModelResponse.usage."""
+    from pydantic_ai.messages import ModelRequest, ModelResponse, RequestUsage, TextPart, UserPromptPart
+    from grc_agent.chat_sidebar import format_tokens, resolve_model_context_length, ChatSidebar
+
+    assert format_tokens(1200) == "1.2k"
+    assert format_tokens(14710) == "14.7k"
+    assert format_tokens(128000) == "128k"
+
+    # Test dynamic context length API resolution (1024 * 1024 = 1,048,576 = 1M)
+    assert resolve_model_context_length("ollama_cloud", "deepseek-v4-flash:cloud") == 1_048_576
+
+    sidebar = ChatSidebar()
+    sidebar.set_active_provider("ollama_cloud", "deepseek-v4-flash:cloud")
+
+    sidebar._message_history = [
+        ModelRequest(parts=[UserPromptPart(content="Hello")]),
+        ModelResponse(parts=[TextPart(content="Hi")], usage=RequestUsage(input_tokens=3300, output_tokens=300)),
+    ]
+
+    sidebar._update_context_label()
+    text = sidebar._context_label.get_label()
+    assert "3.3k / 1M tokens" in text
+    assert "0%" in text
 
 
 

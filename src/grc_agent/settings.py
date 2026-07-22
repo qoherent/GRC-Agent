@@ -49,6 +49,26 @@ _DEFAULT_MODELS = {
 }
 _DEFAULT_PROVIDER = "ollama"
 
+# mtime-gated cache for dotenv_values(env_path()). dotenv_values re-parses the
+# whole .env from disk on every call; callers like rag.py's embedding path hit
+# it thousands of times per ingestion run, so this gates the parse on a cheap
+# stat(). Keyed on (resolved path, mtime) so test isolation via GRC_AGENT_ENV
+# tmp-path redirects and live settings swaps both invalidate correctly.
+_dotenv_cache: tuple[str, float, dict[str, str]] | None = None
+
+
+def _cached_dotenv() -> dict[str, str]:
+    global _dotenv_cache
+    path = env_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    path_str = str(path)
+    if _dotenv_cache is None or _dotenv_cache[0] != path_str or _dotenv_cache[1] != mtime:
+        _dotenv_cache = (path_str, mtime, {k: v for k, v in dotenv_values(path).items() if v is not None})
+    return _dotenv_cache[2]
+
 
 def env_path() -> Path:
     """Resolve the `.env` file that is the single source of truth for GUI
@@ -83,7 +103,7 @@ def load_settings() -> dict:
     """Read the saved preferences from the `.env` file (the source of truth),
     applying defaults for any vars not present. Returns a dict with keys:
     provider, model, ollama_model, openrouter_model, ollama_cloud_model."""
-    vals = {k: v for k, v in dotenv_values(env_path()).items() if v is not None}
+    vals = _cached_dotenv()
 
     provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
     if provider not in _VALID_PROVIDERS:
@@ -123,6 +143,6 @@ def save_settings(provider: str, model: str) -> None:
 
 def get_env_value(key: str) -> str | None:
     """Read a single key from the ``.env`` file (the saved source of truth)."""
-    return dotenv_values(env_path()).get(key)
+    return _cached_dotenv().get(key)
 
 

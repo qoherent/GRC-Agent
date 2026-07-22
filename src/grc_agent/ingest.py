@@ -84,7 +84,8 @@ def ingest_catalog(  # noqa: C901
                 text = _compose_catalog_text(rendered)
                 fts_rows.append((block_id, text))
                 try:
-                    embedding = embed_document(text, model)
+                    embed_text = _cap_words(text, EMBED_MAX_WORDS, label=f"catalog:{block_id}")
+                    embedding = embed_document(embed_text, model)
                     vec_rows.append((block_id, embedding))
                 except Exception as exc:
                     _log.warning("catalog embed failed for block_id=%s: %s", block_id, exc)
@@ -151,20 +152,19 @@ def _compose_catalog_text(rendered: dict[str, Any]) -> str:
     parts += [
         f"port: {p['port_id']} ({p['dtype']})" for p in rendered["inputs"] + rendered["outputs"]
     ]
-    return _cap_words("\n".join(parts), EMBED_MAX_WORDS)
+    return "\n".join(parts)
 
 
 _HEADING_RE = re.compile(r"^(#{1,2})\s+(.*)$", re.MULTILINE)
 
 
 def _chunk_markdown(text: str) -> list[tuple[str, str]]:
-    """Split on level-1/level-2 headings; cap each chunk's body separately.
-    A flatter, simplified version of the original recursive splitter — good
-    enough since chunks only need to stay under the embedding word cap, not
-    preserve full document structure."""
+    """Split on level-1/level-2 headings. Returns the FULL body of each
+    chunk — the caller caps per-chunk text only for the embedding API call
+    (see ingest_docs), while the DB stores and returns the complete text."""
     matches = list(_HEADING_RE.finditer(text))
     if not matches:
-        return [("", _cap_words(text, EMBED_MAX_WORDS))]
+        return [("", text)]
 
     chunks = []
     for i, m in enumerate(matches):
@@ -173,8 +173,8 @@ def _chunk_markdown(text: str) -> list[tuple[str, str]]:
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[start:end].strip()
         if body:
-            chunks.append((heading, _cap_words(body, EMBED_MAX_WORDS)))
-    return chunks or [("", _cap_words(text, EMBED_MAX_WORDS))]
+            chunks.append((heading, body))
+    return chunks or [("", text)]
 
 
 def ingest_docs(  # noqa: C901
@@ -204,7 +204,8 @@ def ingest_docs(  # noqa: C901
         composed = f"path: {path}\nheading: {heading}\n{body}"
         composed_list.append(composed)
         try:
-            embedding = embed_document(composed, model)
+            embed_text = _cap_words(composed, EMBED_MAX_WORDS, label=f"docs:{path}:{heading}")
+            embedding = embed_document(embed_text, model)
             vec_rows.append((i, embedding))
         except Exception as exc:
             _log.warning("docs embed failed for path=%s heading=%s: %s", path, heading, exc)

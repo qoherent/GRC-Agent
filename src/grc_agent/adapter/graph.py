@@ -2,6 +2,7 @@ import contextlib
 import fcntl
 import functools
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 _PLATFORM: Any = None
 
@@ -81,8 +84,8 @@ def hide_panels_by_default(app: Any) -> None:
         try:
             if action.get_active():
                 app._handle_action(action)
-        except Exception as e:
-            print(f"Failed to hide GRC panel via action {action}: {e}")
+        except Exception:
+            _log.warning("Failed to hide GRC panel via action %s", action, exc_info=True)
 
 
 def set_blocks_panel_visibility(app: Any, visible: bool) -> bool:
@@ -96,8 +99,8 @@ def set_blocks_panel_visibility(app: Any, visible: bool) -> bool:
     try:
         if bool(action.get_active()) != bool(visible):
             app._handle_action(action)
-    except Exception as e:
-        print(f"Failed to set Block Library panel visibility via action {action}: {e}")
+    except Exception:
+        _log.warning("Failed to set Block Library panel visibility via action %s", action, exc_info=True)
     return bool(action.get_active())
 
 
@@ -144,10 +147,13 @@ def load_flow_graph(file_path: str) -> Any:
 
 
 def parse_conn(conn_str: str):
-    if "->" not in conn_str:
+    # Exactly one '->' separator and exactly one ':' on each side — anything
+    # else is malformed and returns None so the caller reports a precise
+    # invalid_connection_format error instead of raising ValueError on unpack.
+    if conn_str.count("->") != 1:
         return None
     src, dst = conn_str.split("->")
-    if ":" not in src or ":" not in dst:
+    if src.count(":") != 1 or dst.count(":") != 1:
         return None
     src_block, src_port = src.split(":")
     dst_block, dst_port = dst.split(":")
@@ -171,6 +177,7 @@ def _throwaway_block(block_type: str) -> Any:
         flow_graph = platform.make_flow_graph()
         return flow_graph.new_block(block_type)
     except Exception:
+        _log.debug("throwaway block creation failed for %r", block_type, exc_info=True)
         return None
 
 
@@ -189,6 +196,7 @@ def param_metadata(block_type: str) -> dict[str, dict[str, str]]:
             for name, param in block.params.items()
         }
     except Exception:
+        _log.warning("param_metadata extraction failed for %r", block_type, exc_info=True)
         return {}
 
 
@@ -214,6 +222,7 @@ def port_metadata(block_type: str) -> dict[str, dict[str, dict[str, Any]]]:
             "outputs": _collect(getattr(block, "sources", ()) or ()),
         }
     except Exception:
+        _log.warning("port_metadata extraction failed for %r", block_type, exc_info=True)
         return {}
 
 
@@ -678,11 +687,9 @@ def inspect_graph(  # noqa: C901
 
 
 def _atomic_write_text(payload: str, path: Path) -> None:
-    """Shared by write_flow_graph_atomic and the undo/redo snapshot-restore
-    path (undo_flowgraph/redo_flowgraph) — both need to atomically replace a
-    file's content with an already-fully-serialized YAML string; the only
-    difference is where that string came from (a live flow_graph object vs.
-    an already-serialized undo snapshot read back off disk)."""
+    """Atomically replace ``path``'s content with ``payload`` (temp → fsync →
+    os.replace → directory fsync). Does NOT take a lock — callers that need
+    cross-process mutual exclusion use ``_flowgraph_lock``."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
@@ -698,16 +705,46 @@ def _atomic_write_text(payload: str, path: Path) -> None:
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
-        except (OSError, AttributeError):
+        except AttributeError:
+            # os.O_DIRECTORY not available on non-POSIX platforms.
             pass
+        except OSError as exc:
+            _log.debug("directory fsync failed for %s: %s", path.parent, exc)
     except Exception:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
 
 
+@contextlib.contextmanager
+def _flowgraph_lock(path: Path):
+    """Acquire LOCK_EX|LOCK_NB on ``.grc_agent/<name>.lock`` derived from
+    ``path``. Non-blocking: raises BlockingIOError immediately if contended
+    (never blocks the single gbulb UI thread). Callers handle the contention
+    case — change_graph rolls back as ``save_failed``, sync_manual_edit
+    defers to the next poll tick."""
+    path = Path(path)
+    lock_dir = path.parent / ".grc_agent"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = lock_dir / (path.name + ".lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
-    _atomic_write_text(_serialize_flow_graph(flow_graph), Path(path))
+    """Serialize ``flow_graph`` and atomically write to ``path``. Acquires an
+    exclusive flock on ``.grc_agent/<name>.lock`` so a concurrent process
+    editing the same ``.grc`` can't interleave writes. Callers needing a
+    wider critical section (backup, hash-check, snapshot) should acquire
+    ``_flowgraph_lock`` themselves and call
+    ``_atomic_write_text(_serialize_flow_graph(fg), path)`` directly."""
+    path = Path(path)
+    with _flowgraph_lock(path):
+        _atomic_write_text(_serialize_flow_graph(flow_graph), path)
 
 
 def set_param(block: Any, param_key: str, value: str) -> None:
@@ -921,7 +958,14 @@ def change_graph(  # noqa: C901
 
             ranks = _compute_ranks(flow_graph, new_block_names, add_connections)
 
-            for item in add_blocks:
+            # Sort add_blocks topologically by rank so upstream blocks (sources)
+            # are placed first, providing solid layout anchors for downstream blocks.
+            add_blocks_sorted = sorted(
+                add_blocks,
+                key=lambda item: ranks.get(item["instance_name"], 0),
+            )
+
+            for item in add_blocks_sorted:
                 block_id = item["block_id"]
                 instance_name = item["instance_name"]
 
@@ -1253,7 +1297,7 @@ def change_graph(  # noqa: C901
                     backup_path = backup_dir / f"{timestamp}-{old_hash[:16]}{target_path.suffix}"
                     shutil.copy2(target_path, backup_path)
                     _prune_old_backups(backup_dir)
-                write_flow_graph_atomic(flow_graph, target_path)
+                _atomic_write_text(_serialize_flow_graph(flow_graph), target_path)
                 push_undo_snapshot(flow_graph, target_path, initial_data)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -1350,8 +1394,9 @@ def preview_flowgraph_py(flow_graph: Any, k: int = 5) -> dict[str, Any]:
     unbounded) block-source entries are included alongside it. Excess
     entries are dropped from the end of that block-source list (arbitrarily,
     since GNU Radio doesn't order them meaningfully) and counted in the
-    returned "omitted_files", never silently.
+    returned "omitted_files", never silently. `k` is clamped to 1-20.
     """
+    k = max(1, min(20, k))
     _check_codegen_preconditions(flow_graph)
 
     grc_file_path = getattr(flow_graph, "grc_file_path", "")

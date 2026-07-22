@@ -1,7 +1,10 @@
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 MAX_BACKUPS_PER_DIR = 50
 
@@ -21,53 +24,47 @@ def _prune_old_backups(backup_dir: Path) -> None:
         pass
 
 
-# ---- Undo/Redo: a shared, disk-based snapshot stack ----
+# ---- Undo snapshot stack (append-only) ----
 #
-# Both change_graph() (agent edits) and native_canvas.py's manual drag-save
-# path write to the SAME target .grc file from the same process (single-thread
-# via gbulb), so the undo/redo history lives on disk for persistence across
-# sessions. Mirrors GRC's own native undo (gnuradio.grc.gui's
-# StateCache), which is also just export_data()/import_data() snapshots —
-# independent confirmation this is the right shape, not just a plausible
-# analogy. Each snapshot is a plain numbered .grc file (same serialization
-# as a real save), so restoring one is exactly write_flow_graph_atomic's
-# own atomic-replace, and reading one back is exactly load_flow_graph.
+# GRC's native StateCache (gnuradio.grc.gui) owns the in-session undo/redo
+# the user actually interacts with via Ctrl+Z/Y. This module is kept only for
+# the snapshot-push side effect during change_graph() and manual canvas saves
+# — a durable record of tracked edits, one numbered .grc file per push,
+# deduplicated by content hash. With the UI undo/redo buttons removed, there
+# is no consumer of an index/cursor discipline, so this is now a plain
+# append-only stack bounded by UNDO_MAX_DEPTH (oldest deleted by name).
 UNDO_MAX_DEPTH = 50
 
 
 def _undo_dir(target_path: Path) -> Path:
-    # Per-filename (not per-directory, unlike backups/) since this needs a
-    # stateful cursor, not just a pile of independently-timestamped files.
+    # Per-filename (not per-directory, unlike backups/) since each target
+    # keeps its own append-only stack.
     return target_path.parent / ".grc_agent" / (target_path.name + ".undo")
 
 
 def _read_undo_cursor(undo_dir: Path) -> dict:
+    """Read the push cursor. ``count`` is the monotonic next-file index
+    (never decreases — pruning deletes oldest files but does not renumber),
+    and ``hash`` is the last pushed snapshot's content hash for dedup."""
     try:
         return json.loads((undo_dir / "cursor.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"index": -1, "count": 0, "hash": None}
+        return {"count": 0, "hash": None}
 
 
 def _write_undo_cursor(undo_dir: Path, cursor: dict) -> None:
     (undo_dir / "cursor.json").write_text(json.dumps(cursor), encoding="utf-8")
 
 
-def _prune_undo_stack(undo_dir: Path, cursor: dict) -> None:
-    """Bound depth like _prune_old_backups — but snapshots are addressed by
-    contiguous 0-based index (not an independently-sortable timestamp), so
-    the oldest ones must be deleted AND everything else renumbered down, or
-    the index<->filename mapping breaks. Mutates `cursor` in place."""
-    excess = cursor["count"] - UNDO_MAX_DEPTH
+def _prune_undo_stack(undo_dir: Path, count: int) -> None:
+    """Bound depth: when ``count`` (next-file index) exceeds UNDO_MAX_DEPTH,
+    delete the oldest files by name. No renumbering — file indices are
+    monotonic, so the oldest are simply the lowest-numbered beyond the cap."""
+    excess = count - UNDO_MAX_DEPTH
     if excess <= 0:
         return
     for i in range(excess):
         (undo_dir / f"{i:05d}.grc").unlink(missing_ok=True)
-    for old_index in range(excess, cursor["count"]):
-        old_path = undo_dir / f"{old_index:05d}.grc"
-        if old_path.exists():
-            old_path.rename(undo_dir / f"{old_index - excess:05d}.grc")
-    cursor["index"] -= excess
-    cursor["count"] -= excess
 
 
 def push_undo_snapshot(flow_graph: Any, target_path: Path, initial_data: dict | None = None) -> None:
@@ -75,21 +72,20 @@ def push_undo_snapshot(flow_graph: Any, target_path: Path, initial_data: dict | 
     undo stack. Called from both change_graph's own success path and
     native_canvas.py's manual drag-save path, so both mutation sources share
     one history. Deduplicates against a genuinely-unchanged state (e.g. a
-    selection click that didn't move anything) via content hash. A new push
-    after an undo discards the redo branch — standard undo/redo semantics.
-    Best-effort: a failure here must never fail the caller's own
-    already-committed save, so exceptions are logged, not raised.
+    selection click that didn't move anything) via content hash. Best-effort:
+    a failure here must never fail the caller's own already-committed save,
+    so exceptions are logged, not raised.
 
     `initial_data` — change_graph's own pre-mutation
     flow_graph.export_data(), taken before any phase runs — seeds a
-    baseline entry the first time this is ever called for a file, so undo
-    can return all the way to "before the first tracked edit," not just
-    between edits. Manual canvas saves have no pre-edit snapshot of their
-    own to offer (the in-memory graph is already post-edit by the time
+    baseline entry the first time this is ever called for a file, so the
+    stack records "before the first tracked edit," not just the edits
+    themselves. Manual canvas saves have no pre-edit snapshot of their own
+    to offer (the in-memory graph is already post-edit by the time
     _do_trigger_reload runs); they rely on a prior change_graph call (or an
     earlier canvas save) having already seeded the baseline.
     """
-    from grc_agent.adapter.graph import _serialize_flow_graph
+    from grc_agent.adapter.graph import _atomic_write_text, _serialize_flow_graph
 
     try:
         target_path = Path(target_path)
@@ -105,23 +101,16 @@ def push_undo_snapshot(flow_graph: Any, target_path: Path, initial_data: dict | 
 
             baseline_payload = _grc_yaml.dump(initial_data)
             baseline_hash = hashlib.sha256(baseline_payload.encode()).hexdigest()
-            (undo_dir / "00000.grc").write_text(baseline_payload, encoding="utf-8")
-            cursor = {"index": 0, "count": 1, "hash": baseline_hash}
+            _atomic_write_text(baseline_payload, undo_dir / "00000.grc")
+            cursor = {"count": 1, "hash": baseline_hash}
 
         if current_hash == cursor["hash"]:
             return  # nothing actually changed since the last tracked state
 
-        for stale in undo_dir.glob("*.grc"):
-            try:
-                if int(stale.stem) > cursor["index"]:
-                    stale.unlink()
-            except ValueError:
-                continue
-
-        new_index = cursor["index"] + 1
-        (undo_dir / f"{new_index:05d}.grc").write_text(current_payload, encoding="utf-8")
-        cursor = {"index": new_index, "count": new_index + 1, "hash": current_hash}
-        _prune_undo_stack(undo_dir, cursor)
+        new_index = cursor["count"]
+        _atomic_write_text(current_payload, undo_dir / f"{new_index:05d}.grc")
+        cursor = {"count": new_index + 1, "hash": current_hash}
+        _prune_undo_stack(undo_dir, cursor["count"])
         _write_undo_cursor(undo_dir, cursor)
     except Exception as e:
-        print(f"[grc-agent] Failed to push undo snapshot for {target_path}: {e}")
+        _log.warning("Failed to push undo snapshot for %s: %s", target_path, e, exc_info=True)

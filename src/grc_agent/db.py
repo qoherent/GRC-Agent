@@ -25,15 +25,27 @@ _MAX_SESSIONS = 200
 # isolation via GRC_AGENT_ENV still re-inits for each fresh tmp path.
 _initialized_paths: set[str] = set()
 
-# Set when a session row is written; cleared once _cleanup_invalid_sessions
-# has run. Avoids a full-table Path stat sweep on every get_recent_sessions()
-# render — cleanup now runs once on first access and only again after a write.
-_cleanup_needed: bool = True
+# Per-db-path "cleanup already ran" guard — same path-keying rationale as
+# _initialized_paths, so test isolation via GRC_AGENT_ENV re-runs cleanup for
+# each fresh tmp path rather than being skipped by a stale global flag.
+_cleanup_done: set[str] = set()
 
 
 def get_db_path() -> Path:
-    """Resolve the SQLite database path, residing in the same directory as the .env file."""
-    return env_path().parent / "chat_sessions.db"
+    """Resolve the SQLite database path inside `.grc_agent/`, residing in the same parent directory as the `.env` file."""
+    base_dir = env_path().parent
+    db_dir = base_dir / ".grc_agent"
+    db_path = db_dir / "chat_sessions.db"
+
+    legacy_path = base_dir / "chat_sessions.db"
+    if legacy_path.is_file() and not db_path.exists():
+        try:
+            db_dir.mkdir(parents=True, exist_ok=True)
+            legacy_path.replace(db_path)
+        except OSError:
+            pass
+
+    return db_path
 
 
 def get_connection() -> sqlite3.Connection:
@@ -71,21 +83,10 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 grc_file_path TEXT NOT NULL,
                 messages TEXT NOT NULL,
-                last_message TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Migrate pre-last_message databases: add the column and backfill the
-        # preview from each existing messages blob (one-time cost at first open).
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-        if "last_message" not in cols:
-            conn.execute("ALTER TABLE sessions ADD COLUMN last_message TEXT")
-            for r in conn.execute("SELECT id, messages FROM sessions").fetchall():
-                conn.execute(
-                    "UPDATE sessions SET last_message = ? WHERE id = ?",
-                    (_extract_last_message(r["messages"]), r["id"]),
-                )
         conn.commit()
     _initialized_paths.add(db_path)
 
@@ -110,16 +111,18 @@ def _cleanup_invalid_sessions() -> None:
 
 def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
     """Load recently active GRC flowgraph sessions, newest first, filtered to
-    paths still on disk. Bounded by a SQL LIMIT."""
+    paths still on disk. Bounded by a SQL LIMIT. The last-message preview is
+    recomputed lazily from the stored messages blob — deserialization cost is
+    bounded by LIMIT (default 10), paid only on sidebar refresh, not per-token."""
     init_db()
-    global _cleanup_needed
-    if _cleanup_needed:
+    db_path = str(get_db_path())
+    if db_path not in _cleanup_done:
         _cleanup_invalid_sessions()
-        _cleanup_needed = False
+        _cleanup_done.add(db_path)
 
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT id, grc_file_path, last_message, created_at, updated_at "
+            "SELECT id, grc_file_path, messages, created_at, updated_at "
             "FROM sessions ORDER BY updated_at DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -137,7 +140,7 @@ def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
             res.append({
                 "id": r["id"],
                 "grc_file_path": path_str,
-                "last_message": r["last_message"] or "",
+                "last_message": _extract_last_message(r["messages"]),
                 "created_at": r["created_at"],
                 "updated_at": r["updated_at"],
             })
@@ -188,8 +191,8 @@ def deserialize_messages(messages_json: str) -> list[ModelMessage]:
 
 def _extract_last_message(messages_json: str) -> str:
     """Extract the most recent user/assistant text from a session's serialized
-    messages, for the recent-sessions preview — so get_recent_sessions() need
-    not deserialize the full history of every row on each render."""
+    messages, for the recent-sessions preview. Called lazily by
+    get_recent_sessions() per rendered row (cost bounded by its LIMIT)."""
     try:
         msgs = deserialize_messages(messages_json)
         for m in reversed(msgs):
@@ -238,18 +241,15 @@ def save_session(
     in that case so callers can tell "skipped" apart from a real save.
     """
     init_db()
-    global _cleanup_needed
-    _cleanup_needed = True
     messages_str = serialize_messages(messages)
-    last_message = _extract_last_message(messages_str)
     abs_path = str(Path(grc_file_path).resolve())
     with _conn() as conn:
         if session_id is not None:
             row = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
             if row:
                 conn.execute(
-                    "UPDATE sessions SET grc_file_path = ?, messages = ?, last_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (abs_path, messages_str, last_message, session_id),
+                    "UPDATE sessions SET grc_file_path = ?, messages = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (abs_path, messages_str, session_id),
                 )
                 conn.commit()
                 _prune_in(conn)
@@ -261,8 +261,8 @@ def save_session(
             )
             return None
         cursor = conn.execute(
-            "INSERT INTO sessions (grc_file_path, messages, last_message) VALUES (?, ?, ?)",
-            (abs_path, messages_str, last_message),
+            "INSERT INTO sessions (grc_file_path, messages) VALUES (?, ?)",
+            (abs_path, messages_str),
         )
         conn.commit()
         new_id = cursor.lastrowid

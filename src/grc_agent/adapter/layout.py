@@ -31,6 +31,17 @@ BLOCK_FOOTPRINT_W = 300
 BLOCK_FOOTPRINT_H = 220
 BLOCK_SPACING = 60
 
+# Default placement when there are no neighbors and no existing bounding box
+# (an empty canvas). Matches GRC's own default new-block coordinates.
+_DEFAULT_PLACE_X = 200.0
+_DEFAULT_PLACE_Y = 12.0
+
+# Maximum ring-search radius for the collision-avoidance spiral. Each ring is
+# one grid step (BLOCK_FOOTPRINT + BLOCK_SPACING), so 60 rings covers a very
+# large canvas — if no slot is found by then, the graph is so dense that the
+# linear fallback (place to the right of everything) is more legible anyway.
+_MAX_SEARCH_RINGS = 60
+
 
 def _rects_overlap(ax: float, ay: float, bx: float, by: float) -> bool:
     """AABB collision check with spacing gap. Coordinates are top-left
@@ -105,30 +116,28 @@ def _find_block_placement(  # noqa: C901
 
     Prioritizes placement near connected neighbors (from the same batch's
     add_connections), anchored by each neighbor's grandalf-computed rank
-    distance (see _compute_ranks) rather than always assuming exactly one
-    hop to the right — a neighbor several hops downstream in an existing
-    chain gets anchored that many grid columns further out, not one, and a
-    neighbor at the same rank (e.g. a parallel branch) stays in the same
-    column. Falls back to the graph's centroid with no neighbors. Uses a
-    spiral grid search to find the nearest empty slot — fills empty space
-    rather than always extending to the right.
+    distance (see _compute_ranks). Never places a downstream block to the left
+    of its upstream providers, maintaining a clean left-to-right signal flow.
     """
     grid_w = BLOCK_FOOTPRINT_W + BLOCK_SPACING
     grid_h = BLOCK_FOOTPRINT_H + BLOCK_SPACING
 
-    # 1. Find connected neighbors' coordinates (existing blocks or
-    #    already-placed new blocks from the same batch), anchored by rank
-    #    distance where available — otherwise one grid step to the right,
-    #    matching the previous unconditional assumption.
+    # 1. Find connected neighbors' coordinates and min_allowed_x for downstream blocks
     neighbor_coords = []
     my_rank = (ranks or {}).get(new_block_name)
+    min_allowed_x = 0.0
+
     for other in neighbor_map.get(new_block_name, ()):
         if other not in block_coords:
             continue
         ox, oy = block_coords[other]
         other_rank = (ranks or {}).get(other)
         if my_rank is not None and other_rank is not None:
-            neighbor_coords.append((ox + (my_rank - other_rank) * grid_w, oy))
+            rank_diff = my_rank - other_rank
+            neighbor_coords.append((ox + rank_diff * grid_w, oy))
+            if rank_diff > 0:
+                # 'other' is upstream of us — we must stay at or to the right of (ox + grid_w)
+                min_allowed_x = max(min_allowed_x, ox + grid_w)
         else:
             neighbor_coords.append((ox + grid_w, oy))
 
@@ -141,31 +150,46 @@ def _find_block_placement(  # noqa: C901
         target_x = (bbox[0] + bbox[2]) / 2
         target_y = (bbox[1] + bbox[3]) / 2
     else:
-        target_x = 200.0
-        target_y = 12.0
+        target_x = _DEFAULT_PLACE_X
+        target_y = _DEFAULT_PLACE_Y
 
-    # 3. Snap to grid, clamping to non-negative boundaries
-    gx = max(0.0, round(target_x / grid_w) * grid_w)
+    # Ensure target_x respects min_allowed_x
+    target_x = max(target_x, min_allowed_x)
+
+    # 3. Snap target to grid
+    gx = max(min_allowed_x, round(target_x / grid_w) * grid_w)
     gy = max(0.0, round(target_y / grid_h) * grid_h)
 
-    # 4. Spiral search: ring 0 is just the target, ring N is the perimeter
-    #    of cells at Chebyshev distance N. Expands outward until it finds
-    #    a non-overlapping slot.
+    # Check target position first
     if gx >= 0 and gy >= 0 and not any(_rects_overlap(gx, gy, ox, oy) for ox, oy in occupied):
         return (gx, gy)
 
-    for ring in range(1, 60):
-        for dx in range(-ring, ring + 1):
-            for dy in range(-ring, ring + 1):
+    # 4. Directionally prioritized grid search:
+    #    Test same-column vertical offsets first (dx=0), then forward downstream (dx>0),
+    #    and backwards (dx<0) only if allowed by min_allowed_x.
+    dx_sequence = [0]
+    for d in range(1, _MAX_SEARCH_RINGS):
+        dx_sequence.append(d)
+        dx_sequence.append(-d)
+
+    dy_sequence = [0]
+    for d in range(1, _MAX_SEARCH_RINGS):
+        dy_sequence.append(d)
+        dy_sequence.append(-d)
+
+    for ring in range(1, _MAX_SEARCH_RINGS):
+        for dx in dx_sequence:
+            for dy in dy_sequence:
                 if max(abs(dx), abs(dy)) != ring:
                     continue
                 cx = gx + dx * grid_w
                 cy = gy + dy * grid_h
-                if cx < 0 or cy < 0:
+                if cx < min_allowed_x or cy < 0:
                     continue
                 if not any(_rects_overlap(cx, cy, ox, oy) for ox, oy in occupied):
                     return (cx, cy)
 
-    # 5. Fallback: place to the right of everything, ensuring non-negative coordinates
-    fallback_x = max(o[0] for o in occupied) + grid_w if occupied else 200.0
-    return (max(0.0, fallback_x), max(0.0, gy))
+    # 5. Fallback: place to the right of everything
+    fallback_x = max(o[0] for o in occupied) + grid_w if occupied else _DEFAULT_PLACE_X
+    fallback_x = max(fallback_x, min_allowed_x)
+    return (fallback_x, gy)
