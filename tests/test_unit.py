@@ -1393,14 +1393,55 @@ def test_active_graph_label_format():
 
     # Initial state
     assert sidebar._graph_label.get_text() == "Active Graph: none"
+    assert "No flowgraph currently active" in sidebar._graph_label.get_tooltip_text()
 
-    # Set active graph
-    sidebar.set_active_graph("my_cool_flowgraph")
+    # Set active graph with path
+    sidebar.set_active_graph("my_cool_flowgraph", "/path/to/my_cool_flowgraph.grc")
     assert sidebar._graph_label.get_text() == "Active Graph: my_cool_flowgraph"
+    assert "/path/to/my_cool_flowgraph.grc" in sidebar._graph_label.get_tooltip_text()
 
     # Clear active graph
     sidebar.set_active_graph(None)
     assert sidebar._graph_label.get_text() == "Active Graph: none"
+
+
+def test_ui_micro_interactions_and_shortcuts():
+    from gi.repository import Gdk
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+
+    # 1. Focus management & Sensitivity
+    assert not sidebar.grab_entry_focus()
+    sidebar.set_input_enabled(True)
+    assert sidebar._entry.get_sensitive()
+
+    # 2. Active Provider badge tooltips
+    sidebar.set_active_provider("openrouter", "deepseek/deepseek-v4-flash", is_default=False, base_url="https://openrouter.ai/api/v1")
+    assert "deepseek-v4-flash" in sidebar._provider_label.get_text()
+    tooltip = sidebar._provider_label.get_tooltip_text()
+    assert "OpenRouter (cloud)" in tooltip
+    assert "https://openrouter.ai/api/v1" in tooltip
+    assert "Configured provider active" in tooltip
+
+    # 3. Esc key handling (clears text)
+    sidebar._entry.set_text("Hello world")
+    esc_event = Gdk.EventKey()
+    esc_event.keyval = Gdk.KEY_Escape
+    handled = sidebar._on_entry_key_press(sidebar._entry, esc_event)
+    assert handled
+    assert sidebar._entry.get_text() == ""
+
+    # 4. Shift+Enter handling (inserts newline)
+    sidebar._entry.set_text("Line 1")
+    sidebar._entry.set_position(6)
+    shift_enter_event = Gdk.EventKey()
+    shift_enter_event.keyval = Gdk.KEY_Return
+    shift_enter_event.state = Gdk.ModifierType.SHIFT_MASK
+    handled = sidebar._on_entry_key_press(sidebar._entry, shift_enter_event)
+    assert handled
+    assert sidebar._entry.get_text() == "Line 1\n"
+
 
 
 def test_delete_recent_session_ui(monkeypatch):
@@ -2985,6 +3026,717 @@ def test_context_label_updates_with_pydantic_ai_usage():
     text = sidebar._context_label.get_label()
     assert "3.3k / 1M tokens" in text
     assert "0%" in text
+
+
+# ==========================================
+# User Preference Settings & UI Refinement Unit Tests
+# ==========================================
+
+
+def test_settings_custom_ollama_url_and_thinking(tmp_path, monkeypatch):
+    """Test OLLAMA_BASE_URL and OLLAMA_THINKING_ENABLED settings load, default, and save."""
+    from grc_agent.settings import default_settings, load_settings, save_settings
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+
+    # 1. Defaults
+    defaults = default_settings()
+    assert defaults["ollama_base_url"] == "http://localhost:11434"
+    assert defaults["ollama_thinking_enabled"] is True
+
+    # 2. Load from empty .env returns defaults
+    cfg = load_settings()
+    assert cfg["ollama_base_url"] == "http://localhost:11434"
+    assert cfg["ollama_thinking_enabled"] is True
+
+    # 3. Save custom settings
+    save_settings(
+        "ollama",
+        "qwen3.6:35b-a3b-q4_K_M",
+        ollama_base_url="http://192.168.1.100:11434",
+        thinking_enabled=False,
+    )
+
+    # 4. Load persisted custom settings
+    cfg2 = load_settings()
+    assert cfg2["ollama_base_url"] == "http://192.168.1.100:11434"
+    assert cfg2["ollama_thinking_enabled"] is False
+
+
+def test_agent_factory_custom_ollama_url_and_thinking():
+    """Test build_agent_from_cfg passes custom base_url and thinking flag to model settings."""
+    from grc_agent.agent_factory import build_agent_from_cfg, preflight_connection
+
+    cfg = {
+        "provider": "ollama",
+        "model": "qwen3.6:35b-a3b-q4_K_M",
+        "ollama_base_url": "http://192.168.1.200:11434",
+        "ollama_thinking_enabled": False,
+    }
+
+    agent, err = build_agent_from_cfg(cfg)
+    assert err is None
+    # Verify thinking is False in model_settings
+    assert agent.model_settings.get("extra_body", {}).get("think") is False
+
+    # Verify provider base_url contains custom IP (with /v1 appended)
+    provider = getattr(agent.model, "_provider", None) or getattr(agent.model, "provider", None)
+    assert provider is not None
+    assert "192.168.1.200:11434" in provider.base_url
+
+    # Verify preflight_connection uses custom ollama_base_url (will fail connection gracefully)
+    res = preflight_connection("ollama", ollama_base_url="http://127.0.0.1:9999", timeout=0.1)
+    assert res is not None
+    assert "connection failed" in res.lower() or "http" in res.lower() or "refused" in res.lower()
+
+
+def test_openai_compatible_provider_and_factory(tmp_path, monkeypatch):
+    """Test openai_compatible provider settings, agent creation, and preflight connection."""
+    from grc_agent.agent_factory import build_agent_from_cfg, preflight_connection
+    from grc_agent.settings import load_settings, save_settings
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+
+    # Save openai_compatible settings
+    save_settings(
+        "openai_compatible",
+        "llama3.3:70b-gguf",
+        openai_compatible_base_url="http://localhost:8080/v1",
+    )
+
+    cfg = load_settings()
+    assert cfg["provider"] == "openai_compatible"
+    assert cfg["model"] == "llama3.3:70b-gguf"
+    assert cfg["openai_compatible_base_url"] == "http://localhost:8080/v1"
+
+    agent, err = build_agent_from_cfg(cfg)
+    assert err is None
+
+    # Check model provider
+    provider = getattr(agent.model, "_provider", None) or getattr(agent.model, "provider", None)
+    assert provider is not None
+    assert "localhost:8080" in provider.base_url
+
+    res = preflight_connection("openai_compatible", ollama_base_url="http://127.0.0.1:9999/v1", timeout=0.1)
+    assert res is not None
+    assert "connection failed" in res.lower() or "http" in res.lower() or "refused" in res.lower()
+
+
+
+def test_copy_code_block_to_clipboard(monkeypatch):
+    """Test markdown pre element rendering creates a Copy button and copies code text to clipboard."""
+    from gi.repository import Gdk, Gtk
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+    code_snippet = "def hello_world():\n    print('Antigravity')"
+    md_text = f"```python\n{code_snippet}\n```"
+
+    sidebar._render_markdown_to_box(box, md_text)
+
+    # Locate code_box container, header_box, and copy_btn
+    widgets: list[Gtk.Widget] = []
+
+    def walk(w):
+        widgets.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                walk(c)
+
+    walk(box)
+
+    buttons = [w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() in ("Copy", "✓ Copied!")]
+    assert len(buttons) >= 1, "Expected Copy button in rendered code block"
+
+    copy_btn = buttons[0]
+
+    # Trigger click on Copy button
+    copy_btn.emit("clicked")
+    assert copy_btn.get_label() == "✓ Copied!"
+
+    # Verify text was written to system clipboard
+    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+    text = clipboard.wait_for_text()
+    assert text is not None
+    assert "def hello_world():" in text
+
+
+def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
+    """Test Settings Dialog includes Base URL entry and Thinking checkbox, saving them properly."""
+    from gi.repository import Gtk
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import load_settings, save_settings
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "old-model", ollama_base_url="http://localhost:11434", thinking_enabled=True)
+
+    sidebar = ChatSidebar()
+    sidebar._open_settings()
+    dlg = sidebar._open_dialog
+    assert dlg is not None
+
+    entries: list[Gtk.Entry] = []
+    checks: list[Gtk.CheckButton] = []
+
+    def walk(w):
+        if isinstance(w, Gtk.Entry):
+            entries.append(w)
+        if isinstance(w, Gtk.CheckButton):
+            checks.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                walk(c)
+
+    walk(dlg)
+
+    url_entry = next(e for e in entries if e.get_text() == "http://localhost:11434")
+    url_entry.set_text("http://10.0.0.5:11434")
+
+    thinking_check = checks[0]
+    assert thinking_check.get_active() is True
+    thinking_check.set_active(False)
+
+    # Bypass preflight reachability check for 10.0.0.5
+    monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *a, **kw: None)
+
+    dlg.emit("response", Gtk.ResponseType.APPLY)
+
+    persisted = load_settings()
+    assert persisted["ollama_base_url"] == "http://10.0.0.5:11434"
+    assert persisted["ollama_thinking_enabled"] is False
+
+
+def test_badge_regex_matching():
+    """Block-name badge regex (ChatSidebar._compile_badge_regex): whole-word
+    match built from the live flowgraph's block names, no substring false
+    positives, longest-name-first precedence, cached by block-name set."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    fg = MagicMock()
+
+    def _mock_blocks(names):
+        blocks = []
+        for n in names:
+            b = MagicMock()
+            b.name = n
+            blocks.append(b)
+        return blocks
+
+    fg.blocks = _mock_blocks({"test_block_x", "x", "samp_rate", "other"})
+    cm.current_flow_graph = fg
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    rx = sidebar._compile_badge_regex()
+    assert rx is not None
+    assert [m.group(1) for m in rx.finditer("test_block_x")] == ["test_block_x"]
+    assert [m.group(1) for m in rx.finditer("x")] == ["x"]
+    assert [m.group(1) for m in rx.finditer("test_block_x and x")] == ["test_block_x", "x"]
+    # samp_rate_2 must not match samp_rate as a substring — _ is a word char.
+    assert [m.group(1) for m in rx.finditer("samp_rate_2")] == []
+    assert [m.group(1) for m in rx.finditer("the rate of")] == []
+
+    # Same block-name set -> identical cached pattern object.
+    assert sidebar._compile_badge_regex() is rx
+
+    # No active blocks -> None, and the cache is cleared.
+    cm.current_flow_graph = None
+    assert sidebar._compile_badge_regex() is None
+    assert sidebar._badge_regex_cache is None
+
+
+def test_badge_render_prose_textview():
+    """Prose markdown blocks render into a Gtk.TextView; a mentioned block
+    name becomes a GtkTextChildAnchor-embedded pill badge, not plain text."""
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    block = MagicMock()
+    block.name = "test_block_x"
+    fg = MagicMock()
+    fg.blocks = [block]
+    cm.current_flow_graph = fg
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box, "This refers to test_block_x in text.", clear=True)
+
+    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    assert len(textviews) == 1
+    tv = textviews[0]
+
+    buffer = tv.get_buffer()
+    # get_text() excludes the child-anchor placeholder entirely — get_slice()
+    # is the one that includes it.
+    slice_text = buffer.get_slice(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    assert "￼" in slice_text
+
+    start, end = buffer.get_start_iter(), buffer.get_end_iter()
+    it = start.copy()
+    anchors = []
+    while it.compare(end) < 0:
+        anchor = it.get_child_anchor()
+        if anchor:
+            anchors.append(anchor)
+        if not it.forward_char():
+            break
+    assert len(anchors) == 1
+
+
+def test_badge_only_paragraph_not_dropped():
+    """A message that is nothing but a block name must still render — the
+    emptiness check in _render_markdown_to_box uses get_slice (which counts
+    the badge's anchor placeholder), not get_text (which would see nothing
+    but a trailing newline and silently drop the whole paragraph)."""
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    block = MagicMock()
+    block.name = "test_block_x"
+    fg = MagicMock()
+    fg.blocks = [block]
+    cm.current_flow_graph = fg
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box, "test_block_x", clear=True)
+
+    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    assert len(textviews) == 1
+
+
+def test_badge_hover_calls_canvas_highlight():
+    """Hovering a chat badge pill calls canvas_manager.set_highlight_block;
+    un-hovering calls clear_highlight. Bound methods (not lambdas) are used
+    for enter/leave so this can be verified without a real Gdk.Event."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    pill = sidebar._make_block_badge_widget("analog_sig_source_x_0")
+    assert pill is not None
+
+    sidebar._on_badge_enter(pill, None, "analog_sig_source_x_0")
+    cm.set_highlight_block.assert_called_once_with("analog_sig_source_x_0")
+
+    sidebar._on_badge_leave(pill, None, "analog_sig_source_x_0")
+    cm.clear_highlight.assert_called_once()
+
+
+def test_link_click_opens_uri(monkeypatch):
+    """A markdown link in a chat message must still open a browser on click.
+    Gtk.Label's built-in activate-link handling did this for free before the
+    prose renderer moved to Gtk.TextView, which has no equivalent default —
+    this is the explicit replacement, not a new feature."""
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gdk, Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box, "Check [this link](https://example.com) out.", clear=True)
+
+    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    assert len(textviews) == 1
+    buffer = textviews[0].get_buffer()
+
+    found_tags = []
+    buffer.get_tag_table().foreach(lambda t: found_tags.append(t))
+    link_tags = [t for t in found_tags if getattr(t, "grc_href", None)]
+    assert len(link_tags) == 1
+    assert link_tags[0].grc_href == "https://example.com"
+
+    opened = MagicMock()
+    monkeypatch.setattr("grc_agent.chat_sidebar.Gtk.show_uri_on_window", opened)
+
+    event = MagicMock()
+    event.type = Gdk.EventType.BUTTON_RELEASE
+    event.time = 999
+    handled = sidebar._on_link_tag_event(link_tags[0], None, event, None, "https://example.com")
+
+    assert handled is True
+    opened.assert_called_once_with(None, "https://example.com", 999)
+
+
+def test_highlight_overlay_state():
+    """NativeCanvasManager.set_highlight_block sets _highlight_block_name
+    and queues a redraw; clear_highlight resets it (and is a no-op, with no
+    extra redraw, if nothing was highlighted)."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    da = MagicMock()
+    page = MagicMock()
+    page.drawing_area = da
+    window = MagicMock()
+    window.current_page = page
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = window
+    cm._highlight_block_name = None
+
+    cm.set_highlight_block("test_block")
+    assert cm._highlight_block_name == "test_block"
+    da.queue_draw.assert_called_once()
+
+    cm.clear_highlight()
+    assert cm._highlight_block_name is None
+    assert da.queue_draw.call_count == 2
+
+    da.queue_draw.reset_mock()
+    cm.clear_highlight()
+    da.queue_draw.assert_not_called()
+
+
+def test_highlight_overlay_draw_geometry():
+    """Drives _on_draw_highlight_overlay against a REAL cairo context so the
+    geometry (is_horizontal() w/h swap, translate to block.coordinate, the
+    +/-pad rectangle) and the stale-block KeyError safe-fail are actually
+    exercised — the field-set/queue_draw test above mocks the DrawingArea and
+    never runs this path."""
+    from types import SimpleNamespace
+
+    import cairo
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    class _Block:
+        def __init__(self, coordinate, w, h, horizontal=True):
+            self.coordinate = coordinate
+            self.width = w
+            self.height = h
+            self._horizontal = horizontal
+
+        def is_horizontal(self):
+            return self._horizontal
+
+    class _FG:
+        def __init__(self, block):
+            self._block = block
+            self.blocks = [block]
+
+        def get_block(self, name):
+            if self._block.name != name:
+                raise KeyError(name)
+            return self._block
+
+    block = _Block((30, 40), 100, 60, horizontal=True)
+    block.name = "b0"
+    fg = _FG(block)
+    page = SimpleNamespace(flow_graph=fg, drawing_area=None)
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=page)
+    cm._highlight_block_name = None
+    da = SimpleNamespace(zoom_factor=1.0)
+
+    def _render():
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 240, 200)
+        cr = cairo.Context(surf)
+        return surf, cr
+
+    def _ink(surf):
+        data = surf.get_data()
+        return sum(1 for i in range(3, len(data), 4) if data[i] > 0)
+
+    # No highlight set -> no draw, blank surface.
+    surf, cr = _render()
+    assert cm._on_draw_highlight_overlay(da, cr) is False
+    assert _ink(surf) == 0
+
+    # Real horizontal block -> draws (ink appears), returns False (chain continues).
+    cm.set_highlight_block("b0")
+    surf, cr = _render()
+    assert cm._on_draw_highlight_overlay(da, cr) is False
+    assert _ink(surf) > 0
+
+    # Vertical block -> is_horizontal()==False swaps w/h; still draws, no raise.
+    block._horizontal = False
+    surf, cr = _render()
+    assert cm._on_draw_highlight_overlay(da, cr) is False
+    assert _ink(surf) > 0
+
+    # Stale/renamed block -> fg.get_block raises KeyError -> safe no-op, blank.
+    cm._highlight_block_name = "gone"
+    surf, cr = _render()
+    assert cm._on_draw_highlight_overlay(da, cr) is False
+    assert _ink(surf) == 0
+
+
+def test_highlight_cleared_on_tab_switch():
+    """Tab switch must clear _highlight_block_name so a stale chat-badge
+    hover doesn't draw an outline against the newly-switched-to flowgraph."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm._highlight_block_name = "some_block"
+    cm.on_graphs_changed = None
+    cm._setup_drawing_area = MagicMock()
+    cm._sync_page_baselines = MagicMock()
+
+    cm._on_page_switched(MagicMock(), MagicMock(), 0)
+
+    assert cm._highlight_block_name is None
+    cm._setup_drawing_area.assert_called_once()
+    cm._sync_page_baselines.assert_called_once()
+
+
+def test_highlight_cleared_on_history_rebuild():
+    """A full message-list rebuild (_render_history) must clear the canvas
+    highlight — GTK3 doesn't synthesize leave-notify-event on a destroyed
+    widget, so a badge pill removed mid-hover could otherwise leave a stale
+    highlight stuck on canvas."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    sidebar._render_history()
+
+    cm.clear_highlight.assert_called_once()
+
+
+def test_highlight_cleared_on_partial_rerender():
+    """A single-message re-render (_render_last_message_rich, fired per
+    streaming chunk) must also clear the canvas highlight — same reason as the
+    full-rebuild test above: a pill hovered mid-stream is destroyed without a
+    leave-notify-event, which would otherwise leave a stale outline."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    box = sidebar._start_agent_message()
+    # Empty-parts ModelResponse is enough to reach the clear at the top of
+    # _render_last_message_rich (it runs before the parts loop).
+    sidebar._render_last_message_rich(box, SimpleNamespace(parts=[]))
+
+    cm.clear_highlight.assert_called_once()
+
+
+def test_prose_textview_wraps_at_available_width():
+    """Gtk.TextView doesn't self-report a usable natural width for
+    word-wrapped content (unlike Gtk.Label, which measures via Pango
+    internally) — left alone, the agent message bubble (which hugs its
+    content via hbox.set_halign(START)) collapses to a tiny width and wraps
+    one word per line. The rendered bubble must use most of the available
+    column width instead."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    win = Gtk.Window()
+    win.set_default_size(700, 400)
+    sidebar = ChatSidebar()
+    win.add(sidebar)
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    box = sidebar._start_agent_message()
+    long_text = (
+        "This is a long sentence meant to exercise word wrapping across a "
+        "realistically wide chat column so it does not collapse to one word "
+        "per line."
+    )
+    sidebar._render_markdown_to_box(box, long_text, clear=True)
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    assert len(textviews) == 1
+    width, _height = textviews[0].get_size_request()
+    assert width > 400
+
+    win.destroy()
+
+
+def test_prose_textview_rewraps_on_listbox_resize():
+    """A prose bubble rendered before the window's first size-allocate
+    (get_allocated_width() reads 0, so the narrow fallback width is used —
+    e.g. session history loaded at startup before window.show_all()) must
+    widen once the sidebar is actually laid out, via the listbox's
+    size-allocate handler re-clamping every rendered bubble."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    long_text = (
+        "This is a long sentence meant to exercise word wrapping across a "
+        "realistically wide chat column so it does not collapse to one word "
+        "per line."
+    )
+    box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box, long_text, clear=True)
+    tv = next(c for c in box.get_children() if isinstance(c, Gtk.TextView))
+    narrow_width, _height = tv.get_size_request()
+
+    win = Gtk.Window()
+    win.set_default_size(900, 500)
+    win.add(sidebar)
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    wide_width, _height = tv.get_size_request()
+    assert wide_width > narrow_width
+
+    win.destroy()
+
+
+def test_table_renders_block_badges():
+    """Verify block names inside Markdown tables are converted into interactive pill badges."""
+    from unittest.mock import MagicMock
+    from gi.repository import Gtk
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    block1 = MagicMock()
+    block1.name = "tone1"
+    block2 = MagicMock()
+    block2.name = "mixer"
+    fg = MagicMock()
+    fg.blocks = [block1, block2]
+    cm.current_flow_graph = fg
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    box = sidebar._start_agent_message()
+    table_md = "| Block | Type |\n|---|---|\n| tone1 | Source |\n| mixer | Adder |"
+    sidebar._render_markdown_to_box(box, table_md, clear=True)
+
+    scrolled_windows = [c for c in box.get_children() if isinstance(c, Gtk.ScrolledWindow)]
+    assert len(scrolled_windows) == 1
+    sw = scrolled_windows[0]
+    tv = sw.get_child()
+    assert isinstance(tv, Gtk.TextView)
+
+    buffer = tv.get_buffer()
+    slice_text = buffer.get_slice(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    assert "￼" in slice_text
+
+    # Count child anchors for pill badges (tone1 and mixer)
+    start, end = buffer.get_start_iter(), buffer.get_end_iter()
+    it = start.copy()
+    anchors = []
+    while it.compare(end) < 0:
+        anchor = it.get_child_anchor()
+        if anchor:
+            anchors.append(anchor)
+        if not it.forward_char():
+            break
+    assert len(anchors) == 2
+
+
+def test_badge_click_scrolls_canvas():
+    """Clicking a block pill badge in the chat sidebar invokes scroll_to_block on canvas."""
+    from unittest.mock import MagicMock
+    from gi.repository import Gdk
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    pill = sidebar._make_block_badge_widget("block_0")
+    event = MagicMock()
+    event.type = Gdk.EventType.BUTTON_PRESS
+    event.button = 1
+
+    result = sidebar._on_badge_click(pill, event, "block_0")
+    assert result is True
+    cm.scroll_to_block.assert_called_once_with("block_0")
+
+
+def test_scroll_to_block():
+    """verify NativeCanvasManager.scroll_to_block safely handles valid and invalid block lookups."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    block = SimpleNamespace(states={"coordinate": [150, 300]})
+    fg = SimpleNamespace(
+        get_block=lambda name: block if name == "b0" else (_ for _ in ()).throw(KeyError(name)),
+        get_extents=lambda: (0, 0, 1000, 1000),
+    )
+    adj_h = MagicMock()
+    adj_h.get_upper.return_value = 500
+    adj_h.get_lower.return_value = 0
+    adj_h.get_page_size.return_value = 200
+
+    adj_v = MagicMock()
+    adj_v.get_upper.return_value = 800
+    adj_v.get_lower.return_value = 0
+    adj_v.get_page_size.return_value = 200
+
+    sw = MagicMock()
+    sw.get_hadjustment.return_value = adj_h
+    sw.get_vadjustment.return_value = adj_v
+
+    da = MagicMock()
+    da.zoom_factor = 1.5
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    page = SimpleNamespace(flow_graph=fg, drawing_area=da)
+    cm.window = SimpleNamespace(current_page=page)
+    cm._get_scrolled_window = lambda *a: sw
+
+    # Valid block -> calculates target and updates adjustments
+    assert cm.scroll_to_block("b0") is True
+    adj_h.set_value.assert_called_once_with(225.0)  # 150 * 1.5
+    adj_v.set_value.assert_called_once_with(450.0)  # 300 * 1.5
+
+    # Missing block -> returns False
+    assert cm.scroll_to_block("missing") is False
 
 
 

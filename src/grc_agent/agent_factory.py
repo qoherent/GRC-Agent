@@ -6,8 +6,10 @@ import httpx
 from pydantic_ai import Agent, ModelSettings, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models.ollama import OllamaModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -62,9 +64,19 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
             cfg["model"],
             provider=OllamaProvider(base_url="https://ollama.com/v1", api_key=key, http_client=http_client),
         )
+    if cfg["provider"] == "openai_compatible":
+        key = get_env_value("OPENAI_COMPATIBLE_API_KEY") or cfg.get("openai_compatible_api_key") or "not-required"
+        raw_url = (cfg.get("openai_compatible_base_url") or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1").rstrip("/")
+        base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
+        return OpenAIChatModel(
+            cfg["model"],
+            provider=OpenAIProvider(base_url=base_url, api_key=key, http_client=http_client),
+        )
+    raw_url = (cfg.get("ollama_base_url") or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+    base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
     return OllamaModel(
         cfg["model"],
-        provider=OllamaProvider(base_url=OLLAMA_V1, http_client=http_client),
+        provider=OllamaProvider(base_url=base_url, http_client=http_client),
     )
 
 
@@ -118,11 +130,14 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
         model = _build_model(cfg, http_client)
 
     is_ollama = cfg["provider"] in ("ollama", "ollama_cloud")
-    model_settings = ModelSettings(extra_body={"think": True}) if is_ollama else ModelSettings()
+    thinking = cfg.get("ollama_thinking_enabled", True)
+    model_settings = ModelSettings(extra_body={"think": thinking}) if is_ollama else ModelSettings()
 
-    agent = Agent(
+    from grc_agent.native_canvas import NativeFlowgraphProxy
+
+    agent: Agent[NativeFlowgraphProxy, Any] = Agent(
         model=model,
-        deps_type=Any,
+        deps_type=NativeFlowgraphProxy,
         output_type=[GrcAgentResponse, str],
         name="grc_desktop_chat_agent",
         instructions=build_system_prompt("pai-desktop-chat"),
@@ -136,6 +151,15 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
         model_settings=model_settings,
         retries={"tools": 3, "output": 3},
     )
+
+    @agent.instructions
+    def add_active_flowgraph_context(ctx: RunContext[NativeFlowgraphProxy]) -> str | None:
+        if ctx.deps is not None:
+            cm = getattr(ctx.deps, "_canvas_manager", None)
+            if cm and getattr(cm, "path", None):
+                return f"Active flowgraph file path: {cm.path}"
+        return None
+
     agent.output_validator(validate_flowgraph_state)
     return agent, model_build_error
 
@@ -149,7 +173,13 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
     return build_agent_from_cfg(load_settings())
 
 
-def preflight_connection(provider: str, api_key: str = "", *, timeout: float = 5.0) -> str | None:
+def preflight_connection(
+    provider: str,
+    api_key: str = "",
+    *,
+    ollama_base_url: str = "",
+    timeout: float = 5.0,
+) -> str | None:
     """Cheap sync reachability check against the configured provider's
     `GET /models`-equivalent. Returns None on success, an error string on any
     failure (connection refused, bad status, missing key, etc.).
@@ -163,9 +193,10 @@ def preflight_connection(provider: str, api_key: str = "", *, timeout: float = 5
     startup resolves them from the already-loaded cfg/env.
 
     Endpoints:
-      - openrouter:  GET https://openrouter.ai/api/v1/models  (Bearer key)
-      - ollama_cloud: GET https://ollama.com/v1/models         (Bearer key)
-      - ollama:      GET http://localhost:11434/api/tags        (no key)
+      - openrouter:        GET https://openrouter.ai/api/v1/models (Bearer key)
+      - ollama_cloud:      GET https://ollama.com/v1/models        (Bearer key)
+      - openai_compatible: GET {base_url}/models                   (Optional Bearer key)
+      - ollama:            GET {ollama_base_url}/api/tags         (no key)
     """
     try:
         if provider == "openrouter":
@@ -184,8 +215,14 @@ def preflight_connection(provider: str, api_key: str = "", *, timeout: float = 5
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=timeout,
             )
+        elif provider == "openai_compatible":
+            base = (ollama_base_url or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1").rstrip("/")
+            models_url = base if base.endswith("/models") else f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            r = httpx.get(models_url, headers=headers, timeout=timeout)
         else:
-            r = httpx.get("http://localhost:11434/api/tags", timeout=timeout)
+            base_url = (ollama_base_url or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+            r = httpx.get(f"{base_url}/api/tags", timeout=timeout)
     except httpx.HTTPError as exc:
         return f"connection failed: {exc}"
     if r.status_code >= 400:
@@ -209,8 +246,15 @@ def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
     provider = cfg.get("provider", "ollama")
     if provider == "openrouter":
         key = get_env_value("OPENROUTER_API_KEY") or ""
+        ollama_url = ""
     elif provider == "ollama_cloud":
         key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
+        ollama_url = ""
+    elif provider == "openai_compatible":
+        key = get_env_value("OPENAI_COMPATIBLE_API_KEY") or ""
+        ollama_url = cfg.get("openai_compatible_base_url") or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1"
     else:
         key = ""
-    return preflight_connection(provider, key, timeout=timeout)
+        ollama_url = cfg.get("ollama_base_url") or ""
+    return preflight_connection(provider, key, ollama_base_url=ollama_url, timeout=timeout)
+

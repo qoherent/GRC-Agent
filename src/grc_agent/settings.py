@@ -28,26 +28,32 @@ from pathlib import Path
 
 from dotenv import dotenv_values, set_key
 
-_VALID_PROVIDERS = ("ollama", "openrouter", "ollama_cloud")
+_VALID_PROVIDERS = ("ollama", "openai_compatible", "openrouter", "ollama_cloud")
 
 # Per-provider chat-model env var name + settings dict key.
 _PROVIDER_ENV_VAR = {
     "ollama": "OLLAMA_CHAT_MODEL",
+    "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
     "openrouter": "OPENROUTER_MODEL",
     "ollama_cloud": "OLLAMA_CLOUD_MODEL",
 }
 _PROVIDER_MODEL_KEY = {
     "ollama": "ollama_model",
+    "openai_compatible": "openai_compatible_model",
     "openrouter": "openrouter_model",
     "ollama_cloud": "ollama_cloud_model",
 }
 
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.6:35b-a3b-q4_K_M",
+    "openai_compatible_model": "local-model",
     "openrouter_model": "deepseek/deepseek-v4-flash",
     "ollama_cloud_model": "deepseek-v4-flash:cloud",
 }
 _DEFAULT_PROVIDER = "ollama"
+_DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+_DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://localhost:8080/v1"
+_DEFAULT_OLLAMA_THINKING_ENABLED = True
 
 # mtime-gated cache for dotenv_values(env_path()). dotenv_values re-parses the
 # whole .env from disk on every call; callers like rag.py's embedding path hit
@@ -93,6 +99,9 @@ def env_path() -> Path:
 def default_settings() -> dict:
     res = {
         "provider": _DEFAULT_PROVIDER,
+        "ollama_base_url": _DEFAULT_OLLAMA_BASE_URL,
+        "openai_compatible_base_url": _DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "ollama_thinking_enabled": _DEFAULT_OLLAMA_THINKING_ENABLED,
         **_DEFAULT_MODELS,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[res["provider"]]]
@@ -102,18 +111,30 @@ def default_settings() -> dict:
 def load_settings() -> dict:
     """Read the saved preferences from the `.env` file (the source of truth),
     applying defaults for any vars not present. Returns a dict with keys:
-    provider, model, ollama_model, openrouter_model, ollama_cloud_model."""
+    provider, model, ollama_model, openai_compatible_model, openrouter_model,
+    ollama_cloud_model, ollama_base_url, openai_compatible_base_url,
+    ollama_thinking_enabled."""
     vals = _cached_dotenv()
 
     provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
     if provider not in _VALID_PROVIDERS:
         provider = _DEFAULT_PROVIDER
 
+    thinking_val = vals.get("OLLAMA_THINKING_ENABLED")
+    if thinking_val is None:
+        thinking_enabled = _DEFAULT_OLLAMA_THINKING_ENABLED
+    else:
+        thinking_enabled = thinking_val.lower() in ("true", "1", "yes")
+
     res = {
         "provider": provider,
         "ollama_model": vals.get("OLLAMA_CHAT_MODEL", _DEFAULT_MODELS["ollama_model"]),
+        "openai_compatible_model": vals.get("OPENAI_COMPATIBLE_MODEL", _DEFAULT_MODELS["openai_compatible_model"]),
         "openrouter_model": vals.get("OPENROUTER_MODEL", _DEFAULT_MODELS["openrouter_model"]),
         "ollama_cloud_model": vals.get("OLLAMA_CLOUD_MODEL", _DEFAULT_MODELS["ollama_cloud_model"]),
+        "ollama_base_url": vals.get("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
+        "openai_compatible_base_url": vals.get("OPENAI_COMPATIBLE_BASE_URL", _DEFAULT_OPENAI_COMPATIBLE_BASE_URL),
+        "ollama_thinking_enabled": thinking_enabled,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[provider]]
     return res
@@ -126,19 +147,30 @@ def upsert_env_key(key: str, value: str, path: Path | None = None) -> None:
     set_key(str(target), key, value, quote_mode="never")
 
 
-def save_settings(provider: str, model: str) -> None:
-    """Persist the active provider + its chat model name into the `.env` file.
-    Only the selected provider's model var is touched — the other providers'
-    saved model names are preserved verbatim (standard `.env` upsert). Does
-    NOT touch os.environ: `load_settings()` reads from the file on every call,
-    so a write here is immediately visible to the next `build_agent_from_cfg`
-    (the live-swap entry point invoked by the Settings dialog's Save handler)."""
+def save_settings(
+    provider: str,
+    model: str,
+    ollama_base_url: str | None = None,
+    openai_compatible_base_url: str | None = None,
+    thinking_enabled: bool | None = None,
+) -> None:
+    """Persist the active provider, chat model name, base URLs, and
+    thinking toggle into the `.env` file."""
     if provider not in _VALID_PROVIDERS:
         raise ValueError(f"Unknown provider: {provider!r}")
     if not model.strip():
         raise ValueError("model must be non-empty")
     upsert_env_key("GRC_PROVIDER", provider)
     upsert_env_key(_PROVIDER_ENV_VAR[provider], model.strip())
+    if ollama_base_url is not None:
+        url = ollama_base_url.strip() or _DEFAULT_OLLAMA_BASE_URL
+        upsert_env_key("OLLAMA_BASE_URL", url)
+    if openai_compatible_base_url is not None:
+        url = openai_compatible_base_url.strip() or _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+        upsert_env_key("OPENAI_COMPATIBLE_BASE_URL", url)
+    if thinking_enabled is not None:
+        upsert_env_key("OLLAMA_THINKING_ENABLED", "true" if thinking_enabled else "false")
+
 
 
 def get_env_value(key: str) -> str | None:

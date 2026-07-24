@@ -51,8 +51,8 @@ GRC_EXTENSIONS = (".grc", ".yml", ".yaml")
 _GLOBAL_CSS_TEMPLATE = """
 * { font-size: %(base)dpx; }
 .toolbar-btn { padding: 4px 8px; }
-.validation-valid { color: #2e7d32; font-weight: bold; }
-.validation-invalid { color: #c62828; font-weight: bold; }
+.validation-valid { color: #1b5e20; font-weight: bold; }
+.validation-invalid { color: #b71c1c; font-weight: bold; }
 """
 
 _BASE_FONT_SIZE = 13
@@ -176,15 +176,15 @@ def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
         elif hasattr(page.flow_graph, "get_option"):
             with contextlib.suppress(Exception):
                 name = page.flow_graph.get_option("title") or page.flow_graph.get_option("id")
-        if not name:
-            name = "untitled"
-    sidebar.set_active_graph(name)
+    p = page.file_path if page else None
+    sidebar.set_active_graph(name, path=p)
     fg = canvas.current_flow_graph
     if fg is not None:
         sidebar.set_input_enabled(True)
+        sidebar.grab_entry_focus()
     else:
         sidebar.set_input_enabled(False)
-    sidebar.sync_to_file(page.file_path if page else None)
+    sidebar.sync_to_file(p)
 
 
 def _show_fatal_error(title: str, message: str) -> None:
@@ -237,14 +237,15 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
         sys.exit(1)
 
     main_widget = window.main
+    main_widget.set_size_request(450, -1)
     parent = main_widget.get_parent()
     outer_paned = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
     parent.remove(main_widget)
     outer_paned.pack1(main_widget, resize=True, shrink=False)
 
     sidebar = ChatSidebar()
-    sidebar.set_size_request(1, -1)
-    outer_paned.pack2(sidebar, resize=True, shrink=True)
+    sidebar.set_size_request(300, -1)
+    outer_paned.pack2(sidebar, resize=True, shrink=False)
     parent.pack_start(outer_paned, expand=True, fill=True, padding=0)
 
     agent, model_error = build_interactive_agent()
@@ -323,8 +324,14 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
         err = f"preflight raised: {exc}"
     if err:
         provider = cfg.get("provider", "?") if "cfg" in locals() else "?"
+        from grc_agent.chat_sidebar import _PROVIDER_LABELS
+        provider_label = _PROVIDER_LABELS.get(provider, provider)
+        if provider == "ollama":
+            hint = "Ensure 'ollama serve' is running or check Preferences (Ctrl+,)."
+        else:
+            hint = "Check network connectivity or API key in Preferences (Ctrl+,)."
         sidebar.set_status(
-            f"Cannot reach {provider} backend ({err}). The first message may fail.",
+            f"Cannot reach {provider_label} ({err}). {hint}",
             error=True,
         )
 

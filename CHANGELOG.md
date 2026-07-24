@@ -9,6 +9,30 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+### Added
+- Chat-to-canvas block highlighting: when an agent message mentions a flowgraph
+  block by name, it now renders as a rounded pill badge in the chat. Hovering
+  a badge outlines the corresponding block on the GRC canvas with a blue
+  border overlay (drawn via a second `draw` handler on GRC's own
+  `DrawingArea`, independent of GRC's native selection highlighting, which
+  gets reset on every canvas action); clicking a badge scrolls the canvas to
+  center that block. Prose markdown (paragraphs, lists, headings) now renders into a
+  `Gtk.TextView` with `GtkTextChildAnchor`-embedded badge widgets, replacing the
+  previous Pango-markup label path; code blocks and tables are unaffected.
+- OpenAI-compatible local server provider support (e.g., llama.cpp / vLLM) in
+  `settings.py`, `agent_factory.py`, and Preferences UI with custom base URL and
+  reasoning toggle configuration.
+
+### Fixed
+- Fixed agent message bubbles collapsing to a one-word-per-line column.
+  `Gtk.TextView` (unlike the `Gtk.Label` it replaced for prose rendering)
+  doesn't self-report a usable natural width for word-wrapped content, which
+  broke the message bubble's "hug the content" sizing. Bubbles now measure
+  their actual text via Pango and clamp to the available column width, and
+  re-clamp automatically on the sidebar's next layout pass (covers both
+  session history rendered before the window's first show, and the user
+  resizing the sidebar's paned divider afterwards).
+
 ## [0.1.1] - 2026-07-22
 
 ### Added

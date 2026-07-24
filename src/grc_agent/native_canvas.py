@@ -120,6 +120,12 @@ class NativeCanvasManager:
         self._last_state_cache_version: tuple[int, int, int] | None = None
         self._poll_tick_count = 0
         self._blocks_visible = get_blocks_panel_visibility()
+        # Block name the chat sidebar wants outlined on canvas (set/cleared by
+        # a chat badge hover) — deliberately independent of GRC's own
+        # element.highlighted/selected_elements mechanism, which
+        # FlowGraph.update_selected() overwrites on every dispatched action
+        # (selection, undo/redo, move, ...), wiping a single named highlight.
+        self._highlight_block_name: str | None = None
         self.panning = False
         self.pan_start_x = 0.0
         self.pan_start_y = 0.0
@@ -278,6 +284,95 @@ class NativeCanvasManager:
         self._blocks_visible = not self._blocks_visible
         return set_blocks_panel_visibility(self.app, self._blocks_visible)
 
+    def set_highlight_block(self, name: str) -> None:
+        """Outline the named block on canvas (chat badge hover)."""
+        self._highlight_block_name = name
+        da = self.drawing_area
+        if da:
+            da.queue_draw()
+
+    def clear_highlight(self) -> None:
+        if self._highlight_block_name is not None:
+            self._highlight_block_name = None
+            da = self.drawing_area
+            if da:
+                da.queue_draw()
+
+    def scroll_to_block(self, name: str) -> bool:
+        """Scroll the canvas so the named block is centered/visible."""
+        fg = self.current_flow_graph
+        if fg is None:
+            return False
+        try:
+            block = fg.get_block(name)
+            coord = tuple(block.states.get("coordinate", (0, 0)))
+        except (KeyError, AttributeError):
+            return False
+        scrolled_window = self._get_scrolled_window()
+        if scrolled_window is None or not self.drawing_area:
+            return False
+        try:
+            zoom = getattr(self.drawing_area, "zoom_factor", 1.0)
+            content_w, content_h = fg.get_extents()[2:] if hasattr(fg, "get_extents") else (1000, 1000)
+            target_x = coord[0] * zoom
+            target_y = coord[1] * zoom
+            for adjustment, content_extent, target in (
+                (scrolled_window.get_hadjustment(), content_w * zoom + 100, target_x),
+                (scrolled_window.get_vadjustment(), content_h * zoom + 100, target_y),
+            ):
+                if adjustment is None:
+                    continue
+                adjustment.set_upper(max(adjustment.get_upper(), content_extent))
+                upper_bound = max(
+                    adjustment.get_lower(), adjustment.get_upper() - adjustment.get_page_size()
+                )
+                adjustment.set_value(max(adjustment.get_lower(), min(target, upper_bound)))
+            return True
+        except Exception as e:
+            _log.warning("Failed to scroll to block %r: %s", name, e)
+            return False
+
+    def _on_draw_highlight_overlay(self, da: Any, cr: Any) -> bool:
+        """Second 'draw' handler on the DrawingArea, connected after GRC's own
+        (DrawingArea.draw), so it inherits the same cairo context — including
+        the cr.scale(zoom_factor, zoom_factor) GRC's handler already applied,
+        with no save/restore around it to undo. Drawing directly in
+        block.coordinate/width/height (flow-graph/logical units), exactly as
+        Block.draw() itself does, lands in the right place with no extra
+        transform of our own."""
+        name = self._highlight_block_name
+        if not name:
+            return False
+        fg = self.current_flow_graph
+        if fg is None:
+            return False
+        try:
+            block = fg.get_block(name)
+        except KeyError:
+            return False
+        if not (block.width and block.height):
+            return False
+
+        try:
+            w, h = (block.width, block.height) if block.is_horizontal() else (block.height, block.width)
+            zoom = da.zoom_factor
+            pad = 4.0
+
+            cr.save()
+            try:
+                cr.translate(*block.coordinate)
+                cr.rectangle(-pad, -pad, w + 2 * pad, h + 2 * pad)
+                cr.set_line_width(2.5 / zoom)
+                cr.set_source_rgba(0.13, 0.59, 0.95, 0.18)  # #2196F3 fill — distinct
+                cr.fill_preserve()  # from GRC's own cyan HIGHLIGHT_COLOR, so a chat
+                cr.set_source_rgba(0.13, 0.59, 0.95, 1.0)  # hover reads differently
+                cr.stroke()  # than a real canvas selection.
+            finally:
+                cr.restore()
+        except Exception as e:
+            _log.warning("Failed to draw block highlight overlay: %s", e)
+        return False
+
     def _scroll_to_new_blocks(self, flow_graph: Any, old_names: set[str]) -> None:
         try:
             new_coords = [
@@ -339,6 +434,11 @@ class NativeCanvasManager:
         da.connect("button-press-event", self._on_button_press)
         da.connect("button-release-event", self._on_button_release)
         da.connect("motion-notify-event", self._on_motion_notify)
+        # Connected after GRC's own DrawingArea.draw (wired during page
+        # construction, always before this setup runs) — fires second on the
+        # same cr, already zoom-scaled, so we draw straight in block
+        # coordinates with no transform of our own.
+        da.connect("draw", self._on_draw_highlight_overlay)
 
     @staticmethod
     def _state_cache_version(page: Any) -> tuple[int, int, int] | None:
@@ -371,6 +471,7 @@ class NativeCanvasManager:
             _log.warning("Failed to sync page baselines on tab switch: %s", e)
 
     def _on_page_switched(self, _notebook: Any, _page: Any, _page_num: int) -> None:
+        self._highlight_block_name = None
         self._setup_drawing_area()
         self._sync_page_baselines()
         if self.on_graphs_changed:

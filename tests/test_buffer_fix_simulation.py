@@ -56,7 +56,7 @@ def _make_proxy(fg, exec_monitor):
     class FakeCanvasManager:
         current_flow_graph = fg
         current_page = None
-        path = None
+        path = getattr(fg, "file_path", None)
         window = None
         def after_agent_edit(self):
             if hasattr(fg, "update"):
@@ -89,13 +89,13 @@ def test_agent_fixes_buffer_too_small_ollama_cloud():
 
     load_dotenv(env_path())
 
-    # 1. Load the real flowgraph
-    fixture = Path("playground/untitled.grc")
+    # 1. Load the real flowgraph from tests/data/
+    fixture = Path("tests/data/ofdm_buffer_test.grc")
     if not fixture.exists():
         pytest.skip(f"{fixture} not found")
 
     tmp_dir = tempfile.mkdtemp()
-    tmp = Path(tmp_dir) / "untitled.grc"
+    tmp = Path(tmp_dir) / "ofdm_buffer_test.grc"
     shutil.copy2(fixture, tmp)
     fg = load_flow_graph(str(tmp))
 
