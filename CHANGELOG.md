@@ -9,6 +9,8 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-01
+
 ### Added
 - Chat-to-canvas block highlighting: when an agent message mentions a flowgraph
   block by name, it now renders as a rounded pill badge in the chat. Hovering
@@ -22,16 +24,23 @@ web-dashboard codebase and are not part of this history.
 - OpenAI-compatible local server provider support (e.g., llama.cpp / vLLM) in
   `settings.py`, `agent_factory.py`, and Preferences UI with custom base URL and
   reasoning toggle configuration.
+- SQLite chat session persistence fallback for unsaved flowgraph tabs (`untitled:<page_title>`).
+- Persisting complete intermediate tool call history and error traces in `chat_sessions.db` on failed or aborted turns.
+- Real-time active context token usage label updates during streaming turns, featuring output and reasoning token breakdown tooltips.
+- System prompt connection validation guidance for GNU Radio stream fan-in (strictly 1 source per sink port) and vector itemsize matching.
+- Keyboard numeric keypad `Ctrl+0` (`Gdk.KEY_KP_0`) zoom reset support.
 
 ### Fixed
+- Fixed tool expander jump-scrolling by connecting a `notify::expanded` listener that pauses `_auto_scroll` upon click.
+- Fixed thinking box readability by increasing max content height (from 250px to 500px), enlarging typography (1.0em), and expanding padding.
+- Enhanced `_format_turn_error()` to unpack structured JSON/dict error bodies returned by API providers (such as OpenRouter HTTP 403 quota limits) and expose underlying exception causes.
+- Fixed HTTP transport retry configuration in `_retrying_http_client()` by catching all `httpx.TransportError` subtypes.
 - Fixed agent message bubbles collapsing to a one-word-per-line column.
   `Gtk.TextView` (unlike the `Gtk.Label` it replaced for prose rendering)
   doesn't self-report a usable natural width for word-wrapped content, which
   broke the message bubble's "hug the content" sizing. Bubbles now measure
   their actual text via Pango and clamp to the available column width, and
-  re-clamp automatically on the sidebar's next layout pass (covers both
-  session history rendered before the window's first show, and the user
-  resizing the sidebar's paned divider afterwards).
+  re-clamp automatically on the sidebar's next layout pass.
 
 ## [0.1.1] - 2026-07-22
 

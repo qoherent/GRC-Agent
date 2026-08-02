@@ -50,9 +50,6 @@ GRC_EXTENSIONS = (".grc", ".yml", ".yaml")
 
 _GLOBAL_CSS_TEMPLATE = """
 * { font-size: %(base)dpx; }
-.toolbar-btn { padding: 4px 8px; }
-.validation-valid { color: #1b5e20; font-weight: bold; }
-.validation-invalid { color: #b71c1c; font-weight: bold; }
 """
 
 _BASE_FONT_SIZE = 13
@@ -147,7 +144,7 @@ def _on_window_key_press(
         _apply_canvas_zoom(canvas, "out")
         sidebar.set_status(f"Zoom: {int(_scale_factor * 100)}%")
         return True
-    if key == Gdk.KEY_0:
+    if key in (Gdk.KEY_0, Gdk.KEY_KP_0):
         _reset_scale()
         _apply_canvas_zoom(canvas, "reset")
         sidebar.set_status("Zoom reset")
@@ -324,8 +321,8 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
         err = f"preflight raised: {exc}"
     if err:
         provider = cfg.get("provider", "?") if "cfg" in locals() else "?"
-        from grc_agent.chat_sidebar import _PROVIDER_LABELS
-        provider_label = _PROVIDER_LABELS.get(provider, provider)
+        from grc_agent.ui.providers import PROVIDER_LABELS
+        provider_label = PROVIDER_LABELS.get(provider, provider)
         if provider == "ollama":
             hint = "Ensure 'ollama serve' is running or check Preferences (Ctrl+,)."
         else:

@@ -15,7 +15,6 @@ from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from grc_agent.agent import (
-    OLLAMA_V1,
     GrcAgentResponse,
     StopGracefully,
     grc_tools,
@@ -31,17 +30,16 @@ _log = logging.getLogger(__name__)
 
 def _retrying_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=15.0, read=1800.0, write=60.0, pool=30.0),
         transport=AsyncTenacityTransport(
             config=RetryConfig(
-                retry=retry_if_exception_type(
-                    (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException, httpx.HTTPStatusError)
-                ),
+                retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
                 wait=wait_exponential(multiplier=1, max=10),
                 stop=stop_after_attempt(3),
                 reraise=True,
             ),
             validate_response=lambda r: r.raise_for_status(),
-        )
+        ),
     )
 
 
@@ -173,6 +171,43 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
     return build_agent_from_cfg(load_settings())
 
 
+def _preflight_target(
+    provider: str, api_key: str, ollama_base_url: str
+) -> tuple[str, dict] | str:
+    """Resolve the provider's /models endpoint to (url, headers), or return an
+    error string when a required key is missing."""
+    if provider == "openrouter":
+        if not api_key:
+            return "OPENROUTER_API_KEY is not set"
+        return "https://openrouter.ai/api/v1/models", {"Authorization": f"Bearer {api_key}"}
+    if provider == "ollama_cloud":
+        if not api_key:
+            return "OLLAMA_CLOUD_API_KEY is not set"
+        return "https://ollama.com/v1/models", {"Authorization": f"Bearer {api_key}"}
+    if provider == "openai_compatible":
+        base = (ollama_base_url or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1").rstrip("/")
+        models_url = (
+            base if base.endswith("/models") else f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+        )
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        return models_url, headers
+    base_url = (ollama_base_url or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+    return f"{base_url}/api/tags", {}
+
+
+def _preflight_status_error(r) -> str:
+    detail = ""
+    try:
+        body = r.text.strip()
+        if body:
+            first = body.split("\n", 1)[0].strip()
+            if first:
+                detail = f": {first}"
+    except Exception:
+        pass
+    return f"HTTP {r.status_code}{detail}"
+
+
 def preflight_connection(
     provider: str,
     api_key: str = "",
@@ -191,51 +226,17 @@ def preflight_connection(
     Takes provider + api_key explicitly so the Save handler can validate a
     NEW config BEFORE writing it to .env (no save/restore dance), while
     startup resolves them from the already-loaded cfg/env.
-
-    Endpoints:
-      - openrouter:        GET https://openrouter.ai/api/v1/models (Bearer key)
-      - ollama_cloud:      GET https://ollama.com/v1/models        (Bearer key)
-      - openai_compatible: GET {base_url}/models                   (Optional Bearer key)
-      - ollama:            GET {ollama_base_url}/api/tags         (no key)
     """
+    target = _preflight_target(provider, api_key, ollama_base_url)
+    if isinstance(target, str):
+        return target
+    url, headers = target
     try:
-        if provider == "openrouter":
-            if not api_key:
-                return "OPENROUTER_API_KEY is not set"
-            r = httpx.get(
-                "https://openrouter.ai/api/v1/models",
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=timeout,
-            )
-        elif provider == "ollama_cloud":
-            if not api_key:
-                return "OLLAMA_CLOUD_API_KEY is not set"
-            r = httpx.get(
-                "https://ollama.com/v1/models",
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=timeout,
-            )
-        elif provider == "openai_compatible":
-            base = (ollama_base_url or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1").rstrip("/")
-            models_url = base if base.endswith("/models") else f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
-            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            r = httpx.get(models_url, headers=headers, timeout=timeout)
-        else:
-            base_url = (ollama_base_url or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
-            r = httpx.get(f"{base_url}/api/tags", timeout=timeout)
+        r = httpx.get(url, headers=headers, timeout=timeout)
     except httpx.HTTPError as exc:
         return f"connection failed: {exc}"
     if r.status_code >= 400:
-        detail = ""
-        try:
-            body = r.text.strip()
-            if body:
-                first = body.split("\n", 1)[0].strip()
-                if first:
-                    detail = f": {first}"
-        except Exception:
-            pass
-        return f"HTTP {r.status_code}{detail}"
+        return _preflight_status_error(r)
     return None
 
 

@@ -444,12 +444,13 @@ async def _with_state_lock(ctx: RunContext[Any], fn):
 
 
 # Module-level tool functions
-async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = None) -> str:
+async def inspect_graph_func(
+    ctx: RunContext[Any], targets: list[str] | str | None = None
+) -> str:
     """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.
 
     Args:
-        targets: Block/variable instance names to scope the inspection to.
-            Omit, or pass "all"/"*", to inspect the whole graph.
+        targets: Block/variable instance name(s) to scope inspection to (e.g. ["samp_rate", "blocks_head_0"] or "samp_rate"). Omit or pass null to inspect the full graph.
     """
     result = await _with_state_lock(
         ctx, lambda: inspect_graph(ctx.deps, targets=targets, view="overview")

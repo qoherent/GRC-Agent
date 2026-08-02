@@ -829,7 +829,7 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
     )
 
     # openrouter (key required by OpenRouterProvider at construction time)
-    save_settings("openrouter", "deepseek/deepseek-v4-flash")
+    save_settings("openrouter", "openai/gpt-4o-mini")
     upsert_env_key("OPENROUTER_API_KEY", "sk-or-dummy-key-for-build-test")
     agent_or, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent_or.model, OpenRouterModel), (
@@ -877,7 +877,7 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     # 2. Simulate the Settings dialog's Save path: write the new provider +
     #    real key to .env, then rebuild (exactly what
     #    ChatSidebar._rebuild_agent invokes after a successful Save).
-    save_settings("openrouter", "deepseek/deepseek-v4-flash")
+    save_settings("openrouter", "openai/gpt-4o-mini")
     upsert_env_key("OPENROUTER_API_KEY", api_key)
     agent2, _ = build_agent_from_cfg(load_settings())
 

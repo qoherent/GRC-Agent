@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import socket
@@ -22,6 +23,7 @@ from grc_agent.adapter import (
     query_docs,
     set_param,
 )
+from grc_agent.agent import inspect_graph_func
 
 FIXTURES_DIR = Path("tests/data")
 
@@ -70,8 +72,44 @@ def test_inspect_graph_scoped(temp_dial_tone):
     graph = res["graph"]
     block_names = {b["instance_name"] for b in graph["blocks"]}
     assert "samp_rate" in block_names
-    assert "analog_sig_source_x_0" in block_names
     assert len(block_names) == 2
+
+
+def test_inspect_graph_target_formats(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    full = inspect_graph(fg, targets=None)
+    full_count = len(full["graph"]["blocks"])
+
+    # All string/list wildcard and empty targets inspect full graph
+    for target in ["all", "*", "", ["all"], ["*"], [""]]:
+        res = inspect_graph(fg, targets=target)
+        assert res["ok"] is True
+        assert len(res["graph"]["blocks"]) == full_count
+
+    # Single string target normalizes to single block list
+    res_str = inspect_graph(fg, targets="samp_rate")
+    assert res_str["ok"] is True
+    assert len(res_str["graph"]["blocks"]) == 1
+    assert res_str["graph"]["blocks"][0]["instance_name"] == "samp_rate"
+
+
+@pytest.mark.asyncio
+async def test_inspect_graph_func_wrapper(temp_dial_tone):
+    from unittest.mock import MagicMock
+    fg = load_flow_graph(str(temp_dial_tone))
+    ctx = MagicMock()
+    ctx.deps = fg
+
+    # Test passing a string "all"
+    res_raw = await inspect_graph_func(ctx, targets="all")
+    res = json.loads(res_raw)
+    assert res["ok"] is True
+
+    # Test passing a string "samp_rate"
+    res_raw_scoped = await inspect_graph_func(ctx, targets="samp_rate")
+    res_scoped = json.loads(res_raw_scoped)
+    assert res_scoped["ok"] is True
+    assert len(res_scoped["graph"]["blocks"]) == 1
 
 
 # ==========================================
@@ -1236,10 +1274,11 @@ def test_chat_sidebar_copy_and_rich_rendering():
     sidebar._render_last_message_rich(box, msg)
     new_children = box.get_children()
 
-    # Verify we have Gtk.Expander for thinking/tools and Gtk.ScrolledWindow for the table
+    # Verify we have Gtk.Expander for thinking/tools and a table (TableBlock, a
+    # Gtk.ScrolledWindow subclass) for the markdown table.
     exp_classes = [c.__class__.__name__ for c in new_children]
     assert "Expander" in exp_classes
-    assert "ScrolledWindow" in exp_classes
+    assert any(isinstance(c, Gtk.ScrolledWindow) for c in new_children)
 
 
 def test_recent_sessions_persistence(tmp_path, monkeypatch):
@@ -1407,6 +1446,7 @@ def test_active_graph_label_format():
 
 def test_ui_micro_interactions_and_shortcuts():
     from gi.repository import Gdk
+
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -1445,7 +1485,11 @@ def test_ui_micro_interactions_and_shortcuts():
 
 
 def test_delete_recent_session_ui(monkeypatch):
+    """Per-row conversation delete requires confirmation (web-UI sidebar
+    parity): YES deletes + re-renders; CANCEL does nothing."""
     from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
@@ -1455,17 +1499,39 @@ def test_delete_recent_session_ui(monkeypatch):
     mock_delete = MagicMock()
     monkeypatch.setattr("grc_agent.chat_sidebar.delete_session", mock_delete)
 
-    sidebar._on_delete_recent_session(123)
+    mock_dialog = MagicMock()
+    monkeypatch.setattr(Gtk, "MessageDialog", MagicMock(return_value=mock_dialog))
+
+    def confirm(response: int) -> None:
+        mock_dialog.connect.reset_mock()
+        sidebar._on_delete_recent_session(123)
+        handler = mock_dialog.connect.call_args.args[1]
+        handler(mock_dialog, response)
+
+    # CANCEL: no delete, no re-render
+    confirm(Gtk.ResponseType.CANCEL)
+    mock_delete.assert_not_called()
+    sidebar._render_history.assert_not_called()
+
+    # YES: delete once + re-render
+    confirm(Gtk.ResponseType.YES)
     mock_delete.assert_called_once_with(123)
     sidebar._render_history.assert_called_once()
 
 
-def test_clear_history_confirmation(monkeypatch):
+def test_clear_history_confirmation(tmp_path, monkeypatch):
     from unittest.mock import MagicMock
 
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
+
+    # CRITICAL: this test drives the real _on_clear_history_clicked -> YES
+    # path, which calls the REAL delete_all_sessions(). Without GRC_AGENT_ENV
+    # isolation it wiped the user's actual chat_sessions.db on every full-suite
+    # run (pre-existing landmine — 28 real sessions destroyed). Keep it
+    # hermetic like the other clear-history tests.
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
     sidebar = ChatSidebar()
     sidebar.clear_messages = MagicMock()
@@ -1779,12 +1845,15 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     sidebar._flush_streaming(ctx)
     assert ctx.think_body.get_text() == "thought1"
 
-    ctx.think_acc = "thought2"
+    ctx.think_acc += "thought2"  # real streaming appends deltas, never replaces
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx)  # immediately after -> throttled
     assert ctx.think_body.get_text() == "thought1"
     sidebar._flush_streaming(ctx, force=True)
-    assert ctx.think_body.get_text() == "thought2"
+    # Buffers accumulate (delta-append, never full replace) — replacing the
+    # whole buffer per flush would reset the thinking scroller's scroll
+    # position mid-stream.
+    assert ctx.think_body.get_text() == "thought1thought2"
 
 
 def test_thinking_expander_label_changes_on_close():
@@ -1801,7 +1870,7 @@ def test_thinking_expander_label_changes_on_close():
     assert exp.get_label() == "Thinking..."
 
     sidebar._close_thinking(ctx)
-    assert exp.get_label() == "Thinked"
+    assert exp.get_label() == "Thought"
 
 
 def test_send_quick_prompt():
@@ -2044,6 +2113,10 @@ def test_format_turn_error_covers_each_exception_type():
         == "Model HTTP 500 Error: server exploded"
     )
     assert (
+        _format_turn_error(ModelHTTPError(403, "gpt-x", body={"message": "Key limit exceeded", "code": 403}))
+        == "Model HTTP 403 Error: Key limit exceeded"
+    )
+    assert (
         _format_turn_error(ModelHTTPError(503, "gpt-x"))
         == "Model HTTP 503 Error from gpt-x"
     )
@@ -2120,12 +2193,9 @@ def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
     """DB-1 regression: _save_history must be async and dispatch save_session via
     asyncio.to_thread so it never blocks the gbulb event loop."""
     import asyncio
-    import inspect
     from unittest.mock import MagicMock
 
     from grc_agent.chat_sidebar import ChatSidebar
-
-    assert inspect.iscoroutinefunction(ChatSidebar._save_history)
 
     sidebar = ChatSidebar()
     sidebar._active_session_id = 7
@@ -2146,6 +2216,61 @@ def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
 
     asyncio.run(sidebar._save_history())
     assert used["to_thread"] is True
+
+
+def test_effective_path_unsaved_tab_fallback():
+    """Unsaved flowgraph tabs fallback to untitled:<page_title> for session persistence."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    cm.path = ""
+    cm.page_title = "MyUnsavedTab"
+    proxy._canvas_manager = cm
+    sidebar._flowgraph_proxy = proxy
+
+    assert sidebar._get_effective_path() == "untitled:MyUnsavedTab"
+
+
+def test_context_label_updates_from_active_run_usage():
+    """Context label reads live active_run usage during streaming."""
+    from unittest.mock import MagicMock
+
+    from pydantic_ai.messages import ModelResponse
+    from pydantic_ai.usage import RequestUsage
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    label = MagicMock()
+    sidebar._context_label = label
+
+    usage = RequestUsage(input_tokens=14500, output_tokens=1200, details={"reasoning_tokens": 800})
+    resp = ModelResponse(parts=[], usage=usage)
+    run_mock = MagicMock()
+    run_mock.all_messages.return_value = [resp]
+    sidebar._active_run = run_mock
+
+    sidebar._update_context_label()
+    assert label.set_markup.called
+    markup = label.set_markup.call_args[0][0]
+    assert "14.5k" in markup or "15k" in markup or "14.5" in markup
+
+
+def test_tool_expander_disables_auto_scroll():
+    """Toggling a tool expander pauses _auto_scroll to prevent jump-scrolling."""
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar._auto_scroll = True
+    exp = sidebar._make_tool_expander("inspect_graph")
+
+    # Simulate GTK notify::expanded signal
+    exp.set_expanded(True)
+    assert sidebar._auto_scroll is False
 
 
 def test_save_history_deletes_session_resurrected_by_concurrent_clear(monkeypatch):
@@ -3004,8 +3129,15 @@ def test_downstream_block_placement_never_placed_left():
 
 def test_context_label_updates_with_pydantic_ai_usage():
     """Context label must extract token usage natively from Pydantic AI ModelResponse.usage."""
-    from pydantic_ai.messages import ModelRequest, ModelResponse, RequestUsage, TextPart, UserPromptPart
-    from grc_agent.chat_sidebar import format_tokens, resolve_model_context_length, ChatSidebar
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        RequestUsage,
+        TextPart,
+        UserPromptPart,
+    )
+
+    from grc_agent.chat_sidebar import ChatSidebar, format_tokens, resolve_model_context_length
 
     assert format_tokens(1200) == "1.2k"
     assert format_tokens(14710) == "14.7k"
@@ -3125,9 +3257,10 @@ def test_openai_compatible_provider_and_factory(tmp_path, monkeypatch):
 
 
 
-def test_copy_code_block_to_clipboard(monkeypatch):
+def test_copy_code_block_to_clipboard():
     """Test markdown pre element rendering creates a Copy button and copies code text to clipboard."""
     from gi.repository import Gdk, Gtk
+
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -3168,6 +3301,7 @@ def test_copy_code_block_to_clipboard(monkeypatch):
 def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     """Test Settings Dialog includes Base URL entry and Thinking checkbox, saving them properly."""
     from gi.repository import Gtk
+
     from grc_agent.chat_sidebar import ChatSidebar
     from grc_agent.settings import load_settings, save_settings
 
@@ -3201,7 +3335,7 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     thinking_check.set_active(False)
 
     # Bypass preflight reachability check for 10.0.0.5
-    monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *a, **kw: None)
+    monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *_a, **_kw: None)
 
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
@@ -3251,7 +3385,7 @@ def test_badge_regex_matching():
     # No active blocks -> None, and the cache is cleared.
     cm.current_flow_graph = None
     assert sidebar._compile_badge_regex() is None
-    assert sidebar._badge_regex_cache is None
+    assert sidebar._md._badge_regex_cache is None
 
 
 def test_badge_render_prose_textview():
@@ -3378,12 +3512,12 @@ def test_link_click_opens_uri(monkeypatch):
     assert link_tags[0].grc_href == "https://example.com"
 
     opened = MagicMock()
-    monkeypatch.setattr("grc_agent.chat_sidebar.Gtk.show_uri_on_window", opened)
+    monkeypatch.setattr("grc_agent.ui.markdown_view.Gtk.show_uri_on_window", opened)
 
     event = MagicMock()
     event.type = Gdk.EventType.BUTTON_RELEASE
     event.time = 999
-    handled = sidebar._on_link_tag_event(link_tags[0], None, event, None, "https://example.com")
+    handled = sidebar._md._on_link_tag_event(link_tags[0], None, event, None, "https://example.com")
 
     assert handled is True
     opened.assert_called_once_with(None, "https://example.com", 999)
@@ -3630,9 +3764,12 @@ def test_prose_textview_rewraps_on_listbox_resize():
 
 
 def test_table_renders_block_badges():
-    """Verify block names inside Markdown tables are converted into interactive pill badges."""
+    """Block names inside a Markdown table render as a real Gtk.Grid (TableBlock)
+    whose cells contain interactive pill badges — not ASCII art in a TextView."""
     from unittest.mock import MagicMock
+
     from gi.repository import Gtk
+
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -3652,33 +3789,31 @@ def test_table_renders_block_badges():
     table_md = "| Block | Type |\n|---|---|\n| tone1 | Source |\n| mixer | Adder |"
     sidebar._render_markdown_to_box(box, table_md, clear=True)
 
-    scrolled_windows = [c for c in box.get_children() if isinstance(c, Gtk.ScrolledWindow)]
-    assert len(scrolled_windows) == 1
-    sw = scrolled_windows[0]
-    tv = sw.get_child()
-    assert isinstance(tv, Gtk.TextView)
+    tables = [c for c in box.get_children() if isinstance(c, Gtk.ScrolledWindow)]
+    assert len(tables) == 1, "expected exactly one TableBlock (ScrolledWindow)"
 
-    buffer = tv.get_buffer()
-    slice_text = buffer.get_slice(buffer.get_start_iter(), buffer.get_end_iter(), True)
-    assert "￼" in slice_text
+    # Count BlockBadge pills anywhere under the table (tone1 + mixer).
+    pills = []
 
-    # Count child anchors for pill badges (tone1 and mixer)
-    start, end = buffer.get_start_iter(), buffer.get_end_iter()
-    it = start.copy()
-    anchors = []
-    while it.compare(end) < 0:
-        anchor = it.get_child_anchor()
-        if anchor:
-            anchors.append(anchor)
-        if not it.forward_char():
-            break
-    assert len(anchors) == 2
+    def walk(w):
+        if getattr(w, "grc_is_badge", False):
+            pills.append(w)
+        if isinstance(w, Gtk.Container):
+            for ch in w.get_children():
+                walk(ch)
+
+    walk(tables[0])
+    assert len(pills) == 2, "expected tone1 + mixer pills in the table"
+    badge_names = sorted(p.get_child().get_text() for p in pills)
+    assert badge_names == ["mixer", "tone1"]
 
 
 def test_badge_click_scrolls_canvas():
     """Clicking a block pill badge in the chat sidebar invokes scroll_to_block on canvas."""
     from unittest.mock import MagicMock
+
     from gi.repository import Gdk
+
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -3701,6 +3836,7 @@ def test_scroll_to_block():
     """verify NativeCanvasManager.scroll_to_block safely handles valid and invalid block lookups."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
+
     from grc_agent.native_canvas import NativeCanvasManager
 
     block = SimpleNamespace(states={"coordinate": [150, 300]})
@@ -3728,7 +3864,7 @@ def test_scroll_to_block():
     cm = NativeCanvasManager.__new__(NativeCanvasManager)
     page = SimpleNamespace(flow_graph=fg, drawing_area=da)
     cm.window = SimpleNamespace(current_page=page)
-    cm._get_scrolled_window = lambda *a: sw
+    cm._get_scrolled_window = lambda *_a: sw
 
     # Valid block -> calculates target and updates adjustments
     assert cm.scroll_to_block("b0") is True

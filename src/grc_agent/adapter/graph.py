@@ -566,7 +566,7 @@ def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) ->
 
 
 def inspect_graph(  # noqa: C901
-    flow_graph: Any, targets: list[str] | None = None, view: str = "overview"
+    flow_graph: Any, targets: list[str] | str | None = None, view: str = "overview"
 ) -> dict[str, Any]:
     selected_view = str(view).strip().lower()
     blocks_all = []
@@ -643,8 +643,15 @@ def inspect_graph(  # noqa: C901
             else:
                 errors.append(f"{elem}: {msg}")
 
-    whole_graph = not targets or any(t in ("all", "*") for t in targets)
+    if isinstance(targets, str):
+        cleaned = targets.strip().lower()
+        targets = None if cleaned in ("", "all", "*") else [targets.strip()]
+
+    whole_graph = not targets or any(
+        isinstance(t, str) and t.strip().lower() in ("", "all", "*") for t in targets
+    )
     if not whole_graph:
+        assert targets is not None
         requested = set(targets)
         existing_names = {b["instance_name"] for b in blocks_all}
         missing = [t for t in targets if t not in existing_names]
@@ -747,6 +754,17 @@ def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
         _atomic_write_text(_serialize_flow_graph(flow_graph), path)
 
 
+def _sanitize_data(data: Any) -> Any:
+    """Recursively normalize non-breaking spaces (U+00A0) in strings, lists, and dicts."""
+    if isinstance(data, str):
+        return data.replace("\u00a0", " ").replace("\xa0", " ")
+    if isinstance(data, dict):
+        return {k: _sanitize_data(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_sanitize_data(item) for item in data]
+    return data
+
+
 def set_param(block: Any, param_key: str, value: str) -> None:
     if param_key not in block.params:
         valid_keys = sorted(block.params.keys())
@@ -763,7 +781,7 @@ def set_param(block: Any, param_key: str, value: str) -> None:
             )
         return
 
-    raw_value = str(value)
+    raw_value = str(value).replace("\u00a0", " ").replace("\xa0", " ")
     template = _VARIABLE_TEMPLATE_RE.match(raw_value)
     if template:
         bare = template.group(1)
@@ -806,6 +824,9 @@ def change_graph(  # noqa: C901
 ) -> dict[str, Any]:
     from grc_agent.adapter.layout import _compute_ranks, _find_block_placement
     from grc_agent.adapter.snapshots import _prune_old_backups, push_undo_snapshot
+
+    add_blocks = _sanitize_data(add_blocks)
+    update_params = _sanitize_data(update_params)
 
     if not any(
         [

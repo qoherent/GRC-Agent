@@ -140,7 +140,7 @@ def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
             res.append({
                 "id": r["id"],
                 "grc_file_path": path_str,
-                "last_message": _extract_last_message(r["messages"]),
+                "first_message": _extract_first_message(r["messages"]),
                 "created_at": r["created_at"],
                 "updated_at": r["updated_at"],
             })
@@ -189,17 +189,27 @@ def deserialize_messages(messages_json: str) -> list[ModelMessage]:
         return []
 
 
-def _extract_last_message(messages_json: str) -> str:
-    """Extract the most recent user/assistant text from a session's serialized
-    messages, for the recent-sessions preview. Called lazily by
+def _extract_first_message(messages_json: str) -> str:
+    """Extract the first user text from a session's serialized messages, to
+    label the conversation in the recent-sessions list — mirrors the web UI's
+    ``firstMessage`` (a chat is identified by how it starts). Called lazily by
     get_recent_sessions() per rendered row (cost bounded by its LIMIT)."""
     try:
         msgs = deserialize_messages(messages_json)
-        for m in reversed(msgs):
-            for part in reversed(getattr(m, "parts", [])):
-                cls_name = part.__class__.__name__
-                if cls_name in ("UserPromptPart", "TextPart") and part.content:
-                    return part.content
+        for m in msgs:
+            for part in getattr(m, "parts", []):
+                if part.__class__.__name__ != "UserPromptPart" or not part.content:
+                    continue
+                content = part.content
+                if not isinstance(content, str):
+                    pieces = []
+                    for item in content:
+                        if hasattr(item, "text"):
+                            pieces.append(item.text)
+                        elif isinstance(item, str):
+                            pieces.append(item)
+                    content = "".join(pieces)
+                return content
     except Exception:
         pass
     return ""
