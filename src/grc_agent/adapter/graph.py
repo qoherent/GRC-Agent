@@ -1163,6 +1163,8 @@ def change_graph(  # noqa: C901
                         }
                     )
                     continue
+                src_port = None
+                dst_port = None
                 try:
                     src_port = _find_port(flow_graph, p["src_block"], p["src_port"], kind="source")
                     dst_port = _find_port(flow_graph, p["dst_block"], p["dst_port"], kind="sink")

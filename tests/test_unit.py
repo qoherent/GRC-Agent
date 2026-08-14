@@ -3921,3 +3921,62 @@ def test_scroll_to_block():
 
     # Missing block -> returns False
     assert cm.scroll_to_block("missing") is False
+
+
+def test_change_graph_invalid_sink_port_returns_add_connection_failed(temp_dial_tone):
+    """Connecting to a non-existent sink port must return add_connection_failed
+    with clear port/block detail — NOT crash Phase 7 with an UnboundLocalError
+    on dst_port masking the real failure as mutation_failed."""
+    from grc_agent.adapter.graph import change_graph, load_flow_graph
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(fg, add_connections=["analog_sig_source_x_0:0->audio_sink:999"])
+    assert res["ok"] is False
+    assert len(res["errors"]) == 1
+    err = res["errors"][0]
+    assert err["code"] == "add_connection_failed"
+    assert "sink port '999' not on block 'audio_sink'" in err["message"]
+
+
+def test_clean_message_history_for_new_turn():
+    """_clean_message_history_for_new_turn must pop trailing ModelResponses
+    that contain unprocessed tool calls so PydanticAI accepts a subsequent
+    user prompt without raising UserError."""
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        RetryPromptPart,
+        TextPart,
+        ToolCallPart,
+        UserPromptPart,
+    )
+    from grc_agent.chat_sidebar import _clean_message_history_for_new_turn
+
+    # Case 1: Trailing ModelResponse with ToolCallPart is trimmed
+    msgs = [
+        ModelRequest(parts=[UserPromptPart(content="turn 1")]),
+        ModelResponse(parts=[ToolCallPart("change_graph", {})]),
+    ]
+    cleaned = _clean_message_history_for_new_turn(msgs)
+    assert len(cleaned) == 1
+    assert isinstance(cleaned[0].parts[0], UserPromptPart)
+
+    # Case 2: Multi-retry failure ending in ToolCallPart is trimmed
+    msgs = [
+        ModelRequest(parts=[UserPromptPart(content="turn 1")]),
+        ModelResponse(parts=[ToolCallPart("change_graph", {})]),
+        ModelRequest(parts=[RetryPromptPart(content="retry 1")]),
+        ModelResponse(parts=[ToolCallPart("change_graph", {})]),
+    ]
+    cleaned = _clean_message_history_for_new_turn(msgs)
+    assert len(cleaned) == 3
+    assert isinstance(cleaned[-1].parts[0], RetryPromptPart)
+
+    # Case 3: Completed response with TextPart is preserved intact
+    msgs = [
+        ModelRequest(parts=[UserPromptPart(content="turn 1")]),
+        ModelResponse(parts=[TextPart("all done")]),
+    ]
+    cleaned = _clean_message_history_for_new_turn(msgs)
+    assert len(cleaned) == 2
+

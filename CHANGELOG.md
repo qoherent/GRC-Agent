@@ -9,6 +9,12 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-14
+
+### Fixed
+- Fixed an `UnboundLocalError` on `dst_port` in `change_graph` (Phase 7) when looking up non-existent destination ports or blocks, which previously caused the mutation to fail with an internal Python error instead of returning clear, actionable port connection diagnostic messages.
+- Fixed session lockout caused by saving unfulfilled `ToolCallPart` instances into `_message_history` when turns failed or were cancelled mid-stream. Added `_clean_message_history_for_new_turn()` to strip trailing unprocessed tool calls before new agent runs, auto-repairing existing corrupted sessions and preventing PydanticAI `UserError: Cannot provide a new user prompt when the message history contains unprocessed tool calls.`.
+
 ## [0.1.3] - 2026-08-14
 
 ### Added

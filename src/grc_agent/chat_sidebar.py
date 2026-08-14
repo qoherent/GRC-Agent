@@ -42,6 +42,7 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
+    ModelResponse,
     NativeToolCallPart,
     NativeToolReturnPart,
     RetryPromptPart,
@@ -270,6 +271,29 @@ def _format_turn_error(e: Exception) -> str:
         return f"Unexpected Model Behavior: {e}{cause_str}"
 
     return f"Agent Error: {e}{cause_str}"
+
+
+def _clean_message_history_for_new_turn(
+    messages: list[ModelMessage],
+) -> list[ModelMessage]:
+    """Ensure message_history is valid for a new user prompt.
+
+    PydanticAI rejects any run whose message_history ends on a ModelResponse
+    with unfulfilled tool_calls (raising UserError: "Cannot provide a new user
+    prompt when the message history contains unprocessed tool calls.").
+
+    If an earlier turn aborted, hit max retries, or was persisted with
+    trailing unprocessed tool calls, pop trailing ModelResponse messages with
+    tool_calls so the next turn can start cleanly.
+    """
+    cleaned = list(messages)
+    while cleaned:
+        last = cleaned[-1]
+        if isinstance(last, ModelResponse) and last.tool_calls:
+            cleaned.pop()
+            continue
+        break
+    return cleaned
 
 
 class _StreamCtx:
@@ -1954,6 +1978,7 @@ class ChatSidebar(Gtk.Box):
                 user_prompt=text,
                 origin_page_path=self._get_effective_path(),
             )
+            self._message_history = _clean_message_history_for_new_turn(self._message_history)
             async with self._agent.iter(
                 text,
                 message_history=self._message_history,
@@ -1985,7 +2010,9 @@ class ChatSidebar(Gtk.Box):
             if self.current_page is origin_page and self._clear_generation == origin_gen:
                 if active_run is not None:
                     try:
-                        self._message_history = active_run.all_messages()
+                        self._message_history = _clean_message_history_for_new_turn(
+                            active_run.all_messages()
+                        )
                     except Exception:
                         self._remember_user_message(text)
                 else:
@@ -2002,7 +2029,9 @@ class ChatSidebar(Gtk.Box):
             if self.current_page is origin_page:
                 if active_run is not None:
                     try:
-                        self._message_history = active_run.all_messages()
+                        self._message_history = _clean_message_history_for_new_turn(
+                            active_run.all_messages()
+                        )
                     except Exception:
                         self._remember_user_message(text)
                 else:
