@@ -17,10 +17,15 @@ gbulb.install(gtk=True)
 # Patch gbulb to avoid AssertionError in ReadTransport._loop_reading when transports close/change
 try:
     import gbulb.transports
+
     _original_loop_reading = gbulb.transports.ReadTransport._loop_reading
 
     def _patched_loop_reading(self, fut=None):
-        if fut is not None and self._read_fut is not fut and not (self._read_fut is None and self._closing):
+        if (
+            fut is not None
+            and self._read_fut is not fut
+            and not (self._read_fut is None and self._closing)
+        ):
             return
         return _original_loop_reading(self, fut)
 
@@ -322,6 +327,7 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
     if err:
         provider = cfg.get("provider", "?") if "cfg" in locals() else "?"
         from grc_agent.ui.providers import PROVIDER_LABELS
+
         provider_label = PROVIDER_LABELS.get(provider, provider)
         if provider == "ollama":
             hint = "Ensure 'ollama serve' is running or check Preferences (Ctrl+,)."

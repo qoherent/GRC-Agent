@@ -2,6 +2,7 @@
 get_run_log proxy accessor. No mocking of the monitor itself; messages are
 fed through the real handle_message path just as GRC's Messages bus delivers
 them."""
+
 import json
 
 from grc_agent.exec_monitor import ExecutionErrorMonitor
@@ -292,7 +293,9 @@ def test_runtime_error_shows_in_get_last_run_log():
     monitor = ExecutionErrorMonitor(on_error=_noop)
 
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")
-    for ch in "throttle :info: set_min_output_buffer to 20480\nofdm :error: ERROR Buffer too small\n":
+    for (
+        ch
+    ) in "throttle :info: set_min_output_buffer to 20480\nofdm :error: ERROR Buffer too small\n":
         monitor.handle_message(ch)
     monitor.handle_message("\n>>> Done\n")
 

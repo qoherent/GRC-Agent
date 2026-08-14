@@ -116,7 +116,11 @@ class ExecutionErrorMonitor:
             self._tracking = False
             match = _RETURN_CODE_RE.search(text)
             code = int(match.group(1)) if match else 0
-            _log.info("exec_monitor: run finished with code=%d, chunks=%d bytes", code, len("".join(self._chunks)))
+            _log.info(
+                "exec_monitor: run finished with code=%d, chunks=%d bytes",
+                code,
+                len("".join(self._chunks)),
+            )
             # Retain the log for get_run_log BEFORE resetting the buffer.
             self._last_run_log = "".join(self._chunks)
             self._last_run_code = code
@@ -153,7 +157,11 @@ class ExecutionErrorMonitor:
 
     def _fail(self, code: int) -> None:
         log_text = self._last_run_log or ""
-        _log.info("exec_monitor: reporting failure (code=%d, %d chars), invoking callback", code, len(log_text))
+        _log.info(
+            "exec_monitor: reporting failure (code=%d, %d chars), invoking callback",
+            code,
+            len(log_text),
+        )
         try:
             self._on_error(code, log_text)
         except Exception:

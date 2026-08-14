@@ -9,6 +9,49 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-14
+
+### Added
+- Per-turn reasoning traces: every agent turn (success, abort, or error) is now
+  recorded as a row in a new `turn_traces` SQLite table — run/conversation ids,
+  provider/model/base_url snapshot at turn start, system-prompt hash, user
+  prompt, origin flowgraph, timings, the ordered event stream (part starts,
+  tool calls with args, tool results, errors), final output, and per-turn token
+  usage (input/output/reasoning/total). Traces cascade-delete with their
+  session and can never resurrect after a Clear History.
+- WAL journal mode, `busy_timeout`, and `foreign_keys` pragmas on every
+  chat-DB connection — session/trace writes (worker threads) can no longer
+  hit "database is locked" against main-loop reads.
+- Versioned DB schema: a `_meta(schema_version)` table with ordered, idempotent
+  migrations (v1 adds the `first_message` column, v2 adds `turn_traces`);
+  existing databases migrate in place on first launch.
+- Two new hermetic test suites: `tests/test_session_traces.py` (23 tests) and
+  `tests/test_session_traces_advanced.py` (16 tests — real pydantic-ai
+  `TestModel` agent runs, multi-thread concurrency stress, Unicode/large-blob
+  integrity, v1→v2 migration, and end-to-end ChatSidebar → trace-row coverage).
+- CI now installs xvfb and runs the session/trace suites alongside the unit
+  tests.
+
+### Changed
+- Message-history serialization now uses pydantic-ai's builtin
+  `ModelMessagesTypeAdapter.dump_json`/`validate_json` (single step, ~9%
+  smaller output) instead of the redundant `json.dumps(to_jsonable_python(...))`
+  double conversion; `ThinkingPart` reasoning, tool parts, usage, and
+  run/conversation ids all round-trip exactly.
+- The recent-sessions list reads a `first_message` column populated at save
+  time instead of re-deserializing each row's full messages blob.
+- Removed the one-time legacy `chat_sessions.db` path-migration code
+  (the relocation ran for all existing installs long ago).
+
+### Fixed
+- Hardened `init_db()` against concurrent first-run initialization with a
+  threading lock, and the v0→v1 migration now survives a crash between the
+  `ALTER TABLE` (auto-committed) and the `first_message` backfill
+  (the backfill is idempotent and re-runs on the next launch).
+- Recorder/trace wiring no longer feeds the trace recorder before the GTK
+  handlers, and a cancellation during the final trace save can no longer skip
+  the chat UI's busy-state cleanup.
+
 ## [0.1.2] - 2026-08-01
 
 ### Added

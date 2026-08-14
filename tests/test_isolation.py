@@ -398,7 +398,9 @@ def test_ingest_catalog_reports_progress_per_block(tmp_path, monkeypatch):
 
     db_path = str(tmp_path / "catalog.db")
     seen: list[tuple[int, int]] = []
-    n = ingest_mod.ingest_catalog(db_path, "fake-model", on_progress=lambda cur, tot: seen.append((cur, tot)))
+    n = ingest_mod.ingest_catalog(
+        db_path, "fake-model", on_progress=lambda cur, tot: seen.append((cur, tot))
+    )
 
     # 2 of the 3 non-underscore blocks indexed (the failing-render one skipped);
     # total still counts all 3 non-underscore blocks.
@@ -792,7 +794,13 @@ def test_grc_tools_includes_generate_python():
     # Structural check only (no LLM, no gnuradio execution) — confirms the
     # tool is actually wired into the agent's tool list, not just defined.
     names = {tool.name for tool in grc_tools()}
-    assert names == {"inspect_graph", "query_knowledge", "generate_python", "change_graph", "get_run_log"}
+    assert names == {
+        "inspect_graph",
+        "query_knowledge",
+        "generate_python",
+        "change_graph",
+        "get_run_log",
+    }
 
 
 def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path, monkeypatch):

@@ -96,6 +96,7 @@ def test_inspect_graph_target_formats(temp_dial_tone):
 @pytest.mark.asyncio
 async def test_inspect_graph_func_wrapper(temp_dial_tone):
     from unittest.mock import MagicMock
+
     fg = load_flow_graph(str(temp_dial_tone))
     ctx = MagicMock()
     ctx.deps = fg
@@ -142,6 +143,7 @@ def test_change_graph_add_block(temp_dial_tone):
 
 def test_change_graph_unsaved_flowgraph():
     from grc_agent.adapter.graph import get_platform
+
     fg = get_platform().make_flow_graph()
     fg.grc_file_path = ""
     res = change_graph(
@@ -470,7 +472,9 @@ def test_change_graph_same_call_port_dtype_change_and_connect_rolls_back(temp_em
 
     res = change_graph(
         fg,
-        update_params=[{"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}],
+        update_params=[
+            {"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}
+        ],
         add_connections=["my_src:0->my_epy:0"],
         force=True,
     )
@@ -525,7 +529,9 @@ def test_change_graph_epy_block_port_change_works_across_two_calls(temp_empty):
 
     step1 = change_graph(
         fg,
-        update_params=[{"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}],
+        update_params=[
+            {"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}
+        ],
         force=True,  # still unconnected — expected at this intermediate step
     )
     assert step1["ok"] is True
@@ -576,7 +582,9 @@ def test_change_graph_update_params_only_batch_catches_dropped_preexisting_conne
     # ONLY update_params — no add_connections in this call at all.
     res = change_graph(
         fg,
-        update_params=[{"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}],
+        update_params=[
+            {"instance_name": "my_epy", "params": {"_source_code": _EPY_FLOAT_INPUT_SOURCE}}
+        ],
         force=True,
     )
     assert res["ok"] is False
@@ -797,7 +805,9 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
-    conn.execute("CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT);")
+    conn.execute(
+        "CREATE TABLE catalog_chunks(rowid INTEGER PRIMARY KEY, block_id TEXT, payload TEXT);"
+    )
     conn.execute("CREATE VIRTUAL TABLE catalog_idx USING vec0(embedding float[3]);")
     # A catalog_fts table must also exist, or _ensure_db_built treats this as
     # a pre-lexical-fallback DB and rebuilds it (see rag.py's _build_db).
@@ -1003,6 +1013,7 @@ def test_web_search_success():
     # lite_web_search hits lite.duckduckgo.com directly (no LLM), and must NOT
     # silently return "No results" like the old adapter.web_search did.
     import asyncio
+
     res = asyncio.run(lite_web_search("python programming language"))
     assert isinstance(res, str)
     assert len(res) > 0
@@ -1218,7 +1229,14 @@ def test_message_history_serialization_round_trip(tmp_path):
 
     messages = [
         ModelRequest(parts=[UserPromptPart(content="Hello")]),
-        ModelResponse(parts=[TextPart(content="Hi there!"), ToolCallPart(tool_name="inspect_graph", args={"view": "overview"}, tool_call_id="call1")]),
+        ModelResponse(
+            parts=[
+                TextPart(content="Hi there!"),
+                ToolCallPart(
+                    tool_name="inspect_graph", args={"view": "overview"}, tool_call_id="call1"
+                ),
+            ]
+        ),
     ]
 
     # Serialize
@@ -1266,11 +1284,13 @@ def test_chat_sidebar_copy_and_rich_rendering():
     assert any(isinstance(c, Gtk.ScrolledWindow) for c in children)
 
     # 3. Test last message rich rendering maps thinking, text, and tools
-    msg = ModelResponse(parts=[
-        ThinkingPart(content="think progress"),
-        TextPart(content="here is a table:\n| A | B |\n|---|---|\n| 1 | 2 |"),
-        ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_test")
-    ])
+    msg = ModelResponse(
+        parts=[
+            ThinkingPart(content="think progress"),
+            TextPart(content="here is a table:\n| A | B |\n|---|---|\n| 1 | 2 |"),
+            ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_test"),
+        ]
+    )
     sidebar._render_last_message_rich(box, msg)
     new_children = box.get_children()
 
@@ -1360,6 +1380,7 @@ def test_open_recent_session_tab_switching(tmp_path):
     notebook.get_nth_page.return_value = page1
 
     import os
+
     orig_cwd = os.getcwd()
     os.chdir(str(tmp_path))
     try:
@@ -1369,7 +1390,7 @@ def test_open_recent_session_tab_switching(tmp_path):
                 "grc_file_path": str(file_real.resolve()),
                 "messages": "[]",
                 "created_at": "...",
-                "updated_at": "..."
+                "updated_at": "...",
             }
             sidebar._on_recent_session_clicked(123)
     finally:
@@ -1428,6 +1449,7 @@ def test_sidebar_session_no_autoload_on_graph_open(tmp_path, monkeypatch):
 
 def test_active_graph_label_format():
     from grc_agent.chat_sidebar import ChatSidebar
+
     sidebar = ChatSidebar()
 
     # Initial state
@@ -1457,7 +1479,12 @@ def test_ui_micro_interactions_and_shortcuts():
     assert sidebar._entry.get_sensitive()
 
     # 2. Active Provider badge tooltips
-    sidebar.set_active_provider("openrouter", "deepseek/deepseek-v4-flash", is_default=False, base_url="https://openrouter.ai/api/v1")
+    sidebar.set_active_provider(
+        "openrouter",
+        "deepseek/deepseek-v4-flash",
+        is_default=False,
+        base_url="https://openrouter.ai/api/v1",
+    )
     assert "deepseek-v4-flash" in sidebar._provider_label.get_text()
     tooltip = sidebar._provider_label.get_tooltip_text()
     assert "OpenRouter (cloud)" in tooltip
@@ -1481,7 +1508,6 @@ def test_ui_micro_interactions_and_shortcuts():
     handled = sidebar._on_entry_key_press(sidebar._entry, shift_enter_event)
     assert handled
     assert sidebar._entry.get_text() == "Line 1\n"
-
 
 
 def test_delete_recent_session_ui(monkeypatch):
@@ -1899,7 +1925,9 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
     sidebar = ChatSidebar()
     calls: list[tuple[str, bool]] = []
     monkeypatch.setattr(
-        sidebar, "set_status", lambda msg, *, error=False, background=False: calls.append((msg, error))  # noqa: ARG005
+        sidebar,
+        "set_status",
+        lambda msg, *, error=False, background=False: calls.append((msg, error)),  # noqa: ARG005
     )
 
     adapter_mod._rag_building.clear()
@@ -1910,7 +1938,10 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
 
         # Building: live progress shows counts.
         adapter_mod._rag_building["catalog"] = {
-            "status": "building", "current": 3, "total": 10, "indexed": 0
+            "status": "building",
+            "current": 3,
+            "total": 10,
+            "indexed": 0,
         }
         sidebar._poll_indexing()
         assert calls[-1] == ("Indexing block library for search\u2026 3/10", False)
@@ -1925,7 +1956,10 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
 
         # Transition to ready with indexed(8) < total(10): message uses indexed.
         adapter_mod._rag_building["catalog"] = {
-            "status": "ready", "current": 10, "total": 10, "indexed": 8
+            "status": "ready",
+            "current": 10,
+            "total": 10,
+            "indexed": 8,
         }
         sidebar._poll_indexing()
         assert calls[-1] == ("Block library indexed \u2014 8 entries ready for search.", False)
@@ -1935,7 +1969,10 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
 
         # A docs failure surfaces as an error status.
         adapter_mod._rag_building["docs"] = {
-            "status": "failed", "current": 0, "total": 0, "indexed": 0
+            "status": "failed",
+            "current": 0,
+            "total": 0,
+            "indexed": 0,
         }
         sidebar._poll_indexing()
         assert calls[-1][1] is True
@@ -2113,20 +2150,18 @@ def test_format_turn_error_covers_each_exception_type():
         == "Model HTTP 500 Error: server exploded"
     )
     assert (
-        _format_turn_error(ModelHTTPError(403, "gpt-x", body={"message": "Key limit exceeded", "code": 403}))
+        _format_turn_error(
+            ModelHTTPError(403, "gpt-x", body={"message": "Key limit exceeded", "code": 403})
+        )
         == "Model HTTP 403 Error: Key limit exceeded"
     )
-    assert (
-        _format_turn_error(ModelHTTPError(503, "gpt-x"))
-        == "Model HTTP 503 Error from gpt-x"
-    )
+    assert _format_turn_error(ModelHTTPError(503, "gpt-x")) == "Model HTTP 503 Error from gpt-x"
     assert (
         _format_turn_error(UsageLimitExceeded("too many tokens"))
         == "Usage Limit Exceeded: too many tokens"
     )
     assert (
-        _format_turn_error(ModelAPIError("gpt-x", "bad request"))
-        == "Model API Error: bad request"
+        _format_turn_error(ModelAPIError("gpt-x", "bad request")) == "Model API Error: bad request"
     )
     assert (
         _format_turn_error(UnexpectedModelBehavior("no tool call"))
@@ -2444,8 +2479,12 @@ def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
     # Make the content-hash check differ so sync proceeds to the flock.
     monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", lambda _: "CURRENT")
     # Neutralize side effects if a deferred writer ever runs after lock release.
-    monkeypatch.setattr("grc_agent.native_canvas._atomic_write_text", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("grc_agent.native_canvas.push_undo_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "grc_agent.native_canvas._atomic_write_text", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "grc_agent.native_canvas.push_undo_snapshot", lambda *_args, **_kwargs: None
+    )
 
     lock_path = tmp_path / ".grc_agent" / (grc.name + ".lock")
     held = lock_path.open("a", encoding="utf-8")
@@ -2587,7 +2626,9 @@ def test_check_for_unsynced_edit_periodic_backstop_catches_undo_then_edit_collis
 
     for _ in range(_POLL_FULL_CHECK_EVERY - 1):
         assert cm._check_for_unsynced_edit() is True
-    assert call_count == 0, "state_cache tuple never moved, so no tick before the backstop should hash"
+    assert call_count == 0, (
+        "state_cache tuple never moved, so no tick before the backstop should hash"
+    )
 
     # The Nth tick is the periodic backstop — it must force the full check
     # regardless of the (unchanged-looking) state_cache tuple.
@@ -2634,8 +2675,7 @@ def test_deserialize_messages_logs_on_malformed_json(caplog):
         result = deserialize_messages("{not valid json")
     assert result == []
     assert any(
-        "deserialize" in r.message.lower() or "failed" in r.message.lower()
-        for r in caplog.records
+        "deserialize" in r.message.lower() or "failed" in r.message.lower() for r in caplog.records
     )
 
 
@@ -2817,6 +2857,7 @@ def test_lite_web_search_handles_ddgs_failure_gracefully(monkeypatch):
             raise RuntimeError("ddgs backend down")
 
     import ddgs
+
     monkeypatch.setattr(ddgs, "DDGS", _BrokenDDGS)
     result = asyncio.run(search.lite_web_search("anything"))
     assert "Web search failed" in result
@@ -3151,7 +3192,9 @@ def test_context_label_updates_with_pydantic_ai_usage():
 
     sidebar._message_history = [
         ModelRequest(parts=[UserPromptPart(content="Hello")]),
-        ModelResponse(parts=[TextPart(content="Hi")], usage=RequestUsage(input_tokens=3300, output_tokens=300)),
+        ModelResponse(
+            parts=[TextPart(content="Hi")], usage=RequestUsage(input_tokens=3300, output_tokens=300)
+        ),
     ]
 
     sidebar._update_context_label()
@@ -3251,10 +3294,11 @@ def test_openai_compatible_provider_and_factory(tmp_path, monkeypatch):
     assert provider is not None
     assert "localhost:8080" in provider.base_url
 
-    res = preflight_connection("openai_compatible", ollama_base_url="http://127.0.0.1:9999/v1", timeout=0.1)
+    res = preflight_connection(
+        "openai_compatible", ollama_base_url="http://127.0.0.1:9999/v1", timeout=0.1
+    )
     assert res is not None
     assert "connection failed" in res.lower() or "http" in res.lower() or "refused" in res.lower()
-
 
 
 def test_copy_code_block_to_clipboard():
@@ -3282,7 +3326,9 @@ def test_copy_code_block_to_clipboard():
 
     walk(box)
 
-    buttons = [w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() in ("Copy", "✓ Copied!")]
+    buttons = [
+        w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() in ("Copy", "✓ Copied!")
+    ]
     assert len(buttons) >= 1, "Expected Copy button in rendered code block"
 
     copy_btn = buttons[0]
@@ -3306,7 +3352,9 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     from grc_agent.settings import load_settings, save_settings
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "old-model", ollama_base_url="http://localhost:11434", thinking_enabled=True)
+    save_settings(
+        "ollama", "old-model", ollama_base_url="http://localhost:11434", thinking_enabled=True
+    )
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
@@ -3873,7 +3921,3 @@ def test_scroll_to_block():
 
     # Missing block -> returns False
     assert cm.scroll_to_block("missing") is False
-
-
-
-

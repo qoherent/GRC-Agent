@@ -65,7 +65,9 @@ class SettingsDialog(Gtk.Dialog):
 
         lbl_p = Gtk.Label(label="Provider:")
         lbl_p.set_xalign(0.0)
-        lbl_p.set_tooltip_text("Select local Ollama daemon or a cloud provider (OpenRouter / Ollama Cloud)")
+        lbl_p.set_tooltip_text(
+            "Select local Ollama daemon or a cloud provider (OpenRouter / Ollama Cloud)"
+        )
         self.provider_combo = Gtk.ComboBoxText()
         self.provider_combo.set_tooltip_text(
             "Select your AI model provider:\n"
@@ -102,7 +104,9 @@ class SettingsDialog(Gtk.Dialog):
         self.key_entry = Gtk.Entry()
         self.key_entry.set_visibility(False)
         self.key_entry.set_activates_default(True)
-        self.key_entry.set_tooltip_text("API key for the selected cloud provider. Not required for local Ollama.")
+        self.key_entry.set_tooltip_text(
+            "API key for the selected cloud provider. Not required for local Ollama."
+        )
         grid.attach(lbl_k, 0, 3, 1, 1)
         grid.attach(self.key_entry, 1, 3, 1, 1)
 
@@ -115,7 +119,9 @@ class SettingsDialog(Gtk.Dialog):
 
         self.url_label = Gtk.Label(label="Ollama Base URL:")
         self.url_label.set_xalign(0.0)
-        self.url_label.set_tooltip_text("Base URL endpoint for the Ollama daemon (default http://localhost:11434)")
+        self.url_label.set_tooltip_text(
+            "Base URL endpoint for the Ollama daemon (default http://localhost:11434)"
+        )
         self.url_entry = Gtk.Entry()
         self.url_entry.set_text(cfg.get("ollama_base_url", "http://localhost:11434"))
         self.url_entry.set_hexpand(True)
@@ -129,7 +135,9 @@ class SettingsDialog(Gtk.Dialog):
         lbl_t = Gtk.Label(label="Model Reasoning:")
         lbl_t.set_xalign(0.0)
         lbl_t.set_tooltip_text("Enable or disable model thinking output (think: true/false)")
-        self.thinking_check = Gtk.CheckButton(label="Enable reasoning / thinking tags (think: true)")
+        self.thinking_check = Gtk.CheckButton(
+            label="Enable reasoning / thinking tags (think: true)"
+        )
         self.thinking_check.set_active(cfg.get("ollama_thinking_enabled", True))
         self.thinking_check.set_tooltip_text(
             "Controls whether model reasoning is enabled (think: True/False) for supported Ollama models."
@@ -165,7 +173,9 @@ class SettingsDialog(Gtk.Dialog):
             self.thinking_check.set_sensitive(True)
         elif p == "openai_compatible":
             self.url_label.set_text("Base URL:")
-            self.url_entry.set_text(cfg.get("openai_compatible_base_url", "http://localhost:8080/v1"))
+            self.url_entry.set_text(
+                cfg.get("openai_compatible_base_url", "http://localhost:8080/v1")
+            )
             self.url_entry.set_sensitive(True)
             self.thinking_check.set_sensitive(False)
         elif p == "ollama_cloud":

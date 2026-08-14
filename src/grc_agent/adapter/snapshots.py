@@ -67,7 +67,9 @@ def _prune_undo_stack(undo_dir: Path, count: int) -> None:
         (undo_dir / f"{i:05d}.grc").unlink(missing_ok=True)
 
 
-def push_undo_snapshot(flow_graph: Any, target_path: Path, initial_data: dict | None = None) -> None:
+def push_undo_snapshot(
+    flow_graph: Any, target_path: Path, initial_data: dict | None = None
+) -> None:
     """Push the CURRENT (post-edit) state of flow_graph onto target_path's
     undo stack. Called from both change_graph's own success path and
     native_canvas.py's manual drag-save path, so both mutation sources share

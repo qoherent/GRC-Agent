@@ -51,7 +51,6 @@ def _embed_endpoint() -> tuple[str, str | None]:
     return "http://localhost:11434/v1", "not-needed"
 
 
-
 # (base_url, api_key, client) as ONE tuple, replaced by a single atomic
 # assignment below. embed_query/embed_document run on real OS threads (via
 # asyncio.to_thread), so two threads racing here with DIFFERENT keys (e.g.
@@ -407,8 +406,7 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return (
-        conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone()
-        is not None
+        conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone() is not None
     )
 
 
@@ -544,7 +542,9 @@ def _query_index(
             search_mode = "lexical"
             if fts_result and fts_result[1]:
                 extra_note = f" (lexical query capped to {_FTS_MAX_TOKENS} tokens)"
-                embed_error = (embed_error or "") + extra_note if embed_error else extra_note.strip()
+                embed_error = (
+                    (embed_error or "") + extra_note if embed_error else extra_note.strip()
+                )
 
         id_by_rowid: dict[int, Any] = {}
         if ranked_rowids:

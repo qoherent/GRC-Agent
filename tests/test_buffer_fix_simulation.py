@@ -12,6 +12,7 @@ Prerequisites:
 - playground/untitled.grc exists (the real OFDM flowgraph)
 - Local Ollama running for embeddings (query_knowledge may be called)
 """
+
 import shutil
 import tempfile
 from pathlib import Path
@@ -40,6 +41,7 @@ def _ollama_cloud_available():
     from dotenv import load_dotenv
 
     from grc_agent.settings import env_path
+
     load_dotenv(env_path())
     return bool(os.environ.get("OLLAMA_CLOUD_API_KEY"))
 
@@ -53,14 +55,17 @@ pytestmark = pytest.mark.skipif(
 def _make_proxy(fg, exec_monitor):
     """Build a NativeFlowgraphProxy that resolves to the given flowgraph,
     with an exec_monitor wired for get_run_log."""
+
     class FakeCanvasManager:
         current_flow_graph = fg
         current_page = None
         path = getattr(fg, "file_path", None)
         window = None
+
         def after_agent_edit(self):
             if hasattr(fg, "update"):
                 fg.update()
+
     proxy = NativeFlowgraphProxy(FakeCanvasManager(), exec_monitor=exec_monitor)
     return proxy
 
@@ -169,7 +174,9 @@ def test_agent_fixes_buffer_too_small_ollama_cloud():
     )
 
     # 7. Print the agent's full output for debugging
-    print(f"\nAgent output: {result.output[:500] if isinstance(result.output, str) else str(result.output)[:500]}")
+    print(
+        f"\nAgent output: {result.output[:500] if isinstance(result.output, str) else str(result.output)[:500]}"
+    )
     print(f"\nAll messages: {len(result.all_messages())} messages")
 
     # Cleanup

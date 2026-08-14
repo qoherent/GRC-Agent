@@ -100,7 +100,9 @@ def set_blocks_panel_visibility(app: Any, visible: bool) -> bool:
         if bool(action.get_active()) != bool(visible):
             app._handle_action(action)
     except Exception:
-        _log.warning("Failed to set Block Library panel visibility via action %s", action, exc_info=True)
+        _log.warning(
+            "Failed to set Block Library panel visibility via action %s", action, exc_info=True
+        )
     return bool(action.get_active())
 
 
@@ -490,7 +492,9 @@ def keep_param(  # noqa: C901
 
     if value != default:
         return True
-    return bool(variable_names and any(tok in variable_names for tok in _IDENTIFIER_RE.findall(value)))
+    return bool(
+        variable_names and any(tok in variable_names for tok in _IDENTIFIER_RE.findall(value))
+    )
 
 
 def render_port(port: Any, mode: str = "overview") -> dict[str, Any] | None:
@@ -1260,7 +1264,9 @@ def change_graph(  # noqa: C901
                         {"code": "gnu_validation", "message": f"{parent.name}: {elem}: {msg}"}
                     )
                 else:
-                    validation_errors.append({"code": "gnu_validation", "message": f"{elem}: {msg}"})
+                    validation_errors.append(
+                        {"code": "gnu_validation", "message": f"{elem}: {msg}"}
+                    )
             flow_graph.import_data(initial_data)
             flow_graph.rewrite()
             return {

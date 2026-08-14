@@ -444,9 +444,7 @@ async def _with_state_lock(ctx: RunContext[Any], fn):
 
 
 # Module-level tool functions
-async def inspect_graph_func(
-    ctx: RunContext[Any], targets: list[str] | str | None = None
-) -> str:
+async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | str | None = None) -> str:
     """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.
 
     Args:
@@ -604,16 +602,20 @@ async def get_run_log_func(ctx: RunContext[Any]) -> str:
     """
     get_fn = getattr(ctx.deps, "get_run_log", None)
     if get_fn is None or not callable(get_fn):
-        return json.dumps({
-            "log_text": "",
-            "message": "No execution log available — no run monitor wired.",
-        })
+        return json.dumps(
+            {
+                "log_text": "",
+                "message": "No execution log available — no run monitor wired.",
+            }
+        )
     data = get_fn()
     if data is None:
-        return json.dumps({
-            "log_text": "",
-            "message": "No flowgraph has been run yet. Use GRC's Execute button to run the flowgraph first.",
-        })
+        return json.dumps(
+            {
+                "log_text": "",
+                "message": "No flowgraph has been run yet. Use GRC's Execute button to run the flowgraph first.",
+            }
+        )
     return json.dumps(data)
 
 

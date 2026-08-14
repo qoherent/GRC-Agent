@@ -165,7 +165,9 @@ class MarkdownView:
 
         self._insert_plain_tagged(buffer, text[last_end:], tags)
 
-    def _on_link_tag_event(self, _tag: Any, _widget: Any, event: Any, _iter: Any, href: str) -> bool:
+    def _on_link_tag_event(
+        self, _tag: Any, _widget: Any, event: Any, _iter: Any, href: str
+    ) -> bool:
         """Mirrors Gtk.Label's built-in activate-link default handler."""
         if href and event.type == Gdk.EventType.BUTTON_RELEASE:
             Gtk.show_uri_on_window(None, href, event.time)
@@ -179,7 +181,9 @@ class MarkdownView:
         hovering_link = any(getattr(t, "grc_href", None) for t in it.get_tags())
         window = tv.get_window(Gtk.TextWindowType.TEXT)
         if window is not None:
-            cursor = Gdk.Cursor.new_from_name(window.get_display(), "pointer") if hovering_link else None
+            cursor = (
+                Gdk.Cursor.new_from_name(window.get_display(), "pointer") if hovering_link else None
+            )
             window.set_cursor(cursor)
         return False
 
@@ -314,7 +318,7 @@ class MarkdownView:
         history loaded before first size-allocate and for dragging the divider.
 
         Reuses the sizing text stored on the textview (grc_plain_for_size)
-        rather than buffer.get_slice(): the slice carries a \uFFFC placeholder
+        rather than buffer.get_slice(): the slice carries a \ufffc placeholder
         per pill badge (~1 char to Pango), which would collapse a badge-heavy
         bubble on every resize."""
         for child in container.get_children():
@@ -355,7 +359,9 @@ class MarkdownView:
                 if tag == "table":
                     headers, rows = parse_table(element)
                     if headers or rows:
-                        box.pack_start(TableBlock(headers, rows, self.render_inline), False, False, 0)
+                        box.pack_start(
+                            TableBlock(headers, rows, self.render_inline), False, False, 0
+                        )
                 elif tag == "pre":
                     code_text = element.get_text().replace("\u00a0", " ").replace("\xa0", " ")
                     lang = ""

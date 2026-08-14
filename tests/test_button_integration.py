@@ -114,7 +114,9 @@ def test_change_graph_add_block():
     try:
         result = change_graph(
             fg,
-            add_blocks=[{"block_id": "variable", "instance_name": "my_new_var", "params": {"value": "42"}}],
+            add_blocks=[
+                {"block_id": "variable", "instance_name": "my_new_var", "params": {"value": "42"}}
+            ],
         )
         assert result["ok"] is True
         names = {b.name for b in fg.blocks}

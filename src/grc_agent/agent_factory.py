@@ -46,7 +46,9 @@ def _retrying_http_client() -> httpx.AsyncClient:
 def _build_model(cfg: dict, http_client: httpx.AsyncClient):
     if cfg["provider"] == "openrouter":
         key = get_env_value("OPENROUTER_API_KEY") or ""
-        return OpenRouterModel(cfg["model"], provider=OpenRouterProvider(api_key=key, http_client=http_client))
+        return OpenRouterModel(
+            cfg["model"], provider=OpenRouterProvider(api_key=key, http_client=http_client)
+        )
     if cfg["provider"] == "ollama_cloud":
         key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
         if not key:
@@ -60,17 +62,29 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
             )
         return OllamaModel(
             cfg["model"],
-            provider=OllamaProvider(base_url="https://ollama.com/v1", api_key=key, http_client=http_client),
+            provider=OllamaProvider(
+                base_url="https://ollama.com/v1", api_key=key, http_client=http_client
+            ),
         )
     if cfg["provider"] == "openai_compatible":
-        key = get_env_value("OPENAI_COMPATIBLE_API_KEY") or cfg.get("openai_compatible_api_key") or "not-required"
-        raw_url = (cfg.get("openai_compatible_base_url") or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1").rstrip("/")
+        key = (
+            get_env_value("OPENAI_COMPATIBLE_API_KEY")
+            or cfg.get("openai_compatible_api_key")
+            or "not-required"
+        )
+        raw_url = (
+            cfg.get("openai_compatible_base_url")
+            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
+            or "http://localhost:8080/v1"
+        ).rstrip("/")
         base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
         return OpenAIChatModel(
             cfg["model"],
             provider=OpenAIProvider(base_url=base_url, api_key=key, http_client=http_client),
         )
-    raw_url = (cfg.get("ollama_base_url") or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+    raw_url = (
+        cfg.get("ollama_base_url") or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434"
+    ).rstrip("/")
     base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
     return OllamaModel(
         cfg["model"],
@@ -105,7 +119,9 @@ class ModelRequestLogger(AbstractCapability[Any]):
         if provider is not None:
             provider_name = getattr(provider, "name", provider_name)
             base_url = getattr(provider, "base_url", base_url)
-        _log.info("model request -> provider=%s base_url=%s model=%s", provider_name, base_url, model_name)
+        _log.info(
+            "model request -> provider=%s base_url=%s model=%s", provider_name, base_url, model_name
+        )
         return request_context
 
 
@@ -122,7 +138,9 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
     try:
         model = _build_model(cfg, http_client)
     except Exception as e:
-        _log.warning("Failed to build chat model from cfg (provider=%s): %s", cfg.get("provider"), e)
+        _log.warning(
+            "Failed to build chat model from cfg (provider=%s): %s", cfg.get("provider"), e
+        )
         model_build_error = str(e)
         cfg = default_settings()
         model = _build_model(cfg, http_client)
@@ -171,9 +189,7 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
     return build_agent_from_cfg(load_settings())
 
 
-def _preflight_target(
-    provider: str, api_key: str, ollama_base_url: str
-) -> tuple[str, dict] | str:
+def _preflight_target(provider: str, api_key: str, ollama_base_url: str) -> tuple[str, dict] | str:
     """Resolve the provider's /models endpoint to (url, headers), or return an
     error string when a required key is missing."""
     if provider == "openrouter":
@@ -185,13 +201,23 @@ def _preflight_target(
             return "OLLAMA_CLOUD_API_KEY is not set"
         return "https://ollama.com/v1/models", {"Authorization": f"Bearer {api_key}"}
     if provider == "openai_compatible":
-        base = (ollama_base_url or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1").rstrip("/")
+        base = (
+            ollama_base_url
+            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
+            or "http://localhost:8080/v1"
+        ).rstrip("/")
         models_url = (
-            base if base.endswith("/models") else f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+            base
+            if base.endswith("/models")
+            else f"{base}/models"
+            if base.endswith("/v1")
+            else f"{base}/v1/models"
         )
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         return models_url, headers
-    base_url = (ollama_base_url or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+    base_url = (
+        ollama_base_url or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434"
+    ).rstrip("/")
     return f"{base_url}/api/tags", {}
 
 
@@ -253,9 +279,12 @@ def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
         ollama_url = ""
     elif provider == "openai_compatible":
         key = get_env_value("OPENAI_COMPATIBLE_API_KEY") or ""
-        ollama_url = cfg.get("openai_compatible_base_url") or get_env_value("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1"
+        ollama_url = (
+            cfg.get("openai_compatible_base_url")
+            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
+            or "http://localhost:8080/v1"
+        )
     else:
         key = ""
         ollama_url = cfg.get("ollama_base_url") or ""
     return preflight_connection(provider, key, ollama_base_url=ollama_url, timeout=timeout)
-

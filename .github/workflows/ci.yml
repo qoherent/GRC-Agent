@@ -38,12 +38,14 @@ jobs:
       - name: Install GNU Radio
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnuradio
+          sudo apt-get install -y gnuradio xvfb
 
       # Runs the fast, no-live-model test suites (matches AGENTS.md's Test
       # Gate). LLM/vector-dependent tests inside these suites automatically
       # skip if no local Ollama or OpenRouter credentials are found.
       # test_button_integration.py (Ollama Cloud) and test_integration.py
       # (live model, ~15-20 min) are not run here.
+      # xvfb-run is needed for test_unit.py and test_session_traces_advanced.py
+      # which build real GTK3 widget trees (ChatSidebar).
       - name: Run tests
-        run: uv run pytest tests/test_unit.py tests/test_exec_monitor.py tests/test_isolation.py -v
+        run: xvfb-run -a uv run pytest tests/test_unit.py tests/test_session_traces.py tests/test_session_traces_advanced.py tests/test_exec_monitor.py tests/test_isolation.py -v

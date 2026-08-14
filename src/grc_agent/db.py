@@ -1,28 +1,31 @@
-import json
 import logging
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
-from pydantic_core import to_jsonable_python
 
 from .settings import env_path
 
 _log = logging.getLogger(__name__)
+
+# Latest on-disk schema version applied by init_db(). Each migration in
+# _apply_migrations() bumps the version recorded in the `_meta` table so a
+# crashed migration resumes cleanly and a stale-schema DB is detectable.
+LATEST_SCHEMA_VERSION = 2
 
 # Generous cap so the sessions table cannot grow without limit. The previous
 # JSON-file store bounded itself to 10 on write; this only prunes well outside
 # the recent window a user would reasonably scroll back to.
 _MAX_SESSIONS = 200
 
-# Per-db-path "already initialized" guard. init_db() issues an idempotent
-# CREATE TABLE IF NOT EXISTS, but skipping the connection + statement entirely
-# after the first init per path avoids re-opening a second connection on every
-# single db call (the DB-4 double-open). Keyed on the resolved db path so test
-# isolation via GRC_AGENT_ENV still re-inits for each fresh tmp path.
+# Per-db-path "already initialized" guard. init_db() is idempotent, but the
+# guard avoids re-running the PRAGMA-table_info / migration probes on every
+# call. Keyed on the resolved db path so test isolation via GRC_AGENT_ENV
+# still re-inits for each fresh tmp path.
 _initialized_paths: set[str] = set()
 
 # Per-db-path "cleanup already ran" guard — same path-keying rationale as
@@ -30,30 +33,47 @@ _initialized_paths: set[str] = set()
 # each fresh tmp path rather than being skipped by a stale global flag.
 _cleanup_done: set[str] = set()
 
+# Guards the init_db check-then-add sequence. save_session and save_turn_trace
+# call init_db() from asyncio.to_thread workers, so two threads could
+# otherwise both pass the _initialized_paths guard and run the migrations
+# concurrently.
+_init_lock = threading.Lock()
+
 
 def get_db_path() -> Path:
-    """Resolve the SQLite database path inside `.grc_agent/`, residing in the same parent directory as the `.env` file."""
+    """Resolve the SQLite database path inside `.grc_agent/`, residing in the
+    same parent directory as the `.env` file."""
     base_dir = env_path().parent
     db_dir = base_dir / ".grc_agent"
-    db_path = db_dir / "chat_sessions.db"
-
-    legacy_path = base_dir / "chat_sessions.db"
-    if legacy_path.is_file() and not db_path.exists():
-        try:
-            db_dir.mkdir(parents=True, exist_ok=True)
-            legacy_path.replace(db_path)
-        except OSError:
-            pass
-
-    return db_path
+    return db_dir / "chat_sessions.db"
 
 
 def get_connection() -> sqlite3.Connection:
-    """Get a connection to the SQLite database with Row factory enabled."""
+    """Open a connection with the standard desktop SQLite reliability pragmas.
+
+    The app is single-threaded (gbulb), but ``save_session`` / ``save_turn_trace``
+    are dispatched via ``asyncio.to_thread`` (worker thread) while reads like
+    ``get_recent_sessions`` run on the main loop — WAL + busy_timeout is the
+    one uniform rule that keeps the two from blocking each other under the
+    default rollback journal. ``foreign_keys`` is per-connection in SQLite, so
+    the ``turn_traces.session_id`` ON DELETE CASCADE fires reliably.
+    """
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    # journal_mode persists at the DB-file level, but setting it per-connection
+    # is idempotent and cheap (returns the current mode); busy_timeout and
+    # foreign_keys are per-connection and MUST be set on every open.
+    mode_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    if mode_row is not None and mode_row[0] != "wal":
+        _log.warning(
+            "Failed to enable WAL journal mode (got %r); database may experience "
+            "'database is locked' errors under concurrent access",
+            mode_row[0],
+        )
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -72,30 +92,147 @@ def _conn():
         conn.close()
 
 
-def init_db() -> None:
-    """Initialize the sessions database table (idempotent per db path)."""
-    db_path = str(get_db_path())
-    if db_path in _initialized_paths:
-        return
-    with _conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
+def _read_schema_version(conn: sqlite3.Connection) -> int:
+    """Read the persisted schema version from `_meta`, or 0 if unset/corrupt."""
+    row = conn.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
+    try:
+        return int(row["value"]) if row else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
+        (str(version),),
+    )
+    conn.commit()
+
+
+def _migrate_to_v1(conn: sqlite3.Connection) -> None:
+    """v1: ``sessions`` table with a ``first_message`` column.
+
+    Two-phase, fully idempotent:
+    1. Ensure the ``first_message`` column exists — CREATE on a fresh DB,
+       ALTER TABLE on a pre-existing v0 ``sessions`` table.
+    2. Backfill any row whose ``first_message`` is empty AND whose messages
+       blob is non-empty.
+
+    The backfill runs unconditionally (not gated on whether the column was
+    just added) because Python's sqlite3 module auto-commits DDL (ALTER
+    TABLE) but not DML (UPDATE). If the process is killed after the ALTER
+    but before the backfill UPDATEs commit, the column will be present on
+    restart but unbackfilled. The idempotent backfill catches this on the
+    next init. Re-runs after a successful backfill are a no-op because
+    every populated row has ``first_message != ''``.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if not cols:
+        conn.execute(
+            """
+            CREATE TABLE sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 grc_file_path TEXT NOT NULL,
                 messages TEXT NOT NULL,
+                first_message TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """)
-        conn.commit()
-    _initialized_paths.add(db_path)
+            """
+        )
+    elif "first_message" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN first_message TEXT NOT NULL DEFAULT ''")
+    # Idempotent backfill — see method docstring for why this is outside the
+    # elif. Only touches rows that still need it (first_message = '' AND
+    # messages != '').
+    for r in conn.execute(
+        "SELECT id, messages FROM sessions WHERE first_message = '' AND messages != ''"
+    ).fetchall():
+        conn.execute(
+            "UPDATE sessions SET first_message = ? WHERE id = ?",
+            (_extract_first_user_prompt_json(r["messages"]), r["id"]),
+        )
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """v2: `turn_traces` table — one row per agent turn (see trace.py)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS turn_traces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            run_id TEXT,
+            conversation_id TEXT,
+            provider TEXT,
+            model TEXT,
+            base_url TEXT,
+            system_prompt_hash TEXT,
+            user_prompt TEXT,
+            origin_page_path TEXT,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            duration_ms INTEGER,
+            events TEXT NOT NULL DEFAULT '[]',
+            final_output TEXT,
+            error TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_turn_traces_session ON turn_traces(session_id)")
+
+
+_MIGRATIONS = (
+    _migrate_to_v1,
+    _migrate_to_v2,
+)
+
+
+def _apply_migrations(conn: sqlite3.Connection, current: int) -> None:
+    """Apply ordered, idempotent migrations to bring the schema from `current`
+    to LATEST_SCHEMA_VERSION. Each step commits its own version bump so a
+    crash mid-migration resumes cleanly on the next open."""
+    for version, migrate in enumerate(_MIGRATIONS, start=1):
+        if current < version:
+            migrate(conn)
+            _set_schema_version(conn, version)
+
+
+def init_db() -> None:
+    """Initialize the chat-sessions + turn-traces schema (idempotent per path).
+
+    Ensures the `_meta` table exists, reads the persisted schema version, and
+    applies any pending migrations. Subsequent calls short-circuit on the
+    per-path ``_initialized_paths`` guard. Thread-safe via ``_init_lock`` so
+    a worker-thread ``init_db()`` (from ``save_turn_trace``) can't race the
+    main loop's init.
+    """
+    db_path = str(get_db_path())
+    if db_path in _initialized_paths:
+        return
+    with _init_lock:
+        # Re-check inside the lock — another thread may have initialized
+        # while we were waiting.
+        if db_path in _initialized_paths:
+            return
+        with _conn() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            current = _read_schema_version(conn)
+            if current < LATEST_SCHEMA_VERSION:
+                _apply_migrations(conn, current)
+        _initialized_paths.add(db_path)
 
 
 def _cleanup_invalid_sessions() -> None:
     """Delete any corrupted database sessions where the path is a directory or empty."""
     with _conn() as conn:
-        all_rows = conn.execute("SELECT id, grc_file_path FROM sessions").fetchall()
-        for r in all_rows:
+        for r in conn.execute("SELECT id, grc_file_path FROM sessions").fetchall():
             p = r["grc_file_path"]
             if not p:
                 conn.execute("DELETE FROM sessions WHERE id = ?", (r["id"],))
@@ -111,9 +248,9 @@ def _cleanup_invalid_sessions() -> None:
 
 def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
     """Load recently active GRC flowgraph sessions, newest first, filtered to
-    paths still on disk. Bounded by a SQL LIMIT. The last-message preview is
-    recomputed lazily from the stored messages blob — deserialization cost is
-    bounded by LIMIT (default 10), paid only on sidebar refresh, not per-token."""
+    paths still on disk. Bounded by a SQL LIMIT. The `first_message` column is
+    read directly — no per-row messages-blob deserialization on the hot path
+    (the column is populated at save_session time)."""
     init_db()
     db_path = str(get_db_path())
     if db_path not in _cleanup_done:
@@ -122,7 +259,7 @@ def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
 
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT id, grc_file_path, messages, created_at, updated_at "
+            "SELECT id, grc_file_path, first_message, created_at, updated_at "
             "FROM sessions ORDER BY updated_at DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -137,13 +274,15 @@ def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
             exists_and_file = False
 
         if exists_and_file:
-            res.append({
-                "id": r["id"],
-                "grc_file_path": path_str,
-                "first_message": _extract_first_message(r["messages"]),
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-            })
+            res.append(
+                {
+                    "id": r["id"],
+                    "grc_file_path": path_str,
+                    "first_message": r["first_message"] or "",
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                }
+            )
     return res
 
 
@@ -152,7 +291,8 @@ def load_session(session_id: int) -> dict[str, Any] | None:
     init_db()
     with _conn() as conn:
         row = conn.execute(
-            "SELECT id, grc_file_path, messages, created_at, updated_at FROM sessions WHERE id = ?",
+            "SELECT id, grc_file_path, messages, first_message, created_at, updated_at "
+            "FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
     if row:
@@ -160,6 +300,7 @@ def load_session(session_id: int) -> dict[str, Any] | None:
             "id": row["id"],
             "grc_file_path": row["grc_file_path"],
             "messages": row["messages"],
+            "first_message": row["first_message"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -167,58 +308,71 @@ def load_session(session_id: int) -> dict[str, Any] | None:
 
 
 def serialize_messages(messages: list[ModelMessage]) -> str:
-    """Serialize Pydantic AI ModelMessages to a JSON string."""
-    return json.dumps(to_jsonable_python(messages))
+    """Serialize Pydantic AI ModelMessages to a JSON string using the
+    library's sanctioned one-step TypeAdapter (``dump_json``). This replaces
+    the previous ``json.dumps(to_jsonable_python(...))`` double conversion and
+    preserves every part field — including ``ThinkingPart`` (reasoning),
+    ``ToolCallPart``/``ToolReturnPart``, ``ModelResponse.usage`` (incl.
+    ``reasoning_tokens``), and ``run_id``/``conversation_id`` — exactly."""
+    return ModelMessagesTypeAdapter.dump_json(messages).decode("utf-8")
 
 
 def deserialize_messages(messages_json: str) -> list[ModelMessage]:
-    """Deserialize a JSON string back to Pydantic AI ModelMessages.
+    """Deserialize a JSON string back to Pydantic AI ModelMessages via the
+    library's sanctioned ``validate_json`` (single step).
 
     A malformed/incompatible payload (e.g. saved by a different pydantic-ai
-    version) logs a warning and returns an empty list rather than raising — but
-    the failure is surfaced in the log instead of silently presenting an empty
-    chat indistinguishable from a brand-new one.
+    version) logs a warning and returns an empty list rather than raising —
+    but the failure is surfaced in the log instead of silently presenting an
+    empty chat indistinguishable from a brand-new one.
     """
     if not messages_json.strip():
         return []
     try:
-        data = json.loads(messages_json)
-        return ModelMessagesTypeAdapter.validate_python(data)
+        return ModelMessagesTypeAdapter.validate_json(messages_json)
     except Exception as e:
         _log.warning("Failed to deserialize chat session messages: %s", e, exc_info=True)
         return []
 
 
-def _extract_first_message(messages_json: str) -> str:
-    """Extract the first user text from a session's serialized messages, to
-    label the conversation in the recent-sessions list — mirrors the web UI's
-    ``firstMessage`` (a chat is identified by how it starts). Called lazily by
-    get_recent_sessions() per rendered row (cost bounded by its LIMIT)."""
-    try:
-        msgs = deserialize_messages(messages_json)
-        for m in msgs:
-            for part in getattr(m, "parts", []):
-                if part.__class__.__name__ != "UserPromptPart" or not part.content:
-                    continue
-                content = part.content
-                if not isinstance(content, str):
-                    pieces = []
-                    for item in content:
-                        if hasattr(item, "text"):
-                            pieces.append(item.text)
-                        elif isinstance(item, str):
-                            pieces.append(item)
-                    content = "".join(pieces)
-                return content
-    except Exception:
-        pass
+def _first_user_prompt(messages: list[ModelMessage]) -> str:
+    """Extract the first user prompt's text from a list of ModelMessages.
+
+    Used at save time to populate the `first_message` column (one rule, no
+    per-row deserialize on the read path). Returns "" if there is no user
+    prompt yet (e.g. an empty session just created to pin an id)."""
+    for m in messages:
+        for part in getattr(m, "parts", []):
+            if part.__class__.__name__ != "UserPromptPart" or not part.content:
+                continue
+            content = part.content
+            if not isinstance(content, str):
+                pieces = []
+                for item in content:
+                    if hasattr(item, "text"):
+                        pieces.append(item.text)
+                    elif isinstance(item, str):
+                        pieces.append(item)
+                content = "".join(pieces)
+            return content
     return ""
+
+
+def _extract_first_user_prompt_json(messages_json: str) -> str:
+    """Backfill helper used by the v0→v1 migration: extract the first user
+    prompt from a stored messages blob. Best-effort — ``deserialize_messages``
+    already catches all exceptions internally and returns ``[]`` on a malformed
+    blob, so this never raises; a corrupt row yields ``""`` rather than
+    blocking the migration."""
+    return _first_user_prompt(deserialize_messages(messages_json))
 
 
 def _prune_in(conn: sqlite3.Connection, keep: int = _MAX_SESSIONS) -> None:
     """Evict the oldest sessions beyond ``keep`` (by updated_at then id) using
-    an already-open connection. Bounds the table's growth; the deleted rows are
-    the long-tail a user is unlikely to scroll back to."""
+    an already-open connection. The ON DELETE CASCADE on turn_traces keeps
+    each evicted session's trace rows from being orphaned. Bounds the table's
+    growth; the deleted rows are the long-tail a user is unlikely to scroll
+    back to."""
     conn.execute(
         "DELETE FROM sessions WHERE id NOT IN ("
         "SELECT id FROM sessions ORDER BY updated_at DESC, id DESC LIMIT ?)",
@@ -244,22 +398,28 @@ def save_session(
     it and returns the same id.
 
     If session_id is provided but no longer exists — e.g. a per-row delete
-    (`_on_delete_recent_session`) or a global Clear History raced an
+    (``_on_delete_recent_session``) or a global Clear History raced an
     in-flight save dispatched before the deletion — the save is skipped
     entirely rather than falling through to an INSERT, which used to
     silently resurrect the deleted session under a new row id. Returns None
     in that case so callers can tell "skipped" apart from a real save.
+
+    `first_message` is extracted from `messages` once here so the
+    recent-sessions list can read it as a plain column instead of
+    re-deserializing the whole messages blob per rendered row.
     """
     init_db()
     messages_str = serialize_messages(messages)
+    first_msg = _first_user_prompt(messages)
     abs_path = str(Path(grc_file_path).resolve())
     with _conn() as conn:
         if session_id is not None:
             row = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
             if row:
                 conn.execute(
-                    "UPDATE sessions SET grc_file_path = ?, messages = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (abs_path, messages_str, session_id),
+                    "UPDATE sessions SET grc_file_path = ?, messages = ?, first_message = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (abs_path, messages_str, first_msg, session_id),
                 )
                 conn.commit()
                 _prune_in(conn)
@@ -271,8 +431,8 @@ def save_session(
             )
             return None
         cursor = conn.execute(
-            "INSERT INTO sessions (grc_file_path, messages) VALUES (?, ?)",
-            (abs_path, messages_str),
+            "INSERT INTO sessions (grc_file_path, messages, first_message) VALUES (?, ?, ?)",
+            (abs_path, messages_str, first_msg),
         )
         conn.commit()
         new_id = cursor.lastrowid
@@ -281,7 +441,8 @@ def save_session(
 
 
 def delete_session(session_id: int) -> None:
-    """Delete a session from SQLite."""
+    """Delete a session from SQLite. Its turn_traces rows are removed by the
+    ON DELETE CASCADE on the foreign key (see _migrate_to_v2)."""
     init_db()
     with _conn() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -292,7 +453,8 @@ def delete_all_sessions() -> None:
     """Delete every saved session. Used by the toolbar 'Clear History' button,
     which clears the whole recent-sessions list the user sees — independent of
     which flowgraph (if any) is active. Per-session deletion stays available via
-    the per-row delete buttons (delete_session)."""
+    the per-row delete buttons (delete_session). All turn_traces rows are
+    removed by the ON DELETE CASCADE on each session's foreign key."""
     init_db()
     with _conn() as conn:
         conn.execute("DELETE FROM sessions")

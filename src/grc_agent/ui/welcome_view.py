@@ -32,9 +32,11 @@ def format_relative_time(timestamp_str: str) -> str:
     from datetime import UTC, datetime
 
     try:
-        dt = datetime.fromisoformat(timestamp_str) if "T" in timestamp_str else datetime.strptime(
-            timestamp_str, "%Y-%m-%d %H:%M:%S"
-        ).replace(tzinfo=UTC)
+        dt = (
+            datetime.fromisoformat(timestamp_str)
+            if "T" in timestamp_str
+            else datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        )
         now = datetime.now(UTC)
         seconds = (now - dt).total_seconds()
         if seconds < 60:
@@ -57,14 +59,19 @@ def format_relative_time(timestamp_str: str) -> str:
 _QUICK_PROMPTS = [
     ("\U0001f50d Inspect graph", "Inspect this flowgraph and summarize its architecture."),
     ("\u26a1 Check errors", "Check this flowgraph for configuration errors or missing parameters."),
-    ("\u2753 Explain pipeline", "Explain what signal processing pipeline this flowgraph implements."),
+    (
+        "\u2753 Explain pipeline",
+        "Explain what signal processing pipeline this flowgraph implements.",
+    ),
 ]
 
 
 class WelcomeView:
     """Builds the welcome card + recent-sessions list into the chat listbox."""
 
-    def __init__(self, listbox: Gtk.ListBox, on_quick_prompt, on_open_session, on_delete_session) -> None:
+    def __init__(
+        self, listbox: Gtk.ListBox, on_quick_prompt, on_open_session, on_delete_session
+    ) -> None:
         self._listbox = listbox
         self._on_quick_prompt = on_quick_prompt
         self._on_open_session = on_open_session
@@ -135,7 +142,10 @@ class WelcomeView:
         hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         hdr_box.get_style_context().add_class("chat-recent-header")
         hdr_box.pack_start(
-            Gtk.Image.new_from_icon_name("document-open-recent-symbolic", Gtk.IconSize.MENU), False, False, 0
+            Gtk.Image.new_from_icon_name("document-open-recent-symbolic", Gtk.IconSize.MENU),
+            False,
+            False,
+            0,
         )
         lbl = Gtk.Label()
         lbl.set_markup("<b>Recent Sessions</b>")
@@ -159,7 +169,12 @@ class WelcomeView:
         btn.set_hexpand(True)
 
         inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        inner.pack_start(Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU), False, False, 0)
+        inner.pack_start(
+            Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU),
+            False,
+            False,
+            0,
+        )
 
         text_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         top_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -170,7 +185,9 @@ class WelcomeView:
         if updated_at:
             time_lbl = Gtk.Label()
             time_lbl.get_style_context().add_class("dim-label")
-            time_lbl.set_markup(f"<span size='small'>{_esc(format_relative_time(updated_at))}</span>")
+            time_lbl.set_markup(
+                f"<span size='small'>{_esc(format_relative_time(updated_at))}</span>"
+            )
             time_lbl.set_xalign(1.0)
             top_hbox.pack_end(time_lbl, False, False, 0)
 

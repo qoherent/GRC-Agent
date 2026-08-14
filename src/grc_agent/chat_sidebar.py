@@ -64,6 +64,11 @@ from .settings import (
     save_settings,
     upsert_env_key,
 )
+from .trace import (
+    TraceRecorder,
+    delete_turn_trace,
+    save_turn_trace,
+)
 from .ui.block_badge import (
     BlockBadge,
     badge_click,
@@ -246,7 +251,9 @@ def _format_turn_error(e: Exception) -> str:
         if e.body:
             body_detail = ""
             if isinstance(e.body, dict):
-                body_detail = e.body.get("message") or e.body.get("error", {}).get("message") or str(e.body)
+                body_detail = (
+                    e.body.get("message") or e.body.get("error", {}).get("message") or str(e.body)
+                )
             else:
                 body_detail = str(e.body)
             return f"{msg}: {body_detail}{cause_str}"
@@ -409,6 +416,7 @@ class ChatSidebar(Gtk.Box):
         # backend the running agent is actually using.
         self._active_provider: str = ""
         self._active_model: str = ""
+        self._active_base_url: str | None = None
         # True when the status bar currently shows an error. set_status uses
         # this to enforce the "background poll can't clobber a sticky error"
         # rule (M5) — saves save/preflight failures visible past the next
@@ -459,9 +467,13 @@ class ChatSidebar(Gtk.Box):
         self._blocks_toggle.set_tooltip_text("Toggle block library")
         self._blocks_toggle.get_style_context().add_class("chat-side-toggle")
         self._blocks_toggle.set_valign(Gtk.Align.FILL)
-        self._blocks_arrow = Gtk.Image.new_from_icon_name("pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
+        self._blocks_arrow = Gtk.Image.new_from_icon_name(
+            "pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR
+        )
         self._blocks_toggle.set_valign(Gtk.Align.FILL)
-        self._blocks_arrow = Gtk.Image.new_from_icon_name("pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
+        self._blocks_arrow = Gtk.Image.new_from_icon_name(
+            "pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR
+        )
         self._blocks_toggle.set_image(self._blocks_arrow)
         self._blocks_toggle.set_tooltip_text("Toggle GRC block library")
         self._blocks_toggle.connect("clicked", lambda *_: self.emit("toggle-blocks-panel"))
@@ -497,7 +509,10 @@ class ChatSidebar(Gtk.Box):
         GLib.timeout_add(500, self._poll_indexing)
 
     def _on_key_press_event(self, _widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
-        if (event.state & Gdk.ModifierType.CONTROL_MASK) and event.keyval in (Gdk.KEY_comma, Gdk.KEY_Comma):
+        if (event.state & Gdk.ModifierType.CONTROL_MASK) and event.keyval in (
+            Gdk.KEY_comma,
+            Gdk.KEY_Comma,
+        ):
             self._open_settings()
             return True
         return False
@@ -506,7 +521,9 @@ class ChatSidebar(Gtk.Box):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         bar.set_border_width(4)
 
-        def _icon_btn(icon_name: str, tooltip: str, signal: str | None = None, cb=None) -> Gtk.Button:
+        def _icon_btn(
+            icon_name: str, tooltip: str, signal: str | None = None, cb=None
+        ) -> Gtk.Button:
             b = Gtk.Button.new_from_icon_name(icon_name, Gtk.IconSize.SMALL_TOOLBAR)
             b.set_tooltip_text(tooltip)
             b.get_style_context().add_class("chat-toolbar-btn")
@@ -517,8 +534,14 @@ class ChatSidebar(Gtk.Box):
             bar.pack_start(b, False, False, 0)
             return b
 
-        self._new_session_btn = _icon_btn("document-new-symbolic", "New chat session", "new-session-clicked")
-        self._clear_hist_btn = _icon_btn("edit-clear-all-symbolic", "Clear conversation history", cb=self._on_clear_history_clicked)
+        self._new_session_btn = _icon_btn(
+            "document-new-symbolic", "New chat session", "new-session-clicked"
+        )
+        self._clear_hist_btn = _icon_btn(
+            "edit-clear-all-symbolic",
+            "Clear conversation history",
+            cb=self._on_clear_history_clicked,
+        )
 
         # Active graph badge — expands to fill the toolbar's leftover space.
         self._graph_label = Gtk.Label(label="Active Graph: none")
@@ -543,7 +566,11 @@ class ChatSidebar(Gtk.Box):
         bar.pack_start(self._provider_label, False, False, 0)
 
         # Settings
-        self._gear_btn = _icon_btn("preferences-system-symbolic", "Preferences (Ctrl+,)", cb=lambda *_: self._open_settings())
+        self._gear_btn = _icon_btn(
+            "preferences-system-symbolic",
+            "Preferences (Ctrl+,)",
+            cb=lambda *_: self._open_settings(),
+        )
 
         bar.get_style_context().add_class("chat-toolbar")
         content.pack_start(bar, False, False, 0)
@@ -580,7 +607,9 @@ class ChatSidebar(Gtk.Box):
         self._entry.connect("changed", lambda *_: self._update_send_sensitivity())
         self._entry.set_sensitive(False)
 
-        self._send_btn = Gtk.Button.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
+        self._send_btn = Gtk.Button.new_from_icon_name(
+            "media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR
+        )
         self._send_btn.set_tooltip_text("Send message (Enter, Shift+Enter for newline)")
         self._send_btn.get_style_context().add_class("chat-send-btn")
         self._send_btn.connect("clicked", self._on_send_clicked)
@@ -605,7 +634,11 @@ class ChatSidebar(Gtk.Box):
 
     def _update_context_label(self) -> None:
         """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
-        msgs = self._active_run.all_messages() if getattr(self, "_active_run", None) else self._message_history
+        msgs = (
+            self._active_run.all_messages()
+            if getattr(self, "_active_run", None)
+            else self._message_history
+        )
         (
             last_input_tokens,
             last_output_tokens,
@@ -632,7 +665,9 @@ class ChatSidebar(Gtk.Box):
                     f"</span>"
                 )
             else:
-                text = f"<span size='small'>Context: {format_tokens(last_input_tokens)} tokens</span>"
+                text = (
+                    f"<span size='small'>Context: {format_tokens(last_input_tokens)} tokens</span>"
+                )
 
         if hasattr(self, "_context_label"):
             # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
@@ -646,7 +681,9 @@ class ChatSidebar(Gtk.Box):
                 elif pct >= 75:
                     ctx_classes.add_class("warn")
             self._context_label.set_markup(text)
-            reasoning_str = f" ({last_reasoning_tokens:,} reasoning)" if last_reasoning_tokens else ""
+            reasoning_str = (
+                f" ({last_reasoning_tokens:,} reasoning)" if last_reasoning_tokens else ""
+            )
             self._context_label.set_tooltip_text(
                 f"Active model: {active_model or 'default'}\n"
                 f"Provider: {active_provider or 'unknown'}\n"
@@ -695,7 +732,9 @@ class ChatSidebar(Gtk.Box):
         if name and path:
             self._graph_label.set_tooltip_text(f"Active Flowgraph: {name}\nFull Path: {path}")
         elif name:
-            self._graph_label.set_tooltip_text(f"Active Flowgraph: {name}\nFull Path: (Unsaved / In-memory)")
+            self._graph_label.set_tooltip_text(
+                f"Active Flowgraph: {name}\nFull Path: (Unsaved / In-memory)"
+            )
         else:
             self._graph_label.set_tooltip_text("No flowgraph currently active or open in GRC")
 
@@ -772,7 +811,9 @@ class ChatSidebar(Gtk.Box):
     def _on_clear_history_clicked(self, _widget: Gtk.Button) -> None:
         _log.info("Clear History: button clicked")
         dialog = Gtk.MessageDialog(
-            transient_for=self.get_toplevel() if isinstance(self.get_toplevel(), Gtk.Window) else None,
+            transient_for=self.get_toplevel()
+            if isinstance(self.get_toplevel(), Gtk.Window)
+            else None,
             flags=Gtk.DialogFlags.MODAL,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO,
@@ -868,24 +909,32 @@ class ChatSidebar(Gtk.Box):
                 cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
                 path = cm.path if cm else ""
             if not path:
-                self._entry.set_placeholder_text("Save the flowgraph to keep this chat. Ask about your flowgraph...")
+                self._entry.set_placeholder_text(
+                    "Save the flowgraph to keep this chat. Ask about your flowgraph..."
+                )
             else:
                 self._entry.set_placeholder_text("Ask about your flowgraph...")
             self.grab_entry_focus()
         else:
-            self._entry.set_placeholder_text("Open or create a flowgraph in GRC to start chatting...")
+            self._entry.set_placeholder_text(
+                "Open or create a flowgraph in GRC to start chatting..."
+            )
 
     def _update_send_sensitivity(self) -> None:
         # Gate Send on non-blank input too, on top of the entry's own
         # busy/flowgraph-present sensitivity — otherwise a click on
         # whitespace-only text is a silent no-op (see _dispatch_send).
-        self._send_btn.set_sensitive(self._entry.get_sensitive() and bool(self._entry.get_text().strip()))
+        self._send_btn.set_sensitive(
+            self._entry.get_sensitive() and bool(self._entry.get_text().strip())
+        )
 
     def set_blocks_expanded(self, expanded: bool) -> None:
         self._blocks_expanded = expanded
         icon = "pan-start-symbolic" if expanded else "pan-end-symbolic"
         self._blocks_arrow.set_from_icon_name(icon, Gtk.IconSize.SMALL_TOOLBAR)
-        self._blocks_toggle.set_tooltip_text("Hide block library" if expanded else "Show block library")
+        self._blocks_toggle.set_tooltip_text(
+            "Hide block library" if expanded else "Show block library"
+        )
 
     def set_agent(self, agent: Agent) -> None:
         self._agent = agent
@@ -910,7 +959,9 @@ class ChatSidebar(Gtk.Box):
             )
         except Exception:
             is_default = False
-        self.set_active_provider(resolved_provider, model_name, is_default=is_default, base_url=base_url)
+        self.set_active_provider(
+            resolved_provider, model_name, is_default=is_default, base_url=base_url
+        )
 
     def set_rebuild_agent_callback(self, cb: Callable[[], tuple[Agent, str | None]]) -> None:
         """Wire the live-swap entry point. desktop_app.py calls this once at
@@ -919,7 +970,9 @@ class ChatSidebar(Gtk.Box):
         new provider/model/key to the running process immediately."""
         self._rebuild_agent = cb
 
-    def set_active_provider(self, provider: str, model: str, *, is_default: bool = False, base_url: str | None = None) -> None:
+    def set_active_provider(
+        self, provider: str, model: str, *, is_default: bool = False, base_url: str | None = None
+    ) -> None:
         """Update the toolbar's active-provider badge and rich tooltip.
         `is_default` is True when the running agent's resolved provider doesn't
         match the saved cfg (e.g. a startup build failure fell back to local
@@ -1066,7 +1119,9 @@ class ChatSidebar(Gtk.Box):
 
     def _on_recent_session_clicked(self, session_id: int) -> None:
         if self._busy:
-            self.set_status("Stop or wait for the current response before switching sessions.", error=True)
+            self.set_status(
+                "Stop or wait for the current response before switching sessions.", error=True
+            )
             return
         session_data = load_session(session_id)
         if not session_data:
@@ -1089,7 +1144,11 @@ class ChatSidebar(Gtk.Box):
             self._loading_session_id = None
 
     def _switch_or_open_file(self, path: str) -> None:
-        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None) if self._flowgraph_proxy else None
+        cm = (
+            getattr(self._flowgraph_proxy, "_canvas_manager", None)
+            if self._flowgraph_proxy
+            else None
+        )
         if not cm or not cm.window:
             self.set_status("GRC window not available.", error=True)
             return
@@ -1112,7 +1171,9 @@ class ChatSidebar(Gtk.Box):
                         switched = True
                         break
                 except Exception:
-                    _log.debug("recent-session: skipping page %r during resolve", p_path, exc_info=True)
+                    _log.debug(
+                        "recent-session: skipping page %r during resolve", p_path, exc_info=True
+                    )
 
         if not switched:
             try:
@@ -1159,6 +1220,29 @@ class ChatSidebar(Gtk.Box):
             except Exception:
                 _log.exception("Failed to remove session resurrected by in-flight save")
 
+    async def _save_trace(self, row: dict[str, Any]) -> None:
+        """Persist one finalized turn-trace row. Mirrors ``_save_history``'s
+        pattern: the SQLite insert runs on a worker thread (``asyncio.to_thread``)
+        on the WAL-enabled DB, and the same clear-generation guard prevents a
+        late insert from resurrecting a trace row for a session the user just
+        cleared. (The ON DELETE CASCADE on ``turn_traces.session_id`` already
+        handles the case where the session ROW is gone; this guard covers the
+        case where the chat UI was cleared via ``clear_messages`` without
+        removing the underlying session row.)"""
+        if row.get("session_id") is None:
+            return
+        gen = self._clear_generation
+        try:
+            new_id = await asyncio.to_thread(save_turn_trace, row)
+        except Exception as e:
+            _log.error("Failed to save turn trace to database: %s", e)
+            return
+        if new_id is not None and gen != self._clear_generation:
+            try:
+                delete_turn_trace(new_id)
+            except Exception:
+                _log.exception("Failed to remove trace resurrected by in-flight save")
+
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
@@ -1171,18 +1255,24 @@ class ChatSidebar(Gtk.Box):
         if self._md is not None:
             self._md.set_shutting_down(True)
 
-    async def _stream_request(self, ctx: _StreamCtx, node, run) -> None:
+    async def _stream_request(
+        self, ctx: _StreamCtx, node, run, recorder: TraceRecorder | None = None
+    ) -> None:
         async with node.stream(run.ctx) as stream:
             async for event in stream:
                 if isinstance(event, PartStartEvent):
                     self._on_part_start(ctx, event)
                 elif isinstance(event, PartDeltaEvent):
                     self._on_part_delta(ctx, event)
+                if recorder is not None:
+                    recorder.on_event(event)
         # Force a final flush so the last throttled chunk is painted before the
         # node hands control back (and before any markdown re-render).
         self._flush_streaming(ctx, force=True)
 
-    async def _stream_tools(self, ctx: _StreamCtx, node, run) -> None:
+    async def _stream_tools(
+        self, ctx: _StreamCtx, node, run, recorder: TraceRecorder | None = None
+    ) -> None:
         async with node.stream(run.ctx) as stream:
             async for event in stream:
                 if isinstance(event, FunctionToolCallEvent):
@@ -1204,6 +1294,11 @@ class ChatSidebar(Gtk.Box):
                             self._set_tool_result(exp, res_str)
                         ctx.full_raw_text += f"<Tool Result: {res_str}>\n"
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
+                # Feed the recorder AFTER the GTK handlers — best-effort capture
+                # that never blocks a UI update, and never gets skipped by a
+                # GTK-handler exception (same ordering as _stream_request).
+                if recorder is not None:
+                    recorder.on_event(event)
 
     def _on_part_start(self, ctx: _StreamCtx, event: PartStartEvent) -> None:
         part = event.part
@@ -1484,7 +1579,9 @@ class ChatSidebar(Gtk.Box):
         copy_btn.set_tooltip_text("Copy message")
 
         copy_btn._grc_copy_text = ""
-        copy_btn.connect("clicked", lambda b: self._copy_to_clipboard(getattr(b, "_grc_copy_text", ""), b))
+        copy_btn.connect(
+            "clicked", lambda b: self._copy_to_clipboard(getattr(b, "_grc_copy_text", ""), b)
+        )
 
         hbox.pack_start(copy_btn, False, False, 0)
         hbox._grc_copy_btn = copy_btn
@@ -1494,7 +1591,11 @@ class ChatSidebar(Gtk.Box):
 
     def _get_cm(self):
         """Resolve the live canvas manager (it changes across tab switches)."""
-        return getattr(self._flowgraph_proxy, "_canvas_manager", None) if self._flowgraph_proxy else None
+        return (
+            getattr(self._flowgraph_proxy, "_canvas_manager", None)
+            if self._flowgraph_proxy
+            else None
+        )
 
     def _compile_badge_regex(self) -> re.Pattern | None:
         """Delegates to the MarkdownView (cached, whole-word over live block names)."""
@@ -1562,9 +1663,12 @@ class ChatSidebar(Gtk.Box):
                     for m in self._message_history:
                         if m.__class__.__name__ == "ModelRequest":
                             for p in m.parts:
-                                if p.__class__.__name__ == "ToolReturnPart" and p.tool_call_id == tcid:
+                                if (
+                                    p.__class__.__name__ == "ToolReturnPart"
+                                    and p.tool_call_id == tcid
+                                ):
                                     ret_content = str(p.content)
-                                    is_success = (p.outcome != "failed")
+                                    is_success = p.outcome != "failed"
                                     break
                                 if isinstance(p, RetryPromptPart) and p.tool_call_id == tcid:
                                     ret_content = p.model_response()
@@ -1579,7 +1683,9 @@ class ChatSidebar(Gtk.Box):
                         exp.set_label(f"\u2699 {tool_name} \u2713")
                     else:
                         exp.set_label(f"\u2699 {tool_name} \u2717")
-                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
+                    full_text += (
+                        f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
+                    )
                 else:
                     exp.set_label(f"\u2699 {tool_name} ✓")
                     full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\n"
@@ -1595,10 +1701,12 @@ class ChatSidebar(Gtk.Box):
                 ret_part = native_returns.get(part.tool_call_id)
                 if ret_part is not None:
                     ret_content = str(ret_part.content)
-                    is_success = (ret_part.outcome != "failed")
+                    is_success = ret_part.outcome != "failed"
                     self._set_tool_body(exp, ret_content)
                     exp.set_label(f"⚙ {tool_name} {'✓' if is_success else '✗'}")
-                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
+                    full_text += (
+                        f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
+                    )
                 else:
                     exp.set_label(f"⚙ {tool_name} ✓")
                     full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\n"
@@ -1616,7 +1724,11 @@ class ChatSidebar(Gtk.Box):
             inner = c.get_child() if isinstance(c, Gtk.ListBoxRow) else c
             if inner:
                 ctx = inner.get_style_context()
-                if ctx.has_class("chat-welcome-box") or ctx.has_class("chat-recent-header") or ctx.has_class("chat-recent-item"):
+                if (
+                    ctx.has_class("chat-welcome-box")
+                    or ctx.has_class("chat-recent-header")
+                    or ctx.has_class("chat-recent-item")
+                ):
                     has_welcome = True
                     break
         if has_welcome:
@@ -1823,11 +1935,25 @@ class ChatSidebar(Gtk.Box):
         origin_gen = self._clear_generation
         ctx: _StreamCtx | None = None
         active_run: Any = None
+        # Per-turn trace recorder. Captures provider/model/base_url snapshot
+        # at turn start so a live-swap mid-turn stays attributable. Fed by
+        # _stream_request/_stream_tools during the iter() loop; finalized +
+        # persisted once at the end via _save_trace (mirror of _save_history).
+        recorder: TraceRecorder | None = None
+        turn_exc: BaseException | None = None
         try:
             if self._agent is None:
                 self._append_error("No agent configured.")
                 return
             ctx = _StreamCtx(self._start_agent_message())
+            recorder = TraceRecorder(
+                session_id=self._active_session_id,
+                provider=getattr(self, "_active_provider", "") or "",
+                model=getattr(self, "_active_model", "") or "",
+                base_url=getattr(self, "_active_base_url", "") or "",
+                user_prompt=text,
+                origin_page_path=self._get_effective_path(),
+            )
             async with self._agent.iter(
                 text,
                 message_history=self._message_history,
@@ -1838,11 +1964,11 @@ class ChatSidebar(Gtk.Box):
                 node = run.next_node
                 while node is not None and not isinstance(node, End):
                     if Agent.is_model_request_node(node):
-                        await self._stream_request(ctx, node, run)
+                        await self._stream_request(ctx, node, run, recorder)
                     elif Agent.is_call_tools_node(node):
                         self._close_text(ctx)
                         self._close_thinking(ctx)
-                        await self._stream_tools(ctx, node, run)
+                        await self._stream_tools(ctx, node, run, recorder)
                     self._scroll_to_bottom()
                     node = await run.next(node)
                     self._update_context_label()
@@ -1852,7 +1978,10 @@ class ChatSidebar(Gtk.Box):
                 await self._save_history()
                 self._render_history()
                 rich_rendered = True
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as e:
+            turn_exc = e
+            if recorder is not None:
+                recorder.record_error("cancelled", e)
             if self.current_page is origin_page and self._clear_generation == origin_gen:
                 if active_run is not None:
                     try:
@@ -1866,7 +1995,10 @@ class ChatSidebar(Gtk.Box):
                 rich_rendered = True
             raise
         except Exception as e:
+            turn_exc = e
             _log.exception("agent run failed")
+            if recorder is not None:
+                recorder.record_error("run", e)
             if self.current_page is origin_page:
                 if active_run is not None:
                     try:
@@ -1879,6 +2011,26 @@ class ChatSidebar(Gtk.Box):
                 self._append_error(_format_turn_error(e))
                 rich_rendered = True
         finally:
+            # Persist the trace row for this turn. Finalize even if recorder
+            # saw no events (e.g. the agent was None or iter() raised early)
+            # — a turn that ended in an error is still a recorded turn. The
+            # clear-generation guard inside _save_trace prevents a late insert
+            # from resurrecting a trace against a cleared session.
+            #
+            # On the success path (turn_exc is None) we await so the trace is
+            # saved before widgets update. On cancel/error paths we dispatch as
+            # a detached future — mirroring the cancel-path's _save_history
+            # pattern — so a double-cancel can't skip the widget cleanup below
+            # (CancelledError inherits BaseException, not Exception).
+            if recorder is not None:
+                try:
+                    row = recorder.finalize(active_run, turn_exc)
+                    if turn_exc is None:
+                        await self._save_trace(row)
+                    else:
+                        asyncio.ensure_future(self._save_trace(row))
+                except Exception:
+                    _log.exception("Failed to dispatch trace save")
             self._active_run = None
             self._update_context_label()
             # Paint any throttled-but-unflushed tail before deciding whether to
@@ -1892,7 +2044,12 @@ class ChatSidebar(Gtk.Box):
                 return  # noqa: B012
             if ctx is not None:
                 self._flush_streaming(ctx, force=True)
-            if ctx is not None and not rich_rendered and ctx.full_raw_text and self.current_page is origin_page:
+            if (
+                ctx is not None
+                and not rich_rendered
+                and ctx.full_raw_text
+                and self.current_page is origin_page
+            ):
                 self._render_markdown_to_box(ctx.box, ctx.full_raw_text)
             self._set_busy(False)
             self._scroll_to_bottom()
@@ -1917,12 +2074,20 @@ class ChatSidebar(Gtk.Box):
         self._new_session_btn.set_sensitive(not busy)
         self._clear_hist_btn.set_sensitive(not busy)
         if busy:
-            self._send_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-stop-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            self._send_btn.set_image(
+                Gtk.Image.new_from_icon_name(
+                    "media-playback-stop-symbolic", Gtk.IconSize.SMALL_TOOLBAR
+                )
+            )
             self._send_btn.set_tooltip_text("Stop")
             self._send_btn.set_sensitive(True)
             self._entry.set_sensitive(False)
         else:
-            self._send_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR))
+            self._send_btn.set_image(
+                Gtk.Image.new_from_icon_name(
+                    "media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR
+                )
+            )
             self._send_btn.set_tooltip_text("Send")
             self._entry.set_sensitive(can_type)
             self._update_send_sensitivity()
@@ -1939,7 +2104,9 @@ class ChatSidebar(Gtk.Box):
             self._auto_scroll = False
         elif direction == Gdk.ScrollDirection.DOWN:
             adj = self._scrolled.get_vadjustment()
-            near_bottom = (adj.get_upper() - adj.get_page_size() - adj.get_value()) <= _SCROLL_STICK_THRESHOLD
+            near_bottom = (
+                adj.get_upper() - adj.get_page_size() - adj.get_value()
+            ) <= _SCROLL_STICK_THRESHOLD
             if near_bottom:
                 self._auto_scroll = True
         elif direction == Gdk.ScrollDirection.SMOOTH:
@@ -1949,7 +2116,9 @@ class ChatSidebar(Gtk.Box):
                 self._auto_scroll = False
             elif delta_y > 0:
                 adj = self._scrolled.get_vadjustment()
-                near_bottom = (adj.get_upper() - adj.get_page_size() - adj.get_value()) <= _SCROLL_STICK_THRESHOLD
+                near_bottom = (
+                    adj.get_upper() - adj.get_page_size() - adj.get_value()
+                ) <= _SCROLL_STICK_THRESHOLD
                 if near_bottom:
                     self._auto_scroll = True
         return False
@@ -2028,11 +2197,17 @@ class ChatSidebar(Gtk.Box):
         try:
             if provider == "openai_compatible":
                 save_settings(
-                    provider, model, openai_compatible_base_url=ollama_base_url, thinking_enabled=thinking_enabled
+                    provider,
+                    model,
+                    openai_compatible_base_url=ollama_base_url,
+                    thinking_enabled=thinking_enabled,
                 )
             else:
                 save_settings(
-                    provider, model, ollama_base_url=ollama_base_url, thinking_enabled=thinking_enabled
+                    provider,
+                    model,
+                    ollama_base_url=ollama_base_url,
+                    thinking_enabled=thinking_enabled,
                 )
             if key_var:
                 upsert_env_key(key_var, key_val)

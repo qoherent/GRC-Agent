@@ -313,7 +313,9 @@ class NativeCanvasManager:
             return False
         try:
             zoom = getattr(self.drawing_area, "zoom_factor", 1.0)
-            content_w, content_h = fg.get_extents()[2:] if hasattr(fg, "get_extents") else (1000, 1000)
+            content_w, content_h = (
+                fg.get_extents()[2:] if hasattr(fg, "get_extents") else (1000, 1000)
+            )
             target_x = coord[0] * zoom
             target_y = coord[1] * zoom
             for adjustment, content_extent, target in (
@@ -354,7 +356,11 @@ class NativeCanvasManager:
             return False
 
         try:
-            w, h = (block.width, block.height) if block.is_horizontal() else (block.height, block.width)
+            w, h = (
+                (block.width, block.height)
+                if block.is_horizontal()
+                else (block.height, block.width)
+            )
             zoom = da.zoom_factor
             pad = 4.0
 
@@ -378,8 +384,7 @@ class NativeCanvasManager:
             new_coords = [
                 tuple(b.states["coordinate"])
                 for b in flow_graph.blocks
-                if b.name not in old_names
-                and isinstance(b.states.get("coordinate"), (list, tuple))
+                if b.name not in old_names and isinstance(b.states.get("coordinate"), (list, tuple))
             ]
             if not new_coords:
                 return

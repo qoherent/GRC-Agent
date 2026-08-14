@@ -72,7 +72,11 @@ def _cached_dotenv() -> dict[str, str]:
         mtime = 0.0
     path_str = str(path)
     if _dotenv_cache is None or _dotenv_cache[0] != path_str or _dotenv_cache[1] != mtime:
-        _dotenv_cache = (path_str, mtime, {k: v for k, v in dotenv_values(path).items() if v is not None})
+        _dotenv_cache = (
+            path_str,
+            mtime,
+            {k: v for k, v in dotenv_values(path).items() if v is not None},
+        )
     return _dotenv_cache[2]
 
 
@@ -129,11 +133,15 @@ def load_settings() -> dict:
     res = {
         "provider": provider,
         "ollama_model": vals.get("OLLAMA_CHAT_MODEL", _DEFAULT_MODELS["ollama_model"]),
-        "openai_compatible_model": vals.get("OPENAI_COMPATIBLE_MODEL", _DEFAULT_MODELS["openai_compatible_model"]),
+        "openai_compatible_model": vals.get(
+            "OPENAI_COMPATIBLE_MODEL", _DEFAULT_MODELS["openai_compatible_model"]
+        ),
         "openrouter_model": vals.get("OPENROUTER_MODEL", _DEFAULT_MODELS["openrouter_model"]),
         "ollama_cloud_model": vals.get("OLLAMA_CLOUD_MODEL", _DEFAULT_MODELS["ollama_cloud_model"]),
         "ollama_base_url": vals.get("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
-        "openai_compatible_base_url": vals.get("OPENAI_COMPATIBLE_BASE_URL", _DEFAULT_OPENAI_COMPATIBLE_BASE_URL),
+        "openai_compatible_base_url": vals.get(
+            "OPENAI_COMPATIBLE_BASE_URL", _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+        ),
         "ollama_thinking_enabled": thinking_enabled,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[provider]]
@@ -172,9 +180,6 @@ def save_settings(
         upsert_env_key("OLLAMA_THINKING_ENABLED", "true" if thinking_enabled else "false")
 
 
-
 def get_env_value(key: str) -> str | None:
     """Read a single key from the ``.env`` file (the saved source of truth)."""
     return _cached_dotenv().get(key)
-
-

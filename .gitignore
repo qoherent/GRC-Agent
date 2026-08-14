@@ -24,6 +24,8 @@ Thumbs.db
 # ---- GRC agent runtime artifacts ----
 # Backups, locks, and undo snapshots written next to loaded .grc files
 .grc_agent/
+# Trace-dataset planning/export workspace (local analysis artifacts)
+grc_trace_dataset/
 # GRC save/restore scratch variants
 *.saved.grc
 *.restored.grc
