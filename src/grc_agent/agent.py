@@ -25,8 +25,9 @@ from pydantic_ai.capabilities import (
     WrapNodeRunHandler,
 )
 from pydantic_ai.models.ollama import OllamaModel
-from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.result import FinalResult
 from pydantic_graph import End
 
@@ -51,14 +52,27 @@ OLLAMA_V1 = "http://localhost:11434/v1"
 def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
     """Build a model instance for the scenario/integration harness.
 
-    The web app has its own _build_model() that respects user settings; this
+    The app has its own _build_model() that respects user settings; this
     helper is for the reproducible scenario harness and tests, which may run
-    against either a local Ollama model, an Ollama Cloud model, or an OpenRouter
-    model depending on the environment.
+    against either Ollama (local/cloud) or OpenAI-compatible (OpenRouter/llama.cpp/vLLM/etc.)
+    depending on the environment.
     """
-    if provider == "openrouter":
-        return OpenRouterModel(
-            model_name or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+    if provider in ("openai_compatible", "openrouter"):
+        key = (
+            os.environ.get("OPENAI_COMPATIBLE_API_KEY")
+            or os.environ.get("OPENROUTER_API_KEY")
+            or "not-required"
+        )
+        raw_url = (
+            os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+            or ("https://openrouter.ai/api/v1" if provider == "openrouter" else "http://localhost:8080/v1")
+        ).rstrip("/")
+        base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
+        return OpenAIChatModel(
+            model_name
+            or os.environ.get("OPENAI_COMPATIBLE_MODEL")
+            or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"),
+            provider=OpenAIProvider(base_url=base_url, api_key=key),
         )
     if provider == "ollama_cloud":
         key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
@@ -69,7 +83,10 @@ def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
                 api_key=key,
             ),
         )
-    return OllamaModel(model_name or MODEL, provider=OllamaProvider(base_url=OLLAMA_V1))
+    raw_url = (os.environ.get("OLLAMA_BASE_URL") or OLLAMA_V1).rstrip("/")
+    base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
+    key = os.environ.get("OLLAMA_API_KEY") or os.environ.get("OLLAMA_CLOUD_API_KEY")
+    return OllamaModel(model_name or MODEL, provider=OllamaProvider(base_url=base_url, api_key=key))
 
 
 SCENARIOS = [

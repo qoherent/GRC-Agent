@@ -73,6 +73,20 @@ def ingest_catalog(  # noqa: C901
     # successfully; the vector index is only built if it's non-empty.
     fts_rows: list[tuple[str, str]] = []
     vec_rows: list[tuple[str, list[float]]] = []
+
+    # Probe embedding availability before the loop. If the embedding backend
+    # is unreachable or the model is not found, skip per-block embedding calls
+    # and build a lexical-only (FTS5) index cleanly without spamming failed requests.
+    can_embed = True
+    try:
+        embed_document("probe", model)
+    except Exception as exc:
+        _log.info(
+            "catalog: embedding backend unavailable (%s) — building lexical-only (FTS5) index",
+            exc,
+        )
+        can_embed = False
+
     for i, block_id in enumerate(block_ids):
         # Render + embed; a failure for one block skips it without aborting the
         # whole build. on_progress fires per iteration (including skipped
@@ -83,12 +97,14 @@ def ingest_catalog(  # noqa: C901
             if rendered:
                 text = _compose_catalog_text(rendered)
                 fts_rows.append((block_id, text))
-                try:
-                    embed_text = _cap_words(text, EMBED_MAX_WORDS, label=f"catalog:{block_id}")
-                    embedding = embed_document(embed_text, model)
-                    vec_rows.append((block_id, embedding))
-                except Exception as exc:
-                    _log.warning("catalog embed failed for block_id=%s: %s", block_id, exc)
+                if can_embed:
+                    try:
+                        embed_text = _cap_words(text, EMBED_MAX_WORDS, label=f"catalog:{block_id}")
+                        embedding = embed_document(embed_text, model)
+                        vec_rows.append((block_id, embedding))
+                    except Exception as exc:
+                        _log.warning("catalog embed failed for block_id=%s: %s", block_id, exc)
+                        can_embed = False
         except Exception as exc:
             _log.warning("catalog render failed for block_id=%s: %s", block_id, exc)
         if on_progress is not None:
@@ -99,10 +115,9 @@ def ingest_catalog(  # noqa: C901
             "No catalog blocks could be rendered — check the GNU Radio platform is available."
         )
     if not vec_rows:
-        _log.warning(
-            "catalog: no blocks could be embedded (embedding backend unreachable?) — "
-            "building a lexical-only (FTS5) index; vector search stays unavailable "
-            "until the next successful rebuild."
+        _log.info(
+            "catalog: built lexical-only (FTS5) index (no vector index); vector search "
+            "stays unavailable until the next successful rebuild."
         )
 
     conn = _open_db(db_path)
@@ -200,23 +215,38 @@ def ingest_docs(  # noqa: C901
     total = len(chunk_list)
     composed_list: list[str] = []
     vec_rows: list[tuple[int, list[float]]] = []
+
+    # Probe embedding availability before the loop. If the embedding backend
+    # is unreachable or the model is not found, skip per-chunk embedding calls
+    # and build a lexical-only (FTS5) index cleanly without spamming failed requests.
+    can_embed = True
+    try:
+        embed_document("probe", model)
+    except Exception as exc:
+        _log.info(
+            "docs: embedding backend unavailable (%s) — building lexical-only (FTS5) index",
+            exc,
+        )
+        can_embed = False
+
     for i, (path, heading, body) in enumerate(chunk_list):
         composed = f"path: {path}\nheading: {heading}\n{body}"
         composed_list.append(composed)
-        try:
-            embed_text = _cap_words(composed, EMBED_MAX_WORDS, label=f"docs:{path}:{heading}")
-            embedding = embed_document(embed_text, model)
-            vec_rows.append((i, embedding))
-        except Exception as exc:
-            _log.warning("docs embed failed for path=%s heading=%s: %s", path, heading, exc)
+        if can_embed:
+            try:
+                embed_text = _cap_words(composed, EMBED_MAX_WORDS, label=f"docs:{path}:{heading}")
+                embedding = embed_document(embed_text, model)
+                vec_rows.append((i, embedding))
+            except Exception as exc:
+                _log.warning("docs embed failed for path=%s heading=%s: %s", path, heading, exc)
+                can_embed = False
         if on_progress is not None:
             on_progress(i + 1, total)
 
     if not vec_rows:
-        _log.warning(
-            "docs: no chunks could be embedded (embedding backend unreachable?) — "
-            "building a lexical-only (FTS5) index; vector search stays unavailable "
-            "until the next successful rebuild."
+        _log.info(
+            "docs: built lexical-only (FTS5) index (no vector index); vector search "
+            "stays unavailable until the next successful rebuild."
         )
 
     conn = _open_db(db_path)

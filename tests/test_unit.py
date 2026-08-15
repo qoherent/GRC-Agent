@@ -1480,14 +1480,14 @@ def test_ui_micro_interactions_and_shortcuts():
 
     # 2. Active Provider badge tooltips
     sidebar.set_active_provider(
-        "openrouter",
+        "openai_compatible",
         "deepseek/deepseek-v4-flash",
         is_default=False,
         base_url="https://openrouter.ai/api/v1",
     )
     assert "deepseek-v4-flash" in sidebar._provider_label.get_text()
     tooltip = sidebar._provider_label.get_tooltip_text()
-    assert "OpenRouter (cloud)" in tooltip
+    assert "OpenAI Compatible" in tooltip
     assert "https://openrouter.ai/api/v1" in tooltip
     assert "Configured provider active" in tooltip
 
@@ -2022,7 +2022,7 @@ def test_settings_dialog_persists_api_key(tmp_path, monkeypatch):
     from grc_agent.settings import get_env_value, save_settings
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("openrouter", "openai/gpt-4o-mini")
+    save_settings("openai_compatible", "openai/gpt-4o-mini")
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
@@ -2046,7 +2046,7 @@ def test_settings_dialog_persists_api_key(tmp_path, monkeypatch):
 
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
-    assert get_env_value("OPENROUTER_API_KEY") == "sk-test-persists-123"
+    assert get_env_value("OPENAI_COMPATIBLE_API_KEY") == "sk-test-persists-123"
 
 
 def test_sync_to_file_does_not_autoload_session(tmp_path, monkeypatch):
@@ -2156,9 +2156,8 @@ def test_format_turn_error_covers_each_exception_type():
         == "Model HTTP 403 Error: Key limit exceeded"
     )
     assert _format_turn_error(ModelHTTPError(503, "gpt-x")) == "Model HTTP 503 Error from gpt-x"
-    assert (
-        _format_turn_error(UsageLimitExceeded("too many tokens"))
-        == "Usage Limit Exceeded: too many tokens"
+    assert _format_turn_error(UsageLimitExceeded("too many tokens")).startswith(
+        "Usage Limit Exceeded: too many tokens"
     )
     assert (
         _format_turn_error(ModelAPIError("gpt-x", "bad request")) == "Model API Error: bad request"
@@ -3378,7 +3377,12 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     url_entry = next(e for e in entries if e.get_text() == "http://localhost:11434")
     url_entry.set_text("http://10.0.0.5:11434")
 
-    thinking_check = checks[0]
+    thinking_check = next(
+        c
+        for c in checks
+        if "think" in (c.get_label() or "").lower()
+        or "reasoning" in (c.get_label() or "").lower()
+    )
     assert thinking_check.get_active() is True
     thinking_check.set_active(False)
 
@@ -3390,6 +3394,56 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     persisted = load_settings()
     assert persisted["ollama_base_url"] == "http://10.0.0.5:11434"
     assert persisted["ollama_thinking_enabled"] is False
+
+
+def test_settings_dialog_ollama_cloud_checkbox(tmp_path, monkeypatch):
+    """Checking 'Use Ollama Cloud' sets https://ollama.com/v1 and disables URL entry.
+    Unchecking enables URL entry with default http://localhost:11434."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import load_settings, save_settings
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M", ollama_base_url="http://localhost:11434")
+
+    sidebar = ChatSidebar()
+    sidebar._open_settings()
+    dlg = sidebar._open_dialog
+    assert dlg is not None
+
+    checks: list[Gtk.CheckButton] = []
+    entries: list[Gtk.Entry] = []
+
+    def walk(w):
+        if isinstance(w, Gtk.CheckButton):
+            checks.append(w)
+        if isinstance(w, Gtk.Entry):
+            entries.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                walk(c)
+
+    walk(dlg)
+
+    cloud_check = next(c for c in checks if "cloud" in (c.get_label() or "").lower())
+    url_entry = next(e for e in entries if "localhost" in e.get_text())
+
+    assert cloud_check.get_active() is False
+    assert url_entry.get_sensitive() is True
+
+    # Check the Cloud box
+    cloud_check.set_active(True)
+    assert url_entry.get_text() == "https://ollama.com/v1"
+    assert url_entry.get_sensitive() is False
+
+    # Bypass preflight check
+    monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *_a, **_kw: None)
+
+    dlg.emit("response", Gtk.ResponseType.APPLY)
+
+    persisted = load_settings()
+    assert persisted["ollama_base_url"] == "https://ollama.com/v1"
 
 
 def test_badge_regex_matching():
@@ -3950,6 +4004,7 @@ def test_clean_message_history_for_new_turn():
         ToolCallPart,
         UserPromptPart,
     )
+
     from grc_agent.chat_sidebar import _clean_message_history_for_new_turn
 
     # Case 1: Trailing ModelResponse with ToolCallPart is trimmed

@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 import sqlite_vec
-from openai import APIConnectionError, OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI
 
 from grc_agent._paths import vectors_dir
 from grc_agent.settings import get_env_value, load_settings
@@ -21,14 +21,17 @@ def get_db_and_model(domain: str) -> tuple[str, str | None]:
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
-    if provider == "openrouter":
-        model = get_env_value("OPENROUTER_EMBEDDING_MODEL") or os.getenv(
-            "OPENROUTER_EMBEDDING_MODEL", "perplexity/pplx-embed-v1-0.6b"
+    if provider in ("openai_compatible", "openrouter"):
+        model = (
+            get_env_value("OPENAI_COMPATIBLE_EMBEDDING_MODEL")
+            or get_env_value("OPENROUTER_EMBEDDING_MODEL")
+            or os.getenv("OPENAI_COMPATIBLE_EMBEDDING_MODEL")
+            or os.getenv("OPENROUTER_EMBEDDING_MODEL")
+            or "perplexity/pplx-embed-v1-0.6b"
         )
-        db_name = f"{domain}_openrouter.db"
+        db_name = f"{domain}_openai_compatible.db"
     else:
-        # ollama and ollama_cloud both use local Ollama for embeddings
-        # (Ollama Cloud's API doesn't expose /v1/embeddings)
+        # ollama uses local Ollama for embeddings
         model = get_env_value("OLLAMA_EMBEDDING_MODEL") or os.getenv(
             "OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest"
         )
@@ -44,11 +47,40 @@ def _embed_endpoint() -> tuple[str, str | None]:
     cfg = load_settings()
     provider = cfg.get("provider", "ollama")
 
-    if provider == "openrouter":
-        key = get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
-        return "https://openrouter.ai/api/v1", key
-    # ollama and ollama_cloud both use local Ollama for embeddings
-    return "http://localhost:11434/v1", "not-needed"
+    if provider in ("openai_compatible", "openrouter"):
+        url = (
+            cfg.get("openai_compatible_base_url")
+            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
+            or "https://openrouter.ai/api/v1"
+        ).rstrip("/")
+        base_url = url if url.endswith("/v1") else f"{url}/v1"
+        key = (
+            get_env_value("OPENAI_COMPATIBLE_API_KEY")
+            or get_env_value("OPENROUTER_API_KEY")
+            or os.getenv("OPENAI_COMPATIBLE_API_KEY")
+            or os.getenv("OPENROUTER_API_KEY")
+            or "not-needed"
+        )
+        return base_url, key
+
+    # ollama (local or remote)
+    raw_url = (
+        cfg.get("ollama_base_url")
+        or get_env_value("OLLAMA_BASE_URL")
+        or "http://localhost:11434"
+    ).rstrip("/")
+    base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
+    if "ollama.com" in base_url:
+        key = (
+            get_env_value("OLLAMA_API_KEY")
+            or get_env_value("OLLAMA_CLOUD_API_KEY")
+            or os.getenv("OLLAMA_API_KEY")
+            or os.getenv("OLLAMA_CLOUD_API_KEY")
+            or "not-needed"
+        )
+    else:
+        key = "not-needed"
+    return base_url, key
 
 
 # (base_url, api_key, client) as ONE tuple, replaced by a single atomic
@@ -97,6 +129,13 @@ def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[f
             else "Check OPENROUTER_API_KEY and network connectivity."
         )
         raise RuntimeError(f"Cannot reach the embeddings endpoint at {base_url}. {hint}") from exc
+    except APIStatusError as exc:
+        base_url, _ = _embed_endpoint()
+        if exc.status_code == 404 and "localhost" in base_url:
+            hint = f"Model '{model}' not found in Ollama. Run `ollama pull {model}` to enable vector search."
+        else:
+            hint = f"HTTP {exc.status_code}: {exc.message}"
+        raise RuntimeError(f"Embeddings request failed at {base_url}. {hint}") from exc
     if isinstance(input_text, list):
         return [d.embedding for d in response.data]
     return response.data[0].embedding

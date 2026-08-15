@@ -2,7 +2,7 @@ import os
 
 import pytest
 from pydantic_ai.models.ollama import OllamaModel
-from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.models.openai import OpenAIChatModel
 
 from grc_agent.adapter import _embed_endpoint, get_db_and_model
 from grc_agent.agent import build_scenario_model, grc_tools
@@ -18,8 +18,7 @@ from grc_agent.settings import (
 
 def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     """Verify that settings are saved/loaded correctly and that ollama_model
-
-    and openrouter_model are handled independently (no overwriting).
+    and openai_compatible_model are handled independently (no overwriting).
     """
     tmp_env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
@@ -28,17 +27,15 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     cfg = load_settings()
     assert cfg["provider"] == "ollama"
     assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"
-    assert cfg["openrouter_model"] == "deepseek/deepseek-v4-flash"
-    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:cloud"
+    assert cfg["openai_compatible_model"] == "deepseek/deepseek-v4-flash"
 
-    # 2. Switch provider to openrouter and change model
-    save_settings("openrouter", "google/gemini-2.5-flash")
+    # 2. Switch provider to openai_compatible and change model
+    save_settings("openai_compatible", "google/gemini-2.5-flash")
     cfg = load_settings()
-    assert cfg["provider"] == "openrouter"
+    assert cfg["provider"] == "openai_compatible"
     assert cfg["model"] == "google/gemini-2.5-flash"
-    assert cfg["openrouter_model"] == "google/gemini-2.5-flash"
+    assert cfg["openai_compatible_model"] == "google/gemini-2.5-flash"
     assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"  # preserved!
-    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:cloud"  # preserved!
 
     # 3. Switch back to ollama and change model
     save_settings("ollama", "mistral-large")
@@ -46,16 +43,7 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     assert cfg["provider"] == "ollama"
     assert cfg["model"] == "mistral-large"
     assert cfg["ollama_model"] == "mistral-large"
-    assert cfg["openrouter_model"] == "google/gemini-2.5-flash"  # preserved!
-
-    # 4. Switch to ollama_cloud and verify independence
-    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
-    cfg = load_settings()
-    assert cfg["provider"] == "ollama_cloud"
-    assert cfg["model"] == "deepseek-v4-flash:cloud"
-    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:cloud"
-    assert cfg["ollama_model"] == "mistral-large"  # preserved!
-    assert cfg["openrouter_model"] == "google/gemini-2.5-flash"  # preserved!
+    assert cfg["openai_compatible_model"] == "google/gemini-2.5-flash"  # preserved!
 
 
 def test_db_and_model_isolation(tmp_path, monkeypatch):
@@ -71,24 +59,24 @@ def test_db_and_model_isolation(tmp_path, monkeypatch):
     save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
     db_path_ollama, model_ollama = get_db_and_model("catalog")
     assert db_path_ollama.endswith("catalog_ollama.db")
-    assert "catalog_openrouter.db" not in db_path_ollama
+    assert "catalog_openai_compatible.db" not in db_path_ollama
 
-    # Test under OpenRouter provider
-    save_settings("openrouter", "openai/gpt-4o-mini")
-    db_path_openrouter, model_openrouter = get_db_and_model("catalog")
-    assert db_path_openrouter.endswith("catalog_openrouter.db")
-    assert "catalog_ollama.db" not in db_path_openrouter
+    # Test under OpenAI-Compatible provider
+    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    db_path_compat, model_compat = get_db_and_model("catalog")
+    assert db_path_compat.endswith("catalog_openai_compatible.db")
+    assert "catalog_ollama.db" not in db_path_compat
 
 
 def test_embed_endpoint_isolation(tmp_path, monkeypatch):
     """Verify API endpoints and keys do not leak or overlap.
 
     When Ollama is selected, it must target localhost:11434 and use 'not-needed'.
-    When OpenRouter is selected, it must target openrouter.ai and use key env.
+    When OpenAI-compatible is selected, it must target configured endpoint and use key.
     """
     tmp_env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
-    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-openrouter-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "dummy-openrouter-key")
 
     # Ollama provider check
     save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
@@ -96,8 +84,12 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
     assert base_url == "http://localhost:11434/v1"
     assert api_key == "not-needed"
 
-    # OpenRouter provider check
-    save_settings("openrouter", "openai/gpt-4o-mini")
+    # OpenAI-compatible provider check
+    save_settings(
+        "openai_compatible",
+        "openai/gpt-4o-mini",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+    )
     base_url, api_key = _embed_endpoint()
     assert base_url == "https://openrouter.ai/api/v1"
     assert api_key == "dummy-openrouter-key"
@@ -118,7 +110,7 @@ def test_get_embed_client_never_returns_mismatched_client_for_key(tmp_path, monk
 
     tmp_env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
-    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-openrouter-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "dummy-openrouter-key")
     rag_mod._embed_client_state = None
 
     try:
@@ -126,15 +118,16 @@ def test_get_embed_client_never_returns_mismatched_client_for_key(tmp_path, monk
         client_ollama = rag_mod._get_embed_client()
         assert str(client_ollama.base_url).rstrip("/") == "http://localhost:11434/v1"
 
-        save_settings("openrouter", "openai/gpt-4o-mini")
+        save_settings(
+            "openai_compatible",
+            "openai/gpt-4o-mini",
+            openai_compatible_base_url="https://openrouter.ai/api/v1",
+        )
         client_openrouter = rag_mod._get_embed_client()
         assert str(client_openrouter.base_url).rstrip("/") == "https://openrouter.ai/api/v1"
         assert client_openrouter is not client_ollama
 
-        # Switch back — must rebuild again (not silently reuse the openrouter
-        # client, and not incorrectly rebuild a third distinct instance for
-        # settings it's already seen — the state is exactly one entry, not a
-        # growing cache, so "switch back" must reuse neither stale client).
+        # Switch back — must rebuild again
         save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
         client_ollama_again = rag_mod._get_embed_client()
         assert str(client_ollama_again.base_url).rstrip("/") == "http://localhost:11434/v1"
@@ -146,7 +139,7 @@ def test_web_build_model_isolation(tmp_path, monkeypatch):
     """Verify that agent_factory._build_model instantiates the correct model type based on the settings."""
     tmp_env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
-    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-test-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "dummy-test-key")
 
     http_client = _retrying_http_client()
 
@@ -155,26 +148,39 @@ def test_web_build_model_isolation(tmp_path, monkeypatch):
     assert isinstance(m, OllamaModel)
     assert m.model_name == "qwen3.6:35b-a3b-q4_K_M"
 
-    cfg = {"provider": "openrouter", "model": "openai/gpt-4o-mini"}
+    cfg = {
+        "provider": "openai_compatible",
+        "model": "deepseek/deepseek-v4-flash",
+        "openai_compatible_base_url": "https://openrouter.ai/api/v1",
+    }
     m = _build_model(cfg, http_client)
-    assert isinstance(m, OpenRouterModel)
-    assert m.model_name == "openai/gpt-4o-mini"
+    assert isinstance(m, OpenAIChatModel)
+    assert m.model_name == "deepseek/deepseek-v4-flash"
 
-    # ollama_cloud reads its key via get_env_value (the .env file, not
-    # os.environ) — unlike the openrouter case above, OllamaProvider's own
-    # os.getenv fallback checks OLLAMA_API_KEY, not OLLAMA_CLOUD_API_KEY, so
-    # the monkeypatched env var alone wouldn't satisfy it. Write the key to
-    # the actual .env file so _build_model's explicit guard sees it.
-    upsert_env_key("OLLAMA_CLOUD_API_KEY", "dummy-test-key")
-    cfg = {"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"}
+    # Ollama remote / cloud (ollama.com) with API key
+    upsert_env_key("OLLAMA_API_KEY", "dummy-test-key")
+    cfg = {
+        "provider": "ollama",
+        "model": "deepseek-v4-flash:cloud",
+        "ollama_base_url": "https://ollama.com/v1",
+    }
     m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
     assert m.model_name == "deepseek-v4-flash:cloud"
 
+    cfg = {
+        "provider": "openai_compatible",
+        "model": "vllm-model",
+        "openai_compatible_base_url": "http://localhost:8000/v1",
+    }
+    m = _build_model(cfg, http_client)
+    assert isinstance(m, OpenAIChatModel)
+    assert m.model_name == "vllm-model"
+
 
 def test_scenario_model_builder_uses_provider(monkeypatch):
     """Regression for P2-7: the scenario harness must be able to build a model
-    for either backend so integration tests can run against Ollama, Ollama Cloud, or OpenRouter."""
+    for either backend so integration tests can run against Ollama or OpenAI-compatible."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-test-key")
     ollama = build_scenario_model("ollama")
     assert isinstance(ollama, OllamaModel)
@@ -184,8 +190,12 @@ def test_scenario_model_builder_uses_provider(monkeypatch):
     assert ollama_cloud.model_name == "deepseek-v4-flash:cloud"
 
     openrouter = build_scenario_model("openrouter", "google/gemini-2.5-flash")
-    assert isinstance(openrouter, OpenRouterModel)
+    assert isinstance(openrouter, OpenAIChatModel)
     assert openrouter.model_name == "google/gemini-2.5-flash"
+
+    openai_compat = build_scenario_model("openai_compatible", "my-custom-model")
+    assert isinstance(openai_compat, OpenAIChatModel)
+    assert openai_compat.model_name == "my-custom-model"
 
 
 # ── New comprehensive tests for the .env consolidation ──────────────────────
@@ -220,18 +230,18 @@ def test_upsert_env_key_inserts_and_updates(tmp_path):
     assert "GRC_PROVIDER=ollama" in content
 
     # Update
-    upsert_env_key("GRC_PROVIDER", "ollama_cloud", path=env)
+    upsert_env_key("GRC_PROVIDER", "openai_compatible", path=env)
     content = env.read_text(encoding="utf-8")
     assert content.count("GRC_PROVIDER=") == 1
-    assert "GRC_PROVIDER=ollama_cloud" in content
+    assert "GRC_PROVIDER=openai_compatible" in content
 
     # Insert second key — first must be preserved
-    upsert_env_key("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud", path=env)
+    upsert_env_key("OPENAI_COMPATIBLE_MODEL", "deepseek/deepseek-v4-flash", path=env)
     content = env.read_text(encoding="utf-8")
-    assert "GRC_PROVIDER=ollama_cloud" in content
-    assert "OLLAMA_CLOUD_MODEL=deepseek-v4-flash:cloud" in content
+    assert "GRC_PROVIDER=openai_compatible" in content
+    assert "OPENAI_COMPATIBLE_MODEL=deepseek/deepseek-v4-flash" in content
     assert content.count("GRC_PROVIDER=") == 1
-    assert content.count("OLLAMA_CLOUD_MODEL=") == 1
+    assert content.count("OPENAI_COMPATIBLE_MODEL=") == 1
 
 
 def test_get_env_value_reads_from_file_not_os_environ(tmp_path, monkeypatch):
@@ -242,83 +252,80 @@ def test_get_env_value_reads_from_file_not_os_environ(tmp_path, monkeypatch):
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
 
     # Write a key to the file
-    upsert_env_key("OLLAMA_CLOUD_API_KEY", "file-key-123", path=env)
+    upsert_env_key("OPENAI_COMPATIBLE_API_KEY", "file-key-123", path=env)
 
     # Set a DIFFERENT value in os.environ (simulating a stale startup snapshot)
-    monkeypatch.setenv("OLLAMA_CLOUD_API_KEY", "env-key-456")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "env-key-456")
 
     # get_env_value must return the file value, not the env var
-    assert get_env_value("OLLAMA_CLOUD_API_KEY") == "file-key-123"
+    assert get_env_value("OPENAI_COMPATIBLE_API_KEY") == "file-key-123"
 
     # For a key not in the file, must return None
     assert get_env_value("NONEXISTENT_KEY") is None
 
 
 def test_build_model_ollama_cloud_raises_on_missing_api_key(tmp_path, monkeypatch):
-    """Regression: OllamaProvider itself never raises on a missing API key —
-    it silently substitutes a placeholder ('api-key-not-set') and the failure
-    only ever surfaces as an HTTP 401 on the first real chat call. _build_model
-    must raise explicitly for ollama_cloud with no key configured, matching
-    openrouter's existing behavior (OpenRouterProvider raises UserError on an
-    empty key) so build_interactive_agent's existing fallback-and-warn path
-    catches it instead of silently proceeding."""
+    """When connecting to Ollama Cloud (https://ollama.com), _build_model
+    must raise explicitly if no API key is configured."""
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    monkeypatch.delenv("OLLAMA_CLOUD_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     http_client = _retrying_http_client()
-    with pytest.raises(ValueError, match="OLLAMA_CLOUD_API_KEY"):
-        _build_model({"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"}, http_client)
+    with pytest.raises(ValueError, match="API key is required"):
+        _build_model(
+            {
+                "provider": "ollama",
+                "model": "deepseek-v4-flash:cloud",
+                "ollama_base_url": "https://ollama.com/v1",
+            },
+            http_client,
+        )
 
 
-def test_save_settings_writes_ollama_cloud_model_to_env(tmp_path, monkeypatch):
-    """save_settings for ollama_cloud must write GRC_PROVIDER and
-    OLLAMA_CLOUD_MODEL to the .env file, and preserve other providers' models."""
+def test_save_settings_writes_openai_compatible_model_to_env(tmp_path, monkeypatch):
+    """save_settings for openai_compatible must write GRC_PROVIDER and
+    OPENAI_COMPATIBLE_MODEL to the .env file, and preserve other providers' models."""
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
 
-    # First save openrouter — sets GRC_PROVIDER + OPENROUTER_MODEL
-    save_settings("openrouter", "google/gemini-2.5-flash")
+    # First save ollama — sets GRC_PROVIDER + OLLAMA_CHAT_MODEL
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
     content = env.read_text(encoding="utf-8")
-    assert "GRC_PROVIDER=openrouter" in content
-    assert "OPENROUTER_MODEL=google/gemini-2.5-flash" in content
+    assert "GRC_PROVIDER=ollama" in content
+    assert "OLLAMA_CHAT_MODEL=qwen3.6:35b-a3b-q4_K_M" in content
 
-    # Now save ollama_cloud — must add OLLAMA_CLOUD_MODEL and update
-    # GRC_PROVIDER, but preserve OPENROUTER_MODEL
-    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
+    # Now save openai_compatible — must add OPENAI_COMPATIBLE_MODEL and update
+    # GRC_PROVIDER, but preserve OLLAMA_CHAT_MODEL
+    save_settings("openai_compatible", "deepseek/deepseek-v4-flash")
     content = env.read_text(encoding="utf-8")
-    assert "GRC_PROVIDER=ollama_cloud" in content
-    assert "OLLAMA_CLOUD_MODEL=deepseek-v4-flash:cloud" in content
-    assert "OPENROUTER_MODEL=google/gemini-2.5-flash" in content  # preserved
+    assert "GRC_PROVIDER=openai_compatible" in content
+    assert "OPENAI_COMPATIBLE_MODEL=deepseek/deepseek-v4-flash" in content
+    assert "OLLAMA_CHAT_MODEL=qwen3.6:35b-a3b-q4_K_M" in content  # preserved
 
     # load_settings must reflect the saved state
     cfg = load_settings()
-    assert cfg["provider"] == "ollama_cloud"
-    assert cfg["model"] == "deepseek-v4-flash:cloud"
-    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:cloud"
-    assert cfg["openrouter_model"] == "google/gemini-2.5-flash"  # preserved
+    assert cfg["provider"] == "openai_compatible"
+    assert cfg["model"] == "deepseek/deepseek-v4-flash"
+    assert cfg["openai_compatible_model"] == "deepseek/deepseek-v4-flash"
+    assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"  # preserved
 
 
 def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
-    """When _build_model() fails (e.g. OpenRouter with no API key), the
+    """When _build_model() fails (e.g. OpenAI-compatible with bad config), the
     fallback in build_interactive_agent must NOT mutate the saved cfg."""
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
-    save_settings("openrouter", "openai/gpt-4o-mini")
+    save_settings("openai_compatible", "openai/gpt-4o-mini")
 
-    import os
+    from grc_agent.settings import default_settings
 
-    had_key = os.environ.pop("OPENROUTER_API_KEY", None)
-    try:
-        from grc_agent.settings import default_settings
-
-        http_client = _retrying_http_client()
-        saved_cfg = load_settings()
-        fallback_cfg = default_settings()
-        fallback_model = _build_model(fallback_cfg, http_client)
-        assert isinstance(fallback_model, OllamaModel)
-        assert saved_cfg["provider"] == "openrouter"
-        assert saved_cfg["model"] == "openai/gpt-4o-mini"
-    finally:
-        if had_key is not None:
-            os.environ["OPENROUTER_API_KEY"] = had_key
+    http_client = _retrying_http_client()
+    saved_cfg = load_settings()
+    fallback_cfg = default_settings()
+    fallback_model = _build_model(fallback_cfg, http_client)
+    assert isinstance(fallback_model, OllamaModel)
+    assert saved_cfg["provider"] == "openai_compatible"
+    assert saved_cfg["model"] == "openai/gpt-4o-mini"
 
 
 def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
@@ -454,7 +461,10 @@ def test_ingest_catalog_builds_lexical_only_when_all_embeds_fail(tmp_path, monke
 
     import grc_agent.ingest as ingest_mod
 
+    calls = []
+
     def fail_embed(text, model):  # noqa: ARG001
+        calls.append(text)
         raise RuntimeError("backend down")
 
     monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
@@ -462,6 +472,7 @@ def test_ingest_catalog_builds_lexical_only_when_all_embeds_fail(tmp_path, monke
     db_path = str(tmp_path / "catalog.db")
     n = ingest_mod.ingest_catalog(db_path, "fake-model")
     assert n > 0
+    assert len(calls) == 1, "backend probe failure must avoid re-calling embed_document per block"
 
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
@@ -668,12 +679,15 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("docs")
+    docs_calls = []
 
     def fail_embed(text, model):  # noqa: ARG001
+        docs_calls.append(text)
         raise RuntimeError("backend down")
 
     monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
     ingest_mod.ingest_docs(db_path, model)
+    assert len(docs_calls) == 1, "ingest_docs backend probe failure must avoid re-calling embed_document per chunk"
 
     import grc_agent.adapter.rag as rag_mod
 
@@ -814,6 +828,9 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
 
+    from pydantic_ai.models.ollama import OllamaModel
+    from pydantic_ai.models.openai import OpenAIChatModel
+
     from grc_agent.agent_factory import build_agent_from_cfg
 
     # ollama (local default)
@@ -823,25 +840,23 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
         f"local ollama cfg must produce OllamaModel, got {type(agent_local.model).__name__}"
     )
 
-    # ollama_cloud
-    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
-    upsert_env_key("OLLAMA_CLOUD_API_KEY", "dummy-key-for-build-test")
+    # ollama (remote/cloud)
+    save_settings("ollama", "deepseek-v4-flash:cloud", ollama_base_url="https://ollama.com/v1")
+    upsert_env_key("OLLAMA_API_KEY", "dummy-key-for-build-test")
     agent_cloud, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent_cloud.model, OllamaModel), (
-        f"ollama_cloud cfg must produce OllamaModel, got {type(agent_cloud.model).__name__}"
+        f"ollama cloud cfg must produce OllamaModel, got {type(agent_cloud.model).__name__}"
     )
-    # And its base_url must point at ollama.com, not localhost — the exact
-    # confusion the live-swap fix exists to prevent.
     assert "ollama.com" in str(agent_cloud.model._provider.base_url), (
-        f"ollama_cloud base_url must be ollama.com, got {agent_cloud.model._provider.base_url}"
+        f"ollama cloud base_url must be ollama.com, got {agent_cloud.model._provider.base_url}"
     )
 
-    # openrouter (key required by OpenRouterProvider at construction time)
-    save_settings("openrouter", "openai/gpt-4o-mini")
-    upsert_env_key("OPENROUTER_API_KEY", "sk-or-dummy-key-for-build-test")
+    # openai_compatible (pointing at OpenRouter endpoint)
+    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    upsert_env_key("OPENAI_COMPATIBLE_API_KEY", "sk-or-dummy-key-for-build-test")
     agent_or, _ = build_agent_from_cfg(load_settings())
-    assert isinstance(agent_or.model, OpenRouterModel), (
-        f"openrouter cfg must produce OpenRouterModel, got {type(agent_or.model).__name__}"
+    assert isinstance(agent_or.model, OpenAIChatModel), (
+        f"openai_compatible cfg must produce OpenAIChatModel, got {type(agent_or.model).__name__}"
     )
     assert "openrouter.ai" in str(agent_or.model._provider.base_url), (
         f"openrouter base_url must be openrouter.ai, got {agent_or.model._provider.base_url}"
@@ -857,6 +872,8 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     import asyncio
 
     from dotenv import load_dotenv
+    from pydantic_ai.models.ollama import OllamaModel
+    from pydantic_ai.models.openai import OpenAIChatModel
 
     # Load the repo .env first so OPENROUTER_API_KEY is visible when set
     # there (matches the existing Ollama Cloud live-test pattern). The
@@ -873,11 +890,11 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
 
     from grc_agent.agent_factory import build_agent_from_cfg
 
-    # 1. Boot with ollama_cloud cfg + a dummy key. We never send a real
+    # 1. Boot with ollama cfg + a dummy key. We never send a real
     #    request on this agent, so the dummy key is fine — it just exercises
     #    the build path and gives us a baseline agent to "swap away from".
-    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
-    upsert_env_key("OLLAMA_CLOUD_API_KEY", "dummy-boot-key-not-used")
+    save_settings("ollama", "deepseek-v4-flash:cloud", ollama_base_url="https://ollama.com/v1")
+    upsert_env_key("OLLAMA_API_KEY", "dummy-boot-key-not-used")
     agent1, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent1.model, OllamaModel)
     assert "ollama.com" in str(agent1.model._provider.base_url)
@@ -885,8 +902,8 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     # 2. Simulate the Settings dialog's Save path: write the new provider +
     #    real key to .env, then rebuild (exactly what
     #    ChatSidebar._rebuild_agent invokes after a successful Save).
-    save_settings("openrouter", "openai/gpt-4o-mini")
-    upsert_env_key("OPENROUTER_API_KEY", api_key)
+    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    upsert_env_key("OPENAI_COMPATIBLE_API_KEY", api_key)
     agent2, _ = build_agent_from_cfg(load_settings())
 
     # 3. The new agent's model must actually be the new provider's type and
@@ -895,8 +912,8 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     #    (the agent would silently still be the old OllamaModel-on-ollama.com
     #    instance).
     assert agent2 is not agent1, "live-swap must build a NEW agent, not return the cached one"
-    assert isinstance(agent2.model, OpenRouterModel), (
-        f"post-swap model must be OpenRouterModel, got {type(agent2.model).__name__}"
+    assert isinstance(agent2.model, OpenAIChatModel), (
+        f"post-swap model must be OpenAIChatModel, got {type(agent2.model).__name__}"
     )
     assert "openrouter.ai" in str(agent2.model._provider.base_url)
 
@@ -911,39 +928,28 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
         mini = Agent(
             agent2.model,
             output_type=str,
-            instructions="You are a terse assistant. Reply in one short sentence.",
         )
-        result = await mini.run("Reply with exactly: OPENROUTER_LIVE_OK")
-        return result.output.strip()
+        res = await mini.run("reply with the single word PONG")
+        assert "PONG" in res.output.upper(), f"unexpected reply: {res.output!r}"
 
-    reply = asyncio.run(_run())
-    assert "OPENROUTER_LIVE_OK" in reply, f"expected OPENROUTER_LIVE_OK in reply, got: {reply!r}"
+    asyncio.run(_run())
 
 
 def test_preflight_connection_returns_none_on_success_and_error_on_failure():
     """preflight_connection must return None on a reachable endpoint and a
-    descriptive error string on any failure. Two paths exercised:
-
-    - Success: real OpenRouter /v1/models ping with the configured key (when
-      set) — proves the endpoint, headers, and status-code check all work.
-    - Failure (deterministic, no network): a missing api_key must return a
-      non-None error string. OpenRouter's /v1/models is a public listing
-      endpoint (no auth required), so a bogus key doesn't 401 there — the
-      only reliable, network-independent failure case is the empty-key guard.
-    """
+    descriptive error string on any failure."""
     from grc_agent.agent_factory import preflight_connection
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         # Real success path — exercises the actual endpoint.
-        err = preflight_connection("openrouter", api_key, timeout=10.0)
+        err = preflight_connection("openai_compatible", api_key, ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0)
         assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
 
-    # Deterministic failure: missing key for each cloud provider must return
-    # a non-empty error string. The exact message wording is not asserted so
-    # the test stays robust to message edits.
-    err = preflight_connection("openrouter", "", timeout=10.0)
+    # Deterministic failure: missing key for OpenRouter must return a non-empty error string.
+    err = preflight_connection("openai_compatible", "", ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0)
     assert isinstance(err, str) and err, "missing openrouter key must produce a non-empty error"
 
-    err = preflight_connection("ollama_cloud", "", timeout=10.0)
-    assert isinstance(err, str) and err, "missing ollama_cloud key must produce a non-empty error"
+    # Deterministic failure: missing key for Ollama Cloud must return a non-empty error string.
+    err = preflight_connection("ollama", "", ollama_base_url="https://ollama.com/v1", timeout=10.0)
+    assert isinstance(err, str) and err, "missing ollama cloud key must produce a non-empty error"

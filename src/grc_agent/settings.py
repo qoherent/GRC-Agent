@@ -28,31 +28,25 @@ from pathlib import Path
 
 from dotenv import dotenv_values, set_key
 
-_VALID_PROVIDERS = ("ollama", "openai_compatible", "openrouter", "ollama_cloud")
+_VALID_PROVIDERS = ("ollama", "openai_compatible")
 
 # Per-provider chat-model env var name + settings dict key.
 _PROVIDER_ENV_VAR = {
     "ollama": "OLLAMA_CHAT_MODEL",
     "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
-    "openrouter": "OPENROUTER_MODEL",
-    "ollama_cloud": "OLLAMA_CLOUD_MODEL",
 }
 _PROVIDER_MODEL_KEY = {
     "ollama": "ollama_model",
     "openai_compatible": "openai_compatible_model",
-    "openrouter": "openrouter_model",
-    "ollama_cloud": "ollama_cloud_model",
 }
 
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.6:35b-a3b-q4_K_M",
-    "openai_compatible_model": "local-model",
-    "openrouter_model": "deepseek/deepseek-v4-flash",
-    "ollama_cloud_model": "deepseek-v4-flash:cloud",
+    "openai_compatible_model": "deepseek/deepseek-v4-flash",
 }
 _DEFAULT_PROVIDER = "ollama"
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-_DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://localhost:8080/v1"
+_DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://openrouter.ai/api/v1"
 _DEFAULT_OLLAMA_THINKING_ENABLED = True
 
 # mtime-gated cache for dotenv_values(env_path()). dotenv_values re-parses the
@@ -115,13 +109,16 @@ def default_settings() -> dict:
 def load_settings() -> dict:
     """Read the saved preferences from the `.env` file (the source of truth),
     applying defaults for any vars not present. Returns a dict with keys:
-    provider, model, ollama_model, openai_compatible_model, openrouter_model,
-    ollama_cloud_model, ollama_base_url, openai_compatible_base_url,
-    ollama_thinking_enabled."""
+    provider, model, ollama_model, openai_compatible_model,
+    ollama_base_url, openai_compatible_base_url, ollama_thinking_enabled."""
     vals = _cached_dotenv()
 
-    provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
-    if provider not in _VALID_PROVIDERS:
+    raw_provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
+    if raw_provider in ("openrouter", "openai_compatible"):
+        provider = "openai_compatible"
+    elif raw_provider in ("ollama", "ollama_cloud"):
+        provider = "ollama"
+    else:
         provider = _DEFAULT_PROVIDER
 
     thinking_val = vals.get("OLLAMA_THINKING_ENABLED")
@@ -130,18 +127,35 @@ def load_settings() -> dict:
     else:
         thinking_enabled = thinking_val.lower() in ("true", "1", "yes")
 
+    ollama_model = (
+        vals.get("OLLAMA_CHAT_MODEL")
+        or vals.get("OLLAMA_CLOUD_MODEL")
+        or _DEFAULT_MODELS["ollama_model"]
+    )
+    openai_compatible_model = (
+        vals.get("OPENAI_COMPATIBLE_MODEL")
+        or vals.get("OPENROUTER_MODEL")
+        or _DEFAULT_MODELS["openai_compatible_model"]
+    )
+
+    ollama_url = vals.get("OLLAMA_BASE_URL")
+    if not ollama_url:
+        ollama_url = (
+            "https://ollama.com/v1"
+            if vals.get("OLLAMA_CLOUD_API_KEY")
+            else _DEFAULT_OLLAMA_BASE_URL
+        )
+
+    openai_url = vals.get("OPENAI_COMPATIBLE_BASE_URL")
+    if not openai_url:
+        openai_url = _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+
     res = {
         "provider": provider,
-        "ollama_model": vals.get("OLLAMA_CHAT_MODEL", _DEFAULT_MODELS["ollama_model"]),
-        "openai_compatible_model": vals.get(
-            "OPENAI_COMPATIBLE_MODEL", _DEFAULT_MODELS["openai_compatible_model"]
-        ),
-        "openrouter_model": vals.get("OPENROUTER_MODEL", _DEFAULT_MODELS["openrouter_model"]),
-        "ollama_cloud_model": vals.get("OLLAMA_CLOUD_MODEL", _DEFAULT_MODELS["ollama_cloud_model"]),
-        "ollama_base_url": vals.get("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
-        "openai_compatible_base_url": vals.get(
-            "OPENAI_COMPATIBLE_BASE_URL", _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
-        ),
+        "ollama_model": ollama_model,
+        "openai_compatible_model": openai_compatible_model,
+        "ollama_base_url": ollama_url,
+        "openai_compatible_base_url": openai_url,
         "ollama_thinking_enabled": thinking_enabled,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[provider]]

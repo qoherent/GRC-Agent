@@ -1,4 +1,5 @@
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -7,10 +8,8 @@ from pydantic_ai import Agent, ModelSettings, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -44,51 +43,47 @@ def _retrying_http_client() -> httpx.AsyncClient:
 
 
 def _build_model(cfg: dict, http_client: httpx.AsyncClient):
-    if cfg["provider"] == "openrouter":
-        key = get_env_value("OPENROUTER_API_KEY") or ""
-        return OpenRouterModel(
-            cfg["model"], provider=OpenRouterProvider(api_key=key, http_client=http_client)
-        )
-    if cfg["provider"] == "ollama_cloud":
-        key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
-        if not key:
-            # OllamaProvider itself never raises on a missing key — it silently
-            # substitutes a placeholder ('api-key-not-set') and the failure only
-            # surfaces as an HTTP 401 on the first real chat call. Raise here so
-            # this degrades the same way the openrouter branch already does
-            # (OpenRouterProvider raises UserError on an empty key, caught below).
-            raise ValueError(
-                "OLLAMA_CLOUD_API_KEY is not set. Configure it in Settings or the .env file to use Ollama Cloud."
-            )
-        return OllamaModel(
-            cfg["model"],
-            provider=OllamaProvider(
-                base_url="https://ollama.com/v1", api_key=key, http_client=http_client
-            ),
-        )
-    if cfg["provider"] == "openai_compatible":
+    provider = cfg.get("provider", "ollama")
+    if provider in ("openai_compatible", "openrouter"):
         key = (
             get_env_value("OPENAI_COMPATIBLE_API_KEY")
+            or get_env_value("OPENROUTER_API_KEY")
+            or os.environ.get("OPENAI_COMPATIBLE_API_KEY")
+            or os.environ.get("OPENROUTER_API_KEY")
             or cfg.get("openai_compatible_api_key")
             or "not-required"
         )
         raw_url = (
             cfg.get("openai_compatible_base_url")
             or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-            or "http://localhost:8080/v1"
+            or "https://openrouter.ai/api/v1"
         ).rstrip("/")
         base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
         return OpenAIChatModel(
             cfg["model"],
             provider=OpenAIProvider(base_url=base_url, api_key=key, http_client=http_client),
         )
+
+    # Ollama (local or remote/cloud)
     raw_url = (
         cfg.get("ollama_base_url") or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434"
     ).rstrip("/")
     base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
+    key = (
+        get_env_value("OLLAMA_API_KEY")
+        or get_env_value("OLLAMA_CLOUD_API_KEY")
+        or os.environ.get("OLLAMA_API_KEY")
+        or os.environ.get("OLLAMA_CLOUD_API_KEY")
+        or cfg.get("ollama_api_key")
+    )
+    if "ollama.com" in base_url and not key:
+        raise ValueError(
+            "An API key is required when connecting to Ollama Cloud (https://ollama.com). "
+            "Set it in Settings or the .env file."
+        )
     return OllamaModel(
         cfg["model"],
-        provider=OllamaProvider(base_url=base_url, http_client=http_client),
+        provider=OllamaProvider(base_url=base_url, api_key=key, http_client=http_client),
     )
 
 
@@ -192,20 +187,14 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
 def _preflight_target(provider: str, api_key: str, ollama_base_url: str) -> tuple[str, dict] | str:
     """Resolve the provider's /models endpoint to (url, headers), or return an
     error string when a required key is missing."""
-    if provider == "openrouter":
-        if not api_key:
-            return "OPENROUTER_API_KEY is not set"
-        return "https://openrouter.ai/api/v1/models", {"Authorization": f"Bearer {api_key}"}
-    if provider == "ollama_cloud":
-        if not api_key:
-            return "OLLAMA_CLOUD_API_KEY is not set"
-        return "https://ollama.com/v1/models", {"Authorization": f"Bearer {api_key}"}
-    if provider == "openai_compatible":
+    if provider in ("openai_compatible", "openrouter"):
         base = (
             ollama_base_url
             or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-            or "http://localhost:8080/v1"
+            or "https://openrouter.ai/api/v1"
         ).rstrip("/")
+        if "openrouter.ai" in base and not api_key:
+            return "API key is required for OpenRouter"
         models_url = (
             base
             if base.endswith("/models")
@@ -213,11 +202,21 @@ def _preflight_target(provider: str, api_key: str, ollama_base_url: str) -> tupl
             if base.endswith("/v1")
             else f"{base}/v1/models"
         )
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        headers = (
+            {"Authorization": f"Bearer {api_key}"}
+            if (api_key and api_key != "not-required")
+            else {}
+        )
         return models_url, headers
+
+    # Ollama (local or cloud)
     base_url = (
         ollama_base_url or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434"
     ).rstrip("/")
+    if "ollama.com" in base_url:
+        if not api_key:
+            return "API key is required for Ollama Cloud"
+        return "https://ollama.com/v1/models", {"Authorization": f"Bearer {api_key}"}
     return f"{base_url}/api/tags", {}
 
 
@@ -271,20 +270,22 @@ def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
     then call `preflight_connection`. Used by desktop_app.py after
     build_interactive_agent() to warn (not block) on an unreachable backend."""
     provider = cfg.get("provider", "ollama")
-    if provider == "openrouter":
-        key = get_env_value("OPENROUTER_API_KEY") or ""
-        ollama_url = ""
-    elif provider == "ollama_cloud":
-        key = get_env_value("OLLAMA_CLOUD_API_KEY") or ""
-        ollama_url = ""
-    elif provider == "openai_compatible":
-        key = get_env_value("OPENAI_COMPATIBLE_API_KEY") or ""
-        ollama_url = (
+    if provider in ("openai_compatible", "openrouter"):
+        key = (
+            get_env_value("OPENAI_COMPATIBLE_API_KEY")
+            or get_env_value("OPENROUTER_API_KEY")
+            or ""
+        )
+        url = (
             cfg.get("openai_compatible_base_url")
             or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-            or "http://localhost:8080/v1"
+            or "https://openrouter.ai/api/v1"
         )
     else:
-        key = ""
-        ollama_url = cfg.get("ollama_base_url") or ""
-    return preflight_connection(provider, key, ollama_base_url=ollama_url, timeout=timeout)
+        key = (
+            get_env_value("OLLAMA_API_KEY")
+            or get_env_value("OLLAMA_CLOUD_API_KEY")
+            or ""
+        )
+        url = cfg.get("ollama_base_url") or ""
+    return preflight_connection(provider, key, ollama_base_url=url, timeout=timeout)

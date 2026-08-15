@@ -31,6 +31,7 @@ class SettingsDialog(Gtk.Dialog):
 
     def __init__(self, toplevel: Gtk.Window | None, cfg: dict, on_save) -> None:
         super().__init__(title="Chat Settings", transient_for=toplevel, modal=True)
+        self.set_default_size(520, -1)
         self.add_button("Cancel", Gtk.ResponseType.CANCEL)
         self.add_button("Save", Gtk.ResponseType.APPLY)
         self.set_default_response(Gtk.ResponseType.APPLY)
@@ -66,18 +67,18 @@ class SettingsDialog(Gtk.Dialog):
         lbl_p = Gtk.Label(label="Provider:")
         lbl_p.set_xalign(0.0)
         lbl_p.set_tooltip_text(
-            "Select local Ollama daemon or a cloud provider (OpenRouter / Ollama Cloud)"
+            "Select Ollama (local/cloud) or OpenAI-compatible endpoint (OpenRouter, llama.cpp, vLLM, OpenAI, Groq, etc.)"
         )
         self.provider_combo = Gtk.ComboBoxText()
         self.provider_combo.set_tooltip_text(
             "Select your AI model provider:\n"
-            "• Ollama (local) — Local or custom Ollama daemon\n"
-            "• OpenRouter (cloud) — OpenRouter cloud API\n"
-            "• Ollama Cloud (cloud) — Remote Ollama cloud API"
+            "• Ollama (local / cloud) — Local Ollama server or Ollama Cloud\n"
+            "• OpenAI Compatible — OpenRouter, llama.cpp, vLLM, LM Studio, OpenAI, Groq, etc."
         )
         for p in PROVIDER_ORDER:
             self.provider_combo.append_text(PROVIDER_LABELS[p])
-        self.provider_combo.set_active(PROVIDER_ORDER.index(cfg["provider"]))
+        active_idx = PROVIDER_ORDER.index(cfg["provider"]) if cfg["provider"] in PROVIDER_ORDER else 0
+        self.provider_combo.set_active(active_idx)
         grid.attach(lbl_p, 0, 1, 1, 1)
         grid.attach(self.provider_combo, 1, 1, 1, 1)
 
@@ -91,21 +92,20 @@ class SettingsDialog(Gtk.Dialog):
         self.model_entry.set_tooltip_text(
             "Enter model ID or tag for chat.\n"
             "Examples:\n"
-            "• Local Ollama: qwen3.6:35b-a3b-q4_K_M\n"
-            "• OpenRouter: deepseek/deepseek-v4-flash\n"
-            "• Ollama Cloud: deepseek-v4-flash:cloud"
+            "• Ollama: qwen3.6:35b-a3b-q4_K_M or deepseek-v4-flash:cloud\n"
+            "• OpenAI Compatible: deepseek/deepseek-v4-flash, qwen2.5-coder:32b, gpt-4o"
         )
         grid.attach(lbl_m, 0, 2, 1, 1)
         grid.attach(self.model_entry, 1, 2, 1, 1)
 
         lbl_k = Gtk.Label(label="API Key:")
         lbl_k.set_xalign(0.0)
-        lbl_k.set_tooltip_text("Authentication key required for OpenRouter or Ollama Cloud")
+        lbl_k.set_tooltip_text("Authentication key (required for cloud endpoints, optional for local servers)")
         self.key_entry = Gtk.Entry()
         self.key_entry.set_visibility(False)
         self.key_entry.set_activates_default(True)
         self.key_entry.set_tooltip_text(
-            "API key for the selected cloud provider. Not required for local Ollama."
+            "API key for the selected provider (e.g. OpenRouter, Ollama Cloud, OpenAI). Optional for local servers."
         )
         grid.attach(lbl_k, 0, 3, 1, 1)
         grid.attach(self.key_entry, 1, 3, 1, 1)
@@ -113,24 +113,31 @@ class SettingsDialog(Gtk.Dialog):
     def _build_execution_section(self, grid: Gtk.Grid) -> None:
         cfg = self._cfg
         hdr = Gtk.Label()
-        hdr.set_markup("<b>Ollama &amp; Model Execution Options</b>")
+        hdr.set_markup("<b>Endpoint &amp; Execution Options</b>")
         hdr.set_xalign(0.0)
         grid.attach(hdr, 0, 5, 2, 1)
 
-        self.url_label = Gtk.Label(label="Ollama Base URL:")
+        self.ollama_cloud_check = Gtk.CheckButton(
+            label="Use Ollama Cloud (https://ollama.com/v1)"
+        )
+        is_cloud = "ollama.com" in cfg.get("ollama_base_url", "")
+        self.ollama_cloud_check.set_active(is_cloud)
+        self.ollama_cloud_check.set_tooltip_text(
+            "Use Ollama's official cloud service at https://ollama.com/v1 instead of a local daemon."
+        )
+        grid.attach(self.ollama_cloud_check, 1, 6, 1, 1)
+
+        self.url_label = Gtk.Label(label="Base URL (default):")
         self.url_label.set_xalign(0.0)
         self.url_label.set_tooltip_text(
-            "Base URL endpoint for the Ollama daemon (default http://localhost:11434)"
+            "Base URL endpoint for the model server"
         )
         self.url_entry = Gtk.Entry()
         self.url_entry.set_text(cfg.get("ollama_base_url", "http://localhost:11434"))
         self.url_entry.set_hexpand(True)
         self.url_entry.set_activates_default(True)
-        self.url_entry.set_tooltip_text(
-            "Base URL for the Ollama daemon (e.g. http://localhost:11434 or http://192.168.1.100:11434)"
-        )
-        grid.attach(self.url_label, 0, 6, 1, 1)
-        grid.attach(self.url_entry, 1, 6, 1, 1)
+        grid.attach(self.url_label, 0, 7, 1, 1)
+        grid.attach(self.url_entry, 1, 7, 1, 1)
 
         lbl_t = Gtk.Label(label="Model Reasoning:")
         lbl_t.set_xalign(0.0)
@@ -142,11 +149,52 @@ class SettingsDialog(Gtk.Dialog):
         self.thinking_check.set_tooltip_text(
             "Controls whether model reasoning is enabled (think: True/False) for supported Ollama models."
         )
-        grid.attach(lbl_t, 0, 7, 1, 1)
-        grid.attach(self.thinking_check, 1, 7, 1, 1)
+        grid.attach(lbl_t, 0, 8, 1, 1)
+        grid.attach(self.thinking_check, 1, 8, 1, 1)
 
         self.provider_combo.connect("changed", self._sync_provider_fields)
+        self.ollama_cloud_check.connect("toggled", self._on_ollama_cloud_toggled)
         self._sync_provider_fields(self.provider_combo)
+
+    def _on_ollama_cloud_toggled(self, check: Gtk.CheckButton) -> None:
+        idx = self.provider_combo.get_active()
+        if idx < 0:
+            return
+        p = PROVIDER_ORDER[idx]
+        if p != "ollama":
+            return
+
+        use_cloud = check.get_active()
+        if use_cloud:
+            self.url_label.set_text("Base URL:")
+            self.url_entry.set_text("https://ollama.com/v1")
+            self.url_entry.set_sensitive(False)
+            self.url_entry.set_tooltip_text(
+                "Ollama Cloud endpoint is set automatically to https://ollama.com/v1"
+            )
+            self.key_entry.set_placeholder_text("Enter Ollama Cloud API Key (sk-...)")
+            cur_model = self.model_entry.get_text().strip()
+            if not cur_model or cur_model == "qwen3.6:35b-a3b-q4_K_M":
+                self.model_entry.set_text("deepseek-v4-flash:cloud")
+        else:
+            self.url_label.set_text("Base URL (default):")
+            cur_url = self.url_entry.get_text().strip()
+            if not cur_url or "ollama.com" in cur_url:
+                local_url = (
+                    self._cfg.get("ollama_base_url")
+                    if "ollama.com" not in self._cfg.get("ollama_base_url", "")
+                    else "http://localhost:11434"
+                )
+                self.url_entry.set_text(local_url or "http://localhost:11434")
+            self.url_entry.set_placeholder_text("http://localhost:11434 (default)")
+            self.url_entry.set_sensitive(True)
+            self.url_entry.set_tooltip_text(
+                "Default is http://localhost:11434. Change only if running Ollama on a custom port or remote host."
+            )
+            self.key_entry.set_placeholder_text("Optional for local Ollama")
+            cur_model = self.model_entry.get_text().strip()
+            if not cur_model or cur_model == "deepseek-v4-flash:cloud":
+                self.model_entry.set_text("qwen3.6:35b-a3b-q4_K_M")
 
     def _sync_provider_fields(self, combo: Gtk.ComboBoxText) -> None:
         idx = combo.get_active()
@@ -159,32 +207,28 @@ class SettingsDialog(Gtk.Dialog):
         key_var = PROVIDER_API_KEY[p]
         if key_var:
             self.key_entry.set_text(get_env_value(key_var) or "")
-            self.key_entry.set_sensitive(True)
             self.key_entry.set_placeholder_text(PROVIDER_KEY_PLACEHOLDER[p])
         else:
             self.key_entry.set_text("")
-            self.key_entry.set_sensitive(False)
             self.key_entry.set_placeholder_text("")
 
         if p == "ollama":
-            self.url_label.set_text("Ollama Base URL:")
-            self.url_entry.set_text(cfg.get("ollama_base_url", "http://localhost:11434"))
-            self.url_entry.set_sensitive(True)
+            self.ollama_cloud_check.set_visible(True)
             self.thinking_check.set_sensitive(True)
-        elif p == "openai_compatible":
+            self._on_ollama_cloud_toggled(self.ollama_cloud_check)
+        else:  # openai_compatible
+            self.ollama_cloud_check.set_visible(False)
             self.url_label.set_text("Base URL:")
             self.url_entry.set_text(
-                cfg.get("openai_compatible_base_url", "http://localhost:8080/v1")
+                cfg.get("openai_compatible_base_url", "https://openrouter.ai/api/v1")
+            )
+            self.url_entry.set_placeholder_text(
+                "e.g. https://openrouter.ai/api/v1, http://localhost:8080/v1, https://api.openai.com/v1"
             )
             self.url_entry.set_sensitive(True)
-            self.thinking_check.set_sensitive(False)
-        elif p == "ollama_cloud":
-            self.url_label.set_text("Ollama Base URL:")
-            self.url_entry.set_sensitive(False)
-            self.thinking_check.set_sensitive(True)
-        else:
-            self.url_label.set_text("Base URL:")
-            self.url_entry.set_sensitive(False)
+            self.url_entry.set_tooltip_text(
+                "Base URL for OpenAI-compatible server (e.g. OpenRouter, llama.cpp, vLLM, OpenAI)"
+            )
             self.thinking_check.set_sensitive(False)
 
     def _collect(self) -> tuple:
@@ -193,9 +237,15 @@ class SettingsDialog(Gtk.Dialog):
         model = self.model_entry.get_text().strip()
         key_var = PROVIDER_API_KEY.get(provider)
         key_val = self.key_entry.get_text().strip()
-        ollama_url = self.url_entry.get_text().strip()
+        if provider == "ollama":
+            if self.ollama_cloud_check.get_active():
+                base_url = "https://ollama.com/v1"
+            else:
+                base_url = self.url_entry.get_text().strip() or "http://localhost:11434"
+        else:
+            base_url = self.url_entry.get_text().strip() or "https://openrouter.ai/api/v1"
         thinking = self.thinking_check.get_active()
-        return provider, model, key_var, key_val, ollama_url, thinking
+        return provider, model, key_var, key_val, base_url, thinking
 
     def _on_response(self, _dlg: Gtk.Dialog, response: int) -> None:
         # Read widget values BEFORE destroy — reading after destroy returns

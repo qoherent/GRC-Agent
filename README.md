@@ -98,18 +98,23 @@ uv sync --extra dev --locked --python .venv/bin/python
 of a loose resolve that could silently pick up untested dependency versions.
 
 ### 3. Setup LLM Backend
-Three chat providers, switchable anytime from the app's Settings dialog. The
-active provider and model names persist in `.env` and apply immediately on
-Save (no restart needed).
+Two unified chat providers, switchable anytime from the app's Settings dialog:
+1. **Ollama** (Local daemon or Ollama Cloud)
+2. **OpenAI-Compatible** (OpenRouter, llama.cpp, vLLM, LM Studio, OpenAI, Groq, etc.)
 
-#### Option A: Ollama (Local & Free)
-```bash
-ollama pull qwen3.6:35b-a3b-q4_K_M   # chat model
-ollama pull embeddinggemma:latest    # embedding model
-```
+The active provider, model name, base URL, and API keys persist in `.env` and apply immediately on Save (no restart needed).
+
+#### Option A: Ollama (Local Daemon or Cloud)
+- **Local Ollama:**
+  ```bash
+  ollama pull qwen3.6:35b-a3b-q4_K_M   # chat model
+  ollama pull embeddinggemma:latest    # embedding model (optional — FTS5 lexical search is used if unavailable)
+  ```
+- **Ollama Cloud:**
+  Set Base URL to `https://ollama.com/v1`, Model to `deepseek-v4-flash:cloud`, and enter your [Ollama Cloud API Key](https://ollama.com/settings/keys).
 
 <details>
-<summary>Required: increase Ollama's context window (click to expand)</summary>
+<summary>Required for local Ollama: increase context window (click to expand)</summary>
 
 Ollama's default context window is too small for multi-turn tool-calling.
 Set it to `120000`:
@@ -120,22 +125,18 @@ Set it to `120000`:
 - **Windows:** add `OLLAMA_CONTEXT_LENGTH` = `120000` to User Environment Variables, then restart Ollama.
 </details>
 
-#### Option B: OpenRouter (Cloud)
-Get a key at [OpenRouter](https://openrouter.ai/), then set it from the
-app's Settings dialog (gear button) or add `OPENROUTER_API_KEY` to `.env`.
-
-#### Option C: Ollama Cloud (Cloud)
-Get a key at [Ollama](https://ollama.com/settings/keys), then set
-`OLLAMA_CLOUD_API_KEY` from Settings or `.env`.
+#### Option B: OpenAI-Compatible Endpoint (Local or Cloud)
+Use any OpenAI-compatible server or cloud provider (e.g. `OpenRouter`, `llama.cpp` / `llama-server`, `vLLM`, `LM Studio`, `LocalAI`, `Groq`, `OpenAI`):
+- **OpenRouter:** Base URL `https://openrouter.ai/api/v1`, Model `deepseek/deepseek-v4-flash`, paste your [OpenRouter API Key](https://openrouter.ai/).
+- **Local Server (llama.cpp / vLLM / LM Studio):** Base URL `http://localhost:8080/v1` (or your server port), Model e.g. `qwen2.5-coder:32b`, API key optional.
+- **OpenAI / Cloud Providers:** Base URL e.g. `https://api.openai.com/v1`, Model e.g. `gpt-4o`, paste your API key.
 
 > [!NOTE]
-> Vector search (`query_knowledge`) always routes embeddings locally via
-> Ollama (`embeddinggemma:latest`), even when using a cloud chat provider. If
-> that backend is unreachable (Ollama not running, model not pulled),
-> catalog/docs search automatically falls back to a local SQLite FTS5
-> (BM25) keyword search over the same corpus instead of failing outright —
-> the tool result always says `"search_mode": "lexical"` (vs. `"vector"`)
-> so a fallback is never silent.
+> Vector search (`query_knowledge`) uses embeddings locally via Ollama
+> (`embeddinggemma:latest`) when available. If the embedding
+> backend is unreachable, search automatically uses local SQLite FTS5 (BM25)
+> keyword search over the same corpus without requiring any manual setup —
+> the tool result always indicates `"search_mode": "lexical"` (vs. `"vector"`).
 
 ---
 

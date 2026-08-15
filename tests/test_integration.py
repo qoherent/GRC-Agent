@@ -48,8 +48,13 @@ def _openrouter_available() -> bool:
     return bool(os.getenv("OPENROUTER_API_KEY"))
 
 
+def _openai_compatible_available() -> bool:
+    return bool(os.getenv("OPENAI_COMPATIBLE_BASE_URL"))
+
+
 _BACKEND_AVAILABILITY = {
     "ollama": _ollama_available,
+    "openai_compatible": _openai_compatible_available,
     "ollama_cloud": _ollama_cloud_available,
     "openrouter": _openrouter_available,
 }
@@ -57,7 +62,7 @@ _BACKEND_AVAILABILITY = {
 
 def _selected_backends():
     """Backends the scenario suite can run against. Override via
-    GRC_TEST_BACKEND=ollama|ollama_cloud|openrouter to force one.
+    GRC_TEST_BACKEND=ollama|openai_compatible|ollama_cloud|openrouter to force one.
 
     With no override, this prefers Ollama Cloud alone (the project's standard
     real-LLM backend for tests) when it's configured — it deliberately does
@@ -93,8 +98,8 @@ _OPENROUTER_DEFAULT_MODEL = os.getenv("GRC_OPENROUTER_MODEL", "openai/gpt-4o-min
 
 
 def _build_model_for_backend(backend: str):
-    if backend == "openrouter":
-        return build_scenario_model("openrouter", _OPENROUTER_DEFAULT_MODEL)
+    if backend in ("openrouter", "openai_compatible"):
+        return build_scenario_model(backend, _OPENROUTER_DEFAULT_MODEL)
     if backend == "ollama_cloud":
         return build_scenario_model(
             "ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud")

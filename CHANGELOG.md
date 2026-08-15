@@ -9,6 +9,17 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-15
+
+### Added
+- Universal OpenAI-compatible backend support (`OpenAIChatModel` + `OpenAIProvider`) covering OpenRouter, llama.cpp / llama-server, vLLM, LM Studio, OpenAI, Groq, and custom endpoints.
+- Settings dialog options for Ollama Cloud toggle (automatic `https://ollama.com/v1` endpoint handling and key management) and default local Ollama URL (`http://localhost:11434`) with optional customization.
+
+### Changed
+- Consolidated provider configuration into two unified native categories: `ollama` (local / cloud) and `openai_compatible` (OpenRouter, llama.cpp, vLLM, etc.).
+- Upgraded dependencies to latest releases, including `pydantic-ai` 2.31.0 and `openai` 3.1.0.
+- Streamlined RAG embedding client and SQLite FTS5 lexical fallback logic to seamlessly handle the consolidated endpoints.
+
 ## [0.1.4] - 2026-08-14
 
 ### Fixed
