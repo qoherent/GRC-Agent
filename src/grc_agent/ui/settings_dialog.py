@@ -16,7 +16,10 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
 from .. import embed_runtime
+from ..providers.openai_codex import clear as codex_sign_out
+from ..providers.openai_codex import is_signed_in as codex_is_signed_in
 from ..settings import get_env_value
+from .codex_login_dialog import CodexLoginDialog
 from .embed_runtime_dialog import EmbedRuntimeDialog
 from .providers import (
     EMBED_BACKEND_LABELS,
@@ -59,6 +62,10 @@ class SettingsDialog(Gtk.Dialog):
         content.pack_start(grid, False, False, 0)
         content.pack_start(info, False, False, 0)
         content.show_all()
+        # After show_all, never before: show_all() forces every child visible,
+        # so any set_visible(False) made during construction is undone by it.
+        self._sync_provider_fields(self.provider_combo)
+        self._sync_embed_fields()
 
         self.connect("response", self._on_response)
 
@@ -82,7 +89,9 @@ class SettingsDialog(Gtk.Dialog):
         )
         for p in PROVIDER_ORDER:
             self.provider_combo.append_text(PROVIDER_LABELS[p])
-        active_idx = PROVIDER_ORDER.index(cfg["provider"]) if cfg["provider"] in PROVIDER_ORDER else 0
+        active_idx = (
+            PROVIDER_ORDER.index(cfg["provider"]) if cfg["provider"] in PROVIDER_ORDER else 0
+        )
         self.provider_combo.set_active(active_idx)
         grid.attach(lbl_p, 0, 1, 1, 1)
         grid.attach(self.provider_combo, 1, 1, 1, 1)
@@ -105,15 +114,32 @@ class SettingsDialog(Gtk.Dialog):
 
         lbl_k = Gtk.Label(label="API Key:")
         lbl_k.set_xalign(0.0)
-        lbl_k.set_tooltip_text("Authentication key (required for cloud endpoints, optional for local servers)")
+        lbl_k.set_tooltip_text(
+            "Authentication key (required for cloud endpoints, optional for local servers)"
+        )
         self.key_entry = Gtk.Entry()
         self.key_entry.set_visibility(False)
         self.key_entry.set_activates_default(True)
         self.key_entry.set_tooltip_text(
             "API key for the selected provider (e.g. OpenRouter, Ollama Cloud, OpenAI). Optional for local servers."
         )
+        self.key_label = lbl_k
         grid.attach(lbl_k, 0, 3, 1, 1)
         grid.attach(self.key_entry, 1, 3, 1, 1)
+
+        # ChatGPT signs in with OAuth instead of an API key, so it gets an
+        # account row in place of the key entry rather than an empty one.
+        self.codex_status = Gtk.Label()
+        self.codex_status.set_xalign(0.0)
+        self.codex_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.codex_button = Gtk.Button()
+        self.codex_button.connect("clicked", self._on_codex_button)
+        self.codex_box.pack_start(self.codex_status, True, True, 0)
+        self.codex_box.pack_start(self.codex_button, False, False, 0)
+        self.codex_label = Gtk.Label(label="Account:")
+        self.codex_label.set_xalign(0.0)
+        grid.attach(self.codex_label, 0, 3, 1, 1)
+        grid.attach(self.codex_box, 1, 3, 1, 1)
 
     def _build_execution_section(self, grid: Gtk.Grid) -> None:
         cfg = self._cfg
@@ -122,9 +148,7 @@ class SettingsDialog(Gtk.Dialog):
         hdr.set_xalign(0.0)
         grid.attach(hdr, 0, 5, 2, 1)
 
-        self.ollama_cloud_check = Gtk.CheckButton(
-            label="Use Ollama Cloud (https://ollama.com/v1)"
-        )
+        self.ollama_cloud_check = Gtk.CheckButton(label="Use Ollama Cloud (https://ollama.com/v1)")
         is_cloud = "ollama.com" in cfg.get("ollama_base_url", "")
         self.ollama_cloud_check.set_active(is_cloud)
         self.ollama_cloud_check.set_tooltip_text(
@@ -134,9 +158,7 @@ class SettingsDialog(Gtk.Dialog):
 
         self.url_label = Gtk.Label(label="Base URL (default):")
         self.url_label.set_xalign(0.0)
-        self.url_label.set_tooltip_text(
-            "Base URL endpoint for the model server"
-        )
+        self.url_label.set_tooltip_text("Base URL endpoint for the model server")
         self.url_entry = Gtk.Entry()
         self.url_entry.set_text(cfg.get("ollama_base_url", "http://localhost:11434"))
         self.url_entry.set_hexpand(True)
@@ -159,7 +181,6 @@ class SettingsDialog(Gtk.Dialog):
 
         self.provider_combo.connect("changed", self._sync_provider_fields)
         self.ollama_cloud_check.connect("toggled", self._on_ollama_cloud_toggled)
-        self._sync_provider_fields(self.provider_combo)
 
     def _build_embeddings_section(self, grid: Gtk.Grid) -> None:
         """Embeddings backend, chosen independently of the chat provider.
@@ -206,7 +227,6 @@ class SettingsDialog(Gtk.Dialog):
         grid.attach(self.embed_install_button, 1, 13, 1, 1)
 
         self.embed_combo.connect("changed", lambda _c: self._sync_embed_fields())
-        self._sync_embed_fields()
 
     def _sync_embed_fields(self) -> None:
         idx = self.embed_combo.get_active()
@@ -283,6 +303,25 @@ class SettingsDialog(Gtk.Dialog):
             self.key_entry.set_text("")
             self.key_entry.set_placeholder_text("")
 
+        is_codex = p == "openai_codex"
+        # The key entry and the account row occupy the same grid cell.
+        self.key_entry.set_visible(not is_codex)
+        self.key_label.set_visible(not is_codex)
+        self.codex_box.set_visible(is_codex)
+        self.codex_label.set_visible(is_codex)
+        if is_codex:
+            self._sync_codex_account()
+
+        if is_codex:
+            # No base URL and no key: the endpoint is fixed and auth is OAuth.
+            self.ollama_cloud_check.set_visible(False)
+            self.url_label.set_visible(False)
+            self.url_entry.set_visible(False)
+            self.thinking_check.set_sensitive(False)
+            return
+        self.url_label.set_visible(True)
+        self.url_entry.set_visible(True)
+
         if p == "ollama":
             self.ollama_cloud_check.set_visible(True)
             self.thinking_check.set_sensitive(True)
@@ -328,3 +367,18 @@ class SettingsDialog(Gtk.Dialog):
         if response != Gtk.ResponseType.APPLY:
             return
         self._on_save(*values)
+
+    def _sync_codex_account(self) -> None:
+        if codex_is_signed_in():
+            self.codex_status.set_text("Signed in")
+            self.codex_button.set_label("Sign out")
+        else:
+            self.codex_status.set_text("Not signed in")
+            self.codex_button.set_label("Sign in with ChatGPT")
+
+    def _on_codex_button(self, _btn: Gtk.Button) -> None:
+        if codex_is_signed_in():
+            codex_sign_out()
+            self._sync_codex_account()
+            return
+        CodexLoginDialog(self, on_done=lambda _ok, _err: self._sync_codex_account()).show()

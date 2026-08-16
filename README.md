@@ -143,6 +143,19 @@ Use any OpenAI-compatible server or cloud provider (e.g. `OpenRouter`, `llama.cp
 - **Local Server (llama.cpp / vLLM / LM Studio):** Base URL `http://localhost:8080/v1` (or your server port), Model e.g. `qwen2.5-coder:32b`, API key optional.
 - **OpenAI / Cloud Providers:** Base URL e.g. `https://api.openai.com/v1`, Model e.g. `gpt-4o`, paste your API key.
 
+#### Option C: ChatGPT Plus/Pro (Codex)
+Sign in with your ChatGPT account instead of an API key — OpenAI documents
+ChatGPT sign-in as the [subscription auth mode for
+Codex](https://developers.openai.com/codex/auth). Pick **ChatGPT Plus/Pro
+(Codex)** in Settings, click **Sign in with ChatGPT**, and complete the login
+in your browser. On a remote or headless machine, paste the redirect URL (or
+just the code) back into the dialog instead.
+
+Requires an active ChatGPT Plus or Pro subscription. Tokens are stored in
+`~/.config/grc_agent/openai-codex-auth.json` with `0600` permissions, never in
+`.env`, and there is no base URL or API key to configure. Codex serves no
+embeddings endpoint, so choose an embeddings backend below.
+
 #### Embeddings for vector search
 Vector search (`query_knowledge`) needs an embeddings endpoint, and that is
 chosen **independently of the chat provider** in the Settings dialog — many

@@ -1193,3 +1193,234 @@ def test_partial_embedding_failure_yields_no_vector_index(tmp_path, monkeypatch)
         )
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# ChatGPT Plus/Pro (Codex) OAuth provider
+# ---------------------------------------------------------------------------
+
+
+def _fake_jwt(account_id: str | None) -> str:
+    import base64
+    import json
+
+    claims = {"https://api.openai.com/auth": {}}
+    if account_id is not None:
+        claims["https://api.openai.com/auth"]["chatgpt_account_id"] = account_id
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{body}.signature"
+
+
+def test_codex_is_a_real_third_provider(tmp_path, monkeypatch):
+    """Regression: load_settings() reverts unknown providers to the default, so
+    a saved GRC_PROVIDER=openai_codex would silently vanish on next load unless
+    the normalization knows about it."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    save_settings("openai_codex", "gpt-5.1-codex")
+    cfg = load_settings()
+    assert cfg["provider"] == "openai_codex"
+    assert cfg["model"] == "gpt-5.1-codex", "res['model'] needs a _PROVIDER_MODEL_KEY entry"
+
+    # Switching away and back must not lose either provider's model.
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    cfg = load_settings()
+    assert cfg["openai_codex_model"] == "gpt-5.1-codex"
+
+
+def test_codex_auto_embeddings_do_not_follow_a_backend_without_embeddings(tmp_path, monkeypatch):
+    """The Codex transport exposes no /v1/embeddings, so "auto" must not
+    resolve to it — every embed call would fail."""
+    from grc_agent.settings import resolve_embed_backend
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("openai_codex", "gpt-5.1-codex", embed_backend="auto")
+    assert resolve_embed_backend(load_settings()) == "ollama"
+
+    save_settings("openai_codex", "gpt-5.1-codex", embed_backend="llamacpp")
+    assert resolve_embed_backend(load_settings()) == "llamacpp"
+
+
+def test_codex_badge_resolves_from_its_base_url():
+    """Regression: resolve_provider_from_base_url() maps any non-Ollama URL to
+    openai_compatible, and set_agent() then reports a healthy connection as
+    'Fallback default (configured provider unreachable)'."""
+    from grc_agent.providers.openai_codex.model import BASE_URL
+    from grc_agent.ui.providers import (
+        PROVIDER_API_KEY,
+        PROVIDER_BADGE_LABEL,
+        PROVIDER_MODEL_KEY,
+        PROVIDER_ORDER,
+        resolve_provider_from_base_url,
+    )
+
+    assert resolve_provider_from_base_url(BASE_URL) == "openai_codex"
+    # Every parallel catalog dict must carry an entry, or the dialog KeyErrors.
+    for table in (PROVIDER_MODEL_KEY, PROVIDER_API_KEY, PROVIDER_BADGE_LABEL):
+        assert "openai_codex" in table
+    assert "openai_codex" in PROVIDER_ORDER
+    assert PROVIDER_API_KEY["openai_codex"] is None, "OAuth tokens must never be written to .env"
+
+
+def test_codex_authorize_url_matches_the_registered_client(tmp_path, monkeypatch):
+    """The redirect URI is registered against this client id — an ephemeral
+    port produces a redirect_uri mismatch rather than a working login."""
+    import urllib.parse
+
+    from grc_agent.providers.openai_codex import auth
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    flow = auth.start_login()
+    parsed = urllib.parse.urlparse(flow.url)
+    params = dict(urllib.parse.parse_qsl(parsed.query))
+
+    assert parsed.netloc == "auth.openai.com"
+    assert params["redirect_uri"] == "http://localhost:1455/auth/callback"
+    assert params["code_challenge_method"] == "S256"
+    assert params["code_challenge"] != flow.verifier, (
+        "the challenge must be the hash, not the verifier"
+    )
+    assert params["state"] == flow.state
+    assert "offline_access" in params["scope"], "a refresh token requires offline_access"
+
+
+def test_codex_redirect_parsing_accepts_what_users_actually_paste(tmp_path, monkeypatch):
+    from grc_agent.providers.openai_codex import auth
+    from grc_agent.providers.openai_codex.credentials import AuthenticationError
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    state = "abc123state"
+    assert (
+        auth.parse_redirect(f"http://localhost:1455/auth/callback?code=C1&state={state}", state)
+        == "C1"
+    )
+    assert auth.parse_redirect(f"code=C2&state={state}", state) == "C2"
+    assert auth.parse_redirect("  C3  ", state) == "C3"
+
+    with pytest.raises(AuthenticationError, match="State mismatch"):
+        auth.parse_redirect("http://x/?code=C&state=wrong", state)
+    with pytest.raises(AuthenticationError, match="Authorization failed"):
+        auth.parse_redirect("http://x/?error=access_denied", state)
+
+
+def test_codex_credentials_are_private_and_never_in_the_repo(tmp_path, monkeypatch):
+    """These are rotating OAuth tokens, not a preference: 0600, and never in
+    `.env` (which is world-readable and sits in the repo root for a dev
+    checkout)."""
+    import stat
+
+    from grc_agent.providers.openai_codex import credentials as creds
+
+    auth_file = tmp_path / "nested" / "auth.json"
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(auth_file))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    assert creds.load() is None and not creds.is_signed_in()
+
+    cred = creds.credential_from_token_response(
+        {"access_token": _fake_jwt("acct-42"), "refresh_token": "r1", "expires_in": 3600}
+    )
+    creds.save(cred)
+
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+    assert creds.load().account_id == "acct-42"
+    assert creds.is_signed_in()
+
+    env_text = (tmp_path / ".env").read_text() if (tmp_path / ".env").exists() else ""
+    assert "r1" not in env_text and cred.access not in env_text
+
+    creds.clear()
+    assert not creds.is_signed_in()
+
+
+def test_codex_rejects_a_token_without_a_codex_entitlement(tmp_path, monkeypatch):
+    """No chatgpt_account_id means the account cannot use Codex. Failing here
+    beats sending every request without the header the endpoint requires."""
+    from grc_agent.providers.openai_codex import credentials as creds
+    from grc_agent.providers.openai_codex.credentials import AuthenticationError
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    with pytest.raises(AuthenticationError, match="entitlement"):
+        creds.credential_from_token_response(
+            {"access_token": _fake_jwt(None), "refresh_token": "r", "expires_in": 3600}
+        )
+
+
+def test_codex_refreshes_only_when_expiry_is_near(tmp_path, monkeypatch):
+    """A rotated refresh token invalidates the previous one, so refreshing
+    twice concurrently would log the user out. Fresh tokens must not refresh
+    at all; expiring ones must refresh exactly once under contention."""
+    import asyncio
+
+    from grc_agent.providers.openai_codex import credentials as creds
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    calls = {"n": 0}
+
+    async def fake_refresh(cred):  # noqa: ARG001
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        return creds.Credential(
+            access=_fake_jwt("acct-42"),
+            refresh=f"r{calls['n']}",
+            expires=9e12,
+            account_id="acct-42",
+        )
+
+    monkeypatch.setattr(creds, "_refresh", fake_refresh)
+
+    creds.save(
+        creds.Credential(
+            access=_fake_jwt("acct-42"), refresh="r0", expires=9e12, account_id="acct-42"
+        )
+    )
+    assert asyncio.run(creds.get_valid()).refresh == "r0"
+    assert calls["n"] == 0, "a token far from expiry must not be refreshed"
+
+    creds.save(
+        creds.Credential(access=_fake_jwt("acct-42"), refresh="r0", expires=0, account_id="acct-42")
+    )
+
+    async def race():
+        return await asyncio.gather(*(creds.get_valid() for _ in range(4)))
+
+    results = asyncio.run(race())
+    assert calls["n"] == 1, f"expected exactly one refresh under contention, got {calls['n']}"
+    assert {r.refresh for r in results} == {"r1"}
+
+
+def test_codex_model_targets_the_codex_responses_endpoint(tmp_path, monkeypatch):
+    """The OpenAI SDK posts to the literal path /responses, so the base URL
+    must be .../backend-api/codex — and building the model must not require
+    credentials, so an unauthenticated config still starts the app."""
+    from grc_agent.agent_factory import _build_model, _retrying_http_client
+    from grc_agent.providers.openai_codex.model import CodexResponsesModel
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "absent.json"))
+    model = _build_model(
+        {"provider": "openai_codex", "model": "gpt-5.1-codex"}, _retrying_http_client()
+    )
+    assert isinstance(model, CodexResponsesModel)
+    assert str(model._provider.base_url).rstrip("/") == "https://chatgpt.com/backend-api/codex"
+
+
+def test_codex_preflight_reports_signed_out_without_a_network_call(tmp_path, monkeypatch):
+    """There is no /models endpoint on the Codex transport; the equivalent
+    check is whether a usable credential exists."""
+    import httpx
+
+    from grc_agent.agent_factory import preflight_connection
+    from grc_agent.providers.openai_codex import credentials as creds
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+
+    def explode(*a, **k):  # noqa: ARG001
+        raise AssertionError("preflight must not hit the network for openai_codex")
+
+    monkeypatch.setattr(httpx, "get", explode)
+
+    err = preflight_connection("openai_codex")
+    assert err and "Not signed in" in err
+
+    creds.save(creds.Credential(access=_fake_jwt("a"), refresh="r", expires=9e12, account_id="a"))
+    assert preflight_connection("openai_codex") is None

@@ -2184,6 +2184,41 @@ class ChatSidebar(Gtk.Box):
         dlg.connect("destroy", lambda *_: setattr(self, "_open_dialog", None))
         dlg.show()
 
+    @staticmethod
+    def _persist_settings(
+        provider: str,
+        model: str,
+        key_var: str | None,
+        key_val: str,
+        base_url: str,
+        thinking_enabled: bool,
+        embed_backend: str,
+    ) -> None:
+        """Write the new config to `.env`. The base-URL argument is routed to
+        the key belonging to the active provider — ChatGPT/Codex has neither a
+        base URL nor an API key, and passing one through would write whatever
+        the (hidden) URL entry still held over OLLAMA_BASE_URL."""
+        if provider == "openai_codex":
+            save_settings(provider, model, embed_backend=embed_backend)
+        elif provider == "openai_compatible":
+            save_settings(
+                provider,
+                model,
+                openai_compatible_base_url=base_url,
+                thinking_enabled=thinking_enabled,
+                embed_backend=embed_backend,
+            )
+        else:
+            save_settings(
+                provider,
+                model,
+                ollama_base_url=base_url,
+                thinking_enabled=thinking_enabled,
+                embed_backend=embed_backend,
+            )
+        if key_var:
+            upsert_env_key(key_var, key_val)
+
     def _apply_settings_save(
         self,
         provider: str,
@@ -2225,24 +2260,9 @@ class ChatSidebar(Gtk.Box):
         # 2. Persist to .env synchronously — tests assert on load_settings()
         #    immediately after emitting the response signal.
         try:
-            if provider == "openai_compatible":
-                save_settings(
-                    provider,
-                    model,
-                    openai_compatible_base_url=ollama_base_url,
-                    thinking_enabled=thinking_enabled,
-                    embed_backend=embed_backend,
-                )
-            else:
-                save_settings(
-                    provider,
-                    model,
-                    ollama_base_url=ollama_base_url,
-                    thinking_enabled=thinking_enabled,
-                    embed_backend=embed_backend,
-                )
-            if key_var:
-                upsert_env_key(key_var, key_val)
+            self._persist_settings(
+                provider, model, key_var, key_val, ollama_base_url, thinking_enabled, embed_backend
+            )
         except Exception as e:
             _log.exception("Failed to save settings")
             self.set_status(f"Settings not saved ({e}).", error=True)
@@ -2282,7 +2302,9 @@ class ChatSidebar(Gtk.Box):
         if the user wants to save anyway. Anchors the dialog on `self` so
         PyGObject doesn't GC it mid-`.run()`."""
         provider_label = _PROVIDER_LABELS.get(provider, provider)
-        if provider == "ollama":
+        if provider == "openai_codex":
+            hint = "• Click 'Sign in with ChatGPT' in Preferences.\n• Codex requires an active ChatGPT Plus or Pro subscription."
+        elif provider == "ollama":
             hint = f"• Ensure local Ollama daemon is running ('ollama serve').\n• Verify host is reachable at {ollama_base_url}."
         elif provider == "openai_compatible":
             hint = f"• Ensure local OpenAI-compatible server (e.g. llama-server) is running.\n• Verify endpoint is reachable at {ollama_base_url}."

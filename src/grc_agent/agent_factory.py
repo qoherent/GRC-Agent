@@ -44,6 +44,15 @@ def _retrying_http_client() -> httpx.AsyncClient:
 
 def _build_model(cfg: dict, http_client: httpx.AsyncClient):
     provider = cfg.get("provider", "ollama")
+    if provider == "openai_codex":
+        # Returns before the /v1 suffixing below: the Codex base URL is
+        # https://chatgpt.com/backend-api/codex, and the OpenAI SDK appends
+        # the literal /responses to it. It also brings its own http client,
+        # because `http_client` raises for status inside its retry transport,
+        # which would fire before the 401-refresh path could see it.
+        from grc_agent.providers.openai_codex import build_model as build_codex_model
+
+        return build_codex_model(cfg["model"])
     if provider in ("openai_compatible", "openrouter"):
         key = (
             get_env_value("OPENAI_COMPATIBLE_API_KEY")
@@ -142,7 +151,15 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
 
     is_ollama = cfg["provider"] in ("ollama", "ollama_cloud")
     thinking = cfg.get("ollama_thinking_enabled", True)
-    model_settings = ModelSettings(extra_body={"think": thinking}) if is_ollama else ModelSettings()
+    if is_ollama:
+        model_settings = ModelSettings(extra_body={"think": thinking})
+    elif cfg["provider"] == "openai_codex":
+        from grc_agent.providers.openai_codex.model import CODEX_MODEL_SETTINGS
+
+        # Codex rejects store:true outright ("Store must be set to false").
+        model_settings = ModelSettings(**CODEX_MODEL_SETTINGS)
+    else:
+        model_settings = ModelSettings()
 
     from grc_agent.native_canvas import NativeFlowgraphProxy
 
@@ -245,13 +262,23 @@ def preflight_connection(
     failure (connection refused, bad status, missing key, etc.).
 
     Sync intentionally — runs from the GTK Save handler and from startup
-    (which is itself sync up to the gbulb loop.run_forever()). Bounded at
+    (which is itself sync up to the unified loop's run_forever()). Bounded at
     `timeout` so a hung host fails fast instead of blocking the UI.
 
     Takes provider + api_key explicitly so the Save handler can validate a
     NEW config BEFORE writing it to .env (no save/restore dance), while
     startup resolves them from the already-loaded cfg/env.
     """
+    if provider == "openai_codex":
+        # There is no /models endpoint on the Codex transport, so there is no
+        # URL to probe. The equivalent question is whether a usable credential
+        # exists — the first real request refreshes it if needed.
+        from grc_agent.providers.openai_codex import is_signed_in
+
+        if not is_signed_in():
+            return "Not signed in to ChatGPT — use Sign in with ChatGPT in Settings"
+        return None
+
     target = _preflight_target(provider, api_key, ollama_base_url)
     if isinstance(target, str):
         return target

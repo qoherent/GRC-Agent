@@ -30,7 +30,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values, set_key
 
-_VALID_PROVIDERS = ("ollama", "openai_compatible")
+_VALID_PROVIDERS = ("ollama", "openai_compatible", "openai_codex")
 
 # Which backend serves RAG embeddings. Deliberately independent of the chat
 # provider: a chat endpoint that speaks the OpenAI API does not necessarily
@@ -45,15 +45,18 @@ _DEFAULT_EMBED_BACKEND = "auto"
 _PROVIDER_ENV_VAR = {
     "ollama": "OLLAMA_CHAT_MODEL",
     "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
+    "openai_codex": "OPENAI_CODEX_MODEL",
 }
 _PROVIDER_MODEL_KEY = {
     "ollama": "ollama_model",
     "openai_compatible": "openai_compatible_model",
+    "openai_codex": "openai_codex_model",
 }
 
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.6:35b-a3b-q4_K_M",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
+    "openai_codex_model": "gpt-5.1-codex",
 }
 _DEFAULT_PROVIDER = "ollama"
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
@@ -113,9 +116,14 @@ def resolve_embed_backend(cfg: dict) -> str:
     dialog can never disagree about which backend is in use.
     """
     backend = cfg.get("embed_backend", _DEFAULT_EMBED_BACKEND)
-    if backend == "auto":
-        return cfg.get("provider", _DEFAULT_PROVIDER)
-    return backend
+    if backend != "auto":
+        return backend
+    provider = cfg.get("provider", _DEFAULT_PROVIDER)
+    # "auto" can only follow a chat provider that also serves embeddings. The
+    # ChatGPT/Codex transport does not expose /v1/embeddings at all, so it
+    # falls back to the default rather than resolving to a backend that would
+    # fail every call.
+    return provider if provider in ("ollama", "openai_compatible") else _DEFAULT_PROVIDER
 
 
 def default_settings() -> dict:
@@ -143,6 +151,8 @@ def load_settings() -> dict:
         provider = "openai_compatible"
     elif raw_provider in ("ollama", "ollama_cloud"):
         provider = "ollama"
+    elif raw_provider in _VALID_PROVIDERS:
+        provider = raw_provider
     else:
         provider = _DEFAULT_PROVIDER
 
@@ -161,6 +171,9 @@ def load_settings() -> dict:
         vals.get("OPENAI_COMPATIBLE_MODEL")
         or vals.get("OPENROUTER_MODEL")
         or _DEFAULT_MODELS["openai_compatible_model"]
+    )
+    openai_codex_model = (
+        vals.get("OPENAI_CODEX_MODEL") or _DEFAULT_MODELS["openai_codex_model"]
     )
 
     ollama_url = vals.get("OLLAMA_BASE_URL")
@@ -184,6 +197,7 @@ def load_settings() -> dict:
         "embed_backend": embed_backend,
         "ollama_model": ollama_model,
         "openai_compatible_model": openai_compatible_model,
+        "openai_codex_model": openai_codex_model,
         "ollama_base_url": ollama_url,
         "openai_compatible_base_url": openai_url,
         "ollama_thinking_enabled": thinking_enabled,

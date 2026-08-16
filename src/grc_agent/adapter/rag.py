@@ -137,6 +137,18 @@ def _get_embed_client() -> OpenAI:
 
 def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[float]]:
     client = _get_embed_client()
+    if resolve_embed_backend(load_settings()) == "llamacpp":
+        # The upstream word cap is an estimate; this backend has a hard token
+        # limit we can measure exactly, and exceeding it fails the request —
+        # which, under ingest.py's all-or-nothing rule, costs the whole vector
+        # index rather than one chunk. Done here rather than in embed_document
+        # because the limit belongs to the transport, not to how a document
+        # was composed.
+        input_text = (
+            [embed_runtime.fit_to_context(t) for t in input_text]
+            if isinstance(input_text, list)
+            else embed_runtime.fit_to_context(input_text)
+        )
     try:
         response = client.embeddings.create(model=model, input=input_text, encoding_format="float")
     except APIConnectionError as exc:
@@ -225,12 +237,6 @@ def _cap_words(text: str, max_words: int, *, label: str = "") -> str:
 
 def embed_document(text: str, model: str) -> list[float]:
     body = _DOCUMENT_PREFIX + text if _uses_gemma_prefix(model) else text
-    if resolve_embed_backend(load_settings()) == "llamacpp":
-        # The word cap upstream is an estimate; this backend has a hard token
-        # limit we can measure exactly, and exceeding it fails the request —
-        # which, under ingest.py's all-or-nothing rule, costs the entire
-        # vector index rather than one chunk.
-        body = embed_runtime.fit_to_context(body)
     result = _embed(model, body)
     if not isinstance(result, list) or (result and not isinstance(result[0], float)):
         raise TypeError(f"Unexpected embedding response shape from _embed: {type(result)}")
