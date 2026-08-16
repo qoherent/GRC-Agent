@@ -28,17 +28,35 @@ BASE_URL = "https://chatgpt.com/backend-api/codex"
 ORIGINATOR = "grc-agent"
 # Verified against a live ChatGPT account's /codex/models: `gpt-5.1-codex`
 # is rejected with "not supported when using Codex with a ChatGPT account".
-# Only what that endpoint lists is usable, so the default is its everyday
-# coding model — and the Settings dialog lists the account's real options
-# rather than making anyone guess an id.
-DEFAULT_MODEL = "gpt-5.4"
+# Only what that endpoint lists is usable. This default is a starting point,
+# not a claim about any particular account: Settings -> Load lists what the
+# signed-in account actually offers, which is the reliable way to pick one.
+DEFAULT_MODEL = "gpt-5.6-luna"
 
-# Sent as ?client_version= on the models endpoint, which requires it, and
-# compared by the server against each model's `minimal_client_version`.
-CLIENT_VERSION = "0.104.0"
+# Sent as ?client_version= on the models endpoint, which requires it and
+# filters the catalog against each model's `minimal_client_version`. Verified
+# live: 0.104.0 returned 3 models and silently hid gpt-5.5 (needs 0.124.0) and
+# the gpt-5.6 family (needs 0.144.0). The gate describes Codex CLI features —
+# apply-patch modes, shell types, websocket transport — that this app does not
+# use, since it drives the plain Responses API through pydantic-ai, so asking
+# for the unfiltered catalog is correct rather than a version claim. A pinned
+# number would silently hide each new model instead.
+CLIENT_VERSION = "9999.0.0"
 
-# Codex rejects `store: true` outright ("Store must be set to false").
-CODEX_MODEL_SETTINGS = {"openai_store": False, "openai_text_verbosity": "low"}
+# Codex rejects `store: true` outright ("Store must be set to false") and
+# likewise requires `stream: true` ("Stream must be set to true"), which the
+# chat sidebar always does.
+#
+# Every model reports `default_reasoning_summary: "none"`, so without asking
+# for a summary the reasoning is computed and then discarded — the sidebar's
+# per-turn trace stays empty. Requesting one turns it into ThinkingParts
+# (confirmed live: Codex emits `response.reasoning_summary_text.delta`).
+CODEX_MODEL_SETTINGS = {
+    "openai_store": False,
+    "openai_text_verbosity": "low",
+    "openai_reasoning_summary": "auto",
+    "openai_reasoning_effort": "medium",
+}
 
 
 class EntitlementError(CodexError):
@@ -160,9 +178,10 @@ async def list_models() -> list[str]:
     """Model slugs this ChatGPT account can actually use.
 
     `visibility: "hide"` entries (e.g. `codex-auto-review`) are internal to
-    Codex and are not selectable, so they are dropped; the rest are ordered by
-    the server's own `priority` so the dropdown leads with what OpenAI leads
-    with.
+    Codex and are not selectable, so they are dropped. The server's own array
+    order is kept — it comes back newest-first, which is what a dropdown
+    wants. (Its `priority` field ranks the *older* models higher, so sorting
+    by it buries the newest ones at the bottom.)
     """
     cred = await credentials.get_valid()
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -179,6 +198,41 @@ async def list_models() -> list[str]:
     if r.status_code >= 400:
         raise RuntimeError(f"ChatGPT model list failed (HTTP {r.status_code})")
     models = r.json().get("models", [])
-    listed = [m for m in models if m.get("visibility") != "hide" and m.get("slug")]
-    listed.sort(key=lambda m: -(m.get("priority") or 0))
-    return [m["slug"] for m in listed]
+    return [m["slug"] for m in models if m.get("visibility") != "hide" and m.get("slug")]
+
+
+def _fetch_models_sync() -> list[dict]:
+    """The raw catalog, using a stored credential without refreshing it.
+
+    Sync so the context-length lookup can use it from the GTK main loop, where
+    the existing Ollama/OpenAI lookups already make a bounded blocking call.
+    Returns [] rather than refreshing when the token is stale — a real request
+    refreshes it moments later, and the result is cached by the caller.
+    """
+    cred = credentials.load()
+    if cred is None or cred.expires_soon:
+        return []
+    r = httpx.get(
+        f"{BASE_URL}/models",
+        params={"client_version": CLIENT_VERSION},
+        headers={
+            "Authorization": f"Bearer {cred.access}",
+            "chatgpt-account-id": cred.account_id,
+            "originator": ORIGINATOR,
+            "OpenAI-Beta": "responses=experimental",
+        },
+        timeout=5.0,
+    )
+    if r.status_code >= 400:
+        return []
+    return r.json().get("models", [])
+
+
+def context_window(slug: str) -> int | None:
+    """The model's context window, so the sidebar can show `x / y` rather than
+    a bare token count."""
+    for m in _fetch_models_sync():
+        if m.get("slug") == slug:
+            n = m.get("context_window")
+            return int(n) if isinstance(n, (int, float)) else None
+    return None

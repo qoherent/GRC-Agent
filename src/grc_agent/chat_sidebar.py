@@ -213,7 +213,15 @@ def resolve_model_context_length(provider: str, model: str) -> int | None:
     try:
         if provider in ("ollama", "ollama_cloud"):
             ctx_len = _ollama_context_length(provider, model)
-        elif provider == "openrouter":
+        elif provider == "openai_codex":
+            from grc_agent.providers.openai_codex.model import context_window
+
+            ctx_len = context_window(model)
+        elif provider in ("openai_compatible", "openrouter"):
+            # Was gated on "openrouter" alone, which load_settings() has not
+            # been able to return since the backends were consolidated — so
+            # every OpenAI-compatible endpoint fell through to None and the
+            # label showed a bare token count with nothing to compare against.
             ctx_len = _openrouter_context_length(model)
         else:
             ctx_len = None

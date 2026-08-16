@@ -1603,9 +1603,12 @@ def test_model_catalog_lists_what_each_backend_reports(monkeypatch):
     assert got == ["y", "z"]
 
 
-def test_codex_model_list_drops_hidden_entries_and_ranks_by_priority(monkeypatch):
-    """`codex-auto-review` is internal to Codex and is not selectable; the
-    server's own `priority` decides what the dropdown leads with."""
+def test_codex_model_list_drops_hidden_entries_and_keeps_server_order(monkeypatch):
+    """`codex-auto-review` is internal to Codex and is not selectable.
+
+    Server order is preserved because it comes back newest-first, which is
+    what a dropdown wants — the `priority` field ranks the *older* models
+    higher, so sorting by it buries the newest at the bottom."""
     import asyncio
 
     import httpx
@@ -1637,4 +1640,35 @@ def test_codex_model_list_drops_hidden_entries_and_ranks_by_priority(monkeypatch
     monkeypatch.setattr(codex_model.credentials, "get_valid", fake_valid)
     monkeypatch.setattr(httpx, "AsyncClient", lambda *_a, **_k: _Client())
 
-    assert asyncio.run(codex_model.list_models()) == ["gpt-5.4-mini", "gpt-5.4"]
+    assert asyncio.run(codex_model.list_models()) == ["gpt-5.4", "gpt-5.4-mini"]
+
+
+def test_codex_client_version_does_not_hide_newer_models():
+    """Regression: the models endpoint filters on ?client_version= against each
+    model's `minimal_client_version`. A pinned 0.104.0 returned 3 models and
+    silently hid gpt-5.5 (0.124.0) and the whole gpt-5.6 family (0.144.0) — so
+    the dropdown, and the default derived from it, were quietly a generation
+    behind. The gate describes Codex CLI features this app does not use.
+    """
+    from grc_agent.providers.openai_codex.model import CLIENT_VERSION
+
+    parts = [int(p) for p in CLIENT_VERSION.split(".")]
+    assert parts >= [1, 0, 0], (
+        f"client_version {CLIENT_VERSION} is below 1.0.0 and will hide models "
+        "whose minimal_client_version is newer"
+    )
+
+
+def test_codex_requests_reasoning_summaries():
+    """Every Codex model reports `default_reasoning_summary: "none"`, so
+    without asking for one the reasoning is computed and discarded and the
+    per-turn trace stays empty. Confirmed live: with a summary requested the
+    endpoint emits response.reasoning_summary_text.delta, which pydantic-ai
+    turns into ThinkingParts."""
+    from grc_agent.providers.openai_codex.model import CODEX_MODEL_SETTINGS
+
+    assert CODEX_MODEL_SETTINGS.get("openai_reasoning_summary"), (
+        "Codex defaults reasoning summaries off; one must be requested"
+    )
+    # store:true and non-streaming are both rejected outright by Codex.
+    assert CODEX_MODEL_SETTINGS["openai_store"] is False

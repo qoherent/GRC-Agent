@@ -56,7 +56,7 @@ _PROVIDER_MODEL_KEY = {
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.6:35b-a3b-q4_K_M",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
-    "openai_codex_model": "gpt-5.4",
+    "openai_codex_model": "gpt-5.6-luna",
 }
 _DEFAULT_PROVIDER = "ollama"
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
