@@ -26,7 +26,16 @@ from .credentials import CodexError
 
 BASE_URL = "https://chatgpt.com/backend-api/codex"
 ORIGINATOR = "grc-agent"
-DEFAULT_MODEL = "gpt-5.1-codex"
+# Verified against a live ChatGPT account's /codex/models: `gpt-5.1-codex`
+# is rejected with "not supported when using Codex with a ChatGPT account".
+# Only what that endpoint lists is usable, so the default is its everyday
+# coding model — and the Settings dialog lists the account's real options
+# rather than making anyone guess an id.
+DEFAULT_MODEL = "gpt-5.4"
+
+# Sent as ?client_version= on the models endpoint, which requires it, and
+# compared by the server against each model's `minimal_client_version`.
+CLIENT_VERSION = "0.104.0"
 
 # Codex rejects `store: true` outright ("Store must be set to false").
 CODEX_MODEL_SETTINGS = {"openai_store": False, "openai_text_verbosity": "low"}
@@ -145,3 +154,31 @@ def build_model(model_name: str = DEFAULT_MODEL) -> CodexResponsesModel:
         },
     )
     return CodexResponsesModel(model_name, provider=OpenAIProvider(openai_client=client))
+
+
+async def list_models() -> list[str]:
+    """Model slugs this ChatGPT account can actually use.
+
+    `visibility: "hide"` entries (e.g. `codex-auto-review`) are internal to
+    Codex and are not selectable, so they are dropped; the rest are ordered by
+    the server's own `priority` so the dropdown leads with what OpenAI leads
+    with.
+    """
+    cred = await credentials.get_valid()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(
+            f"{BASE_URL}/models",
+            params={"client_version": CLIENT_VERSION},
+            headers={
+                "Authorization": f"Bearer {cred.access}",
+                "chatgpt-account-id": cred.account_id,
+                "originator": ORIGINATOR,
+                "OpenAI-Beta": "responses=experimental",
+            },
+        )
+    if r.status_code >= 400:
+        raise RuntimeError(f"ChatGPT model list failed (HTTP {r.status_code})")
+    models = r.json().get("models", [])
+    listed = [m for m in models if m.get("visibility") != "hide" and m.get("slug")]
+    listed.sort(key=lambda m: -(m.get("priority") or 0))
+    return [m["slug"] for m in listed]

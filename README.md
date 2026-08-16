@@ -151,6 +151,9 @@ Codex](https://developers.openai.com/codex/auth). Pick **ChatGPT Plus/Pro
 in your browser. On a remote or headless machine, paste the redirect URL (or
 just the code) back into the dialog instead.
 
+In Settings, click **Load** next to Model to list the models your account can
+actually use — that works for every provider, so you never have to guess an id.
+
 Requires an active ChatGPT Plus or Pro subscription. Tokens are stored in
 `~/.config/grc_agent/openai-codex-auth.json` with `0600` permissions, never in
 `.env`, and there is no base URL or API key to configure. Codex serves no

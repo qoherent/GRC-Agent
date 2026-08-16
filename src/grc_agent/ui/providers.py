@@ -35,7 +35,7 @@ PROVIDER_API_KEY = {
 PROVIDER_MODEL_PLACEHOLDER = {
     "ollama": "qwen3.6:35b-a3b-q4_K_M (or deepseek-v4-flash:cloud)",
     "openai_compatible": "deepseek/deepseek-v4-flash, qwen2.5-coder:32b, gpt-4o",
-    "openai_codex": "gpt-5.1-codex",
+    "openai_codex": "gpt-5.4 (or gpt-5.4-mini)",
 }
 
 PROVIDER_KEY_PLACEHOLDER = {

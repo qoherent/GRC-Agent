@@ -10,12 +10,16 @@ which owns preflight, persistence and live-swap.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
 from .. import embed_runtime
+from ..model_catalog import list_models
 from ..providers.openai_codex import clear as codex_sign_out
 from ..providers.openai_codex import is_signed_in as codex_is_signed_in
 from ..settings import get_env_value
@@ -31,6 +35,8 @@ from .providers import (
     PROVIDER_MODEL_PLACEHOLDER,
     PROVIDER_ORDER,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class SettingsDialog(Gtk.Dialog):
@@ -99,18 +105,26 @@ class SettingsDialog(Gtk.Dialog):
         lbl_m = Gtk.Label(label="Model:")
         lbl_m.set_xalign(0.0)
         lbl_m.set_tooltip_text("The specific LLM model ID or tag for chat responses")
-        self.model_entry = Gtk.Entry()
+        # Editable combo: the list is whatever the backend reports, but a
+        # model can still be typed in — a brand-new id should not be
+        # unreachable just because the catalog has not caught up.
+        self.model_combo = Gtk.ComboBoxText.new_with_entry()
+        self.model_entry = self.model_combo.get_child()
         self.model_entry.set_text(cfg["model"])
-        self.model_entry.set_hexpand(True)
         self.model_entry.set_activates_default(True)
-        self.model_entry.set_tooltip_text(
-            "Enter model ID or tag for chat.\n"
-            "Examples:\n"
-            "• Ollama: qwen3.6:35b-a3b-q4_K_M or deepseek-v4-flash:cloud\n"
-            "• OpenAI Compatible: deepseek/deepseek-v4-flash, qwen2.5-coder:32b, gpt-4o"
+        self.model_combo.set_hexpand(True)
+        self.model_combo.set_tooltip_text(
+            "Model ID or tag for chat. Click Load to list what the configured "
+            "backend actually serves, or type one in."
         )
+        self.model_load_button = Gtk.Button(label="Load")
+        self.model_load_button.set_tooltip_text("Ask the backend which models it serves")
+        self.model_load_button.connect("clicked", self._on_load_models)
+        model_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        model_box.pack_start(self.model_combo, True, True, 0)
+        model_box.pack_start(self.model_load_button, False, False, 0)
         grid.attach(lbl_m, 0, 2, 1, 1)
-        grid.attach(self.model_entry, 1, 2, 1, 1)
+        grid.attach(model_box, 1, 2, 1, 1)
 
         lbl_k = Gtk.Label(label="API Key:")
         lbl_k.set_xalign(0.0)
@@ -382,3 +396,40 @@ class SettingsDialog(Gtk.Dialog):
             self._sync_codex_account()
             return
         CodexLoginDialog(self, on_done=lambda _ok, _err: self._sync_codex_account()).show()
+
+    def _on_load_models(self, _btn: Gtk.Button) -> None:
+        self.model_load_button.set_sensitive(False)
+        self.model_load_button.set_label("Loading…")
+        asyncio.ensure_future(self._load_models())
+
+    async def _load_models(self) -> None:
+        """Populate the dropdown from the backend, preserving what is typed.
+
+        Reads the *pending* provider/key/URL from the widgets rather than the
+        saved config, so the list matches what Save would apply — otherwise
+        switching provider and hitting Load would query the previous backend.
+        """
+        provider, _model, _kv, key_val, base_url, _think, _embed = self._collect()
+        current = self.model_entry.get_text().strip()
+        try:
+            names = await list_models({"provider": provider}, api_key=key_val, base_url=base_url)
+        except Exception as exc:
+            self._set_model_load_state(f"Load failed: {exc}")
+            return
+        if not names:
+            self._set_model_load_state("Backend listed no models")
+            return
+        self.model_combo.remove_all()
+        for name in names:
+            self.model_combo.append_text(name)
+        # append_text on a combo-with-entry does not touch the entry, but
+        # remove_all clears it, so the typed value is restored explicitly.
+        self.model_entry.set_text(current or names[0])
+        self._set_model_load_state(None)
+
+    def _set_model_load_state(self, error: str | None) -> None:
+        self.model_load_button.set_sensitive(True)
+        self.model_load_button.set_label("Load")
+        if error:
+            _log.info("model list unavailable: %s", error)
+            self.model_combo.set_tooltip_text(error)

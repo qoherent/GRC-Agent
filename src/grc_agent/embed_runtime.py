@@ -47,6 +47,7 @@ import shutil
 import signal
 import subprocess
 import tarfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -118,6 +119,15 @@ USER_AGENT = "grc-agent-setup"
 
 _READY_TIMEOUT = 180.0
 _HEALTH_TIMEOUT = 1.0
+
+# Serializes ensure_server(). Embedding runs on asyncio.to_thread workers, and
+# a cold start fans out — the catalog and docs indexes build concurrently
+# (_BUILD_LOCKS in rag.py is per-domain), so several threads reach
+# ensure_server() at once. Without this each one spawns a llama-server: the
+# first binds the socket, the rest die with "couldn't bind HTTP server socket"
+# — and worse, every loser has already overwritten server.token, so the
+# survivor answers "unauthorized: Invalid API Key" to every request.
+_start_lock = threading.Lock()
 
 
 class FetchError(RuntimeError):
@@ -675,14 +685,33 @@ def stop_server() -> bool:
 def ensure_server(wait: float = _READY_TIMEOUT) -> str:
     """Start llama-server if it is not already answering, and return the API
     token once it is ready. Blocking; safe to call from a worker thread."""
-    if is_alive():
-        token = read_token()
-        if token:
+    token = _running_token()
+    if token is not None:
+        return token
+    with _start_lock:
+        # Re-check: while waiting for the lock another thread very likely
+        # started the server already.
+        token = _running_token()
+        if token is not None:
             return token
-        # Socket answers but our token is gone — not our server, or state was
-        # cleared underneath us. Restart rather than talk to it unauthenticated.
-        stop_server()
+        return _start_server(wait)
 
+
+def _running_token() -> str | None:
+    """The token of an already-answering server, or None if none is up."""
+    if not is_alive():
+        return None
+    token = read_token()
+    if token:
+        return token
+    # The socket answers but our token is gone — not our server, or the state
+    # dir was cleared underneath us. Restart rather than talk to it
+    # unauthenticated.
+    stop_server()
+    return None
+
+
+def _start_server(wait: float) -> str:
     if not is_provisioned():
         raise FetchError(
             "the local embedding runtime is not installed — "

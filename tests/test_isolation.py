@@ -1532,3 +1532,109 @@ def test_codex_login_dialog_completes_from_the_browser_callback(tmp_path, monkey
     assert exchanged.get("code") == "THE_CODE", "the callback's code must reach the exchange"
     assert creds.is_signed_in(), "a successful callback must persist a credential"
     assert done.get("ok") is True, "the dialog must report success so Settings can refresh"
+
+
+def test_ensure_server_starts_exactly_one_llama_server(tmp_path, monkeypatch):
+    """Regression: ensure_server() had no lock, and embedding fans out across
+    asyncio.to_thread workers (catalog and docs build concurrently, since
+    rag.py's _BUILD_LOCKS is per-domain). Every thread saw no live server and
+    spawned its own: the first bound the socket, the rest died with "couldn't
+    bind HTTP server socket" — and because each had already written its own
+    server.token, the survivor answered "unauthorized: Invalid API Key" to
+    everything. Observed live: three starts inside one second.
+    """
+    import concurrent.futures as cf
+
+    from grc_agent import embed_runtime
+
+    monkeypatch.setenv("GRC_AGENT_RUNTIME_DIR", str(tmp_path))
+    starts = {"n": 0}
+    alive = {"up": False}
+
+    monkeypatch.setattr(embed_runtime, "is_alive", lambda *_a, **_k: alive["up"])
+    monkeypatch.setattr(embed_runtime, "is_provisioned", lambda: True)
+
+    def fake_start(_wait):
+        starts["n"] += 1
+        embed_runtime._write_private(embed_runtime._token_path(), f"token{starts['n']}")
+        alive["up"] = True
+        return f"token{starts['n']}"
+
+    monkeypatch.setattr(embed_runtime, "_start_server", fake_start)
+
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        tokens = list(ex.map(lambda _: embed_runtime.ensure_server(), range(8)))
+
+    assert starts["n"] == 1, f"expected one server start under contention, got {starts['n']}"
+    assert len(set(tokens)) == 1, "every caller must get the surviving server's token"
+
+
+def test_model_catalog_lists_what_each_backend_reports(monkeypatch):
+    """Typing a model id by hand is how `gpt-5.1-codex` reached an endpoint
+    that rejects it. Both response shapes must be understood."""
+    import asyncio
+
+    import httpx
+
+    from grc_agent import model_catalog
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    # Ollama's /api/tags shape.
+    monkeypatch.setattr(
+        httpx, "get", lambda *_a, **_k: _Resp({"models": [{"name": "b"}, {"name": "a"}]})
+    )
+    got = asyncio.run(model_catalog.list_models({"provider": "ollama"}, base_url="http://x:11434"))
+    assert got == ["a", "b"], "ollama tags must be listed and sorted"
+
+    # The OpenAI /v1/models shape.
+    monkeypatch.setattr(httpx, "get", lambda *_a, **_k: _Resp({"data": [{"id": "z"}, {"id": "y"}]}))
+    got = asyncio.run(
+        model_catalog.list_models(
+            {"provider": "openai_compatible"}, api_key="k", base_url="http://x/v1"
+        )
+    )
+    assert got == ["y", "z"]
+
+
+def test_codex_model_list_drops_hidden_entries_and_ranks_by_priority(monkeypatch):
+    """`codex-auto-review` is internal to Codex and is not selectable; the
+    server's own `priority` decides what the dropdown leads with."""
+    import asyncio
+
+    import httpx
+
+    from grc_agent.providers.openai_codex import credentials as creds
+    from grc_agent.providers.openai_codex import model as codex_model
+
+    payload = {
+        "models": [
+            {"slug": "codex-auto-review", "visibility": "hide", "priority": 43},
+            {"slug": "gpt-5.4", "visibility": "list", "priority": 16},
+            {"slug": "gpt-5.4-mini", "visibility": "list", "priority": 23},
+        ]
+    }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *_a, **_k):
+            return httpx.Response(200, json=payload)
+
+    async def fake_valid():
+        return creds.Credential(access="a", refresh="r", expires=9e12, account_id="acct")
+
+    monkeypatch.setattr(codex_model.credentials, "get_valid", fake_valid)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *_a, **_k: _Client())
+
+    assert asyncio.run(codex_model.list_models()) == ["gpt-5.4-mini", "gpt-5.4"]
