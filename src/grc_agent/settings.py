@@ -172,9 +172,7 @@ def load_settings() -> dict:
         or vals.get("OPENROUTER_MODEL")
         or _DEFAULT_MODELS["openai_compatible_model"]
     )
-    openai_codex_model = (
-        vals.get("OPENAI_CODEX_MODEL") or _DEFAULT_MODELS["openai_codex_model"]
-    )
+    openai_codex_model = vals.get("OPENAI_CODEX_MODEL") or _DEFAULT_MODELS["openai_codex_model"]
 
     ollama_url = vals.get("OLLAMA_BASE_URL")
     if not ollama_url:

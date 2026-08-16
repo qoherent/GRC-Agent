@@ -132,11 +132,16 @@ class CodexResponsesModel(OpenAIResponsesModel):
     is inherited unchanged.
     """
 
-    async def request(self, *args, **kwargs):
-        try:
-            return await super().request(*args, **kwargs)
-        except APIStatusError as exc:
-            raise _translate(exc) from exc
+    async def request(self, *_args, **_kwargs):
+        # Codex rejects every non-streaming request with a bare
+        # 400 "Stream must be set to true", which reads as a malformed body
+        # rather than an unsupported mode. The chat sidebar always streams, so
+        # reaching here means a caller took a path this transport cannot
+        # serve — say that instead of relaying the API's wording.
+        raise CodexError(
+            "The ChatGPT (Codex) provider only supports streaming requests; "
+            "this call asked for a non-streamed response."
+        )
 
     def request_stream(self, *args, **kwargs):
         # Returns an async context manager, so the failure surfaces on

@@ -299,9 +299,7 @@ def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
     provider = cfg.get("provider", "ollama")
     if provider in ("openai_compatible", "openrouter"):
         key = (
-            get_env_value("OPENAI_COMPATIBLE_API_KEY")
-            or get_env_value("OPENROUTER_API_KEY")
-            or ""
+            get_env_value("OPENAI_COMPATIBLE_API_KEY") or get_env_value("OPENROUTER_API_KEY") or ""
         )
         url = (
             cfg.get("openai_compatible_base_url")
@@ -309,10 +307,6 @@ def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
             or "https://openrouter.ai/api/v1"
         )
     else:
-        key = (
-            get_env_value("OLLAMA_API_KEY")
-            or get_env_value("OLLAMA_CLOUD_API_KEY")
-            or ""
-        )
+        key = get_env_value("OLLAMA_API_KEY") or get_env_value("OLLAMA_CLOUD_API_KEY") or ""
         url = cfg.get("ollama_base_url") or ""
     return preflight_connection(provider, key, ollama_base_url=url, timeout=timeout)

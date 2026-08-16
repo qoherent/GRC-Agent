@@ -38,14 +38,18 @@ built with, rather than inferring it from a URL. `build_agent_from_cfg` already
 knows the answer; pass it through instead of re-deriving it downstream. That
 removes the guess entirely rather than adding another branch to it.
 
+**Status**: a `chatgpt.com` branch was added so the ChatGPT provider reads
+correctly, but that is one more special case layered on the guess, not a fix.
+The next provider hits the same wall, and a local Ollama served on a
+non-11434 port is still mislabelled today.
+
 ---
 
 ## 2. Dead `openrouter` / `ollama_cloud` code paths
 
 **Where**: [`adapter/rag.py`](../src/grc_agent/adapter/rag.py),
 [`agent_factory.py`](../src/grc_agent/agent_factory.py),
-[`chat_sidebar.py`](../src/grc_agent/chat_sidebar.py) `_confirm_unreachable`,
-plus [`.env.example`](../.env.example).
+[`chat_sidebar.py`](../src/grc_agent/chat_sidebar.py) `_confirm_unreachable`.
 
 `bda0f2f` consolidated the backends to two, and `load_settings()` now
 normalizes the old names on read:
@@ -58,9 +62,9 @@ elif raw_provider in ("ollama", "ollama_cloud"):
 ```
 
 `load_settings()` can therefore never return `"openrouter"` or
-`"ollama_cloud"` — but branches testing for exactly those strings survive
-throughout the codebase and are unreachable. `.env.example` still documents
-four providers that no longer exist.
+`"ollama_cloud"` — but roughly 19 branches testing for exactly those strings
+survive throughout the codebase and are unreachable. (`save_settings()` now
+rejects them outright.)
 
 This is not merely cosmetic: the same pattern already produced one live bug.
 `rag.py` gated the EmbeddingGemma task prefix on `provider != "openrouter"`, a
@@ -68,8 +72,18 @@ condition that became permanently true, so the prefix was applied to every
 backend including non-Gemma models. That instance is fixed; the remaining
 branches are the same trap left armed.
 
-**Proposed fix**: delete the branches and correct `.env.example`. Per AGENTS.md
-("No Backward Compatibility") this is a deletion, not a migration.
+A second instance was found and fixed since: `resolve_model_context_length`
+keyed the context-window lookup on `"openrouter"` alone, so every
+OpenAI-compatible endpoint fell through to `None` and the sidebar showed a
+bare token count with no total to compare against.
+
+`.env.example` has been corrected and no longer documents the dead values.
+The env *keys* (`OPENROUTER_API_KEY`, `OLLAMA_CLOUD_MODEL`, …) are still read
+as fallbacks so existing files keep working — those are a separate decision
+from the dead provider branches.
+
+**Proposed fix**: delete the branches. Per AGENTS.md ("No Backward
+Compatibility") this is a deletion, not a migration.
 
 ---
 
@@ -108,44 +122,7 @@ so the vector index either covers the whole corpus or does not exist.
 
 ---
 
-## 4. `embed_query` always resolves the catalog model
-
-**Where**: [`adapter/rag.py`](../src/grc_agent/adapter/rag.py) — `embed_query`.
-
-```python
-_, model = get_db_and_model("catalog")
-```
-
-This runs even when the caller is querying the `docs` domain. It is harmless
-today only because `get_db_and_model` derives the model from the provider
-rather than the domain, so both domains resolve to the same string. It becomes
-a live bug the moment per-domain embedding models are possible — the docs index
-would be queried with the catalog's model, silently returning garbage rankings
-rather than an error.
-
-**Proposed fix**: pass the caller's domain through instead of hardcoding
-`"catalog"`.
-
----
-
-## 5. `ruff format --check` fails on `main`
-
-**Where**: `adapter/rag.py`, `agent.py`, `agent_factory.py`,
-`ui/settings_dialog.py`, `tests/test_isolation.py`, `tests/test_unit.py`.
-
-Six tracked files are not formatted to the pinned ruff's satisfaction, so CI's
-`Run Ruff (format check)` step fails on `main`. The ruff version is unchanged
-(`0.16.3` in `uv.lock` both before and after the 26.04 relock), so this is
-pre-existing drift, not a version bump — the files were committed without
-`ruff format` having been run.
-
-**Proposed fix**: run `uv run ruff format` once and commit the result. Kept out
-of the 26.04 branch deliberately, so a mechanical reformat of six files does
-not obscure a functional diff.
-
----
-
-## 6. Modal dialogs stall the event loop
+## 4. Modal dialogs stall the event loop
 
 **Where**: [`chat_sidebar.py`](../src/grc_agent/chat_sidebar.py) —
 `_confirm_unreachable` uses `confirm.run()`.

@@ -3396,8 +3396,7 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     thinking_check = next(
         c
         for c in checks
-        if "think" in (c.get_label() or "").lower()
-        or "reasoning" in (c.get_label() or "").lower()
+        if "think" in (c.get_label() or "").lower() or "reasoning" in (c.get_label() or "").lower()
     )
     assert thinking_check.get_active() is True
     thinking_check.set_active(False)
@@ -4050,4 +4049,3 @@ def test_clean_message_history_for_new_turn():
     ]
     cleaned = _clean_message_history_for_new_turn(msgs)
     assert len(cleaned) == 2
-
