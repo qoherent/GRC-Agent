@@ -196,6 +196,17 @@ def _openrouter_context_length(model: str) -> int | None:
     return None
 
 
+def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> float | None:
+    """Generation rate for the last turn, or None when it cannot be measured.
+
+    Returns None rather than 0 for a turn that produced no tokens or took no
+    measurable time — showing "0 tok/s" would read as a stalled backend.
+    """
+    if not output_tokens or not duration_ms or duration_ms <= 0:
+        return None
+    return output_tokens / (duration_ms / 1000)
+
+
 def resolve_model_context_length(provider: str, model: str) -> int | None:
     """Dynamically query the active provider's API for the model's exact context
     length. Cached in-memory per (provider, model) pair; returns None if
@@ -700,6 +711,10 @@ class ChatSidebar(Gtk.Box):
                 text = (
                     f"<span size='small'>Context: {format_tokens(last_input_tokens)} tokens</span>"
                 )
+
+        rate = getattr(self, "_last_turn_rate", None)
+        if rate:
+            text = text.replace("</span>", f" \u00b7 {rate:.0f} tok/s</span>")
 
         if hasattr(self, "_context_label"):
             # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
@@ -1404,6 +1419,13 @@ class ChatSidebar(Gtk.Box):
             ctx.text_dirty = True
             self._flush_streaming(ctx)
         elif isinstance(delta, ThinkingPartDelta):
+            # content_delta is Optional on this delta type (unlike TextPartDelta):
+            # a ThinkingPartDelta may carry only a signature/provider-metadata
+            # update with no text at all. Codex sends those around its reasoning
+            # summary parts, and appending one raised
+            # "can only concatenate str (not NoneType) to str", killing the turn.
+            if delta.content_delta is None:
+                return
             self._close_text(ctx)
             ctx.think_acc += delta.content_delta
             ctx.full_raw_text += delta.content_delta
@@ -2062,6 +2084,12 @@ class ChatSidebar(Gtk.Box):
             if recorder is not None:
                 try:
                     row = recorder.finalize(active_run, turn_exc)
+                    # Generation rate for the status line. Taken from the trace
+                    # row rather than timed separately, so the number shown and
+                    # the number persisted can never disagree.
+                    self._last_turn_rate = _tokens_per_second(
+                        row.get("output_tokens"), row.get("duration_ms")
+                    )
                     if turn_exc is None:
                         await self._save_trace(row)
                     else:

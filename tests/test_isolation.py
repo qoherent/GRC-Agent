@@ -1672,3 +1672,39 @@ def test_codex_requests_reasoning_summaries():
     )
     # store:true and non-streaming are both rejected outright by Codex.
     assert CODEX_MODEL_SETTINGS["openai_store"] is False
+
+
+def test_thinking_delta_without_content_does_not_crash_the_turn():
+    """Regression: ThinkingPartDelta.content_delta is Optional (unlike
+    TextPartDelta's), because a delta may carry only a signature or provider
+    metadata update. Codex sends those around its reasoning summary parts, and
+    `ctx.think_acc += delta.content_delta` raised "can only concatenate str
+    (not NoneType) to str", killing the whole turn.
+    """
+    from pydantic_ai.messages import PartDeltaEvent, ThinkingPartDelta
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    # The field really is optional — that is what makes this reachable.
+    assert ThinkingPartDelta.__dataclass_fields__["content_delta"].type == "str | None"
+
+    ctx = _StreamCtx.__new__(_StreamCtx)
+    ctx.think_acc = "so far"
+    ctx.full_raw_text = "so far"
+
+    sidebar = ChatSidebar.__new__(ChatSidebar)
+    event = PartDeltaEvent(index=0, delta=ThinkingPartDelta(signature_delta="sig"))
+    ChatSidebar._on_part_delta(sidebar, ctx, event)  # must not raise
+
+    assert ctx.think_acc == "so far", "a content-free delta must leave the buffer alone"
+
+
+def test_token_rate_is_omitted_rather_than_shown_as_zero():
+    from grc_agent.chat_sidebar import _tokens_per_second
+
+    assert _tokens_per_second(160, 4000) == 40.0
+    # A turn with no output, or no measurable duration, has no rate — showing
+    # "0 tok/s" would read as a stalled backend.
+    assert _tokens_per_second(0, 4000) is None
+    assert _tokens_per_second(160, 0) is None
+    assert _tokens_per_second(None, None) is None
