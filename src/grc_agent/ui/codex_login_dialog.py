@@ -139,6 +139,16 @@ class CodexLoginDialog(Gtk.Dialog):
         self._submit.set_sensitive(True)
 
     def _cancel_task(self) -> None:
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
+        """Stop waiting on the browser callback.
+
+        Never cancels the *current* task. `_finish` runs inside the callback
+        waiter itself, so cancelling unconditionally here killed the token
+        exchange mid-flight: the CancelledError landed on the `await` inside
+        `_finish`, and because it derives from BaseException rather than
+        Exception, nothing caught it — the sign-in silently never completed
+        and the dialog sat there as if nothing had happened.
+        """
+        task = self._task
         self._task = None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()

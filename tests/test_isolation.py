@@ -1462,3 +1462,73 @@ def test_codex_callback_listens_on_both_loopback_families():
         assert asyncio.run(deliver(family, host)) == f"{family}CODE", (
             f"the callback must be reachable over {family}"
         )
+
+
+def test_codex_login_dialog_completes_from_the_browser_callback(tmp_path, monkeypatch):
+    """End-to-end through the real dialog: a callback must save a credential.
+
+    Regression: `_finish` ran *inside* the callback-waiter task and called
+    `_cancel_task()`, which cancelled that same task. The CancelledError landed
+    on the await inside `_finish`, and since it derives from BaseException the
+    `except Exception` there never saw it — so the token exchange was killed
+    mid-flight, nothing was saved, and no error was displayed. The dialog just
+    sat waiting for a paste, while the browser showed a successful sign-in.
+
+    Unit-testing the pieces missed this entirely; only driving the dialog the
+    way the app does reproduces it.
+    """
+    import asyncio
+
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    if not Gtk.init_check([])[0]:
+        pytest.skip("no display")
+
+    from grc_agent.providers.openai_codex import auth as auth_mod
+    from grc_agent.providers.openai_codex import credentials as creds
+    from grc_agent.ui import codex_login_dialog as dlg_mod
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+
+    async def fake_wait(flow, timeout=300.0):  # noqa: ARG001
+        await asyncio.sleep(0.01)
+        return "THE_CODE"
+
+    exchanged = {}
+
+    async def fake_exchange(code, verifier, redirect_uri=None):  # noqa: ARG001
+        await asyncio.sleep(0.01)  # a real network round trip has an await
+        exchanged["code"] = code
+        cred = creds.Credential(
+            access=_fake_jwt("acct-1"), refresh="r", expires=9e12, account_id="acct-1"
+        )
+        creds.save(cred)
+        return cred
+
+    monkeypatch.setattr(dlg_mod.auth, "wait_for_callback", fake_wait)
+    monkeypatch.setattr(dlg_mod.auth, "exchange_code", fake_exchange)
+    monkeypatch.setattr(dlg_mod.auth, "start_login", auth_mod.start_login)
+    monkeypatch.setattr(dlg_mod.Gio.AppInfo, "launch_default_for_uri", lambda *_a, **_k: True)
+
+    done = {}
+
+    async def drive():
+        dialog = dlg_mod.CodexLoginDialog(None, on_done=lambda ok, err: done.update(ok=ok, err=err))
+        for _ in range(200):  # up to ~2s
+            await asyncio.sleep(0.01)
+            if done:
+                break
+        return dialog
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(drive())
+    finally:
+        loop.close()
+
+    assert exchanged.get("code") == "THE_CODE", "the callback's code must reach the exchange"
+    assert creds.is_signed_in(), "a successful callback must persist a credential"
+    assert done.get("ok") is True, "the dialog must report success so Settings can refresh"
