@@ -106,7 +106,12 @@ MODEL = {
 # querying one model's index with another model's vectors.
 EMBED_MODEL_ID = "llamacpp/embeddinggemma-300m-qat-Q8_0"
 
-# EmbeddingGemma's trained context length.
+# EmbeddingGemma's trained context length. The batch sizes below must match it:
+# an embedding request is a single sequence that has to fit in one physical
+# batch, and llama-server's default ubatch is 512, so leaving it alone rejects
+# any input over 512 tokens with "input (N tokens) is too large to process"
+# — which during ingestion silently costs the whole vector index (see
+# ingest.py's all-or-nothing rule).
 CONTEXT_TOKENS = 2048
 
 USER_AGENT = "grc-agent-setup"
@@ -115,11 +120,8 @@ _READY_TIMEOUT = 180.0
 _HEALTH_TIMEOUT = 1.0
 
 
-class RuntimeError_(RuntimeError):
+class FetchError(RuntimeError):
     """Provisioning or lifecycle failure that should surface as a message."""
-
-
-FetchError = RuntimeError_
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +615,36 @@ def is_alive(timeout: float = _HEALTH_TIMEOUT) -> bool:
         return False
 
 
+def fit_to_context(text: str, limit: int = CONTEXT_TOKENS - 8) -> str:
+    """Truncate `text` to the model's context, measured with the server's own
+    tokenizer rather than estimated.
+
+    A word-count cap cannot bound tokens: across the shipped docs corpus the
+    900-word cap still produced up to 2993 tokens, because tables, code, and
+    URLs tokenize at roughly 3.3 tokens per word instead of the ~1.3 that
+    prose does. Guessing a smaller word cap would truncate ordinary prose
+    chunks to protect against the dense minority; asking the tokenizer is
+    exact and only shortens what actually overflows.
+
+    Costs one local round trip, and a second only when truncation is needed.
+    Returns the text unchanged when it already fits.
+    """
+    token = read_token()
+    with _client(30.0) as c:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        tokens = c.post("/tokenize", json={"content": text}, headers=headers).json()["tokens"]
+        if len(tokens) <= limit:
+            return text
+        _log.warning(
+            "fit_to_context: truncating a document from %d to %d tokens (%.0f%% discarded)",
+            len(tokens),
+            limit,
+            100 * (1 - limit / len(tokens)),
+        )
+        r = c.post("/detokenize", json={"tokens": tokens[:limit]}, headers=headers)
+        return r.json()["content"]
+
+
 def _is_our_server(pid: int) -> bool:
     """Confirm a pid really is our llama-server before signalling it, so a
     recycled pid never gets an unrelated process killed."""
@@ -671,6 +703,11 @@ def ensure_server(wait: float = _READY_TIMEOUT) -> str:
         "-t",
         str(resolve_threads()),
         "-c",
+        str(CONTEXT_TOKENS),
+        # Logical and physical batch must both admit a full-context sequence.
+        "-b",
+        str(CONTEXT_TOKENS),
+        "-ub",
         str(CONTEXT_TOKENS),
         "--no-webui",
         "--api-key",

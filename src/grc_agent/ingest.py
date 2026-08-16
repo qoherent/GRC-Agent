@@ -11,12 +11,16 @@ Schema (must exactly match what query_catalog()/query_docs() read):
     docs_idx       vec0(embedding)                                — vector search, primary
     docs_fts       fts5(path, heading, payload, content=docs_chunks) — lexical fallback
 
-catalog_idx/docs_idx are only built for rows that embedded successfully; if
-every embed call fails (e.g. the embedding backend is unreachable), the
-respective vec0 table is skipped entirely and the DB is left lexical-only —
-catalog_fts/docs_fts are always built from the full chunk set regardless of
-embedding outcome. See adapter/rag.py's query_catalog()/query_docs() for the
-vector-first, lexical-fallback query logic.
+The vector index is all-or-nothing: it either covers the entire corpus or it
+is not built at all. If any embed call fails, the embeddings collected so far
+are discarded and the DB is left lexical-only. A *partial* vec0 table is worse
+than none — queries would report `search_mode: "vector"` while silently
+missing whatever never embedded, and no staleness check can detect that
+(`_db_meta` records only the model and corpus version, both of which still
+match). catalog_fts/docs_fts are always built from the full chunk set
+regardless of embedding outcome, so search keeps working either way. See
+adapter/rag.py's query_catalog()/query_docs() for the vector-first,
+lexical-fallback query logic.
 """
 
 import logging
@@ -103,7 +107,21 @@ def ingest_catalog(  # noqa: C901
                         embedding = embed_document(embed_text, model)
                         vec_rows.append((block_id, embedding))
                     except Exception as exc:
-                        _log.warning("catalog embed failed for block_id=%s: %s", block_id, exc)
+                        # All-or-nothing: one failure disables embedding for the
+                        # rest of the build AND discards what was collected, so
+                        # the index can never cover part of the corpus while
+                        # reporting itself as a healthy vector index. A partial
+                        # index is worse than none — queries would return
+                        # search_mode "vector" with silently missing recall,
+                        # and no staleness check can detect it.
+                        _log.warning(
+                            "catalog embed failed for block_id=%s: %s — discarding %d "
+                            "partial embeddings and building lexical-only (FTS5) index",
+                            block_id,
+                            exc,
+                            len(vec_rows),
+                        )
+                        vec_rows.clear()
                         can_embed = False
         except Exception as exc:
             _log.warning("catalog render failed for block_id=%s: %s", block_id, exc)
@@ -238,7 +256,16 @@ def ingest_docs(  # noqa: C901
                 embedding = embed_document(embed_text, model)
                 vec_rows.append((i, embedding))
             except Exception as exc:
-                _log.warning("docs embed failed for path=%s heading=%s: %s", path, heading, exc)
+                # All-or-nothing — see the identical rule in ingest_catalog.
+                _log.warning(
+                    "docs embed failed for path=%s heading=%s: %s — discarding %d "
+                    "partial embeddings and building lexical-only (FTS5) index",
+                    path,
+                    heading,
+                    exc,
+                    len(vec_rows),
+                )
+                vec_rows.clear()
                 can_embed = False
         if on_progress is not None:
             on_progress(i + 1, total)

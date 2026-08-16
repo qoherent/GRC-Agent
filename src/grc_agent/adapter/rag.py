@@ -225,6 +225,12 @@ def _cap_words(text: str, max_words: int, *, label: str = "") -> str:
 
 def embed_document(text: str, model: str) -> list[float]:
     body = _DOCUMENT_PREFIX + text if _uses_gemma_prefix(model) else text
+    if resolve_embed_backend(load_settings()) == "llamacpp":
+        # The word cap upstream is an estimate; this backend has a hard token
+        # limit we can measure exactly, and exceeding it fails the request —
+        # which, under ingest.py's all-or-nothing rule, costs the entire
+        # vector index rather than one chunk.
+        body = embed_runtime.fit_to_context(body)
     result = _embed(model, body)
     if not isinstance(result, list) or (result and not isinstance(result[0], float)):
         raise TypeError(f"Unexpected embedding response shape from _embed: {type(result)}")

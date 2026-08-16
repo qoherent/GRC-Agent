@@ -1144,3 +1144,52 @@ def test_tar_extraction_refuses_path_traversal(tmp_path):
     with pytest.raises(embed_runtime.FetchError, match="escapes the target"):
         embed_runtime.extract_runtime(archive, tmp_path / "unpacked")
     assert not (tmp_path / "escaped.txt").exists()
+
+
+def test_partial_embedding_failure_yields_no_vector_index(tmp_path, monkeypatch):
+    """A vector index must cover the whole corpus or not exist.
+
+    Regression: one mid-build embed failure used to disable embedding for the
+    remainder of the run while KEEPING what had already been collected, so the
+    vec0 table was created over a fraction of the corpus. Queries then reported
+    search_mode "vector" with silently missing recall, and nothing could detect
+    it — `_db_meta` records only the model and corpus version, both of which
+    still match. Observed live: a docs index with 4 vector rows against 718
+    chunks, which ranked an AGC page top for "what is a stream tag".
+    """
+    import sqlite3
+
+    import sqlite_vec
+
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import get_db_and_model
+
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_path / "vectors"))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("catalog")
+
+    calls = {"n": 0}
+
+    def flaky_embed(text, model):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] > 5:  # the probe plus a handful of blocks succeed first
+            raise RuntimeError("input too large to process")
+        return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr(ingest_mod, "embed_document", flaky_embed)
+    ingest_mod.ingest_catalog(db_path, model)
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        chunks = conn.execute("SELECT count(*) FROM catalog_chunks").fetchone()[0]
+        assert chunks > 0, "the lexical index must still be built in full"
+        assert "catalog_idx" not in tables, (
+            "a partially-embedded corpus must produce NO vector index — a partial "
+            "one reports itself as healthy while silently missing recall"
+        )
+    finally:
+        conn.close()

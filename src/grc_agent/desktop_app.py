@@ -10,7 +10,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 
-from grc_agent import event_loop
+from grc_agent import embed_runtime, event_loop
 
 event_loop.install()
 
@@ -328,6 +328,11 @@ def main() -> None:
     def _shutdown() -> None:
         sidebar.shutting_down()
         sidebar.stop_chat()
+        # The local embedding server is deliberately detached
+        # (start_new_session=True), so without this it would outlive the GUI
+        # holding the model resident. No-op when it was never started.
+        with contextlib.suppress(Exception):
+            embed_runtime.stop_server()
 
         async def _async_cleanup():
             tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]

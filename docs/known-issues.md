@@ -62,21 +62,23 @@ elif raw_provider in ("ollama", "ollama_cloud"):
 throughout the codebase and are unreachable. `.env.example` still documents
 four providers that no longer exist.
 
-This is not merely cosmetic. One such branch is a live bug — see issue 3.
+This is not merely cosmetic: the same pattern already produced one live bug.
+`rag.py` gated the EmbeddingGemma task prefix on `provider != "openrouter"`, a
+condition that became permanently true, so the prefix was applied to every
+backend including non-Gemma models. That instance is fixed; the remaining
+branches are the same trap left armed.
 
 **Proposed fix**: delete the branches and correct `.env.example`. Per AGENTS.md
 ("No Backward Compatibility") this is a deletion, not a migration.
 
 ---
 
-## 3. Serial embedding, and a silently partial vector index
+## 3. Serial embedding calls during ingest
 
 **Where**: [`ingest.py`](../src/grc_agent/ingest.py) — `ingest_catalog` and
 `ingest_docs`.
 
-Two separate defects in the same loop.
-
-**Serial calls.** `_embed` already accepts a list, and `/v1/embeddings` accepts
+`_embed` already accepts a list, and `/v1/embeddings` accepts
 an array, but both ingest paths call `embed_document()` once per item:
 
 ```python
@@ -87,27 +89,22 @@ vec_rows.append((block_id, embedding))
 That is one HTTP round trip per block and per doc chunk. Batching is the single
 largest ingest-latency lever, and it matters most against a local server.
 
-**Silently partial index.** A single mid-run failure disables embedding for the
-remainder of the build, with no retry:
+**Proposed fix**: batch the embed calls.
 
-```python
-except Exception as exc:
-    _log.warning("catalog embed failed for block_id=%s: %s", block_id, exc)
-    can_embed = False
-```
+**Silently partial index — FIXED.** Left here because it was found in the
+wild and is worth not reintroducing. A single mid-run embed failure used to
+disable embedding for the rest of the build while *keeping* what had already
+been collected, so the `vec0` table was created over a fraction of the corpus.
+No staleness check could detect it: `_db_meta` records only `embedding_model`
+and `corpus_version`, both of which still matched, and `rag.py` treats a
+vector-index-present DB as healthy — so queries returned `search_mode:
+"vector"` with silently incomplete recall.
 
-The `vec0` table is still created afterwards from whatever `vec_rows`
-accumulated. The result is a vector index with **fewer rows than the FTS
-index** — some blocks are simply unreachable by vector search. No staleness
-check detects this: `_db_meta` records only `embedding_model` and
-`corpus_version`, both of which still match, and `rag.py` treats a
-vector-index-present DB as healthy. Queries then return `search_mode:
-"vector"` with silently incomplete recall, which violates AGENTS.md's "No
-silent transformation".
-
-**Proposed fix**: batch the embed calls; and on partial failure either abort to
-a lexical-only build or record the expected row count in `_db_meta` so the
-shortfall is detected and triggers a rebuild.
+Observed live while enabling the llama.cpp backend: **4 vector rows against 718
+docs chunks** (and 288 against 584 catalog blocks), which ranked an AGC page
+top for "what is a stream tag" — worse than the lexical fallback it had
+replaced. `ingest.py` now discards partial embeddings and builds lexical-only,
+so the vector index either covers the whole corpus or does not exist.
 
 ---
 
