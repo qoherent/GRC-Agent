@@ -40,16 +40,26 @@ class CodexLoginDialog(Gtk.Dialog):
         self._status.set_line_wrap(True)
         self._status.set_selectable(True)
         self._status.set_text(
-            "A browser window is opening for you to sign in to ChatGPT.\n"
-            "Requires an active ChatGPT Plus or Pro subscription.\n\n"
-            "If the browser did not open — or you are on a remote machine — "
-            "open the link below and paste the resulting address here."
+            "Waiting for you to finish signing in…\n"
+            "The browser redirects back here automatically; this dialog closes "
+            "on its own when it does.\n"
+            "Requires an active ChatGPT Plus or Pro subscription."
         )
         content.pack_start(self._status, False, False, 0)
 
         link = Gtk.LinkButton(uri=self._flow.url, label="Open the ChatGPT sign-in page")
         link.set_halign(Gtk.Align.START)
         content.pack_start(link, False, False, 0)
+
+        fallback = Gtk.Label()
+        fallback.set_xalign(0.0)
+        fallback.set_line_wrap(True)
+        fallback.get_style_context().add_class("dim-label")
+        fallback.set_text(
+            "Only if it does not: copy your browser's address bar after signing "
+            "in (it starts with http://localhost:1455/) and paste it below."
+        )
+        content.pack_start(fallback, False, False, 0)
 
         self._paste = Gtk.Entry()
         self._paste.set_placeholder_text("Paste the redirect URL or authorization code")
@@ -81,6 +91,10 @@ class CodexLoginDialog(Gtk.Dialog):
         except asyncio.CancelledError:
             raise
         except TimeoutError:
+            self._status.set_text(
+                "Timed out waiting for the browser to redirect back. "
+                "Paste the redirect URL below, or Cancel and try again."
+            )
             return
         except Exception as exc:
             self._fail(str(exc))

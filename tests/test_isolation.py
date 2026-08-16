@@ -1424,3 +1424,41 @@ def test_codex_preflight_reports_signed_out_without_a_network_call(tmp_path, mon
 
     creds.save(creds.Credential(access=_fake_jwt("a"), refresh="r", expires=9e12, account_id="a"))
     assert preflight_connection("openai_codex") is None
+
+
+def test_codex_callback_listens_on_both_loopback_families():
+    """Regression: the redirect URI says `localhost`, and the browser decides
+    how to resolve it. On a dual-stack box `localhost` resolves to ::1 first,
+    so binding only 127.0.0.1 got the redirect refused — the browser landed on
+    the authorization server's own "return to your app" page and the sign-in
+    never completed, with no code anywhere for the user to paste instead.
+    """
+    import asyncio
+    import socket
+
+    from grc_agent.providers.openai_codex import auth
+
+    async def deliver(family: str, host: str) -> str:
+        flow = auth.start_login()
+        waiter = asyncio.ensure_future(auth.wait_for_callback(flow, timeout=10))
+        await asyncio.sleep(0.3)
+        try:
+            reader, writer = await asyncio.open_connection(host, auth.CALLBACK_PORT)
+            writer.write(
+                f"GET {auth.CALLBACK_PATH}?code={family}CODE&state={flow.state} "
+                f"HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
+            )
+            await writer.drain()
+            await reader.read(64)
+            writer.close()
+            return await asyncio.wait_for(waiter, 5)
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+
+    for family, host in (("IPV4", "127.0.0.1"), ("IPV6", "::1")):
+        if family == "IPV6" and not socket.has_ipv6:
+            continue
+        assert asyncio.run(deliver(family, host)) == f"{family}CODE", (
+            f"the callback must be reachable over {family}"
+        )

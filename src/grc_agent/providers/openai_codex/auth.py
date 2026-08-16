@@ -36,7 +36,13 @@ ORIGINATOR = "grc-agent"
 # Fixed, not ephemeral: this exact URI is registered against the client id
 # above, and the authorization server rejects anything else. Binding a
 # different port produces a redirect_uri mismatch rather than a working login.
-CALLBACK_HOST = "127.0.0.1"
+# Both loopback families, because the redirect URI says `localhost` and the
+# browser picks how to resolve it. On a dual-stack Linux box `localhost`
+# resolves to ::1 first, so binding only 127.0.0.1 gets the redirect refused
+# and the callback never arrives — the browser lands on the authorization
+# server's own "you can return to your app" page and the sign-in silently
+# never completes.
+CALLBACK_HOSTS = ["127.0.0.1", "::1"]
 CALLBACK_PORT = 1455
 CALLBACK_PATH = "/auth/callback"
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}"
@@ -172,9 +178,31 @@ async def wait_for_callback(flow: LoginFlow, timeout: float = 300.0) -> str:
         finally:
             writer.close()
 
-    server = await asyncio.start_server(handle, CALLBACK_HOST, CALLBACK_PORT)
+    server = await _listen(handle)
     try:
         return await asyncio.wait_for(result, timeout)
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def _listen(handle) -> asyncio.AbstractServer:
+    """Listen on every loopback family available, not just the first.
+
+    Tries both at once, then falls back to whichever alone can bind — a host
+    with IPv6 disabled must still be able to sign in, and so must one where
+    `localhost` only resolves to ::1.
+    """
+    try:
+        return await asyncio.start_server(handle, CALLBACK_HOSTS, CALLBACK_PORT)
+    except OSError as both_failed:
+        for host in CALLBACK_HOSTS:
+            try:
+                return await asyncio.start_server(handle, host, CALLBACK_PORT)
+            except OSError:
+                continue
+        raise AuthenticationError(
+            f"Could not listen on port {CALLBACK_PORT} for the sign-in redirect "
+            f"({both_failed}). Close anything else using it — the Codex CLI uses "
+            "the same port — then try again."
+        ) from both_failed
