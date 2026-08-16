@@ -2192,6 +2192,7 @@ class ChatSidebar(Gtk.Box):
         key_val: str,
         ollama_base_url: str = "http://localhost:11434",
         thinking_enabled: bool = True,
+        embed_backend: str = "auto",
     ) -> None:
         """Post-Save flow: preflight → persist → live-swap.
 
@@ -2230,6 +2231,7 @@ class ChatSidebar(Gtk.Box):
                     model,
                     openai_compatible_base_url=ollama_base_url,
                     thinking_enabled=thinking_enabled,
+                    embed_backend=embed_backend,
                 )
             else:
                 save_settings(
@@ -2237,6 +2239,7 @@ class ChatSidebar(Gtk.Box):
                     model,
                     ollama_base_url=ollama_base_url,
                     thinking_enabled=thinking_enabled,
+                    embed_backend=embed_backend,
                 )
             if key_var:
                 upsert_env_key(key_var, key_val)

@@ -15,8 +15,12 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
+from .. import embed_runtime
 from ..settings import get_env_value
+from .embed_runtime_dialog import EmbedRuntimeDialog
 from .providers import (
+    EMBED_BACKEND_LABELS,
+    EMBED_BACKEND_ORDER,
     PROVIDER_API_KEY,
     PROVIDER_KEY_PLACEHOLDER,
     PROVIDER_LABELS,
@@ -46,7 +50,8 @@ class SettingsDialog(Gtk.Dialog):
         self._build_provider_section(grid)
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 4, 2, 1)
         self._build_execution_section(grid)
-        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 8, 2, 1)
+        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 9, 2, 1)
+        self._build_embeddings_section(grid)
 
         info = Gtk.Label(label="Changes apply immediately on Save.")
         info.get_style_context().add_class("dim-label")
@@ -156,6 +161,72 @@ class SettingsDialog(Gtk.Dialog):
         self.ollama_cloud_check.connect("toggled", self._on_ollama_cloud_toggled)
         self._sync_provider_fields(self.provider_combo)
 
+    def _build_embeddings_section(self, grid: Gtk.Grid) -> None:
+        """Embeddings backend, chosen independently of the chat provider.
+
+        These are separate concerns: a chat endpoint that speaks the OpenAI
+        API need not implement /v1/embeddings (llama-server without
+        `--embeddings` answers 501), and when embeddings fail the knowledge
+        base silently falls back to lexical search. The bundled llama.cpp
+        runtime makes vector search work with nothing installed system-wide.
+        """
+        hdr = Gtk.Label()
+        hdr.set_markup("<b>Knowledge Base (RAG) Embeddings</b>")
+        hdr.set_xalign(0.0)
+        grid.attach(hdr, 0, 10, 2, 1)
+
+        lbl_e = Gtk.Label(label="Embeddings:")
+        lbl_e.set_xalign(0.0)
+        lbl_e.set_tooltip_text(
+            "Which backend computes vectors for block/doc search. Independent "
+            "of the chat provider — many chat endpoints do not serve embeddings."
+        )
+        self.embed_combo = Gtk.ComboBoxText()
+        for backend in EMBED_BACKEND_ORDER:
+            self.embed_combo.append_text(EMBED_BACKEND_LABELS[backend])
+        current = self._cfg.get("embed_backend", "auto")
+        self.embed_combo.set_active(
+            EMBED_BACKEND_ORDER.index(current) if current in EMBED_BACKEND_ORDER else 0
+        )
+        grid.attach(lbl_e, 0, 11, 1, 1)
+        grid.attach(self.embed_combo, 1, 11, 1, 1)
+
+        self.embed_status = Gtk.Label()
+        self.embed_status.set_xalign(0.0)
+        self.embed_status.set_line_wrap(True)
+        self.embed_status.get_style_context().add_class("dim-label")
+        grid.attach(self.embed_status, 1, 12, 1, 1)
+
+        self.embed_install_button = Gtk.Button(label="Install local runtime…")
+        self.embed_install_button.set_tooltip_text(
+            "Download a pinned llama.cpp build and the EmbeddingGemma model "
+            "into your user data directory. Nothing is installed system-wide."
+        )
+        self.embed_install_button.connect("clicked", self._on_install_embed_runtime)
+        grid.attach(self.embed_install_button, 1, 13, 1, 1)
+
+        self.embed_combo.connect("changed", lambda _c: self._sync_embed_fields())
+        self._sync_embed_fields()
+
+    def _sync_embed_fields(self) -> None:
+        idx = self.embed_combo.get_active()
+        backend = EMBED_BACKEND_ORDER[idx] if idx >= 0 else "auto"
+        is_local = backend == "llamacpp"
+        self.embed_install_button.set_visible(is_local)
+        self.embed_status.set_visible(is_local)
+        if not is_local:
+            return
+        if embed_runtime.is_provisioned():
+            self.embed_status.set_text(f"Installed at {embed_runtime.data_dir()}")
+            self.embed_install_button.set_label("Reinstall…")
+        else:
+            self.embed_status.set_text("Not installed — vector search stays lexical until it is.")
+            self.embed_install_button.set_label("Install local runtime…")
+
+    def _on_install_embed_runtime(self, _btn: Gtk.Button) -> None:
+        dlg = EmbedRuntimeDialog(self, on_done=lambda _ok, _err: self._sync_embed_fields())
+        dlg.show()
+
     def _on_ollama_cloud_toggled(self, check: Gtk.CheckButton) -> None:
         idx = self.provider_combo.get_active()
         if idx < 0:
@@ -245,7 +316,9 @@ class SettingsDialog(Gtk.Dialog):
         else:
             base_url = self.url_entry.get_text().strip() or "https://openrouter.ai/api/v1"
         thinking = self.thinking_check.get_active()
-        return provider, model, key_var, key_val, base_url, thinking
+        eidx = self.embed_combo.get_active()
+        embed_backend = EMBED_BACKEND_ORDER[eidx] if eidx >= 0 else "auto"
+        return provider, model, key_var, key_val, base_url, thinking, embed_backend
 
     def _on_response(self, _dlg: Gtk.Dialog, response: int) -> None:
         # Read widget values BEFORE destroy — reading after destroy returns

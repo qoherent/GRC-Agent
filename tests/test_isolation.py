@@ -62,7 +62,11 @@ def test_db_and_model_isolation(tmp_path, monkeypatch):
     assert "catalog_openai_compatible.db" not in db_path_ollama
 
     # Test under OpenAI-Compatible provider
-    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    save_settings(
+        "openai_compatible",
+        "openai/gpt-4o-mini",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+    )
     db_path_compat, model_compat = get_db_and_model("catalog")
     assert db_path_compat.endswith("catalog_openai_compatible.db")
     assert "catalog_ollama.db" not in db_path_compat
@@ -80,7 +84,7 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
 
     # Ollama provider check
     save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
-    base_url, api_key = _embed_endpoint()
+    base_url, api_key, _uds = _embed_endpoint()
     assert base_url == "http://localhost:11434/v1"
     assert api_key == "not-needed"
 
@@ -90,7 +94,7 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
         "openai/gpt-4o-mini",
         openai_compatible_base_url="https://openrouter.ai/api/v1",
     )
-    base_url, api_key = _embed_endpoint()
+    base_url, api_key, _uds = _embed_endpoint()
     assert base_url == "https://openrouter.ai/api/v1"
     assert api_key == "dummy-openrouter-key"
 
@@ -651,7 +655,7 @@ def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path
     # Simulate the embedding backend having recovered since: embed_query now succeeds.
     import grc_agent.adapter.rag as rag_mod
 
-    monkeypatch.setattr(rag_mod, "embed_query", lambda q: [0.1, 0.2, 0.3])  # noqa: ARG005
+    monkeypatch.setattr(rag_mod, "embed_query", lambda q, domain="catalog": [0.1, 0.2, 0.3])  # noqa: ARG005
 
     try:
         res = query_catalog("low pass filter")
@@ -687,7 +691,9 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
 
     monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
     ingest_mod.ingest_docs(db_path, model)
-    assert len(docs_calls) == 1, "ingest_docs backend probe failure must avoid re-calling embed_document per chunk"
+    assert len(docs_calls) == 1, (
+        "ingest_docs backend probe failure must avoid re-calling embed_document per chunk"
+    )
 
     import grc_agent.adapter.rag as rag_mod
 
@@ -852,7 +858,11 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
     )
 
     # openai_compatible (pointing at OpenRouter endpoint)
-    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    save_settings(
+        "openai_compatible",
+        "openai/gpt-4o-mini",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+    )
     upsert_env_key("OPENAI_COMPATIBLE_API_KEY", "sk-or-dummy-key-for-build-test")
     agent_or, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent_or.model, OpenAIChatModel), (
@@ -902,7 +912,11 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     # 2. Simulate the Settings dialog's Save path: write the new provider +
     #    real key to .env, then rebuild (exactly what
     #    ChatSidebar._rebuild_agent invokes after a successful Save).
-    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    save_settings(
+        "openai_compatible",
+        "openai/gpt-4o-mini",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+    )
     upsert_env_key("OPENAI_COMPATIBLE_API_KEY", api_key)
     agent2, _ = build_agent_from_cfg(load_settings())
 
@@ -943,13 +957,190 @@ def test_preflight_connection_returns_none_on_success_and_error_on_failure():
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         # Real success path — exercises the actual endpoint.
-        err = preflight_connection("openai_compatible", api_key, ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0)
+        err = preflight_connection(
+            "openai_compatible",
+            api_key,
+            ollama_base_url="https://openrouter.ai/api/v1",
+            timeout=10.0,
+        )
         assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
 
     # Deterministic failure: missing key for OpenRouter must return a non-empty error string.
-    err = preflight_connection("openai_compatible", "", ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0)
+    err = preflight_connection(
+        "openai_compatible", "", ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0
+    )
     assert isinstance(err, str) and err, "missing openrouter key must produce a non-empty error"
 
     # Deterministic failure: missing key for Ollama Cloud must return a non-empty error string.
     err = preflight_connection("ollama", "", ollama_base_url="https://ollama.com/v1", timeout=10.0)
     assert isinstance(err, str) and err, "missing ollama cloud key must produce a non-empty error"
+
+
+# ---------------------------------------------------------------------------
+# Embeddings backend selection (independent of the chat provider)
+# ---------------------------------------------------------------------------
+
+
+def test_embed_backend_is_independent_of_chat_provider(tmp_path, monkeypatch):
+    """The embeddings backend must be selectable on its own.
+
+    A chat endpoint that speaks the OpenAI API need not implement
+    /v1/embeddings — llama-server started without `--embeddings` answers 501 —
+    so pinning embeddings to the chat provider silently degrades the knowledge
+    base to lexical search with no way to fix it.
+    """
+    from grc_agent.settings import resolve_embed_backend
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    # "auto" (the default) keeps the historical behaviour: follow the chat provider.
+    save_settings("openai_compatible", "some/model")
+    cfg = load_settings()
+    assert cfg["embed_backend"] == "auto"
+    assert resolve_embed_backend(cfg) == "openai_compatible"
+
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    assert resolve_embed_backend(load_settings()) == "ollama"
+
+    # Pinned explicitly, the chat provider no longer has any say.
+    save_settings("openai_compatible", "some/model", embed_backend="llamacpp")
+    cfg = load_settings()
+    assert resolve_embed_backend(cfg) == "llamacpp"
+    assert cfg["provider"] == "openai_compatible"
+
+    db_path, model = get_db_and_model("catalog")
+    assert db_path.endswith("catalog_llamacpp.db"), "each backend needs its own index"
+    assert "embeddinggemma" in model.lower()
+
+    with pytest.raises(ValueError):
+        save_settings("ollama", "m", embed_backend="not-a-backend")
+
+
+def test_gemma_task_prefix_follows_the_model_not_the_provider():
+    """Regression: the EmbeddingGemma task prefix used to be gated on
+    `provider != "openrouter"`, but load_settings() normalizes "openrouter" to
+    "openai_compatible" and can never return it — so the condition was always
+    true and the Gemma-specific prefix was prepended for every backend,
+    including endpoints serving non-Gemma models, corrupting their embeddings.
+
+    The prefix is correct only for EmbeddingGemma, so that is what it keys on.
+    """
+    from grc_agent.adapter.rag import _uses_gemma_prefix
+
+    assert _uses_gemma_prefix("embeddinggemma:latest")
+    assert _uses_gemma_prefix("llamacpp/embeddinggemma-300m-qat-Q8_0")
+    assert not _uses_gemma_prefix("perplexity/pplx-embed-v1-0.6b")
+    assert not _uses_gemma_prefix("text-embedding-3-small")
+    assert not _uses_gemma_prefix(None)
+
+
+def test_embed_query_and_document_agree_on_the_prefix():
+    """Ingest and query must never disagree: a document embedded with the task
+    prefix and a query embedded without it land in different regions of the
+    space, which silently degrades every ranking rather than failing."""
+    from grc_agent.adapter import rag as rag_mod
+
+    seen: list[str] = []
+    orig = rag_mod._embed
+    try:
+        rag_mod._embed = lambda _model, body: seen.append(body) or [0.1, 0.2]
+        for model in ("embeddinggemma:latest", "text-embedding-3-small"):
+            seen.clear()
+            rag_mod.embed_document("hello", model)
+            doc_prefixed = seen[0] != "hello"
+            seen.clear()
+            query_body = (
+                rag_mod._QUERY_PREFIX + "hello" if rag_mod._uses_gemma_prefix(model) else "hello"
+            )
+            assert doc_prefixed == (query_body != "hello"), f"prefix disagreement for {model}"
+    finally:
+        rag_mod._embed = orig
+
+
+def test_llamacpp_runtime_paths_are_xdg_and_overridable(tmp_path, monkeypatch):
+    """Several hundred MB of binaries and weights must not land inside the
+    installed package."""
+    from grc_agent import embed_runtime
+
+    monkeypatch.delenv("GRC_AGENT_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert embed_runtime.data_dir() == tmp_path / "xdg" / "grc-agent"
+
+    monkeypatch.setenv("GRC_AGENT_RUNTIME_DIR", str(tmp_path / "custom"))
+    assert embed_runtime.data_dir() == tmp_path / "custom"
+    assert embed_runtime.bin_dir().parent == embed_runtime.data_dir()
+    assert embed_runtime.model_path().name == embed_runtime.MODEL["file"]
+
+
+def test_runtime_plan_refuses_platforms_it_cannot_run(monkeypatch):
+    """Deciding before downloading is the point: the failure being avoided is
+    a successful download of a binary that cannot start."""
+    from grc_agent import embed_runtime
+
+    assert embed_runtime.runtime_plan(("Linux", "riscv64"))["kind"] == "none"
+
+    monkeypatch.setattr(embed_runtime, "is_musl", lambda: True)
+    plan = embed_runtime.runtime_plan(("Linux", "x86_64"))
+    assert plan["kind"] == "none" and "musl" in plan["reason"]
+
+    monkeypatch.setattr(embed_runtime, "is_musl", lambda: False)
+    monkeypatch.setattr(embed_runtime, "glibc_version", lambda: (2, 17))
+    plan = embed_runtime.runtime_plan(("Linux", "x86_64"))
+    assert plan["kind"] == "none" and "glibc" in plan["reason"]
+
+    monkeypatch.setattr(embed_runtime, "glibc_version", lambda: (2, 39))
+    plan = embed_runtime.runtime_plan(("Linux", "x86_64"))
+    assert plan["kind"] == "upstream" and plan["url"].endswith("ubuntu-x64.tar.gz")
+
+
+def test_download_verifies_before_it_renames(tmp_path, monkeypatch):
+    """A corrupted transfer must never be left at the destination path, where
+    a later run would treat it as a complete install."""
+    from grc_agent import embed_runtime
+
+    class _Fake:
+        headers = {"content-length": "5"}
+
+        def read(self, _n):
+            chunk, self._done = (b"hello" if not getattr(self, "_done", False) else b""), True
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(embed_runtime, "_open", lambda *_a, **_k: _Fake())
+    dest = tmp_path / "artifact.bin"
+
+    with pytest.raises(embed_runtime.FetchError, match="checksum mismatch"):
+        embed_runtime.download("http://x/y", dest, sha256="00" * 32)
+    assert not dest.exists(), "a failed download must not appear at the destination"
+    assert not dest.with_name(dest.name + ".part").exists(), "partial file must be cleaned up"
+
+    import hashlib
+
+    good = hashlib.sha256(b"hello").hexdigest()
+    embed_runtime.download("http://x/y", dest, sha256=good)
+    assert dest.read_bytes() == b"hello"
+
+
+def test_tar_extraction_refuses_path_traversal(tmp_path):
+    """The archive is fetched over the network; a member escaping the target
+    directory must be a hard failure, not a surprising write."""
+    import io
+    import tarfile
+
+    from grc_agent import embed_runtime
+
+    archive = tmp_path / "evil.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        data = b"pwned"
+        info = tarfile.TarInfo("../escaped.txt")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(embed_runtime.FetchError, match="escapes the target"):
+        embed_runtime.extract_runtime(archive, tmp_path / "unpacked")
+    assert not (tmp_path / "escaped.txt").exists()

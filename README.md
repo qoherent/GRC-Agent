@@ -143,12 +143,28 @@ Use any OpenAI-compatible server or cloud provider (e.g. `OpenRouter`, `llama.cp
 - **Local Server (llama.cpp / vLLM / LM Studio):** Base URL `http://localhost:8080/v1` (or your server port), Model e.g. `qwen2.5-coder:32b`, API key optional.
 - **OpenAI / Cloud Providers:** Base URL e.g. `https://api.openai.com/v1`, Model e.g. `gpt-4o`, paste your API key.
 
+#### Embeddings for vector search
+Vector search (`query_knowledge`) needs an embeddings endpoint, and that is
+chosen **independently of the chat provider** in the Settings dialog — many
+chat endpoints do not serve embeddings at all (`llama-server` started without
+`--embeddings` answers HTTP 501). Options:
+
+- **Local llama.cpp (bundled)** — click *Install local runtime…* in Settings.
+  Downloads a pinned `llama.cpp` build and the EmbeddingGemma GGUF (~345 MB
+  total, less if you already have `llama-server` on your `PATH`) into
+  `~/.local/share/grc-agent`. Nothing is installed system-wide, and it needs
+  no Ollama.
+- **Ollama** — `ollama pull embeddinggemma:latest`.
+- **OpenAI-Compatible** — uses your configured chat endpoint, if it serves
+  `/v1/embeddings`.
+- **Follow chat provider** (default) — whichever of the two above matches your
+  chat provider.
+
 > [!NOTE]
-> Vector search (`query_knowledge`) uses embeddings locally via Ollama
-> (`embeddinggemma:latest`) when available. If the embedding
-> backend is unreachable, search automatically uses local SQLite FTS5 (BM25)
-> keyword search over the same corpus without requiring any manual setup —
-> the tool result always indicates `"search_mode": "lexical"` (vs. `"vector"`).
+> If the embeddings backend is unreachable, search falls back to local SQLite
+> FTS5 (BM25) keyword search over the same corpus with no manual setup — the
+> tool result always reports `"search_mode": "lexical"` (vs. `"vector"`), so
+> the degradation is never silent.
 
 ---
 

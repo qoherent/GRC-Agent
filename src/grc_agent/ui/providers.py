@@ -52,3 +52,14 @@ def resolve_provider_from_base_url(base_url: str) -> str:
     if base_url:
         return "openai_compatible"
     return ""
+
+
+# Embeddings backend, chosen independently of the chat provider. "auto" keeps
+# the historical behaviour of following the chat provider; the rest pin it.
+EMBED_BACKEND_ORDER = ("auto", "llamacpp", "ollama", "openai_compatible")
+EMBED_BACKEND_LABELS = {
+    "auto": "Follow chat provider",
+    "llamacpp": "Local llama.cpp (bundled EmbeddingGemma)",
+    "ollama": "Ollama",
+    "openai_compatible": "OpenAI Compatible",
+}

@@ -8,12 +8,14 @@ benchmarking.
 Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
 -> ~/.config/grc_agent/.env for an installed package):
 
-  GRC_PROVIDER          active provider: ollama | openrouter | ollama_cloud
-  OLLAMA_CHAT_MODEL     local Ollama chat model
-  OPENROUTER_MODEL      OpenRouter chat model
-  OLLAMA_CLOUD_MODEL    Ollama Cloud chat model
-  OPENROUTER_API_KEY    OpenRouter API key
-  OLLAMA_CLOUD_API_KEY  Ollama Cloud API key
+  GRC_PROVIDER              active chat provider: ollama | openai_compatible
+  GRC_EMBED_BACKEND         embeddings backend: auto | ollama | llamacpp |
+                            openai_compatible ("auto" follows GRC_PROVIDER)
+  OLLAMA_CHAT_MODEL         local Ollama chat model
+  OPENAI_COMPATIBLE_MODEL   OpenAI-compatible chat model
+  OLLAMA_BASE_URL           local/remote Ollama base URL
+  OPENAI_COMPATIBLE_BASE_URL
+  OPENAI_COMPATIBLE_API_KEY
 
 `load_settings()` reads the `.env` *file* (the saved source of truth), never
 os.environ. A model/provider change is applied live by the Settings dialog's
@@ -29,6 +31,15 @@ from pathlib import Path
 from dotenv import dotenv_values, set_key
 
 _VALID_PROVIDERS = ("ollama", "openai_compatible")
+
+# Which backend serves RAG embeddings. Deliberately independent of the chat
+# provider: a chat endpoint that speaks the OpenAI API does not necessarily
+# implement /v1/embeddings (llama-server started without `--embeddings`
+# answers 501), and when it does not, vector search silently degrades to
+# lexical BM25. "auto" keeps the historical behaviour of following the chat
+# provider; the others pin it explicitly.
+_VALID_EMBED_BACKENDS = ("auto", "ollama", "llamacpp", "openai_compatible")
+_DEFAULT_EMBED_BACKEND = "auto"
 
 # Per-provider chat-model env var name + settings dict key.
 _PROVIDER_ENV_VAR = {
@@ -94,9 +105,23 @@ def env_path() -> Path:
     return Path.home() / ".config" / "grc_agent" / ".env"
 
 
+def resolve_embed_backend(cfg: dict) -> str:
+    """The backend that actually serves embeddings for this config.
+
+    Resolves "auto" to the chat provider. Single source of truth so `rag.py`
+    (which picks the endpoint and the vector-DB filename) and the Settings
+    dialog can never disagree about which backend is in use.
+    """
+    backend = cfg.get("embed_backend", _DEFAULT_EMBED_BACKEND)
+    if backend == "auto":
+        return cfg.get("provider", _DEFAULT_PROVIDER)
+    return backend
+
+
 def default_settings() -> dict:
     res = {
         "provider": _DEFAULT_PROVIDER,
+        "embed_backend": _DEFAULT_EMBED_BACKEND,
         "ollama_base_url": _DEFAULT_OLLAMA_BASE_URL,
         "openai_compatible_base_url": _DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
         "ollama_thinking_enabled": _DEFAULT_OLLAMA_THINKING_ENABLED,
@@ -150,8 +175,13 @@ def load_settings() -> dict:
     if not openai_url:
         openai_url = _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
 
+    embed_backend = vals.get("GRC_EMBED_BACKEND", _DEFAULT_EMBED_BACKEND)
+    if embed_backend not in _VALID_EMBED_BACKENDS:
+        embed_backend = _DEFAULT_EMBED_BACKEND
+
     res = {
         "provider": provider,
+        "embed_backend": embed_backend,
         "ollama_model": ollama_model,
         "openai_compatible_model": openai_compatible_model,
         "ollama_base_url": ollama_url,
@@ -175,11 +205,14 @@ def save_settings(
     ollama_base_url: str | None = None,
     openai_compatible_base_url: str | None = None,
     thinking_enabled: bool | None = None,
+    embed_backend: str | None = None,
 ) -> None:
-    """Persist the active provider, chat model name, base URLs, and
-    thinking toggle into the `.env` file."""
+    """Persist the active provider, chat model name, base URLs, embedding
+    backend, and thinking toggle into the `.env` file."""
     if provider not in _VALID_PROVIDERS:
         raise ValueError(f"Unknown provider: {provider!r}")
+    if embed_backend is not None and embed_backend not in _VALID_EMBED_BACKENDS:
+        raise ValueError(f"Unknown embedding backend: {embed_backend!r}")
     if not model.strip():
         raise ValueError("model must be non-empty")
     upsert_env_key("GRC_PROVIDER", provider)
@@ -192,6 +225,8 @@ def save_settings(
         upsert_env_key("OPENAI_COMPATIBLE_BASE_URL", url)
     if thinking_enabled is not None:
         upsert_env_key("OLLAMA_THINKING_ENABLED", "true" if thinking_enabled else "false")
+    if embed_backend is not None:
+        upsert_env_key("GRC_EMBED_BACKEND", embed_backend)
 
 
 def get_env_value(key: str) -> str | None:
