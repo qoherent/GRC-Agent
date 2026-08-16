@@ -10,28 +10,9 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 
-import gbulb
+from grc_agent import event_loop
 
-gbulb.install(gtk=True)
-
-# Patch gbulb to avoid AssertionError in ReadTransport._loop_reading when transports close/change
-try:
-    import gbulb.transports
-
-    _original_loop_reading = gbulb.transports.ReadTransport._loop_reading
-
-    def _patched_loop_reading(self, fut=None):
-        if (
-            fut is not None
-            and self._read_fut is not fut
-            and not (self._read_fut is None and self._closing)
-        ):
-            return
-        return _original_loop_reading(self, fut)
-
-    gbulb.transports.ReadTransport._loop_reading = _patched_loop_reading
-except Exception as e:
-    print(f"Warning: Failed to patch gbulb transports: {e}")
+event_loop.install()
 
 from gi.repository import Gdk, GLib, Gtk
 
@@ -316,7 +297,7 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
     """Run after window.show_all() — surfaces a non-blocking status-bar
     warning if the configured chat backend is unreachable. Bounded at 5s
     inside preflight_from_cfg. Running it via asyncio.to_thread keeps the
-    gbulb-unified main loop responsive (chat streaming, indexing polls,
+    unified main loop responsive (chat streaming, indexing polls,
     canvas syncs all keep firing) instead of the old sync call that
     delayed window.show_all() by up to 5s before any window appeared."""
     try:
@@ -342,8 +323,7 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
 def main() -> None:
     window, canvas, sidebar, proxy = build_app()
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    loop = event_loop.main_event_loop()
 
     def _shutdown() -> None:
         sidebar.shutting_down()

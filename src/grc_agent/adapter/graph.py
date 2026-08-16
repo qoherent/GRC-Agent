@@ -816,6 +816,29 @@ def set_param(block: Any, param_key: str, value: str) -> None:
     param.set_value(raw_value)
 
 
+def _revert_flow_graph(flow_graph: Any, initial_data: Any) -> str | None:
+    """Restore the shared flowgraph to its pre-mutation state.
+
+    Returns an error string if the revert itself failed, and never raises.
+    Every caller is already on a failure path returning ok:false, so
+    propagating from here would replace that structured result with a raw
+    traceback while leaving the canvas-rendered graph half-mutated — the exact
+    outcome the rollback exists to prevent.
+
+    The revert can genuinely fail: GNU Radio >= 3.10.12's `import_data` calls
+    `flow_graph.validate()` itself (`core/blocks/options.py`'s
+    `insert_grc_parameters`), so whatever raised on the way in can raise again
+    on the way back out. A failed revert is reported to the caller rather than
+    swallowed.
+    """
+    try:
+        flow_graph.import_data(initial_data)
+        flow_graph.rewrite()
+        return None
+    except Exception as exc:
+        return f"rollback failed, flowgraph may be left mutated: {exc}"
+
+
 def change_graph(  # noqa: C901
     flow_graph: Any,
     add_blocks: list[dict] | None = None,
@@ -1241,13 +1264,16 @@ def change_graph(  # noqa: C901
                 )
 
     except Exception as exc:
-        flow_graph.import_data(initial_data)
-        flow_graph.rewrite()
-        return {"ok": False, "errors": [{"code": "mutation_failed", "message": str(exc)}]}
+        mutation_errors = [{"code": "mutation_failed", "message": str(exc)}]
+        revert_error = _revert_flow_graph(flow_graph, initial_data)
+        if revert_error:
+            mutation_errors.append({"code": "rollback_failed", "message": revert_error})
+        return {"ok": False, "errors": mutation_errors}
 
     if errors:
-        flow_graph.import_data(initial_data)
-        flow_graph.rewrite()
+        revert_error = _revert_flow_graph(flow_graph, initial_data)
+        if revert_error:
+            errors.append({"code": "rollback_failed", "message": revert_error})
         return {"ok": False, "errors": errors}
 
     # See inspect_graph's identical call for why this is required: without
@@ -1269,23 +1295,28 @@ def change_graph(  # noqa: C901
                     validation_errors.append(
                         {"code": "gnu_validation", "message": f"{elem}: {msg}"}
                     )
-            flow_graph.import_data(initial_data)
-            flow_graph.rewrite()
+            if not validation_errors:
+                validation_errors = [
+                    {"code": "gnu_validation", "message": "GRC validation failed."}
+                ]
+            revert_error = _revert_flow_graph(flow_graph, initial_data)
+            if revert_error:
+                validation_errors.append({"code": "rollback_failed", "message": revert_error})
             return {
                 "ok": False,
                 "error_type": "validation_failed",
-                "errors": validation_errors
-                if validation_errors
-                else [{"code": "gnu_validation", "message": "GRC validation failed."}],
+                "errors": validation_errors,
             }
     except Exception as exc:
         # The validation gate itself raised (rather than populating an error
         # list). The phases above already mutated the shared, canvas-rendered
         # flowgraph, so revert it exactly like the enclosing mutation rollback
         # instead of propagating the exception and leaving the graph mutated.
-        flow_graph.import_data(initial_data)
-        flow_graph.rewrite()
-        return {"ok": False, "errors": [{"code": "mutation_failed", "message": str(exc)}]}
+        gate_errors = [{"code": "mutation_failed", "message": str(exc)}]
+        revert_error = _revert_flow_graph(flow_graph, initial_data)
+        if revert_error:
+            gate_errors.append({"code": "rollback_failed", "message": revert_error})
+        return {"ok": False, "errors": gate_errors}
 
     # Write atomically with lock and backup
     try:
@@ -1331,14 +1362,16 @@ def change_graph(  # noqa: C901
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception as exc:
-        flow_graph.import_data(initial_data)
-        flow_graph.rewrite()
+        save_errors = [
+            {"code": "save_failed", "message": f"Failed to commit changes atomically: {exc}"}
+        ]
+        revert_error = _revert_flow_graph(flow_graph, initial_data)
+        if revert_error:
+            save_errors.append({"code": "rollback_failed", "message": revert_error})
         return {
             "ok": False,
             "error_type": "save_failed",
-            "errors": [
-                {"code": "save_failed", "message": f"Failed to commit changes atomically: {exc}"}
-            ],
+            "errors": save_errors,
         }
 
     return {"ok": True}
