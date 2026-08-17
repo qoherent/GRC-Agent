@@ -752,3 +752,60 @@ def test_trace_finalize_without_run_records_zero_usage():
     assert row["reasoning_tokens"] == 0
     assert row["total_tokens"] == 0
     assert row["input_tokens"] == 0
+
+
+def test_trace_finalize_generation_ms_from_native_timestamps():
+    """generation_ms must come from pydantic-ai's own ModelRequest/ModelResponse
+    timestamps (the delta per pair = that request's model processing time),
+    summed over THIS run's messages only — tool execution happens between a
+    response and the next request, so it is excluded by construction, and
+    new_messages() excludes prior turns' messages."""
+    from datetime import UTC, datetime, timedelta
+
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        UserPromptPart,
+    )
+
+    from grc_agent.trace import TraceRecorder
+
+    t0 = datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC)
+
+    def req(offset_s: float) -> ModelRequest:
+        return ModelRequest(
+            parts=[UserPromptPart(content="p")], timestamp=t0 + timedelta(seconds=offset_s)
+        )
+
+    def resp(offset_s: float) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart(content="t")], timestamp=t0 + timedelta(seconds=offset_s)
+        )
+
+    # This run: request at +0.0 -> response at +0.4 (400ms generation),
+    # then a 2s tool gap, then request at +2.4 -> response at +2.7 (300ms).
+    new_msgs = [req(0.0), resp(0.4), req(2.4), resp(2.7)]
+
+    class _Result:
+        output = "done"
+
+        def new_messages(self):
+            return new_msgs
+
+    class _Run:
+        run_id = "r"
+        conversation_id = "c"
+        usage = None
+        result = _Result()
+
+        def all_messages(self):
+            return new_msgs
+
+    rec = TraceRecorder(
+        session_id=None, provider="p", model="m", base_url="b", user_prompt="u", origin_page_path=None
+    )
+    row = rec.finalize(_Run())
+
+    # 400 + 300 = 700ms of generation; the 2s tool gap is excluded.
+    assert row["generation_ms"] == 700, f"expected 700ms of generation, got {row['generation_ms']}"

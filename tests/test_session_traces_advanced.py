@@ -687,10 +687,18 @@ def test_chatsidebar_run_agent_turn_produces_trace_row(tmp_path):
     # Run id should be a real UUID from pydantic-ai
     assert t["run_id"] is not None and len(t["run_id"]) > 10
 
-    # The tok/s status-line rate must be computed from the real turn: visible
-    # output tokens over measured generation time (both > 0 for a real stream).
+    # The tok/s status-line rate must be computed from the trace row's own
+    # numbers — the displayed rate and the persisted row can never disagree.
+    # (TestModel generates in <1ms, so generation_ms truncates to 0 and the
+    # rate is None — the consistency contract is what's asserted, not a
+    # positive value.)
+    from grc_agent.chat_sidebar import _tokens_per_second
+
     rate = getattr(sidebar, "_last_turn_rate", None)
-    assert rate is not None and rate > 0, f"expected a positive tok/s rate, got {rate!r}"
+    visible = max(0, (t["output_tokens"] or 0) - (t["reasoning_tokens"] or 0))
+    assert rate == _tokens_per_second(visible, t["generation_ms"]), (
+        f"displayed rate {rate!r} must match the trace row's numbers"
+    )
     assert t["output_tokens"] > 0, "the trace row must carry the turn's output tokens"
 
 
@@ -802,3 +810,66 @@ def ModelResponse_with_text(text):
     from pydantic_ai.messages import ModelResponse, TextPart
 
     return ModelResponse(parts=[TextPart(content=text)])
+
+
+def test_v2_to_v3_migration_adds_generation_ms(tmp_path, monkeypatch):
+    """A DB already at schema_version=2 (turn_traces without generation_ms)
+    must be migrated to v3 by adding the column, defaulting existing rows to
+    0, without touching existing trace data."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    from grc_agent.db import LATEST_SCHEMA_VERSION, get_db_path
+
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build a v2 DB manually: sessions + turn_traces WITHOUT generation_ms.
+    with sqlite3.connect(str(db_path)) as raw:
+        raw.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '2')")
+        raw.execute(
+            "CREATE TABLE sessions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "grc_file_path TEXT NOT NULL, "
+            "messages TEXT NOT NULL, "
+            "first_message TEXT NOT NULL DEFAULT '', "
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        raw.execute(
+            "INSERT INTO sessions (grc_file_path, messages, first_message) VALUES (?, ?, ?)",
+            (str(tmp_path / "v2.grc"), "[]", "v2 prompt"),
+        )
+        raw.execute(
+            "CREATE TABLE turn_traces ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "session_id INTEGER NOT NULL, "
+            "run_id TEXT, conversation_id TEXT, provider TEXT, model TEXT, "
+            "base_url TEXT, system_prompt_hash TEXT, user_prompt TEXT, "
+            "origin_page_path TEXT, started_at REAL NOT NULL, ended_at REAL, "
+            "duration_ms INTEGER, events TEXT NOT NULL DEFAULT '[]', "
+            "final_output TEXT, error TEXT, "
+            "input_tokens INTEGER NOT NULL DEFAULT 0, "
+            "output_tokens INTEGER NOT NULL DEFAULT 0, "
+            "reasoning_tokens INTEGER NOT NULL DEFAULT 0, "
+            "total_tokens INTEGER NOT NULL DEFAULT 0, "
+            "FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE)"
+        )
+        raw.execute(
+            "INSERT INTO turn_traces (session_id, run_id, started_at, output_tokens) "
+            "VALUES (1, 'old-run', 1000.0, 42)"
+        )
+        raw.commit()
+
+    from grc_agent import db as db_mod
+
+    db_mod._initialized_paths.clear()
+    db_mod.init_db()
+
+    with sqlite3.connect(str(db_path)) as raw:
+        version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
+        assert int(version[0]) == LATEST_SCHEMA_VERSION
+        cols = [r[1] for r in raw.execute("PRAGMA table_info(turn_traces)").fetchall()]
+        assert "generation_ms" in cols
+        # Pre-existing rows default to 0, data untouched.
+        row = raw.execute("SELECT run_id, output_tokens, generation_ms FROM turn_traces").fetchone()
+        assert row == ("old-run", 42, 0)

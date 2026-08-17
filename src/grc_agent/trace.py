@@ -136,6 +136,26 @@ def _extract_input_and_prompt_hash(messages: list[Any]) -> tuple[int, str]:
     return input_tokens, system_prompt_hash
 
 
+def _generation_ms_from_messages(new_msgs: list[Any]) -> int:
+    """Sum of (ModelResponse.timestamp - ModelRequest.timestamp) per pair.
+
+    pydantic-ai stamps high-precision local timestamps on ModelRequest
+    (send) and ModelResponse (received) — the delta per (request, response)
+    pair is that request's model processing time (TTFT + generation). Tool
+    execution happens between a response and the next request, so summing
+    the pairs excludes it. `new_msgs` must be THIS run's own messages
+    (result.new_messages() — input history and older runs excluded), so no
+    prior-turn leakage. Verified live: a tool-calling turn's pair-sum matched
+    the measured generation time and excluded the tool sleep.
+    """
+    total_ms = 0.0
+    # The pairing is inherently (n, n-1): the last message has no successor.
+    for prev, m in zip(new_msgs, new_msgs[1:], strict=False):
+        if m.__class__.__name__ == "ModelResponse" and prev.__class__.__name__ == "ModelRequest":
+            total_ms += (m.timestamp - prev.timestamp).total_seconds() * 1000
+    return int(total_ms)
+
+
 class TraceRecorder:
     """Per-turn trace collector. Fed in-memory by the stream handlers during
     ``_run_agent_turn``; ``finalize`` produces the row for ``save_turn_trace``.
@@ -251,6 +271,16 @@ class TraceRecorder:
             except Exception:
                 final_output = ""
 
+        # Generation time, natively: pydantic-ai's own ModelRequest/ModelResponse
+        # timestamps (see _generation_ms_from_messages). result.new_messages()
+        # is this run's own messages only, so no prior-turn leakage.
+        generation_ms = 0
+        if result is not None:
+            try:
+                generation_ms = _generation_ms_from_messages(list(result.new_messages()))
+            except Exception:
+                generation_ms = 0
+
         events_list = list(self._events)
         if self._dropped:
             events_list.append({"kind": "dropped", "count": self._dropped})
@@ -268,6 +298,7 @@ class TraceRecorder:
             "started_at": self.started_at,
             "ended_at": ended_at,
             "duration_ms": int((ended_at - self.started_at) * 1000),
+            "generation_ms": int(generation_ms),
             "events": json.dumps(events_list, default=str),
             "final_output": final_output,
             "error": _format_exc(exc),
@@ -282,9 +313,9 @@ _INSERT_TURN_TRACE_SQL = """
 INSERT INTO turn_traces (
     session_id, run_id, conversation_id, provider, model, base_url,
     system_prompt_hash, user_prompt, origin_page_path, started_at, ended_at,
-    duration_ms, events, final_output, error,
+    duration_ms, generation_ms, events, final_output, error,
     input_tokens, output_tokens, reasoning_tokens, total_tokens
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -322,6 +353,7 @@ def save_turn_trace(row: dict[str, Any]) -> int | None:
                 row["started_at"],
                 row["ended_at"],
                 row["duration_ms"],
+                row["generation_ms"],
                 row["events"],
                 row["final_output"],
                 row["error"],

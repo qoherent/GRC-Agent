@@ -15,7 +15,7 @@ _log = logging.getLogger(__name__)
 # Latest on-disk schema version applied by init_db(). Each migration in
 # _apply_migrations() bumps the version recorded in the `_meta` table so a
 # crashed migration resumes cleanly and a stale-schema DB is detectable.
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 # Generous cap so the sessions table cannot grow without limit. The previous
 # JSON-file store bounded itself to 10 on write; this only prunes well outside
@@ -186,9 +186,19 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_turn_traces_session ON turn_traces(session_id)")
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v3: `turn_traces.generation_ms` — the turn's model generation time,
+    computed natively from pydantic-ai's ModelRequest/ModelResponse
+    timestamps (tool-call time excluded). The tok/s status-line rate derives
+    from it, so the displayed number and the persisted row can never
+    disagree."""
+    conn.execute("ALTER TABLE turn_traces ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0")
+
+
 _MIGRATIONS = (
     _migrate_to_v1,
     _migrate_to_v2,
+    _migrate_to_v3,
 )
 
 

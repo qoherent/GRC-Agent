@@ -238,10 +238,11 @@ def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> fl
     """Generation rate for the last turn, or None when it cannot be measured.
 
     `output_tokens` is the turn's VISIBLE output (total minus reasoning) and
-    `duration_ms` is the time the model was actually generating (tool-call
-    time excluded, measured per model request in _stream_request) — so the
-    number is the rate the user watched text stream, not tokens per
-    wall-clock turn second.
+    `duration_ms` is the time the model was actually generating — computed
+    natively from pydantic-ai's ModelRequest/ModelResponse timestamps (see
+    TraceRecorder.finalize), so tool-call time is excluded and the number is
+    the rate the user watched text stream, not tokens per wall-clock turn
+    second.
 
     Returns None rather than 0 for a turn that produced no tokens or took no
     measurable time — showing "0 tok/s" would read as a stalled backend.
@@ -372,7 +373,6 @@ class _StreamCtx:
         "tools",
         "full_raw_text",
         "last_flush",
-        "generation_ms",
     )
 
     def __init__(self, box: Gtk.Box) -> None:
@@ -392,10 +392,6 @@ class _StreamCtx:
         self.tools: dict[str, Gtk.Expander] = {}
         self.full_raw_text = ""
         self.last_flush = 0.0
-        # Wall time the model spent generating this turn (summed per model
-        # request in _stream_request). Tool-call execution happens between
-        # requests and is deliberately excluded — it is not generation.
-        self.generation_ms = 0.0
 
 
 class _ChatTextView(Gtk.ScrolledWindow):
@@ -1375,7 +1371,6 @@ class ChatSidebar(Gtk.Box):
     async def _stream_request(
         self, ctx: _StreamCtx, node, run, recorder: TraceRecorder | None = None
     ) -> None:
-        t0 = time.monotonic()
         async with node.stream(run.ctx) as stream:
             async for event in stream:
                 if isinstance(event, PartStartEvent):
@@ -1384,10 +1379,6 @@ class ChatSidebar(Gtk.Box):
                     self._on_part_delta(ctx, event)
                 if recorder is not None:
                     recorder.on_event(event)
-        # The stream's wall time is this model request's generation time
-        # (first-token latency included); tool-call time happens between
-        # requests and is excluded from the tok/s denominator.
-        ctx.generation_ms += (time.monotonic() - t0) * 1000
         # Force a final flush so the last throttled chunk is painted before the
         # node hands control back (and before any markdown re-render).
         self._flush_streaming(ctx, force=True)
@@ -2224,17 +2215,18 @@ class ChatSidebar(Gtk.Box):
                     row = recorder.finalize(active_run, turn_exc)
                     # Generation rate for the status line. Visible output
                     # tokens (turn total minus hidden reasoning) over the
-                    # time the model was actually generating (tool-call time
-                    # excluded) — the rate the user watched text stream, not
-                    # tokens per wall-clock turn second. Taken from the trace
-                    # row + the stream timing rather than timed separately, so
-                    # the number shown and the number persisted can never
-                    # disagree.
+                    # time the model was actually generating — computed
+                    # natively by the trace from pydantic-ai's own
+                    # ModelRequest/ModelResponse timestamps (tool-call time
+                    # excluded). Taken from the trace row rather than timed
+                    # separately, so the number shown and the number
+                    # persisted can never disagree.
                     visible_output = max(
                         0, (row.get("output_tokens") or 0) - (row.get("reasoning_tokens") or 0)
                     )
-                    gen_ms = getattr(ctx, "generation_ms", 0) or 0
-                    self._last_turn_rate = _tokens_per_second(visible_output, gen_ms)
+                    self._last_turn_rate = _tokens_per_second(
+                        visible_output, row.get("generation_ms")
+                    )
                     if turn_exc is None:
                         await self._save_trace(row)
                     else:
