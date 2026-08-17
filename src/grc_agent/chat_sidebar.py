@@ -10,6 +10,7 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -126,6 +127,35 @@ def _format_tool_display(text: str, max_chars: int = _MAX_TOOL_DISPLAY_CHARS) ->
         return text
     half = max_chars // 2
     return f"{text[:half]}\n\n... [truncated {len(text) - max_chars} chars] ...\n\n{text[-half:]}"
+
+
+def _parse_final_summary(args: Any) -> tuple[list[str], str] | None:
+    """Recover the model's final structured output from a `final_result` tool call.
+
+    The agent's output type is `[GrcAgentResponse, str]`, so a structured turn
+    ends with a call to pydantic-ai's generated `final_result` tool whose args
+    are the GrcAgentResponse JSON (`actions_taken` + `explanation`). Returns
+    (actions, explanation) when the args carry that shape, else None — the
+    caller then renders the call as an ordinary tool expander instead.
+    """
+    if not args:
+        return None
+    if isinstance(args, str):
+        try:
+            data = json.loads(args)
+        except (ValueError, TypeError):
+            return None
+    elif isinstance(args, dict):
+        data = args
+    else:
+        return None
+    actions = data.get("actions_taken")
+    explanation = data.get("explanation")
+    if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
+        return None
+    if not isinstance(explanation, str):
+        explanation = ""
+    return actions, explanation
 
 
 _context_length_cache: dict[tuple[str, str], int] = {}
@@ -1365,6 +1395,22 @@ class ChatSidebar(Gtk.Box):
             self._close_text(ctx)
             self._close_thinking(ctx)
             tcid = part.tool_call_id or ""
+            summary = _parse_final_summary(part.args)
+            if (part.tool_name or "") == "final_result" and summary is not None:
+                # The model's final structured output (GrcAgentResponse)
+                # arrives as a final_result tool call — render it as a
+                # readable summary card, not a raw-JSON tool expander.
+                # Deliberately NOT registered in ctx.tools: the
+                # FunctionToolResultEvent handler would overwrite the card
+                # with the "Final result processed." return.
+                widget = self._make_final_summary_widget(*summary)
+                ctx.box.pack_start(widget, False, False, 0)
+                widget.show_all()
+                ctx.full_raw_text += (
+                    f"<Summary>\n{summary[0]}\n{summary[1]}\n</Summary>\n"
+                )
+                self._update_copy_text(ctx.box, ctx.full_raw_text)
+                return
             exp = self._make_tool_expander(part.tool_name or "?")
             args_str = str(part.args) if part.args else ""
             if args_str:
@@ -1710,6 +1756,16 @@ class ChatSidebar(Gtk.Box):
                 full_text += f"<Thinking>\n{part.content}\n</Thinking>\n"
             elif part_cls == "ToolCallPart":
                 tool_name = part.tool_name or "?"
+                summary = _parse_final_summary(part.args)
+                if tool_name == "final_result" and summary is not None:
+                    # Same summary-card treatment as the streaming path — a
+                    # re-render (e.g. after a settings live-swap) must not
+                    # degrade the final structured output back to raw JSON.
+                    widget = self._make_final_summary_widget(*summary)
+                    box.pack_start(widget, False, False, 0)
+                    widget.show_all()
+                    full_text += f"<Summary>\n{summary[0]}\n{summary[1]}\n</Summary>\n"
+                    continue
                 exp = self._make_tool_expander(tool_name)
                 args_str = str(part.args) if part.args else ""
                 self._set_tool_body(exp, args_str)
@@ -1807,6 +1863,43 @@ class ChatSidebar(Gtk.Box):
         # The _auto_scroll flag handles the "user scrolled up to read" case
         # during streaming — but for a new row, we always want to show it.
         self._scroll_to_bottom(force=True)
+
+    def _make_final_summary_widget(self, actions: list[str], explanation: str) -> Gtk.Box:
+        """Render the model's final structured output (GrcAgentResponse) as a
+        readable summary card instead of a raw `final_result` tool expander:
+        a bold Done header, a bulleted list of the actions taken, and the
+        explanation. The model already produces this structure — the UI was
+        just showing the JSON it arrives in."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_hexpand(True)
+        box.set_halign(Gtk.Align.FILL)
+
+        header = Gtk.Label()
+        header.set_markup("<b>Done</b>")
+        header.set_xalign(0.0)
+        box.pack_start(header, False, False, 0)
+
+        for action in actions:
+            lbl = Gtk.Label()
+            lbl.set_markup(f"\u2022 {GLib.markup_escape_text(action)}")
+            lbl.set_line_wrap(True)
+            lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            lbl.set_xalign(0.0)
+            lbl.set_halign(Gtk.Align.FILL)
+            lbl.set_selectable(True)
+            box.pack_start(lbl, False, False, 0)
+
+        if explanation:
+            expl = Gtk.Label()
+            expl.set_markup(f"<i>{GLib.markup_escape_text(explanation)}</i>")
+            expl.set_line_wrap(True)
+            expl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            expl.set_xalign(0.0)
+            expl.set_halign(Gtk.Align.FILL)
+            expl.set_selectable(True)
+            box.pack_start(expl, False, False, 0)
+
+        return box
 
     def _make_tool_expander(self, tool_name: str) -> Gtk.Expander:
         exp = Gtk.Expander(label=f"\u2699 {tool_name} ...")

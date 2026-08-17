@@ -4878,3 +4878,88 @@ def test_native_flowgraph_proxy_save_block_calls_reload_only_on_success(monkeypa
     assert result2["ok"] is False
     cm.reload_block_library.assert_not_called()
 
+
+
+def test_parse_final_summary_accepts_grc_agent_response_shapes():
+    """The model's final structured output (GrcAgentResponse) arrives as a
+    final_result tool call; _parse_final_summary must recover (actions,
+    explanation) from both the dict form (pydantic-ai ToolCallPart.args) and
+    the JSON-string form, and return None for anything else so the caller
+    falls back to a normal tool expander."""
+    from grc_agent.chat_sidebar import _parse_final_summary
+
+    assert _parse_final_summary(
+        {"actions_taken": ["Added x", "Connected y"], "explanation": "Graph valid"}
+    ) == (["Added x", "Connected y"], "Graph valid")
+    assert _parse_final_summary('{"actions_taken": ["a"], "explanation": "e"}') == (["a"], "e")
+    # Missing explanation is tolerated (the field is required by the schema,
+    # but a malformed model response must degrade to a card, not a crash).
+    assert _parse_final_summary({"actions_taken": ["a"]}) == (["a"], "")
+
+    # Non-GrcAgentResponse shapes -> None (render as a plain tool expander).
+    assert _parse_final_summary({"foo": "bar"}) is None
+    assert _parse_final_summary({"actions_taken": "not a list"}) is None
+    assert _parse_final_summary({"actions_taken": [1, 2]}) is None
+    assert _parse_final_summary("not json") is None
+    assert _parse_final_summary(None) is None
+    assert _parse_final_summary(42) is None
+    assert _parse_final_summary("") is None
+
+
+def test_render_last_message_rich_shows_summary_card_for_final_result():
+    """A final_result tool call carrying a GrcAgentResponse must render as a
+    readable summary card (Done header + action bullets + explanation), not a
+    raw-JSON tool expander."""
+    from gi.repository import Gtk
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    msg = ModelResponse(
+        parts=[
+            ToolCallPart(
+                tool_name="final_result",
+                args={
+                    "actions_taken": ["Added block", "Wired it up"],
+                    "explanation": "The chain is valid.",
+                },
+                tool_call_id="fr1",
+            )
+        ]
+    )
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    sidebar._render_last_message_rich(box, msg)
+
+    def walk(w):
+        yield w
+        if hasattr(w, "get_children"):
+            for c in w.get_children():
+                yield from walk(c)
+
+    widgets = list(walk(box))
+    labels = [w for w in widgets if isinstance(w, Gtk.Label)]
+    assert any("Done" in (lb.get_text() or "") for lb in labels), "summary card header missing"
+    assert not any(isinstance(w, Gtk.Expander) for w in widgets), (
+        "final_result must not render as a tool expander"
+    )
+    texts = " ".join(lb.get_text() or "" for lb in labels)
+    assert "Added block" in texts and "Wired it up" in texts
+    assert "The chain is valid." in texts
+
+
+def test_render_last_message_rich_keeps_expander_for_other_tools():
+    """Ordinary tool calls must keep the expander rendering — only the
+    final_result structured output becomes a summary card."""
+    from gi.repository import Gtk
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    msg = ModelResponse(
+        parts=[ToolCallPart(tool_name="inspect_graph", args={"detail": "all"}, tool_call_id="c1")]
+    )
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    sidebar._render_last_message_rich(box, msg)
+    assert any(isinstance(c, Gtk.Expander) for c in box.get_children())
