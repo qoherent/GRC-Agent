@@ -9,36 +9,55 @@ on:
 
 jobs:
   fast-checks:
-    name: Fast Checks
-    runs-on: ubuntu-24.04
+    # Both event-loop backends are exercised: 24.04's PyGObject 3.48 has no
+    # `gi.events`, so it takes the gbulb path, while 26.04's 3.56 takes the
+    # in-tree `gi.events` path. See src/grc_agent/event_loop.py.
+    name: Fast Checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # Must come before the venv is created. GNU Radio's Python bindings are
+      # compiled against the system interpreter's ABI only (cp312 on 24.04,
+      # cp314 on 26.04), and `gi` comes from python3-gi rather than PyPI — so
+      # the venv is built on the system python with --system-site-packages,
+      # exactly as the README instructs users to.
+      - name: Install GNU Radio and GTK bindings
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnuradio python3-gi python3-gi-cairo xvfb
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
 
+      - name: Create virtualenv on the system interpreter
+        run: uv venv --system-site-packages --python /usr/bin/python3
+
       - name: Sync dependencies
-        run: uv sync --extra dev --locked
+        run: uv sync --extra dev --locked --python .venv/bin/python
+
+      - name: Report the active event-loop backend
+        run: |
+          uv run python -c "
+          import gi; gi.require_version('Gtk', '3.0')
+          from grc_agent import event_loop
+          event_loop.install()
+          print('event-loop backend:', event_loop.backend)
+          "
 
       - name: Run Ruff (lint)
         run: uv run ruff check
 
       - name: Run Ruff (format check)
         run: uv run ruff format --check
-
-      - name: Install GNU Radio
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gnuradio xvfb
 
       # Runs the fast, no-live-model test suites (matches AGENTS.md's Test
       # Gate). LLM/vector-dependent tests inside these suites automatically

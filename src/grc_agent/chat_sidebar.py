@@ -196,6 +196,17 @@ def _openrouter_context_length(model: str) -> int | None:
     return None
 
 
+def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> float | None:
+    """Generation rate for the last turn, or None when it cannot be measured.
+
+    Returns None rather than 0 for a turn that produced no tokens or took no
+    measurable time — showing "0 tok/s" would read as a stalled backend.
+    """
+    if not output_tokens or not duration_ms or duration_ms <= 0:
+        return None
+    return output_tokens / (duration_ms / 1000)
+
+
 def resolve_model_context_length(provider: str, model: str) -> int | None:
     """Dynamically query the active provider's API for the model's exact context
     length. Cached in-memory per (provider, model) pair; returns None if
@@ -213,7 +224,15 @@ def resolve_model_context_length(provider: str, model: str) -> int | None:
     try:
         if provider in ("ollama", "ollama_cloud"):
             ctx_len = _ollama_context_length(provider, model)
-        elif provider == "openrouter":
+        elif provider == "openai_codex":
+            from grc_agent.providers.openai_codex.model import context_window
+
+            ctx_len = context_window(model)
+        elif provider in ("openai_compatible", "openrouter"):
+            # Was gated on "openrouter" alone, which load_settings() has not
+            # been able to return since the backends were consolidated — so
+            # every OpenAI-compatible endpoint fell through to None and the
+            # label showed a bare token count with nothing to compare against.
             ctx_len = _openrouter_context_length(model)
         else:
             ctx_len = None
@@ -692,6 +711,10 @@ class ChatSidebar(Gtk.Box):
                 text = (
                     f"<span size='small'>Context: {format_tokens(last_input_tokens)} tokens</span>"
                 )
+
+        rate = getattr(self, "_last_turn_rate", None)
+        if rate:
+            text = text.replace("</span>", f" \u00b7 {rate:.0f} tok/s</span>")
 
         if hasattr(self, "_context_label"):
             # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
@@ -1396,6 +1419,13 @@ class ChatSidebar(Gtk.Box):
             ctx.text_dirty = True
             self._flush_streaming(ctx)
         elif isinstance(delta, ThinkingPartDelta):
+            # content_delta is Optional on this delta type (unlike TextPartDelta):
+            # a ThinkingPartDelta may carry only a signature/provider-metadata
+            # update with no text at all. Codex sends those around its reasoning
+            # summary parts, and appending one raised
+            # "can only concatenate str (not NoneType) to str", killing the turn.
+            if delta.content_delta is None:
+                return
             self._close_text(ctx)
             ctx.think_acc += delta.content_delta
             ctx.full_raw_text += delta.content_delta
@@ -2054,6 +2084,12 @@ class ChatSidebar(Gtk.Box):
             if recorder is not None:
                 try:
                     row = recorder.finalize(active_run, turn_exc)
+                    # Generation rate for the status line. Taken from the trace
+                    # row rather than timed separately, so the number shown and
+                    # the number persisted can never disagree.
+                    self._last_turn_rate = _tokens_per_second(
+                        row.get("output_tokens"), row.get("duration_ms")
+                    )
                     if turn_exc is None:
                         await self._save_trace(row)
                     else:
@@ -2184,6 +2220,41 @@ class ChatSidebar(Gtk.Box):
         dlg.connect("destroy", lambda *_: setattr(self, "_open_dialog", None))
         dlg.show()
 
+    @staticmethod
+    def _persist_settings(
+        provider: str,
+        model: str,
+        key_var: str | None,
+        key_val: str,
+        base_url: str,
+        thinking_enabled: bool,
+        embed_backend: str,
+    ) -> None:
+        """Write the new config to `.env`. The base-URL argument is routed to
+        the key belonging to the active provider — ChatGPT/Codex has neither a
+        base URL nor an API key, and passing one through would write whatever
+        the (hidden) URL entry still held over OLLAMA_BASE_URL."""
+        if provider == "openai_codex":
+            save_settings(provider, model, embed_backend=embed_backend)
+        elif provider == "openai_compatible":
+            save_settings(
+                provider,
+                model,
+                openai_compatible_base_url=base_url,
+                thinking_enabled=thinking_enabled,
+                embed_backend=embed_backend,
+            )
+        else:
+            save_settings(
+                provider,
+                model,
+                ollama_base_url=base_url,
+                thinking_enabled=thinking_enabled,
+                embed_backend=embed_backend,
+            )
+        if key_var:
+            upsert_env_key(key_var, key_val)
+
     def _apply_settings_save(
         self,
         provider: str,
@@ -2192,6 +2263,7 @@ class ChatSidebar(Gtk.Box):
         key_val: str,
         ollama_base_url: str = "http://localhost:11434",
         thinking_enabled: bool = True,
+        embed_backend: str = "auto",
     ) -> None:
         """Post-Save flow: preflight → persist → live-swap.
 
@@ -2224,22 +2296,9 @@ class ChatSidebar(Gtk.Box):
         # 2. Persist to .env synchronously — tests assert on load_settings()
         #    immediately after emitting the response signal.
         try:
-            if provider == "openai_compatible":
-                save_settings(
-                    provider,
-                    model,
-                    openai_compatible_base_url=ollama_base_url,
-                    thinking_enabled=thinking_enabled,
-                )
-            else:
-                save_settings(
-                    provider,
-                    model,
-                    ollama_base_url=ollama_base_url,
-                    thinking_enabled=thinking_enabled,
-                )
-            if key_var:
-                upsert_env_key(key_var, key_val)
+            self._persist_settings(
+                provider, model, key_var, key_val, ollama_base_url, thinking_enabled, embed_backend
+            )
         except Exception as e:
             _log.exception("Failed to save settings")
             self.set_status(f"Settings not saved ({e}).", error=True)
@@ -2279,7 +2338,9 @@ class ChatSidebar(Gtk.Box):
         if the user wants to save anyway. Anchors the dialog on `self` so
         PyGObject doesn't GC it mid-`.run()`."""
         provider_label = _PROVIDER_LABELS.get(provider, provider)
-        if provider == "ollama":
+        if provider == "openai_codex":
+            hint = "• Click 'Sign in with ChatGPT' in Preferences.\n• Codex requires an active ChatGPT Plus or Pro subscription."
+        elif provider == "ollama":
             hint = f"• Ensure local Ollama daemon is running ('ollama serve').\n• Verify host is reachable at {ollama_base_url}."
         elif provider == "openai_compatible":
             hint = f"• Ensure local OpenAI-compatible server (e.g. llama-server) is running.\n• Verify endpoint is reachable at {ollama_base_url}."

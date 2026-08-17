@@ -42,10 +42,11 @@ Choose **Ollama** (local, free), **Ollama Cloud**, **OpenRouter**, or any OpenAI
 ## Getting Started
 
 ```bash
-# Prerequisites: GNU Radio 3.10, Python 3.12+, uv
+# Prerequisites: GNU Radio 3.10, Python 3.12-3.14, uv
+# sudo apt install gnuradio python3-gi python3-gi-cairo
 git clone https://github.com/qoherent/grc-agent.git
 cd grc-agent
-uv venv --system-site-packages --python 3.12
+uv venv --system-site-packages --python /usr/bin/python3
 uv sync --extra dev --locked --python .venv/bin/python
 uv run grc-agent
 ```

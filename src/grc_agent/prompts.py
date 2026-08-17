@@ -75,5 +75,9 @@ def build_system_prompt(session_id: str | None = None) -> str:
         "in its own change_graph call with no add_blocks in that same call, then confirm the new "
         "ports/params via inspect_graph before a later call that wires the new ports or sets the new "
         "param's value. Attempting both in one call fails outright with a clear error.\n"
+        "The 'name=' string passed to a GNU Radio block's __init__ (e.g. an epy_block's "
+        "gr.sync_block.__init__(name=...)) is rendered verbatim as that block's label on the GRC "
+        "canvas with no truncation — always keep it a short title (a few words), never a sentence "
+        "or description.\n"
         "Answer concisely. Do not use LaTeX or TeX math notation; write math inline in plain text.\n"
     )

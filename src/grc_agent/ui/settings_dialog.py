@@ -10,13 +10,24 @@ which owns preflight, persistence and live-swap.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
+from .. import embed_runtime
+from ..model_catalog import list_models
+from ..providers.openai_codex import clear as codex_sign_out
+from ..providers.openai_codex import is_signed_in as codex_is_signed_in
 from ..settings import get_env_value
+from .codex_login_dialog import CodexLoginDialog
+from .embed_runtime_dialog import EmbedRuntimeDialog
 from .providers import (
+    EMBED_BACKEND_LABELS,
+    EMBED_BACKEND_ORDER,
     PROVIDER_API_KEY,
     PROVIDER_KEY_PLACEHOLDER,
     PROVIDER_LABELS,
@@ -24,6 +35,8 @@ from .providers import (
     PROVIDER_MODEL_PLACEHOLDER,
     PROVIDER_ORDER,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class SettingsDialog(Gtk.Dialog):
@@ -46,7 +59,8 @@ class SettingsDialog(Gtk.Dialog):
         self._build_provider_section(grid)
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 4, 2, 1)
         self._build_execution_section(grid)
-        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 8, 2, 1)
+        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 9, 2, 1)
+        self._build_embeddings_section(grid)
 
         info = Gtk.Label(label="Changes apply immediately on Save.")
         info.get_style_context().add_class("dim-label")
@@ -54,6 +68,10 @@ class SettingsDialog(Gtk.Dialog):
         content.pack_start(grid, False, False, 0)
         content.pack_start(info, False, False, 0)
         content.show_all()
+        # After show_all, never before: show_all() forces every child visible,
+        # so any set_visible(False) made during construction is undone by it.
+        self._sync_provider_fields(self.provider_combo)
+        self._sync_embed_fields()
 
         self.connect("response", self._on_response)
 
@@ -77,7 +95,9 @@ class SettingsDialog(Gtk.Dialog):
         )
         for p in PROVIDER_ORDER:
             self.provider_combo.append_text(PROVIDER_LABELS[p])
-        active_idx = PROVIDER_ORDER.index(cfg["provider"]) if cfg["provider"] in PROVIDER_ORDER else 0
+        active_idx = (
+            PROVIDER_ORDER.index(cfg["provider"]) if cfg["provider"] in PROVIDER_ORDER else 0
+        )
         self.provider_combo.set_active(active_idx)
         grid.attach(lbl_p, 0, 1, 1, 1)
         grid.attach(self.provider_combo, 1, 1, 1, 1)
@@ -85,30 +105,55 @@ class SettingsDialog(Gtk.Dialog):
         lbl_m = Gtk.Label(label="Model:")
         lbl_m.set_xalign(0.0)
         lbl_m.set_tooltip_text("The specific LLM model ID or tag for chat responses")
-        self.model_entry = Gtk.Entry()
+        # Editable combo: the list is whatever the backend reports, but a
+        # model can still be typed in — a brand-new id should not be
+        # unreachable just because the catalog has not caught up.
+        self.model_combo = Gtk.ComboBoxText.new_with_entry()
+        self.model_entry = self.model_combo.get_child()
         self.model_entry.set_text(cfg["model"])
-        self.model_entry.set_hexpand(True)
         self.model_entry.set_activates_default(True)
-        self.model_entry.set_tooltip_text(
-            "Enter model ID or tag for chat.\n"
-            "Examples:\n"
-            "• Ollama: qwen3.6:35b-a3b-q4_K_M or deepseek-v4-flash:cloud\n"
-            "• OpenAI Compatible: deepseek/deepseek-v4-flash, qwen2.5-coder:32b, gpt-4o"
+        self.model_combo.set_hexpand(True)
+        self.model_combo.set_tooltip_text(
+            "Model ID or tag for chat. Click Load to list what the configured "
+            "backend actually serves, or type one in."
         )
+        self.model_load_button = Gtk.Button(label="Load")
+        self.model_load_button.set_tooltip_text("Ask the backend which models it serves")
+        self.model_load_button.connect("clicked", self._on_load_models)
+        model_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        model_box.pack_start(self.model_combo, True, True, 0)
+        model_box.pack_start(self.model_load_button, False, False, 0)
         grid.attach(lbl_m, 0, 2, 1, 1)
-        grid.attach(self.model_entry, 1, 2, 1, 1)
+        grid.attach(model_box, 1, 2, 1, 1)
 
         lbl_k = Gtk.Label(label="API Key:")
         lbl_k.set_xalign(0.0)
-        lbl_k.set_tooltip_text("Authentication key (required for cloud endpoints, optional for local servers)")
+        lbl_k.set_tooltip_text(
+            "Authentication key (required for cloud endpoints, optional for local servers)"
+        )
         self.key_entry = Gtk.Entry()
         self.key_entry.set_visibility(False)
         self.key_entry.set_activates_default(True)
         self.key_entry.set_tooltip_text(
             "API key for the selected provider (e.g. OpenRouter, Ollama Cloud, OpenAI). Optional for local servers."
         )
+        self.key_label = lbl_k
         grid.attach(lbl_k, 0, 3, 1, 1)
         grid.attach(self.key_entry, 1, 3, 1, 1)
+
+        # ChatGPT signs in with OAuth instead of an API key, so it gets an
+        # account row in place of the key entry rather than an empty one.
+        self.codex_status = Gtk.Label()
+        self.codex_status.set_xalign(0.0)
+        self.codex_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.codex_button = Gtk.Button()
+        self.codex_button.connect("clicked", self._on_codex_button)
+        self.codex_box.pack_start(self.codex_status, True, True, 0)
+        self.codex_box.pack_start(self.codex_button, False, False, 0)
+        self.codex_label = Gtk.Label(label="Account:")
+        self.codex_label.set_xalign(0.0)
+        grid.attach(self.codex_label, 0, 3, 1, 1)
+        grid.attach(self.codex_box, 1, 3, 1, 1)
 
     def _build_execution_section(self, grid: Gtk.Grid) -> None:
         cfg = self._cfg
@@ -117,9 +162,7 @@ class SettingsDialog(Gtk.Dialog):
         hdr.set_xalign(0.0)
         grid.attach(hdr, 0, 5, 2, 1)
 
-        self.ollama_cloud_check = Gtk.CheckButton(
-            label="Use Ollama Cloud (https://ollama.com/v1)"
-        )
+        self.ollama_cloud_check = Gtk.CheckButton(label="Use Ollama Cloud (https://ollama.com/v1)")
         is_cloud = "ollama.com" in cfg.get("ollama_base_url", "")
         self.ollama_cloud_check.set_active(is_cloud)
         self.ollama_cloud_check.set_tooltip_text(
@@ -129,9 +172,7 @@ class SettingsDialog(Gtk.Dialog):
 
         self.url_label = Gtk.Label(label="Base URL (default):")
         self.url_label.set_xalign(0.0)
-        self.url_label.set_tooltip_text(
-            "Base URL endpoint for the model server"
-        )
+        self.url_label.set_tooltip_text("Base URL endpoint for the model server")
         self.url_entry = Gtk.Entry()
         self.url_entry.set_text(cfg.get("ollama_base_url", "http://localhost:11434"))
         self.url_entry.set_hexpand(True)
@@ -154,7 +195,71 @@ class SettingsDialog(Gtk.Dialog):
 
         self.provider_combo.connect("changed", self._sync_provider_fields)
         self.ollama_cloud_check.connect("toggled", self._on_ollama_cloud_toggled)
-        self._sync_provider_fields(self.provider_combo)
+
+    def _build_embeddings_section(self, grid: Gtk.Grid) -> None:
+        """Embeddings backend, chosen independently of the chat provider.
+
+        These are separate concerns: a chat endpoint that speaks the OpenAI
+        API need not implement /v1/embeddings (llama-server without
+        `--embeddings` answers 501), and when embeddings fail the knowledge
+        base silently falls back to lexical search. The bundled llama.cpp
+        runtime makes vector search work with nothing installed system-wide.
+        """
+        hdr = Gtk.Label()
+        hdr.set_markup("<b>Knowledge Base (RAG) Embeddings</b>")
+        hdr.set_xalign(0.0)
+        grid.attach(hdr, 0, 10, 2, 1)
+
+        lbl_e = Gtk.Label(label="Embeddings:")
+        lbl_e.set_xalign(0.0)
+        lbl_e.set_tooltip_text(
+            "Which backend computes vectors for block/doc search. Independent "
+            "of the chat provider — many chat endpoints do not serve embeddings."
+        )
+        self.embed_combo = Gtk.ComboBoxText()
+        for backend in EMBED_BACKEND_ORDER:
+            self.embed_combo.append_text(EMBED_BACKEND_LABELS[backend])
+        current = self._cfg.get("embed_backend", "auto")
+        self.embed_combo.set_active(
+            EMBED_BACKEND_ORDER.index(current) if current in EMBED_BACKEND_ORDER else 0
+        )
+        grid.attach(lbl_e, 0, 11, 1, 1)
+        grid.attach(self.embed_combo, 1, 11, 1, 1)
+
+        self.embed_status = Gtk.Label()
+        self.embed_status.set_xalign(0.0)
+        self.embed_status.set_line_wrap(True)
+        self.embed_status.get_style_context().add_class("dim-label")
+        grid.attach(self.embed_status, 1, 12, 1, 1)
+
+        self.embed_install_button = Gtk.Button(label="Install local runtime…")
+        self.embed_install_button.set_tooltip_text(
+            "Download a pinned llama.cpp build and the EmbeddingGemma model "
+            "into your user data directory. Nothing is installed system-wide."
+        )
+        self.embed_install_button.connect("clicked", self._on_install_embed_runtime)
+        grid.attach(self.embed_install_button, 1, 13, 1, 1)
+
+        self.embed_combo.connect("changed", lambda _c: self._sync_embed_fields())
+
+    def _sync_embed_fields(self) -> None:
+        idx = self.embed_combo.get_active()
+        backend = EMBED_BACKEND_ORDER[idx] if idx >= 0 else "auto"
+        is_local = backend == "llamacpp"
+        self.embed_install_button.set_visible(is_local)
+        self.embed_status.set_visible(is_local)
+        if not is_local:
+            return
+        if embed_runtime.is_provisioned():
+            self.embed_status.set_text(f"Installed at {embed_runtime.data_dir()}")
+            self.embed_install_button.set_label("Reinstall…")
+        else:
+            self.embed_status.set_text("Not installed — vector search stays lexical until it is.")
+            self.embed_install_button.set_label("Install local runtime…")
+
+    def _on_install_embed_runtime(self, _btn: Gtk.Button) -> None:
+        dlg = EmbedRuntimeDialog(self, on_done=lambda _ok, _err: self._sync_embed_fields())
+        dlg.show()
 
     def _on_ollama_cloud_toggled(self, check: Gtk.CheckButton) -> None:
         idx = self.provider_combo.get_active()
@@ -212,6 +317,25 @@ class SettingsDialog(Gtk.Dialog):
             self.key_entry.set_text("")
             self.key_entry.set_placeholder_text("")
 
+        is_codex = p == "openai_codex"
+        # The key entry and the account row occupy the same grid cell.
+        self.key_entry.set_visible(not is_codex)
+        self.key_label.set_visible(not is_codex)
+        self.codex_box.set_visible(is_codex)
+        self.codex_label.set_visible(is_codex)
+        if is_codex:
+            self._sync_codex_account()
+
+        if is_codex:
+            # No base URL and no key: the endpoint is fixed and auth is OAuth.
+            self.ollama_cloud_check.set_visible(False)
+            self.url_label.set_visible(False)
+            self.url_entry.set_visible(False)
+            self.thinking_check.set_sensitive(False)
+            return
+        self.url_label.set_visible(True)
+        self.url_entry.set_visible(True)
+
         if p == "ollama":
             self.ollama_cloud_check.set_visible(True)
             self.thinking_check.set_sensitive(True)
@@ -245,7 +369,9 @@ class SettingsDialog(Gtk.Dialog):
         else:
             base_url = self.url_entry.get_text().strip() or "https://openrouter.ai/api/v1"
         thinking = self.thinking_check.get_active()
-        return provider, model, key_var, key_val, base_url, thinking
+        eidx = self.embed_combo.get_active()
+        embed_backend = EMBED_BACKEND_ORDER[eidx] if eidx >= 0 else "auto"
+        return provider, model, key_var, key_val, base_url, thinking, embed_backend
 
     def _on_response(self, _dlg: Gtk.Dialog, response: int) -> None:
         # Read widget values BEFORE destroy — reading after destroy returns
@@ -255,3 +381,55 @@ class SettingsDialog(Gtk.Dialog):
         if response != Gtk.ResponseType.APPLY:
             return
         self._on_save(*values)
+
+    def _sync_codex_account(self) -> None:
+        if codex_is_signed_in():
+            self.codex_status.set_text("Signed in")
+            self.codex_button.set_label("Sign out")
+        else:
+            self.codex_status.set_text("Not signed in")
+            self.codex_button.set_label("Sign in with ChatGPT")
+
+    def _on_codex_button(self, _btn: Gtk.Button) -> None:
+        if codex_is_signed_in():
+            codex_sign_out()
+            self._sync_codex_account()
+            return
+        CodexLoginDialog(self, on_done=lambda _ok, _err: self._sync_codex_account()).show()
+
+    def _on_load_models(self, _btn: Gtk.Button) -> None:
+        self.model_load_button.set_sensitive(False)
+        self.model_load_button.set_label("Loading…")
+        asyncio.ensure_future(self._load_models())
+
+    async def _load_models(self) -> None:
+        """Populate the dropdown from the backend, preserving what is typed.
+
+        Reads the *pending* provider/key/URL from the widgets rather than the
+        saved config, so the list matches what Save would apply — otherwise
+        switching provider and hitting Load would query the previous backend.
+        """
+        provider, _model, _kv, key_val, base_url, _think, _embed = self._collect()
+        current = self.model_entry.get_text().strip()
+        try:
+            names = await list_models({"provider": provider}, api_key=key_val, base_url=base_url)
+        except Exception as exc:
+            self._set_model_load_state(f"Load failed: {exc}")
+            return
+        if not names:
+            self._set_model_load_state("Backend listed no models")
+            return
+        self.model_combo.remove_all()
+        for name in names:
+            self.model_combo.append_text(name)
+        # append_text on a combo-with-entry does not touch the entry, but
+        # remove_all clears it, so the typed value is restored explicitly.
+        self.model_entry.set_text(current or names[0])
+        self._set_model_load_state(None)
+
+    def _set_model_load_state(self, error: str | None) -> None:
+        self.model_load_button.set_sensitive(True)
+        self.model_load_button.set_label("Load")
+        if error:
+            _log.info("model list unavailable: %s", error)
+            self.model_combo.set_tooltip_text(error)

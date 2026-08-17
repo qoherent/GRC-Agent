@@ -13,11 +13,12 @@ live, directly-editable canvas in a single native desktop app.
 
 ## Architecture at a glance
 
-Single-process, single-thread native GTK3 app (via `gbulb`). GRC's own
+Single-process, single-thread native GTK3 app. GRC's own
 `MainWindow` is extended with a `ChatSidebar` — no web server, no subprocess,
 no Broadway. The agent streams responses directly on the GLib main loop.
 
-A single asyncio+GTK event loop (unified by `gbulb`) hosts GRC's native
+A single asyncio+GTK event loop (unified by PyGObject's `gi.events`, or
+`gbulb` on older PyGObject) hosts GRC's native
 window, the chat sidebar, and a PydanticAI agent that shares one live
 `FlowGraph` object with the canvas — the agent mutates it in place, and the
 canvas just redraws. Chat history persists to SQLite (`db.py`). `ingest.py`
@@ -26,7 +27,7 @@ docs corpus, for RAG).
 
 ```mermaid
 flowchart TB
-  subgraph UI["GTK3 UI — single gbulb event loop"]
+  subgraph UI["GTK3 UI — single unified event loop"]
     DA["desktop_app.py"]
     CS["chat_sidebar.py"]
     NC["native_canvas.py"]
@@ -65,7 +66,8 @@ flowchart TB
 
 | File | Role |
 |------|------|
-| `desktop_app.py` | Entrypoint. `gbulb` install, GRC `Application`/`MainWindow`, sidebar packing, Ctrl+/- zoom, startup preflight. |
+| `desktop_app.py` | Entrypoint. Event-loop install, GRC `Application`/`MainWindow`, sidebar packing, Ctrl+/- zoom, startup preflight. |
+| `event_loop.py` | asyncio+GLib unification: PyGObject's in-tree `gi.events`, falling back to `gbulb` on PyGObject < 3.50. |
 | `chat_sidebar.py` | Native GTK chat UI. Streaming via `agent.iter()` + `run.next()`, settings dialog with live-swap, provider badge, auto-scroll tracking, Send/Stop button. |
 | `native_canvas.py` | GRC `MainWindow` signal-wiring: dynamic graph resolution from `window.current_page`, notebook tab tracking, manual-edit disk-sync, agent-edit redraw, pan. |
 | `exec_monitor.py` | Detects flowgraph execution failures from GRC's console message bus; auto-notifies the agent with the return code (agent reads the full log via `get_run_log`). |
@@ -82,20 +84,30 @@ flowchart TB
 
 ### 1. Prerequisites
 - **[GNU Radio 3.10](https://wiki.gnuradio.org/index.php?title=InstallingGR)**
-  with Python bindings (CI and development are done against `3.10.9.2` on
-  Ubuntu 24.04 — other 3.10.x builds are likely fine).
-- **Python >= 3.12** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**.
+  with Python bindings. CI covers Ubuntu 24.04 (GNU Radio 3.10.9.x) and
+  Ubuntu 26.04 (3.10.12.x); other 3.10.x builds are likely fine.
+- **Python 3.12 – 3.14** and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**.
+- GTK bindings from your distro, not PyPI:
+  ```bash
+  sudo apt install gnuradio python3-gi python3-gi-cairo
+  ```
 
 ### 2. Clone & Setup
 ```bash
 git clone https://github.com/qoherent/grc-agent.git
 cd grc-agent
-uv venv --system-site-packages --python 3.12
+uv venv --system-site-packages --python /usr/bin/python3
 uv sync --extra dev --locked --python .venv/bin/python
 ```
 `--system-site-packages` bridges the venv to your system-installed GNU Radio.
 `--locked` installs exactly what's pinned in `uv.lock` (matching CI) instead
 of a loose resolve that could silently pick up untested dependency versions.
+
+Use `/usr/bin/python3` explicitly rather than a bare `--python 3.12`. GNU
+Radio's Python bindings are compiled against your system interpreter's ABI
+only (`cpython-312` on 24.04, `cpython-314` on 26.04), so a different
+interpreter — a uv-managed build, or a `pyenv`/`conda` shim earlier on your
+`PATH` — will fail to `import gnuradio` even with `--system-site-packages`.
 
 ### 3. Setup LLM Backend
 Two unified chat providers, switchable anytime from the app's Settings dialog:
@@ -131,12 +143,44 @@ Use any OpenAI-compatible server or cloud provider (e.g. `OpenRouter`, `llama.cp
 - **Local Server (llama.cpp / vLLM / LM Studio):** Base URL `http://localhost:8080/v1` (or your server port), Model e.g. `qwen2.5-coder:32b`, API key optional.
 - **OpenAI / Cloud Providers:** Base URL e.g. `https://api.openai.com/v1`, Model e.g. `gpt-4o`, paste your API key.
 
+#### Option C: ChatGPT Plus/Pro (Codex)
+Sign in with your ChatGPT account instead of an API key — OpenAI documents
+ChatGPT sign-in as the [subscription auth mode for
+Codex](https://developers.openai.com/codex/auth). Pick **ChatGPT Plus/Pro
+(Codex)** in Settings, click **Sign in with ChatGPT**, and complete the login
+in your browser. On a remote or headless machine, paste the redirect URL (or
+just the code) back into the dialog instead.
+
+In Settings, click **Load** next to Model to list the models your account can
+actually use — that works for every provider, so you never have to guess an id.
+
+Requires an active ChatGPT Plus or Pro subscription. Tokens are stored in
+`~/.config/grc_agent/openai-codex-auth.json` with `0600` permissions, never in
+`.env`, and there is no base URL or API key to configure. Codex serves no
+embeddings endpoint, so choose an embeddings backend below.
+
+#### Embeddings for vector search
+Vector search (`query_knowledge`) needs an embeddings endpoint, and that is
+chosen **independently of the chat provider** in the Settings dialog — many
+chat endpoints do not serve embeddings at all (`llama-server` started without
+`--embeddings` answers HTTP 501). Options:
+
+- **Local llama.cpp (bundled)** — click *Install local runtime…* in Settings.
+  Downloads a pinned `llama.cpp` build and the EmbeddingGemma GGUF (~345 MB
+  total, less if you already have `llama-server` on your `PATH`) into
+  `~/.local/share/grc-agent`. Nothing is installed system-wide, and it needs
+  no Ollama.
+- **Ollama** — `ollama pull embeddinggemma:latest`.
+- **OpenAI-Compatible** — uses your configured chat endpoint, if it serves
+  `/v1/embeddings`.
+- **Follow chat provider** (default) — whichever of the two above matches your
+  chat provider.
+
 > [!NOTE]
-> Vector search (`query_knowledge`) uses embeddings locally via Ollama
-> (`embeddinggemma:latest`) when available. If the embedding
-> backend is unreachable, search automatically uses local SQLite FTS5 (BM25)
-> keyword search over the same corpus without requiring any manual setup —
-> the tool result always indicates `"search_mode": "lexical"` (vs. `"vector"`).
+> If the embeddings backend is unreachable, search falls back to local SQLite
+> FTS5 (BM25) keyword search over the same corpus with no manual setup — the
+> tool result always reports `"search_mode": "lexical"` (vs. `"vector"`), so
+> the degradation is never silent.
 
 ---
 

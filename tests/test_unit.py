@@ -3156,8 +3156,22 @@ def test_change_graph_validation_gate_exception_rolls_back(temp_empty):
     fg = load_flow_graph(str(temp_empty))
     initial_block_count = len(fg.blocks)
 
+    # Raises once, on the mutated graph, then behaves. That models the real
+    # failure — validation blowing up on the *content* the mutation produced —
+    # and is the only stub that can work on GNU Radio >= 3.10.12, whose
+    # `import_data` calls `validate()` itself (core/blocks/options.py's
+    # `insert_grc_parameters`). An always-raising stub also poisons the
+    # rollback, so the pre-mutation state could never be restored by
+    # construction, and the test would assert something unachievable rather
+    # than the contract it documents.
+    real_validate = fg.validate
+    calls = []
+
     def boom():
-        raise RuntimeError("validate blew up")
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("validate blew up")
+        return real_validate()
 
     fg.validate = boom
 
@@ -3169,6 +3183,8 @@ def test_change_graph_validation_gate_exception_rolls_back(temp_empty):
     )
     assert res["ok"] is False
     assert res["errors"][0]["code"] == "mutation_failed"
+    # The revert itself must have succeeded — no rollback_failed alongside it.
+    assert not any(e["code"] == "rollback_failed" for e in res["errors"])
     assert len(fg.blocks) == initial_block_count
 
 
@@ -3732,8 +3748,7 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     thinking_check = next(
         c
         for c in checks
-        if "think" in (c.get_label() or "").lower()
-        or "reasoning" in (c.get_label() or "").lower()
+        if "think" in (c.get_label() or "").lower() or "reasoning" in (c.get_label() or "").lower()
     )
     assert thinking_check.get_active() is True
     thinking_check.set_active(False)

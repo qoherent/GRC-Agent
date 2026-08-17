@@ -8,7 +8,7 @@ This document details the system's architecture, including its model-facing tool
 
 ## System Architecture
 
-GRC-Agent runs as a single-process, single-threaded native GTK3 desktop application. It unifies GNU Radio Companion's UI, the canvas drawing area, and the async agentic loop on a single event loop via `gbulb`, eliminating the need for separate server/virtualization layers.
+GRC-Agent runs as a single-process, single-threaded native GTK3 desktop application. It unifies GNU Radio Companion's UI, the canvas drawing area, and the async agentic loop on a single event loop via PyGObject's `gi.events` (or `gbulb` on PyGObject < 3.50), eliminating the need for separate server/virtualization layers.
 
 ```mermaid
 flowchart LR
@@ -31,7 +31,7 @@ flowchart LR
 The application merges the GNU Radio Companion desktop canvas with the AI sidebar widget seamlessly:
 
 ### 1. Unified Event Loop
-- **Gbulb Integration**: The application initializes the asyncio event loop using `gbulb.install(gtk=True)`. This bridges Python's async task execution with the GLib main loop, allowing agent completions and GRC drawing events to coexist safely on the same thread without cross-thread marshalling.
+- **Event Loop Unification**: The application initializes the asyncio event loop via `event_loop.install()`, which selects PyGObject's in-tree `gi.events` policy when available (PyGObject >= 3.50, and the only option on Python 3.14) and falls back to `gbulb` otherwise. This bridges Python's async task execution with the GLib main loop, allowing agent completions and GRC drawing events to coexist safely on the same thread without cross-thread marshalling.
 - **Obsolete Future Protection**: Obsolete event loop transport assertions are bypassed cleanly to ensure terminal execution output remains noise-free.
 
 ### 2. Panel & Layout Synchronization

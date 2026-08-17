@@ -66,7 +66,11 @@ def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
         )
         raw_url = (
             os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
-            or ("https://openrouter.ai/api/v1" if provider == "openrouter" else "http://localhost:8080/v1")
+            or (
+                "https://openrouter.ai/api/v1"
+                if provider == "openrouter"
+                else "http://localhost:8080/v1"
+            )
         ).rstrip("/")
         base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
         return OpenAIChatModel(

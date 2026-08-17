@@ -62,7 +62,11 @@ def test_db_and_model_isolation(tmp_path, monkeypatch):
     assert "catalog_openai_compatible.db" not in db_path_ollama
 
     # Test under OpenAI-Compatible provider
-    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    save_settings(
+        "openai_compatible",
+        "openai/gpt-4o-mini",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+    )
     db_path_compat, model_compat = get_db_and_model("catalog")
     assert db_path_compat.endswith("catalog_openai_compatible.db")
     assert "catalog_ollama.db" not in db_path_compat
@@ -80,7 +84,7 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
 
     # Ollama provider check
     save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
-    base_url, api_key = _embed_endpoint()
+    base_url, api_key, _uds = _embed_endpoint()
     assert base_url == "http://localhost:11434/v1"
     assert api_key == "not-needed"
 
@@ -90,7 +94,7 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
         "openai/gpt-4o-mini",
         openai_compatible_base_url="https://openrouter.ai/api/v1",
     )
-    base_url, api_key = _embed_endpoint()
+    base_url, api_key, _uds = _embed_endpoint()
     assert base_url == "https://openrouter.ai/api/v1"
     assert api_key == "dummy-openrouter-key"
 
@@ -651,7 +655,7 @@ def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path
     # Simulate the embedding backend having recovered since: embed_query now succeeds.
     import grc_agent.adapter.rag as rag_mod
 
-    monkeypatch.setattr(rag_mod, "embed_query", lambda q: [0.1, 0.2, 0.3])  # noqa: ARG005
+    monkeypatch.setattr(rag_mod, "embed_query", lambda q, domain="catalog": [0.1, 0.2, 0.3])  # noqa: ARG005
 
     try:
         res = query_catalog("low pass filter")
@@ -687,7 +691,9 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
 
     monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
     ingest_mod.ingest_docs(db_path, model)
-    assert len(docs_calls) == 1, "ingest_docs backend probe failure must avoid re-calling embed_document per chunk"
+    assert len(docs_calls) == 1, (
+        "ingest_docs backend probe failure must avoid re-calling embed_document per chunk"
+    )
 
     import grc_agent.adapter.rag as rag_mod
 
@@ -872,7 +878,11 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
     )
 
     # openai_compatible (pointing at OpenRouter endpoint)
-    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    save_settings(
+        "openai_compatible",
+        "openai/gpt-4o-mini",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+    )
     upsert_env_key("OPENAI_COMPATIBLE_API_KEY", "sk-or-dummy-key-for-build-test")
     agent_or, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent_or.model, OpenAIChatModel), (
@@ -922,7 +932,11 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     # 2. Simulate the Settings dialog's Save path: write the new provider +
     #    real key to .env, then rebuild (exactly what
     #    ChatSidebar._rebuild_agent invokes after a successful Save).
-    save_settings("openai_compatible", "openai/gpt-4o-mini", openai_compatible_base_url="https://openrouter.ai/api/v1")
+    save_settings(
+        "openai_compatible",
+        "openai/gpt-4o-mini",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+    )
     upsert_env_key("OPENAI_COMPATIBLE_API_KEY", api_key)
     agent2, _ = build_agent_from_cfg(load_settings())
 
@@ -963,13 +977,754 @@ def test_preflight_connection_returns_none_on_success_and_error_on_failure():
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         # Real success path — exercises the actual endpoint.
-        err = preflight_connection("openai_compatible", api_key, ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0)
+        err = preflight_connection(
+            "openai_compatible",
+            api_key,
+            ollama_base_url="https://openrouter.ai/api/v1",
+            timeout=10.0,
+        )
         assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
 
     # Deterministic failure: missing key for OpenRouter must return a non-empty error string.
-    err = preflight_connection("openai_compatible", "", ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0)
+    err = preflight_connection(
+        "openai_compatible", "", ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0
+    )
     assert isinstance(err, str) and err, "missing openrouter key must produce a non-empty error"
 
     # Deterministic failure: missing key for Ollama Cloud must return a non-empty error string.
     err = preflight_connection("ollama", "", ollama_base_url="https://ollama.com/v1", timeout=10.0)
     assert isinstance(err, str) and err, "missing ollama cloud key must produce a non-empty error"
+
+
+# ---------------------------------------------------------------------------
+# Embeddings backend selection (independent of the chat provider)
+# ---------------------------------------------------------------------------
+
+
+def test_embed_backend_is_independent_of_chat_provider(tmp_path, monkeypatch):
+    """The embeddings backend must be selectable on its own.
+
+    A chat endpoint that speaks the OpenAI API need not implement
+    /v1/embeddings — llama-server started without `--embeddings` answers 501 —
+    so pinning embeddings to the chat provider silently degrades the knowledge
+    base to lexical search with no way to fix it.
+    """
+    from grc_agent.settings import resolve_embed_backend
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    # "auto" (the default) keeps the historical behaviour: follow the chat provider.
+    save_settings("openai_compatible", "some/model")
+    cfg = load_settings()
+    assert cfg["embed_backend"] == "auto"
+    assert resolve_embed_backend(cfg) == "openai_compatible"
+
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    assert resolve_embed_backend(load_settings()) == "ollama"
+
+    # Pinned explicitly, the chat provider no longer has any say.
+    save_settings("openai_compatible", "some/model", embed_backend="llamacpp")
+    cfg = load_settings()
+    assert resolve_embed_backend(cfg) == "llamacpp"
+    assert cfg["provider"] == "openai_compatible"
+
+    db_path, model = get_db_and_model("catalog")
+    assert db_path.endswith("catalog_llamacpp.db"), "each backend needs its own index"
+    assert "embeddinggemma" in model.lower()
+
+    with pytest.raises(ValueError):
+        save_settings("ollama", "m", embed_backend="not-a-backend")
+
+
+def test_gemma_task_prefix_follows_the_model_not_the_provider():
+    """Regression: the EmbeddingGemma task prefix used to be gated on
+    `provider != "openrouter"`, but load_settings() normalizes "openrouter" to
+    "openai_compatible" and can never return it — so the condition was always
+    true and the Gemma-specific prefix was prepended for every backend,
+    including endpoints serving non-Gemma models, corrupting their embeddings.
+
+    The prefix is correct only for EmbeddingGemma, so that is what it keys on.
+    """
+    from grc_agent.adapter.rag import _uses_gemma_prefix
+
+    assert _uses_gemma_prefix("embeddinggemma:latest")
+    assert _uses_gemma_prefix("llamacpp/embeddinggemma-300m-qat-Q8_0")
+    assert not _uses_gemma_prefix("perplexity/pplx-embed-v1-0.6b")
+    assert not _uses_gemma_prefix("text-embedding-3-small")
+    assert not _uses_gemma_prefix(None)
+
+
+def test_embed_query_and_document_agree_on_the_prefix():
+    """Ingest and query must never disagree: a document embedded with the task
+    prefix and a query embedded without it land in different regions of the
+    space, which silently degrades every ranking rather than failing."""
+    from grc_agent.adapter import rag as rag_mod
+
+    seen: list[str] = []
+    orig = rag_mod._embed
+    try:
+        rag_mod._embed = lambda _model, body: seen.append(body) or [0.1, 0.2]
+        for model in ("embeddinggemma:latest", "text-embedding-3-small"):
+            seen.clear()
+            rag_mod.embed_document("hello", model)
+            doc_prefixed = seen[0] != "hello"
+            seen.clear()
+            query_body = (
+                rag_mod._QUERY_PREFIX + "hello" if rag_mod._uses_gemma_prefix(model) else "hello"
+            )
+            assert doc_prefixed == (query_body != "hello"), f"prefix disagreement for {model}"
+    finally:
+        rag_mod._embed = orig
+
+
+def test_llamacpp_runtime_paths_are_xdg_and_overridable(tmp_path, monkeypatch):
+    """Several hundred MB of binaries and weights must not land inside the
+    installed package."""
+    from grc_agent import embed_runtime
+
+    monkeypatch.delenv("GRC_AGENT_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert embed_runtime.data_dir() == tmp_path / "xdg" / "grc-agent"
+
+    monkeypatch.setenv("GRC_AGENT_RUNTIME_DIR", str(tmp_path / "custom"))
+    assert embed_runtime.data_dir() == tmp_path / "custom"
+    assert embed_runtime.bin_dir().parent == embed_runtime.data_dir()
+    assert embed_runtime.model_path().name == embed_runtime.MODEL["file"]
+
+
+def test_runtime_plan_refuses_platforms_it_cannot_run(monkeypatch):
+    """Deciding before downloading is the point: the failure being avoided is
+    a successful download of a binary that cannot start."""
+    from grc_agent import embed_runtime
+
+    assert embed_runtime.runtime_plan(("Linux", "riscv64"))["kind"] == "none"
+
+    monkeypatch.setattr(embed_runtime, "is_musl", lambda: True)
+    plan = embed_runtime.runtime_plan(("Linux", "x86_64"))
+    assert plan["kind"] == "none" and "musl" in plan["reason"]
+
+    monkeypatch.setattr(embed_runtime, "is_musl", lambda: False)
+    monkeypatch.setattr(embed_runtime, "glibc_version", lambda: (2, 17))
+    plan = embed_runtime.runtime_plan(("Linux", "x86_64"))
+    assert plan["kind"] == "none" and "glibc" in plan["reason"]
+
+    monkeypatch.setattr(embed_runtime, "glibc_version", lambda: (2, 39))
+    plan = embed_runtime.runtime_plan(("Linux", "x86_64"))
+    assert plan["kind"] == "upstream" and plan["url"].endswith("ubuntu-x64.tar.gz")
+
+
+def test_download_verifies_before_it_renames(tmp_path, monkeypatch):
+    """A corrupted transfer must never be left at the destination path, where
+    a later run would treat it as a complete install."""
+    from grc_agent import embed_runtime
+
+    class _Fake:
+        headers = {"content-length": "5"}
+
+        def read(self, _n):
+            chunk, self._done = (b"hello" if not getattr(self, "_done", False) else b""), True
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(embed_runtime, "_open", lambda *_a, **_k: _Fake())
+    dest = tmp_path / "artifact.bin"
+
+    with pytest.raises(embed_runtime.FetchError, match="checksum mismatch"):
+        embed_runtime.download("http://x/y", dest, sha256="00" * 32)
+    assert not dest.exists(), "a failed download must not appear at the destination"
+    assert not dest.with_name(dest.name + ".part").exists(), "partial file must be cleaned up"
+
+    import hashlib
+
+    good = hashlib.sha256(b"hello").hexdigest()
+    embed_runtime.download("http://x/y", dest, sha256=good)
+    assert dest.read_bytes() == b"hello"
+
+
+def test_tar_extraction_refuses_path_traversal(tmp_path):
+    """The archive is fetched over the network; a member escaping the target
+    directory must be a hard failure, not a surprising write."""
+    import io
+    import tarfile
+
+    from grc_agent import embed_runtime
+
+    archive = tmp_path / "evil.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        data = b"pwned"
+        info = tarfile.TarInfo("../escaped.txt")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(embed_runtime.FetchError, match="escapes the target"):
+        embed_runtime.extract_runtime(archive, tmp_path / "unpacked")
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+def test_partial_embedding_failure_yields_no_vector_index(tmp_path, monkeypatch):
+    """A vector index must cover the whole corpus or not exist.
+
+    Regression: one mid-build embed failure used to disable embedding for the
+    remainder of the run while KEEPING what had already been collected, so the
+    vec0 table was created over a fraction of the corpus. Queries then reported
+    search_mode "vector" with silently missing recall, and nothing could detect
+    it — `_db_meta` records only the model and corpus version, both of which
+    still match. Observed live: a docs index with 4 vector rows against 718
+    chunks, which ranked an AGC page top for "what is a stream tag".
+    """
+    import sqlite3
+
+    import sqlite_vec
+
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import get_db_and_model
+
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_path / "vectors"))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    db_path, model = get_db_and_model("catalog")
+
+    calls = {"n": 0}
+
+    def flaky_embed(text, model):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] > 5:  # the probe plus a handful of blocks succeed first
+            raise RuntimeError("input too large to process")
+        return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr(ingest_mod, "embed_document", flaky_embed)
+    ingest_mod.ingest_catalog(db_path, model)
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        chunks = conn.execute("SELECT count(*) FROM catalog_chunks").fetchone()[0]
+        assert chunks > 0, "the lexical index must still be built in full"
+        assert "catalog_idx" not in tables, (
+            "a partially-embedded corpus must produce NO vector index — a partial "
+            "one reports itself as healthy while silently missing recall"
+        )
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# ChatGPT Plus/Pro (Codex) OAuth provider
+# ---------------------------------------------------------------------------
+
+
+def _fake_jwt(account_id: str | None) -> str:
+    import base64
+    import json
+
+    claims = {"https://api.openai.com/auth": {}}
+    if account_id is not None:
+        claims["https://api.openai.com/auth"]["chatgpt_account_id"] = account_id
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{body}.signature"
+
+
+def test_codex_is_a_real_third_provider(tmp_path, monkeypatch):
+    """Regression: load_settings() reverts unknown providers to the default, so
+    a saved GRC_PROVIDER=openai_codex would silently vanish on next load unless
+    the normalization knows about it."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    save_settings("openai_codex", "gpt-5.1-codex")
+    cfg = load_settings()
+    assert cfg["provider"] == "openai_codex"
+    assert cfg["model"] == "gpt-5.1-codex", "res['model'] needs a _PROVIDER_MODEL_KEY entry"
+
+    # Switching away and back must not lose either provider's model.
+    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    cfg = load_settings()
+    assert cfg["openai_codex_model"] == "gpt-5.1-codex"
+
+
+def test_codex_auto_embeddings_do_not_follow_a_backend_without_embeddings(tmp_path, monkeypatch):
+    """The Codex transport exposes no /v1/embeddings, so "auto" must not
+    resolve to it — every embed call would fail."""
+    from grc_agent.settings import resolve_embed_backend
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("openai_codex", "gpt-5.1-codex", embed_backend="auto")
+    assert resolve_embed_backend(load_settings()) == "ollama"
+
+    save_settings("openai_codex", "gpt-5.1-codex", embed_backend="llamacpp")
+    assert resolve_embed_backend(load_settings()) == "llamacpp"
+
+
+def test_codex_badge_resolves_from_its_base_url():
+    """Regression: resolve_provider_from_base_url() maps any non-Ollama URL to
+    openai_compatible, and set_agent() then reports a healthy connection as
+    'Fallback default (configured provider unreachable)'."""
+    from grc_agent.providers.openai_codex.model import BASE_URL
+    from grc_agent.ui.providers import (
+        PROVIDER_API_KEY,
+        PROVIDER_BADGE_LABEL,
+        PROVIDER_MODEL_KEY,
+        PROVIDER_ORDER,
+        resolve_provider_from_base_url,
+    )
+
+    assert resolve_provider_from_base_url(BASE_URL) == "openai_codex"
+    # Every parallel catalog dict must carry an entry, or the dialog KeyErrors.
+    for table in (PROVIDER_MODEL_KEY, PROVIDER_API_KEY, PROVIDER_BADGE_LABEL):
+        assert "openai_codex" in table
+    assert "openai_codex" in PROVIDER_ORDER
+    assert PROVIDER_API_KEY["openai_codex"] is None, "OAuth tokens must never be written to .env"
+
+
+def test_codex_authorize_url_matches_the_registered_client(tmp_path, monkeypatch):
+    """The redirect URI is registered against this client id — an ephemeral
+    port produces a redirect_uri mismatch rather than a working login."""
+    import urllib.parse
+
+    from grc_agent.providers.openai_codex import auth
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    flow = auth.start_login()
+    parsed = urllib.parse.urlparse(flow.url)
+    params = dict(urllib.parse.parse_qsl(parsed.query))
+
+    assert parsed.netloc == "auth.openai.com"
+    assert params["redirect_uri"] == "http://localhost:1455/auth/callback"
+    assert params["code_challenge_method"] == "S256"
+    assert params["code_challenge"] != flow.verifier, (
+        "the challenge must be the hash, not the verifier"
+    )
+    assert params["state"] == flow.state
+    assert "offline_access" in params["scope"], "a refresh token requires offline_access"
+
+
+def test_codex_redirect_parsing_accepts_what_users_actually_paste(tmp_path, monkeypatch):
+    from grc_agent.providers.openai_codex import auth
+    from grc_agent.providers.openai_codex.credentials import AuthenticationError
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    state = "abc123state"
+    assert (
+        auth.parse_redirect(f"http://localhost:1455/auth/callback?code=C1&state={state}", state)
+        == "C1"
+    )
+    assert auth.parse_redirect(f"code=C2&state={state}", state) == "C2"
+    assert auth.parse_redirect("  C3  ", state) == "C3"
+
+    with pytest.raises(AuthenticationError, match="State mismatch"):
+        auth.parse_redirect("http://x/?code=C&state=wrong", state)
+    with pytest.raises(AuthenticationError, match="Authorization failed"):
+        auth.parse_redirect("http://x/?error=access_denied", state)
+
+
+def test_codex_credentials_are_private_and_never_in_the_repo(tmp_path, monkeypatch):
+    """These are rotating OAuth tokens, not a preference: 0600, and never in
+    `.env` (which is world-readable and sits in the repo root for a dev
+    checkout)."""
+    import stat
+
+    from grc_agent.providers.openai_codex import credentials as creds
+
+    auth_file = tmp_path / "nested" / "auth.json"
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(auth_file))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    assert creds.load() is None and not creds.is_signed_in()
+
+    cred = creds.credential_from_token_response(
+        {"access_token": _fake_jwt("acct-42"), "refresh_token": "r1", "expires_in": 3600}
+    )
+    creds.save(cred)
+
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+    assert creds.load().account_id == "acct-42"
+    assert creds.is_signed_in()
+
+    env_text = (tmp_path / ".env").read_text() if (tmp_path / ".env").exists() else ""
+    assert "r1" not in env_text and cred.access not in env_text
+
+    creds.clear()
+    assert not creds.is_signed_in()
+
+
+def test_codex_rejects_a_token_without_a_codex_entitlement(tmp_path, monkeypatch):
+    """No chatgpt_account_id means the account cannot use Codex. Failing here
+    beats sending every request without the header the endpoint requires."""
+    from grc_agent.providers.openai_codex import credentials as creds
+    from grc_agent.providers.openai_codex.credentials import AuthenticationError
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    with pytest.raises(AuthenticationError, match="entitlement"):
+        creds.credential_from_token_response(
+            {"access_token": _fake_jwt(None), "refresh_token": "r", "expires_in": 3600}
+        )
+
+
+def test_codex_refreshes_only_when_expiry_is_near(tmp_path, monkeypatch):
+    """A rotated refresh token invalidates the previous one, so refreshing
+    twice concurrently would log the user out. Fresh tokens must not refresh
+    at all; expiring ones must refresh exactly once under contention."""
+    import asyncio
+
+    from grc_agent.providers.openai_codex import credentials as creds
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+    calls = {"n": 0}
+
+    async def fake_refresh(cred):  # noqa: ARG001
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        return creds.Credential(
+            access=_fake_jwt("acct-42"),
+            refresh=f"r{calls['n']}",
+            expires=9e12,
+            account_id="acct-42",
+        )
+
+    monkeypatch.setattr(creds, "_refresh", fake_refresh)
+
+    creds.save(
+        creds.Credential(
+            access=_fake_jwt("acct-42"), refresh="r0", expires=9e12, account_id="acct-42"
+        )
+    )
+    assert asyncio.run(creds.get_valid()).refresh == "r0"
+    assert calls["n"] == 0, "a token far from expiry must not be refreshed"
+
+    creds.save(
+        creds.Credential(access=_fake_jwt("acct-42"), refresh="r0", expires=0, account_id="acct-42")
+    )
+
+    async def race():
+        return await asyncio.gather(*(creds.get_valid() for _ in range(4)))
+
+    results = asyncio.run(race())
+    assert calls["n"] == 1, f"expected exactly one refresh under contention, got {calls['n']}"
+    assert {r.refresh for r in results} == {"r1"}
+
+
+def test_codex_model_targets_the_codex_responses_endpoint(tmp_path, monkeypatch):
+    """The OpenAI SDK posts to the literal path /responses, so the base URL
+    must be .../backend-api/codex — and building the model must not require
+    credentials, so an unauthenticated config still starts the app."""
+    from grc_agent.agent_factory import _build_model, _retrying_http_client
+    from grc_agent.providers.openai_codex.model import CodexResponsesModel
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "absent.json"))
+    model = _build_model(
+        {"provider": "openai_codex", "model": "gpt-5.1-codex"}, _retrying_http_client()
+    )
+    assert isinstance(model, CodexResponsesModel)
+    assert str(model._provider.base_url).rstrip("/") == "https://chatgpt.com/backend-api/codex"
+
+
+def test_codex_preflight_reports_signed_out_without_a_network_call(tmp_path, monkeypatch):
+    """There is no /models endpoint on the Codex transport; the equivalent
+    check is whether a usable credential exists."""
+    import httpx
+
+    from grc_agent.agent_factory import preflight_connection
+    from grc_agent.providers.openai_codex import credentials as creds
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+
+    def explode(*a, **k):  # noqa: ARG001
+        raise AssertionError("preflight must not hit the network for openai_codex")
+
+    monkeypatch.setattr(httpx, "get", explode)
+
+    err = preflight_connection("openai_codex")
+    assert err and "Not signed in" in err
+
+    creds.save(creds.Credential(access=_fake_jwt("a"), refresh="r", expires=9e12, account_id="a"))
+    assert preflight_connection("openai_codex") is None
+
+
+def test_codex_callback_listens_on_both_loopback_families():
+    """Regression: the redirect URI says `localhost`, and the browser decides
+    how to resolve it. On a dual-stack box `localhost` resolves to ::1 first,
+    so binding only 127.0.0.1 got the redirect refused — the browser landed on
+    the authorization server's own "return to your app" page and the sign-in
+    never completed, with no code anywhere for the user to paste instead.
+    """
+    import asyncio
+    import socket
+
+    from grc_agent.providers.openai_codex import auth
+
+    async def deliver(family: str, host: str) -> str:
+        flow = auth.start_login()
+        waiter = asyncio.ensure_future(auth.wait_for_callback(flow, timeout=10))
+        await asyncio.sleep(0.3)
+        try:
+            reader, writer = await asyncio.open_connection(host, auth.CALLBACK_PORT)
+            writer.write(
+                f"GET {auth.CALLBACK_PATH}?code={family}CODE&state={flow.state} "
+                f"HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
+            )
+            await writer.drain()
+            await reader.read(64)
+            writer.close()
+            return await asyncio.wait_for(waiter, 5)
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+
+    for family, host in (("IPV4", "127.0.0.1"), ("IPV6", "::1")):
+        if family == "IPV6" and not socket.has_ipv6:
+            continue
+        assert asyncio.run(deliver(family, host)) == f"{family}CODE", (
+            f"the callback must be reachable over {family}"
+        )
+
+
+def test_codex_login_dialog_completes_from_the_browser_callback(tmp_path, monkeypatch):
+    """End-to-end through the real dialog: a callback must save a credential.
+
+    Regression: `_finish` ran *inside* the callback-waiter task and called
+    `_cancel_task()`, which cancelled that same task. The CancelledError landed
+    on the await inside `_finish`, and since it derives from BaseException the
+    `except Exception` there never saw it — so the token exchange was killed
+    mid-flight, nothing was saved, and no error was displayed. The dialog just
+    sat waiting for a paste, while the browser showed a successful sign-in.
+
+    Unit-testing the pieces missed this entirely; only driving the dialog the
+    way the app does reproduces it.
+    """
+    import asyncio
+
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    if not Gtk.init_check([])[0]:
+        pytest.skip("no display")
+
+    from grc_agent.providers.openai_codex import auth as auth_mod
+    from grc_agent.providers.openai_codex import credentials as creds
+    from grc_agent.ui import codex_login_dialog as dlg_mod
+
+    monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
+
+    async def fake_wait(flow, timeout=300.0):  # noqa: ARG001
+        await asyncio.sleep(0.01)
+        return "THE_CODE"
+
+    exchanged = {}
+
+    async def fake_exchange(code, verifier, redirect_uri=None):  # noqa: ARG001
+        await asyncio.sleep(0.01)  # a real network round trip has an await
+        exchanged["code"] = code
+        cred = creds.Credential(
+            access=_fake_jwt("acct-1"), refresh="r", expires=9e12, account_id="acct-1"
+        )
+        creds.save(cred)
+        return cred
+
+    monkeypatch.setattr(dlg_mod.auth, "wait_for_callback", fake_wait)
+    monkeypatch.setattr(dlg_mod.auth, "exchange_code", fake_exchange)
+    monkeypatch.setattr(dlg_mod.auth, "start_login", auth_mod.start_login)
+    monkeypatch.setattr(dlg_mod.Gio.AppInfo, "launch_default_for_uri", lambda *_a, **_k: True)
+
+    done = {}
+
+    async def drive():
+        dialog = dlg_mod.CodexLoginDialog(None, on_done=lambda ok, err: done.update(ok=ok, err=err))
+        for _ in range(200):  # up to ~2s
+            await asyncio.sleep(0.01)
+            if done:
+                break
+        return dialog
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(drive())
+    finally:
+        loop.close()
+
+    assert exchanged.get("code") == "THE_CODE", "the callback's code must reach the exchange"
+    assert creds.is_signed_in(), "a successful callback must persist a credential"
+    assert done.get("ok") is True, "the dialog must report success so Settings can refresh"
+
+
+def test_ensure_server_starts_exactly_one_llama_server(tmp_path, monkeypatch):
+    """Regression: ensure_server() had no lock, and embedding fans out across
+    asyncio.to_thread workers (catalog and docs build concurrently, since
+    rag.py's _BUILD_LOCKS is per-domain). Every thread saw no live server and
+    spawned its own: the first bound the socket, the rest died with "couldn't
+    bind HTTP server socket" — and because each had already written its own
+    server.token, the survivor answered "unauthorized: Invalid API Key" to
+    everything. Observed live: three starts inside one second.
+    """
+    import concurrent.futures as cf
+
+    from grc_agent import embed_runtime
+
+    monkeypatch.setenv("GRC_AGENT_RUNTIME_DIR", str(tmp_path))
+    starts = {"n": 0}
+    alive = {"up": False}
+
+    monkeypatch.setattr(embed_runtime, "is_alive", lambda *_a, **_k: alive["up"])
+    monkeypatch.setattr(embed_runtime, "is_provisioned", lambda: True)
+
+    def fake_start(_wait):
+        starts["n"] += 1
+        embed_runtime._write_private(embed_runtime._token_path(), f"token{starts['n']}")
+        alive["up"] = True
+        return f"token{starts['n']}"
+
+    monkeypatch.setattr(embed_runtime, "_start_server", fake_start)
+
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        tokens = list(ex.map(lambda _: embed_runtime.ensure_server(), range(8)))
+
+    assert starts["n"] == 1, f"expected one server start under contention, got {starts['n']}"
+    assert len(set(tokens)) == 1, "every caller must get the surviving server's token"
+
+
+def test_model_catalog_lists_what_each_backend_reports(monkeypatch):
+    """Typing a model id by hand is how `gpt-5.1-codex` reached an endpoint
+    that rejects it. Both response shapes must be understood."""
+    import asyncio
+
+    import httpx
+
+    from grc_agent import model_catalog
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    # Ollama's /api/tags shape.
+    monkeypatch.setattr(
+        httpx, "get", lambda *_a, **_k: _Resp({"models": [{"name": "b"}, {"name": "a"}]})
+    )
+    got = asyncio.run(model_catalog.list_models({"provider": "ollama"}, base_url="http://x:11434"))
+    assert got == ["a", "b"], "ollama tags must be listed and sorted"
+
+    # The OpenAI /v1/models shape.
+    monkeypatch.setattr(httpx, "get", lambda *_a, **_k: _Resp({"data": [{"id": "z"}, {"id": "y"}]}))
+    got = asyncio.run(
+        model_catalog.list_models(
+            {"provider": "openai_compatible"}, api_key="k", base_url="http://x/v1"
+        )
+    )
+    assert got == ["y", "z"]
+
+
+def test_codex_model_list_drops_hidden_entries_and_keeps_server_order(monkeypatch):
+    """`codex-auto-review` is internal to Codex and is not selectable.
+
+    Server order is preserved because it comes back newest-first, which is
+    what a dropdown wants — the `priority` field ranks the *older* models
+    higher, so sorting by it buries the newest at the bottom."""
+    import asyncio
+
+    import httpx
+
+    from grc_agent.providers.openai_codex import credentials as creds
+    from grc_agent.providers.openai_codex import model as codex_model
+
+    payload = {
+        "models": [
+            {"slug": "codex-auto-review", "visibility": "hide", "priority": 43},
+            {"slug": "gpt-5.4", "visibility": "list", "priority": 16},
+            {"slug": "gpt-5.4-mini", "visibility": "list", "priority": 23},
+        ]
+    }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *_a, **_k):
+            return httpx.Response(200, json=payload)
+
+    async def fake_valid():
+        return creds.Credential(access="a", refresh="r", expires=9e12, account_id="acct")
+
+    monkeypatch.setattr(codex_model.credentials, "get_valid", fake_valid)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *_a, **_k: _Client())
+
+    assert asyncio.run(codex_model.list_models()) == ["gpt-5.4", "gpt-5.4-mini"]
+
+
+def test_codex_client_version_does_not_hide_newer_models():
+    """Regression: the models endpoint filters on ?client_version= against each
+    model's `minimal_client_version`. A pinned 0.104.0 returned 3 models and
+    silently hid gpt-5.5 (0.124.0) and the whole gpt-5.6 family (0.144.0) — so
+    the dropdown, and the default derived from it, were quietly a generation
+    behind. The gate describes Codex CLI features this app does not use.
+    """
+    from grc_agent.providers.openai_codex.model import CLIENT_VERSION
+
+    parts = [int(p) for p in CLIENT_VERSION.split(".")]
+    assert parts >= [1, 0, 0], (
+        f"client_version {CLIENT_VERSION} is below 1.0.0 and will hide models "
+        "whose minimal_client_version is newer"
+    )
+
+
+def test_codex_requests_reasoning_summaries():
+    """Every Codex model reports `default_reasoning_summary: "none"`, so
+    without asking for one the reasoning is computed and discarded and the
+    per-turn trace stays empty. Confirmed live: with a summary requested the
+    endpoint emits response.reasoning_summary_text.delta, which pydantic-ai
+    turns into ThinkingParts."""
+    from grc_agent.providers.openai_codex.model import CODEX_MODEL_SETTINGS
+
+    assert CODEX_MODEL_SETTINGS.get("openai_reasoning_summary"), (
+        "Codex defaults reasoning summaries off; one must be requested"
+    )
+    # store:true and non-streaming are both rejected outright by Codex.
+    assert CODEX_MODEL_SETTINGS["openai_store"] is False
+
+
+def test_thinking_delta_without_content_does_not_crash_the_turn():
+    """Regression: ThinkingPartDelta.content_delta is Optional (unlike
+    TextPartDelta's), because a delta may carry only a signature or provider
+    metadata update. Codex sends those around its reasoning summary parts, and
+    `ctx.think_acc += delta.content_delta` raised "can only concatenate str
+    (not NoneType) to str", killing the whole turn.
+    """
+    from pydantic_ai.messages import PartDeltaEvent, ThinkingPartDelta
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    # The field really is optional — that is what makes this reachable.
+    assert ThinkingPartDelta.__dataclass_fields__["content_delta"].type == "str | None"
+
+    ctx = _StreamCtx.__new__(_StreamCtx)
+    ctx.think_acc = "so far"
+    ctx.full_raw_text = "so far"
+
+    sidebar = ChatSidebar.__new__(ChatSidebar)
+    event = PartDeltaEvent(index=0, delta=ThinkingPartDelta(signature_delta="sig"))
+    ChatSidebar._on_part_delta(sidebar, ctx, event)  # must not raise
+
+    assert ctx.think_acc == "so far", "a content-free delta must leave the buffer alone"
+
+
+def test_token_rate_is_omitted_rather_than_shown_as_zero():
+    from grc_agent.chat_sidebar import _tokens_per_second
+
+    assert _tokens_per_second(160, 4000) == 40.0
+    # A turn with no output, or no measurable duration, has no rate — showing
+    # "0 tok/s" would read as a stalled backend.
+    assert _tokens_per_second(0, 4000) is None
+    assert _tokens_per_second(160, 0) is None
+    assert _tokens_per_second(None, None) is None
