@@ -145,19 +145,27 @@ def format_tokens(n: int) -> str:
     return str(n)
 
 
-def _ollama_context_length(provider: str, model: str) -> int | None:
+def _ollama_context_length(model: str) -> int | None:
     """POST {base_url}/api/show -> model_info context_length, falling back to
-    parsing num_ctx from the parameters blob. Returns None if unresolvable."""
+    parsing num_ctx from the parameters blob. Returns None if unresolvable.
+
+    The endpoint is the resolved `ollama_base_url` from load_settings() —
+    the same source of truth `_build_model` uses — so a cloud user (no local
+    URL configured, OLLAMA_CLOUD_API_KEY present) hits ollama.com with the
+    key, and a local user hits their own daemon. Never keyed on a provider
+    name: `load_settings()` normalizes "ollama_cloud" away, and the old
+    name-keyed branch left cloud users silently querying localhost since
+    the backends were consolidated.
+    """
     import httpx
 
-    from grc_agent.settings import get_env_value
+    from grc_agent.settings import get_env_value, load_settings
 
-    base_url = (
-        "https://ollama.com"
-        if provider == "ollama_cloud"
-        else (get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
-    )
-    api_key = get_env_value("OLLAMA_CLOUD_API_KEY") if provider == "ollama_cloud" else ""
+    cfg = load_settings()
+    base_url = (cfg.get("ollama_base_url") or "http://localhost:11434").rstrip("/")
+    api_key = ""
+    if "ollama.com" in base_url:
+        api_key = get_env_value("OLLAMA_API_KEY") or get_env_value("OLLAMA_CLOUD_API_KEY") or ""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     with httpx.Client(timeout=3.0) as client:
         r = client.post(f"{base_url}/api/show", json={"name": model}, headers=headers)
@@ -222,17 +230,13 @@ def resolve_model_context_length(provider: str, model: str) -> int | None:
         return None
 
     try:
-        if provider in ("ollama", "ollama_cloud"):
-            ctx_len = _ollama_context_length(provider, model)
+        if provider == "ollama":
+            ctx_len = _ollama_context_length(model)
         elif provider == "openai_codex":
             from grc_agent.providers.openai_codex.model import context_window
 
             ctx_len = context_window(model)
-        elif provider in ("openai_compatible", "openrouter"):
-            # Was gated on "openrouter" alone, which load_settings() has not
-            # been able to return since the backends were consolidated — so
-            # every OpenAI-compatible endpoint fell through to None and the
-            # label showed a bare token count with nothing to compare against.
+        elif provider == "openai_compatible":
             ctx_len = _openrouter_context_length(model)
         else:
             ctx_len = None
@@ -1036,11 +1040,10 @@ class ChatSidebar(Gtk.Box):
         self._provider_label.set_text(f"{badge_label} \u00b7 {short_model}")
 
         provider_title = _PROVIDER_LABELS.get(provider, provider.capitalize())
-        resolved_url = base_url or (
-            "https://openrouter.ai/api/v1"
-            if provider == "openrouter"
-            else ("https://ollama.com" if provider == "ollama_cloud" else "http://localhost:11434")
-        )
+        # base_url is the running model's own provider URL; when it is empty
+        # the provider resolution above already early-returned, so there is
+        # no fallback URL to invent here.
+        resolved_url = base_url or ""
         status_str = (
             "Fallback default (configured provider unreachable)"
             if is_default
@@ -2344,12 +2347,11 @@ class ChatSidebar(Gtk.Box):
             hint = f"• Ensure local Ollama daemon is running ('ollama serve').\n• Verify host is reachable at {ollama_base_url}."
         elif provider == "openai_compatible":
             hint = f"• Ensure local OpenAI-compatible server (e.g. llama-server) is running.\n• Verify endpoint is reachable at {ollama_base_url}."
-        elif provider == "openrouter":
-            hint = "• Check network connectivity to openrouter.ai.\n• Verify your OPENROUTER_API_KEY in Preferences."
-        elif provider == "ollama_cloud":
-            hint = "• Check network connectivity to ollama.com.\n• Verify your OLLAMA_CLOUD_API_KEY in Preferences."
         else:
             hint = "• Check provider configuration and network connectivity."
+        # A cloud Ollama user (provider normalized to "ollama", base URL
+        # ollama.com) gets the ollama hint above, which already names the
+        # reachable host — no separate cloud branch is needed.
 
         confirm = Gtk.MessageDialog(
             transient_for=toplevel,

@@ -58,7 +58,7 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
         from grc_agent.providers.openai_codex import build_model as build_codex_model
 
         return build_codex_model(cfg["model"])
-    if provider in ("openai_compatible", "openrouter"):
+    if provider == "openai_compatible":
         key = (
             get_env_value("OPENAI_COMPATIBLE_API_KEY")
             or get_env_value("OPENROUTER_API_KEY")
@@ -202,7 +202,7 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
         cfg = default_settings()
         model = _build_model(cfg, http_client)
 
-    is_ollama = cfg["provider"] in ("ollama", "ollama_cloud")
+    is_ollama = cfg["provider"] == "ollama"
     thinking = cfg.get("ollama_thinking_enabled", True)
     if is_ollama:
         model_settings = ModelSettings(extra_body={"think": thinking})
@@ -258,7 +258,7 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
 def _preflight_target(provider: str, api_key: str, ollama_base_url: str) -> tuple[str, dict] | str:
     """Resolve the provider's /models endpoint to (url, headers), or return an
     error string when a required key is missing."""
-    if provider in ("openai_compatible", "openrouter"):
+    if provider == "openai_compatible":
         base = (
             ollama_base_url
             or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
@@ -351,7 +351,7 @@ def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
     then call `preflight_connection`. Used by desktop_app.py after
     build_interactive_agent() to warn (not block) on an unreachable backend."""
     provider = cfg.get("provider", "ollama")
-    if provider in ("openai_compatible", "openrouter"):
+    if provider == "openai_compatible":
         key = (
             get_env_value("OPENAI_COMPATIBLE_API_KEY") or get_env_value("OPENROUTER_API_KEY") or ""
         )

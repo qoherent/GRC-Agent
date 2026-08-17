@@ -62,28 +62,27 @@ elif raw_provider in ("ollama", "ollama_cloud"):
 ```
 
 `load_settings()` can therefore never return `"openrouter"` or
-`"ollama_cloud"` — but roughly 19 branches testing for exactly those strings
-survive throughout the codebase and are unreachable. (`save_settings()` now
-rejects them outright.)
+`"ollama_cloud"` — branches testing for exactly those strings were unreachable.
+(`save_settings()` rejects them outright.)
 
-This is not merely cosmetic: the same pattern already produced one live bug.
-`rag.py` gated the EmbeddingGemma task prefix on `provider != "openrouter"`, a
-condition that became permanently true, so the prefix was applied to every
-backend including non-Gemma models. That instance is fixed; the remaining
-branches are the same trap left armed.
+**RESOLVED.** All settings-provider-driven dead branches were deleted (the
+scenario harness in `agent.py` and the normalization in `settings.py` keep
+their explicit backend strings — those describe *test* backends and the
+old-`.env` migration path, which are live). Deleting them surfaced one real
+defect the dead code had been hiding: `_ollama_context_length`'s cloud
+endpoint was keyed on the dead `provider == "ollama_cloud"` string, so since
+the v0.1.5 consolidation a cloud user's context-length lookup silently went
+to `localhost:11434`. It now derives the endpoint from the resolved
+`ollama_base_url` (the same source of truth `_build_model` uses) and attaches
+the API key when that URL is ollama.com.
 
-A second instance was found and fixed since: `resolve_model_context_length`
-keyed the context-window lookup on `"openrouter"` alone, so every
-OpenAI-compatible endpoint fell through to `None` and the sidebar showed a
-bare token count with no total to compare against.
-
-`.env.example` has been corrected and no longer documents the dead values.
-The env *keys* (`OPENROUTER_API_KEY`, `OLLAMA_CLOUD_MODEL`, …) are still read
-as fallbacks so existing files keep working — those are a separate decision
-from the dead provider branches.
-
-**Proposed fix**: delete the branches. Per AGENTS.md ("No Backward
-Compatibility") this is a deletion, not a migration.
+Two earlier instances of the same trap, both fixed on branch `26`: the
+EmbeddingGemma task prefix keyed on `provider != "openrouter"` (permanently
+true — prefix applied to every backend), and `resolve_model_context_length`
+keyed on `"openrouter"` alone (every OpenAI-compatible endpoint fell through
+to `None`). The env *keys* (`OPENROUTER_API_KEY`, `OLLAMA_CLOUD_MODEL`, …)
+remain readable as fallbacks so existing `.env` files keep working — that is
+a separate decision from the dead provider branches.
 
 ---
 

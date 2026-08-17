@@ -230,11 +230,18 @@ def glibc_version() -> tuple | None:
 def is_musl() -> bool:
     """True on Alpine and other musl systems, where these builds will not run."""
     try:
-        if platform.libc_ver()[0] == "musl":
-            return True
+        libc = platform.libc_ver()[0]
     except OSError:
-        pass
-    # libc_ver() commonly reports ("", "") on musl, so also look for the loader.
+        libc = ""
+    # A definitive answer always wins. Confirmed live: the Debian/Ubuntu
+    # `musl` package (a common rust cross-compilation dependency) installs
+    # /lib/ld-musl-x86_64.so.1 alongside glibc, and the loader-only check
+    # false-positived on a glibc 2.39 host, disabling the runtime install
+    # with "musl libc (Alpine)" for a machine that is not Alpine.
+    if libc in ("glibc", "musl"):
+        return libc == "musl"
+    # libc_ver() commonly reports ("", "") on musl — inconclusive — so fall
+    # back to looking for the loader.
     return any(Path(p).exists() for p in ("/lib/ld-musl-x86_64.so.1", "/lib/ld-musl-aarch64.so.1"))
 
 

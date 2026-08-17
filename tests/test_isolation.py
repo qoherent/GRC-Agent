@@ -1728,3 +1728,82 @@ def test_token_rate_is_omitted_rather_than_shown_as_zero():
     assert _tokens_per_second(0, 4000) is None
     assert _tokens_per_second(160, 0) is None
     assert _tokens_per_second(None, None) is None
+
+
+def test_is_musl_false_positive_on_glibc_host_with_musl_loader():
+    """Regression: the Debian/Ubuntu `musl` package (a rust
+    cross-compilation dependency) installs /lib/ld-musl-x86_64.so.1 alongside
+    glibc. The loader-only fallback used to read that as Alpine and disable
+    the prebuilt runtime ("musl libc (Alpine)") on a perfectly good glibc
+    host — a definitive libc_ver() answer must always win."""
+    import platform
+    from unittest.mock import patch
+
+    from grc_agent import embed_runtime
+
+    # Real loader file present on this test host class; keep the check honest
+    # by patching both signals explicitly for each scenario.
+    with (
+        patch.object(platform, "libc_ver", return_value=("glibc", "2.39")),
+        patch.object(embed_runtime.Path, "exists", return_value=True),
+    ):
+        assert embed_runtime.is_musl() is False, "glibc answer must beat a stray musl loader"
+
+    with (
+        patch.object(platform, "libc_ver", return_value=("musl", "1.2.5")),
+        patch.object(embed_runtime.Path, "exists", return_value=False),
+    ):
+        assert embed_runtime.is_musl() is True
+
+    # Inconclusive libc_ver ("" on Alpine) falls back to the loader file.
+    with (
+        patch.object(platform, "libc_ver", return_value=("", "")),
+        patch.object(embed_runtime.Path, "exists", return_value=True),
+    ):
+        assert embed_runtime.is_musl() is True
+
+
+def test_ollama_context_length_targets_cloud_url_for_cloud_users(tmp_path, monkeypatch):
+    """Regression: the cloud endpoint was keyed on the dead
+    `provider == "ollama_cloud"` string, so since the v0.1.5 consolidation a
+    cloud user's context-length lookup silently went to localhost:11434. The
+    endpoint must come from the resolved ollama_base_url (load_settings
+    defaults it to ollama.com when a cloud key is present and no local URL is
+    set), with the API key attached — the same source of truth _build_model
+    uses."""
+    import httpx
+
+    import grc_agent.chat_sidebar as cs
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    (tmp_path / ".env").write_text("OLLAMA_CLOUD_API_KEY=test-cloud-key\n")
+
+    seen: dict = {}
+
+    def fake_post(self, url, **kwargs):  # noqa: ARG001
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers") or {}
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "model_info": {"context_length": 1_048_576},
+                    "parameters": "",
+                }
+
+        return R()
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    cs._context_length_cache.clear()
+    cs._context_negative_cache.clear()
+    try:
+        out = cs._ollama_context_length("deepseek-v4-flash:cloud")
+    finally:
+        cs._context_length_cache.clear()
+        cs._context_negative_cache.clear()
+
+    assert out == 1_048_576
+    assert "ollama.com" in seen["url"], f"cloud user must query ollama.com, got {seen['url']}"
+    assert seen["headers"].get("Authorization") == "Bearer test-cloud-key"
